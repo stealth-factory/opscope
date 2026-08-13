@@ -14,7 +14,16 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Coding agents running under Herdr, across every workspace.
+"""Everything running in Herdr, across every workspace.
+
+Two sections. AGENTS lists recognised coding agents with the lifecycle state
+Herdr reports, ordered so the ones wanting a human come first. PROCESSES lists
+every other pane that is actually running something — dev servers, monitors,
+builds — with what it is running and what it costs. Panes idling at a shell
+prompt are omitted, since they have nothing to report.
+
+Enter jumps to whatever is selected: the agent's pane, or the tab holding that
+process.
 
 A Herdr client, not a general agent monitor: the inventory and the lifecycle
 states come from `herdr agent list`, the workspace labels from
@@ -37,7 +46,7 @@ state, and the real CPU and memory of its process. A duration is prefixed with
 ≥ when the state was already in place before this tool started, since then it
 is only a lower bound.
 
-    python3 herdr-agents.py [-n SECONDS]
+    python3 herdr-panes.py [-n SECONDS]
 
 Keys: up/down select, Enter (or f) focuses that agent's pane so you jump
 straight to whatever needs you, w toggles workspace labels vs pane ids,
@@ -56,7 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, pad,
                     rgb, seg, setup, size, title)
 
-_CFG = load_config("herdr_agents", {"refresh": 4.0})
+_CFG = load_config("herdr_panes", {"refresh": 4.0})
 REFRESH = float(_CFG["refresh"])           # seconds between herdr polls (-n)
 
 BLOCKED = rgb(255, 105, 115)
@@ -68,6 +77,7 @@ DIM = rgb(127, 147, 172)
 TXT = rgb(225, 235, 245)
 LBL = rgb(130, 165, 200)
 ACCENT = rgb(150, 210, 255)
+PROC = rgb(170, 190, 215)
 
 # ordering: what needs a human first
 RANK = {"blocked": 0, "done": 1, "working": 2, "idle": 3, "unknown": 4}
@@ -96,6 +106,24 @@ def herdr(*args):
         return None
 
 
+def command_label(proc):
+    """Readable name for what a pane is running.
+
+    "python3" or "node" says nothing useful, so prefer the script they were
+    handed; otherwise fall back to the executable's own name.
+    """
+    argv = proc.get("argv") or []
+    if not argv:
+        return proc.get("name") or "?"
+    head = os.path.basename(argv[0])
+    if head.split(".")[0] in ("python", "python3", "node", "ruby", "perl", "bun",
+                              "deno", "sh", "bash", "zsh") and len(argv) > 1:
+        for token in argv[1:]:
+            if not token.startswith("-"):
+                return os.path.basename(token)
+    return head
+
+
 def proc_stats(pid):
     """(cpu_ticks, rss_bytes) for a pid, or None."""
     try:
@@ -110,6 +138,7 @@ class Store(object):
     def __init__(self):
         self.lock = threading.Lock()
         self.agents = []
+        self.panels = []
         self.labels = {}
         self.error = None
         self.wake = threading.Event()
@@ -119,7 +148,45 @@ class Store(object):
 
     def snapshot(self):
         with self.lock:
-            return list(self.agents), dict(self.labels), self.error
+            return (list(self.agents), list(self.panels), dict(self.labels),
+                    self.error)
+
+    def _panels(self, now, hz):
+        """Non-agent panes that are actually running something.
+
+        A pane sitting at its shell prompt has nothing to report, so those are
+        skipped: when a command runs, the foreground pid differs from the
+        pane's own shell pid.
+        """
+        listing = herdr("pane", "list") or {}
+        out = []
+        for pane in (listing.get("panes") or []):
+            if pane.get("agent"):
+                continue
+            pid_info = herdr("pane", "process-info", "--pane", pane["pane_id"]) or {}
+            info = pid_info.get("process_info") or {}
+            fg = info.get("foreground_processes") or []
+            if not fg or fg[0].get("pid") == info.get("shell_pid"):
+                continue
+            proc = fg[0]
+            pid = proc.get("pid")
+            entry = {"pane_id": pane.get("pane_id"), "tab_id": pane.get("tab_id"),
+                     "workspace_id": pane.get("workspace_id"),
+                     "command": command_label(proc), "pid": pid,
+                     "cwd": proc.get("cwd") or pane.get("cwd") or "",
+                     "cpu": None, "rss": None}
+            st = proc_stats(pid) if pid else None
+            if st:
+                ticks, rss = st
+                entry["rss"] = rss
+                prev = self.cpu.get(pid)
+                if prev and now - prev[1] > 0:
+                    entry["cpu"] = ((ticks - prev[0]) / float(hz)
+                                    / (now - prev[1]) * 100.0)
+                self.cpu[pid] = (ticks, now)
+            out.append(entry)
+        out.sort(key=lambda e: -(e["cpu"] or 0))
+        return out
 
     def run(self):
         hz = os.sysconf("SC_CLK_TCK")
@@ -171,8 +238,10 @@ class Store(object):
 
             agents.sort(key=lambda x: (RANK.get(x.get("agent_status"), 9),
                                        -x.get("since", 0)))
+            panels = self._panels(now, hz)
             with self.lock:
-                self.agents, self.labels, self.error = agents, labels, None
+                self.agents, self.panels = agents, panels
+                self.labels, self.error = labels, None
             self.first_poll = False
             self.wake.wait(REFRESH)
             self.wake.clear()
@@ -241,22 +310,31 @@ def main():
                 selected = max(0, len(agents_now) - 1)
             elif key in ("enter", "f"):
                 if agents_now:
-                    target = agents_now[min(selected, len(agents_now) - 1)]
+                    kind, target = agents_now[min(selected, len(agents_now) - 1)]
                     pane = target.get("pane_id")
-                    ok = herdr_action("agent", "focus", pane)
-                    note = ("→ focused %s in %s" % (target.get("agent"), pane)
+                    if kind == "agent":
+                        ok = herdr_action("agent", "focus", pane)
+                        what = target.get("agent")
+                    else:
+                        # non-agent panes have no focus-by-id; focusing the tab
+                        # brings the pane into view, since a tab tiles its panes
+                        ok = herdr_action("tab", "focus", target.get("tab_id"))
+                        what = target.get("command")
+                    note = ("→ focused %s in %s" % (what, pane)
                             if ok else "! could not focus %s" % pane)
                     note_until = time.time() + 3
 
         w, h = size()
-        agents, labels, err = store.snapshot()
-        agents_now = agents
-        selected = max(0, min(selected, len(agents) - 1)) if agents else 0
+        agents, panels, labels, err = store.snapshot()
+        entries = ([("agent", a) for a in agents] +
+                   [("proc", p) for p in panels])
+        agents_now = entries
+        selected = max(0, min(selected, len(entries) - 1)) if entries else 0
         if note and time.time() > note_until:
             note = ""
         counts = collections.Counter(a.get("agent_status") for a in agents)
 
-        rows = [title("herdr agents", w, ACCENT)]
+        rows = [title("herdr panes", w, ACCENT)]
         summary = [(DIM, " %d agent%s" % (len(agents), "" if len(agents) == 1 else "s")),
                    (DIM, " · %d workspace%s" % (
                        len({a.get("workspace_id") for a in agents}),
@@ -278,21 +356,16 @@ def main():
         rows.append("")
 
         wide = w >= 66
+        rows.append(LBL + " ── AGENTS ── " + DIM + "%d" % len(agents))
         head = " %-8s %-8s %-6s %-5s" % ("AGENT", "STATE", "FOR", "CPU")
         if wide:
             head += " %-5s %-18s" % ("MEM", "WORKSPACE")
-        rows.append(LBL + pad(head, w - 1))
+        rows.append(DIM + pad(head, w - 1))
 
-        visible = max(1, (h - len(rows) - 2) // 2)
-        if selected < scroll:
-            scroll = selected
-        elif selected >= scroll + visible:
-            scroll = selected - visible + 1
-        scroll = max(0, min(scroll, max(0, len(agents) - visible)))
-
-        for i in range(scroll, min(len(agents), scroll + visible)):
+        visible = max(1, len(entries))
+        for i in range(len(agents)):
             a = agents[i]
-            if len(rows) >= h - 2:
+            if len(rows) >= h - 6:
                 break
             here = i == selected
             state = a.get("agent_status") or "unknown"
@@ -327,6 +400,36 @@ def main():
                                  (tint, " " * w if (loud or here) else "")], w - 1))
         if not agents and not err:
             rows.append(DIM + "   no agents running")
+
+        rows.append("")
+        rows.append(LBL + " ── PROCESSES ── " + DIM +
+                    "%d pane%s running something" %
+                    (len(panels), "" if len(panels) == 1 else "s"))
+        if wide:
+            rows.append(DIM + pad(" %-20s %-5s %-5s %-18s" %
+                                  ("COMMAND", "CPU", "MEM", "WORKSPACE"), w - 1))
+        for j, pn in enumerate(panels):
+            if len(rows) >= h - 2:
+                break
+            here = (len(agents) + j) == selected
+            tint = bg(38, 56, 76) if here else ""
+            cpu = pn.get("cpu")
+            place = labels.get(pn.get("workspace_id")) or pn.get("workspace_id", "")
+            if not show_labels:
+                place = pn.get("pane_id", "")
+            line = [(tint + PROC, ("▸" if here else " ") + "▪ "),
+                    (tint + TXT, pad(pn.get("command", "?"), 20)),
+                    (tint + (heat(min(1.0, (cpu or 0) / 100.0)) if cpu else DIM),
+                     "%4.0f%%" % cpu if cpu is not None else "   -")]
+            if wide:
+                line.append((tint + DIM, " " + mem(pn.get("rss"))))
+                line.append((tint + ACCENT, " " + pad(place, 18)))
+            if here:
+                line.append((tint, " " * w))
+            rows.append(seg(line, w - 1))
+        if not panels:
+            rows.append(DIM + "   every other pane is idle at a prompt")
+
         while len(rows) < h - 1:
             rows.append("")
         if note:
@@ -334,7 +437,7 @@ def main():
                               " " + note)], w - 1))
         else:
             rows.append("")
-        rows.append(seg([(DIM, " ↑↓ select · ↵ go to agent · [w]orkspace"
+        rows.append(seg([(DIM, " ↑↓ select · ↵ go there · [w]orkspace"
                               " [r]efresh [q]uit")], w - 1))
         draw(rows, w, h)
         time.sleep(0.25)

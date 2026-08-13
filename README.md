@@ -61,24 +61,30 @@ locally and never printed. `vercel ls --all --format json` returns similar
 data, but spawns a Node process per refresh (~1.4s) against ~0.75s for a
 direct API call returning 100 records, so this queries the REST API.
 
-### `herdr-agents.py` — coding agents across every workspace
+### `herdr-panes.py` — everything running in Herdr
 
-Lists every agent Herdr knows about, ordered so the ones wanting attention come
-first: `blocked` (waiting on an approval right now), `done` (finished background
+Two sections. **AGENTS** lists every agent Herdr knows about, ordered so the
+ones wanting attention come first: `blocked` (waiting on an approval right now), `done` (finished background
 work you have not seen), then `working` and `idle`. On a server with a dozen
 workspaces this is the difference between noticing an agent finished and finding
 out an hour later.
 
+**PROCESSES** lists every other pane that is actually running something — dev
+servers, monitors, builds — with the command, CPU and memory. Panes idling at a
+shell prompt are omitted, detected by their foreground pid matching the pane's
+own shell pid.
+
 Each row carries the workspace, how long the state has held, and the real CPU
-and RSS of the agent's process. Durations show `≥` when the state predates the
+and RSS of the process. Durations show `≥` when the state predates the
 tool starting, since then it is only a lower bound.
 
 ```sh
-./herdr-agents.py      # 4s refresh
-./herdr-agents.py -n 10
+./herdr-panes.py       # 4s refresh
+./herdr-panes.py -n 10
 ```
 
-Keys: `↑`/`↓` select, **`Enter` jumps to that agent's pane** — across
+Keys: `↑`/`↓` select across both sections, **`Enter` jumps to whatever is
+selected** — an agent's pane, or the tab holding that process, across
 workspaces — `w` toggles workspace label vs pane id, `r` refresh, `q` quit.
 
 Since the list is already ordered by who needs attention, "press Enter on the
