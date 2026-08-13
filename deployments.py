@@ -25,8 +25,9 @@ Polls every 15s by default (-n changes it, minimum 5s). One request per team
 per poll, so the default is 4 polls/min — modest against the API's limits.
 
 Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
-c or Enter opens a copy sheet for the selected deployment offering its
-dashboard, branch-preview, commit-preview and pull-request URLs, r refreshes
+Enter, i or c opens a full detail view for the selected deployment - state and
+failure reason, timings, regions, commit, and everything worth copying on
+number keys - r refreshes
 now, f cycles the filter (all / failed / production), p cycles which project
 is shown, q quits.
 
@@ -53,8 +54,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, clipboard, config_paths, cycle,
-                    draw, load_config, maybe_help, pad, rgb, seg, setup, size,
-                    title)
+                    draw, load_config, maybe_help, pack_hints, pad, rgb, seg,
+                    setup, size, title)
 
 _CFG = load_config("deployments", {
     "token": "",             # a Vercel token; keep it in config.json, not here
@@ -90,6 +91,7 @@ PROD = rgb(120, 180, 255)
 SHA = rgb(190, 170, 255)
 BRANCH = rgb(150, 210, 255)
 SPARK = "▁▂▃▄▅▆▇█"
+ACCENT = rgb(150, 210, 255)
 
 STATE_COLOR = {"READY": READY, "BUILDING": BUILD, "ERROR": ERROR,
                "QUEUED": QUEUE, "INITIALIZING": QUEUE, "CANCELED": CANCEL}
@@ -141,6 +143,21 @@ def discover_teams(tok):
         return []
 
 
+def fetch_detail(dep, tok):
+    """Per-deployment detail: why it failed, timings, regions, aliases.
+
+    The list endpoint carries none of this, so it is fetched on demand when the
+    info view opens rather than for 200 deployments nobody has asked about.
+    """
+    q = "/v13/deployments/%s" % dep.get("uid")
+    if dep.get("_team"):
+        q += "?teamId=" + dep["_team"]
+    try:
+        return api(q, tok)
+    except Exception as e:
+        return {"_error": "%s: %s" % (type(e).__name__, e)}
+
+
 class Store(object):
     """Deployments fetched in the background, so the UI never blocks on HTTP."""
 
@@ -175,7 +192,10 @@ class Store(object):
                     if team:
                         q += "&teamId=" + team
                     try:
-                        out.extend(api(q, tok).get("deployments", []))
+                        got = api(q, tok).get("deployments", [])
+                        for d in got:
+                            d["_team"] = team          # needed to fetch detail
+                        out.extend(got)
                     except urllib.error.HTTPError as e:
                         err = "HTTP %s from Vercel%s" % (
                             e.code, " (token expired? run `vercel login`)"
@@ -221,52 +241,110 @@ def build_seconds(d):
     return None
 
 
-def links(d):
-    """The four URLs worth copying, as (label, url) pairs."""
-    meta = d.get("meta") or {}
-    out = []
-    if d.get("inspectorUrl"):
-        out.append(("Deployment dashboard", d["inspectorUrl"]))
-    if meta.get("branchAlias"):
-        out.append(("Branch preview", "https://" + meta["branchAlias"]))
-    if d.get("url"):
-        out.append(("Commit preview", "https://" + d["url"]))
-    if meta.get("githubPrId") and meta.get("githubOrg") and meta.get("githubRepo"):
-        out.append(("Pull request", "https://github.com/%s/%s/pull/%s" % (
-            meta["githubOrg"], meta["githubRepo"], meta["githubPrId"])))
-    return out
-
 
 def wrap(text, width):
     return [text[i:i + width] for i in range(0, len(text), width)] or [""]
 
 
-def copy_overlay(d, rows, w, h, note):
-    """Full-panel copy sheet for the selected deployment."""
-    meta = d.get("meta") or {}
-    rows.append(title("copy links", w, SHA))
-    rows.append("")
-    rows.append(seg([(TXT, " " + (d.get("name") or "?")),
-                     (DIM, "  " + (meta.get("githubCommitSha") or "")[:7]),
-                     (BRANCH, "  " + (meta.get("githubCommitRef") or ""))], w - 1))
-    rows.append(seg([(MSG, " " + (meta.get("githubCommitMessage") or "")
-                      .split("\n")[0])], w - 1))
-    rows.append("")
-    pairs = links(d)
-    for i, (label, url) in enumerate(pairs, 1):
-        rows.append(seg([(READY, " [%d] " % i), (TXT, label)], w - 1))
-        for line in wrap(url, max(10, w - 6)):
-            rows.append(URL + "     " + line)
+def when(ms):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ms / 1000.0)) if ms else None
+
+
+def copy_items(dep, detail):
+    """Everything worth copying out of a deployment."""
+    meta = dep.get("meta") or {}
+    items = []
+    if dep.get("inspectorUrl"):
+        items.append(("Deployment dashboard", dep["inspectorUrl"]))
+    if meta.get("branchAlias"):
+        items.append(("Branch preview", "https://" + meta["branchAlias"]))
+    if dep.get("url"):
+        items.append(("Commit preview", "https://" + dep["url"]))
+    if meta.get("githubPrId") and meta.get("githubOrg") and meta.get("githubRepo"):
+        items.append(("Pull request", "https://github.com/%s/%s/pull/%s" % (
+            meta["githubOrg"], meta["githubRepo"], meta["githubPrId"])))
+    if meta.get("githubCommitSha"):
+        items.append(("Commit SHA", meta["githubCommitSha"]))
+    if meta.get("githubCommitRef"):
+        items.append(("Branch name", meta["githubCommitRef"]))
+    err = (detail or {}).get("errorMessage")
+    if err:
+        items.append(("Error message", err))
+    return items
+
+
+def info_overlay(dep, detail, w, h, note):
+    """One deployment in full: state, timings, why it failed, and what to copy."""
+    meta = dep.get("meta") or {}
+    d = detail or {}
+    rows = [title("deployment", w, PROD)]
+
+    def field(label, value, color=TXT):
+        if value in (None, "", []):
+            return
+        rows.append(seg([(DIM, " %-11s" % label), (color, str(value))], w - 1))
+
+    state = dep.get("state", "?")
+    scol = STATE_COLOR.get(state, DIM)
+    field("project", dep.get("name"), ACCENT)
+    field("state", state.title() + ("  (%s)" % d.get("errorStep")
+                                    if d.get("errorStep") else ""), scol)
+    field("target", "production" if dep.get("target") == "production" else "preview",
+          PROD if dep.get("target") == "production" else DIM)
+    field("created", when(dep.get("created") or dep.get("createdAt")))
+    secs = build_seconds(dep)
+    if secs:
+        queued = ((dep.get("buildingAt", 0) - (dep.get("createdAt") or 0)) / 1000.0
+                  if dep.get("createdAt") and dep.get("buildingAt") else None)
+        field("build", dur(secs).strip() + ("   queued %.0fs" % queued
+                                            if queued and queued > 0.5 else ""))
+    if d.get("regions"):
+        field("regions", ", ".join(d["regions"]) +
+              ("   plan %s" % d["plan"] if d.get("plan") else ""))
+    aliases = d.get("alias") or []
+    if aliases:
+        field("aliases", "%d assigned" % len(aliases), DIM)
+
+    if d.get("errorMessage") or d.get("errorCode"):
         rows.append("")
-    if not pairs:
-        rows.append(DIM + "  (this deployment exposes no links)")
-    missing = 4 - len(pairs)
-    if missing:
-        rows.append(DIM + "  (%d link%s unavailable for this deployment)" %
-                    (missing, "" if missing == 1 else "s"))
+        rows.append(LBL + " ── WHY IT FAILED ──")
+        if d.get("errorCode"):
+            rows.append(seg([(ERROR, "  " + d["errorCode"])], w - 1))
+        for line in wrap(d.get("errorMessage") or "", max(10, w - 4)):
+            rows.append(seg([(MSG, "  " + line)], w - 1))
+        if d.get("errorLink"):
+            rows.append(seg([(URL, "  " + d["errorLink"])], w - 1))
+    elif d.get("_error"):
+        rows.append("")
+        rows.append(seg([(ERROR, " detail unavailable: " + d["_error"])], w - 1))
+    elif not d:
+        rows.append("")
+        rows.append(seg([(DIM, " loading detail…")], w - 1))
+
+    if meta.get("githubCommitSha"):
+        rows.append("")
+        rows.append(LBL + " ── COMMIT ──")
+        rows.append(seg([(SHA, "  " + meta["githubCommitSha"][:7]),
+                         (BRANCH, "  " + (meta.get("githubCommitRef") or ""))], w - 1))
+        for line in wrap((meta.get("githubCommitMessage") or "").split("\n")[0],
+                         max(10, w - 4)):
+            rows.append(seg([(MSG, "  " + line)], w - 1))
+        who = meta.get("githubCommitAuthorName") or meta.get("githubCommitAuthorLogin")
+        if who:
+            rows.append(seg([(DIM, "  by " + who)], w - 1))
+
+    pairs = copy_items(dep, detail)
+    if pairs:
+        rows.append("")
+        rows.append(LBL + " ── COPY ──")
+        for i, (label, value) in enumerate(pairs, 1):
+            short = value if len(value) <= w - 28 else value[:w - 31] + "…"
+            rows.append(seg([(READY, "  [%d] " % i), (TXT, "%-21s " % label),
+                             (URL, short)], w - 1))
+
     while len(rows) < h - 2:
         rows.append("")
-    rows.append(seg([(DIM, " press 1-%d to copy · esc or c to close" % max(1, len(pairs)))],
+    rows.append(seg([(HINT, " press 1-%d to copy · esc or i to close" % len(pairs))],
                     w - 1))
     rows.append(seg([(READY, " " + note) if note else (DIM, "")], w - 1))
     return rows
@@ -342,6 +420,8 @@ def main():
     th.start()
 
     flt = "all"
+    details = {}         # uid -> detail dict, fetched on demand
+    fetching = set()
     only = None          # project cycled with `p`
     tick = 0
     selected = 0         # index into the filtered list
@@ -358,7 +438,8 @@ def main():
                 if key in ("esc", "c", "q", "Q", "enter"):
                     overlay = False
                 elif key.isdigit() and shown:
-                    pairs = links(shown[min(selected, len(shown) - 1)])
+                    chosen = shown[min(selected, len(shown) - 1)]
+                    pairs = copy_items(chosen, details.get(chosen.get("uid")))
                     idx = int(key) - 1
                     if 0 <= idx < len(pairs):
                         label, url = pairs[idx]
@@ -412,7 +493,20 @@ def main():
 
         selected = max(0, min(selected, len(shown) - 1)) if shown else 0
         if overlay and shown:
-            draw(copy_overlay(shown[selected], [], w, h, note), w, h)
+            chosen = shown[selected]
+            uid = chosen.get("uid")
+            if uid and uid not in details and uid not in fetching:
+                fetching.add(uid)
+
+                def grab(dep=chosen, key=uid):
+                    tok, _ = token()
+                    details[key] = fetch_detail(dep, tok) if tok else {}
+                    fetching.discard(key)
+
+                t = threading.Thread(target=grab)
+                t.daemon = True
+                t.start()
+            draw(info_overlay(chosen, details.get(uid), w, h, note), w, h)
             time.sleep(0.1)
             continue
 
@@ -437,9 +531,8 @@ def main():
             filt_bits.append(flt)
         if only:
             filt_bits.append(only)
-        rows.append(seg([(HINT, " ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit"),
-                         (BUILD, ("   filter: " + " + ".join(filt_bits))
-                          if filt_bits else "")], w - 1))
+        if filt_bits:
+            rows.append(seg([(BUILD, " filter: " + " + ".join(filt_bits))], w - 1))
         rows.append("")
 
         # --- deployments over time ---
@@ -516,6 +609,16 @@ def main():
                                  (tint, " " * w if here else "")], w - 1))
         if not shown:
             rows.append(DIM + "   (nothing matches the current filter)")
+
+        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(ACCENT, "↵/[i]"), (DIM, " details")],
+                 [(DIM, "[f]ilter")], [(DIM, "[p]roject")],
+                 [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+        footer = [" " + line for line in pack_hints(hints, w - 2)]
+        rows = rows[:h - len(footer)]
+        while len(rows) < h - len(footer):
+            rows.append("")
+        rows.extend(footer)
         draw(rows, w, h)
         time.sleep(0.25)
 

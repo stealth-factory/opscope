@@ -36,10 +36,30 @@ of recent durations so drift is visible.
 preview/production, commit SHA and branch, with the commit subject beneath. Live
 builds get a spinner and a running elapsed time.
 
-## Copying links
+## Detail view
 
-`c` or `Enter` opens a copy sheet for the selected deployment with the four URLs
-worth having:
+`Enter`, `i` or `c` opens the selected deployment in full — and this is where a
+failure finally explains itself. The list can only say `Error`; the detail view
+fetches the per-deployment endpoint and shows why:
+
+```
+ project    ferry-hk
+ state      Error  (buildStep)
+ target     preview
+ build      17s   queued 1s
+ regions    hkg1, sfo1, syd1, sin1   plan pro
+
+ ── WHY IT FAILED ──
+  BUILD_UTILS_SPAWN_1
+  Command "pnpm run build" exited with 1
+```
+
+It also carries timings split into queue and build, the regions and plan, how
+many aliases were assigned, and the full commit. Detail is fetched on demand in
+the background — 200 deployments are not worth pre-fetching for the one you
+open — so the view paints immediately and fills in.
+
+Everything worth copying sits at the bottom on number keys:
 
 ```
  [1] Deployment dashboard   vercel.com/org/project/A51x3neL…
@@ -60,8 +80,8 @@ OSC 52 is blocked.
 | Key | Action |
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | move the selection |
-| `c` / `Enter` | copy sheet for the selected deployment |
-| `1`–`4` | inside the sheet, copy that URL |
+| `Enter` / `i` / `c` | full detail view for the selected deployment |
+| `1`–`7` | inside the view, copy that item |
 | `f` | filter — all / failed / production |
 | `p` | cycle which project is shown |
 | `r` | refresh now |
