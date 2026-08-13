@@ -34,6 +34,10 @@ node runs with --accept-routes.
 A live throughput section graphs peers currently moving data (toggle with g),
 and the info view carries the same graph for the selected machine.
 
+n cycles the poll interval while running (1/2/5/10/30s), the same way the
+latency monitor's i key does; the graph resolution follows it. -n sets the
+starting value, and `tailnet.refresh` in config.json sets the default.
+
 Keys: up/down select a peer, Enter or i opens a full machine info view (every address,
 routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
@@ -53,12 +57,13 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, clipboard, draw, load_config, maybe_help,
-                    pad, rgb, seg, setup, size, title)
+from common import (RST, Keyboard, bg, clipboard, cycle, draw, load_config,
+                    maybe_help, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("tailnet", {"refresh": 2.0, "history": 180})
 REFRESH = float(_CFG["refresh"])
 HISTORY = int(_CFG["history"])   # rate samples kept per peer
+REFRESH_CHOICES = (1.0, 2.0, 5.0, 10.0, 30.0)   # cycled at runtime with n
 SPARK = "▁▂▃▄▅▆▇█"
 
 ONLINE = rgb(90, 240, 160)
@@ -558,6 +563,9 @@ def main():
                 selected = 0
             elif key == "g":
                 show_graph = not show_graph
+            elif key == "n":
+                REFRESH = cycle(REFRESH_CHOICES, REFRESH)
+                store.wake.set()      # apply the new interval immediately
             elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
@@ -604,7 +612,8 @@ def main():
         rows.append(seg([(ONLINE, " %d online" % len(online)),
                          (DIM, " / %d peers" % len(peers)),
                          (DIRECT, "   %d direct" % len(direct)),
-                         (RELAY, "   %d relayed" % len(relayed))], w - 1))
+                         (RELAY, "   %d relayed" % len(relayed)),
+                         (DIM, "   every %gs" % REFRESH)], w - 1))
         line = [(ROUTE, " %d advertising routes" % len(routers))]
         line.append((EXIT, "   exit node: " + (peer_name(exits[0]) if exits
                                                else "none")))
@@ -690,8 +699,8 @@ def main():
                              (TXT, ", ".join(rts[:2])),
                              (DIM, (" +%d more" % (len(rts) - 2)) if len(rts) > 2 else "")],
                             w - 1))
-        rows.append(seg([(DIM, " ↑↓ · ↵/[i]nfo [c]opy [g]raph [o]ffline [r]efresh"
-                              " [q]uit")], w - 1))
+        rows.append(seg([(DIM, " ↑↓ · ↵/[i]nfo [c]opy [g]raph [o]ffline"
+                              " [n]=%gs [r]efresh [q]uit" % REFRESH)], w - 1))
         draw(rows, w, h)
         time.sleep(0.3)
 
