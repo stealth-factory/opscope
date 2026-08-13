@@ -173,6 +173,17 @@ world clock covering 19 tech hubs sorted west to east.
 ./worldclock.py
 ```
 
+**Pomodoro** — off until you press `p`. Standard 25/5 with a longer break every
+fourth session. `space` pauses, `r` restarts the phase, `s` skips on, `+`/`-`
+change the focus length.
+
+A phase never ends itself. When time is up the counter keeps running and the
+bar rescales so a growing red section shows the overrun — at 25 minutes over a
+25-minute block, half the bar is red. The terminal is alerted when the phase
+elapses and again every minute it is ignored (BEL plus an OSC 9 desktop
+notification where the terminal supports one). State persists across restarts,
+so relaunching the panel does not cost you a session.
+
 Configure `CITIES`, and `WORK_START_H` / `WORK_END_H` (default Mon–Fri 09:00–18:00).
 Set `TZ` to a fixed offset to pin the clock instead of following the system zone.
 

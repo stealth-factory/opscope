@@ -14,21 +14,35 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Server time, office-hours countdowns, and a world clock.
+"""Server time, office-hours countdowns, a pomodoro timer, and a world clock.
+
+The pomodoro is off until you press p. It runs the standard 25/5 with a longer
+break every fourth session, all configurable, and persists across restarts so
+relaunching the panel does not cost you a session.
+
+A phase does not end itself. When the time is up the counter keeps going,
+showing how far over you are, and the bar rescales so a growing red section
+represents the overrun — the longer you ignore it, the more of the bar is red.
+The terminal is alerted when the phase elapses and again every minute it keeps
+running.
+
+Keys: p toggles the pomodoro, space pauses or resumes, r restarts the phase,
+s skips to the next one, +/- change the focus length, q quits.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
 there are plausibly at work.
 """
 import datetime
+import json
 import os
 import sys
 import time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, bar, draw, load_config, maybe_help, pad, rgb, seg,
-                    setup, size, title)
+from common import (RST, Keyboard, bar, draw, flush, load_config, maybe_help,
+                    out, pad, rgb, seg, setup, size, title)
 
 # None = follow the system timezone for the big digits.
 TZ = None
@@ -46,6 +60,13 @@ _CFG = load_config("worldclock", {
     ],
     "work_start_hour": 9,
     "work_end_hour": 18,
+    "pomodoro_enabled": False,
+    "pomodoro_focus_minutes": 25,
+    "pomodoro_short_break_minutes": 5,
+    "pomodoro_long_break_minutes": 15,
+    "pomodoro_sessions_before_long_break": 4,
+    "pomodoro_bell": True,          # terminal bell on elapse and each minute over
+    "pomodoro_notify": True,        # OSC 9 desktop notification, where supported
 })
 
 CITIES = [tuple(c) for c in _CFG["cities"]]
@@ -67,9 +88,20 @@ BIG = {
 WORK_START_H = int(_CFG["work_start_hour"])
 WORK_END_H = int(_CFG["work_end_hour"])
 
+# Pomodoro: 25 minutes of focus, 5 off, a longer break every fourth session.
+PHASES = ("focus", "short", "long")
+PHASE_LABEL = {"focus": "FOCUS", "short": "SHORT BREAK", "long": "LONG BREAK"}
+STATE_FILE = os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "terminal-toys", "pomodoro.json")
+
 C1 = rgb(120, 255, 200)
 PURPLE = rgb(175, 130, 255)
 HOUR = rgb(90, 220, 255)
+FOCUS = rgb(255, 130, 120)
+BREAK = rgb(120, 235, 170)
+PAUSED = rgb(160, 172, 190)
+OVER = rgb(255, 80, 90)
 C2 = rgb(40, 150, 120)
 DIM = rgb(70, 130, 110)
 TXT = rgb(220, 255, 240)
@@ -78,6 +110,161 @@ EVE = rgb(255, 200, 90)        # evening
 NIGHT = rgb(95, 130, 175)      # asleep
 WEEKEND = rgb(150, 150, 170)
 HERE = rgb(255, 170, 220)
+
+
+def alert(text, bell=True, notify=True):
+    """Nudge the user through the terminal.
+
+    BEL is universal; OSC 9 raises a desktop notification on terminals that
+    implement it and is ignored by those that do not, so both are sent.
+    """
+    if bell:
+        out("\a")
+    if notify:
+        out("\x1b]9;%s\x07" % text)
+    flush()
+
+
+class Pomodoro(object):
+    """A pomodoro that survives the panel being restarted.
+
+    Panels get relaunched often, and losing a 20-minute session to that would
+    make the timer useless, so phase and elapsed time are persisted and
+    reloaded. Time is tracked as an absolute deadline rather than by counting
+    down, so a stalled or slow redraw cannot make the timer drift.
+    """
+
+    def __init__(self):
+        self.focus = int(_CFG["pomodoro_focus_minutes"])
+        self.short = int(_CFG["pomodoro_short_break_minutes"])
+        self.long = int(_CFG["pomodoro_long_break_minutes"])
+        self.cycle = int(_CFG["pomodoro_sessions_before_long_break"])
+        self.enabled = bool(_CFG["pomodoro_enabled"])
+        self.phase = "focus"
+        self.completed = 0
+        self.running = False
+        self.left = self.focus * 60.0     # seconds remaining when paused
+        self.deadline = None              # wall-clock end when running
+        self.rang = False
+        self.nagged = 0            # whole minutes of overtime already alerted
+        self.bell = bool(_CFG["pomodoro_bell"])
+        self.notify = bool(_CFG["pomodoro_notify"])
+        self._load()
+
+    # ---- persistence -------------------------------------------------
+    def _load(self):
+        try:
+            with open(STATE_FILE) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            return
+        if d.get("day") != time.strftime("%Y-%m-%d"):
+            return                         # a new day starts a fresh count
+        self.phase = d.get("phase", self.phase)
+        self.completed = int(d.get("completed", 0))
+        self.focus = int(d.get("focus", self.focus))
+        self.enabled = bool(d.get("enabled", self.enabled))
+        self.left = float(d.get("left", self.left))
+        if d.get("running") and d.get("deadline"):
+            # resume mid-phase; if it elapsed while we were away the timer
+            # simply shows how far over it has run
+            self.deadline = float(d["deadline"])
+            self.running = True
+            self.rang = self.signed() <= 0
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            with open(STATE_FILE, "w") as f:
+                json.dump({"day": time.strftime("%Y-%m-%d"), "phase": self.phase,
+                           "completed": self.completed, "focus": self.focus,
+                           "enabled": self.enabled, "running": self.running,
+                           "left": self.left, "deadline": self.deadline}, f)
+        except OSError:
+            pass
+
+    # ---- state -------------------------------------------------------
+    def duration(self):
+        return {"focus": self.focus, "short": self.short,
+                "long": self.long}[self.phase] * 60.0
+
+    def signed(self):
+        """Seconds left; negative once the phase has been overrun."""
+        if self.running and self.deadline:
+            return self.deadline - time.time()
+        return self.left
+
+    def remaining(self):
+        return max(0.0, self.signed())
+
+    def overtime(self):
+        return max(0.0, -self.signed())
+
+    def toggle(self):
+        self.enabled = not self.enabled
+        self.save()
+
+    def pause(self):
+        if self.running:
+            self.left = self.signed()          # keeps any overtime accrued
+            self.running, self.deadline = False, None
+        else:
+            self.deadline = time.time() + self.signed()
+            self.running = True
+        self.save()
+
+    def restart(self):
+        self.left = self.duration()
+        self.deadline = time.time() + self.left if self.running else None
+        self.rang = False
+        self.nagged = 0
+        self.save()
+
+    def advance(self, auto=False):
+        """Move to the next phase, long break every `cycle` focus sessions."""
+        if self.phase == "focus":
+            self.completed += 1
+            self.phase = ("long" if self.cycle and self.completed % self.cycle == 0
+                          else "short")
+        else:
+            self.phase = "focus"
+        self.left = self.duration()
+        self.deadline = time.time() + self.left if (self.running and auto) else None
+        if not auto:
+            self.running = False
+        self.rang = False
+        self.nagged = 0
+        self.save()
+
+    def adjust(self, delta):
+        """Change the focus length; applies now when focus is not running."""
+        self.focus = max(1, min(120, self.focus + delta))
+        if self.phase == "focus" and not self.running:
+            self.left = self.duration()
+        self.save()
+
+    def tick(self):
+        """True exactly once, when a phase elapses.
+
+        The phase is not advanced automatically: overrunning a focus block is
+        worth seeing rather than silently resetting, so the timer keeps
+        counting upward until `s` moves it on.
+        """
+        if not self.running:
+            return False
+        over = self.overtime()
+        if over <= 0:
+            return False
+        if not self.rang:
+            self.rang = True
+            self.nagged = 0
+            return True
+        # keep nagging once per minute for as long as it is ignored
+        minutes = int(over // 60)
+        if minutes > self.nagged:
+            self.nagged = minutes
+            return True
+        return False
 
 
 def render_big(s, w):
@@ -182,6 +369,8 @@ def phase(dt):
 def main():
     maybe_help(__doc__)
     setup()
+    keyboard = Keyboard()
+    pomo = Pomodoro()
     zones = []
     for name, key in CITIES:
         try:
@@ -190,6 +379,31 @@ def main():
             continue
     local_key = time.tzname[0]
     while True:
+        for key in keyboard.poll():
+            if key in ("q", "Q"):
+                keyboard.restore()
+                raise SystemExit(0)
+            if key == "p":
+                pomo.toggle()
+            elif not pomo.enabled:
+                continue
+            elif key == " ":
+                pomo.pause()
+            elif key == "r":
+                pomo.restart()
+            elif key == "s":
+                pomo.advance()
+            elif key in ("+", "="):
+                pomo.adjust(5)
+            elif key == "-":
+                pomo.adjust(-5)
+        if pomo.tick():
+            over = pomo.overtime()
+            alert("%s %s" % (PHASE_LABEL[pomo.phase],
+                             "finished" if over < 60
+                             else "running %dm over" % (over // 60)),
+                  pomo.bell, pomo.notify)
+
         w, h = size()
         stamp = datetime.datetime.now(TZ) if TZ else datetime.datetime.now().astimezone()
 
@@ -205,6 +419,31 @@ def main():
         for label, text, frac, col in countdowns(stamp):
             rows.append(seg([(DIM, " " + pad(label, 21)), (TXT, text)], w - 1))
             rows.append(" " + col + bar(frac, max(4, w - 3)))
+
+        if pomo.enabled:
+            over = pomo.overtime()
+            col = FOCUS if pomo.phase == "focus" else BREAK
+            if not pomo.running:
+                col = PAUSED
+            rows.append(seg([(col, " " + pad("Pomodoro · " + PHASE_LABEL[pomo.phase],
+                                             21)),
+                             (OVER if over else TXT,
+                              ("+" + hms(over)) if over else hms(pomo.remaining())),
+                             (PAUSED, "  paused" if not pomo.running else ""),
+                             (OVER if over else DIM,
+                              "  OVER" if over else ""),
+                             (DIM, "   %d done" % pomo.completed)], w - 1))
+            n = max(4, w - 3)
+            if over:
+                # the bar rescales to duration+overtime, so the red share grows
+                # the longer the phase is ignored
+                total = pomo.duration() + over
+                base = max(1, int(round(n * pomo.duration() / total)))
+                rows.append(" " + col + "█" * base + OVER + "█" * (n - base))
+            else:
+                done = 1.0 - (pomo.remaining() / pomo.duration()
+                              if pomo.duration() else 0)
+                rows.append(" " + col + bar(done, n))
         rows.append("")
 
         # sort west -> east by current UTC offset
@@ -233,9 +472,16 @@ def main():
                              (DIM, dt.strftime("  %a")),
                              (DIM, "  " + pad(offset_str(dt), 8)),
                              (EVE, tag)], w - 1))
+        rows = rows[:h - 1]
         while len(rows) < h - 1:
             rows.append("")
-        rows.append(C2 + " " + "▔" * max(1, w - 2))
+        if pomo.enabled:
+            rows.append(seg([(DIM, " [space]"), (TXT, "pause" if pomo.running
+                                                 else "start"),
+                             (DIM, " [r]estart [s]kip [±]%dmin [p]off" % pomo.focus)],
+                            w - 1))
+        else:
+            rows.append(seg([(DIM, " [p] pomodoro")], w - 1))
         draw(rows, w, h)
         time.sleep(0.25)
 
