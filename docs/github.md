@@ -83,8 +83,15 @@ current streak, because it is not over yet.
 This is the one decorative section, so it is skipped entirely in a short pane to
 leave the account table its rows.
 
-**By account** — one row per org. `↑` `↓` selects one; the selected row is
-tinted.
+**By account** — one row per org, **busiest first**: open PRs decide the order,
+merged-in-window breaks ties so an idle backlog ranks below an account of the
+same size that is actually moving, and the name settles the rest to keep the
+order steady frame to frame.
+
+`↑` `↓` select. Where the pane cannot show every account the table **scrolls**
+rather than truncating — the selection stays on screen, centred where there is
+room either side and pinned at the ends — and the heading counts what is shown,
+`8-9 of 9`.
 
 The sparkline on the right is that account's own merged-per-day across the
 window. The columns carry totals but no shape, and a fortnight of nothing

@@ -442,6 +442,10 @@ def main():
 
         w, h = size()
         stats, rate, err, fetched, calendar = store.snapshot()
+        # Busiest first: open PRs decide it, and merged-in-window breaks ties
+        # so an idle backlog ranks below an account of the same size that is
+        # actually moving. Name last, to keep the order steady frame to frame.
+        stats.sort(key=lambda x: (-x["open"], -x["merged"], x["account"].lower()))
         # Windowed figures are stale until every account has reported for the
         # window now selected; rows carry the window they were fetched for.
         # The charts are tracked apart from the headline because their data
@@ -588,10 +592,10 @@ def main():
 
         rows.append("")
 
-        # The account table earns the remaining height: it truncates at h - 3
-        # and was showing five of nine accounts, while the calendar below it
-        # spent eight rows on decoration. The calendar keeps its place only
-        # where the pane is tall enough for both.
+        # The account table earns the remaining height: it scrolls within
+        # whatever is left, while the calendar below it spends eight rows on
+        # decoration. The calendar keeps its place only where the pane is tall
+        # enough for both.
         if calendar and h > 38:
             grid, peak, total = heatmap(calendar["weeks"], w)
             rows.append(seg([(LBL, " ── CONTRIBUTIONS ── "),
@@ -631,7 +635,18 @@ def main():
                     rows.append(seg(line, w - 1))
             rows.append("")
 
-        rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))
+        # Scroll rather than truncate: the selection has to stay on screen, or
+        # the arrows move something invisible. Keep it centred where there is
+        # room either side, and pinned at the ends of the list. Two header
+        # lines and the footer come out of the height before the rows do.
+        room = max(1, h - 5 - len(rows))
+        first = 0
+        if len(stats) > room:
+            first = min(max(0, selected - room // 2), len(stats) - room)
+        counter = ("   %d-%d of %d" % (first + 1, min(first + room, len(stats)),
+                                       len(stats))
+                   if len(stats) > room else "")
+        rows.append(seg([(LBL, " ── BY ACCOUNT ──"), (DIM, counter)], w - 1))
         wide = w >= 62
         head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",
                                             "MRG%dD" % store.days, "RATE")
@@ -645,10 +660,7 @@ def main():
             head += "  " + ("MERGED/DAY · OWN PEAK"
                             if bar_cols >= 21 else "MERGED/DAY")[:bar_cols]
         rows.append(DIM + pad(head, w - 1))
-        busiest = max((s["open"] for s in stats), default=0) or 1
-        for i, s in enumerate(stats):
-            if len(rows) >= h - 3:
-                break
+        for i, s in list(enumerate(stats))[first:first + room]:
             here = i == selected
             tint = bg(38, 56, 76) if here else ""
             r = s["rate"]
