@@ -10,7 +10,7 @@
     "strip_suffixes": [".example.internal"]
   },
 
-  "worldclock": {
+  "timekeeper": {
     "cities": [
       ["San Francisco", "America/Los_Angeles"],
       ["London", "Europe/London"],

@@ -14,7 +14,11 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Server time, office-hours countdowns, a pomodoro timer, and a world clock.
+"""Time on this server, time you have left, and time everywhere else.
+
+Four sections: a big clock in the machine's own timezone, countdown bars for
+the next hour, office hours and the end of day, an optional pomodoro, and a
+world clock covering the hubs you care about.
 
 The pomodoro is off until you press p. It runs the standard 25/5 with a longer
 break every fourth session, all configurable, and persists across restarts so
@@ -62,7 +66,7 @@ from common import (RST, Keyboard, bar, bg, draw, flush, load_config,
 # None = follow the system timezone for the big digits.
 TZ = None
 
-_CFG = load_config("worldclock", {
+_CFG = load_config("timekeeper", {
     "cities": [
         ["San Francisco", "America/Los_Angeles"],
         ["New York", "America/New_York"],
@@ -626,8 +630,8 @@ def main():
         w, h = size()
         stamp = datetime.datetime.now(TZ) if TZ else datetime.datetime.now().astimezone()
 
-        rows = [title("server time", w)]
-        rows.append("")
+        rows = [title("timekeeper", w)]
+        rows.append(DIM + " ── SERVER TIME ──")
         for i, ln in enumerate(render_big(stamp.strftime("%H:%M:%S"), w - 2)):
             rows.append(" " + (C1 if i < 3 else C2) + ln)
         rows.append("")
