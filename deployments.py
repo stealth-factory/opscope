@@ -35,11 +35,11 @@ text reaches your local clipboard even over SSH. If your terminal or
 multiplexer blocks OSC 52, the sheet still shows each URL in full for mouse
 selection.
 
-Credentials: either works, and no dashboard key is required. $VERCEL_TOKEN is
-checked first - set it on a machine with no CLI - and otherwise the CLI's own
-session is used, so if `vercel whoami` works this does too. The CLI session
-carries an expiry and can only be refreshed by the CLI itself, so the panel
-warns an hour ahead and says what to run. The token is never printed. `vercel ls --all --format json` is an equivalent data source
+Credentials, in order: `deployments.token` in config.json, then $VERCEL_TOKEN,
+then the Vercel CLI's own session. A dashboard token is the durable choice - a
+CLI session expires within hours and only the CLI can refresh it - so set
+`use_cli_session` to false to require a token and stop falling back. The token
+is read locally and never printed. `vercel ls --all --format json` is an equivalent data source
 but spawns a Node process per refresh, so this queries the REST API directly.
 """
 import collections
@@ -53,10 +53,14 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, clipboard, cycle, draw, load_config,
-                    maybe_help, pad, rgb, seg, setup, size, title)
+from common import (RST, Keyboard, bar, bg, clipboard, config_paths, cycle,
+                    draw, load_config, maybe_help, pad, rgb, seg, setup, size,
+                    title)
 
 _CFG = load_config("deployments", {
+    "token": "",             # a Vercel token; keep it in config.json, not here
+    "token_env": "VERCEL_TOKEN",
+    "use_cli_session": True,  # fall back to the Vercel CLI's own login
     "refresh": 15,       # seconds between API polls (-n)
     "limit": 100,        # deployments per request (API maximum)
     "teams": [],         # empty = discover every team you can see
@@ -101,16 +105,36 @@ STATE_COLOR = {"READY": READY, "BUILDING": BUILD, "ERROR": ERROR,
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def token():
-    """A Vercel token, from the environment or the CLI's own session.
+def config_token_warning():
+    """Warn when a token sits in a file others can read."""
+    for path in config_paths():
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            mode = os.stat(path).st_mode & 0o077
+        except OSError:
+            return None
+        if mode:
+            return "config.json is readable by others; chmod 600 it"
+        return None
+    return None
 
-    Either works and neither needs a dashboard key: set VERCEL_TOKEN for a
-    machine with no CLI, or just be logged in - if `vercel whoami` works, so
-    does this. Returns (token, expires_at|None).
+
+def token():
+    """A Vercel token: config first, then the environment, then the CLI.
+
+    A token from the dashboard is the durable choice - it is not tied to a CLI
+    login and does not expire in a few hours the way a CLI session does. Set
+    `use_cli_session` to false to require one and stop falling back.
+    Returns (token, expires_at|None, source).
     """
-    tok = os.environ.get("VERCEL_TOKEN")
+    if _CFG["token"]:
+        return _CFG["token"], None, "config"
+    tok = os.environ.get(_CFG["token_env"] or "VERCEL_TOKEN")
     if tok:
-        return tok, None
+        return tok, None, "env"
+    if not _CFG["use_cli_session"]:
+        return None, None, "disabled"
     for path in AUTH_PATHS:
         try:
             with open(os.path.expanduser(path)) as f:
@@ -118,8 +142,8 @@ def token():
         except (OSError, ValueError):
             continue
         if data.get("token"):
-            return data["token"], data.get("expiresAt")
-    return None, None
+            return data["token"], data.get("expiresAt"), "cli"
+    return None, None, "missing"
 
 
 def api(path, tok):
@@ -155,10 +179,14 @@ class Store(object):
 
     def run(self):
         while True:
-            tok, expires = token()
+            tok, expires, source = token()
             if not tok:
                 with self.lock:
-                    self.error = "no credential: run `vercel login` or set VERCEL_TOKEN"
+                    self.error = ("no token: put one in config.json under "
+                                  "deployments.token"
+                                  if source == "disabled" else
+                                  "no credential: set deployments.token, "
+                                  "$VERCEL_TOKEN, or run `vercel login`")
             elif expires and expires <= time.time():
                 # the CLI can refresh this, but only when the CLI itself runs
                 with self.lock:
@@ -167,8 +195,11 @@ class Store(object):
             else:
                 out, err = [], None
                 if expires and expires - time.time() < 3600:
-                    err = "CLI session expires in %d min" % (
-                        (expires - time.time()) / 60)
+                    err = ("CLI session expires in %d min; a dashboard token in "
+                           "config.json does not" % ((expires - time.time()) / 60))
+                warn = config_token_warning() if source == "config" else None
+                if warn:
+                    err = warn
                 scopes = self.teams or [None]
                 for team in scopes:
                     q = "/v6/deployments?limit=%d" % LIMIT

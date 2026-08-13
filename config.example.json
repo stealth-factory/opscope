@@ -1,33 +1,55 @@
 {
   "_comment": "Copy to config.json (git-ignored) or ~/.config/terminal-toys/config.json. Every key is optional; anything omitted keeps the tool's default.",
-
   "latency": {
-    "hosts": ["1.1.1.1", "8.8.8.8", "example.internal"],
+    "hosts": [
+      "1.1.1.1",
+      "8.8.8.8",
+      "example.internal"
+    ],
     "interval": 0.5,
     "seconds_per_column": 0,
     "window": 600,
     "aggregate": "median",
-    "strip_suffixes": [".example.internal"]
+    "strip_suffixes": [
+      ".example.internal"
+    ]
   },
-
   "clocks": {
     "cities": [
-      ["San Francisco", "America/Los_Angeles"],
-      ["London", "Europe/London"],
-      ["Singapore", "Asia/Singapore"],
-      ["Tokyo", "Asia/Tokyo"]
+      [
+        "San Francisco",
+        "America/Los_Angeles"
+      ],
+      [
+        "London",
+        "Europe/London"
+      ],
+      [
+        "Singapore",
+        "Asia/Singapore"
+      ],
+      [
+        "Tokyo",
+        "Asia/Tokyo"
+      ]
     ],
     "work_start_hour": 9,
     "work_end_hour": 18
   },
-
   "deployments": {
+    "_comment": "token: a Vercel token from Account Settings -> Tokens. Preferred over the CLI session, which expires within hours and only the CLI can refresh. Keep this file chmod 600.",
+    "token": "",
+    "token_env": "VERCEL_TOKEN",
+    "use_cli_session": true,
     "refresh": 15,
     "limit": 100,
     "teams": [],
     "projects": []
   },
-
-  "tailnet":      { "refresh": 5 },
-  "herdr_agents": { "refresh": 4 }
+  "tailnet": {
+    "refresh": 5
+  },
+  "herdr_agents": {
+    "refresh": 4
+  }
 }

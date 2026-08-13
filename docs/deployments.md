@@ -76,18 +76,26 @@ the same height.
 
 ## Credentials
 
-**No dashboard key is required, though one works.** Two sources, in order:
+Three sources, tried in order:
 
-1. **`$VERCEL_TOKEN`** — a token from Account Settings → Tokens. Needs no CLI
-   installed, so it suits CI or a machine you would rather not log in.
-2. **The Vercel CLI's own session** — if `vercel whoami` works, this does. The
-   CLI's `auth.json` is found on Linux, macOS and Windows.
+1. **`deployments.token` in `config.json`** — a token from Account Settings →
+   Tokens. The durable choice, and the only one that works with no CLI present.
+2. **`$VERCEL_TOKEN`** — same thing by environment; the variable name is
+   configurable via `token_env`.
+3. **The Vercel CLI's own session** — if `vercel whoami` works, this does. Found
+   on Linux, macOS and Windows. Set `use_cli_session` to `false` to require a
+   real token and stop falling back to it.
 
 **The token is read locally and never printed.**
 
 A CLI session carries an expiry and can only be refreshed by the CLI itself, so
 the widget warns an hour ahead and, once it lapses, says to run any `vercel`
-command rather than reporting a bare HTTP 403.
+command rather than reporting a bare HTTP 403. A dashboard token has no such
+limit — which is the argument for `use_cli_session: false`.
+
+`config.json` holds a secret once you put a token in it. The widget checks the
+file's permissions and says so if it is group- or world-readable; `chmod 600`
+it. The file is git-ignored, and the token is never printed.
 
 `vercel ls --all --format json` returns comparable data, but spawns a Node
 process per refresh — measured at 1433ms for 3 records against 756ms for 100
@@ -100,6 +108,9 @@ good data on screen behind an error banner rather than freezing the panel.
 
 ```json
 "deployments": {
+  "token": "",
+  "token_env": "VERCEL_TOKEN",
+  "use_cli_session": true,
   "refresh": 15,
   "limit": 100,
   "teams": [],
