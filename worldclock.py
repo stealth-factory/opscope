@@ -27,7 +27,8 @@ The terminal is alerted when the phase elapses and again every minute it keeps
 running.
 
 Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
-countdowns and footer stay pinned. p toggles the pomodoro, space pauses or
+countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
+it with them, space pauses or
 resumes, r restarts the phase, s skips to the next one, +/- change the focus
 length, q quits.
 
@@ -148,6 +149,7 @@ class Pomodoro(object):
         self.left = self.focus * 60.0     # seconds remaining when paused
         self.deadline = None              # wall-clock end when running
         self.rang = False
+        self.was_running = False   # run state to restore when unhidden
         self.nagged = 0            # whole minutes of overtime already alerted
         self.bell = bool(_CFG["pomodoro_bell"])
         self.notify = bool(_CFG["pomodoro_notify"])
@@ -166,6 +168,7 @@ class Pomodoro(object):
         self.completed = int(d.get("completed", 0))
         self.focus = int(d.get("focus", self.focus))
         self.enabled = bool(d.get("enabled", self.enabled))
+        self.was_running = bool(d.get("was_running", False))
         self.left = float(d.get("left", self.left))
         if d.get("running") and d.get("deadline"):
             # resume mid-phase; if it elapsed while we were away the timer
@@ -181,6 +184,7 @@ class Pomodoro(object):
                 json.dump({"day": time.strftime("%Y-%m-%d"), "phase": self.phase,
                            "completed": self.completed, "focus": self.focus,
                            "enabled": self.enabled, "running": self.running,
+                           "was_running": self.was_running,
                            "left": self.left, "deadline": self.deadline}, f)
         except OSError:
             pass
@@ -203,7 +207,22 @@ class Pomodoro(object):
         return max(0.0, -self.signed())
 
     def toggle(self):
-        self.enabled = not self.enabled
+        """Show/hide, and suspend with it.
+
+        A timer that keeps counting while hidden is worse than no timer: you
+        come back to a focus block that expired half an hour ago. Hiding
+        freezes it where it stands, and showing resumes it only if it was
+        running when it went away.
+        """
+        if self.enabled:
+            self.was_running = self.running
+            if self.running:
+                self.pause()               # freezes, preserving any overtime
+            self.enabled = False
+        else:
+            self.enabled = True
+            if self.was_running and not self.running:
+                self.pause()               # resume exactly where it stopped
         self.save()
 
     def pause(self):

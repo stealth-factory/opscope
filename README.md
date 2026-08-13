@@ -173,7 +173,11 @@ world clock covering 19 tech hubs sorted west to east.
 ./worldclock.py
 ```
 
-**Pomodoro** — off until you press `p`. Standard 25/5 with a longer break every
+**Pomodoro** — off until you press `p`, which shows or hides it *and suspends
+it with them*: a timer counting down where you cannot see it just means coming
+back to a block that expired half an hour ago. Hiding freezes it exactly where
+it stands, overtime included; showing resumes it only if it was running when it
+went away. Standard 25/5 with a longer break every
 fourth session. `space` pauses, `r` restarts the phase, `s` skips on, `+`/`-`
 change the focus length.
 
