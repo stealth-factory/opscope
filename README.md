@@ -106,6 +106,11 @@ before changing one:
 - **Say what a number means when it is not obvious.** Counters that reset with
   a daemon, durations that predate the process, aggregates that hide their
   outliers — each is labelled rather than left to mislead.
+- **Never show a stale figure under a fresh label.** Change a setting and the
+  numbers it governs shimmer until real ones land, rather than sitting there
+  looking current. The same rule kills silent truncation: a chart that cannot
+  fit its window says `54d of 90d`, and a token missing a scope is named rather
+  than left to quietly undercount.
 - **Optional enhancements, never requirements.** The clipboard goes through
   OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
   available and skipped silently where not.
@@ -126,10 +131,15 @@ what a pane is running, notification gating, and the layout mistakes worth
 skipping.
 
 `common.py` holds the shared pieces — terminal sizing, a full-frame `draw()`,
-24-bit colour, progress bars, a green→amber→red `heat()` ramp, `seg()` for
-clipping coloured text to a cell budget, `pack_hints()` for wrapping footers,
-non-blocking `Keyboard` input with arrow-key decoding, and `clipboard()` over
-OSC 52.
+24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
+text to a cell budget, `pack_hints()` for wrapping footers, non-blocking
+`Keyboard` input with arrow-key decoding, and `clipboard()` over OSC 52.
+
+The chart helpers are worth knowing before drawing anything new: `vbars()` and
+its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
+`braille_plot()` for continuous lines at 2×4 sub-pixels a cell, `stacked_bar()`
+for proportions, `meter()` for a gauge, and `skeleton()` for the shimmer that
+stands in for a figure still being fetched.
 
 ## License
 

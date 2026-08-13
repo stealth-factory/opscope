@@ -4,33 +4,42 @@ Pull requests across every org you work in — not what shipped, but whether wor
 is actually moving.
 
 ```
-╺━ GITHUB OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 9 accounts   updated 0s ago   4891/5000 api
- ── OPEN PR STATE ── 682 PRs · 217 issues open   (any age)
- ████████████████████████████████████████████████████░░░░░░░░░░░░░░░░░
+╺━ GITHUB OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 9 accounts   updated 41s ago   4100/5000 api
+ ── OPEN PR STATE ── 682 PRs · 220 issues open   (any age)
+ ███████████████████████████████████████████████████████████████████████████
  ▇ awaiting review 486 (71%)   ▇ ready to merge 180 (26%)   ▇ draft 16 (2%)
 
  ── MERGE RATE ── last 7 days
- 81%  ████████████████████████████████████████░░░░░░░░░  17 merged / 4 dropped
+ 81%  ████████████████████████████████████░░░░░░░░  17 merged / 4 dropped
 
  ── PR FLOW ── 7d · ▲ 30 opened · ▼ 17 merged   peak 19/day
-            ██████████
-            ██████████
- ▃▃▃▃▃▃▃▃▃▃ ██████████ ▂▂▂▂▂▂▂▂▂▂            ▁▁▁▁▁▁▁▁▁▁ ▆▆▆▆▆▆▆▆▆▆
+           █████████
+           █████████
+ ▃▃▃▃▃▃▃▃▃ █████████ ▂▂▂▂▂▂▂▂▂           ▁▁▁▁▁▁▁▁▁ ▆▆▆▆▆▆▆▆▆
  ─────────────────────────────────────────────────────────────────────
- ▀▀▀▀▀▀▀▀▀▀                                             ██████████
+ ▀▀▀▀▀▀▀▀▀                                         █████████
  7d ago                                                          today
 
- ── CONTRIBUTIONS ── 6010 in 52 weeks, peak 241/day
- Mon   ░▒░▒░ ░▒░           ░     ░   ░ ░ ░ ░ ░░░░░░░▒▓░
-       ░▒░░░ ▒▓         ░        ░░ ░░░ ░░ ░▒░ ░░░░░▒▒░
- Wed  ░░▒░░▒░░▒░      ░    ░     ░░  ▒░░░░ ░░░░░ ░▒█▓▒░
+ ── CONTRIBUTIONS ── 6024 in 52 weeks, peak 241/day
+ Mon   ░▒░▒░ ░▒░           ░     ░   ░ ░ ░ ░ ░░░░░░░▒░ ░░▒
+       ░▒░░░ ▒▓         ░        ░░ ░░░ ░░ ░▒░ ░░░░░░░░░░░
+ Wed  ░░▒░░▒░░▒░      ░    ░     ░░  ▒░░░░ ░░░░░░░░░░▒░░░
+ current streak 3 days                 longest streak 50 days
+ today 18                              active days 213 of 366 (58%)
+ busiest 2025-08-30 (241)              most on Tue (1031)
 
- ── BY ACCOUNT ──
- ACCOUNT               OPEN  REVW  MRG7D   RATE ISSUES
-▸stealth-factory        628   486     15    83%    159  ████████████
- hk2047                   0     0      0    --       0  ░░░░░░░░░░░░
- wiiiimm (you)           34     0      2    67%     28  █░░░░░░░░░░░
+ ── BY ACCOUNT ──   1-6 of 9
+ ACCOUNT              OPEN REVW MRG7D  RATE ISSUES  MERGED/DAY
+▸stealth-factory       628  486    15   83%    162  ▇▂▂ ▃█
+ wiiiimm (you)          34    0     2   67%     28       █
+ example-labs           20    0     0    --      0
+ example-tools           0    0     0    --      4
+ example-web             0    0     0    --      0
+ example-old             0    0     0    --      0
+
+
+ ↑↓ account  [w]indow  [r]efresh  [q]uit
 ```
 
 ## What is windowed and what is not
@@ -196,11 +205,15 @@ Create it at Settings → Developer settings → Personal access tokens → Toke
 | `read:org` | enumerate the orgs you belong to | the account list comes back short, or empty |
 
 Nothing else is needed. In particular the **contribution calendar needs no
-`read:user`**, and it is not limited to public work: on the token this was
-verified with, 4722 of 6023 contributions came from private repositories and
-all of them were counted (`restrictedContributionsCount`, which the widget
-shows as `in private` beneath the calendar, exists precisely to make that
-visible).
+`read:user`**, and no scope changes its total: the same account over the same
+52 weeks reported 6024 contributions through a token with `user` and through
+one without it. Work in private repositories is counted either way.
+
+(GraphQL's `restrictedContributionsCount` is tempting to read as "how many were
+private", and it is not — it counts contributions whose *details* the token
+cannot see, so it moved from 4722 to 2 between those two tokens while the total
+did not budge. It measures the token, not the work, so this widget does not
+show it.)
 `repo` is coarse (it grants write as well as read), but GitHub offers no
 read-only equivalent for classic tokens.
 

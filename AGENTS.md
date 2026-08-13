@@ -57,7 +57,8 @@ than faked. `matrix.py` is the sole exception and computes nothing on purpose.
 `common.py` holds everything shared: terminal sizing, full-frame `draw()`,
 24-bit `rgb()`, `seg()` for clipping coloured segments to a cell budget,
 `pack_hints()`, bar and chart helpers (`vbars`, `vbars_down`, `braille_plot`,
-`stacked_bar`, `meter`, `skeleton`), non-blocking `Keyboard`, and OSC 52
+`stacked_bar`, `meter`, `skeleton`), `config_token_warning()` for
+widgets holding a secret, non-blocking `Keyboard`, and OSC 52
 `clipboard()`.
 
 `docs/building-herdr-panels.md` records what was learned driving these from
