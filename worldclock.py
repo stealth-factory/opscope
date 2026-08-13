@@ -416,10 +416,6 @@ def main():
                          (DIM, "   " + offset_str(stamp))], w - 1))
         rows.append("")
         rows.append(DIM + " ── COUNTDOWN ──")
-        for label, text, frac, col in countdowns(stamp):
-            rows.append(seg([(DIM, " " + pad(label, 21)), (TXT, text)], w - 1))
-            rows.append(" " + col + bar(frac, max(4, w - 3)))
-
         if pomo.enabled:
             over = pomo.overtime()
             col = FOCUS if pomo.phase == "focus" else BREAK
@@ -444,6 +440,10 @@ def main():
                 done = 1.0 - (pomo.remaining() / pomo.duration()
                               if pomo.duration() else 0)
                 rows.append(" " + col + bar(done, n))
+        for label, text, frac, col in countdowns(stamp):
+            rows.append(seg([(DIM, " " + pad(label, 21)), (TXT, text)], w - 1))
+            rows.append(" " + col + bar(frac, max(4, w - 3)))
+
         rows.append("")
 
         # sort west -> east by current UTC offset
