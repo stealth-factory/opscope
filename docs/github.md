@@ -151,7 +151,7 @@ default 120s. A cold 90d window is a one-time ~54.
 
 `r` drops the day cache and re-reads everything, which is the escape hatch for
 the cases immutability does not cover — a repo deleted, transferred or made
-private. `m` has no need to.
+private. `w` has no need to.
 
 Accounts are fetched one at a time rather than batched: results appear as they
 arrive, and one bad account cannot blank the whole board. Batching every account
@@ -162,7 +162,7 @@ into a single request returned HTTP 502 on the complexity limit.
 | Key | Action |
 |---|---|
 | `↑` `↓` | select an account |
-| `m` | cycle the merge window — 7 / 14 / 30 / 90 days |
+| `w` | cycle the window — 7 / 14 / 30 / 90 days |
 | `r` | refresh now, ignoring the day cache |
 | `q` | quit |
 
@@ -192,7 +192,7 @@ file is git-ignored and the token is never printed.
 
 Empty `accounts` discovers every org you belong to plus your personal account;
 otherwise list org logins, and `@me` for your own. `window_days` sets the window
-the board opens on; `m` cycles it from there.
+the board opens on; `w` cycles it from there.
 
 ```sh
 ./github.py                        # discovered accounts, 120s

@@ -34,7 +34,7 @@ Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
 personal access token with `repo` and `read:org` covers private repositories
 and org discovery. The API is called directly, so the `gh` CLI is not required.
 
-Keys: up/down select an account, r refreshes now, m cycles the merge window
+Keys: up/down select an account, r refreshes now, w cycles the window
 (7/14/30/90 days), q quits.
 """
 import collections
@@ -58,7 +58,7 @@ _CFG = load_config("github", {
     "token": "",
     "token_env": "GITHUB_TOKEN",
     "accounts": [],        # org logins and/or "@me"; empty = discover
-    "window_days": 7,      # merge-rate window
+    "window_days": 7,      # window the board opens on
     "refresh": 120,        # seconds between polls; GraphQL is 5000 points/hour
 })
 
@@ -257,7 +257,7 @@ class Store(object):
                     prev = by_acc.get(acc) or {}
                     by_acc[acc] = {
                         "key": acc,
-                        "window": days_now,     # which merge window these cover
+                        "window": days_now,     # which window these figures cover
                         "account": viewer if acc == "@me" else acc,
                         "is_me": acc == "@me",
                         "open": g("open"), "draft": g("draft"),
@@ -431,7 +431,7 @@ def main():
                 with store.lock:      # manual refresh re-reads even past days
                     store.bust_days = True
                 store.wake.set()
-            elif key == "m":
+            elif key == "w":
                 with store.lock:
                     store.days = cycle(WINDOWS, store.days)
                 store.wake.set()
@@ -688,7 +688,7 @@ def main():
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
 
-        hints = [[(ACCENT, "↑↓"), (DIM, " account")], [(DIM, "[m]erge window")],
+        hints = [[(ACCENT, "↑↓"), (DIM, " account")], [(DIM, "[w]indow")],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         footer = [" " + line for line in pack_hints(hints, w - 2)]
         rows = rows[:h - len(footer)]
