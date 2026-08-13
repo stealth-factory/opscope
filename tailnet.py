@@ -16,6 +16,10 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Tailscale network: who is online, and how you are reaching them.
 
+RX and TX are traffic between *this* host and that peer, counted by the local
+WireGuard engine — not the peer's own totals. They reset when tailscaled
+restarts, so they cover that window rather than all time.
+
 The column that matters is PATH. A peer is either DIRECT, meaning NAT traversal
 succeeded and traffic goes peer-to-peer, or it is relayed through a named DERP
 region, meaning every packet round-trips through Tailscale's infrastructure.
@@ -60,6 +64,32 @@ LBL = rgb(130, 165, 200)
 ACCENT = rgb(120, 200, 255)
 ROUTE = rgb(200, 160, 255)
 EXIT = rgb(255, 140, 200)
+
+
+def daemon_uptime():
+    """Seconds since tailscaled started.
+
+    Its byte counters live in memory and reset with it, so RX/TX cover this
+    window rather than all time — a peer reading 0B may just predate a restart.
+    """
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open("/proc/%s/comm" % pid) as f:
+                    if f.read().strip() != "tailscaled":
+                        continue
+                with open("/proc/%s/stat" % pid) as f:
+                    started = int(f.read().rpartition(")")[2].split()[19])
+                with open("/proc/uptime") as f:
+                    up = float(f.read().split()[0])
+            except (OSError, IndexError, ValueError):
+                continue
+            return up - started / float(os.sysconf("SC_CLK_TCK"))
+    except OSError:
+        pass
+    return None
 
 
 def classify(ip):
@@ -142,6 +172,15 @@ def ts_status():
         return json.loads(out.stdout)
     except Exception:
         return None
+
+
+def ago(s):
+    s = int(max(0, s))
+    if s < 3600:
+        return "%dm ago" % (s / 60)
+    if s < 172800:
+        return "%dh ago" % (s / 3600)
+    return "%dd ago" % (s / 86400)
 
 
 def human(n):
@@ -379,6 +418,11 @@ def main():
         if wide:
             head += " %5s %5s %5s" % ("RX", "TX", "SEEN")
         rows.append(LBL + pad(head, w - 1))
+        if wide:
+            span = daemon_uptime()
+            rows.append(seg([(DIM, " rx/tx = this host ↔ peer, since tailscaled "
+                                   "started" + ((" " + ago(span)) if span else ""))],
+                            w - 1))
 
         def order(p):
             return (not p.get("Online"), not p.get("CurAddr"),

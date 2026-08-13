@@ -95,6 +95,11 @@ milliseconds and is easy to miss in plain `tailscale status`.
 Peers advertising subnet routes are marked `⇄` — those routes only reach you if
 this node runs with `--accept-routes`.
 
+**RX/TX are traffic between this host and that peer**, counted by the local
+WireGuard engine — not the peer's own totals. They live in tailscaled's memory
+and reset when it restarts, so the panel states the window: a peer reading `0B`
+may simply not have talked to you since the last restart.
+
 ```sh
 ./tailnet.py
 ```
