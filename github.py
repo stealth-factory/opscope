@@ -25,6 +25,10 @@ Accounts are org logins, or @me for your own. With none given it uses
 `github.accounts` from config, and failing that every org you belong to plus
 your personal account.
 
+Open counts - PRs, issues, drafts, review backlog - are point-in-time totals of
+whatever is open right now, at any age. Only the merge rate and the merged-per-
+day chart are windowed, by -w.
+
 Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
 personal access token with `repo` and `read:org` covers private repositories
 and org discovery. The API is called directly, so the `gh` CLI is not required.
@@ -353,7 +357,7 @@ def main():
 
         rows = [title("github ops", w, PR)]
         head = [(DIM, " %d account%s" % (len(stats), "" if len(stats) == 1 else "s")),
-                (DIM, " · %dd window" % store.days),
+                (DIM, " · merge window %dd" % store.days),
                 (DIM, "   updated %s ago" % ago(fetched))]
         if rate:
             left = rate.get("remaining", 0)
@@ -381,9 +385,11 @@ def main():
                          (rcol, meter((rate_pct or 0) / 100.0, max(10, w - 34))),
                          (OK, "  %d merged" % tot["merged"]),
                          (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])], w - 1))
-        rows.append(seg([(PR, " %d" % tot["open"]), (DIM, " PRs open   "),
-                         (WARN, "%d" % tot["issues"]), (DIM, " issues open   "),
-                         (DIM, "%d accounts" % len(stats))], w - 1))
+        # these are point-in-time totals, not windowed like the rate above
+        rows.append(seg([(DIM, " open right now:  "),
+                         (PR, "%d" % tot["open"]), (DIM, " PRs   "),
+                         (WARN, "%d" % tot["issues"]), (DIM, " issues"),
+                         (DIM, "   (any age)")], w - 1))
 
         merged_all = collections.Counter()
         for s in stats:
@@ -447,7 +453,8 @@ def main():
         rows.append("")
         rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))
         wide = w >= 62
-        head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "PRS", "REVW", "MERGED", "RATE")
+        head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",
+                                            "MRG%dD" % store.days, "RATE")
         if wide:
             head += " %6s" % "ISSUES"
         rows.append(DIM + pad(head, w - 1))
