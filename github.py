@@ -333,6 +333,51 @@ def contribution_query(weeks):
         weeks { contributionDays { date contributionCount weekday } } } } } }""" % since
 
 
+WEEKDAYS = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+
+def calendar_stats(weeks_data):
+    """Streaks and totals behind the contribution calendar.
+
+    A streak is consecutive days carrying at least one contribution, counted
+    the way github.com does it: a day that has scored nothing *so far* does
+    not break the current streak, because it is not over yet.
+    """
+    days = sorted((d["date"], d["contributionCount"], d.get("weekday", 0))
+                  for wk in weeks_data for d in wk["contributionDays"])
+    if not days:
+        return None
+    today = datetime.date.today().isoformat()
+
+    longest = run = 0
+    for _d, count, _wd in days:
+        run = run + 1 if count else 0
+        longest = max(longest, run)
+
+    done = [x for x in days if x[0] <= today]
+    if done and not done[-1][1]:
+        done = done[:-1]              # today is still in progress
+    current = 0
+    for _d, count, _wd in reversed(done):
+        if not count:
+            break
+        current += 1
+
+    per_weekday = collections.Counter()
+    for _d, count, wd in days:
+        per_weekday[wd] += count
+    top_wd = per_weekday.most_common(1)[0][0] if per_weekday else 0
+    return {
+        "today": dict((d, c) for d, c, _ in days).get(today, 0),
+        "current": current,
+        "longest": longest,
+        "active": sum(1 for _d, c, _wd in days if c),
+        "span": len(days),
+        "busiest": max(days, key=lambda x: x[1]),
+        "weekday": (WEEKDAYS[top_wd], per_weekday[top_wd]),
+    }
+
+
 def heatmap(weeks_data, w):
     """The calendar as seven rows of one cell per week."""
     levels = " ░▒▓█"
@@ -558,6 +603,32 @@ def main():
                 label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
                 rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))],
                                 w - 1))
+            cs = calendar_stats(calendar["weeks"])
+            if cs:
+                bd, bc, _bw = cs["busiest"]
+                cells = [
+                    ("current streak", "%d days" % cs["current"],
+                     OK if cs["current"] else DIM),
+                    ("longest streak", "%d days" % cs["longest"], TXT),
+                    ("today", "%d" % cs["today"],
+                     OK if cs["today"] else DIM),
+                    ("active days", "%d of %d (%.0f%%)"
+                     % (cs["active"], cs["span"],
+                        100.0 * cs["active"] / cs["span"]), TXT),
+                    ("busiest", "%s (%d)" % (bd, bc), TXT),
+                    ("most on", "%s (%d)" % cs["weekday"], TXT),
+                ]
+                # as many columns as the width honestly allows, never fewer
+                # than one - the labels are what make these readable
+                ncols = 3 if w >= 86 else (2 if w >= 58 else 1)
+                cw = (w - 2) // ncols
+                for n in range(0, len(cells), ncols):
+                    line = [(RST, " ")]
+                    for label, value, colour in cells[n:n + ncols]:
+                        used = len(label) + 1 + len(value)
+                        line += [(DIM, label + " "), (colour, value),
+                                 (RST, " " * max(2, cw - used))]
+                    rows.append(seg(line, w - 1))
             rows.append("")
 
         rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))

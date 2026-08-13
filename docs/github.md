@@ -71,8 +71,17 @@ are cropped and the heading says so — `54d of 90d` — because the totals desc
 what is drawn, not the whole window.
 
 **Contributions** — the familiar GitHub calendar, a full 52 weeks, in braille
-shading. It is the one decorative section, so it is skipped entirely in a short
-pane to leave the account table its rows.
+shading, with the numbers underneath it that the squares cannot show: current
+and longest streak, today's count, how many days of the year were active, the
+single busiest day, and which weekday carries the most work. They lay out in
+three columns, two, or one as the width allows.
+
+A streak counts consecutive days with at least one contribution, the way
+github.com does it — a day that has scored nothing *so far* does not break the
+current streak, because it is not over yet.
+
+This is the one decorative section, so it is skipped entirely in a short pane to
+leave the account table its rows.
 
 **By account** — one row per org, with a bar for relative size. `↑` `↓` selects
 one; the selected row is tinted.
