@@ -1,14 +1,31 @@
 # terminal-toys
 
-Small terminal widgets with no dependencies — pure Python 3 standard library,
-24-bit colour, and a full redraw each frame so everything reflows when you
-resize the pane.
+**Sci-fi hacker terminal toys from the movies — except these tell you the
+truth.**
 
-Each widget is a single self-contained script that imports shared drawing
-helpers from `common.py`. Run any of them directly; pass `-h` for its own
-documentation.
+Fill your screen with glowing panels, scrolling graphs and blinking status
+readouts. The difference is that every number on them is real: actual network
+latency, actual deployments, actual machines on your tailnet, actual agents
+waiting on you.
 
-## Widgets
+## How it started
+
+Literally: *"split 10 panels that make my computer look like some sci-fi hacker
+terminal from the movies."*
+
+So there were ten. A radar sweep, a rotating globe, a spectrum analyser, a
+cipher cracker, a memory scanner, a packet intercept — all beautiful, all
+fabricated. They looked exactly right and told you nothing.
+
+Then one got wired to `/proc` and became genuinely useful, and the contrast was
+impossible to unsee. One by one the fakes came down, each replaced by something
+that answers a real question. What survived is the aesthetic with the lying
+removed.
+
+Some of the theatre is still here, unapologetically. `matrix.py` computes
+nothing at all — it just looks good, and it knows it.
+
+## The widgets
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
@@ -19,13 +36,34 @@ documentation.
 | **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
+Each is a single self-contained script with no dependencies — pure Python 3
+standard library, 24-bit colour, and a full redraw each frame so everything
+reflows when you resize the pane.
+
 ```sh
 ./latency.py            # each runs standalone
 ./clocks.py -h          # every widget documents itself
 ```
 
-They are built to sit side by side in a multiplexer, but nothing assumes one —
-each is an ordinary terminal program.
+They are built to sit side by side and fill a wall, but nothing assumes a
+multiplexer — each is an ordinary terminal program. Tile them however you like.
+
+## Building the wall
+
+Six widgets tile into whatever space you have. A layout that works on a wide
+screen:
+
+```
+┌────────────────────┬──────────────────┬────────────┐
+│ deployments        │ latency          │ clocks     │
+├────────────────────┼──────────────────┴────────────┤
+│ herdr-panes        │ tailnet                       │
+└────────────────────┴───────────────────────────────┘
+```
+
+They degrade rather than break as panes get narrower: columns drop out in
+priority order, footers wrap instead of truncating, and graphs rescale. A
+widget in a 30-column strip still says something useful.
 
 ## Configuration
 
