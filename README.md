@@ -212,6 +212,14 @@ independently of the drops, and each column gets its own speed and trail length.
 ./matrix.py
 ```
 
+## Bundled skill
+
+[`skills/herdr/`](skills/herdr/) carries the Herdr control skill, so an agent
+working in this repo can drive panes, tabs and workspaces without going looking
+for it — copy it to `~/.claude/skills/herdr/` to install. It is Herdr's own
+file, not covered by this repository's licence, and `herdr --skill` regenerates
+it after an upgrade.
+
 ## Building your own panels
 
 [`docs/building-herdr-panels.md`](docs/building-herdr-panels.md) collects what

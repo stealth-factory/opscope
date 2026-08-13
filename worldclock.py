@@ -424,7 +424,10 @@ def hint_tokens(pomo):
                    [(DIM, "[±]%dmin" % pomo.focus)]]
     tokens.append([(DIM, "[p]off" if pomo.enabled else "[p] pomodoro")])
     tokens.append([(DIM, "↑↓ cities")])
-    tokens.append([(DIM, "[?]controls")])
+    if pomo.enabled:
+        # only meaningful while there are pomodoro controls to hide, but shown
+        # even when they are hidden, so there is always a way back
+        tokens.append([(DIM, "[?]pomodoro controls")])
     return tokens
 
 
