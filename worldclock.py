@@ -347,7 +347,13 @@ class Pomodoro(object):
         started.
         """
         before = self.focus
-        self.focus = max(1, min(120, self.focus + delta))
+        # Snap to the next multiple of five rather than adding to whatever is
+        # there: stepping by five from an odd length can never reach a round
+        # number, so 1 minute becomes 6, 11, 16 and never 25.
+        step = 5
+        target = ((before // step + 1) * step if delta > 0
+                  else (before - 1) // step * step)
+        self.focus = max(1, min(120, target))
         change = (self.focus - before) * 60.0
         if change and self.phase == "focus":
             if self.running and self.deadline:
