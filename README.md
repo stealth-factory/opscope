@@ -10,14 +10,14 @@ documentation.
 
 ## Widgets
 
-| Widget | What it answers | Needs |
-|---|---|---|
-| [`latency.py`](docs/latency.md) | Is the network to these hosts healthy — and *why* does it feel bad? | `ping` |
-| [`deployments.py`](docs/deployments.md) | How are Vercel deployments going over time, and where is that preview URL? | a Vercel token |
-| [`tailnet.py`](docs/tailnet.md) | Who is on my tailnet, and am I reaching them directly or through a relay? | `tailscale` |
-| [`herdr-panes.py`](docs/herdr-panes.md) | What is running across every workspace, and which agent needs me? | `herdr` |
-| [`clocks.py`](docs/clocks.md) | What time is it here and elsewhere, and how much of it is left? | — |
-| `matrix.py` | Nothing whatsoever. Digital rain, with truecolor fade trails. | — |
+| Widget | What it does | Needs | Docs |
+|---|---|---|---|
+| **`latency.py`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
+| **`deployments.py`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
+| **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
+| **`herdr-panes.py`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
+| **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
+| **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
 ```sh
 ./latency.py            # each runs standalone
