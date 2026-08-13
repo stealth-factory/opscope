@@ -81,6 +81,23 @@ tool starting, since then it is only a lower bound.
 Keys: `r` refresh, `w` toggle workspace label vs pane id, `q` quit.
 Requires `HERDR_ENV`; shells out to the `herdr` CLI.
 
+### `tailnet.py` — Tailscale peers and how you reach them
+
+Every peer with the column that actually matters: **PATH**. A peer is either
+`DIRECT`, meaning NAT traversal succeeded and traffic flows peer-to-peer, or it
+is relayed through a named DERP region, meaning every packet round-trips through
+Tailscale's infrastructure. That difference can be tens to hundreds of
+milliseconds and is easy to miss in plain `tailscale status`.
+
+Peers advertising subnet routes are marked `⇄` — those routes only reach you if
+this node runs with `--accept-routes`.
+
+```sh
+./tailnet.py
+```
+
+Keys: `r` refresh, `o` hide offline peers, `q` quit. No root required.
+
 ### `worldclock.py` — server time, office hours, world clock
 
 Big-digit clock for the machine's own timezone, three live countdown bars, and a
