@@ -26,8 +26,10 @@ represents the overrun — the longer you ignore it, the more of the bar is red.
 The terminal is alerted when the phase elapses and again every minute it keeps
 running.
 
-Keys: p toggles the pomodoro, space pauses or resumes, r restarts the phase,
-s skips to the next one, +/- change the focus length, q quits.
+Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
+countdowns and footer stay pinned. p toggles the pomodoro, space pauses or
+resumes, r restarts the phase, s skips to the next one, +/- change the focus
+length, q quits.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
@@ -220,8 +222,12 @@ class Pomodoro(object):
         self.nagged = 0
         self.save()
 
-    def advance(self, auto=False):
-        """Move to the next phase, long break every `cycle` focus sessions."""
+    def advance(self):
+        """Move to the next phase; a long break every `cycle` focus sessions.
+
+        Keeps whatever run state it had: skipping out of a running focus block
+        starts the break immediately, which is what "I am done, move on" means.
+        """
         if self.phase == "focus":
             self.completed += 1
             self.phase = ("long" if self.cycle and self.completed % self.cycle == 0
@@ -229,9 +235,7 @@ class Pomodoro(object):
         else:
             self.phase = "focus"
         self.left = self.duration()
-        self.deadline = time.time() + self.left if (self.running and auto) else None
-        if not auto:
-            self.running = False
+        self.deadline = time.time() + self.left if self.running else None
         self.rang = False
         self.nagged = 0
         self.save()
@@ -371,6 +375,7 @@ def main():
     setup()
     keyboard = Keyboard()
     pomo = Pomodoro()
+    scroll = 0
     zones = []
     for name, key in CITIES:
         try:
@@ -383,7 +388,19 @@ def main():
             if key in ("q", "Q"):
                 keyboard.restore()
                 raise SystemExit(0)
-            if key == "p":
+            if key == "up":
+                scroll -= 1
+            elif key == "down":
+                scroll += 1
+            elif key == "pgup":
+                scroll -= 8
+            elif key == "pgdn":
+                scroll += 8
+            elif key == "home":
+                scroll = 0
+            elif key == "end":
+                scroll = 10 ** 6           # clamped to the end below
+            elif key == "p":
                 pomo.toggle()
             elif not pomo.enabled:
                 continue
@@ -453,9 +470,16 @@ def main():
             entries.append((now_utc.astimezone(tz), name))
         entries.sort(key=lambda e: (e[0].utcoffset(), e[1]))
 
-        rows.append(DIM + " ── WORLD CLOCK ──")
+        # The clock, countdowns and footer stay pinned; only this list scrolls.
+        room = max(1, h - len(rows) - 2)
+        scroll = max(0, min(scroll, max(0, len(entries) - room)))
+        window = entries[scroll:scroll + room]
+        more = len(entries) > room
+        rows.append(DIM + " ── WORLD CLOCK ──" +
+                    ("  %d-%d of %d  ↑↓" % (scroll + 1, scroll + len(window),
+                                            len(entries)) if more else ""))
         namew = max(9, min(15, w - 26))
-        for dt, name in entries:
+        for dt, name in window:
             if len(rows) >= h - 1:
                 break
             col, glyph = phase(dt)
