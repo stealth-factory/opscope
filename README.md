@@ -61,7 +61,7 @@ locally and never printed. `vercel ls --all --format json` returns similar
 data, but spawns a Node process per refresh (~1.4s) against ~0.75s for a
 direct API call returning 100 records, so this queries the REST API.
 
-### `agents.py` — coding agents across every workspace
+### `herdr-agents.py` — coding agents across every workspace
 
 Lists every agent Herdr knows about, ordered so the ones wanting attention come
 first: `blocked` (waiting on an approval right now), `done` (finished background
@@ -74,12 +74,15 @@ and RSS of the agent's process. Durations show `≥` when the state predates the
 tool starting, since then it is only a lower bound.
 
 ```sh
-./agents.py            # 4s refresh
-./agents.py -n 10
+./herdr-agents.py      # 4s refresh
+./herdr-agents.py -n 10
 ```
 
 Keys: `r` refresh, `w` toggle workspace label vs pane id, `q` quit.
-Requires `HERDR_ENV`; shells out to the `herdr` CLI.
+A Herdr client: states, labels and pids all come from the `herdr` CLI, so
+any agent kind Herdr recognises (claude, codex, copilot, cursor,
+antigravity, grok and ~15 more) appears with no code change. Requires
+`HERDR_ENV`.
 
 ### `tailnet.py` — Tailscale peers and how you reach them
 

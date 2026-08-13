@@ -16,6 +16,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Coding agents running under Herdr, across every workspace.
 
+A Herdr client, not a general agent monitor: the inventory and the lifecycle
+states come from `herdr agent list`, the workspace labels from
+`herdr workspace list`, and the pid behind each pane from
+`herdr pane process-info`. Any agent kind Herdr recognises appears here with
+no change to this file.
+
 On a terminal server hosting many workspaces, agents finish or get stuck in
 places you are not currently looking. This lists every agent with the state
 Herdr reports, ordered so the ones wanting your attention are at the top:
@@ -31,7 +37,7 @@ state, and the real CPU and memory of its process. A duration is prefixed with
 ≥ when the state was already in place before this tool started, since then it
 is only a lower bound.
 
-    python3 agents.py [-n SECONDS]
+    python3 herdr-agents.py [-n SECONDS]
 
 Keys: r refreshes now, w toggles workspace labels vs pane ids, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.
@@ -212,7 +218,7 @@ def main():
         agents, labels, err = store.snapshot()
         counts = collections.Counter(a.get("agent_status") for a in agents)
 
-        rows = [title("agents", w, ACCENT)]
+        rows = [title("herdr agents", w, ACCENT)]
         summary = [(DIM, " %d agent%s" % (len(agents), "" if len(agents) == 1 else "s")),
                    (DIM, " · %d workspace%s" % (
                        len({a.get("workspace_id") for a in agents}),
