@@ -35,9 +35,11 @@ text reaches your local clipboard even over SSH. If your terminal or
 multiplexer blocks OSC 52, the sheet still shows each URL in full for mouse
 selection.
 
-Credentials: reuses the Vercel CLI's own login, so if `vercel whoami` works
-this does too. Reads $VERCEL_TOKEN first, then the CLI's auth.json. The token
-is never printed. `vercel ls --all --format json` is an equivalent data source
+Credentials: either works, and no dashboard key is required. $VERCEL_TOKEN is
+checked first - set it on a machine with no CLI - and otherwise the CLI's own
+session is used, so if `vercel whoami` works this does too. The CLI session
+carries an expiry and can only be refreshed by the CLI itself, so the panel
+warns an hour ahead and says what to run. The token is never printed. `vercel ls --all --format json` is an equivalent data source
 but spawns a Node process per refresh, so this queries the REST API directly.
 """
 import collections
@@ -63,7 +65,13 @@ _CFG = load_config("deployments", {
 
 REFRESH = float(_CFG["refresh"])
 LIMIT = int(_CFG["limit"])
-AUTH_PATH = "~/.local/share/com.vercel.cli/auth.json"
+# The CLI stores its session in a platform-specific place; check them all so
+# this works on a laptop as well as a Linux server.
+AUTH_PATHS = (
+    "~/.local/share/com.vercel.cli/auth.json",                   # Linux
+    "~/Library/Application Support/com.vercel.cli/auth.json",    # macOS
+    "~/AppData/Roaming/com.vercel.cli/auth.json",                # Windows
+)
 API = "https://api.vercel.com"
 
 FILTERS = ("all", "failed", "production")
@@ -94,14 +102,24 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def token():
+    """A Vercel token, from the environment or the CLI's own session.
+
+    Either works and neither needs a dashboard key: set VERCEL_TOKEN for a
+    machine with no CLI, or just be logged in - if `vercel whoami` works, so
+    does this. Returns (token, expires_at|None).
+    """
     tok = os.environ.get("VERCEL_TOKEN")
     if tok:
-        return tok
-    try:
-        with open(os.path.expanduser(AUTH_PATH)) as f:
-            return json.load(f).get("token")
-    except (OSError, ValueError):
-        return None
+        return tok, None
+    for path in AUTH_PATHS:
+        try:
+            with open(os.path.expanduser(path)) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if data.get("token"):
+            return data["token"], data.get("expiresAt")
+    return None, None
 
 
 def api(path, tok):
@@ -137,12 +155,20 @@ class Store(object):
 
     def run(self):
         while True:
-            tok = token()
+            tok, expires = token()
             if not tok:
                 with self.lock:
                     self.error = "no credential: run `vercel login` or set VERCEL_TOKEN"
+            elif expires and expires <= time.time():
+                # the CLI can refresh this, but only when the CLI itself runs
+                with self.lock:
+                    self.error = ("CLI session expired; run any `vercel` command "
+                                  "to refresh it")
             else:
                 out, err = [], None
+                if expires and expires - time.time() < 3600:
+                    err = "CLI session expires in %d min" % (
+                        (expires - time.time()) / 60)
                 scopes = self.teams or [None]
                 for team in scopes:
                     q = "/v6/deployments?limit=%d" % LIMIT

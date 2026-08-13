@@ -76,9 +76,18 @@ the same height.
 
 ## Credentials
 
-Reuses the Vercel CLI's own login: if `vercel whoami` works, this does.
-`$VERCEL_TOKEN` is checked first, then the CLI's `auth.json`. **The token is
-read locally and never printed.**
+**No dashboard key is required, though one works.** Two sources, in order:
+
+1. **`$VERCEL_TOKEN`** — a token from Account Settings → Tokens. Needs no CLI
+   installed, so it suits CI or a machine you would rather not log in.
+2. **The Vercel CLI's own session** — if `vercel whoami` works, this does. The
+   CLI's `auth.json` is found on Linux, macOS and Windows.
+
+**The token is read locally and never printed.**
+
+A CLI session carries an expiry and can only be refreshed by the CLI itself, so
+the widget warns an hour ahead and, once it lapses, says to run any `vercel`
+command rather than reporting a bare HTTP 403.
 
 `vercel ls --all --format json` returns comparable data, but spawns a Node
 process per refresh — measured at 1433ms for 3 records against 756ms for 100
