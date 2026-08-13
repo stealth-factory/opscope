@@ -26,9 +26,9 @@ Accounts are org logins, or @me for your own. With none given it uses
 your personal account.
 
 Open counts - PRs, issues, drafts, review backlog - are point-in-time totals of
-whatever is open right now, at any age. Only the merge rate and the per-account
-merged/rate columns follow the merge window; the per-day charts always cover
-`history_days`.
+whatever is open right now, at any age. Everything else - the merge rate, the
+per-day charts and the per-account merged/rate columns - covers the merge
+window, which is the N days ending today.
 
 Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
 personal access token with `repo` and `read:org` covers private repositories
@@ -59,7 +59,6 @@ _CFG = load_config("github", {
     "accounts": [],        # org logins and/or "@me"; empty = discover
     "window_days": 7,      # merge-rate window
     "refresh": 120,        # seconds between polls; GraphQL is 5000 points/hour
-    "history_days": 14,    # width of the per-day charts
 })
 
 REFRESH = float(_CFG["refresh"])
@@ -121,6 +120,8 @@ def scope(acc, viewer):
 
 
 DAY_CHUNK = 20      # 2 searches a day; the alias ceiling sits between 60 and 90
+FRESH_DAYS = 2      # trailing days to always refetch: today is still running,
+                    # and the search index lags a little behind a merge
 
 
 def build_day_query(q, dates):
@@ -144,14 +145,18 @@ def build_day_query(q, dates):
     return "".join(parts)
 
 
-def build_query(accounts, days, history_days, viewer):
+def build_query(accounts, days, viewer):
     """Metrics for a batch of accounts in one request.
 
     Seven aliased searches per account keeps each request within GitHub's
     complexity limit - asking for seven accounts at once returned HTTP 502 -
     while still being far fewer round trips than one query per metric.
     """
-    since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    # N days *ending today*, so this spans exactly the dates the per-day
+    # charts plot - `days` rather than `days - 1` would cover one day more
+    # and quietly disagree with the chart drawn directly beneath it.
+    since = (datetime.date.today()
+             - datetime.timedelta(days=days - 1)).isoformat()
     parts = ["{"]
     for i, acc in enumerate(accounts):
         q = scope(acc, viewer)
@@ -168,14 +173,13 @@ def build_query(accounts, days, history_days, viewer):
 
 
 class Store(object):
-    def __init__(self, accounts, days, history_days):
+    def __init__(self, accounts, days):
         self.lock = threading.Lock()
         self.accounts = accounts
         self.days = days
-        self.history_days = history_days
         self.stats = []
-        self.day_cache = {}       # account -> (dates, merged, opened)
-        self.reuse_days = False   # set when only the merge window moved
+        self.day_cache = {}       # account -> {date: (merged, opened)}
+        self.bust_days = False    # set by [r]: drop the day cache and refetch
         self.calendar = None
         self.rate = None
         self.error = None
@@ -212,20 +216,23 @@ class Store(object):
                 except Exception:
                     pass
                 with self.lock:
-                    days_now, reuse_days = self.days, self.reuse_days
-                    self.reuse_days = False
-                # Start the pass from what is already on screen, keyed by
-                # account, so rows are replaced in place as each lands instead
-                # of the table emptying and refilling on every refresh.
-                with self.lock:
+                    days_now, bust = self.days, self.bust_days
+                    self.bust_days = False
+                    # Start the pass from what is already on screen, keyed by
+                    # account, so rows are replaced in place as each lands
+                    # instead of the table emptying and refilling every pass.
                     by_acc = dict((x["key"], x) for x in self.stats)
+                today = datetime.date.today()
+                dates = [(today - datetime.timedelta(days=k)).isoformat()
+                         for k in range(days_now - 1, -1, -1)]
+                keep_from = (today - datetime.timedelta(
+                    days=max(WINDOWS) - 1)).isoformat()
                 failed, rate = [], None
                 # one request per account: results appear as they arrive, and a
                 # single bad account cannot blank the whole board
                 for acc in self.accounts:
                     try:
-                        data = graphql(build_query([acc], days_now,
-                                                   self.history_days, viewer), tok)
+                        data = graphql(build_query([acc], days_now, viewer), tok)
                         if data.get("errors"):
                             raise ValueError(data["errors"][0].get("message", "")[:50])
                     except Exception as e:
@@ -236,29 +243,33 @@ class Store(object):
                     i = 0
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
                     merged, dropped = g("merged"), g("dropped")
-                    today = datetime.date.today()
-                    dates = [(today - datetime.timedelta(days=k)).isoformat()
-                             for k in range(self.history_days - 1, -1, -1)]
-                    # The per-day charts cover history_days and so cannot have
-                    # changed when only the merge window moved. Reuse them
-                    # rather than spending a request per account proving it.
-                    cached = self.day_cache.get(acc)
-                    if reuse_days and cached and cached[0] == dates:
-                        hist, opened_hist = cached[1], cached[2]
-                    else:
-                        hist = collections.Counter()
-                        opened_hist = collections.Counter()
-                        for c in range(0, len(dates), DAY_CHUNK):
-                            chunk = dates[c:c + DAY_CHUNK]
-                            try:
-                                dd = graphql(build_day_query(scope(acc, viewer),
-                                                             chunk), tok)["data"]
-                            except Exception:
-                                continue
-                            for n, day in enumerate(chunk):
-                                hist[day] += (dd.get("m%d" % n) or {}).get("issueCount", 0)
-                                opened_hist[day] += (dd.get("c%d" % n) or {}).get("issueCount", 0)
-                        self.day_cache[acc] = (dates, hist, opened_hist)
+                    # A past day's counts cannot change: a PR merged on the 3rd
+                    # stays merged on the 3rd. So only days never seen before,
+                    # plus the trailing few (still in progress, and the search
+                    # index lags), are worth a request. Widening the window
+                    # therefore costs only the days it adds, and narrowing it
+                    # costs nothing at all.
+                    cache = self.day_cache.setdefault(acc, {})
+                    if bust:
+                        cache.clear()
+                    want = [x for x in dates
+                            if x not in cache or x in dates[-FRESH_DAYS:]]
+                    for c in range(0, len(want), DAY_CHUNK):
+                        chunk = want[c:c + DAY_CHUNK]
+                        try:
+                            dd = graphql(build_day_query(scope(acc, viewer),
+                                                         chunk), tok)["data"]
+                        except Exception:
+                            continue
+                        for n, day in enumerate(chunk):
+                            cache[day] = ((dd.get("m%d" % n) or {}).get("issueCount", 0),
+                                          (dd.get("c%d" % n) or {}).get("issueCount", 0))
+                    for stale_day in [x for x in cache if x < keep_from]:
+                        del cache[stale_day]          # older than any window
+                    hist = collections.Counter(
+                        dict((x, cache[x][0]) for x in dates if x in cache))
+                    opened_hist = collections.Counter(
+                        dict((x, cache[x][1]) for x in dates if x in cache))
                     by_acc[acc] = {
                         "key": acc,
                         "window": days_now,     # which merge window these cover
@@ -338,7 +349,7 @@ def main():
 
     setup()
     keyboard = Keyboard()
-    store = Store(accounts, days, int(_CFG["history_days"]))
+    store = Store(accounts, days)
     th = threading.Thread(target=store.run)
     th.daemon = True
     th.start()
@@ -352,11 +363,12 @@ def main():
                 keyboard.restore()
                 raise SystemExit(0)
             if key == "r":
+                with store.lock:      # manual refresh re-reads even past days
+                    store.bust_days = True
                 store.wake.set()
             elif key == "m":
                 with store.lock:
                     store.days = cycle(WINDOWS, store.days)
-                    store.reuse_days = True  # the day charts are unaffected
                 store.wake.set()
             elif key == "up":
                 selected = max(0, selected - 1)
@@ -415,7 +427,7 @@ def main():
         for st in stats:
             merged_all.update(st["hist"])
             opened_all.update(st.get("opened_hist") or {})
-        hist_days = int(_CFG["history_days"])
+        hist_days = store.days
         today = datetime.date.today()
 
         days = [(today - datetime.timedelta(days=n)).isoformat()
@@ -428,13 +440,18 @@ def main():
             peak = max([v for v, _ in cols], default=0)
             total = sum(v for v, _ in cols)
             rows.append("")
+            # A narrow pane cannot draw 90 columns, so the chart shows the most
+            # recent days that fit and says so - the total is of what is drawn,
+            # not of the window, and would otherwise contradict the merge rate.
+            span = ("%dd of %dd" % (len(days), hist_days)
+                    if len(days) < hist_days else "%dd" % len(days))
             rows.append(seg([(LBL, " ── %s ── " % heading),
-                             (DIM, "%dd, %d total, peak %d"
-                                   % (len(days), total, peak))], w - 1))
-            if not stats:                    # first load only: these charts
-                for _ in range(4):           # are fixed to history_days and so
+                             (DIM, "%s, %d total, peak %d"
+                                   % (span, total, peak))], w - 1))
+            if stale:                        # these follow the merge window,
+                for _ in range(4):           # so a change leaves days the
                     rows.append(seg([(RST, " ")] + skeleton(len(days), tick),
-                                    w - 1))   # never go stale on a window change
+                                    w - 1))   # cache has not filled in yet
             else:
                 for line in vbars(cols, 4):
                     rows.append(seg([(RST, " ")] + line, w - 1))
