@@ -8,6 +8,10 @@ readouts. The difference is that every number on them is real: actual network
 latency, actual deployments, actual machines on your tailnet, actual agents
 waiting on you.
 
+[![terminal-toys — click to watch the 30-second demo](docs/demo-poster.jpg)](docs/demo.mp4)
+
+*Six widgets running at once — every figure live. [Watch the 30s demo →](docs/demo.mp4)*
+
 ## How it started
 
 Literally: *"split 10 panels that make my computer look like some sci-fi hacker
