@@ -148,6 +148,11 @@ silently omitted when that would prompt, so the tool never requires privilege.
 Where a peer exposes several private addresses, one inside a subnet it
 advertises wins over a docker or virtual bridge.
 
+Footers wrap rather than truncate: key hints are packed across as many lines as
+they need and never split, since a hint clipped to `[±]25` teaches the wrong
+key. In `worldclock.py`, `?` hides them entirely and hands the space back to the
+city list.
+
 ### Configuration
 
 Every tool reads optional settings from the first of

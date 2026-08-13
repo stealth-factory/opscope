@@ -34,7 +34,7 @@ countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
 it with them, space pauses or
 resumes, r restarts the phase, s starts a break during focus and ends one during
 a break - b and e do the same, and the footer names whichever applies - +/-
-change the focus length, q quits.
+change the focus length, ? hides or shows the key hints, q quits.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
@@ -51,7 +51,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, draw, flush, load_config,
-                    maybe_help, out, pad, rgb, seg, setup, size, title)
+                    maybe_help, out, pack_hints, pad, rgb, seg, setup, size,
+                    title)
 
 # None = follow the system timezone for the big digits.
 TZ = None
@@ -80,6 +81,7 @@ _CFG = load_config("worldclock", {
     "pomodoro_flash_count": 2,      # how many flashes
     "pomodoro_flash_gap": 1.0,      # seconds between them
     "pomodoro_flash_rgb": [246, 248, 252],   # flash colour; near-white by default
+    "show_hints": True,             # key hints along the bottom; ? toggles
 })
 
 CITIES = [tuple(c) for c in _CFG["cities"]]
@@ -229,6 +231,9 @@ class Pomodoro(object):
         self.deadline = None              # wall-clock end when running
         self.rang = False
         self.was_running = False   # run state to restore when unhidden
+        # A display preference rather than timer state, but it rides along in
+        # the same file so the panel comes back looking how you left it.
+        self.hints = bool(_CFG["show_hints"])
         self.nagged = 0            # whole minutes of overtime already alerted
         self.bell = bool(_CFG["pomodoro_bell"])
         self.notify = bool(_CFG["pomodoro_notify"])
@@ -248,6 +253,7 @@ class Pomodoro(object):
         self.focus = int(d.get("focus", self.focus))
         self.enabled = bool(d.get("enabled", self.enabled))
         self.was_running = bool(d.get("was_running", False))
+        self.hints = bool(d.get("hints", self.hints))
         self.left = float(d.get("left", self.left))
         if d.get("running") and d.get("deadline"):
             # resume mid-phase; if it elapsed while we were away the timer
@@ -264,6 +270,7 @@ class Pomodoro(object):
                            "completed": self.completed, "focus": self.focus,
                            "enabled": self.enabled, "running": self.running,
                            "was_running": self.was_running,
+                           "hints": self.hints,
                            "left": self.left, "deadline": self.deadline}, f)
         except OSError:
             pass
@@ -402,6 +409,18 @@ class Pomodoro(object):
         return False
 
 
+def hint_tokens(pomo):
+    """Key hints for the current state, as atomic tokens for pack_hints."""
+    if not pomo.enabled:
+        return [[(DIM, "[p] pomodoro")], [(DIM, "↑↓ cities")], [(DIM, "[?] hints")]]
+    return [[(DIM, "[space] "), (TXT, "pause" if pomo.running else "start")],
+            [(DIM, pomo.next_label())],
+            [(DIM, "[r]estart")],
+            [(DIM, "[±]%dmin" % pomo.focus)],
+            [(DIM, "[p]off")],
+            [(DIM, "[?]hints")]]
+
+
 def render_big(s, w):
     lines = ["", "", "", "", ""]
     for ch in s:
@@ -532,6 +551,9 @@ def main():
                 scroll = 0
             elif key == "end":
                 scroll = 10 ** 6           # clamped to the end below
+            elif key in ("?", "h"):
+                pomo.hints = not pomo.hints
+                pomo.save()
             elif key == "p":
                 pomo.toggle()
             elif not pomo.enabled:
@@ -607,7 +629,8 @@ def main():
         entries.sort(key=lambda e: (e[0].utcoffset(), e[1]))
 
         # The clock, countdowns and footer stay pinned; only this list scrolls.
-        room = max(1, h - len(rows) - 2)
+        room = max(1, h - len(rows) - 1 -
+                   (len(pack_hints(hint_tokens(pomo), w - 2)) if pomo.hints else 0))
         scroll = max(0, min(scroll, max(0, len(entries) - room)))
         window = entries[scroll:scroll + room]
         more = len(entries) > room
@@ -632,17 +655,12 @@ def main():
                              (DIM, dt.strftime("  %a")),
                              (DIM, "  " + pad(offset_str(dt), 8)),
                              (EVE, tag)], w - 1))
-        rows = rows[:h - 1]
-        while len(rows) < h - 1:
+        footer = [" " + line for line in pack_hints(hint_tokens(pomo), w - 2)] \
+            if pomo.hints else []
+        rows = rows[:h - len(footer)]
+        while len(rows) < h - len(footer):
             rows.append("")
-        if pomo.enabled:
-            rows.append(seg([(DIM, " [space]"), (TXT, "pause" if pomo.running
-                                                 else "start"),
-                             (DIM, "  " + pomo.next_label()),
-                             (DIM, "  [r]estart [±]%dmin [p]off" % pomo.focus)],
-                            w - 1))
-        else:
-            rows.append(seg([(DIM, " [p] pomodoro")], w - 1))
+        rows.extend(footer)
         if flash_window(flash_at, int(_CFG["pomodoro_flash_count"]),
                         float(_CFG["pomodoro_flash_gap"])):
             draw(flash_frame(rows, w, h), w, h)

@@ -66,7 +66,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bg, clipboard, cycle, draw, load_config,
-                    maybe_help, pad, rgb, seg, setup, size, title)
+                    maybe_help, pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("tailnet", {"refresh": 2.0, "history": 180})
 REFRESH = float(_CFG["refresh"])
@@ -852,8 +852,12 @@ def main():
                              (TXT, ", ".join(rts[:2])),
                              (DIM, (" +%d more" % (len(rts) - 2)) if len(rts) > 2 else "")],
                             w - 1))
-        rows.append(seg([(DIM, " ↑↓ · ↵/[i]nfo [c]opy [g]raph [o]ffline"
-                              " [n]=%gs [r]efresh [q]uit" % REFRESH)], w - 1))
+        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(DIM, "↵/[i]nfo")], [(DIM, "[c]opy")], [(DIM, "[g]raph")],
+                 [(DIM, "[o]ffline")], [(DIM, "[n]=%gs" % REFRESH)],
+                 [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+        for line in pack_hints(hints, w - 2):
+            rows.append(" " + line)
         draw(rows, w, h)
         time.sleep(0.3)
 

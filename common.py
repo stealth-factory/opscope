@@ -158,6 +158,31 @@ def seg(parts, width):
     return "".join(out)
 
 
+def pack_hints(hints, width, sep="  "):
+    """Lay key hints across as many lines as they need.
+
+    Each hint is a list of (colour, text) segments and is kept whole: footers
+    are the one place a truncated line is actively harmful, since a hint cut to
+    "[±]25" teaches the wrong key. Returns the rendered rows, so a caller can
+    reserve exactly that many at the bottom.
+    """
+    rows, parts, used = [], [], 0
+    for hint in hints:
+        length = sum(len(text) for _, text in hint)
+        gap = len(sep) if parts else 0
+        if parts and used + gap + length > width:
+            rows.append("".join(parts))
+            parts, used, gap = [], 0, 0
+        if gap:
+            parts.append(sep)
+        for color, text in hint:
+            parts.append(color + text)
+        used += gap + length
+    if parts:
+        rows.append("".join(parts))
+    return rows or [""]
+
+
 def heat(frac):
     """Green -> amber -> red gradient."""
     frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)

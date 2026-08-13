@@ -63,8 +63,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, pad,
-                    rgb, seg, setup, size, title)
+from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help,
+                    pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("herdr_panes", {"refresh": 4.0})
 REFRESH = float(_CFG["refresh"])           # seconds between herdr polls (-n)
@@ -475,14 +475,18 @@ def main():
         # The footer must always be the last visible line, so clamp the body
         # to the space left for it rather than budgeting inside each section -
         # that drifted, and the footer ended up written past the bottom row.
-        rows = rows[:h - 2]
-        while len(rows) < h - 2:
+        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(ACCENT, "↵"), (DIM, " switch to this pane")],
+                 [(DIM, "[o]idle")], [(DIM, "[w]labels")],
+                 [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+        footer = [" " + line for line in pack_hints(hints, w - 2)]
+        reserve = len(footer) + 1                     # +1 for the note line
+        rows = rows[:h - reserve]
+        while len(rows) < h - reserve:
             rows.append("")
         rows.append(seg([(DONE if note.startswith("→") else BLOCKED, " " + note)],
                         w - 1) if note else "")
-        rows.append(seg([(ACCENT, " ↑↓"), (DIM, " select   "),
-                         (ACCENT, "↵"), (DIM, " switch to this pane   "),
-                         (DIM, "[o]idle [w]labels [r]efresh [q]uit")], w - 1))
+        rows.extend(footer)
         draw(rows, w, h)
         time.sleep(0.25)
 
