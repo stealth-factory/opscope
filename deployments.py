@@ -63,8 +63,14 @@ BUILD = rgb(255, 200, 90)
 ERROR = rgb(255, 95, 105)
 QUEUE = rgb(120, 160, 220)
 CANCEL = rgb(140, 145, 160)
-DIM = rgb(80, 95, 115)
-GRID = rgb(45, 58, 74)
+# Contrast is measured against both the terminal background and the selected
+# row's tint, which is the harder case. Body text clears WCAG AA (4.5:1) on
+# both; GRID is decorative gridline dots only and is never used for text.
+DIM = rgb(127, 147, 172)      # secondary text: ages, labels   (6.7:1 / 4.5:1)
+GRID = rgb(71, 91, 116)       # chart gridlines only, never text (3.0:1)
+MSG = rgb(158, 174, 196)      # commit subjects                (9.3:1 / 6.3:1)
+URL = rgb(130, 200, 255)      # links                         (11.7:1 / 7.9:1)
+HINT = rgb(126, 148, 173)     # key hints                      (6.7:1 / 4.5:1)
 TXT = rgb(225, 235, 245)
 LBL = rgb(130, 165, 200)
 PROD = rgb(120, 180, 255)
@@ -207,14 +213,14 @@ def copy_overlay(d, rows, w, h, note):
     rows.append(seg([(TXT, " " + (d.get("name") or "?")),
                      (DIM, "  " + (meta.get("githubCommitSha") or "")[:7]),
                      (BRANCH, "  " + (meta.get("githubCommitRef") or ""))], w - 1))
-    rows.append(seg([(GRID, " " + (meta.get("githubCommitMessage") or "")
+    rows.append(seg([(MSG, " " + (meta.get("githubCommitMessage") or "")
                       .split("\n")[0])], w - 1))
     rows.append("")
     pairs = links(d)
     for i, (label, url) in enumerate(pairs, 1):
         rows.append(seg([(READY, " [%d] " % i), (TXT, label)], w - 1))
         for line in wrap(url, max(10, w - 6)):
-            rows.append(GRID + "     " + line)
+            rows.append(URL + "     " + line)
         rows.append("")
     if not pairs:
         rows.append(DIM + "  (this deployment exposes no links)")
@@ -228,6 +234,21 @@ def copy_overlay(d, rows, w, h, note):
                     w - 1))
     rows.append(seg([(READY, " " + note) if note else (DIM, "")], w - 1))
     return rows
+
+
+def columns(w):
+    """Progressive disclosure: spend extra width on more content, not padding.
+
+    Under 66 columns only the essentials fit. Above that the commit SHA and
+    branch appear. From 110 the metadata and commit subject share one line, so
+    twice as many deployments are visible in the same height.
+    """
+    return {
+        "detail": w >= 66,
+        "single": w >= 110,
+        "project": 12 if w < 80 else (16 if w < 110 else 20),
+        "branch": max(12, min(34, w // 5)),
+    }
 
 
 def activity(deps, w, hours=48):
@@ -380,7 +401,7 @@ def main():
             filt_bits.append(flt)
         if only:
             filt_bits.append(only)
-        rows.append(seg([(GRID, " ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit"),
+        rows.append(seg([(HINT, " ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit"),
                          (BUILD, ("   filter: " + " + ".join(filt_bits))
                           if filt_bits else "")], w - 1))
         rows.append("")
@@ -415,8 +436,10 @@ def main():
         rows.append(seg([(LBL, " ── RECENT ── "),
                          (DIM, "%d of %d" % (selected + 1, len(shown)) if shown else "")],
                         w - 1))
-        wide = w >= 66
-        visible = max(1, (h - len(rows) - 1) // 2)
+        cols = columns(w)
+        wide, single = cols["detail"], cols["single"]
+        per_item = 1 if single else 2
+        visible = max(1, (h - len(rows) - 1) // per_item)
         scroll = min(scroll, max(0, len(shown) - visible))
         if selected < scroll:
             scroll = selected
@@ -434,24 +457,26 @@ def main():
             mark = SPINNER[tick % len(SPINNER)] if state in (
                 "BUILDING", "QUEUED", "INITIALIZING") else (
                 "●" if state == "READY" else "✖" if state == "ERROR" else "○")
+            msg = (meta.get("githubCommitMessage") or "").split("\n")[0]
             line = [(tint + col, ("▸" if here else " ") + "%s %-9s" % (mark, state.title())),
-                    (TXT, pad(d.get("name", "?"), 16)),
-                    (DIM, dur(build_seconds(d))),
-                    (DIM, " %4s" % age(d.get("created", 0)))]
+                    (tint + TXT, pad(d.get("name", "?"), cols["project"])),
+                    (tint + DIM, dur(build_seconds(d))),
+                    (tint + DIM, " %4s" % age(d.get("created", 0)))]
             if d.get("target") == "production":
-                line.append((PROD, "  PROD"))
+                line.append((tint + PROD, "  PROD"))
             elif wide:
-                line.append((DIM, "  prev"))
+                line.append((tint + DIM, "  prev"))
             if wide:
-                line.append((SHA, "  " + (meta.get("githubCommitSha") or "")[:7]))
-                line.append((BRANCH, " " + (meta.get("githubCommitRef") or "")[:22]))
+                line.append((tint + SHA, "  " + (meta.get("githubCommitSha") or "")[:7]))
+                line.append((tint + BRANCH, " " + pad((meta.get("githubCommitRef") or ""),
+                                                      cols["branch"])))
+            if single:
+                line.append((tint + (TXT if here else MSG), " " + msg))
             if here:
-                line = [(tint + c, t) for c, t in line]
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
-            if len(rows) < h - 1:
-                msg = (meta.get("githubCommitMessage") or "").split("\n")[0]
-                rows.append(seg([(tint + (TXT if here else GRID), "   " + msg),
+            if not single and len(rows) < h - 1:
+                rows.append(seg([(tint + (TXT if here else MSG), "   " + msg),
                                  (tint, " " * w if here else "")], w - 1))
         if not shown:
             rows.append(DIM + "   (nothing matches the current filter)")
