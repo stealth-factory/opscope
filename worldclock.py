@@ -23,8 +23,9 @@ relaunching the panel does not cost you a session.
 A phase does not end itself. When the time is up the counter keeps going,
 showing how far over you are, and the bar rescales so a growing red section
 represents the overrun — the longer you ignore it, the more of the bar is red.
-The terminal is alerted when the phase elapses and again every minute it keeps
-running: BEL plus OSC 9 and OSC 777 desktop notifications, which are the only
+The whole panel also flashes twice, a second apart, on every alert - visible
+with the sound muted. The terminal is alerted when the phase elapses and again
+every minute it keeps running: BEL plus OSC 9 and OSC 777 desktop notifications, which are the only
 channels that survive SSH. Under Herdr it additionally raises a native toast
 with a sound — additive, never required, and skipped entirely elsewhere.
 
@@ -41,14 +42,15 @@ there are plausibly at work.
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, draw, flush, load_config, maybe_help,
-                    out, pad, rgb, seg, setup, size, title)
+from common import (RST, Keyboard, bar, bg, draw, flush, load_config,
+                    maybe_help, out, pad, rgb, seg, setup, size, title)
 
 # None = follow the system timezone for the big digits.
 TZ = None
@@ -73,6 +75,9 @@ _CFG = load_config("worldclock", {
     "pomodoro_sessions_before_long_break": 4,
     "pomodoro_bell": True,          # terminal bell on elapse and each minute over
     "pomodoro_notify": True,        # OSC 9 desktop notification, where supported
+    "pomodoro_flash": True,         # flash the panel when an alert fires
+    "pomodoro_flash_count": 2,      # how many flashes
+    "pomodoro_flash_gap": 1.0,      # seconds between them
 })
 
 CITIES = [tuple(c) for c in _CFG["cities"]]
@@ -116,6 +121,38 @@ EVE = rgb(255, 200, 90)        # evening
 NIGHT = rgb(95, 130, 175)      # asleep
 WEEKEND = rgb(150, 150, 170)
 HERE = rgb(255, 170, 220)
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+FLASH_ON = 0.35                 # seconds each flash stays lit
+FLASH_BG = bg(122, 26, 32)
+FLASH_FG = rgb(255, 235, 235)
+
+
+def flash_window(started, count, gap):
+    """Is the panel lit right now?
+
+    Flashes are derived from one timestamp rather than driven by sleeps, so
+    the render loop keeps running - the clock stays live and keys stay
+    responsive while it blinks.
+    """
+    if not started:
+        return False
+    since = time.time() - started
+    for n in range(max(1, count)):
+        edge = n * gap
+        if edge <= since < edge + FLASH_ON:
+            return True
+    return False
+
+
+def flash_frame(rows, w, h):
+    """The same frame, repainted solid: colours stripped, one loud background."""
+    out_rows = []
+    for i in range(h):
+        text = ANSI_RE.sub("", rows[i]) if i < len(rows) else ""
+        out_rows.append(FLASH_BG + FLASH_FG + pad(text, w))
+    return out_rows
 
 
 # Herdr, when we happen to be inside it, can raise a real toast with a sound.
@@ -446,6 +483,7 @@ def main():
     keyboard = Keyboard()
     pomo = Pomodoro()
     scroll = 0
+    flash_at = 0.0
     zones = []
     for name, key in CITIES:
         try:
@@ -491,6 +529,8 @@ def main():
                              else "running %dm over" % (over // 60)),
                   pomo.bell, pomo.notify,
                   "done" if over < 60 else "request")
+            if bool(_CFG["pomodoro_flash"]):
+                flash_at = time.time()
 
         w, h = size()
         stamp = datetime.datetime.now(TZ) if TZ else datetime.datetime.now().astimezone()
@@ -577,8 +617,12 @@ def main():
                             w - 1))
         else:
             rows.append(seg([(DIM, " [p] pomodoro")], w - 1))
-        draw(rows, w, h)
-        time.sleep(0.25)
+        if flash_window(flash_at, int(_CFG["pomodoro_flash_count"]),
+                        float(_CFG["pomodoro_flash_gap"])):
+            draw(flash_frame(rows, w, h), w, h)
+        else:
+            draw(rows, w, h)
+        time.sleep(0.15)
 
 
 main()
