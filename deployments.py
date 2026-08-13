@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# terminal-toys - small dependency-free terminal tools
+# terminal-toys - small dependency-free terminal widgets
 # Copyright (C) 2026 William Li
 #
 # This program is free software: you can redistribute it and/or modify

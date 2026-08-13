@@ -1,6 +1,6 @@
 # Building panels for Herdr
 
-Notes from building the tools in this repo against [Herdr](https://herdr.dev),
+Notes from building the widgets in this repo against [Herdr](https://herdr.dev),
 a terminal multiplexer for coding agents. None of this is in `herdr --skill`,
 which documents the CLI surface; this is what the surface does not tell you.
 

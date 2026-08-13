@@ -1,12 +1,12 @@
 # terminal-toys
 
-Small terminal tools with no dependencies — pure Python 3 standard library, 24-bit
+Small terminal widgets with no dependencies — pure Python 3 standard library, 24-bit
 colour, and a full redraw each frame so everything reflows when you resize the pane.
 
-Each tool is a single self-contained script that imports shared drawing helpers
+Each widget is a single self-contained script that imports shared drawing helpers
 from `common.py`. Run any of them directly; pass `-h` for its documentation.
 
-## Tools
+## Widgets
 
 ### `latency.py` — multi-target latency monitor
 
@@ -51,7 +51,7 @@ cycle filter (all / failed / production), `p` cycle project, `q` quit.
 The copy sheet offers the four URLs worth having — deployment dashboard,
 branch preview, commit preview and pull request — on keys `1`-`4`. Copying
 uses OSC 52, so the terminal you are sitting at performs it and the text
-reaches your local clipboard even though the tool runs on a remote host. If
+reaches your local clipboard even though the widget runs on a remote host. If
 your terminal or multiplexer blocks OSC 52, each URL is still shown in full
 for mouse selection.
 
@@ -77,7 +77,7 @@ process names: a busy pane's foreground pid differs from its own shell pid.
 
 Each row carries the workspace, how long the state has held, and the real CPU
 and RSS of the process. Durations show `≥` when the state predates the
-tool starting, since then it is only a lower bound.
+widget starting, since then it is only a lower bound.
 
 ```sh
 ./herdr-panes.py       # 4s refresh
@@ -144,7 +144,7 @@ The copy sheet offers the peer's **Tailscale IP**, **MagicDNS name**, **public
 IP** and **LAN IP** on keys `1`-`4`, copied via OSC 52 so they reach the
 clipboard of the machine you are typing at. Peer LAN addresses come from
 `tailscale debug netmap`, which needs root — it is attempted with `sudo -n` and
-silently omitted when that would prompt, so the tool never requires privilege.
+silently omitted when that would prompt, so the widget never requires privilege.
 Where a peer exposes several private addresses, one inside a subnet it
 advertises wins over a docker or virtual bridge.
 
@@ -156,7 +156,7 @@ hiding the way back would leave no way back.
 
 ### Configuration
 
-Every tool reads optional settings from the first of
+Every widget reads optional settings from the first of
 `$TERMINAL_TOYS_CONFIG`, `~/.config/terminal-toys/config.json`, or
 `config.json` beside the scripts. Copy `config.example.json` to start. This
 keeps hostnames, ping targets and city lists out of the source tree — the
@@ -194,7 +194,7 @@ ignored: BEL, plus OSC 9 and OSC 777 desktop notifications. Escape sequences
 are the only alerting channel that survives SSH — anything local to the machine
 would fire where nobody is sitting. Under Herdr it *additionally* raises a
 native toast with a sound; that is purely additive and skipped everywhere else,
-so the tool never requires Herdr. The whole panel also flashes white twice, a second apart, on every alert —
+so the widget never requires Herdr. The whole panel also flashes white twice, a second apart, on every alert —
 visible with the sound muted. `pomodoro_flash_rgb` changes the colour, and the
 text colour follows it automatically so a dark choice stays readable. State persists across restarts, so relaunching the panel does not cost you a
 session. The completed tally is per day and clears when the date changes —
@@ -239,13 +239,13 @@ binary emits and therefore always matches your version.
 
 ## Shared helpers
 
-`common.py` holds the pieces every tool uses: terminal sizing, a full-frame
+`common.py` holds the pieces every widget uses: terminal sizing, a full-frame
 `draw()`, 24-bit colour, progress bars, a green→amber→red `heat()` ramp, and
 `seg()`, which joins coloured segments while clipping to a printable-cell budget
 so coloured text never overflows a narrow pane.
 
 ## License
 
-[GNU AGPL-3.0](LICENSE). You may use, modify and share these tools freely; if you
+[GNU AGPL-3.0](LICENSE). You may use, modify and share these widgets freely; if you
 distribute a modified version — or run one as a network service — you must make
 your source available under the same license.

@@ -1,4 +1,4 @@
-# terminal-toys - small dependency-free terminal tools
+# terminal-toys - small dependency-free terminal widgets
 # Copyright (C) 2026 William Li
 #
 # This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Shared terminal helpers for the sci-fi panel scripts."""
+"""Shared drawing and input helpers for the terminal widgets."""
 import atexit
 import base64
 import json
