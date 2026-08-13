@@ -196,6 +196,8 @@ class Store(object):
                     rate = d.get("rateLimit") or rate
                     i = 0
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
+                    # "dropped" is closed-without-merging: GitHub's red Closed
+                    # badge. Search's is:closed would also count merges.
                     merged, dropped = g("merged"), g("dropped")
                     hist = collections.Counter()
                     for n in ((d.get("o%d_hist" % i) or {}).get("nodes") or []):
@@ -292,7 +294,8 @@ def pipeline(tot, days, w):
              (TXT, "%6d " % count), (colour, meter(frac, gauge_w))])
     row([])
     row([(OK, "  ✔ merged"), (TXT, "%5d" % tot["merged"]),
-         (DIM, " in %dd" % days), (BAD, "    ✖ %d dropped" % tot["dropped"])])
+         (DIM, " in %dd" % days),
+         (BAD, "    ✖ %d closed unmerged" % tot["dropped"])])
     out.append([(LBL, " └"), (LBL, "─" * inner), (LBL, "┘")])
     return out
 
@@ -376,11 +379,13 @@ def main():
         pct_txt = ("%.0f%%" % rate_pct) if rate_pct is not None else "--"
         rcol = heat((rate_pct or 0) / 100.0) if rate_pct is not None else DIM
         rows.append(seg([(LBL, " ── MERGE RATE ── "),
-                         (DIM, "last %d days" % store.days)], w - 1))
+                         (DIM, "share of PRs closed in %dd that were merged"
+                          % store.days)], w - 1))
+        closed_total = tot["merged"] + tot["dropped"]
         rows.append(seg([(rcol, " %-5s" % pct_txt),
-                         (rcol, meter((rate_pct or 0) / 100.0, max(10, w - 34))),
+                         (rcol, meter((rate_pct or 0) / 100.0, max(10, w - 44))),
                          (OK, "  %d merged" % tot["merged"]),
-                         (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])], w - 1))
+                         (DIM, " of "), (TXT, "%d closed" % closed_total)], w - 1))
         rows.append(seg([(PR, " %d" % tot["open"]), (DIM, " PRs open   "),
                          (WARN, "%d" % tot["issues"]), (DIM, " issues open   "),
                          (DIM, "%d accounts" % len(stats))], w - 1))
@@ -440,7 +445,8 @@ def main():
         if tot["draft"]:
             flags.append((DIM, " ○ %d drafts" % tot["draft"]))
         if tot["dropped"]:
-            flags.append((DIM, " ✖ %d closed unmerged in %dd" % (tot["dropped"], store.days)))
+            flags.append((DIM, " ✖ %d closed without merging in %dd"
+                          % (tot["dropped"], store.days)))
         for colour, text in flags or [(OK, " ✓ nothing waiting")]:
             rows.append(seg([(colour, text)], w - 1))
 
