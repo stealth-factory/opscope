@@ -14,10 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Shared terminal helpers for the sci-fi panel scripts."""
+import atexit
 import os
+import select
 import signal
 import sys
+import termios
 import time
+import tty
 
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
@@ -134,3 +138,47 @@ def title(text, w, color=None, accent="│"):
 
 def now():
     return time.strftime("%H:%M:%S")
+
+
+class Keyboard(object):
+    """Non-blocking single-key input, restoring the terminal on exit."""
+
+    def __init__(self):
+        self.fd = None
+        self.saved = None
+        if sys.stdin.isatty():
+            try:
+                self.fd = sys.stdin.fileno()
+                self.saved = termios.tcgetattr(self.fd)
+                tty.setcbreak(self.fd)
+                atexit.register(self.restore)
+            except (termios.error, ValueError):
+                self.fd = None
+
+    def restore(self):
+        if self.fd is not None and self.saved is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+            except (termios.error, ValueError):
+                pass
+
+    def poll(self):
+        keys = []
+        if self.fd is None:
+            return keys
+        while select.select([self.fd], [], [], 0)[0]:
+            try:
+                ch = os.read(self.fd, 1)
+            except OSError:
+                break
+            if not ch:
+                break
+            keys.append(ch.decode("utf-8", "replace"))
+        return keys
+
+
+def cycle(seq, current):
+    try:
+        return seq[(seq.index(current) + 1) % len(seq)]
+    except ValueError:
+        return seq[0]

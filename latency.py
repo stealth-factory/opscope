@@ -38,21 +38,18 @@ default with 4 targets that is ~0.8 KB/s (~2.8 MB/hour).
 Measures THIS host -> each target. It cannot measure target-to-target legs;
 that needs a probe running on the far end.
 """
-import atexit
 import collections
 import math
 import os
 import re
-import select
 import subprocess
 import sys
-import termios
 import threading
 import time
-import tty
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import RST, draw, maybe_help, pad, rgb, seg, setup, size, title
+from common import (RST, Keyboard, cycle, draw, maybe_help, pad, rgb, seg,
+                    setup, size, title)
 
 DEFAULT_HOSTS = [
     "studio.example.internal",
@@ -90,50 +87,6 @@ SPARK = "▁▂▃▄▅▆▇█"
 
 TIME_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
 IP_RE = re.compile(r"^PING\s+\S+\s+\(([\d.a-fA-F:]+)\)")
-
-
-class Keyboard(object):
-    """Non-blocking single-key input, restoring the terminal on exit."""
-
-    def __init__(self):
-        self.fd = None
-        self.saved = None
-        if sys.stdin.isatty():
-            try:
-                self.fd = sys.stdin.fileno()
-                self.saved = termios.tcgetattr(self.fd)
-                tty.setcbreak(self.fd)
-                atexit.register(self.restore)
-            except (termios.error, ValueError):
-                self.fd = None
-
-    def restore(self):
-        if self.fd is not None and self.saved is not None:
-            try:
-                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
-            except (termios.error, ValueError):
-                pass
-
-    def poll(self):
-        keys = []
-        if self.fd is None:
-            return keys
-        while select.select([self.fd], [], [], 0)[0]:
-            try:
-                ch = os.read(self.fd, 1)
-            except OSError:
-                break
-            if not ch:
-                break
-            keys.append(ch.decode("utf-8", "replace"))
-        return keys
-
-
-def cycle(seq, current):
-    try:
-        return seq[(seq.index(current) + 1) % len(seq)]
-    except ValueError:
-        return seq[0]
 
 
 def fmt_ms(v):

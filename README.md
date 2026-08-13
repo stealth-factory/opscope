@@ -27,6 +27,32 @@ way per target per interval — roughly 1.6 KB/s for four targets at 0.5s.
 It measures *this host → each target*. It cannot measure target-to-target legs;
 that needs a probe running on the far end.
 
+### `deployments.py` — Vercel deployments, live
+
+Deployment activity over time, build-duration trend, and the most recent
+deployments with state, project, branch, commit and build time.
+
+- **Activity** — deployments per hour over the last 48h, each bucket coloured by
+  its worst outcome, so a failed run is visible in the timeline at a glance.
+- **Build time** — median / p95 / max across the fetched window, plus a
+  sparkline of recent build durations to show drift.
+- **Recent** — one row per deployment with live elapsed time for in-flight
+  builds, and the commit subject beneath it.
+
+```sh
+./deployments.py                    # every project you can see, 30s refresh
+./deployments.py -n 60 ferry-hk     # one project, slower poll
+```
+
+Keys: `r` refresh now, `f` cycle filter (all / failed / production), `p` cycle
+project, `q` quit.
+
+Credentials come from the Vercel CLI's existing login — if `vercel whoami`
+works, so does this. `$VERCEL_TOKEN` is used first if set. The token is read
+locally and never printed. `vercel ls --all --format json` returns similar
+data, but spawns a Node process per refresh (~1.4s) against ~0.75s for a
+direct API call returning 100 records, so this queries the REST API.
+
 ### `worldclock.py` — server time, office hours, world clock
 
 Big-digit clock for the machine's own timezone, three live countdown bars, and a
@@ -62,6 +88,7 @@ independently of the drops, and each column gets its own speed and trail length.
 - Python **3.9+** (`worldclock.py` uses `zoneinfo`); developed on 3.12
 - A terminal with 24-bit colour support
 - `ping` on `PATH` (`latency.py` only) — no root needed
+- A Vercel login (`deployments.py` only) — the CLI's token is reused
 
 ## Shared helpers
 
