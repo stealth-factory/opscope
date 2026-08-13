@@ -21,6 +21,10 @@ sparkline, a shared log-scale time graph, and a log of loss/spike events.
 
     python3 latency.py [-i SECONDS] [-c SECONDS] [host ...]
 
+Keys while running: i cycles the ping interval (0.2/0.5/1/2/5s, applied to
+running pings immediately), g cycles the column aggregation, c cycles seconds
+per graph column, q quits.
+
 -i sets the ping interval. -g picks how samples sharing a column combine
 (median, mean, min, max, p95; median by default, because latency is
 right-skewed and a mean lets one spike misrepresent the whole block).
@@ -34,14 +38,18 @@ default with 4 targets that is ~0.8 KB/s (~2.8 MB/hour).
 Measures THIS host -> each target. It cannot measure target-to-target legs;
 that needs a probe running on the far end.
 """
+import atexit
 import collections
 import math
 import os
 import re
+import select
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import RST, draw, maybe_help, pad, rgb, seg, setup, size, title
@@ -63,6 +71,11 @@ SPIKE_FACTOR = 3.0      # sample > factor * median -> spike event
 AGGREGATE = "median"    # how samples sharing a graph column combine (-g)
 AGGREGATORS = ("median", "mean", "min", "max", "p95")
 
+# runtime key bindings cycle through these
+INTERVAL_CHOICES = (0.2, 0.5, 1.0, 2.0, 5.0)
+COLUMN_CHOICES = (0, 2.0, 5.0, 10.0)
+RESTART = threading.Event()   # set when INTERVAL changes; readers relaunch ping
+
 PALETTE = [(90, 220, 255), (255, 170, 80), (140, 255, 160),
            (230, 140, 255), (255, 110, 130), (255, 230, 110),
            (120, 160, 255), (255, 140, 200), (150, 255, 240)]
@@ -77,6 +90,50 @@ SPARK = "▁▂▃▄▅▆▇█"
 
 TIME_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
 IP_RE = re.compile(r"^PING\s+\S+\s+\(([\d.a-fA-F:]+)\)")
+
+
+class Keyboard(object):
+    """Non-blocking single-key input, restoring the terminal on exit."""
+
+    def __init__(self):
+        self.fd = None
+        self.saved = None
+        if sys.stdin.isatty():
+            try:
+                self.fd = sys.stdin.fileno()
+                self.saved = termios.tcgetattr(self.fd)
+                tty.setcbreak(self.fd)
+                atexit.register(self.restore)
+            except (termios.error, ValueError):
+                self.fd = None
+
+    def restore(self):
+        if self.fd is not None and self.saved is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+            except (termios.error, ValueError):
+                pass
+
+    def poll(self):
+        keys = []
+        if self.fd is None:
+            return keys
+        while select.select([self.fd], [], [], 0)[0]:
+            try:
+                ch = os.read(self.fd, 1)
+            except OSError:
+                break
+            if not ch:
+                break
+            keys.append(ch.decode("utf-8", "replace"))
+        return keys
+
+
+def cycle(seq, current):
+    try:
+        return seq[(seq.index(current) + 1) % len(seq)]
+    except ValueError:
+        return seq[0]
 
 
 def fmt_ms(v):
@@ -127,6 +184,8 @@ class Target(object):
         self.samples = collections.deque(maxlen=WINDOW)   # (t, rtt|None)
         self.lock = threading.Lock()
         self.alive = False
+        self.proc = None          # live ping process, so the interval can change
+        self.restarting = False   # True = deliberate relaunch, not an outage
 
     def add(self, rtt):
         with self.lock:
@@ -181,6 +240,7 @@ def reader(t):
                 ["ping", "-n", "-O", "-i", str(INTERVAL), t.host],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
+            t.proc = proc
         except OSError:
             time.sleep(2)
             continue
@@ -207,12 +267,27 @@ def reader(t):
                     log_event(t.color, t.host, "LOSS", "no reply")
                 t.add(None)
         proc.wait()
+        if t.restarting:
+            # we killed it ourselves to apply a new interval; not an outage
+            t.restarting = False
+            continue
         # ping exited (bad name, network gone) - record loss and retry
         if down_since is None:
             down_since = time.time()
             log_event(t.color, t.host, "DOWN", "ping exited, retrying")
         t.add(None)
         time.sleep(2)
+
+
+def apply_interval(targets):
+    """Restart every ping so a new INTERVAL takes effect immediately."""
+    for t in targets:
+        t.restarting = True
+        if t.proc and t.proc.poll() is None:
+            try:
+                t.proc.terminate()
+            except OSError:
+                t.restarting = False
 
 
 def sparkline(samples, n):
@@ -361,19 +436,34 @@ def main():
     hosts = args or DEFAULT_HOSTS
     targets = [Target(h, PALETTE[i % len(PALETTE)]) for i, h in enumerate(hosts)]
     setup()
+    keyboard = Keyboard()
     for t in targets:
         th = threading.Thread(target=reader, args=(t,))
         th.daemon = True
         th.start()
 
     while True:
+        for key in keyboard.poll():
+            if key in ("q", "Q"):
+                keyboard.restore()
+                raise SystemExit(0)
+            if key == "i":
+                INTERVAL = cycle(INTERVAL_CHOICES, INTERVAL)
+                apply_interval(targets)
+            elif key == "g":
+                AGGREGATE = cycle(AGGREGATORS, AGGREGATE)
+            elif key == "c":
+                SECONDS_PER_COLUMN = cycle(COLUMN_CHOICES, SECONDS_PER_COLUMN)
+
         w, h = size()
         bucket = SECONDS_PER_COLUMN or INTERVAL
         rows = [title("network latency monitor", w, rgb(90, 220, 255))]
         rows.append(seg([(DIM, " %d targets · %.1fs interval · " % (len(targets), INTERVAL)),
                          (TXT, time.strftime("%H:%M:%S")),
                          (DIM, " · " + ("1 ping/column" if bucket <= INTERVAL
-                                        else "%s of %gs blocks" % (AGGREGATE, bucket)))],
+                                        else "%s of %gs blocks" % (AGGREGATE, bucket))),
+                         (GRID, "   [i]nterval [g]roup [c]olumns [q]uit"
+                                if keyboard.fd is not None else "")],
                         w - 1))
         rows.append("")
         wide = w >= 72
