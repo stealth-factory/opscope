@@ -49,7 +49,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, big, braille_plot, cycle, draw,
+from common import (RST, Keyboard, bar, bg, big, braille_plot,
+                    config_token_warning, cycle, draw,
                     heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
                     seg, setup, size, skeleton, stacked_bar, title, vbars,
                     vbars_down)
@@ -308,7 +309,12 @@ class Store(object):
                     by_acc[acc]["hist_window"] = days_now
                     publish()
                 with self.lock:
-                    self.error = ("could not read: " + ", ".join(failed)) if failed else None
+                    # with nothing else to report, surface a token sitting in a
+                    # file other users on the box can read
+                    self.error = (("could not read: " + ", ".join(failed))
+                                  if failed else
+                                  (config_token_warning() if source == "config"
+                                   else None))
             except urllib.error.HTTPError as e:
                 with self.lock:
                     self.error = "HTTP %s from GitHub%s" % (
@@ -648,13 +654,16 @@ def main():
                    if len(stats) > room else "")
         rows.append(seg([(LBL, " ── BY ACCOUNT ──"), (DIM, counter)], w - 1))
         wide = w >= 62
-        head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",
-                                            "MRG%dD" % store.days, "RATE")
-        bar_cols = max(4, w - 62)
+        # No separators between these fields: the row emits %5d/%6s
+        # back-to-back, so a space here drifts the header one column per
+        # field - four by the time it reaches RATE.
+        head = " %-20s%5s%5s%6s%6s" % ("ACCOUNT", "OPEN", "REVW",
+                                       "MRG%dD" % store.days, "RATE")
+        bar_cols = max(4, w - 63)
         spark_days = [(today - datetime.timedelta(days=n)).isoformat()
                       for n in range(min(store.days, bar_cols) - 1, -1, -1)]
         if wide:
-            head += " %6s" % "ISSUES"
+            head += "%7s" % "ISSUES"
             # "own peak" matters: a full block is 1 PR on a quiet account and
             # 27 on a busy one. The comparable number is MRG, two columns left.
             head += "  " + ("MERGED/DAY · OWN PEAK"
@@ -679,7 +688,7 @@ def main():
                      "%6s" % ("···" if old else
                               ("%.0f%%" % r if r is not None else "--")))]
             if wide:
-                line.append((tint + DIM, "%6d" % s["issues"]))
+                line.append((tint + DIM, "%7d" % s["issues"]))
                 # Each account's own merged-per-day. The columns carry totals
                 # but no shape, and a fortnight of nothing ending in a spike
                 # reads very differently from a steady trickle. Scaled to this

@@ -47,6 +47,24 @@ def config_paths():
                         os.path.join(here, CONFIG_NAME)) if p]
 
 
+def config_token_warning():
+    """Warn when a config file holding a token is readable by others.
+
+    Any widget that takes a token writes it into this file, so the check
+    belongs beside the loader rather than in whichever widget happened to
+    need it first.
+    """
+    for path in config_paths():
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            mode = os.stat(path).st_mode & 0o077
+        except OSError:
+            return None
+        return "config.json is readable by others; chmod 600 it" if mode else None
+    return None
+
+
 def load_config(section, defaults):
     """Settings for `section`, overlaid on `defaults`.
 

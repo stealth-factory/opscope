@@ -98,21 +98,6 @@ STATE_COLOR = {"READY": READY, "BUILDING": BUILD, "ERROR": ERROR,
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def config_token_warning():
-    """Warn when a token sits in a file others can read."""
-    for path in config_paths():
-        if not path or not os.path.exists(path):
-            continue
-        try:
-            mode = os.stat(path).st_mode & 0o077
-        except OSError:
-            return None
-        if mode:
-            return "config.json is readable by others; chmod 600 it"
-        return None
-    return None
-
-
 def token():
     """A Vercel token, from config.json or the environment.
 
