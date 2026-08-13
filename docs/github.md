@@ -30,13 +30,13 @@ is actually moving.
  busiest 2025-08-30 (241)              most on Tue (1031)
 
  ── BY ACCOUNT ──   1-6 of 9
- ACCOUNT              OPEN REVW MRG7D  RATE ISSUES  MERGED/DAY
-▸example-corp          628  486    15   83%    162  ▇▂▂ ▃█
- wiiiimm (you)          34    0     2   67%     28       █
- example-labs           20    0     0    --      0
- example-tools           0    0     0    --      4
- example-web             0    0     0    --      0
- example-old             0    0     0    --      0
+ ACCOUNT              OPEN REVW  MRG7D  RATE ISSUES  MERGED/DAY
+▸example-corp          628  486     15   83%    162  ▇▂▂ ▃█
+ wiiiimm (you)          34    0      2   67%     28       █
+ example-labs           20    0      0    --      0
+ example-tools           0    0      0    --      4
+ example-web             0    0      0    --      0
+ example-old             0    0      0    --      0
 
 
  ↑↓ account  [w]indow  [r]efresh  [q]uit

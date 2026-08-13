@@ -686,9 +686,11 @@ def main():
         # No separators between these fields: the row emits %5d/%6s
         # back-to-back, so a space here drifts the header one column per
         # field - four by the time it reaches RATE.
-        head = " %-20s%5s%5s%6s%6s" % ("ACCOUNT", "OPEN", "REVW",
+        # MRG takes seven: "MRG60D" is six characters and would sit flush
+        # against REVW in every window but the seven-day one.
+        head = " %-20s%5s%5s%7s%6s" % ("ACCOUNT", "OPEN", "REVW",
                                        "MRG%dD" % store.days, "RATE")
-        bar_cols = max(4, w - 63)
+        bar_cols = max(4, w - 64)
         spark_days = [(today - datetime.timedelta(days=n)).isoformat()
                       for n in range(min(store.days, bar_cols) - 1, -1, -1)]
         if wide:
@@ -711,7 +713,7 @@ def main():
                     (tint + PR, "%5d" % s["open"]),
                     (tint + (WARN if s["review"] else DIM), "%5d" % s["review"]),
                     (tint + (DIM if old else OK),
-                     "%6s" % ("···" if old else s["merged"])),
+                     "%7s" % ("···" if old else s["merged"])),
                     (tint + (DIM if old else
                              (heat(r / 100.0) if r is not None else DIM)),
                      "%6s" % ("···" if old else
