@@ -19,8 +19,9 @@
 Two sections. AGENTS lists recognised coding agents with the lifecycle state
 Herdr reports, ordered so the ones wanting a human come first. PROCESSES lists
 every other pane that is actually running something — dev servers, monitors,
-builds — with what it is running and what it costs. Panes idling at a shell
-prompt are omitted, since they have nothing to report.
+builds — with what it is running and what it costs. IDLE lists the panes
+sitting at a shell prompt, by directory, so they can still be jumped to;
+toggle that section with o.
 
 Enter jumps to whatever is selected: the agent's pane, or the tab holding that
 process.
@@ -78,6 +79,7 @@ TXT = rgb(225, 235, 245)
 LBL = rgb(130, 165, 200)
 ACCENT = rgb(150, 210, 255)
 PROC = rgb(170, 190, 215)
+IDLE_C = rgb(122, 138, 160)
 
 # ordering: what needs a human first
 RANK = {"blocked": 0, "done": 1, "working": 2, "idle": 3, "unknown": 4}
@@ -104,6 +106,13 @@ def herdr(*args):
         return json.loads(out.stdout)["result"]
     except Exception:
         return None
+
+
+def tail_path(path, n):
+    """Keep the end of a path, marking the cut so it does not read as a name."""
+    if len(path) <= n:
+        return path
+    return "…" + path[-(n - 1):]
 
 
 def command_label(proc):
@@ -166,14 +175,16 @@ class Store(object):
             pid_info = herdr("pane", "process-info", "--pane", pane["pane_id"]) or {}
             info = pid_info.get("process_info") or {}
             fg = info.get("foreground_processes") or []
-            if not fg or fg[0].get("pid") == info.get("shell_pid"):
-                continue
-            proc = fg[0]
-            pid = proc.get("pid")
+            busy = bool(fg) and fg[0].get("pid") != info.get("shell_pid")
+            proc = fg[0] if fg else {}
+            pid = proc.get("pid") if busy else None
             entry = {"pane_id": pane.get("pane_id"), "tab_id": pane.get("tab_id"),
                      "workspace_id": pane.get("workspace_id"),
-                     "command": command_label(proc), "pid": pid,
-                     "cwd": proc.get("cwd") or pane.get("cwd") or "",
+                     "command": command_label(proc) if busy else "",
+                     "title": pane.get("terminal_title_stripped") or "",
+                     "idle": not busy, "pid": pid,
+                     "cwd": (proc.get("cwd") if busy else None)
+                            or pane.get("cwd") or "",
                      "cpu": None, "rss": None}
             st = proc_stats(pid) if pid else None
             if st:
@@ -185,7 +196,7 @@ class Store(object):
                                     / (now - prev[1]) * 100.0)
                 self.cpu[pid] = (ticks, now)
             out.append(entry)
-        out.sort(key=lambda e: -(e["cpu"] or 0))
+        out.sort(key=lambda e: (e["idle"], -(e["cpu"] or 0)))
         return out
 
     def run(self):
@@ -284,6 +295,7 @@ def main():
     th.start()
 
     show_labels = True
+    show_idle = True
     selected = 0
     scroll = 0
     note = ""
@@ -300,6 +312,9 @@ def main():
                 store.wake.set()
             elif key == "w":
                 show_labels = not show_labels
+            elif key == "o":
+                show_idle = not show_idle
+                selected = 0
             elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
@@ -327,7 +342,8 @@ def main():
         w, h = size()
         agents, panels, labels, err = store.snapshot()
         entries = ([("agent", a) for a in agents] +
-                   [("proc", p) for p in panels])
+                   [("proc", p) for p in panels
+                    if show_idle or not p["idle"]])
         agents_now = entries
         selected = max(0, min(selected, len(entries) - 1)) if entries else 0
         if note and time.time() > note_until:
@@ -401,14 +417,17 @@ def main():
         if not agents and not err:
             rows.append(DIM + "   no agents running")
 
+        running = [p for p in panels if not p["idle"]]
+        idle = [p for p in panels if p["idle"]]
+
         rows.append("")
         rows.append(LBL + " ── PROCESSES ── " + DIM +
                     "%d pane%s running something" %
-                    (len(panels), "" if len(panels) == 1 else "s"))
+                    (len(running), "" if len(running) == 1 else "s"))
         if wide:
             rows.append(DIM + pad(" %-20s %-5s %-5s %-18s" %
                                   ("COMMAND", "CPU", "MEM", "WORKSPACE"), w - 1))
-        for j, pn in enumerate(panels):
+        for j, pn in enumerate(running):
             if len(rows) >= h - 2:
                 break
             here = (len(agents) + j) == selected
@@ -427,8 +446,31 @@ def main():
             if here:
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
-        if not panels:
+        if not running:
             rows.append(DIM + "   every other pane is idle at a prompt")
+
+        if show_idle and idle:
+            rows.append("")
+            rows.append(LBL + " ── IDLE ── " + DIM +
+                        "%d pane%s at a prompt" %
+                        (len(idle), "" if len(idle) == 1 else "s"))
+            for j, pn in enumerate(idle):
+                if len(rows) >= h - 2:
+                    break
+                here = (len(agents) + len(running) + j) == selected
+                tint = bg(38, 56, 76) if here else ""
+                place = labels.get(pn.get("workspace_id")) or pn.get("workspace_id", "")
+                if not show_labels:
+                    place = pn.get("pane_id", "")
+                where = (pn.get("cwd") or "").replace(
+                    os.path.expanduser("~/projects/"), "").replace(
+                    os.path.expanduser("~"), "~")
+                line = [(tint + IDLE_C, ("▸" if here else " ") + "▫ "),
+                        (tint + IDLE_C, pad(tail_path(where, 26), 27)),
+                        (tint + ACCENT, pad(place, 18))]
+                if here:
+                    line.append((tint, " " * w))
+                rows.append(seg(line, w - 1))
 
         while len(rows) < h - 1:
             rows.append("")
@@ -437,7 +479,7 @@ def main():
                               " " + note)], w - 1))
         else:
             rows.append("")
-        rows.append(seg([(DIM, " ↑↓ select · ↵ go there · [w]orkspace"
+        rows.append(seg([(DIM, " ↑↓ select · ↵ go there · [o]idle [w]orkspace"
                               " [r]efresh [q]uit")], w - 1))
         draw(rows, w, h)
         time.sleep(0.25)

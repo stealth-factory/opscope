@@ -70,9 +70,10 @@ workspaces this is the difference between noticing an agent finished and finding
 out an hour later.
 
 **PROCESSES** lists every other pane that is actually running something — dev
-servers, monitors, builds — with the command, CPU and memory. Panes idling at a
-shell prompt are omitted, detected by their foreground pid matching the pane's
-own shell pid.
+servers, monitors, builds — with the command, CPU and memory. **IDLE** lists
+panes sitting at a shell prompt, by directory, so they can still be jumped to;
+toggle with `o`. The two are told apart exactly rather than by guessing at
+process names: a busy pane's foreground pid differs from its own shell pid.
 
 Each row carries the workspace, how long the state has held, and the real CPU
 and RSS of the process. Durations show `≥` when the state predates the
