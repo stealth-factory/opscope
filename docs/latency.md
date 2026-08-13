@@ -66,6 +66,18 @@ Changing the interval kills and relaunches each `ping`, since `-i` is fixed at
 launch. Those relaunches are marked internally so they are not logged as
 outages.
 
+## The event log
+
+Beneath the graph is a running log of the things worth naming rather than
+leaving you to spot in a line: a host going `DOWN` and coming back `UP` with
+how long it was away, and a `SPIKE` when a single reading lands far above what
+that host normally does.
+
+"Far above" is `spike_factor`, three times the median by default, and it needs
+at least ten samples before it will call anything — otherwise the first slow
+reading on a fresh host is a spike against a median of itself. Raise it on a
+link that is naturally jittery, lower it to catch smaller excursions.
+
 ## Traffic cost
 
 One 98-byte frame each way per target per interval — about **1.6 KB/s for four
@@ -86,6 +98,7 @@ baseline, not a path measurement.
   "interval": 0.5,
   "seconds_per_column": 0,
   "window": 600,
+  "spike_factor": 3.0,
   "aggregate": "median",
   "strip_suffixes": [".internal"]
 }
