@@ -29,10 +29,17 @@ Relayed peers can be dramatically slower and the difference is invisible in
 Peers advertising subnet routes are flagged, since those only reach you if this
 node runs with --accept-routes.
 
+The info view names each peer's home DERP region — the Tailscale POP nearest to
+it — as a location hint. That comes from the local DERP map, so no address is
+ever sent to a geolocation service.
+
     python3 tailnet.py [-n SECONDS]
 
 A live throughput section graphs peers currently moving data (toggle with g),
-and the info view carries the same graph for the selected machine.
+and the info view carries the same graph for the selected machine plus ICMP
+latency over the tunnel — current, average, median, min, max, jitter, loss and
+a sparkline — measured the same way the latency monitor does. Only the selected
+peer is probed, so this costs one ping process regardless of tailnet size.
 
 n cycles the poll interval while running (1/2/5/10/30s), the same way the
 latency monitor's i key does; the graph resolution follows it. -n sets the
@@ -51,6 +58,7 @@ when that would prompt, so nothing here requires privilege.
 import collections
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -191,6 +199,31 @@ def endpoints_by_peer():
     return found
 
 
+_DERP = {}
+
+
+def derp_regions():
+    """DERP region code -> city, from the local map.
+
+    A peer's home region is the Tailscale POP nearest to it, so this gives a
+    location hint without sending anyone's IP to a geolocation service. Cached:
+    the map changes rarely and is the same for every peer.
+    """
+    if _DERP:
+        return _DERP
+    try:
+        out = subprocess.run(["tailscale", "debug", "derp-map"],
+                             capture_output=True, text=True, timeout=20)
+        data = json.loads(out.stdout)
+    except Exception:
+        return _DERP
+    for region in (data.get("Regions") or {}).values():
+        code = region.get("RegionCode")
+        if code:
+            _DERP[code] = region.get("RegionName") or code
+    return _DERP
+
+
 def ts_status():
     try:
         out = subprocess.run(["tailscale", "status", "--json"],
@@ -268,6 +301,72 @@ def seen(iso):
     if s < 172800:
         return "%dh" % (s / 3600)
     return "%dd" % (s / 86400)
+
+
+TIME_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
+
+
+class Prober(object):
+    """Pings whichever peer is selected, keeping per-peer history.
+
+    Probing every peer continuously would mean two dozen ping processes for
+    data nobody is looking at, so exactly one runs at a time and follows the
+    selection. History is kept per peer, so returning to one still shows its
+    earlier samples.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.samples = {}          # machine -> deque of rtt|None
+        self.want = None           # (machine, ip)
+        self.proc = None
+
+    def watch(self, machine, ip):
+        with self.lock:
+            if self.want and self.want[0] == machine:
+                return
+            self.want = (machine, ip) if ip else None
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
+
+    def history(self, machine):
+        with self.lock:
+            return list(self.samples.get(machine) or [])
+
+    def run(self):
+        while True:
+            with self.lock:
+                target = self.want
+            if not target:
+                time.sleep(0.4)
+                continue
+            machine, ip = target
+            try:
+                self.proc = subprocess.Popen(
+                    ["ping", "-n", "-O", "-i", "1", ip],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+            except OSError:
+                time.sleep(2)
+                continue
+            for line in self.proc.stdout:
+                with self.lock:
+                    if not self.want or self.want[0] != machine:
+                        break
+                    hist = self.samples.setdefault(
+                        machine, collections.deque(maxlen=120))
+                m = TIME_RE.search(line)
+                if m:
+                    hist.append(float(m.group(1)))
+                elif "no answer yet" in line or "Unreachable" in line:
+                    hist.append(None)
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
 
 
 class Store(object):
@@ -390,7 +489,7 @@ def activity_rows(rates, w, limit):
     return out
 
 
-def info_overlay(peer, eps, users, w, h, rates=None):
+def info_overlay(peer, eps, users, w, h, rates=None, latency=None):
     """Everything known about one machine, including every address."""
     rows = [title("machine info", w, ACCENT)]
     dns = (peer.get("DNSName") or "").rstrip(".")
@@ -407,6 +506,10 @@ def info_overlay(peer, eps, users, w, h, rates=None):
     if (peer.get("HostName") or "") != peer_name(peer):
         field("hostname", peer.get("HostName") + "   (self-reported)", DIM)
     field("os", peer.get("OS"))
+    region = peer.get("Relay") or ""
+    if region:
+        city = derp_regions().get(region)
+        field("region", "%s — %s" % (region, city) if city else region, ROUTE)
     field("owner", owner)
     field("tags", ", ".join(peer.get("Tags") or []), ROUTE)
     rows.append("")
@@ -416,7 +519,11 @@ def info_overlay(peer, eps, users, w, h, rates=None):
     if peer.get("CurAddr"):
         field("path", "DIRECT via " + peer["CurAddr"], DIRECT)
     else:
-        field("path", "relayed through DERP " + str(peer.get("Relay") or "?"), RELAY)
+        relay = peer.get("Relay") or "?"
+        city = derp_regions().get(relay, "")
+        field("path", "relayed through DERP %s%s" % (relay,
+                                                     " (%s)" % city if city else ""),
+              RELAY)
     field("rx / tx", "%s  /  %s" % (human(peer.get("RxBytes")).strip(),
                                     human(peer.get("TxBytes")).strip()))
     field("handshake", stamp(peer.get("LastHandshake")))
@@ -456,6 +563,41 @@ def info_overlay(peer, eps, users, w, h, rates=None):
             rows.append(seg([(ROUTE, "   " + r)], w - 1))
         if len(routes) > 6:
             rows.append(DIM + "   +%d more" % (len(routes) - 6))
+    pings = [x for x in (latency or []) if x is not None]
+    if latency:
+        rows.append("")
+        loss = 100.0 * (len(latency) - len(pings)) / len(latency)
+        if pings:
+            ordered = sorted(pings)
+            jit = (sum(abs(pings[i] - pings[i - 1]) for i in range(1, len(pings)))
+                   / (len(pings) - 1)) if len(pings) > 1 else 0.0
+            rows.append(LBL + " latency  " + DIM + "(icmp over tailscale, %d samples)"
+                        % len(latency))
+            rows.append(seg([(DIM, "   now "), (TXT, "%7.2fms" % pings[-1]),
+                             (DIM, "  avg "), (TXT, "%7.2fms" % (sum(pings) / len(pings))),
+                             (DIM, "  med "), (TXT, "%7.2fms" % ordered[len(ordered) // 2])],
+                            w - 1))
+            rows.append(seg([(DIM, "   min "), (TXT, "%7.2fms" % ordered[0]),
+                             (DIM, "  max "), (TXT, "%7.2fms" % ordered[-1]),
+                             (DIM, "  jit "), (TXT, "%7.2fms" % jit)], w - 1))
+            rows.append(seg([(DIM, "   loss"), (ONLINE if loss == 0 else RELAY,
+                                                "%7.1f%%" % loss)], w - 1))
+            lo, hi = ordered[0], ordered[-1]
+            span = (hi - lo) or 1.0
+            sw = max(10, w - 8)
+            marks = []
+            for v in latency[-sw:]:
+                if v is None:
+                    marks.append((RELAY, "×"))
+                else:
+                    marks.append((ONLINE, SPARK[min(7, int((v - lo) / span * 7.99))]))
+            rows.append("   " + "".join(c + ch for c, ch in marks))
+        else:
+            rows.append(LBL + " latency  " + RELAY + "no replies")
+    elif peer.get("Online"):
+        rows.append("")
+        rows.append(LBL + " latency  " + DIM + "probing…")
+
     hist = (rates or {}).get(peer_name(peer)) or []
     if hist:
         rows.append("")
@@ -525,6 +667,10 @@ def main():
     th = threading.Thread(target=store.run)
     th.daemon = True
     th.start()
+    prober = Prober()
+    pt = threading.Thread(target=prober.run)
+    pt.daemon = True
+    pt.start()
 
     hide_offline = False
     show_graph = True
@@ -624,7 +770,8 @@ def main():
             chosen = listed[min(selected, len(listed) - 1)]
             if view == "info":
                 users = {str(k): v for k, v in (data.get("User") or {}).items()}
-                draw(info_overlay(chosen, eps_now, users, w, h, rates), w, h)
+                draw(info_overlay(chosen, eps_now, users, w, h, rates,
+                                  prober.history(peer_name(chosen))), w, h)
             else:
                 draw(copy_overlay(chosen, eps_now, w, h, note), w, h)
             time.sleep(0.1)
@@ -651,6 +798,12 @@ def main():
         def order(p):
             return (not p.get("Online"), not p.get("CurAddr"),
                     -(p.get("RxBytes", 0) + p.get("TxBytes", 0)))
+
+        if listed:
+            sel_peer = listed[min(selected, len(listed) - 1)]
+            ip4 = [i for i in (sel_peer.get("TailscaleIPs") or []) if ":" not in i]
+            prober.watch(peer_name(sel_peer),
+                         ip4[0] if (ip4 and sel_peer.get("Online")) else None)
 
         listed = [p for p in sorted(peers, key=order)
                   if not (hide_offline and not p.get("Online"))]

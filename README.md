@@ -126,6 +126,13 @@ machines are directly comparable. Toggle it with `g`. The info view carries the
 same graph for its own machine, scaled to that machine's own peak so its
 variation is visible even when another peer dominates.
 
+The info view adds **ICMP latency over the tunnel** for the selected peer —
+current, average, median, min, max, jitter, loss and a sparkline, the same
+statistics the latency monitor reports — and names the peer's **home DERP
+region** as a location hint (`hkg — Hong Kong`), read from the local DERP map
+so no address is sent to a geolocation service. Only the selected peer is
+probed, so this costs one ping process no matter how large the tailnet.
+
 The info view shows everything known about one machine: its MagicDNS name, the
 self-reported hostname when it differs, owner and tags, whether the path is
 direct or relayed, handshake and enrolment times, **every address** — Tailscale

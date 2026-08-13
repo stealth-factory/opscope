@@ -472,15 +472,17 @@ def main():
                     line.append((tint, " " * w))
                 rows.append(seg(line, w - 1))
 
-        while len(rows) < h - 1:
+        # The footer must always be the last visible line, so clamp the body
+        # to the space left for it rather than budgeting inside each section -
+        # that drifted, and the footer ended up written past the bottom row.
+        rows = rows[:h - 2]
+        while len(rows) < h - 2:
             rows.append("")
-        if note:
-            rows.append(seg([(DONE if note.startswith("→") else BLOCKED,
-                              " " + note)], w - 1))
-        else:
-            rows.append("")
-        rows.append(seg([(DIM, " ↑↓ select · ↵ go there · [o]idle [w]orkspace"
-                              " [r]efresh [q]uit")], w - 1))
+        rows.append(seg([(DONE if note.startswith("→") else BLOCKED, " " + note)],
+                        w - 1) if note else "")
+        rows.append(seg([(ACCENT, " ↑↓"), (DIM, " select   "),
+                         (ACCENT, "↵"), (DIM, " switch to this pane   "),
+                         (DIM, "[o]idle [w]labels [r]efresh [q]uit")], w - 1))
         draw(rows, w, h)
         time.sleep(0.25)
 
