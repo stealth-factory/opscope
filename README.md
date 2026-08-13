@@ -188,8 +188,9 @@ ignored: BEL, plus OSC 9 and OSC 777 desktop notifications. Escape sequences
 are the only alerting channel that survives SSH — anything local to the machine
 would fire where nobody is sitting. Under Herdr it *additionally* raises a
 native toast with a sound; that is purely additive and skipped everywhere else,
-so the tool never requires Herdr. The whole panel also flashes twice, a second apart, on every alert — visible
-with the sound muted. State persists across restarts, so relaunching the panel
+so the tool never requires Herdr. The whole panel also flashes white twice, a second apart, on every alert —
+visible with the sound muted. `pomodoro_flash_rgb` changes the colour, and the
+text colour follows it automatically so a dark choice stays readable. State persists across restarts, so relaunching the panel
 does not cost you a session.
 
 Configure `CITIES`, and `WORK_START_H` / `WORK_END_H` (default Mon–Fri 09:00–18:00).

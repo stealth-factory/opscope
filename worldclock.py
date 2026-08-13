@@ -78,6 +78,7 @@ _CFG = load_config("worldclock", {
     "pomodoro_flash": True,         # flash the panel when an alert fires
     "pomodoro_flash_count": 2,      # how many flashes
     "pomodoro_flash_gap": 1.0,      # seconds between them
+    "pomodoro_flash_rgb": [246, 248, 252],   # flash colour; near-white by default
 })
 
 CITIES = [tuple(c) for c in _CFG["cities"]]
@@ -125,8 +126,13 @@ HERE = rgb(255, 170, 220)
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 FLASH_ON = 0.35                 # seconds each flash stays lit
-FLASH_BG = bg(122, 26, 32)
-FLASH_FG = rgb(255, 235, 235)
+_FLASH_RGB = tuple(int(c) for c in _CFG["pomodoro_flash_rgb"])[:3]
+FLASH_BG = bg(*_FLASH_RGB)
+# Text colour follows the flash colour rather than being fixed, so a custom
+# dark flash stays readable instead of turning the panel into a black square.
+_FLASH_LUM = (0.2126 * _FLASH_RGB[0] + 0.7152 * _FLASH_RGB[1]
+              + 0.0722 * _FLASH_RGB[2]) / 255.0
+FLASH_FG = rgb(18, 20, 26) if _FLASH_LUM > 0.5 else rgb(255, 240, 240)
 
 
 def flash_window(started, count, gap):
