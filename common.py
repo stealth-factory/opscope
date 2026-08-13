@@ -244,6 +244,58 @@ def meter(frac, n, on="▰", off="▱"):
     return on * k + off * (n - k)
 
 
+def panel(heading, body, width, frame=None, accent=None):
+    """A bordered rectangle of fixed width.
+
+    `body` is a list of rows, each a list of (colour, text) segments. Every
+    row is padded to exactly `width` interior cells by its *plain* length, so
+    the right border cannot drift - padding coloured strings by len() counts
+    escape bytes instead of visible ones.
+    """
+    frame = frame or rgb(70, 90, 112)
+    accent = accent or rgb(150, 210, 255)
+    head = "─ %s " % heading if heading else "──"
+    out = [[(frame, "┌"), (accent, head), (frame, "─" * max(0, width - len(head))),
+            (frame, "┐")]]
+    for segments in body:
+        plain = sum(len(t) for _, t in segments)
+        if plain > width:                       # trim, never push the border
+            keep, used = [], 0
+            for colour, text in segments:
+                room = width - used
+                if room <= 0:
+                    break
+                keep.append((colour, text[:room]))
+                used += len(text[:room])
+            segments, plain = keep, width
+        out.append([(frame, "│")] + segments +
+                   [(RST, " " * (width - plain)), (frame, "│")])
+    out.append([(frame, "└" + "─" * width + "┘")])
+    return out
+
+
+def side_by_side(panels, gap=1):
+    """Lay panels out horizontally, padding short ones so rows stay aligned."""
+    if not panels:
+        return []
+    height = max(len(p) for p in panels)
+    widths = []
+    for p in panels:
+        widths.append(max(sum(len(t) for _, t in row) for row in p))
+    out = []
+    for i in range(height):
+        row = []
+        for p, wide in zip(panels, widths):
+            if i < len(p):
+                row += p[i]
+                used = sum(len(t) for _, t in p[i])
+            else:
+                used = 0
+            row.append((RST, " " * (wide - used + gap)))
+        out.append(row)
+    return out
+
+
 def pack_hints(hints, width, sep="  "):
     """Lay key hints across as many lines as they need.
 
