@@ -78,7 +78,12 @@ tool starting, since then it is only a lower bound.
 ./herdr-agents.py -n 10
 ```
 
-Keys: `r` refresh, `w` toggle workspace label vs pane id, `q` quit.
+Keys: `↑`/`↓` select, **`Enter` jumps to that agent's pane** — across
+workspaces — `w` toggles workspace label vs pane id, `r` refresh, `q` quit.
+
+Since the list is already ordered by who needs attention, "press Enter on the
+top row" is the whole workflow: the blocked agent is at the top, and Enter puts
+you in front of it.
 A Herdr client: states, labels and pids all come from the `herdr` CLI, so
 any agent kind Herdr recognises (claude, codex, copilot, cursor,
 antigravity, grok and ~15 more) appears with no code change. Requires

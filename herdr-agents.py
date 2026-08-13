@@ -39,7 +39,9 @@ is only a lower bound.
 
     python3 herdr-agents.py [-n SECONDS]
 
-Keys: r refreshes now, w toggles workspace labels vs pane ids, q quits.
+Keys: up/down select, Enter (or f) focuses that agent's pane so you jump
+straight to whatever needs you, w toggles workspace labels vs pane ids,
+r refreshes now, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.
 """
 import collections
@@ -73,6 +75,16 @@ COLOR = {"blocked": BLOCKED, "done": DONE, "working": WORKING,
          "idle": IDLE, "unknown": UNKNOWN}
 MARK = {"blocked": "⚠", "done": "✓", "working": "◐", "idle": "·", "unknown": "?"}
 SPINNER = "◐◓◑◒"
+
+
+def herdr_action(*args):
+    """Run a herdr command for its effect; True when it succeeded."""
+    try:
+        out = subprocess.run(("herdr",) + args, capture_output=True, text=True,
+                             timeout=15)
+        return out.returncode == 0
+    except Exception:
+        return False
 
 
 def herdr(*args):
@@ -203,6 +215,11 @@ def main():
     th.start()
 
     show_labels = True
+    selected = 0
+    scroll = 0
+    note = ""
+    note_until = 0
+    visible = 1
     tick = 0
     while True:
         tick += 1
@@ -214,9 +231,29 @@ def main():
                 store.wake.set()
             elif key == "w":
                 show_labels = not show_labels
+            elif key == "up":
+                selected = max(0, selected - 1)
+            elif key == "down":
+                selected += 1
+            elif key == "home":
+                selected = 0
+            elif key == "end":
+                selected = max(0, len(agents_now) - 1)
+            elif key in ("enter", "f"):
+                if agents_now:
+                    target = agents_now[min(selected, len(agents_now) - 1)]
+                    pane = target.get("pane_id")
+                    ok = herdr_action("agent", "focus", pane)
+                    note = ("→ focused %s in %s" % (target.get("agent"), pane)
+                            if ok else "! could not focus %s" % pane)
+                    note_until = time.time() + 3
 
         w, h = size()
         agents, labels, err = store.snapshot()
+        agents_now = agents
+        selected = max(0, min(selected, len(agents) - 1)) if agents else 0
+        if note and time.time() > note_until:
+            note = ""
         counts = collections.Counter(a.get("agent_status") for a in agents)
 
         rows = [title("herdr agents", w, ACCENT)]
@@ -246,17 +283,28 @@ def main():
             head += " %-5s %-18s" % ("MEM", "WORKSPACE")
         rows.append(LBL + pad(head, w - 1))
 
-        for a in agents:
-            if len(rows) >= h - 1:
+        visible = max(1, (h - len(rows) - 2) // 2)
+        if selected < scroll:
+            scroll = selected
+        elif selected >= scroll + visible:
+            scroll = selected - visible + 1
+        scroll = max(0, min(scroll, max(0, len(agents) - visible)))
+
+        for i in range(scroll, min(len(agents), scroll + visible)):
+            a = agents[i]
+            if len(rows) >= h - 2:
                 break
+            here = i == selected
             state = a.get("agent_status") or "unknown"
             col = COLOR.get(state, UNKNOWN)
             loud = state in ("blocked", "done")
-            tint = bg(46, 26, 30) if state == "blocked" else (
-                bg(22, 46, 34) if state == "done" else "")
+            tint = bg(38, 56, 76) if here else (
+                bg(46, 26, 30) if state == "blocked" else (
+                    bg(22, 46, 34) if state == "done" else ""))
             mark = SPINNER[tick % 4] if state == "working" else MARK.get(state, "?")
             cpu = a.get("cpu")
-            line = [(tint + col, " %s %-6s" % (mark, a.get("agent", "?")[:6])),
+            line = [(tint + col, ("▸" if here else " ")
+                     + "%s %-6s" % (mark, a.get("agent", "?")[:6])),
                     (tint + col, " %-8s" % state.upper() if loud else " %-8s" % state),
                     (tint + DIM, " %-6s" % (("" if a.get("exact") else "≥")
                                              + ago(a.get("since", 0)))),
@@ -268,20 +316,26 @@ def main():
                     place = a.get("pane_id", "")
                 line.append((tint + DIM, " " + mem(a.get("rss"))))
                 line.append((tint + ACCENT, " " + pad(place, 18)))
-            if loud:
+            if loud or here:
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
             if len(rows) < h - 1:
                 title_text = (a.get("terminal_title_stripped") or "").strip()
                 cwd = (a.get("cwd") or "").replace(os.path.expanduser("~/projects/"), "")
                 rows.append(seg([(tint + DIM, "   " + cwd + "  "),
-                                 (tint + (TXT if loud else DIM), title_text),
-                                 (tint, " " * w if loud else "")], w - 1))
+                                 (tint + (TXT if (loud or here) else DIM), title_text),
+                                 (tint, " " * w if (loud or here) else "")], w - 1))
         if not agents and not err:
             rows.append(DIM + "   no agents running")
         while len(rows) < h - 1:
             rows.append("")
-        rows.append(seg([(DIM, " [r]efresh  [w]orkspace/pane  [q]uit")], w - 1))
+        if note:
+            rows.append(seg([(DONE if note.startswith("→") else BLOCKED,
+                              " " + note)], w - 1))
+        else:
+            rows.append("")
+        rows.append(seg([(DIM, " ↑↓ select · ↵ go to agent · [w]orkspace"
+                              " [r]efresh [q]uit")], w - 1))
         draw(rows, w, h)
         time.sleep(0.25)
 
