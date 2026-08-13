@@ -32,8 +32,9 @@ with a sound — additive, never required, and skipped entirely elsewhere.
 Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
 countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
 it with them, space pauses or
-resumes, r restarts the phase, s skips to the next one, +/- change the focus
-length, q quits.
+resumes, r restarts the phase, s starts a break during focus and ends one during
+a break - b and e do the same, and the footer names whichever applies - +/-
+change the focus length, q quits.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
@@ -337,6 +338,17 @@ class Pomodoro(object):
         self.nagged = 0
         self.save()
 
+    def next_label(self):
+        """What pressing the advance key will actually do, right now.
+
+        The same key starts a break during focus and ends one during a break,
+        so a fixed label like "skip" describes neither.
+        """
+        if self.phase != "focus":
+            return "[e]nd break"
+        upcoming_long = self.cycle and (self.completed + 1) % self.cycle == 0
+        return "[s]tart long break" if upcoming_long else "[s]tart break"
+
     def adjust(self, delta):
         """Change the focus length, shifting the block in progress by the same.
 
@@ -528,7 +540,8 @@ def main():
                 pomo.pause()
             elif key == "r":
                 pomo.restart()
-            elif key == "s":
+            elif key in ("s", "b", "e"):
+                # one action, three mnemonics: skip / break / end
                 pomo.advance()
             elif key in ("+", "="):
                 pomo.adjust(5)
@@ -562,7 +575,7 @@ def main():
             if not pomo.running:
                 col = PAUSED
             rows.append(seg([(col, " " + pad("Pomodoro · " + PHASE_LABEL[pomo.phase],
-                                             21)),
+                                             23)),
                              (OVER if over else TXT,
                               ("+" + hms(over)) if over else hms(pomo.remaining())),
                              (PAUSED, "  paused" if not pomo.running else ""),
@@ -625,7 +638,8 @@ def main():
         if pomo.enabled:
             rows.append(seg([(DIM, " [space]"), (TXT, "pause" if pomo.running
                                                  else "start"),
-                             (DIM, " [r]estart [s]kip [±]%dmin [p]off" % pomo.focus)],
+                             (DIM, "  " + pomo.next_label()),
+                             (DIM, "  [r]estart [±]%dmin [p]off" % pomo.focus)],
                             w - 1))
         else:
             rows.append(seg([(DIM, " [p] pomodoro")], w - 1))
