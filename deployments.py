@@ -51,11 +51,18 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, clipboard, cycle, draw, maybe_help,
-                    pad, rgb, seg, setup, size, title)
+from common import (RST, Keyboard, bar, bg, clipboard, cycle, draw, load_config,
+                    maybe_help, pad, rgb, seg, setup, size, title)
 
-REFRESH = 15            # seconds between API polls (-n)
-LIMIT = 100             # deployments per request (API maximum)
+_CFG = load_config("deployments", {
+    "refresh": 15,       # seconds between API polls (-n)
+    "limit": 100,        # deployments per request (API maximum)
+    "teams": [],         # empty = discover every team you can see
+    "projects": [],      # empty = all projects
+})
+
+REFRESH = float(_CFG["refresh"])
+LIMIT = int(_CFG["limit"])
 AUTH_PATH = "~/.local/share/com.vercel.cli/auth.json"
 API = "https://api.vercel.com"
 
@@ -289,14 +296,14 @@ def main():
     maybe_help(__doc__)
     global REFRESH
     args = sys.argv[1:]
-    teams = []
+    teams = list(_CFG["teams"])
     while args and args[0] in ("-n", "--refresh", "-t", "--team"):
         if args[0] in ("-n", "--refresh"):
             REFRESH = max(5.0, float(args[1]))
         else:
             teams.append(args[1])
         args = args[2:]
-    projects = set(args)
+    projects = set(args) or set(_CFG["projects"])
 
     setup()
     keyboard = Keyboard()

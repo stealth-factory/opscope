@@ -48,24 +48,29 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, cycle, draw, maybe_help, pad, rgb, seg,
-                    setup, size, title)
+from common import (RST, Keyboard, cycle, draw, load_config, maybe_help, pad,
+                    rgb, seg, setup, size, title)
 
-DEFAULT_HOSTS = [
-    "studio.example.internal",
-    "nas.example.internal",
-    "pi.example.internal",
-    "build-mac.example.internal",
-    "1.1.1.1",
-    "8.8.8.8",
-]
+# Defaults are deliberately generic: personal targets belong in config.json,
+# which is git-ignored, so this file stays publishable.
+_CFG = load_config("latency", {
+    "hosts": ["1.1.1.1", "8.8.8.8"],
+    "interval": 0.5,
+    "seconds_per_column": 0,
+    "window": 600,
+    "spike_factor": 3.0,
+    "aggregate": "median",
+    "strip_suffixes": [],
+})
 
-INTERVAL = 0.5          # seconds between pings (>=0.2 without root); -i overrides
-SECONDS_PER_COLUMN = 0   # graph time per column; 0 = one column per ping (-c)
-WINDOW = 600            # samples retained per target
-SPIKE_FACTOR = 3.0      # sample > factor * median -> spike event
+DEFAULT_HOSTS = list(_CFG["hosts"])
+INTERVAL = float(_CFG["interval"])   # seconds between pings; -i overrides
+SECONDS_PER_COLUMN = float(_CFG["seconds_per_column"])
+WINDOW = int(_CFG["window"])         # samples retained per target
+SPIKE_FACTOR = float(_CFG["spike_factor"])
+STRIP_SUFFIXES = list(_CFG["strip_suffixes"])
 
-AGGREGATE = "median"    # how samples sharing a graph column combine (-g)
+AGGREGATE = _CFG["aggregate"]        # how samples sharing a graph column combine
 AGGREGATORS = ("median", "mean", "min", "max", "p95")
 
 # runtime key bindings cycle through these
@@ -87,6 +92,14 @@ SPARK = "▁▂▃▄▅▆▇█"
 
 TIME_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
 IP_RE = re.compile(r"^PING\s+\S+\s+\(([\d.a-fA-F:]+)\)")
+
+
+def short(host):
+    """Trim configured suffixes so long FQDNs stay readable in a narrow pane."""
+    for suffix in STRIP_SUFFIXES:
+        if host.endswith(suffix):
+            return host[:-len(suffix)]
+    return host
 
 
 def fmt_ms(v):
@@ -428,7 +441,7 @@ def main():
         for t in targets:
             st = t.stats()
             dot = GOOD + "●" if t.alive else BAD + "○"
-            name = t.host.replace(".example.internal", "")
+            name = short(t.host)
             lossc = GOOD if st["loss"] == 0 else (WARN if st["loss"] < 5 else BAD)
             rows.append(seg([(dot, " "), (t.color, pad(name, 22)),
                              (TXT, " " + fmt_ms(st["now"])),
@@ -466,7 +479,7 @@ def main():
             for ts, col, host, kind, detail in evs:
                 kc = BAD if kind in ("LOSS", "DOWN") else (WARN if kind == "SPIKE" else GOOD)
                 rows.append(seg([(DIM, " " + ts + " "), (kc, "%-6s" % kind),
-                                 (col, pad(host.replace(".example.internal", ""), 22)),
+                                 (col, pad(short(host), 22)),
                                  (DIM, detail)], w - 1))
         draw(rows, w, h)
         time.sleep(0.5)

@@ -27,32 +27,28 @@ import time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import RST, bar, draw, maybe_help, pad, rgb, seg, setup, size, title
+from common import (RST, bar, draw, load_config, maybe_help, pad, rgb, seg,
+                    setup, size, title)
 
 # None = follow the system timezone for the big digits.
 TZ = None
 
-CITIES = [
-    ("San Francisco", "America/Los_Angeles"),
-    ("Seattle", "America/Los_Angeles"),
-    ("Austin", "America/Chicago"),
-    ("New York", "America/New_York"),
-    ("São Paulo", "America/Sao_Paulo"),
-    ("London", "Europe/London"),
-    ("Berlin", "Europe/Berlin"),
-    ("Tel Aviv", "Asia/Jerusalem"),
-    ("Dubai", "Asia/Dubai"),
-    ("Bengaluru", "Asia/Kolkata"),
-    ("Singapore", "Asia/Singapore"),
-    ("Hong Kong", "Asia/Hong_Kong"),
-    ("Shenzhen", "Asia/Shanghai"),
-    ("Taipei", "Asia/Taipei"),
-    ("Seoul", "Asia/Seoul"),
-    ("Tokyo", "Asia/Tokyo"),
-    ("Brisbane", "Australia/Brisbane"),
-    ("Melbourne", "Australia/Melbourne"),
-    ("Sydney", "Australia/Sydney"),
-]
+_CFG = load_config("worldclock", {
+    "cities": [
+        ["San Francisco", "America/Los_Angeles"],
+        ["New York", "America/New_York"],
+        ["London", "Europe/London"],
+        ["Berlin", "Europe/Berlin"],
+        ["Bengaluru", "Asia/Kolkata"],
+        ["Singapore", "Asia/Singapore"],
+        ["Tokyo", "Asia/Tokyo"],
+        ["Sydney", "Australia/Sydney"],
+    ],
+    "work_start_hour": 9,
+    "work_end_hour": 18,
+})
+
+CITIES = [tuple(c) for c in _CFG["cities"]]
 
 BIG = {
     "0": ["███", "█ █", "█ █", "█ █", "███"],
@@ -68,8 +64,8 @@ BIG = {
     ":": ["   ", " █ ", "   ", " █ ", "   "],
 }
 
-WORK_START_H = 9
-WORK_END_H = 18
+WORK_START_H = int(_CFG["work_start_hour"])
+WORK_END_H = int(_CFG["work_end_hour"])
 
 C1 = rgb(120, 255, 200)
 PURPLE = rgb(175, 130, 255)

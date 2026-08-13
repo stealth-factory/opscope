@@ -16,6 +16,7 @@
 """Shared terminal helpers for the sci-fi panel scripts."""
 import atexit
 import base64
+import json
 import os
 import re
 import select
@@ -31,6 +32,43 @@ HOME = "\x1b[H"
 CLEAR = "\x1b[2J"
 EL = "\x1b[K"
 RST = "\x1b[0m"
+
+
+CONFIG_NAME = "config.json"
+
+
+def config_paths():
+    """Where settings are looked for, in order of preference."""
+    env = os.environ.get("TERMINAL_TOYS_CONFIG")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [p for p in (env,
+                        os.path.join(xdg, "terminal-toys", CONFIG_NAME),
+                        os.path.join(here, CONFIG_NAME)) if p]
+
+
+def load_config(section, defaults):
+    """Settings for `section`, overlaid on `defaults`.
+
+    Keeps personal data — hostnames, targets, city lists — out of the source
+    tree and therefore out of a public repository. The first readable file in
+    `config_paths()` wins; unknown keys are ignored, and a malformed file falls
+    back to the defaults rather than crashing a running panel.
+    """
+    merged = dict(defaults)
+    for path in config_paths():
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        chunk = data.get(section)
+        if isinstance(chunk, dict):
+            for key, value in chunk.items():
+                if key in merged:
+                    merged[key] = value
+        return merged
+    return merged
 
 
 def maybe_help(doc):

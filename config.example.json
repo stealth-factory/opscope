@@ -1,0 +1,33 @@
+{
+  "_comment": "Copy to config.json (git-ignored) or ~/.config/terminal-toys/config.json. Every key is optional; anything omitted keeps the tool's default.",
+
+  "latency": {
+    "hosts": ["1.1.1.1", "8.8.8.8", "example.internal"],
+    "interval": 0.5,
+    "seconds_per_column": 0,
+    "window": 600,
+    "aggregate": "median",
+    "strip_suffixes": [".example.internal"]
+  },
+
+  "worldclock": {
+    "cities": [
+      ["San Francisco", "America/Los_Angeles"],
+      ["London", "Europe/London"],
+      ["Singapore", "Asia/Singapore"],
+      ["Tokyo", "Asia/Tokyo"]
+    ],
+    "work_start_hour": 9,
+    "work_end_hour": 18
+  },
+
+  "deployments": {
+    "refresh": 15,
+    "limit": 100,
+    "teams": [],
+    "projects": []
+  },
+
+  "tailnet":      { "refresh": 5 },
+  "herdr_agents": { "refresh": 4 }
+}

@@ -51,10 +51,11 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, heat, maybe_help, pad, rgb, seg,
-                    setup, size, title)
+from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, pad,
+                    rgb, seg, setup, size, title)
 
-REFRESH = 4.0           # seconds between herdr polls (-n)
+_CFG = load_config("herdr_agents", {"refresh": 4.0})
+REFRESH = float(_CFG["refresh"])           # seconds between herdr polls (-n)
 
 BLOCKED = rgb(255, 105, 115)
 DONE = rgb(90, 240, 160)

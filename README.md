@@ -99,7 +99,24 @@ this node runs with `--accept-routes`.
 ./tailnet.py
 ```
 
-Keys: `r` refresh, `o` hide offline peers, `q` quit. No root required.
+Keys: `↑`/`↓` select a peer, `c` or `Enter` opens a copy sheet, `r` refresh,
+`o` hide offline peers, `q` quit.
+
+The copy sheet offers the peer's **Tailscale IP**, **MagicDNS name**, **public
+IP** and **LAN IP** on keys `1`-`4`, copied via OSC 52 so they reach the
+clipboard of the machine you are typing at. Peer LAN addresses come from
+`tailscale debug netmap`, which needs root — it is attempted with `sudo -n` and
+silently omitted when that would prompt, so the tool never requires privilege.
+Where a peer exposes several private addresses, one inside a subnet it
+advertises wins over a docker or virtual bridge.
+
+### Configuration
+
+Every tool reads optional settings from the first of
+`$TERMINAL_TOYS_CONFIG`, `~/.config/terminal-toys/config.json`, or
+`config.json` beside the scripts. Copy `config.example.json` to start. This
+keeps hostnames, ping targets and city lists out of the source tree — the
+repo ships generic defaults and `config.json` is git-ignored.
 
 ### `worldclock.py` — server time, office hours, world clock
 
