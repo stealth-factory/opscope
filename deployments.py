@@ -21,8 +21,16 @@ deployments with their state, project, branch, commit and build time.
 
     python3 deployments.py [-n SECONDS] [-t TEAM_ID] [project ...]
 
-Keys while running: r refreshes now, f cycles the filter (all / failed /
-production), p cycles which project is shown, q quits.
+Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
+c or Enter opens a copy sheet for the selected deployment offering its
+dashboard, branch-preview, commit-preview and pull-request URLs, r refreshes
+now, f cycles the filter (all / failed / production), p cycles which project
+is shown, q quits.
+
+Copying uses OSC 52, so the terminal you are sitting at performs it and the
+text reaches your local clipboard even over SSH. If your terminal or
+multiplexer blocks OSC 52, the sheet still shows each URL in full for mouse
+selection.
 
 Credentials: reuses the Vercel CLI's own login, so if `vercel whoami` works
 this does too. Reads $VERCEL_TOKEN first, then the CLI's auth.json. The token
@@ -40,8 +48,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, cycle, draw, maybe_help, pad, rgb, seg,
-                    setup, size, title)
+from common import (RST, Keyboard, bar, bg, clipboard, cycle, draw, maybe_help,
+                    pad, rgb, seg, setup, size, title)
 
 REFRESH = 30            # seconds between API polls (-n)
 LIMIT = 100             # deployments per request (API maximum)
@@ -171,6 +179,57 @@ def build_seconds(d):
     return None
 
 
+def links(d):
+    """The four URLs worth copying, as (label, url) pairs."""
+    meta = d.get("meta") or {}
+    out = []
+    if d.get("inspectorUrl"):
+        out.append(("Deployment dashboard", d["inspectorUrl"]))
+    if meta.get("branchAlias"):
+        out.append(("Branch preview", "https://" + meta["branchAlias"]))
+    if d.get("url"):
+        out.append(("Commit preview", "https://" + d["url"]))
+    if meta.get("githubPrId") and meta.get("githubOrg") and meta.get("githubRepo"):
+        out.append(("Pull request", "https://github.com/%s/%s/pull/%s" % (
+            meta["githubOrg"], meta["githubRepo"], meta["githubPrId"])))
+    return out
+
+
+def wrap(text, width):
+    return [text[i:i + width] for i in range(0, len(text), width)] or [""]
+
+
+def copy_overlay(d, rows, w, h, note):
+    """Full-panel copy sheet for the selected deployment."""
+    meta = d.get("meta") or {}
+    rows.append(title("copy links", w, SHA))
+    rows.append("")
+    rows.append(seg([(TXT, " " + (d.get("name") or "?")),
+                     (DIM, "  " + (meta.get("githubCommitSha") or "")[:7]),
+                     (BRANCH, "  " + (meta.get("githubCommitRef") or ""))], w - 1))
+    rows.append(seg([(GRID, " " + (meta.get("githubCommitMessage") or "")
+                      .split("\n")[0])], w - 1))
+    rows.append("")
+    pairs = links(d)
+    for i, (label, url) in enumerate(pairs, 1):
+        rows.append(seg([(READY, " [%d] " % i), (TXT, label)], w - 1))
+        for line in wrap(url, max(10, w - 6)):
+            rows.append(GRID + "     " + line)
+        rows.append("")
+    if not pairs:
+        rows.append(DIM + "  (this deployment exposes no links)")
+    missing = 4 - len(pairs)
+    if missing:
+        rows.append(DIM + "  (%d link%s unavailable for this deployment)" %
+                    (missing, "" if missing == 1 else "s"))
+    while len(rows) < h - 2:
+        rows.append("")
+    rows.append(seg([(DIM, " press 1-%d to copy · esc or c to close" % max(1, len(pairs)))],
+                    w - 1))
+    rows.append(seg([(READY, " " + note) if note else (DIM, "")], w - 1))
+    return rows
+
+
 def activity(deps, w, hours=48):
     """Deployments per time bucket, coloured by the worst outcome in it."""
     cols = max(10, w - 2)
@@ -228,9 +287,28 @@ def main():
     flt = "all"
     only = None          # project cycled with `p`
     tick = 0
+    selected = 0         # index into the filtered list
+    scroll = 0           # first visible row
+    overlay = False      # copy sheet open
+    note = ""            # transient confirmation
+    note_until = 0
+    visible = 1
+    shown = []
     while True:
         tick += 1
         for key in keyboard.poll():
+            if overlay:
+                if key in ("esc", "c", "q", "Q", "enter"):
+                    overlay = False
+                elif key.isdigit() and shown:
+                    pairs = links(shown[min(selected, len(shown) - 1)])
+                    idx = int(key) - 1
+                    if 0 <= idx < len(pairs):
+                        label, url = pairs[idx]
+                        note = ("✓ copied %s" % label.lower()) if clipboard(url) \
+                            else "! no clipboard; select the text with the mouse"
+                        note_until = time.time() + 3
+                continue
             if key in ("q", "Q"):
                 keyboard.restore()
                 raise SystemExit(0)
@@ -238,15 +316,35 @@ def main():
                 store.wake.set()
             elif key == "f":
                 flt = cycle(FILTERS, flt)
+                selected = 0
+            elif key == "up":
+                selected = max(0, selected - 1)
+            elif key == "down":
+                selected += 1
+            elif key == "pgup":
+                selected = max(0, selected - visible)
+            elif key == "pgdn":
+                selected += visible
+            elif key == "home":
+                selected = 0
+            elif key == "end":
+                selected = max(0, len(shown) - 1)
+            elif key in ("c", "enter"):
+                if shown:
+                    overlay = True
+                    note = ""
             elif key == "p":
                 deps, _, _ = store.snapshot()
                 names = sorted({d.get("name") for d in deps if d.get("name")})
                 options = [None] + names
                 only = options[(options.index(only) + 1) % len(options)] \
                     if only in options else (names[0] if names else None)
+                selected = 0
 
         w, h = size()
         deps, err, fetched = store.snapshot()
+        if note and time.time() > note_until:
+            note = ""
         shown = deps
         if only:
             shown = [d for d in shown if d.get("name") == only]
@@ -254,6 +352,12 @@ def main():
             shown = [d for d in shown if d.get("state") in ("ERROR", "CANCELED")]
         elif flt == "production":
             shown = [d for d in shown if d.get("target") == "production"]
+
+        selected = max(0, min(selected, len(shown) - 1)) if shown else 0
+        if overlay and shown:
+            draw(copy_overlay(shown[selected], [], w, h, note), w, h)
+            time.sleep(0.1)
+            continue
 
         states = collections.Counter(d.get("state") for d in deps)
         projects_seen = len({d.get("name") for d in deps})
@@ -276,7 +380,7 @@ def main():
             filt_bits.append(flt)
         if only:
             filt_bits.append(only)
-        rows.append(seg([(GRID, " [r]efresh [f]ilter [p]roject [q]uit"),
+        rows.append(seg([(GRID, " ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit"),
                          (BUILD, ("   filter: " + " + ".join(filt_bits))
                           if filt_bits else "")], w - 1))
         rows.append("")
@@ -308,18 +412,29 @@ def main():
         rows.append("")
 
         # --- recent deployments ---
-        rows.append(LBL + " ── RECENT ──")
+        rows.append(seg([(LBL, " ── RECENT ── "),
+                         (DIM, "%d of %d" % (selected + 1, len(shown)) if shown else "")],
+                        w - 1))
         wide = w >= 66
-        for d in shown:
+        visible = max(1, (h - len(rows) - 1) // 2)
+        scroll = min(scroll, max(0, len(shown) - visible))
+        if selected < scroll:
+            scroll = selected
+        elif selected >= scroll + visible:
+            scroll = selected - visible + 1
+        for i in range(scroll, min(len(shown), scroll + visible)):
+            d = shown[i]
             if len(rows) >= h - 1:
                 break
+            here = (i == selected)
+            tint = bg(28, 44, 62) if here else ""
             meta = d.get("meta") or {}
             state = d.get("state", "?")
             col = STATE_COLOR.get(state, DIM)
             mark = SPINNER[tick % len(SPINNER)] if state in (
                 "BUILDING", "QUEUED", "INITIALIZING") else (
                 "●" if state == "READY" else "✖" if state == "ERROR" else "○")
-            line = [(col, " %s %-9s" % (mark, state.title())),
+            line = [(tint + col, ("▸" if here else " ") + "%s %-9s" % (mark, state.title())),
                     (TXT, pad(d.get("name", "?"), 16)),
                     (DIM, dur(build_seconds(d))),
                     (DIM, " %4s" % age(d.get("created", 0)))]
@@ -330,10 +445,14 @@ def main():
             if wide:
                 line.append((SHA, "  " + (meta.get("githubCommitSha") or "")[:7]))
                 line.append((BRANCH, " " + (meta.get("githubCommitRef") or "")[:22]))
+            if here:
+                line = [(tint + c, t) for c, t in line]
+                line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
             if len(rows) < h - 1:
                 msg = (meta.get("githubCommitMessage") or "").split("\n")[0]
-                rows.append(seg([(GRID, "   " + msg)], w - 1))
+                rows.append(seg([(tint + (TXT if here else GRID), "   " + msg),
+                                 (tint, " " * w if here else "")], w - 1))
         if not shown:
             rows.append(DIM + "   (nothing matches the current filter)")
         draw(rows, w, h)

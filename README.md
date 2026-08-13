@@ -44,8 +44,16 @@ deployments with state, project, branch, commit and build time.
 ./deployments.py -n 60 ferry-hk     # one project, slower poll
 ```
 
-Keys: `r` refresh now, `f` cycle filter (all / failed / production), `p` cycle
-project, `q` quit.
+Keys: `↑`/`↓` (also `PgUp`/`PgDn`, `Home`/`End`) move the selection, `c` or
+`Enter` opens a copy sheet for the selected deployment, `r` refresh now, `f`
+cycle filter (all / failed / production), `p` cycle project, `q` quit.
+
+The copy sheet offers the four URLs worth having — deployment dashboard,
+branch preview, commit preview and pull request — on keys `1`-`4`. Copying
+uses OSC 52, so the terminal you are sitting at performs it and the text
+reaches your local clipboard even though the tool runs on a remote host. If
+your terminal or multiplexer blocks OSC 52, each URL is still shown in full
+for mouse selection.
 
 Credentials come from the Vercel CLI's existing login — if `vercel whoami`
 works, so does this. `$VERCEL_TOKEN` is used first if set. The token is read

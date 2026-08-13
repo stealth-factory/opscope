@@ -15,7 +15,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Shared terminal helpers for the sci-fi panel scripts."""
 import atexit
+import base64
 import os
+import re
 import select
 import signal
 import sys
@@ -140,12 +142,29 @@ def now():
     return time.strftime("%H:%M:%S")
 
 
+KEY_SEQUENCES = {
+    "\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
+    "\x1bOA": "up", "\x1bOB": "down", "\x1bOC": "right", "\x1bOD": "left",
+    "\x1b[5~": "pgup", "\x1b[6~": "pgdn",
+    "\x1b[H": "home", "\x1b[F": "end", "\x1b[1~": "home", "\x1b[4~": "end",
+    "\r": "enter", "\n": "enter", "\x7f": "backspace", "\t": "tab",
+}
+CSI_RE = re.compile(r"\x1b(\[[0-9;]*[A-Za-z~]|O[A-Za-z])")
+
+
 class Keyboard(object):
-    """Non-blocking single-key input, restoring the terminal on exit."""
+    """Non-blocking key input, decoding arrows and navigation sequences.
+
+    Returns names ("up", "pgdn", "enter", "esc") for special keys and the bare
+    character otherwise. No-ops when stdin is not a tty, so piped and cron runs
+    are unaffected. Restores termios on exit.
+    """
 
     def __init__(self):
         self.fd = None
         self.saved = None
+        self.buf = ""
+        self._lone_esc = False
         if sys.stdin.isatty():
             try:
                 self.fd = sys.stdin.fileno()
@@ -168,12 +187,44 @@ class Keyboard(object):
             return keys
         while select.select([self.fd], [], [], 0)[0]:
             try:
-                ch = os.read(self.fd, 1)
+                chunk = os.read(self.fd, 64)
             except OSError:
                 break
-            if not ch:
+            if not chunk:
                 break
-            keys.append(ch.decode("utf-8", "replace"))
+            self.buf += chunk.decode("utf-8", "replace")
+
+        while self.buf:
+            if self.buf[0] == "\x1b":
+                match = None
+                for seq, name in KEY_SEQUENCES.items():
+                    if len(seq) > 1 and self.buf.startswith(seq):
+                        if match is None or len(seq) > len(match[0]):
+                            match = (seq, name)
+                if match:
+                    self.buf = self.buf[len(match[0]):]
+                    keys.append(match[1])
+                    continue
+                m = CSI_RE.match(self.buf)
+                if m:                       # a sequence we don't map; drop it
+                    self.buf = self.buf[m.end():]
+                    continue
+                if self.buf == "\x1b":
+                    # bare ESC, or the start of a sequence still arriving. Only
+                    # treat it as Escape once a second poll finds nothing more.
+                    if self._lone_esc:
+                        self.buf = ""
+                        self._lone_esc = False
+                        keys.append("esc")
+                    else:
+                        self._lone_esc = True
+                    break
+                self.buf = self.buf[1:]     # malformed; discard the ESC
+                continue
+            ch, self.buf = self.buf[0], self.buf[1:]
+            keys.append(KEY_SEQUENCES.get(ch, ch))
+        if self.buf != "\x1b":
+            self._lone_esc = False
         return keys
 
 
@@ -182,3 +233,19 @@ def cycle(seq, current):
         return seq[(seq.index(current) + 1) % len(seq)]
     except ValueError:
         return seq[0]
+
+
+def clipboard(text):
+    """Ask the terminal to put `text` on the system clipboard, via OSC 52.
+
+    The terminal emulator performs the copy, so this reaches the machine you
+    are sitting at even when the program runs on a remote host over SSH.
+    Multiplexers must be willing to forward it. Returns False when stdout is
+    not a terminal, so callers can fall back to showing the text instead.
+    """
+    if not sys.stdout.isatty():
+        return False
+    payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    out("\x1b]52;c;%s\x07" % payload)
+    flush()
+    return True
