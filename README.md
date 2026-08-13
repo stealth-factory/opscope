@@ -150,7 +150,7 @@ advertises wins over a docker or virtual bridge.
 
 Footers wrap rather than truncate: key hints are packed across as many lines as
 they need and never split, since a hint clipped to `[±]25` teaches the wrong
-key. In `timekeeper.py`, `?` hides the pomodoro's controls and hands the space back
+key. In `clocks.py`, `?` hides the pomodoro's controls and hands the space back
 to the city list — the toggle itself and the panel keys always remain, since
 hiding the way back would leave no way back.
 
@@ -162,7 +162,7 @@ Every widget reads optional settings from the first of
 keeps hostnames, ping targets and city lists out of the source tree — the
 repo ships generic defaults and `config.json` is git-ignored.
 
-### `timekeeper.py` — server time, countdowns, pomodoro, world clock
+### `clocks.py` — server time, countdowns, pomodoro, world clock
 
 Big-digit clock for the machine's own timezone, three live countdown bars, and a
 world clock covering 19 tech hubs sorted west to east.
@@ -176,7 +176,7 @@ world clock covering 19 tech hubs sorted west to east.
   Handles half-hour offsets and `+1d` / `-1d` date rollovers.
 
 ```sh
-./timekeeper.py
+./clocks.py
 ```
 
 **Pomodoro** — off until you press `p`, which shows or hides it *and suspends
@@ -232,7 +232,7 @@ binary emits and therefore always matches your version.
 
 ## Requirements
 
-- Python **3.9+** (`timekeeper.py` uses `zoneinfo`); developed on 3.12
+- Python **3.9+** (`clocks.py` uses `zoneinfo`); developed on 3.12
 - A terminal with 24-bit colour support
 - `ping` on `PATH` (`latency.py` only) — no root needed
 - A Vercel login (`deployments.py` only) — the CLI's token is reused
