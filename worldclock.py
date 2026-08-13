@@ -260,10 +260,26 @@ class Pomodoro(object):
         self.save()
 
     def adjust(self, delta):
-        """Change the focus length; applies now when focus is not running."""
+        """Change the focus length, shifting the block in progress by the same.
+
+        The bar divides by duration() while the counter reads the deadline, so
+        changing one without the other made them disagree - the bar moved and
+        the countdown sat still. Both now shift together: +5 means five more
+        minutes on the clock, whether the block is running, paused, or has not
+        started.
+        """
+        before = self.focus
         self.focus = max(1, min(120, self.focus + delta))
-        if self.phase == "focus" and not self.running:
-            self.left = self.duration()
+        change = (self.focus - before) * 60.0
+        if change and self.phase == "focus":
+            if self.running and self.deadline:
+                self.deadline += change
+            else:
+                self.left += change
+            if self.signed() > 0:
+                # extended back out of overtime, so let it alert again
+                self.rang = False
+                self.nagged = 0
         self.save()
 
     def tick(self):
