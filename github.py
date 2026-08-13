@@ -50,7 +50,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, big, braille_plot, cycle, draw,
                     heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
-                    seg, setup, size, stacked_bar, title)
+                    seg, setup, size, stacked_bar, title, vbars)
 
 _CFG = load_config("github", {
     "token": "",
@@ -63,6 +63,7 @@ _CFG = load_config("github", {
 
 REFRESH = float(_CFG["refresh"])
 WINDOWS = (7, 14, 30, 90)
+CONTRIB_WEEKS = 52       # a full year, like the calendar on github.com
 API = "https://api.github.com/graphql"
 
 OK = rgb(90, 240, 160)
@@ -135,8 +136,11 @@ def build_query(accounts, days, history_days, viewer):
   o%(i)d_merged:  search(query:"%(q)s is:pr is:merged merged:>=%(s)s", type:ISSUE) { issueCount }
   o%(i)d_dropped: search(query:"%(q)s is:pr is:unmerged is:closed closed:>=%(s)s", type:ISSUE) { issueCount }
   o%(i)d_issues:  search(query:"%(q)s is:issue is:open", type:ISSUE) { issueCount }
-  o%(i)d_hist:    search(query:"%(q)s is:pr is:merged merged:>=%(h)s", type:ISSUE, first:100) {
-    nodes { ... on PullRequest { mergedAt } }
+  o%(i)d_hist:    search(query:"%(q)s is:pr is:merged merged:>=%(h)s sort:updated-desc", type:ISSUE, first:100) {
+    issueCount nodes { ... on PullRequest { mergedAt } }
+  }
+  o%(i)d_ohist:   search(query:"%(q)s is:pr created:>=%(h)s sort:created-desc", type:ISSUE, first:100) {
+    issueCount nodes { ... on PullRequest { createdAt } }
   }''' % {"i": i, "q": q, "s": since, "h": hist_since})
     parts.append("\n  rateLimit { remaining limit }\n}")
     return "".join(parts)
@@ -179,7 +183,7 @@ class Store(object):
                 if not self.accounts:
                     self.accounts = discover_accounts(tok) or ["@me"]
                 try:
-                    cal = graphql(contribution_query(26), tok)["data"]["viewer"]
+                    cal = graphql(contribution_query(CONTRIB_WEEKS), tok)["data"]["viewer"]
                     with self.lock:
                         self.calendar = cal["contributionsCollection"]["contributionCalendar"]
                 except Exception:
@@ -201,11 +205,21 @@ class Store(object):
                     i = 0
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
                     merged, dropped = g("merged"), g("dropped")
-                    hist = collections.Counter()
-                    for n in ((d.get("o%d_hist" % i) or {}).get("nodes") or []):
-                        when = (n or {}).get("mergedAt")
-                        if when:
-                            hist[when[:10]] += 1
+                    hist, opened_hist = collections.Counter(), collections.Counter()
+                    capped = False
+                    for key, field, bucket in (("hist", "mergedAt", hist),
+                                               ("ohist", "createdAt", opened_hist)):
+                        block = d.get("o%d_%s" % (i, key)) or {}
+                        nodes = block.get("nodes") or []
+                        # search returns at most 100 nodes; with newest first,
+                        # a truncated page means older days are missing rather
+                        # than genuinely empty
+                        if block.get("issueCount", 0) > len(nodes):
+                            capped = True
+                        for n in nodes:
+                            when = (n or {}).get(field)
+                            if when:
+                                bucket[when[:10]] += 1
                     stats.append({
                         "account": viewer if acc == "@me" else acc,
                         "is_me": acc == "@me",
@@ -214,7 +228,8 @@ class Store(object):
                         "merged": merged, "dropped": dropped,
                         "rate": (100.0 * merged / (merged + dropped)
                                  if merged + dropped else None),
-                        "hist": hist,
+                        "hist": hist, "opened_hist": opened_hist,
+                        "capped": capped,
                     })
                     with self.lock:            # publish as each one lands
                         self.stats = list(stats)
@@ -261,54 +276,6 @@ def heatmap(weeks_data, w):
             lvl = 0 if not n else min(4, 1 + int(n / (peak or 1) * 3.99))
             grid[d["weekday"]][x] = levels[lvl]
     return grid, peak, sum(counts)
-
-
-def pipeline(tot, days, w):
-    """The funnel every PR falls through, drawn as one.
-
-    Counts alone do not show that review backlog is a *stage* rather than a
-    number, so the stages are nested and gauged against the open total.
-
-    Every row is built to exactly `inner` printable cells before its borders,
-    including the borders themselves - computing them by separate formulae is
-    how the right edge ends up ragged.
-    """
-    inner = max(30, min(46, w - 5))
-    ready = max(0, tot["open"] - tot["draft"] - tot["review"])
-    gauge_w = max(6, inner - 26)
-    out = [[(LBL, " ┌"), (LBL, ("─ PIPELINE ").ljust(inner, "─")), (LBL, "┐")]]
-
-    def row(segments):
-        plain = sum(len(t) for _, t in segments)
-        if plain > inner:                      # trim rather than push the border
-            segments = segments[:-1] + [(segments[-1][0],
-                                         segments[-1][1][:inner - plain])]
-            plain = inner
-        out.append([(LBL, " │")] + segments +
-                   [(RST, " " * (inner - plain)), (LBL, "│")])
-
-    row([(PR, "  ▣ open"), (TXT, "%6d" % tot["open"])])
-    for mark, label, count, colour in (("├", "draft", tot["draft"], DIM),
-                                       ("├", "review", tot["review"], WARN),
-                                       ("└", "ready", ready, OK)):
-        frac = count / float(tot["open"]) if tot["open"] else 0
-        row([(DIM, "    %s " % mark), (colour, "%-7s" % label),
-             (TXT, "%6d " % count), (colour, meter(frac, gauge_w))])
-    row([])
-    row([(OK, "  ✔ merged"), (TXT, "%5d" % tot["merged"]),
-         (DIM, " in %dd" % days), (BAD, "    ✖ %d dropped" % tot["dropped"])])
-    out.append([(LBL, " └"), (LBL, "─" * inner), (LBL, "┘")])
-    return out
-
-
-def daily_spark(hist, days, width):
-    today = datetime.date.today()
-    series = [hist.get((today - datetime.timedelta(days=n)).isoformat(), 0)
-              for n in range(days - 1, -1, -1)][-width:]
-    peak = max(series) if series else 0
-    if not peak:
-        return "·" * len(series), 0
-    return "".join(SPARK[min(7, int(v / peak * 7.99))] for v in series), peak
 
 
 def ago(t):
@@ -391,22 +358,45 @@ def main():
                          (WARN, "%d" % tot["issues"]), (DIM, " issues"),
                          (DIM, "   (any age)")], w - 1))
 
-        merged_all = collections.Counter()
-        for s in stats:
-            merged_all.update(s["hist"])
+        merged_all, opened_all = collections.Counter(), collections.Counter()
+        capped = False
+        for st in stats:
+            merged_all.update(st["hist"])
+            opened_all.update(st.get("opened_hist") or {})
+            capped = capped or st.get("capped")
         hist_days = int(_CFG["history_days"])
         today = datetime.date.today()
-        series = [merged_all.get((today - datetime.timedelta(days=n)).isoformat(), 0)
-                  for n in range(hist_days - 1, -1, -1)]
-        peak = max(series) if series else 0
-        rows.append("")
-        rows.append(seg([(LBL, " ── MERGED / DAY ── "),
-                         (DIM, "%dd, peak %d" % (hist_days, peak))], w - 1))
-        for line in braille_plot(series, max(10, w - 4), 3, lo=0):
-            rows.append(seg([(OK, "  " + line)], w - 1))
 
-        rows.append("")
-        # donut of open PRs by account, beside a dial of the merge rate
+        # Only chart days both series actually cover: a truncated page means
+        # older days are missing, and drawing them as zero would invent a lull.
+        covered = hist_days
+        if capped:
+            seen = sorted(set(merged_all) | set(opened_all))
+            if seen:
+                oldest = datetime.date(*[int(x) for x in seen[0].split("-")])
+                covered = max(3, min(hist_days, (today - oldest).days + 1))
+
+        days = [(today - datetime.timedelta(days=n)).isoformat()
+                for n in range(covered - 1, -1, -1)]
+        chart_w = max(10, min(covered, w - 6))
+        days = days[-chart_w:]
+
+        def day_chart(heading, counter, colour):
+            cols = [(counter.get(d, 0), colour) for d in days]
+            peak = max([v for v, _ in cols], default=0)
+            total = sum(v for v, _ in cols)
+            rows.append("")
+            rows.append(seg([(LBL, " ── %s ── " % heading),
+                             (DIM, "%dd, %d total, peak %d" % (len(days), total, peak)),
+                             (WARN, "  (100-record cap)" if capped else "")], w - 1))
+            for line in vbars(cols, 4):
+                rows.append(seg([(RST, " ")] + line, w - 1))
+
+        day_chart("OPENED PRs / DAY", opened_all, PR)
+        day_chart("MERGED PRs / DAY", merged_all, OK)
+        rows.append(seg([(DIM, " %dd ago" % len(days)),
+                         (DIM, " " * max(1, len(days) - 13)), (DIM, "today")], w - 1))
+
         if tot["open"]:
             ready = max(0, tot["open"] - tot["draft"] - tot["review"])
             legend = [x for x in (("awaiting review", tot["review"], WARN),
@@ -423,32 +413,17 @@ def main():
             rows.append(seg(key, w - 1))
             rows.append("")
 
-        for line in pipeline(tot, store.days, w):
-            rows.append(seg(line, w - 1))
-
         if calendar and h > 30:
             grid, peak, total = heatmap(calendar["weeks"], w)
             rows.append("")
             rows.append(seg([(LBL, " ── CONTRIBUTIONS ── "),
-                             (DIM, "%d in 26 weeks, peak %d/day"
-                              % (calendar.get("totalContributions", total), peak))],
+                             (DIM, "%d in %d weeks, peak %d/day"
+                              % (calendar.get("totalContributions", total),
+                                 CONTRIB_WEEKS, peak))],
                             w - 1))
             for r, line in enumerate(grid):
                 label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
                 rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))], w - 1))
-
-        rows.append("")
-        rows.append(LBL + " ── NEEDS ATTENTION ──")
-        flags = []
-        if tot["review"]:
-            flags.append((BAD if tot["review"] > 20 else WARN,
-                          " ⚠ %d PRs awaiting review" % tot["review"]))
-        if tot["draft"]:
-            flags.append((DIM, " ○ %d drafts" % tot["draft"]))
-        if tot["dropped"]:
-            flags.append((DIM, " ✖ %d closed unmerged in %dd" % (tot["dropped"], store.days)))
-        for colour, text in flags or [(OK, " ✓ nothing waiting")]:
-            rows.append(seg([(colour, text)], w - 1))
 
         rows.append("")
         rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))

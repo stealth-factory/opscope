@@ -245,6 +245,31 @@ def meter(frac, n, on="█", off="░"):
     return on * k + off * (n - k)
 
 
+def vbars(columns, height):
+    """Vertical bar chart. `columns` is [(value, colour), ...].
+
+    Each cell resolves an eighth of a row via the partial-block glyphs, so a
+    five-row chart has forty levels rather than five.
+    """
+    steps = " ▁▂▃▄▅▆▇█"
+    hi = max((v for v, _ in columns), default=0) or 1
+    rows = []
+    for r in range(height):
+        top = hi * (height - r) / float(height)
+        bottom = hi * (height - r - 1) / float(height)
+        line = []
+        for value, colour in columns:
+            if value >= top:
+                ch = "█"
+            elif value <= bottom:
+                ch = " "
+            else:
+                ch = steps[max(1, int((value - bottom) / (top - bottom) * 8))]
+            line.append((colour, ch))
+        rows.append(line)
+    return rows
+
+
 def pack_hints(hints, width, sep="  "):
     """Lay key hints across as many lines as they need.
 
