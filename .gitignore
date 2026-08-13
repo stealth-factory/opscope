@@ -4,5 +4,13 @@ __pycache__/
 venv/
 .DS_Store
 
-# personal settings: hostnames, targets, city lists
+# Personal settings, and now secrets: config.json holds the Vercel token.
+# Variants are covered too, so a config.local.json or a stray .env cannot be
+# committed by accident.
 config.json
+config.*.json
+!config.example.json
+.env
+.env.*
+*.token
+*.secret

@@ -37,10 +37,9 @@
     "work_end_hour": 18
   },
   "deployments": {
-    "_comment": "token: a Vercel token from Account Settings -> Tokens. Preferred over the CLI session, which expires within hours and only the CLI can refresh. Keep this file chmod 600.",
+    "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
     "token": "",
     "token_env": "VERCEL_TOKEN",
-    "use_cli_session": true,
     "refresh": 15,
     "limit": 100,
     "teams": [],
