@@ -44,9 +44,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, braille_plot, cycle, draw, heat,
-                    load_config, maybe_help, meter, pack_hints, pad, panel, rgb,
-                    seg, setup, side_by_side, size, stacked_bar, title)
+from common import (RST, Keyboard, bar, bg, big, braille_plot, cycle, draw,
+                    heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
+                    seg, setup, size, stacked_bar, title)
 
 _CFG = load_config("github", {
     "token": "",
@@ -259,22 +259,52 @@ def heatmap(weeks_data, w):
     return grid, peak, sum(counts)
 
 
-def stage_rows(tot, days, gauge_w):
-    """Open PRs by stage, as flat rows rather than a nested tree.
+def pipeline(tot, days, w):
+    """The funnel every PR falls through, drawn as one.
 
-    Indentation made the block look ragged for no information gain; the gauge
-    already shows each stage as a share of the open total.
+    Counts alone do not show that review backlog is a *stage* rather than a
+    number, so the stages are nested and gauged against the open total.
+
+    Every row is built to exactly `inner` printable cells before its borders,
+    including the borders themselves - computing them by separate formulae is
+    how the right edge ends up ragged.
     """
+    inner = max(30, min(46, w - 5))
     ready = max(0, tot["open"] - tot["draft"] - tot["review"])
-    rows = []
-    for label, count, colour in (("awaiting review", tot["review"], WARN),
-                                 ("ready to merge", ready, OK),
-                                 ("draft", tot["draft"], DIM)):
+    gauge_w = max(6, inner - 26)
+    out = [[(LBL, " ┌"), (LBL, ("─ PIPELINE ").ljust(inner, "─")), (LBL, "┐")]]
+
+    def row(segments):
+        plain = sum(len(t) for _, t in segments)
+        if plain > inner:                      # trim rather than push the border
+            segments = segments[:-1] + [(segments[-1][0],
+                                         segments[-1][1][:inner - plain])]
+            plain = inner
+        out.append([(LBL, " │")] + segments +
+                   [(RST, " " * (inner - plain)), (LBL, "│")])
+
+    row([(PR, "  ▣ open"), (TXT, "%6d" % tot["open"])])
+    for mark, label, count, colour in (("├", "draft", tot["draft"], DIM),
+                                       ("├", "review", tot["review"], WARN),
+                                       ("└", "ready", ready, OK)):
         frac = count / float(tot["open"]) if tot["open"] else 0
-        rows.append([(TXT, " %-16s" % label), (colour, "%5d " % count),
-                     (colour, meter(frac, gauge_w)),
-                     (DIM, "%4.0f%%" % (frac * 100))])
-    return rows
+        row([(DIM, "    %s " % mark), (colour, "%-7s" % label),
+             (TXT, "%6d " % count), (colour, meter(frac, gauge_w))])
+    row([])
+    row([(OK, "  ✔ merged"), (TXT, "%5d" % tot["merged"]),
+         (DIM, " in %dd" % days), (BAD, "    ✖ %d dropped" % tot["dropped"])])
+    out.append([(LBL, " └"), (LBL, "─" * inner), (LBL, "┘")])
+    return out
+
+
+def daily_spark(hist, days, width):
+    today = datetime.date.today()
+    series = [hist.get((today - datetime.timedelta(days=n)).isoformat(), 0)
+              for n in range(days - 1, -1, -1)][-width:]
+    peak = max(series) if series else 0
+    if not peak:
+        return "·" * len(series), 0
+    return "".join(SPARK[min(7, int(v / peak * 7.99))] for v in series), peak
 
 
 def ago(t):
@@ -345,63 +375,61 @@ def main():
         rows.append("")
         pct_txt = ("%.0f%%" % rate_pct) if rate_pct is not None else "--"
         rcol = heat((rate_pct or 0) / 100.0) if rate_pct is not None else DIM
-        half = max(26, (w - 6) // 2)
-        left = panel("MERGE RATE", [
-            [(rcol, " %-5s" % pct_txt), (DIM, "of PRs closed in %dd merged" % store.days)],
-            [(rcol, " " + meter((rate_pct or 0) / 100.0, min(24, half - 4)))],
-            [(OK, " %d merged" % tot["merged"]), (DIM, "   "),
-             (BAD, "%d dropped" % tot["dropped"])],
-        ], half, frame=GRID, accent=LBL)
-        right = panel("OPEN WORK", [
-            [(PR, " %-5d" % tot["open"]), (DIM, "pull requests open")],
-            [(WARN, " %-5d" % tot["issues"]), (DIM, "issues open")],
-            [(DIM, " across %d account%s" % (len(stats), "" if len(stats) == 1 else "s"))],
-        ], half, frame=GRID, accent=LBL)
-        for line in side_by_side([left, right], gap=2):
-            rows.append(seg([(RST, " ")] + line, w - 1))
+        rows.append(seg([(LBL, " ── MERGE RATE ── "),
+                         (DIM, "last %d days" % store.days)], w - 1))
+        rows.append(seg([(rcol, " %-5s" % pct_txt),
+                         (rcol, meter((rate_pct or 0) / 100.0, max(10, w - 34))),
+                         (OK, "  %d merged" % tot["merged"]),
+                         (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])], w - 1))
+        rows.append(seg([(PR, " %d" % tot["open"]), (DIM, " PRs open   "),
+                         (WARN, "%d" % tot["issues"]), (DIM, " issues open   "),
+                         (DIM, "%d accounts" % len(stats))], w - 1))
 
         merged_all = collections.Counter()
-        for st in stats:
-            merged_all.update(st["hist"])
+        for s in stats:
+            merged_all.update(s["hist"])
         hist_days = int(_CFG["history_days"])
         today = datetime.date.today()
         series = [merged_all.get((today - datetime.timedelta(days=n)).isoformat(), 0)
                   for n in range(hist_days - 1, -1, -1)]
         peak = max(series) if series else 0
         rows.append("")
-        chart_w = max(20, w - 6)
-        body = [[(OK, line)] for line in braille_plot(series, chart_w, 3, lo=0)]
-        body.append([(DIM, "%dd" % hist_days),
-                     (DIM, " " * max(1, chart_w - 14)), (DIM, "peak %d/day" % peak)])
-        for line in panel("MERGED PER DAY", body, chart_w, frame=GRID, accent=LBL):
-            rows.append(seg([(RST, " ")] + line, w - 1))
+        rows.append(seg([(LBL, " ── MERGED / DAY ── "),
+                         (DIM, "%dd, peak %d" % (hist_days, peak))], w - 1))
+        for line in braille_plot(series, max(10, w - 4), 3, lo=0):
+            rows.append(seg([(OK, "  " + line)], w - 1))
 
         rows.append("")
         # donut of open PRs by account, beside a dial of the merge rate
         if tot["open"]:
-            pw = max(28, w - 6)
             ready = max(0, tot["open"] - tot["draft"] - tot["review"])
-            parts = [(tot["review"] / float(tot["open"]), WARN),
-                     (ready / float(tot["open"]), OK),
-                     (tot["draft"] / float(tot["open"]), DIM)]
-            body = [stacked_bar(parts, pw)] + stage_rows(tot, store.days,
-                                                         max(6, pw - 32))
+            legend = [x for x in (("awaiting review", tot["review"], WARN),
+                                  ("ready to merge", ready, OK),
+                                  ("draft", tot["draft"], DIM)) if x[1]]
+            rows.append(seg([(LBL, " ── OPEN PR STATE ── "),
+                             (DIM, "%d total" % tot["open"])], w - 1))
+            parts = [(n / float(tot["open"]), c) for _, n, c in legend]
+            rows.append(seg([(RST, " ")] + stacked_bar(parts, max(10, w - 3)), w - 1))
+            key = [(RST, " ")]
+            for label, count, colour in legend:
+                key += [(colour, "▇ "), (TXT, label),
+                        (DIM, " %d (%.0f%%)   " % (count, 100.0 * count / tot["open"]))]
+            rows.append(seg(key, w - 1))
             rows.append("")
-            for line in panel("OPEN PR STATE", body, pw, frame=GRID, accent=LBL):
-                rows.append(seg([(RST, " ")] + line, w - 1))
+
+        for line in pipeline(tot, store.days, w):
+            rows.append(seg(line, w - 1))
 
         if calendar and h > 30:
-            grid, peak, total = heatmap(calendar["weeks"], w - 8)
-            cw = max(28, w - 6)
-            body = []
+            grid, peak, total = heatmap(calendar["weeks"], w)
+            rows.append("")
+            rows.append(seg([(LBL, " ── CONTRIBUTIONS ── "),
+                             (DIM, "%d in 26 weeks, peak %d/day"
+                              % (calendar.get("totalContributions", total), peak))],
+                            w - 1))
             for r, line in enumerate(grid):
-                body.append([(DIM, " %-4s" % ("Mon", "", "Wed", "", "Fri", "", "")[r]),
-                             (OK, "".join(line))])
-            body.append([(DIM, " %d contributions, peak %d/day"
-                          % (calendar.get("totalContributions", total), peak))])
-            for line in panel("CONTRIBUTIONS · 26 WEEKS", body, cw,
-                              frame=GRID, accent=LBL):
-                rows.append(seg([(RST, " ")] + line, w - 1))
+                label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
+                rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))], w - 1))
 
         rows.append("")
         rows.append(LBL + " ── NEEDS ATTENTION ──")
@@ -417,31 +445,34 @@ def main():
             rows.append(seg([(colour, text)], w - 1))
 
         rows.append("")
-        aw = max(30, w - 6)
-        wide = w >= 68
-        acct_body = [[(DIM, " %-18s %5s %5s %6s %6s%s"
-                       % ("ACCOUNT", "PRS", "REVW", "MERGED", "RATE",
-                          "  ISSUES" if wide else ""))]]
-        busiest = max((x["open"] for x in stats), default=0) or 1
+        rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))
+        wide = w >= 62
+        head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "PRS", "REVW", "MERGED", "RATE")
+        if wide:
+            head += " %6s" % "ISSUES"
+        rows.append(DIM + pad(head, w - 1))
+        busiest = max((s["open"] for s in stats), default=0) or 1
         for i, s in enumerate(stats):
+            if len(rows) >= h - 3:
+                break
             here = i == selected
             tint = bg(38, 56, 76) if here else ""
             r = s["rate"]
             line = [(tint + (ACCENT if here else TXT),
-                     ("▸" if here else " ") + pad(s["account"] + (" (you)" if s["is_me"] else ""), 18)),
+                     ("▸" if here else " ") + pad(s["account"] + (" (you)" if s["is_me"] else ""), 20)),
                     (tint + PR, "%5d" % s["open"]),
                     (tint + (WARN if s["review"] else DIM), "%5d" % s["review"]),
                     (tint + OK, "%6d" % s["merged"]),
                     (tint + (heat(r / 100.0) if r is not None else DIM),
                      "%5s%%" % ("%.0f" % r if r is not None else " --"))]
             if wide:
-                line.append((tint + DIM, "  %6d" % s["issues"]))
+                line.append((tint + DIM, "%6d" % s["issues"]))
                 # relative share of open PRs, so scale is visible not just rank
-                line.append((tint + GRID, " " + meter(s["open"] / float(busiest),
-                                                      max(4, aw - 56))))
-            acct_body.append(line)
-        for line in panel("BY ACCOUNT", acct_body, aw, frame=GRID, accent=LBL):
-            rows.append(seg([(RST, " ")] + line, w - 1))
+                line.append((tint + GRID, "  " + meter(s["open"] / float(busiest),
+                                                       max(4, w - 62))))
+            if here:
+                line.append((tint, " " * w))
+            rows.append(seg(line, w - 1))
 
         hints = [[(ACCENT, "↑↓"), (DIM, " account")], [(DIM, "[w]indow")],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
