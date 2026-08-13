@@ -81,8 +81,8 @@ tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
 **Two widgets need a token:** `deployments.py` wants a Vercel token from
-Account Settings → Tokens, and `github.py` a classic GitHub PAT with `repo` and
-`read:org`. Every other widget runs with no configuration at all.
+Account Settings → Tokens, and `github.py` a *classic* GitHub PAT with `repo` and
+`read:org` (fine-grained tokens reach only one org each). Every other widget runs with no configuration at all.
 
 ## Requirements
 

@@ -241,8 +241,14 @@ class Store(object):
                     self.accounts = discover_accounts(tok) or ["@me"]
                 try:
                     cal = graphql(contribution_query(CONTRIB_WEEKS), tok)["data"]["viewer"]
+                    coll = cal["contributionsCollection"]
+                    grid = coll["contributionCalendar"]
+                    # carried alongside the grid: it is the evidence that the
+                    # total includes work in private repositories rather than
+                    # quietly counting only what is public
+                    grid["restricted"] = coll.get("restrictedContributionsCount") or 0
                     with self.lock:
-                        self.calendar = cal["contributionsCollection"]["contributionCalendar"]
+                        self.calendar = grid
                 except Exception:
                     pass
                 with self.lock:
@@ -364,6 +370,7 @@ def contribution_query(weeks):
     since = (datetime.datetime.now(datetime.timezone.utc)
              - datetime.timedelta(weeks=weeks)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return """{ viewer { contributionsCollection(from:"%s") {
+      restrictedContributionsCount
       contributionCalendar { totalContributions
         weeks { contributionDays { date contributionCount weekday } } } } } }""" % since
 
@@ -633,10 +640,10 @@ def main():
         # enough for both.
         if calendar and h > 38:
             grid, peak, total = heatmap(calendar["weeks"], w)
+            total_c = calendar.get("totalContributions", total)
             rows.append(seg([(LBL, " ── CONTRIBUTIONS ── "),
                              (DIM, "%d in %d weeks, peak %d/day"
-                              % (calendar.get("totalContributions", total),
-                                 CONTRIB_WEEKS, peak))],
+                              % (total_c, CONTRIB_WEEKS, peak))],
                             w - 1))
             for r, line in enumerate(grid):
                 label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
@@ -657,6 +664,10 @@ def main():
                     ("busiest", "%s (%d)" % (bd, bc), TXT),
                     ("most on", "%s (%d)" % cs["weekday"], TXT),
                 ]
+                shut = calendar.get("restricted") or 0
+                if shut:
+                    cells.append(("in private", "%d (%.0f%%)"
+                                  % (shut, 100.0 * shut / max(1, total_c)), TXT))
                 # as many columns as the width honestly allows, never fewer
                 # than one - the labels are what make these readable
                 ncols = 3 if w >= 86 else (2 if w >= 58 else 1)

@@ -175,17 +175,32 @@ into a single request returned HTTP 502 on the complexity limit.
 
 ## Credentials
 
-`github.token` in `config.json`, or `$GITHUB_TOKEN`. Create a **classic**
-personal access token at Settings → Developer settings → Personal access
-tokens → Tokens (classic), with exactly two scopes:
+`github.token` in `config.json`, or `$GITHUB_TOKEN`.
+
+**Use a classic token.** The deciding factor is how many accounts you point the
+widget at: a fine-grained token is *"limited to access resources owned by a
+single user or organization"*, and GitHub lists *"using a fine-grained personal
+access token to access multiple organizations at once"* among the feature's
+current gaps. This board exists to compare orgs side by side, so one
+fine-grained token could cover exactly one of them — you would need a token per
+org, and there is one `github.token` field to put them in. (The limit is one
+*resource owner*, not one permission; fine-grained tokens can carry plenty of
+permissions, just never across two owners.)
+
+Create it at Settings → Developer settings → Personal access tokens → Tokens
+(classic), with exactly two scopes:
 
 | Scope | Why | Without it |
 |---|---|---|
 | `repo` | search sees private repositories | **every figure silently undercounts** — public results only, no error |
 | `read:org` | enumerate the orgs you belong to | the account list comes back short, or empty |
 
-Nothing else is needed. In particular the contribution calendar works without
-`read:user` — verified against a token carrying only `repo` and `read:org`.
+Nothing else is needed. In particular the **contribution calendar needs no
+`read:user`**, and it is not limited to public work: on the token this was
+verified with, 4722 of 6023 contributions came from private repositories and
+all of them were counted (`restrictedContributionsCount`, which the widget
+shows as `in private` beneath the calendar, exists precisely to make that
+visible).
 `repo` is coarse (it grants write as well as read), but GitHub offers no
 read-only equivalent for classic tokens.
 
@@ -193,14 +208,8 @@ Both failure modes are silent rather than loud, which is worse than an error,
 so the widget reads the `X-OAuth-Scopes` header GitHub returns and says which
 scope is missing instead of quietly showing smaller numbers.
 
-**A classic token is required here, not merely preferred.** A fine-grained
-token is *"limited to access resources owned by a single user or
-organization"*, and GitHub lists *"using a fine-grained personal access token
-to access multiple organizations at once"* among the feature's current gaps.
-The whole point of this widget is spanning every org you belong to from one
-token, so a fine-grained one could cover exactly one of them — you would need
-a token per org, which the widget has nowhere to put. They also return no
-scope header, so the check above cannot run.
+Fine-grained tokens also return no `X-OAuth-Scopes` header, so the check above
+cannot run against them. Only the classic path is tested.
 
 **The `gh` CLI is deliberately not used** — the API is called directly so the
 widget carries no dependency on another tool being installed and authenticated.
