@@ -84,10 +84,15 @@ This is the one decorative section, so it is skipped entirely in a short pane to
 leave the account table its rows.
 
 **By account** — one row per org. `↑` `↓` selects one; the selected row is
-tinted. The bar on the right is `SHARE OF OPEN PRs`: each account's open PRs
-against the busiest, so the table conveys scale and not merely rank. It is
-drawn in the same purple as the `OPEN` column it describes — it says nothing
-about the `ISSUES` column it happens to sit next to.
+tinted.
+
+The sparkline on the right is that account's own merged-per-day across the
+window. The columns carry totals but no shape, and a fortnight of nothing
+ending in a spike reads very differently from a steady trickle. **Each row is
+scaled to its own peak** — hence the `OWN PEAK` heading — so a full block is one
+PR on a quiet org and twenty-seven on a busy one; the comparable number is the
+`MRG` column two to its left. A blank row genuinely means nothing merged, and
+dots mean that account has not yet reported for the selected window.
 
 ## How the per-day counts stay exact
 

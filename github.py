@@ -636,11 +636,14 @@ def main():
         head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",
                                             "MRG%dD" % store.days, "RATE")
         bar_cols = max(4, w - 62)
+        spark_days = [(today - datetime.timedelta(days=n)).isoformat()
+                      for n in range(min(store.days, bar_cols) - 1, -1, -1)]
         if wide:
             head += " %6s" % "ISSUES"
-            # the bar plots open PRs, but sits past the issues column, so it
-            # needs saying: unlabelled, it reads as belonging to issues
-            head += "  " + "SHARE OF OPEN PRs"[:bar_cols]
+            # "own peak" matters: a full block is 1 PR on a quiet account and
+            # 27 on a busy one. The comparable number is MRG, two columns left.
+            head += "  " + ("MERGED/DAY · OWN PEAK"
+                            if bar_cols >= 21 else "MERGED/DAY")[:bar_cols]
         rows.append(DIM + pad(head, w - 1))
         busiest = max((s["open"] for s in stats), default=0) or 1
         for i, s in enumerate(stats):
@@ -665,12 +668,22 @@ def main():
                               ("%.0f%%" % r if r is not None else "--")))]
             if wide:
                 line.append((tint + DIM, "%6d" % s["issues"]))
-                # open PRs against the busiest account, so the table shows
-                # scale and not merely rank. Filled in the same purple as the
-                # OPEN column it describes; the empty track stays dim.
-                filled = int(round(s["open"] / float(busiest) * bar_cols))
-                line.append((tint + PR, "  " + "█" * filled))
-                line.append((tint + GRID, "░" * (bar_cols - filled)))
+                # Each account's own merged-per-day. The columns carry totals
+                # but no shape, and a fortnight of nothing ending in a spike
+                # reads very differently from a steady trickle. Scaled to this
+                # account's own peak: the absolute is in MRG two columns left,
+                # so the useful thing here is the shape.
+                hist = s.get("hist") or {}
+                if s.get("hist_window") != store.days:
+                    line.append((tint + GRID, "  " + "·" * len(spark_days)))
+                else:
+                    top = max(hist.values()) if hist else 0
+                    marks = ""
+                    for d in spark_days:
+                        v = hist.get(d, 0)
+                        marks += (SPARK[min(7, int(v / float(top) * 7.99))]
+                                  if v and top else " ")
+                    line.append((tint + OK, "  " + marks))
             if here:
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
