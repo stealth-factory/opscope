@@ -34,7 +34,7 @@ node runs with --accept-routes.
 A live throughput section graphs peers currently moving data (toggle with g),
 and the info view carries the same graph for the selected machine.
 
-Keys: up/down select a peer, i opens a full machine info view (every address,
+Keys: up/down select a peer, Enter or i opens a full machine info view (every address,
 routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
 offline peers, q quits. Copying uses OSC 52, so it reaches the clipboard of
@@ -471,7 +471,7 @@ def info_overlay(peer, eps, users, w, h, rates=None):
 
     while len(rows) < h - 1:
         rows.append("")
-    rows.append(seg([(DIM, " [c]opy addresses · esc or i to close")], w - 1))
+    rows.append(seg([(DIM, " [c]opy addresses · esc, ↵ or i to close")], w - 1))
     return rows
 
 
@@ -535,7 +535,7 @@ def main():
             if view:
                 if key == "esc" or key in ("q", "Q"):
                     view = None
-                elif key == "i":
+                elif key in ("i", "enter"):
                     view = "info" if view != "info" else None
                 elif key == "c":
                     view = "copy" if view != "copy" else None
@@ -570,11 +570,11 @@ def main():
                 selected = 0
             elif key == "end":
                 selected = max(0, len(listed) - 1)
-            elif key in ("c", "enter"):
+            elif key == "c":
                 if listed:
                     view = "copy"
                     note = ""
-            elif key == "i":
+            elif key in ("i", "enter"):
                 if listed:
                     view = "info"
 
@@ -690,8 +690,8 @@ def main():
                              (TXT, ", ".join(rts[:2])),
                              (DIM, (" +%d more" % (len(rts) - 2)) if len(rts) > 2 else "")],
                             w - 1))
-        rows.append(seg([(DIM, " ↑↓ · [i]nfo [c]opy [g]raph [o]ffline [r]efresh [q]uit")],
-                        w - 1))
+        rows.append(seg([(DIM, " ↑↓ · ↵/[i]nfo [c]opy [g]raph [o]ffline [r]efresh"
+                              " [q]uit")], w - 1))
         draw(rows, w, h)
         time.sleep(0.3)
 

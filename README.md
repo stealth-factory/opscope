@@ -104,8 +104,9 @@ may simply not have talked to you since the last restart.
 ./tailnet.py
 ```
 
-Keys: `↑`/`↓` select a peer, `i` opens a full machine info view, `c` or `Enter`
-opens a copy sheet, `r` refresh, `o` hide offline peers, `q` quit.
+Keys: `↑`/`↓` select a peer, `Enter` or `i` opens a full machine info view, `c`
+opens a copy sheet, `g` toggles the throughput graph, `r` refresh, `o` hide
+offline peers, `q` quit.
 
 A **live throughput** section graphs peers currently moving data — `↓` receive
 and `↑` transmit sparklines with current rates — scaled to a shared peak so
