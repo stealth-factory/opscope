@@ -83,8 +83,11 @@ current streak, because it is not over yet.
 This is the one decorative section, so it is skipped entirely in a short pane to
 leave the account table its rows.
 
-**By account** — one row per org, with a bar for relative size. `↑` `↓` selects
-one; the selected row is tinted.
+**By account** — one row per org. `↑` `↓` selects one; the selected row is
+tinted. The bar on the right is `SHARE OF OPEN PRs`: each account's open PRs
+against the busiest, so the table conveys scale and not merely rank. It is
+drawn in the same purple as the `OPEN` column it describes — it says nothing
+about the `ISSUES` column it happens to sit next to.
 
 ## How the per-day counts stay exact
 

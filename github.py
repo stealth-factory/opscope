@@ -635,8 +635,12 @@ def main():
         wide = w >= 62
         head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",
                                             "MRG%dD" % store.days, "RATE")
+        bar_cols = max(4, w - 62)
         if wide:
             head += " %6s" % "ISSUES"
+            # the bar plots open PRs, but sits past the issues column, so it
+            # needs saying: unlabelled, it reads as belonging to issues
+            head += "  " + "SHARE OF OPEN PRs"[:bar_cols]
         rows.append(DIM + pad(head, w - 1))
         busiest = max((s["open"] for s in stats), default=0) or 1
         for i, s in enumerate(stats):
@@ -661,9 +665,12 @@ def main():
                               ("%.0f%%" % r if r is not None else "--")))]
             if wide:
                 line.append((tint + DIM, "%6d" % s["issues"]))
-                # relative share of open PRs, so scale is visible not just rank
-                line.append((tint + GRID, "  " + meter(s["open"] / float(busiest),
-                                                       max(4, w - 62))))
+                # open PRs against the busiest account, so the table shows
+                # scale and not merely rank. Filled in the same purple as the
+                # OPEN column it describes; the empty track stays dim.
+                filled = int(round(s["open"] / float(busiest) * bar_cols))
+                line.append((tint + PR, "  " + "█" * filled))
+                line.append((tint + GRID, "░" * (bar_cols - filled)))
             if here:
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
