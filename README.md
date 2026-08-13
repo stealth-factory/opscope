@@ -40,7 +40,7 @@ deployments with state, project, branch, commit and build time.
   builds, and the commit subject beneath it.
 
 ```sh
-./deployments.py                    # every project you can see, 30s refresh
+./deployments.py                    # every project you can see, 15s refresh
 ./deployments.py -n 60 ferry-hk     # one project, slower poll
 ```
 

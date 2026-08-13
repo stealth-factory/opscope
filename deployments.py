@@ -21,6 +21,9 @@ deployments with their state, project, branch, commit and build time.
 
     python3 deployments.py [-n SECONDS] [-t TEAM_ID] [project ...]
 
+Polls every 15s by default (-n changes it, minimum 5s). One request per team
+per poll, so the default is 4 polls/min — modest against the API's limits.
+
 Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
 c or Enter opens a copy sheet for the selected deployment offering its
 dashboard, branch-preview, commit-preview and pull-request URLs, r refreshes
@@ -51,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, clipboard, cycle, draw, maybe_help,
                     pad, rgb, seg, setup, size, title)
 
-REFRESH = 30            # seconds between API polls (-n)
+REFRESH = 15            # seconds between API polls (-n)
 LIMIT = 100             # deployments per request (API maximum)
 AUTH_PATH = "~/.local/share/com.vercel.cli/auth.json"
 API = "https://api.vercel.com"
