@@ -435,7 +435,7 @@ def main():
         tick += 1
         for key in keyboard.poll():
             if overlay:
-                if key in ("esc", "c", "q", "Q", "enter"):
+                if key in ("esc", "c", "i", "q", "Q", "enter"):
                     overlay = False
                 elif key.isdigit() and shown:
                     chosen = shown[min(selected, len(shown) - 1)]
@@ -467,7 +467,7 @@ def main():
                 selected = 0
             elif key == "end":
                 selected = max(0, len(shown) - 1)
-            elif key in ("c", "enter"):
+            elif key in ("c", "i", "enter"):
                 if shown:
                     overlay = True
                     note = ""
