@@ -31,7 +31,8 @@ node runs with --accept-routes.
 
     python3 tailnet.py [-n SECONDS]
 
-Keys: up/down select a peer, c or Enter opens a copy sheet offering its
+Keys: up/down select a peer, i opens a full machine info view (every address,
+routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
 offline peers, q quits. Copying uses OSC 52, so it reaches the clipboard of
 the machine you are typing at even over SSH.
@@ -295,6 +296,93 @@ def addresses(peer, eps):
     return out
 
 
+def stamp(iso):
+    """ISO-8601 to a readable local time, or None when unset."""
+    if not iso or iso.startswith("0001-01-01"):
+        return None
+    try:
+        t = time.mktime(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    except ValueError:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+
+
+def info_overlay(peer, eps, users, w, h):
+    """Everything known about one machine, including every address."""
+    rows = [title("machine info", w, ACCENT)]
+    dns = (peer.get("DNSName") or "").rstrip(".")
+    ips = peer.get("TailscaleIPs") or []
+    owner = (users.get(str(peer.get("UserID"))) or {}).get("LoginName", "")
+
+    def field(label, value, color=TXT):
+        if value in (None, "", []):
+            return
+        rows.append(seg([(DIM, " %-13s" % label), (color, str(value))], w - 1))
+
+    field("machine", peer_name(peer), ACCENT)
+    field("dns name", dns)
+    if (peer.get("HostName") or "") != peer_name(peer):
+        field("hostname", peer.get("HostName") + "   (self-reported)", DIM)
+    field("os", peer.get("OS"))
+    field("owner", owner)
+    field("tags", ", ".join(peer.get("Tags") or []), ROUTE)
+    rows.append("")
+
+    up = bool(peer.get("Online"))
+    field("status", "online" if up else "offline", ONLINE if up else OFFLINE)
+    if peer.get("CurAddr"):
+        field("path", "DIRECT via " + peer["CurAddr"], DIRECT)
+    else:
+        field("path", "relayed through DERP " + str(peer.get("Relay") or "?"), RELAY)
+    field("rx / tx", "%s  /  %s" % (human(peer.get("RxBytes")).strip(),
+                                    human(peer.get("TxBytes")).strip()))
+    field("handshake", stamp(peer.get("LastHandshake")))
+    field("last seen", stamp(peer.get("LastSeen")) or ("connected" if up else "-"))
+    field("added", stamp(peer.get("Created")))
+    rows.append("")
+
+    rows.append(LBL + " addresses")
+    for ip in ips:
+        field("  tailscale", ip, ACCENT)
+    pub, priv, other = [], [], []
+    cur = (peer.get("CurAddr") or "").rsplit(":", 1)[0]
+    if cur:
+        pub.append(cur)
+    for ip in eps.get(dns, []):
+        kind = classify(ip)
+        bucket = {"public": pub, "private": priv}.get(kind, other)
+        if ip not in bucket:
+            bucket.append(ip)
+    routes = [r for r in (peer.get("PrimaryRoutes") or [])
+              if r not in ("0.0.0.0/0", "::/0")]
+    priv.sort(key=lambda i: lan_rank(i, routes))
+    for ip in pub:
+        field("  public", ip)
+    for ip in priv:
+        tag = "  (in advertised subnet)" if any(in_network(ip, r) for r in routes) else ""
+        field("  private", ip + tag)
+    for ip in other:
+        field("  other", ip, DIM)
+    if not eps:
+        rows.append(DIM + "   endpoints need sudo; only the current path is shown")
+
+    if routes:
+        rows.append("")
+        rows.append(LBL + " advertises")
+        for r in routes[:6]:
+            rows.append(seg([(ROUTE, "   " + r)], w - 1))
+        if len(routes) > 6:
+            rows.append(DIM + "   +%d more" % (len(routes) - 6))
+    if peer.get("ExitNodeOption"):
+        rows.append("")
+        rows.append(seg([(EXIT, " offers itself as an exit node")], w - 1))
+
+    while len(rows) < h - 1:
+        rows.append("")
+    rows.append(seg([(DIM, " [c]opy addresses · esc or i to close")], w - 1))
+    return rows
+
+
 def wrap(text, width):
     return [text[i:i + width] for i in range(0, len(text), width)] or [""]
 
@@ -344,17 +432,21 @@ def main():
     hide_offline = False
     selected = 0
     scroll = 0
-    overlay = False
+    view = None          # None | "copy" | "info"
     note = ""
     note_until = 0
     listed = []
     visible = 1
     while True:
         for key in keyboard.poll():
-            if overlay:
-                if key in ("esc", "c", "q", "Q", "enter"):
-                    overlay = False
-                elif key.isdigit() and listed:
+            if view:
+                if key == "esc" or key in ("q", "Q"):
+                    view = None
+                elif key == "i":
+                    view = "info" if view != "info" else None
+                elif key == "c":
+                    view = "copy" if view != "copy" else None
+                elif view == "copy" and key.isdigit() and listed:
                     pairs = addresses(listed[min(selected, len(listed) - 1)], eps_now)
                     idx = int(key) - 1
                     if 0 <= idx < len(pairs):
@@ -385,8 +477,11 @@ def main():
                 selected = max(0, len(listed) - 1)
             elif key in ("c", "enter"):
                 if listed:
-                    overlay = True
+                    view = "copy"
                     note = ""
+            elif key == "i":
+                if listed:
+                    view = "info"
 
         w, h = size()
         data, eps_now, err = store.snapshot()
@@ -421,9 +516,13 @@ def main():
         rows.append(seg(line, w - 1))
         rows.append("")
 
-        if overlay and listed:
-            draw(copy_overlay(listed[min(selected, len(listed) - 1)], eps_now,
-                              w, h, note), w, h)
+        if view and listed:
+            chosen = listed[min(selected, len(listed) - 1)]
+            if view == "info":
+                users = {str(k): v for k, v in (data.get("User") or {}).items()}
+                draw(info_overlay(chosen, eps_now, users, w, h), w, h)
+            else:
+                draw(copy_overlay(chosen, eps_now, w, h, note), w, h)
             time.sleep(0.1)
             continue
 
@@ -491,7 +590,8 @@ def main():
                              (TXT, ", ".join(rts[:2])),
                              (DIM, (" +%d more" % (len(rts) - 2)) if len(rts) > 2 else "")],
                             w - 1))
-        rows.append(seg([(DIM, " ↑↓ select · [c]opy · [r]efresh [o]ffline [q]uit")], w - 1))
+        rows.append(seg([(DIM, " ↑↓ select · [i]nfo [c]opy · [r]efresh [o]ffline [q]uit")],
+                        w - 1))
         draw(rows, w, h)
         time.sleep(0.3)
 

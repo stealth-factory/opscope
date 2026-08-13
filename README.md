@@ -104,8 +104,15 @@ may simply not have talked to you since the last restart.
 ./tailnet.py
 ```
 
-Keys: `↑`/`↓` select a peer, `c` or `Enter` opens a copy sheet, `r` refresh,
-`o` hide offline peers, `q` quit.
+Keys: `↑`/`↓` select a peer, `i` opens a full machine info view, `c` or `Enter`
+opens a copy sheet, `r` refresh, `o` hide offline peers, `q` quit.
+
+The info view shows everything known about one machine: its MagicDNS name, the
+self-reported hostname when it differs, owner and tags, whether the path is
+direct or relayed, handshake and enrolment times, **every address** — Tailscale
+v4 and v6, public, and each private one with the LAN address marked as being
+inside a subnet the peer advertises — plus its advertised routes and whether it
+offers itself as an exit node.
 
 The copy sheet offers the peer's **Tailscale IP**, **MagicDNS name**, **public
 IP** and **LAN IP** on keys `1`-`4`, copied via OSC 52 so they reach the
