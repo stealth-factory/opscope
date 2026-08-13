@@ -35,7 +35,11 @@ it with them, space pauses or
 resumes, r restarts the phase, s starts a break during focus and ends one during
 a break - b and e do the same, and the footer names whichever applies - +/-
 change the focus length, ? hides or shows the pomodoro controls,
-q quits.
+0 zeroes today's completed count, q quits.
+
+The completed tally is per day: it resets when the date changes, including
+while the panel is running. Preferences - focus length, whether the timer is
+shown - are not tied to the day and persist.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
@@ -231,6 +235,7 @@ class Pomodoro(object):
         self.left = self.focus * 60.0     # seconds remaining when paused
         self.deadline = None              # wall-clock end when running
         self.rang = False
+        self.day = time.strftime("%Y-%m-%d")
         self.was_running = False   # run state to restore when unhidden
         # A display preference rather than timer state, but it rides along in
         # the same file so the panel comes back looking how you left it.
@@ -247,14 +252,16 @@ class Pomodoro(object):
                 d = json.load(f)
         except (OSError, ValueError):
             return
-        if d.get("day") != time.strftime("%Y-%m-%d"):
+        # Preferences outlive the day; only the tally and the block in
+        # progress belong to it.
+        self.focus = int(d.get("focus", self.focus))
+        self.enabled = bool(d.get("enabled", self.enabled))
+        self.hints = bool(d.get("hints", self.hints))
+        if d.get("day") != self.day:
             return                         # a new day starts a fresh count
         self.phase = d.get("phase", self.phase)
         self.completed = int(d.get("completed", 0))
-        self.focus = int(d.get("focus", self.focus))
-        self.enabled = bool(d.get("enabled", self.enabled))
         self.was_running = bool(d.get("was_running", False))
-        self.hints = bool(d.get("hints", self.hints))
         self.left = float(d.get("left", self.left))
         if d.get("running") and d.get("deadline"):
             # resume mid-phase; if it elapsed while we were away the timer
@@ -267,7 +274,7 @@ class Pomodoro(object):
         try:
             os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
             with open(STATE_FILE, "w") as f:
-                json.dump({"day": time.strftime("%Y-%m-%d"), "phase": self.phase,
+                json.dump({"day": self.day, "phase": self.phase,
                            "completed": self.completed, "focus": self.focus,
                            "enabled": self.enabled, "running": self.running,
                            "was_running": self.was_running,
@@ -357,6 +364,25 @@ class Pomodoro(object):
         upcoming_long = self.cycle and (self.completed + 1) % self.cycle == 0
         return "[s]tart long break" if upcoming_long else "[s]tart break"
 
+    def roll_day(self):
+        """Zero the tally when the date changes, even if nothing restarted.
+
+        The count previously reset only on load, so a panel left running over
+        midnight kept adding to yesterday's total.
+        """
+        today = time.strftime("%Y-%m-%d")
+        if today != self.day:
+            self.day = today
+            self.completed = 0
+            self.save()
+            return True
+        return False
+
+    def reset_count(self):
+        """Zero today's completed count, leaving the running phase alone."""
+        self.completed = 0
+        self.save()
+
     def adjust(self, delta):
         """Change the focus length, shifting the block in progress by the same.
 
@@ -422,6 +448,9 @@ def hint_tokens(pomo):
                    [(DIM, pomo.next_label())],
                    [(DIM, "[r]estart")],
                    [(DIM, "[±]%dmin" % pomo.focus)]]
+        if pomo.completed:
+            # nothing to reset at zero, so the hint only appears once it counts
+            tokens.append([(DIM, "[0]reset %d done" % pomo.completed)])
     tokens.append([(DIM, "[p]off" if pomo.enabled else "[p] pomodoro")])
     tokens.append([(DIM, "↑↓ cities")])
     if pomo.enabled:
@@ -577,10 +606,13 @@ def main():
             elif key in ("s", "b", "e"):
                 # one action, three mnemonics: skip / break / end
                 pomo.advance()
+            elif key in ("0", "c"):
+                pomo.reset_count()
             elif key in ("+", "="):
                 pomo.adjust(5)
             elif key == "-":
                 pomo.adjust(-5)
+        pomo.roll_day()
         if pomo.tick():
             over = pomo.overtime()
             alert("%s %s" % (PHASE_LABEL[pomo.phase],

@@ -196,8 +196,10 @@ would fire where nobody is sitting. Under Herdr it *additionally* raises a
 native toast with a sound; that is purely additive and skipped everywhere else,
 so the tool never requires Herdr. The whole panel also flashes white twice, a second apart, on every alert —
 visible with the sound muted. `pomodoro_flash_rgb` changes the colour, and the
-text colour follows it automatically so a dark choice stays readable. State persists across restarts, so relaunching the panel
-does not cost you a session.
+text colour follows it automatically so a dark choice stays readable. State persists across restarts, so relaunching the panel does not cost you a
+session. The completed tally is per day and clears when the date changes —
+including while the panel is running — while preferences such as focus length
+are not tied to the day. `0` zeroes the tally by hand.
 
 Configure `CITIES`, and `WORK_START_H` / `WORK_END_H` (default Mon–Fri 09:00–18:00).
 Set `TZ` to a fixed offset to pin the clock instead of following the system zone.
