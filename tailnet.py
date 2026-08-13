@@ -92,6 +92,20 @@ def daemon_uptime():
     return None
 
 
+def peer_name(peer):
+    """Tailnet-unique display name.
+
+    HostName is whatever the device calls itself and is frequently useless:
+    iPads, Chromecasts and Pixels all report "localhost", and two Apple TVs
+    report the same "apple-tv". The first label of the MagicDNS name is unique
+    across the tailnet and matches what the admin console shows.
+    """
+    dns = (peer.get("DNSName") or "").rstrip(".")
+    if dns:
+        return dns.split(".")[0]
+    return peer.get("HostName") or "?"
+
+
 def classify(ip):
     """public | private | tailscale | other, from the address alone."""
     ip = ip.split("%")[0]
@@ -288,7 +302,7 @@ def wrap(text, width):
 def copy_overlay(peer, eps, w, h, note):
     rows = [title("copy address", w, ROUTE)]
     rows.append("")
-    rows.append(seg([(TXT, " " + (peer.get("HostName") or "?")),
+    rows.append(seg([(TXT, " " + peer_name(peer)),
                      (DIM, "  " + (peer.get("OS") or "")),
                      (DIRECT if peer.get("CurAddr") else RELAY,
                       "  " + ("DIRECT" if peer.get("CurAddr")
@@ -402,7 +416,7 @@ def main():
                          (DIRECT, "   %d direct" % len(direct)),
                          (RELAY, "   %d relayed" % len(relayed))], w - 1))
         line = [(ROUTE, " %d advertising routes" % len(routers))]
-        line.append((EXIT, "   exit node: " + (exits[0].get("HostName") if exits
+        line.append((EXIT, "   exit node: " + (peer_name(exits[0]) if exits
                                                else "none")))
         rows.append(seg(line, w - 1))
         rows.append("")
@@ -414,7 +428,9 @@ def main():
             continue
 
         wide = w >= 62
-        head = " %-24s %-8s %-7s" % ("PEER", "OS", "PATH")
+        # machine names are long; spend spare width on them rather than padding
+        namew = max(16, min(32, w - 45)) if wide else max(12, w - 22)
+        head = " %s %-8s %-7s" % (pad("MACHINE", namew + 1), "OS", "PATH")
         if wide:
             head += " %5s %5s %5s" % ("RX", "TX", "SEEN")
         rows.append(LBL + pad(head, w - 1))
@@ -447,10 +463,11 @@ def main():
             tint = bg(28, 44, 62) if here else ""
             path_direct = bool(p.get("CurAddr"))
             path = "DIRECT" if path_direct else (p.get("Relay") or "?")
-            name = (p.get("HostName") or "?")
+            name = peer_name(p)
             line = [(tint + (ONLINE if up else OFFLINE),
                      ("▸" if here else " ") + "%s " % ("●" if up else "○")),
-                    (tint + (TXT if up else OFFLINE), pad(name[:22], 23)),
+                    (tint + (TXT if up else OFFLINE),
+                     pad(name[:namew - 1], namew)),
                     (tint + DIM, "%-8s" % (p.get("OS") or "?")[:8]),
                     (tint + (DIRECT if path_direct else RELAY),
                      "%-7s" % (path if up else "-"))]
