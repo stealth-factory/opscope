@@ -48,6 +48,8 @@ from common import RST, draw, maybe_help, pad, rgb, seg, setup, size, title
 
 DEFAULT_HOSTS = [
     "studio.example.internal",
+    "nas.example.internal",
+    "pi.example.internal",
     "build-mac.example.internal",
     "1.1.1.1",
     "8.8.8.8",
@@ -62,7 +64,8 @@ AGGREGATE = "median"    # how samples sharing a graph column combine (-g)
 AGGREGATORS = ("median", "mean", "min", "max", "p95")
 
 PALETTE = [(90, 220, 255), (255, 170, 80), (140, 255, 160),
-           (230, 140, 255), (255, 110, 130), (255, 230, 110)]
+           (230, 140, 255), (255, 110, 130), (255, 230, 110),
+           (120, 160, 255), (255, 140, 200), (150, 255, 240)]
 DIM = rgb(70, 100, 120)
 GRID = rgb(38, 58, 74)
 TXT = rgb(215, 235, 250)
