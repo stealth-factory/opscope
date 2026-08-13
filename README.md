@@ -61,6 +61,26 @@ locally and never printed. `vercel ls --all --format json` returns similar
 data, but spawns a Node process per refresh (~1.4s) against ~0.75s for a
 direct API call returning 100 records, so this queries the REST API.
 
+### `agents.py` — coding agents across every workspace
+
+Lists every agent Herdr knows about, ordered so the ones wanting attention come
+first: `blocked` (waiting on an approval right now), `done` (finished background
+work you have not seen), then `working` and `idle`. On a server with a dozen
+workspaces this is the difference between noticing an agent finished and finding
+out an hour later.
+
+Each row carries the workspace, how long the state has held, and the real CPU
+and RSS of the agent's process. Durations show `≥` when the state predates the
+tool starting, since then it is only a lower bound.
+
+```sh
+./agents.py            # 4s refresh
+./agents.py -n 10
+```
+
+Keys: `r` refresh, `w` toggle workspace label vs pane id, `q` quit.
+Requires `HERDR_ENV`; shells out to the `herdr` CLI.
+
 ### `worldclock.py` — server time, office hours, world clock
 
 Big-digit clock for the machine's own timezone, three live countdown bars, and a
