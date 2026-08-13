@@ -183,9 +183,12 @@ change the focus length.
 
 A phase never ends itself. When time is up the counter keeps running and the
 bar rescales so a growing red section shows the overrun — at 25 minutes over a
-25-minute block, half the bar is red. The terminal is alerted when the phase
-elapses and again every minute it is ignored (BEL plus an OSC 9 desktop
-notification where the terminal supports one). State persists across restarts,
+25-minute block, half the bar is red. The terminal is alerted when the phase elapses and again every minute it is
+ignored: BEL, plus OSC 9 and OSC 777 desktop notifications. Escape sequences
+are the only alerting channel that survives SSH — anything local to the machine
+would fire where nobody is sitting. Under Herdr it *additionally* raises a
+native toast with a sound; that is purely additive and skipped everywhere else,
+so the tool never requires Herdr. State persists across restarts,
 so relaunching the panel does not cost you a session.
 
 Configure `CITIES`, and `WORK_START_H` / `WORK_END_H` (default Mon–Fri 09:00–18:00).

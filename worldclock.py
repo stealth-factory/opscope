@@ -24,7 +24,9 @@ A phase does not end itself. When the time is up the counter keeps going,
 showing how far over you are, and the bar rescales so a growing red section
 represents the overrun — the longer you ignore it, the more of the bar is red.
 The terminal is alerted when the phase elapses and again every minute it keeps
-running.
+running: BEL plus OSC 9 and OSC 777 desktop notifications, which are the only
+channels that survive SSH. Under Herdr it additionally raises a native toast
+with a sound — additive, never required, and skipped entirely elsewhere.
 
 Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
 countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
@@ -39,6 +41,7 @@ there are plausibly at work.
 import datetime
 import json
 import os
+import subprocess
 import sys
 import time
 from zoneinfo import ZoneInfo
@@ -115,17 +118,49 @@ WEEKEND = rgb(150, 150, 170)
 HERE = rgb(255, 170, 220)
 
 
-def alert(text, bell=True, notify=True):
-    """Nudge the user through the terminal.
+# Herdr, when we happen to be inside it, can raise a real toast with a sound.
+# Purely additive: nothing here requires Herdr, and outside it this is skipped.
+UNDER_HERDR = os.environ.get("HERDR_ENV") == "1"
 
-    BEL is universal; OSC 9 raises a desktop notification on terminals that
-    implement it and is ignored by those that do not, so both are sent.
+
+def herdr_toast(title, body, sound="done"):
+    """Best-effort native Herdr notification; a no-op anywhere else.
+
+    Fire and forget: waiting on a subprocess would stall the render loop, and
+    a failed toast is not worth interrupting a timer for. Herdr itself decides
+    whether to display it, per `[ui.toast] delivery` in its config.
+    """
+    if not UNDER_HERDR:
+        return
+    try:
+        subprocess.Popen(["herdr", "notification", "show", title,
+                          "--body", body, "--sound", sound],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def alert(text, bell=True, notify=True, sound="done"):
+    """Nudge the user through the terminal, requiring nothing but a terminal.
+
+    Escape sequences are the only alerting channel that survives SSH: the
+    program runs on a server, so anything local to it - notify-send, a sound
+    file - would fire where nobody is sitting. These reach the terminal the
+    user is actually in front of.
+
+    BEL is universal. OSC 9 covers iTerm2, WezTerm, Windows Terminal and
+    Ghostty; OSC 777 covers urxvt and several others. Terminals ignore the
+    notification sequences they do not implement, so sending both costs
+    nothing. A multiplexer in between decides whether to forward them.
     """
     if bell:
         out("\a")
     if notify:
-        out("\x1b]9;%s\x07" % text)
+        out("\x1b]9;%s\x07" % text)                       # iTerm2 & friends
+        out("\x1b]777;notify;Pomodoro;%s\x07" % text)     # urxvt & friends
     flush()
+    if notify:
+        herdr_toast("Pomodoro", text, sound)
 
 
 class Pomodoro(object):
@@ -454,7 +489,8 @@ def main():
             alert("%s %s" % (PHASE_LABEL[pomo.phase],
                              "finished" if over < 60
                              else "running %dm over" % (over // 60)),
-                  pomo.bell, pomo.notify)
+                  pomo.bell, pomo.notify,
+                  "done" if over < 60 else "request")
 
         w, h = size()
         stamp = datetime.datetime.now(TZ) if TZ else datetime.datetime.now().astimezone()
