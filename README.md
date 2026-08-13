@@ -212,6 +212,14 @@ independently of the drops, and each column gets its own speed and trail length.
 ./matrix.py
 ```
 
+## Building your own panels
+
+[`docs/building-herdr-panels.md`](docs/building-herdr-panels.md) collects what
+was learned building these against Herdr — resize semantics, focus, detecting
+what a pane is running, notification gating, and the layout mistakes worth
+skipping. For the CLI reference itself run `herdr --skill`, which the installed
+binary emits and therefore always matches your version.
+
 ## Requirements
 
 - Python **3.9+** (`worldclock.py` uses `zoneinfo`); developed on 3.12
