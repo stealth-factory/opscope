@@ -38,7 +38,7 @@ not fail, it silently undercounts, so the granted scopes are checked and named.
 The API is called directly, so the `gh` CLI is not required.
 
 Keys: up/down select an account, r refreshes now, w cycles the window
-(7/14/30/90 days), q quits.
+(7/14/30/60/90 days), q quits.
 """
 import collections
 import datetime
@@ -67,7 +67,7 @@ _CFG = load_config("github", {
 })
 
 REFRESH = float(_CFG["refresh"])
-WINDOWS = (7, 14, 30, 90)
+WINDOWS = (7, 14, 30, 60, 90)
 CONTRIB_WEEKS = 52       # a full year, like the calendar on github.com
 API = "https://api.github.com/graphql"
 

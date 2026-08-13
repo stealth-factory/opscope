@@ -31,7 +31,7 @@ is actually moving.
 
  ── BY ACCOUNT ──   1-6 of 9
  ACCOUNT              OPEN REVW MRG7D  RATE ISSUES  MERGED/DAY
-▸stealth-factory       628  486    15   83%    162  ▇▂▂ ▃█
+▸example-corp          628  486    15   83%    162  ▇▂▂ ▃█
  wiiiimm (you)          34    0     2   67%     28       █
  example-labs           20    0     0    --      0
  example-tools           0    0     0    --      4
@@ -178,7 +178,7 @@ into a single request returned HTTP 502 on the complexity limit.
 | Key | Action |
 |---|---|
 | `↑` `↓` | select an account |
-| `w` | cycle the window — 7 / 14 / 30 / 90 days |
+| `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now, ignoring the day cache |
 | `q` | quit |
 
