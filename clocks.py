@@ -59,7 +59,7 @@ import time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, draw, flush, load_config,
+from common import (RST, Keyboard, bar, bg, big, draw, flush, load_config,
                     maybe_help, out, pack_hints, pad, rgb, seg, setup, size,
                     title)
 
@@ -95,19 +95,6 @@ _CFG = load_config("clocks", {
 
 CITIES = [tuple(c) for c in _CFG["cities"]]
 
-BIG = {
-    "0": ["███", "█ █", "█ █", "█ █", "███"],
-    "1": ["  █", "  █", "  █", "  █", "  █"],
-    "2": ["███", "  █", "███", "█  ", "███"],
-    "3": ["███", "  █", "███", "  █", "███"],
-    "4": ["█ █", "█ █", "███", "  █", "  █"],
-    "5": ["███", "█  ", "███", "  █", "███"],
-    "6": ["███", "█  ", "███", "█ █", "███"],
-    "7": ["███", "  █", "  █", "  █", "  █"],
-    "8": ["███", "█ █", "███", "█ █", "███"],
-    "9": ["███", "█ █", "███", "  █", "███"],
-    ":": ["   ", " █ ", "   ", " █ ", "   "],
-}
 
 WORK_START_H = int(_CFG["work_start_hour"])
 WORK_END_H = int(_CFG["work_end_hour"])
@@ -467,12 +454,7 @@ def hint_tokens(pomo):
 
 
 def render_big(s, w):
-    lines = ["", "", "", "", ""]
-    for ch in s:
-        g = BIG.get(ch, ["   "] * 5)
-        for i in range(5):
-            lines[i] += g[i] + " "
-    return [ln[:w] for ln in lines]
+    return big(s, w)
 
 
 def offset_str(dt):

@@ -158,6 +158,92 @@ def seg(parts, width):
     return "".join(out)
 
 
+BIG_DIGITS = {
+    "0": ["███", "█ █", "█ █", "█ █", "███"],
+    "1": ["  █", "  █", "  █", "  █", "  █"],
+    "2": ["███", "  █", "███", "█  ", "███"],
+    "3": ["███", "  █", "███", "  █", "███"],
+    "4": ["█ █", "█ █", "███", "  █", "  █"],
+    "5": ["███", "█  ", "███", "  █", "███"],
+    "6": ["███", "█  ", "███", "█ █", "███"],
+    "7": ["███", "  █", "  █", "  █", "  █"],
+    "8": ["███", "█ █", "███", "█ █", "███"],
+    "9": ["███", "█ █", "███", "  █", "███"],
+    ":": ["   ", " █ ", "   ", " █ ", "   "],
+    "%": ["█ █", "  █", " █ ", "█  ", "█ █"],
+    ".": ["   ", "   ", "   ", "   ", " █ "],
+    " ": ["   ", "   ", "   ", "   ", "   "],
+    "-": ["   ", "   ", "███", "   ", "   "],
+}
+
+
+def big(text, width=None):
+    """Render text as five rows of block digits."""
+    rows = ["", "", "", "", ""]
+    for ch in text:
+        glyph = BIG_DIGITS.get(ch, BIG_DIGITS[" "])
+        for i in range(5):
+            rows[i] += glyph[i] + " "
+    return [r[:width] if width else r for r in rows]
+
+
+# Braille packs 2x4 sub-pixels into one cell, so a chart drawn with it has
+# eight times the resolution of block characters. Dot bit per (column, row):
+BRAILLE_DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
+
+
+def braille_plot(values, width, height, lo=None, hi=None):
+    """A continuous line chart in braille.
+
+    Consecutive samples are joined rather than plotted as isolated dots -
+    without that the line reads as scattered specks wherever it moves quickly.
+    Returns `height` strings of `width` cells.
+    """
+    if not values:
+        return [""] * height
+    lo = min(values) if lo is None else lo
+    hi = max(values) if hi is None else hi
+    span = (hi - lo) or 1.0
+    px_w, px_h = width * 2, height * 4
+    cells = [[0] * width for _ in range(height)]
+
+    def row_of(v):
+        return max(0, min(px_h - 1, int(round((1 - (v - lo) / span) * (px_h - 1)))))
+
+    prev = None
+    for px in range(px_w):
+        v = values[min(len(values) - 1, int(px * len(values) / float(px_w)))]
+        y = row_of(v)
+        span_y = (y, y) if prev is None else (min(prev, y), max(prev, y))
+        for py in range(span_y[0], span_y[1] + 1):
+            cells[py // 4][px // 2] |= BRAILLE_DOTS[px % 2][py % 4]
+        prev = y
+    return ["".join(chr(0x2800 + c) for c in row) for row in cells]
+
+
+def stacked_bar(parts, width):
+    """Proportions as one bar: [(fraction, colour), ...] -> coloured segments.
+
+    A bar beats a pie in a character grid - no aliasing, and the eye compares
+    lengths far better than angles.
+    """
+    out, used = [], 0
+    for i, (frac, colour) in enumerate(parts):
+        n = width - used if i == len(parts) - 1 else int(round(frac * width))
+        n = max(0, min(n, width - used))
+        if n:
+            out.append((colour, "█" * n))
+            used += n
+    return out
+
+
+def meter(frac, n, on="▰", off="▱"):
+    """A segmented gauge - reads as an instrument rather than a progress bar."""
+    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+    k = int(round(frac * n))
+    return on * k + off * (n - k)
+
+
 def pack_hints(hints, width, sep="  "):
     """Lay key hints across as many lines as they need.
 
