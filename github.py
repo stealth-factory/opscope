@@ -31,8 +31,10 @@ per-day charts and the per-account merged/rate columns - covers the merge
 window, which is the N days ending today.
 
 Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
-personal access token with `repo` and `read:org` covers private repositories
-and org discovery. The API is called directly, so the `gh` CLI is not required.
+personal access token with exactly two scopes - `repo` so search sees private
+repositories, and `read:org` to enumerate your orgs. Missing either one does
+not fail, it silently undercounts, so the granted scopes are checked and named.
+The API is called directly, so the `gh` CLI is not required.
 
 Keys: up/down select an account, r refreshes now, w cycles the window
 (7/14/30/90 days), q quits.
@@ -95,6 +97,9 @@ def token():
     return None, "missing"
 
 
+_SCOPES = {"seen": False, "have": set()}
+
+
 def graphql(query, tok):
     body = json.dumps({"query": query}).encode()
     req = urllib.request.Request(API, data=body, headers={
@@ -103,7 +108,29 @@ def graphql(query, tok):
         "User-Agent": "terminal-toys",
     })
     with urllib.request.urlopen(req, timeout=30) as r:
+        granted = r.headers.get("X-OAuth-Scopes")
+        if granted is not None:      # absent on fine-grained tokens
+            _SCOPES["seen"] = True
+            _SCOPES["have"] = set(x.strip() for x in granted.split(",") if x.strip())
         return json.load(r)
+
+
+def scope_warning():
+    """Flag a token that will undercount rather than fail.
+
+    A classic token without `repo` still searches happily - it just returns
+    public results only, so every figure on the board comes back smaller with
+    nothing to say it did. Without `read:org` the account list comes back
+    short the same way. Both are worse than an error, so name them.
+    """
+    if not _SCOPES["seen"]:
+        return None
+    missing = [x for x in ("repo", "read:org") if x not in _SCOPES["have"]]
+    if not missing:
+        return None
+    why = ("private repos are not counted" if "repo" in missing
+           else "orgs cannot be discovered")
+    return "token lacks %s - %s" % (" and ".join(missing), why)
 
 
 def discover_accounts(tok):
@@ -313,8 +340,9 @@ class Store(object):
                     # file other users on the box can read
                     self.error = (("could not read: " + ", ".join(failed))
                                   if failed else
-                                  (config_token_warning() if source == "config"
-                                   else None))
+                                  (scope_warning() or
+                                   (config_token_warning()
+                                    if source == "config" else None)))
             except urllib.error.HTTPError as e:
                 with self.lock:
                     self.error = "HTTP %s from GitHub%s" % (

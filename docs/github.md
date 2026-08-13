@@ -175,9 +175,27 @@ into a single request returned HTTP 502 on the complexity limit.
 
 ## Credentials
 
-`github.token` in `config.json`, or `$GITHUB_TOKEN`. A **classic personal access
-token** with `repo` and `read:org` covers private repositories and org
-discovery.
+`github.token` in `config.json`, or `$GITHUB_TOKEN`. Create a **classic
+personal access token** at Settings → Developer settings → Personal access
+tokens, with exactly two scopes:
+
+| Scope | Why | Without it |
+|---|---|---|
+| `repo` | search sees private repositories | **every figure silently undercounts** — public results only, no error |
+| `read:org` | enumerate the orgs you belong to | the account list comes back short, or empty |
+
+Nothing else is needed. In particular the contribution calendar works without
+`read:user` — verified against a token carrying only `repo` and `read:org`.
+`repo` is coarse (it grants write as well as read), but GitHub offers no
+read-only equivalent for classic tokens.
+
+Both failure modes are silent rather than loud, which is worse than an error,
+so the widget reads the `X-OAuth-Scopes` header GitHub returns and says which
+scope is missing instead of quietly showing smaller numbers.
+
+Fine-grained tokens are not recommended here: they must be granted per
+organisation, so a token has to be re-authorised every time you join one, and
+they return no scope header for the widget to check.
 
 **The `gh` CLI is deliberately not used** — the API is called directly so the
 widget carries no dependency on another tool being installed and authenticated.
