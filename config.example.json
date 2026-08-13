@@ -48,7 +48,16 @@
   "tailnet": {
     "refresh": 5
   },
-  "herdr_agents": {
+  "herdr_panes": {
     "refresh": 4
+  },
+  "github": {
+    "_comment": "token: a classic PAT with repo + read:org. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+    "token": "",
+    "token_env": "GITHUB_TOKEN",
+    "accounts": [],
+    "window_days": 7,
+    "history_days": 14,
+    "refresh": 120
   }
 }

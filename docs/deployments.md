@@ -126,7 +126,6 @@ good data on screen behind an error banner rather than freezing the panel.
 "deployments": {
   "token": "",
   "token_env": "VERCEL_TOKEN",
-  "use_cli_session": true,
   "refresh": 15,
   "limit": 100,
   "teams": [],

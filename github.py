@@ -26,8 +26,9 @@ Accounts are org logins, or @me for your own. With none given it uses
 your personal account.
 
 Open counts - PRs, issues, drafts, review backlog - are point-in-time totals of
-whatever is open right now, at any age. Only the merge rate and the merged-per-
-day chart are windowed, by -w.
+whatever is open right now, at any age. Only the merge rate and the per-account
+merged/rate columns follow the merge window; the per-day charts always cover
+`history_days`.
 
 Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
 personal access token with `repo` and `read:org` covers private repositories
@@ -58,7 +59,7 @@ _CFG = load_config("github", {
     "accounts": [],        # org logins and/or "@me"; empty = discover
     "window_days": 7,      # merge-rate window
     "refresh": 120,        # seconds between polls; GraphQL is 5000 points/hour
-    "history_days": 14,    # width of the merged-per-day sparkline
+    "history_days": 14,    # width of the per-day charts
 })
 
 REFRESH = float(_CFG["refresh"])
@@ -173,7 +174,8 @@ class Store(object):
         self.days = days
         self.history_days = history_days
         self.stats = []
-        self.pending = True       # window changed or first load: figures stale
+        self.day_cache = {}       # account -> (dates, merged, opened)
+        self.reuse_days = False   # set when only the merge window moved
         self.calendar = None
         self.rate = None
         self.error = None
@@ -183,7 +185,7 @@ class Store(object):
     def snapshot(self):
         with self.lock:
             return (list(self.stats), self.rate, self.error, self.fetched,
-                    self.calendar, self.pending)
+                    self.calendar)
 
     def run(self):
         viewer = None
@@ -209,12 +211,20 @@ class Store(object):
                         self.calendar = cal["contributionsCollection"]["contributionCalendar"]
                 except Exception:
                     pass
-                stats, failed, rate = [], [], None
+                with self.lock:
+                    days_now, reuse_days = self.days, self.reuse_days
+                    self.reuse_days = False
+                # Start the pass from what is already on screen, keyed by
+                # account, so rows are replaced in place as each lands instead
+                # of the table emptying and refilling on every refresh.
+                with self.lock:
+                    by_acc = dict((x["key"], x) for x in self.stats)
+                failed, rate = [], None
                 # one request per account: results appear as they arrive, and a
                 # single bad account cannot blank the whole board
                 for acc in self.accounts:
                     try:
-                        data = graphql(build_query([acc], self.days,
+                        data = graphql(build_query([acc], days_now,
                                                    self.history_days, viewer), tok)
                         if data.get("errors"):
                             raise ValueError(data["errors"][0].get("message", "")[:50])
@@ -226,21 +236,32 @@ class Store(object):
                     i = 0
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
                     merged, dropped = g("merged"), g("dropped")
-                    hist, opened_hist = collections.Counter(), collections.Counter()
                     today = datetime.date.today()
                     dates = [(today - datetime.timedelta(days=k)).isoformat()
                              for k in range(self.history_days - 1, -1, -1)]
-                    for c in range(0, len(dates), DAY_CHUNK):
-                        chunk = dates[c:c + DAY_CHUNK]
-                        try:
-                            dd = graphql(build_day_query(scope(acc, viewer),
-                                                         chunk), tok)["data"]
-                        except Exception:
-                            continue
-                        for n, day in enumerate(chunk):
-                            hist[day] += (dd.get("m%d" % n) or {}).get("issueCount", 0)
-                            opened_hist[day] += (dd.get("c%d" % n) or {}).get("issueCount", 0)
-                    stats.append({
+                    # The per-day charts cover history_days and so cannot have
+                    # changed when only the merge window moved. Reuse them
+                    # rather than spending a request per account proving it.
+                    cached = self.day_cache.get(acc)
+                    if reuse_days and cached and cached[0] == dates:
+                        hist, opened_hist = cached[1], cached[2]
+                    else:
+                        hist = collections.Counter()
+                        opened_hist = collections.Counter()
+                        for c in range(0, len(dates), DAY_CHUNK):
+                            chunk = dates[c:c + DAY_CHUNK]
+                            try:
+                                dd = graphql(build_day_query(scope(acc, viewer),
+                                                             chunk), tok)["data"]
+                            except Exception:
+                                continue
+                            for n, day in enumerate(chunk):
+                                hist[day] += (dd.get("m%d" % n) or {}).get("issueCount", 0)
+                                opened_hist[day] += (dd.get("c%d" % n) or {}).get("issueCount", 0)
+                        self.day_cache[acc] = (dates, hist, opened_hist)
+                    by_acc[acc] = {
+                        "key": acc,
+                        "window": days_now,     # which merge window these cover
                         "account": viewer if acc == "@me" else acc,
                         "is_me": acc == "@me",
                         "open": g("open"), "draft": g("draft"),
@@ -249,13 +270,13 @@ class Store(object):
                         "rate": (100.0 * merged / (merged + dropped)
                                  if merged + dropped else None),
                         "hist": hist, "opened_hist": opened_hist,
-                    })
+                    }
                     with self.lock:            # publish as each one lands
-                        self.stats = list(stats)
+                        self.stats = [by_acc[a] for a in self.accounts
+                                      if a in by_acc]
                         self.rate = rate
                         self.fetched = time.time()
                 with self.lock:
-                    self.pending = False
                     self.error = ("could not read: " + ", ".join(failed)) if failed else None
             except urllib.error.HTTPError as e:
                 with self.lock:
@@ -335,7 +356,7 @@ def main():
             elif key == "m":
                 with store.lock:
                     store.days = cycle(WINDOWS, store.days)
-                    store.pending = True     # everything windowed is now stale
+                    store.reuse_days = True  # the day charts are unaffected
                 store.wake.set()
             elif key == "up":
                 selected = max(0, selected - 1)
@@ -343,7 +364,10 @@ def main():
                 selected += 1
 
         w, h = size()
-        stats, rate, err, fetched, calendar, pending = store.snapshot()
+        stats, rate, err, fetched, calendar = store.snapshot()
+        # Windowed figures are stale until every account has reported for the
+        # window now selected; rows carry the window they were fetched for.
+        stale = not stats or any(x.get("window") != store.days for x in stats)
         selected = max(0, min(selected, len(stats) - 1)) if stats else 0
 
         rows = [title("github ops", w, PR)]
@@ -372,7 +396,7 @@ def main():
         rows.append(seg([(LBL, " ── MERGE RATE ── "),
                          (DIM, "last %d days" % store.days)], w - 1))
         bar_w = max(10, w - 34)
-        if pending:
+        if stale:
             rows.append(seg([(DIM, " %-5s" % "···")] + skeleton(bar_w, tick) +
                             [(DIM, "  loading %dd…" % store.days)], w - 1))
         else:
@@ -407,9 +431,10 @@ def main():
             rows.append(seg([(LBL, " ── %s ── " % heading),
                              (DIM, "%dd, %d total, peak %d"
                                    % (len(days), total, peak))], w - 1))
-            if pending:
-                for _ in range(4):
-                    rows.append(seg([(RST, " ")] + skeleton(len(days), tick), w - 1))
+            if not stats:                    # first load only: these charts
+                for _ in range(4):           # are fixed to history_days and so
+                    rows.append(seg([(RST, " ")] + skeleton(len(days), tick),
+                                    w - 1))   # never go stale on a window change
             else:
                 for line in vbars(cols, 4):
                     rows.append(seg([(RST, " ")] + line, w - 1))
@@ -462,15 +487,19 @@ def main():
             here = i == selected
             tint = bg(38, 56, 76) if here else ""
             r = s["rate"]
+            # this row's own staleness: accounts land one at a time, so an
+            # account already refetched for the new window shows real numbers
+            # while the ones behind it still shimmer
+            old = s.get("window") != store.days
             line = [(tint + (ACCENT if here else TXT),
                      ("▸" if here else " ") + pad(s["account"] + (" (you)" if s["is_me"] else ""), 20)),
                     (tint + PR, "%5d" % s["open"]),
                     (tint + (WARN if s["review"] else DIM), "%5d" % s["review"]),
-                    (tint + (DIM if pending else OK),
-                     "%6s" % ("···" if pending else s["merged"])),
-                    (tint + (DIM if pending else
+                    (tint + (DIM if old else OK),
+                     "%6s" % ("···" if old else s["merged"])),
+                    (tint + (DIM if old else
                              (heat(r / 100.0) if r is not None else DIM)),
-                     "%6s" % ("···" if pending else
+                     "%6s" % ("···" if old else
                               ("%.0f%%" % r if r is not None else "--")))]
             if wide:
                 line.append((tint + DIM, "%6d" % s["issues"]))
