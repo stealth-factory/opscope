@@ -34,7 +34,8 @@ countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
 it with them, space pauses or
 resumes, r restarts the phase, s starts a break during focus and ends one during
 a break - b and e do the same, and the footer names whichever applies - +/-
-change the focus length, ? hides or shows the key hints, q quits.
+change the focus length, ? hides or shows the pomodoro controls,
+q quits.
 
 Big digits show this server's system-timezone clock. Below it, each hub
 is shown in its own timezone, sorted west to east, coloured by whether people
@@ -410,15 +411,21 @@ class Pomodoro(object):
 
 
 def hint_tokens(pomo):
-    """Key hints for the current state, as atomic tokens for pack_hints."""
-    if not pomo.enabled:
-        return [[(DIM, "[p] pomodoro")], [(DIM, "↑↓ cities")], [(DIM, "[?] hints")]]
-    return [[(DIM, "[space] "), (TXT, "pause" if pomo.running else "start")],
-            [(DIM, pomo.next_label())],
-            [(DIM, "[r]estart")],
-            [(DIM, "[±]%dmin" % pomo.focus)],
-            [(DIM, "[p]off")],
-            [(DIM, "[?]hints")]]
+    """Key hints for the current state, as atomic tokens for pack_hints.
+
+    Only the pomodoro's own controls are hidden by `?`. The toggle itself and
+    the panel-level keys always stay: hiding the way back leaves no way back.
+    """
+    tokens = []
+    if pomo.enabled and pomo.hints:
+        tokens += [[(DIM, "[space] "), (TXT, "pause" if pomo.running else "start")],
+                   [(DIM, pomo.next_label())],
+                   [(DIM, "[r]estart")],
+                   [(DIM, "[±]%dmin" % pomo.focus)]]
+    tokens.append([(DIM, "[p]off" if pomo.enabled else "[p] pomodoro")])
+    tokens.append([(DIM, "↑↓ cities")])
+    tokens.append([(DIM, "[?]controls")])
+    return tokens
 
 
 def render_big(s, w):
@@ -630,7 +637,7 @@ def main():
 
         # The clock, countdowns and footer stay pinned; only this list scrolls.
         room = max(1, h - len(rows) - 1 -
-                   (len(pack_hints(hint_tokens(pomo), w - 2)) if pomo.hints else 0))
+                   len(pack_hints(hint_tokens(pomo), w - 2)))
         scroll = max(0, min(scroll, max(0, len(entries) - room)))
         window = entries[scroll:scroll + room]
         more = len(entries) > room
@@ -655,8 +662,7 @@ def main():
                              (DIM, dt.strftime("  %a")),
                              (DIM, "  " + pad(offset_str(dt), 8)),
                              (EVE, tag)], w - 1))
-        footer = [" " + line for line in pack_hints(hint_tokens(pomo), w - 2)] \
-            if pomo.hints else []
+        footer = [" " + line for line in pack_hints(hint_tokens(pomo), w - 2)]
         rows = rows[:h - len(footer)]
         while len(rows) < h - len(footer):
             rows.append("")

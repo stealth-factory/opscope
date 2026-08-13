@@ -150,8 +150,9 @@ advertises wins over a docker or virtual bridge.
 
 Footers wrap rather than truncate: key hints are packed across as many lines as
 they need and never split, since a hint clipped to `[±]25` teaches the wrong
-key. In `worldclock.py`, `?` hides them entirely and hands the space back to the
-city list.
+key. In `worldclock.py`, `?` hides the pomodoro's controls and hands the space back
+to the city list — the toggle itself and the panel keys always remain, since
+hiding the way back would leave no way back.
 
 ### Configuration
 
