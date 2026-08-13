@@ -175,9 +175,9 @@ into a single request returned HTTP 502 on the complexity limit.
 
 ## Credentials
 
-`github.token` in `config.json`, or `$GITHUB_TOKEN`. Create a **classic
-personal access token** at Settings → Developer settings → Personal access
-tokens, with exactly two scopes:
+`github.token` in `config.json`, or `$GITHUB_TOKEN`. Create a **classic**
+personal access token at Settings → Developer settings → Personal access
+tokens → Tokens (classic), with exactly two scopes:
 
 | Scope | Why | Without it |
 |---|---|---|
@@ -193,9 +193,14 @@ Both failure modes are silent rather than loud, which is worse than an error,
 so the widget reads the `X-OAuth-Scopes` header GitHub returns and says which
 scope is missing instead of quietly showing smaller numbers.
 
-Fine-grained tokens are not recommended here: they must be granted per
-organisation, so a token has to be re-authorised every time you join one, and
-they return no scope header for the widget to check.
+**A classic token is required here, not merely preferred.** A fine-grained
+token is *"limited to access resources owned by a single user or
+organization"*, and GitHub lists *"using a fine-grained personal access token
+to access multiple organizations at once"* among the feature's current gaps.
+The whole point of this widget is spanning every org you belong to from one
+token, so a fine-grained one could cover exactly one of them — you would need
+a token per org, which the widget has nowhere to put. They also return no
+scope header, so the check above cannot run.
 
 **The `gh` CLI is deliberately not used** — the API is called directly so the
 widget carries no dependency on another tool being installed and authenticated.

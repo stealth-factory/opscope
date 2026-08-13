@@ -30,8 +30,9 @@ whatever is open right now, at any age. Everything else - the merge rate, the
 per-day charts and the per-account merged/rate columns - covers the merge
 window, which is the N days ending today.
 
-Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
-personal access token with exactly two scopes - `repo` so search sees private
+Credentials: `github.token` in config.json, or $GITHUB_TOKEN. It must be a
+*classic* token: a fine-grained one is limited to a single resource owner, so
+it cannot span the orgs this board exists to compare. Two scopes - `repo` so search sees private
 repositories, and `read:org` to enumerate your orgs. Missing either one does
 not fail, it silently undercounts, so the granted scopes are checked and named.
 The API is called directly, so the `gh` CLI is not required.
