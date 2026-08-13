@@ -19,7 +19,14 @@
 Continuously pings every target, and shows per-target statistics, a per-target
 sparkline, a shared log-scale time graph, and a log of loss/spike events.
 
-    python3 latency.py [-i SECONDS] [host ...]
+    python3 latency.py [-i SECONDS] [-c SECONDS] [host ...]
+
+-i sets the ping interval. -g picks how samples sharing a column combine
+(median, mean, min, max, p95; median by default, because latency is
+right-skewed and a mean lets one spike misrepresent the whole block).
+-c sets how many seconds each graph column covers;
+the default of one column per ping gives the smoothest motion, while a larger
+value trades that for a longer visible history.
 
 Traffic cost: one 98-byte frame each way per target per interval. At the 1.0s
 default with 4 targets that is ~0.8 KB/s (~2.8 MB/hour).
@@ -47,11 +54,15 @@ DEFAULT_HOSTS = [
 ]
 
 INTERVAL = 0.5          # seconds between pings (>=0.2 without root); -i overrides
+SECONDS_PER_COLUMN = 0   # graph time per column; 0 = one column per ping (-c)
 WINDOW = 600            # samples retained per target
 SPIKE_FACTOR = 3.0      # sample > factor * median -> spike event
 
-PALETTE = [rgb(90, 220, 255), rgb(255, 170, 80), rgb(140, 255, 160),
-           rgb(230, 140, 255), rgb(255, 110, 130), rgb(255, 230, 110)]
+AGGREGATE = "median"    # how samples sharing a graph column combine (-g)
+AGGREGATORS = ("median", "mean", "min", "max", "p95")
+
+PALETTE = [(90, 220, 255), (255, 170, 80), (140, 255, 160),
+           (230, 140, 255), (255, 110, 130), (255, 230, 110)]
 DIM = rgb(70, 100, 120)
 GRID = rgb(38, 58, 74)
 TXT = rgb(215, 235, 250)
@@ -79,10 +90,36 @@ def pct(v):
     return "%5.1f%%" % v
 
 
+def aggregate(values, how=None):
+    """Combine samples that share one graph column.
+
+    Median by default: latency is right-skewed, so a single spike inside a
+    bucket would drag a mean well above the latency actually experienced most
+    of the time.
+    """
+    how = how or AGGREGATE
+    ordered = sorted(values)
+    n = len(ordered)
+    if n == 1:
+        return ordered[0]
+    if how == "mean":
+        return sum(ordered) / n
+    if how == "min":
+        return ordered[0]
+    if how == "max":
+        return ordered[-1]
+    if how == "p95":
+        return ordered[min(n - 1, int(n * 0.95))]
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 class Target(object):
-    def __init__(self, host, color):
+    def __init__(self, host, palette_rgb):
         self.host = host
-        self.color = color
+        self.color = rgb(*palette_rgb)
+        # dimmed variant, used for the min-max spread band behind the line
+        self.band = rgb(*[int(c * 0.42) for c in palette_rgb])
         self.ip = None
         self.samples = collections.deque(maxlen=WINDOW)   # (t, rtt|None)
         self.lock = threading.Lock()
@@ -200,31 +237,41 @@ def sparkline(samples, n):
     return "".join(out)
 
 
-def build_graph(targets, gw, gh, span_s):
+def build_graph(targets, gw, gh, bucket):
     """Log-scale multi-series plot.
 
-    Column gw-1 is 'now'; column 0 is `bucket * gw` seconds ago. Returns
-    (rows, actual_span_seconds) so the axis label matches what is drawn.
+    Columns are anchored to a fixed time grid (floor(ts / bucket)) rather than
+    measured backwards from `now`. A sample therefore never migrates between
+    columns, so the plot steps left exactly once per bucket instead of
+    jittering as `now` slides. With bucket == INTERVAL every ping advances the
+    plot by one column, the finest motion a character grid allows.
+
+    Consecutive samples are joined into a polyline, so each series reads as a
+    continuous trace rather than scattered dots.
+
+    Column gw-1 is 'now'. Returns (rows, span_seconds).
     """
-    now = time.time()
-    bucket = max(INTERVAL, span_s / float(gw))
+    newest = int(math.floor(time.time() / bucket))
     series = {}
     lo = hi = None
     for t in targets:
-        cols = [[] for _ in range(gw)]
+        cols = [None] * gw
         for ts, r in t.snapshot():
             if r is None:
                 continue
-            idx = int(gw - 1 - (now - ts) / bucket)
+            idx = gw - 1 - (newest - int(math.floor(ts / bucket)))
             if 0 <= idx < gw:
+                if cols[idx] is None:
+                    cols[idx] = []
                 cols[idx].append(r)
-        vals = [(sum(c) / len(c)) if c else None for c in cols]
+        # each column -> (central value, bucket min, bucket max)
+        vals = [None if c is None else (aggregate(c), min(c), max(c)) for c in cols]
         series[t.host] = vals
         for v in vals:
             if v is None:
                 continue
-            lo = v if lo is None else min(lo, v)
-            hi = v if hi is None else max(hi, v)
+            lo = v[1] if lo is None else min(lo, v[1])
+            hi = v[2] if hi is None else max(hi, v[2])
     if lo is None:
         return [DIM + " collecting…"], bucket * gw
     lo = max(0.05, lo * 0.8)
@@ -233,15 +280,41 @@ def build_graph(targets, gw, gh, span_s):
 
     grid = [[" "] * gw for _ in range(gh)]
     color = [[None] * gw for _ in range(gh)]
-    for t in reversed(targets):           # first host in list drawn last (wins)
+
+    def put(x, y, ch, col):
+        if 0 <= x < gw and 0 <= y < gh:
+            grid[y][x] = ch
+            color[y][x] = col
+
+    def row_of(v):
+        frac = (math.log10(max(v, 1e-3)) - llo) / (lhi - llo)
+        return int(round((1.0 - frac) * (gh - 1)))
+
+    # pass 1: min-max spread inside each bucket, dimmed, behind everything
+    for t in reversed(targets):
         for x, v in enumerate(series[t.host]):
             if v is None:
                 continue
-            frac = (math.log10(max(v, 1e-3)) - llo) / (lhi - llo)
-            y = int(round((1.0 - frac) * (gh - 1)))
-            if 0 <= y < gh:
-                grid[y][x] = "●"
-                color[y][x] = t.color
+            top, bot = row_of(v[2]), row_of(v[1])
+            if top == bot:
+                continue                  # spread smaller than one row
+            for y in range(min(top, bot), max(top, bot) + 1):
+                put(x, y, "│", t.band)
+
+    # pass 2: the central-value polyline, drawn over the bands
+    for t in reversed(targets):           # first host in list drawn last (wins)
+        pts = [(x, row_of(v[0])) for x, v in enumerate(series[t.host]) if v is not None]
+        for i, (x, y) in enumerate(pts):
+            if i:
+                x0, y0 = pts[i - 1]
+                prev = y0
+                for xx in range(x0 + 1, x + 1):
+                    f = (xx - x0) / float(x - x0)
+                    yy = int(round(y0 + (y - y0) * f))
+                    for k in range(min(prev, yy), max(prev, yy) + 1):
+                        put(xx, k, "·" if k == yy else "│", t.color)
+                    prev = yy
+            put(x, y, "●", t.color)
 
     rows = []
     for y in range(gh):
@@ -269,10 +342,18 @@ def build_graph(targets, gw, gh, span_s):
 
 def main():
     maybe_help(__doc__)
-    global INTERVAL
+    global INTERVAL, SECONDS_PER_COLUMN, AGGREGATE
     args = sys.argv[1:]
-    if args and args[0] in ("-i", "--interval"):
-        INTERVAL = max(0.2, float(args[1]))
+    while args and args[0] in ("-i", "--interval", "-c", "--column-seconds",
+                               "-g", "--group"):
+        if args[0] in ("-i", "--interval"):
+            INTERVAL = max(0.2, float(args[1]))
+        elif args[0] in ("-c", "--column-seconds"):
+            SECONDS_PER_COLUMN = max(0.0, float(args[1]))
+        else:
+            if args[1] not in AGGREGATORS:
+                raise SystemExit("-g must be one of: " + ", ".join(AGGREGATORS))
+            AGGREGATE = args[1]
         args = args[2:]
     hosts = args or DEFAULT_HOSTS
     targets = [Target(h, PALETTE[i % len(PALETTE)]) for i, h in enumerate(hosts)]
@@ -284,14 +365,19 @@ def main():
 
     while True:
         w, h = size()
+        bucket = SECONDS_PER_COLUMN or INTERVAL
         rows = [title("network latency monitor", w, rgb(90, 220, 255))]
         rows.append(seg([(DIM, " %d targets · %.1fs interval · " % (len(targets), INTERVAL)),
                          (TXT, time.strftime("%H:%M:%S")),
-                         (DIM, " · this host → each target")], w - 1))
+                         (DIM, " · " + ("1 ping/column" if bucket <= INTERVAL
+                                        else "%s of %gs blocks" % (AGGREGATE, bucket)))],
+                        w - 1))
         rows.append("")
         wide = w >= 72
-        head = " %-22s %7s %7s %7s %7s %7s %6s" % (
-            "HOST", "NOW", "AVG", "MIN", "MAX", "JITTER", "LOSS")
+        show_med = w >= 80
+        head = " %-22s %7s %7s%s %7s %7s %7s %6s" % (
+            "HOST", "NOW", "AVG", "  MEDIAN" if show_med else "",
+            "MIN", "MAX", "JITTER", "LOSS")
         rows.append(LBL + pad(head, w - 1))
         for t in targets:
             st = t.stats()
@@ -301,6 +387,7 @@ def main():
             rows.append(seg([(dot, " "), (t.color, pad(name, 22)),
                              (TXT, " " + fmt_ms(st["now"])),
                              (TXT, " " + fmt_ms(st["avg"])),
+                             (GOOD, (" " + fmt_ms(st["med"])) if show_med else ""),
                              (DIM, " " + fmt_ms(st["min"])),
                              (DIM, " " + fmt_ms(st["max"])),
                              (TXT, " " + fmt_ms(st["jit"])),
@@ -312,7 +399,7 @@ def main():
         ev_h = 7 if h - len(rows) > 20 else 0
         gh = max(4, h - len(rows) - ev_h - 4)
         gw = max(10, w - 10)
-        graph, gspan = build_graph(targets, gw, gh, WINDOW * INTERVAL)
+        graph, gspan = build_graph(targets, gw, gh, bucket)
         rows.extend(graph)
         rows.append(LBL + "       └" + GRID + "─" * gw)
         # The plot occupies columns 8 .. 8+gw-1, so the axis labels must span
