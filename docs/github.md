@@ -104,11 +104,16 @@ room either side and pinned at the ends — and the heading counts what is shown
 
 The sparkline on the right is that account's own merged-per-day across the
 window. The columns carry totals but no shape, and a fortnight of nothing
-ending in a spike reads very differently from a steady trickle. **Each row is
-scaled to its own peak** — hence the `OWN PEAK` heading — so a full block is one
-PR on a quiet org and twenty-seven on a busy one; the comparable number is the
-`MRG` column two to its left. A blank row genuinely means nothing merged, and
-dots mean that account has not yet reported for the selected window.
+ending in a spike reads very differently from a steady trickle.
+
+**Each row is scaled to its own busiest day**, which is what the `SHAPE ONLY,
+NOT TO SCALE` heading is warning about: on one board here a full block meant 31
+merged in one org's row and 16 in another's. Read a row left-to-right for its
+trend; do not read heights across rows. The comparable number is the `MRG`
+column two to its left.
+
+A blank row genuinely means nothing merged. Dots mean that account has not yet
+reported for the selected window.
 
 ## How the per-day counts stay exact
 

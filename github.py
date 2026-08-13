@@ -695,10 +695,21 @@ def main():
                       for n in range(min(store.days, bar_cols) - 1, -1, -1)]
         if wide:
             head += "%7s" % "ISSUES"
-            # "own peak" matters: a full block is 1 PR on a quiet account and
-            # 27 on a busy one. The comparable number is MRG, two columns left.
-            head += "  " + ("MERGED/DAY · OWN PEAK"
-                            if bar_cols >= 21 else "MERGED/DAY")[:bar_cols]
+            # Each row is scaled to its own busiest day, so a full block is
+            # 31 merged on one account and 16 on another. Say what the reader
+            # may do with it - read the shape - rather than naming the
+            # mechanism, which is what "OWN PEAK" did until someone asked.
+            # Pick the longest label that fits rather than clipping one:
+            # "MERGED/DAY" cut to "MERGED" would be a truncated hint, and the
+            # scale caveat is worth keeping down to the narrowest width it
+            # will fit in.
+            for label in ("MERGED/DAY · SHAPE ONLY, NOT TO SCALE",
+                          "MERGED/DAY · SHAPE ONLY",
+                          "MERGED/DAY (shape)",
+                          "MERGED/DAY", ""):
+                if len(label) <= bar_cols:
+                    break
+            head += ("  " + label) if label else ""
         rows.append(DIM + pad(head, w - 1))
         for i, s in list(enumerate(stats))[first:first + room]:
             here = i == selected
