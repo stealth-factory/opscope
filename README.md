@@ -107,6 +107,12 @@ may simply not have talked to you since the last restart.
 Keys: `↑`/`↓` select a peer, `i` opens a full machine info view, `c` or `Enter`
 opens a copy sheet, `r` refresh, `o` hide offline peers, `q` quit.
 
+A **live throughput** section graphs peers currently moving data — `↓` receive
+and `↑` transmit sparklines with current rates — scaled to a shared peak so
+machines are directly comparable. Toggle it with `g`. The info view carries the
+same graph for its own machine, scaled to that machine's own peak so its
+variation is visible even when another peer dominates.
+
 The info view shows everything known about one machine: its MagicDNS name, the
 self-reported hostname when it differs, owner and tags, whether the path is
 direct or relayed, handshake and enrolment times, **every address** — Tailscale

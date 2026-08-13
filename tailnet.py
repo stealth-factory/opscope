@@ -31,6 +31,9 @@ node runs with --accept-routes.
 
     python3 tailnet.py [-n SECONDS]
 
+A live throughput section graphs peers currently moving data (toggle with g),
+and the info view carries the same graph for the selected machine.
+
 Keys: up/down select a peer, i opens a full machine info view (every address,
 routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
@@ -41,6 +44,7 @@ Needs the `tailscale` CLI. Peer LAN addresses come from `tailscale debug
 netmap`, which needs root; it is attempted with `sudo -n` and simply omitted
 when that would prompt, so nothing here requires privilege.
 """
+import collections
 import json
 import os
 import subprocess
@@ -52,8 +56,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bg, clipboard, draw, load_config, maybe_help,
                     pad, rgb, seg, setup, size, title)
 
-_CFG = load_config("tailnet", {"refresh": 5.0})
+_CFG = load_config("tailnet", {"refresh": 2.0, "history": 180})
 REFRESH = float(_CFG["refresh"])
+HISTORY = int(_CFG["history"])   # rate samples kept per peer
+SPARK = "▁▂▃▄▅▆▇█"
 
 ONLINE = rgb(90, 240, 160)
 OFFLINE = rgb(120, 130, 150)
@@ -189,6 +195,38 @@ def ts_status():
         return None
 
 
+def _sample_rates(store, data):
+    """Turn cumulative byte counters into per-second rates."""
+    now = time.time()
+    for peer in (data.get("Peer") or {}).values():
+        key = peer_name(peer)
+        rx, tx = peer.get("RxBytes", 0), peer.get("TxBytes", 0)
+        prev = store._counters.get(key)
+        store._counters[key] = (rx, tx, now)
+        if not prev:
+            continue
+        dt = now - prev[2]
+        if dt <= 0:
+            continue
+        # a tailscaled restart zeroes the counters; report no traffic rather
+        # than a large negative spike
+        drx = max(0, rx - prev[0]) / dt
+        dtx = max(0, tx - prev[1]) / dt
+        hist = store.rates.setdefault(key, collections.deque(maxlen=HISTORY))
+        hist.append((drx, dtx))
+
+
+def spark(values, n, peak=None):
+    """Sparkline of the last n values, scaled to `peak` or their own max."""
+    vals = list(values)[-n:]
+    if not vals:
+        return ""
+    hi = peak if peak else max(vals)
+    if not hi:
+        return "·" * len(vals)
+    return "".join(SPARK[min(7, int(v / hi * 7.99))] for v in vals)
+
+
 def ago(s):
     s = int(max(0, s))
     if s < 3600:
@@ -235,10 +273,16 @@ class Store(object):
         self.error = None
         self.wake = threading.Event()
         self._endpoints_at = 0
+        self.rates = {}        # machine -> deque of (rx_per_s, tx_per_s)
+        self._counters = {}    # machine -> (rx, tx, when)
 
     def snapshot(self):
         with self.lock:
-            return self.data, dict(self.endpoints), self.error
+            return (self.data, dict(self.endpoints), self.error,
+                    {k: list(v) for k, v in self.rates.items()})
+
+    def _sample(self, data):
+        _sample_rates(self, data)
 
     def run(self):
         while True:
@@ -254,6 +298,8 @@ class Store(object):
                     self.data, self.error = d, None
                 if eps:
                     self.endpoints = eps
+                if d:
+                    self._sample(d)
             self.wake.wait(REFRESH)
             self.wake.clear()
 
@@ -307,7 +353,39 @@ def stamp(iso):
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
 
 
-def info_overlay(peer, eps, users, w, h):
+def rate(v):
+    """Per-second byte rate in six cells."""
+    return "%s/s" % human(v).strip().rjust(5)
+
+
+def activity_rows(rates, w, limit):
+    """Live throughput for peers that are actually moving data."""
+    active = []
+    for name, hist in rates.items():
+        if not hist:
+            continue
+        recent = hist[-30:]
+        if max((r + t for r, t in recent), default=0) < 64:   # ignore keepalives
+            continue
+        active.append((max(r + t for r, t in recent), name, hist))
+    active.sort(reverse=True)
+    if not active:
+        return [DIM + " no peer traffic in the last few minutes"]
+
+    sw = max(8, min(28, w - 42))
+    peak = max(a[0] for a in active)
+    out = []
+    for _, name, hist in active[:limit]:
+        rx = [r for r, _ in hist]
+        tx = [t for _, t in hist]
+        out.append(seg([(TXT, " " + pad(name[:18], 19)),
+                        (ONLINE, "↓" + spark(rx, sw, peak)),
+                        (RELAY, " ↑" + spark(tx, sw, peak)),
+                        (DIM, "  " + rate(rx[-1]) + " " + rate(tx[-1]))], w - 1))
+    return out
+
+
+def info_overlay(peer, eps, users, w, h, rates=None):
     """Everything known about one machine, including every address."""
     rows = [title("machine info", w, ACCENT)]
     dns = (peer.get("DNSName") or "").rstrip(".")
@@ -373,6 +451,20 @@ def info_overlay(peer, eps, users, w, h):
             rows.append(seg([(ROUTE, "   " + r)], w - 1))
         if len(routes) > 6:
             rows.append(DIM + "   +%d more" % (len(routes) - 6))
+    hist = (rates or {}).get(peer_name(peer)) or []
+    if hist:
+        rows.append("")
+        rows.append(LBL + " throughput  " + DIM + "(last %d samples)" % len(hist[-60:]))
+        rx = [r for r, _ in hist]
+        tx = [t for _, t in hist]
+        peak = max(max(rx), max(tx), 1)
+        sw = max(10, w - 22)
+        rows.append(seg([(DIM, "   down "), (ONLINE, spark(rx, sw, peak)),
+                         (DIM, " " + rate(rx[-1]))], w - 1))
+        rows.append(seg([(DIM, "   up   "), (RELAY, spark(tx, sw, peak)),
+                         (DIM, " " + rate(tx[-1]))], w - 1))
+        rows.append(seg([(DIM, "   peak  %s" % rate(peak))], w - 1))
+
     if peer.get("ExitNodeOption"):
         rows.append("")
         rows.append(seg([(EXIT, " offers itself as an exit node")], w - 1))
@@ -430,6 +522,7 @@ def main():
     th.start()
 
     hide_offline = False
+    show_graph = True
     selected = 0
     scroll = 0
     view = None          # None | "copy" | "info"
@@ -463,6 +556,8 @@ def main():
             elif key == "o":
                 hide_offline = not hide_offline
                 selected = 0
+            elif key == "g":
+                show_graph = not show_graph
             elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
@@ -484,7 +579,7 @@ def main():
                     view = "info"
 
         w, h = size()
-        data, eps_now, err = store.snapshot()
+        data, eps_now, err, rates = store.snapshot()
         if note and time.time() > note_until:
             note = ""
         rows = [title("tailnet", w, ACCENT)]
@@ -520,11 +615,16 @@ def main():
             chosen = listed[min(selected, len(listed) - 1)]
             if view == "info":
                 users = {str(k): v for k, v in (data.get("User") or {}).items()}
-                draw(info_overlay(chosen, eps_now, users, w, h), w, h)
+                draw(info_overlay(chosen, eps_now, users, w, h, rates), w, h)
             else:
                 draw(copy_overlay(chosen, eps_now, w, h, note), w, h)
             time.sleep(0.1)
             continue
+
+        if show_graph:
+            rows.append(LBL + " ── LIVE THROUGHPUT ── " + DIM + "peers moving data")
+            rows.extend(activity_rows(rates, w, 4))
+            rows.append("")
 
         wide = w >= 62
         # machine names are long; spend spare width on them rather than padding
@@ -590,7 +690,7 @@ def main():
                              (TXT, ", ".join(rts[:2])),
                              (DIM, (" +%d more" % (len(rts) - 2)) if len(rts) > 2 else "")],
                             w - 1))
-        rows.append(seg([(DIM, " ↑↓ select · [i]nfo [c]opy · [r]efresh [o]ffline [q]uit")],
+        rows.append(seg([(DIM, " ↑↓ · [i]nfo [c]opy [g]raph [o]ffline [r]efresh [q]uit")],
                         w - 1))
         draw(rows, w, h)
         time.sleep(0.3)
