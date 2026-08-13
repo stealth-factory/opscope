@@ -270,6 +270,30 @@ def vbars(columns, height):
     return rows
 
 
+def skeleton(width, tick, span=7):
+    """A placeholder bar with a highlight sweeping across it.
+
+    For values that are being refetched: showing the previous number while a
+    new one is in flight states something false, and blanking the row makes
+    the layout jump. A shimmering grey bar says "pending" without either.
+    """
+    period = width + span * 2
+    centre = (tick % period) - span
+    out, last, run = [], None, []
+    for i in range(width):
+        near = max(0.0, 1.0 - abs(i - centre) / float(span))
+        level = int(58 + near * 118)
+        colour = rgb(level, level, level + 8)
+        if colour != last:
+            if run:
+                out.append((last, "".join(run)))
+            last, run = colour, []
+        run.append("█")
+    if run:
+        out.append((last, "".join(run)))
+    return out
+
+
 def pack_hints(hints, width, sep="  "):
     """Lay key hints across as many lines as they need.
 

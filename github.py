@@ -33,7 +33,7 @@ Credentials: `github.token` in config.json, or $GITHUB_TOKEN. A classic
 personal access token with `repo` and `read:org` covers private repositories
 and org discovery. The API is called directly, so the `gh` CLI is not required.
 
-Keys: up/down select an account, r refreshes now, w cycles the merge window
+Keys: up/down select an account, r refreshes now, m cycles the merge window
 (7/14/30/90 days), q quits.
 """
 import collections
@@ -50,7 +50,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, big, braille_plot, cycle, draw,
                     heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
-                    seg, setup, size, stacked_bar, title, vbars)
+                    seg, setup, size, skeleton, stacked_bar, title, vbars)
 
 _CFG = load_config("github", {
     "token": "",
@@ -114,6 +114,35 @@ def discover_accounts(tok):
     return [o["login"] for o in d["organizations"]["nodes"]] + ["@me"]
 
 
+def scope(acc, viewer):
+    """The search qualifier that limits results to a single account."""
+    return ("user:%s" % viewer) if acc == "@me" else ("org:%s" % acc)
+
+
+DAY_CHUNK = 20      # 2 searches a day; the alias ceiling sits between 60 and 90
+
+
+def build_day_query(q, dates):
+    """Exact per-day PR counts for one account.
+
+    The charts used to read PR nodes and bucket their timestamps, but a search
+    connection returns at most 100 nodes per page, so a busy fortnight lost
+    everything past the hundredth record - and the merged series sorted by
+    update time, so those hundred were not even the hundred most recently
+    merged. A count per day is exact at any volume, and aliased searches cost
+    one rate-limit point per request however many are packed into it.
+    """
+    parts = ["{"]
+    for n, day in enumerate(dates):
+        parts.append(
+            '\n  m%(n)d: search(query:"%(q)s is:pr is:merged merged:%(d)s",'
+            ' type:ISSUE) { issueCount }'
+            '\n  c%(n)d: search(query:"%(q)s is:pr created:%(d)s",'
+            ' type:ISSUE) { issueCount }' % {"n": n, "q": q, "d": day})
+    parts.append("\n}")
+    return "".join(parts)
+
+
 def build_query(accounts, days, history_days, viewer):
     """Metrics for a batch of accounts in one request.
 
@@ -122,26 +151,17 @@ def build_query(accounts, days, history_days, viewer):
     while still being far fewer round trips than one query per metric.
     """
     since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
-    hist_since = (datetime.date.today()
-                  - datetime.timedelta(days=history_days)).isoformat()
     parts = ["{"]
     for i, acc in enumerate(accounts):
-        who = viewer if acc == "@me" else acc
-        kind = "user" if acc == "@me" else "org"
-        q = "%s:%s" % (kind, who)
+        q = scope(acc, viewer)
         parts.append('''
   o%(i)d_open:    search(query:"%(q)s is:pr is:open", type:ISSUE) { issueCount }
   o%(i)d_draft:   search(query:"%(q)s is:pr is:open draft:true", type:ISSUE) { issueCount }
   o%(i)d_review:  search(query:"%(q)s is:pr is:open review:required", type:ISSUE) { issueCount }
   o%(i)d_merged:  search(query:"%(q)s is:pr is:merged merged:>=%(s)s", type:ISSUE) { issueCount }
   o%(i)d_dropped: search(query:"%(q)s is:pr is:unmerged is:closed closed:>=%(s)s", type:ISSUE) { issueCount }
-  o%(i)d_issues:  search(query:"%(q)s is:issue is:open", type:ISSUE) { issueCount }
-  o%(i)d_hist:    search(query:"%(q)s is:pr is:merged merged:>=%(h)s sort:updated-desc", type:ISSUE, first:100) {
-    issueCount nodes { ... on PullRequest { mergedAt } }
-  }
-  o%(i)d_ohist:   search(query:"%(q)s is:pr created:>=%(h)s sort:created-desc", type:ISSUE, first:100) {
-    issueCount nodes { ... on PullRequest { createdAt } }
-  }''' % {"i": i, "q": q, "s": since, "h": hist_since})
+  o%(i)d_issues:  search(query:"%(q)s is:issue is:open", type:ISSUE) { issueCount }'''
+                     % {"i": i, "q": q, "s": since})
     parts.append("\n  rateLimit { remaining limit }\n}")
     return "".join(parts)
 
@@ -153,6 +173,7 @@ class Store(object):
         self.days = days
         self.history_days = history_days
         self.stats = []
+        self.pending = True       # window changed or first load: figures stale
         self.calendar = None
         self.rate = None
         self.error = None
@@ -162,7 +183,7 @@ class Store(object):
     def snapshot(self):
         with self.lock:
             return (list(self.stats), self.rate, self.error, self.fetched,
-                    self.calendar)
+                    self.calendar, self.pending)
 
     def run(self):
         viewer = None
@@ -206,20 +227,19 @@ class Store(object):
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
                     merged, dropped = g("merged"), g("dropped")
                     hist, opened_hist = collections.Counter(), collections.Counter()
-                    capped = False
-                    for key, field, bucket in (("hist", "mergedAt", hist),
-                                               ("ohist", "createdAt", opened_hist)):
-                        block = d.get("o%d_%s" % (i, key)) or {}
-                        nodes = block.get("nodes") or []
-                        # search returns at most 100 nodes; with newest first,
-                        # a truncated page means older days are missing rather
-                        # than genuinely empty
-                        if block.get("issueCount", 0) > len(nodes):
-                            capped = True
-                        for n in nodes:
-                            when = (n or {}).get(field)
-                            if when:
-                                bucket[when[:10]] += 1
+                    today = datetime.date.today()
+                    dates = [(today - datetime.timedelta(days=k)).isoformat()
+                             for k in range(self.history_days - 1, -1, -1)]
+                    for c in range(0, len(dates), DAY_CHUNK):
+                        chunk = dates[c:c + DAY_CHUNK]
+                        try:
+                            dd = graphql(build_day_query(scope(acc, viewer),
+                                                         chunk), tok)["data"]
+                        except Exception:
+                            continue
+                        for n, day in enumerate(chunk):
+                            hist[day] += (dd.get("m%d" % n) or {}).get("issueCount", 0)
+                            opened_hist[day] += (dd.get("c%d" % n) or {}).get("issueCount", 0)
                     stats.append({
                         "account": viewer if acc == "@me" else acc,
                         "is_me": acc == "@me",
@@ -229,13 +249,13 @@ class Store(object):
                         "rate": (100.0 * merged / (merged + dropped)
                                  if merged + dropped else None),
                         "hist": hist, "opened_hist": opened_hist,
-                        "capped": capped,
                     })
                     with self.lock:            # publish as each one lands
                         self.stats = list(stats)
                         self.rate = rate
                         self.fetched = time.time()
                 with self.lock:
+                    self.pending = False
                     self.error = ("could not read: " + ", ".join(failed)) if failed else None
             except urllib.error.HTTPError as e:
                 with self.lock:
@@ -303,15 +323,19 @@ def main():
     th.start()
 
     selected = 0
+    tick = 0
     while True:
+        tick += 1
         for key in keyboard.poll():
             if key in ("q", "Q"):
                 keyboard.restore()
                 raise SystemExit(0)
             if key == "r":
                 store.wake.set()
-            elif key == "w":
-                store.days = cycle(WINDOWS, store.days)
+            elif key == "m":
+                with store.lock:
+                    store.days = cycle(WINDOWS, store.days)
+                    store.pending = True     # everything windowed is now stale
                 store.wake.set()
             elif key == "up":
                 selected = max(0, selected - 1)
@@ -319,12 +343,11 @@ def main():
                 selected += 1
 
         w, h = size()
-        stats, rate, err, fetched, calendar = store.snapshot()
+        stats, rate, err, fetched, calendar, pending = store.snapshot()
         selected = max(0, min(selected, len(stats) - 1)) if stats else 0
 
         rows = [title("github ops", w, PR)]
         head = [(DIM, " %d account%s" % (len(stats), "" if len(stats) == 1 else "s")),
-                (DIM, " · merge window %dd" % store.days),
                 (DIM, "   updated %s ago" % ago(fetched))]
         if rate:
             left = rate.get("remaining", 0)
@@ -348,10 +371,16 @@ def main():
         rcol = heat((rate_pct or 0) / 100.0) if rate_pct is not None else DIM
         rows.append(seg([(LBL, " ── MERGE RATE ── "),
                          (DIM, "last %d days" % store.days)], w - 1))
-        rows.append(seg([(rcol, " %-5s" % pct_txt),
-                         (rcol, meter((rate_pct or 0) / 100.0, max(10, w - 34))),
-                         (OK, "  %d merged" % tot["merged"]),
-                         (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])], w - 1))
+        bar_w = max(10, w - 34)
+        if pending:
+            rows.append(seg([(DIM, " %-5s" % "···")] + skeleton(bar_w, tick) +
+                            [(DIM, "  loading %dd…" % store.days)], w - 1))
+        else:
+            rows.append(seg([(rcol, " %-5s" % pct_txt),
+                             (rcol, meter((rate_pct or 0) / 100.0, bar_w)),
+                             (OK, "  %d merged" % tot["merged"]),
+                             (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])],
+                            w - 1))
         # these are point-in-time totals, not windowed like the rate above
         rows.append(seg([(DIM, " open right now:  "),
                          (PR, "%d" % tot["open"]), (DIM, " PRs   "),
@@ -359,26 +388,15 @@ def main():
                          (DIM, "   (any age)")], w - 1))
 
         merged_all, opened_all = collections.Counter(), collections.Counter()
-        capped = False
         for st in stats:
             merged_all.update(st["hist"])
             opened_all.update(st.get("opened_hist") or {})
-            capped = capped or st.get("capped")
         hist_days = int(_CFG["history_days"])
         today = datetime.date.today()
 
-        # Only chart days both series actually cover: a truncated page means
-        # older days are missing, and drawing them as zero would invent a lull.
-        covered = hist_days
-        if capped:
-            seen = sorted(set(merged_all) | set(opened_all))
-            if seen:
-                oldest = datetime.date(*[int(x) for x in seen[0].split("-")])
-                covered = max(3, min(hist_days, (today - oldest).days + 1))
-
         days = [(today - datetime.timedelta(days=n)).isoformat()
-                for n in range(covered - 1, -1, -1)]
-        chart_w = max(10, min(covered, w - 6))
+                for n in range(hist_days - 1, -1, -1)]
+        chart_w = max(10, min(hist_days, w - 6))
         days = days[-chart_w:]
 
         def day_chart(heading, counter, colour):
@@ -387,10 +405,14 @@ def main():
             total = sum(v for v, _ in cols)
             rows.append("")
             rows.append(seg([(LBL, " ── %s ── " % heading),
-                             (DIM, "%dd, %d total, peak %d" % (len(days), total, peak)),
-                             (WARN, "  (100-record cap)" if capped else "")], w - 1))
-            for line in vbars(cols, 4):
-                rows.append(seg([(RST, " ")] + line, w - 1))
+                             (DIM, "%dd, %d total, peak %d"
+                                   % (len(days), total, peak))], w - 1))
+            if pending:
+                for _ in range(4):
+                    rows.append(seg([(RST, " ")] + skeleton(len(days), tick), w - 1))
+            else:
+                for line in vbars(cols, 4):
+                    rows.append(seg([(RST, " ")] + line, w - 1))
 
         day_chart("OPENED PRs / DAY", opened_all, PR)
         day_chart("MERGED PRs / DAY", merged_all, OK)
@@ -444,9 +466,12 @@ def main():
                      ("▸" if here else " ") + pad(s["account"] + (" (you)" if s["is_me"] else ""), 20)),
                     (tint + PR, "%5d" % s["open"]),
                     (tint + (WARN if s["review"] else DIM), "%5d" % s["review"]),
-                    (tint + OK, "%6d" % s["merged"]),
-                    (tint + (heat(r / 100.0) if r is not None else DIM),
-                     "%5s%%" % ("%.0f" % r if r is not None else " --"))]
+                    (tint + (DIM if pending else OK),
+                     "%6s" % ("···" if pending else s["merged"])),
+                    (tint + (DIM if pending else
+                             (heat(r / 100.0) if r is not None else DIM)),
+                     "%6s" % ("···" if pending else
+                              ("%.0f%%" % r if r is not None else "--")))]
             if wide:
                 line.append((tint + DIM, "%6d" % s["issues"]))
                 # relative share of open PRs, so scale is visible not just rank
@@ -456,7 +481,7 @@ def main():
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
 
-        hints = [[(ACCENT, "↑↓"), (DIM, " account")], [(DIM, "[w]indow")],
+        hints = [[(ACCENT, "↑↓"), (DIM, " account")], [(DIM, "[m]erge window")],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         footer = [" " + line for line in pack_hints(hints, w - 2)]
         rows = rows[:h - len(footer)]
