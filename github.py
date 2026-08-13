@@ -51,7 +51,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, big, braille_plot, cycle, draw,
                     heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
-                    seg, setup, size, skeleton, stacked_bar, title, vbars)
+                    seg, setup, size, skeleton, stacked_bar, title, vbars,
+                    vbars_down)
 
 _CFG = load_config("github", {
     "token": "",
@@ -228,8 +229,18 @@ class Store(object):
                 keep_from = (today - datetime.timedelta(
                     days=max(WINDOWS) - 1)).isoformat()
                 failed, rate = [], None
-                # one request per account: results appear as they arrive, and a
-                # single bad account cannot blank the whole board
+
+                def publish():
+                    with self.lock:
+                        self.stats = [by_acc[a] for a in self.accounts
+                                      if a in by_acc]
+                        self.rate = rate
+                        self.fetched = time.time()
+
+                # Aggregates first, for every account, before any per-day work.
+                # One request each, so the headline is live in seconds; the day
+                # charts below can cost fifty requests on a cold 90d window and
+                # would otherwise hold the whole board grey for minutes.
                 for acc in self.accounts:
                     try:
                         data = graphql(build_query([acc], days_now, viewer), tok)
@@ -243,12 +254,34 @@ class Store(object):
                     i = 0
                     g = lambda k: (d.get("o%d_%s" % (i, k)) or {}).get("issueCount", 0)
                     merged, dropped = g("merged"), g("dropped")
-                    # A past day's counts cannot change: a PR merged on the 3rd
-                    # stays merged on the 3rd. So only days never seen before,
-                    # plus the trailing few (still in progress, and the search
-                    # index lags), are worth a request. Widening the window
-                    # therefore costs only the days it adds, and narrowing it
-                    # costs nothing at all.
+                    prev = by_acc.get(acc) or {}
+                    by_acc[acc] = {
+                        "key": acc,
+                        "window": days_now,     # which merge window these cover
+                        "account": viewer if acc == "@me" else acc,
+                        "is_me": acc == "@me",
+                        "open": g("open"), "draft": g("draft"),
+                        "review": g("review"), "issues": g("issues"),
+                        "merged": merged, "dropped": dropped,
+                        "rate": (100.0 * merged / (merged + dropped)
+                                 if merged + dropped else None),
+                        # carried over until this account's day counts land, and
+                        # tagged with the window they actually cover so a
+                        # half-updated board cannot sum two windows together
+                        "hist": prev.get("hist") or collections.Counter(),
+                        "opened_hist": prev.get("opened_hist") or collections.Counter(),
+                        "hist_window": prev.get("hist_window"),
+                    }
+                    publish()
+
+                # Then the per-day counts. A past day cannot change - a PR
+                # merged on the 3rd stays merged on the 3rd - so only days never
+                # seen before, plus the trailing few (still running, and the
+                # search index lags), cost a request. Widening the window
+                # therefore buys only the days it adds; narrowing is free.
+                for acc in self.accounts:
+                    if acc not in by_acc:
+                        continue
                     cache = self.day_cache.setdefault(acc, {})
                     if bust:
                         cache.clear()
@@ -264,29 +297,16 @@ class Store(object):
                         for n, day in enumerate(chunk):
                             cache[day] = ((dd.get("m%d" % n) or {}).get("issueCount", 0),
                                           (dd.get("c%d" % n) or {}).get("issueCount", 0))
-                    for stale_day in [x for x in cache if x < keep_from]:
-                        del cache[stale_day]          # older than any window
-                    hist = collections.Counter(
-                        dict((x, cache[x][0]) for x in dates if x in cache))
-                    opened_hist = collections.Counter(
-                        dict((x, cache[x][1]) for x in dates if x in cache))
-                    by_acc[acc] = {
-                        "key": acc,
-                        "window": days_now,     # which merge window these cover
-                        "account": viewer if acc == "@me" else acc,
-                        "is_me": acc == "@me",
-                        "open": g("open"), "draft": g("draft"),
-                        "review": g("review"), "issues": g("issues"),
-                        "merged": merged, "dropped": dropped,
-                        "rate": (100.0 * merged / (merged + dropped)
-                                 if merged + dropped else None),
-                        "hist": hist, "opened_hist": opened_hist,
-                    }
-                    with self.lock:            # publish as each one lands
-                        self.stats = [by_acc[a] for a in self.accounts
-                                      if a in by_acc]
-                        self.rate = rate
-                        self.fetched = time.time()
+                    for old_day in [x for x in cache if x < keep_from]:
+                        del cache[old_day]            # older than any window
+                    if not all(x in cache for x in dates):
+                        continue                      # a chunk failed; leave it
+                    by_acc[acc]["hist"] = collections.Counter(
+                        dict((x, cache[x][0]) for x in dates))
+                    by_acc[acc]["opened_hist"] = collections.Counter(
+                        dict((x, cache[x][1]) for x in dates))
+                    by_acc[acc]["hist_window"] = days_now
+                    publish()
                 with self.lock:
                     self.error = ("could not read: " + ", ".join(failed)) if failed else None
             except urllib.error.HTTPError as e:
@@ -379,7 +399,11 @@ def main():
         stats, rate, err, fetched, calendar = store.snapshot()
         # Windowed figures are stale until every account has reported for the
         # window now selected; rows carry the window they were fetched for.
+        # The charts are tracked apart from the headline because their data
+        # costs far more requests and so lands well after it.
         stale = not stats or any(x.get("window") != store.days for x in stats)
+        chart_stale = not stats or any(x.get("hist_window") != store.days
+                                       for x in stats)
         selected = max(0, min(selected, len(stats) - 1)) if stats else 0
 
         rows = [title("github ops", w, PR)]
@@ -402,6 +426,26 @@ def main():
                for k in ("open", "draft", "review", "issues", "merged", "dropped")}
         rate_pct = (100.0 * tot["merged"] / (tot["merged"] + tot["dropped"])
                     if tot["merged"] + tot["dropped"] else None)
+        # What is outstanding right now leads the board: it is the question
+        # asked most often, and it is the only section that is not windowed.
+        if tot["open"]:
+            ready = max(0, tot["open"] - tot["draft"] - tot["review"])
+            legend = [x for x in (("awaiting review", tot["review"], WARN),
+                                  ("ready to merge", ready, OK),
+                                  ("draft", tot["draft"], DIM)) if x[1]]
+            rows.append(seg([(LBL, " ── OPEN PR STATE ── "),
+                             (PR, "%d" % tot["open"]), (DIM, " PRs · "),
+                             (WARN, "%d" % tot["issues"]),
+                             (DIM, " issues open   (any age)")], w - 1))
+            parts = [(n / float(tot["open"]), c) for _, n, c in legend]
+            rows.append(seg([(RST, " ")] + stacked_bar(parts, max(10, w - 3)),
+                            w - 1))
+            key = [(RST, " ")]
+            for label, count, colour in legend:
+                key += [(colour, "▇ "), (TXT, label),
+                        (DIM, " %d (%.0f%%)   " % (count, 100.0 * count / tot["open"]))]
+            rows.append(seg(key, w - 1))
+
         rows.append("")
         pct_txt = ("%.0f%%" % rate_pct) if rate_pct is not None else "--"
         rcol = heat((rate_pct or 0) / 100.0) if rate_pct is not None else DIM
@@ -417,14 +461,10 @@ def main():
                              (OK, "  %d merged" % tot["merged"]),
                              (DIM, " / "), (BAD, "%d dropped" % tot["dropped"])],
                             w - 1))
-        # these are point-in-time totals, not windowed like the rate above
-        rows.append(seg([(DIM, " open right now:  "),
-                         (PR, "%d" % tot["open"]), (DIM, " PRs   "),
-                         (WARN, "%d" % tot["issues"]), (DIM, " issues"),
-                         (DIM, "   (any age)")], w - 1))
-
         merged_all, opened_all = collections.Counter(), collections.Counter()
         for st in stats:
+            if st.get("hist_window") != store.days:
+                continue           # covers a different window; adding it lies
             merged_all.update(st["hist"])
             opened_all.update(st.get("opened_hist") or {})
         hist_days = store.days
@@ -432,54 +472,83 @@ def main():
 
         days = [(today - datetime.timedelta(days=n)).isoformat()
                 for n in range(hist_days - 1, -1, -1)]
-        chart_w = max(10, min(hist_days, w - 6))
-        days = days[-chart_w:]
 
-        def day_chart(heading, counter, colour):
-            cols = [(counter.get(d, 0), colour) for d in days]
-            peak = max([v for v, _ in cols], default=0)
-            total = sum(v for v, _ in cols)
-            rows.append("")
-            # A narrow pane cannot draw 90 columns, so the chart shows the most
-            # recent days that fit and says so - the total is of what is drawn,
-            # not of the window, and would otherwise contradict the merge rate.
-            span = ("%dd of %dd" % (len(days), hist_days)
-                    if len(days) < hist_days else "%dd" % len(days))
-            rows.append(seg([(LBL, " ── %s ── " % heading),
-                             (DIM, "%s, %d total, peak %d"
-                                   % (span, total, peak))], w - 1))
-            if stale:                        # these follow the merge window,
-                for _ in range(4):           # so a change leaves days the
-                    rows.append(seg([(RST, " ")] + skeleton(len(days), tick),
-                                    w - 1))   # cache has not filled in yet
-            else:
-                for line in vbars(cols, 4):
-                    rows.append(seg([(RST, " ")] + line, w - 1))
+        # The chart always fills the pane. Where there is room to spare a day
+        # takes several columns (with a gap between bars once they are wide
+        # enough to need one); where there is not, the oldest days are cropped
+        # rather than the whole chart being squeezed into a corner.
+        avail = max(10, w - 3)
+        if len(days) > avail:
+            days = days[-avail:]
+        slot = max(1, avail // len(days))
+        gap = 1 if slot >= 3 else 0
+        barw = slot - gap
 
-        day_chart("OPENED PRs / DAY", opened_all, PR)
-        day_chart("MERGED PRs / DAY", merged_all, OK)
-        rows.append(seg([(DIM, " %dd ago" % len(days)),
-                         (DIM, " " * max(1, len(days) - 13)), (DIM, "today")], w - 1))
+        def spread(counter, colour):
+            cols = []
+            for n, d in enumerate(days):
+                cols.extend([(counter.get(d, 0), colour)] * barw)
+                if gap and n < len(days) - 1:
+                    cols.extend([(0, colour)] * gap)
+            return cols
 
-        if tot["open"]:
-            ready = max(0, tot["open"] - tot["draft"] - tot["review"])
-            legend = [x for x in (("awaiting review", tot["review"], WARN),
-                                  ("ready to merge", ready, OK),
-                                  ("draft", tot["draft"], DIM)) if x[1]]
-            rows.append(seg([(LBL, " ── OPEN PR STATE ── "),
-                             (DIM, "%d total" % tot["open"])], w - 1))
-            parts = [(n / float(tot["open"]), c) for _, n, c in legend]
-            rows.append(seg([(RST, " ")] + stacked_bar(parts, max(10, w - 3)), w - 1))
-            key = [(RST, " ")]
-            for label, count, colour in legend:
-                key += [(colour, "▇ "), (TXT, label),
-                        (DIM, " %d (%.0f%%)   " % (count, 100.0 * count / tot["open"]))]
-            rows.append(seg(key, w - 1))
-            rows.append("")
+        # One chart, two directions: PRs opened grow up, PRs merged grow down
+        # from a shared baseline. Read together they answer whether the queue
+        # is filling faster than it drains - which two separate charts made
+        # you compare by eye across a heading.
+        up = spread(opened_all, PR)
+        down = spread(merged_all, OK)
+        chart_cols = len(up)
+        # One scale both ways, or the comparison lies.
+        span_hi = max([v for v, _ in up + down], default=0) or 1
+        # A narrow pane cannot draw 90 columns, so the chart shows the most
+        # recent days that fit and says so - the totals are of what is drawn,
+        # not of the window, and would otherwise contradict the merge rate.
+        span = ("%dd of %dd" % (len(days), hist_days)
+                if len(days) < hist_days else "%dd" % len(days))
+        rows.append("")
+        if chart_stale:
+            # totals across a half-updated board would sum two windows
+            rows.append(seg([(LBL, " ── PR FLOW ── "),
+                             (DIM, "counting %dd…" % hist_days)], w - 1))
+        else:
+            # totals come from the days themselves: a day spans several
+            # columns now, so summing the columns would multiply by bar width
+            rows.append(seg([(LBL, " ── PR FLOW ── "), (DIM, "%s · " % span),
+                             (PR, "▲ %d opened"
+                              % sum(opened_all.get(d, 0) for d in days)),
+                             (DIM, " · "),
+                             (OK, "▼ %d merged"
+                              % sum(merged_all.get(d, 0) for d in days)),
+                             (DIM, "   peak %d/day" % span_hi)], w - 1))
+        if chart_stale:
+            for _ in range(5):
+                rows.append(seg([(RST, " ")] + skeleton(chart_cols, tick),
+                                w - 1))
+        else:
+            for line in vbars(up, 3, hi=span_hi):
+                rows.append(seg([(RST, " ")] + line, w - 1))
+            # an explicit baseline: without it the two series abut and the eye
+            # cannot tell which row the bars grow from
+            rows.append(seg([(RST, " "), (GRID, "─" * chart_cols)], w - 1))
+            below = vbars_down(down, 3, hi=span_hi)
+            while len(below) > 1 and not "".join(c for _, c in below[-1]).strip():
+                below.pop()          # drop headroom the merged side never uses
+            for line in below:
+                rows.append(seg([(RST, " ")] + line, w - 1))
+        left = "%dd ago" % len(days)
+        rows.append(seg([(DIM, " " + left),
+                         (DIM, " " * max(1, chart_cols - len(left) - 5)),
+                         (DIM, "today")], w - 1))
 
-        if calendar and h > 30:
+        rows.append("")
+
+        # The account table earns the remaining height: it truncates at h - 3
+        # and was showing five of nine accounts, while the calendar below it
+        # spent eight rows on decoration. The calendar keeps its place only
+        # where the pane is tall enough for both.
+        if calendar and h > 38:
             grid, peak, total = heatmap(calendar["weeks"], w)
-            rows.append("")
             rows.append(seg([(LBL, " ── CONTRIBUTIONS ── "),
                              (DIM, "%d in %d weeks, peak %d/day"
                               % (calendar.get("totalContributions", total),
@@ -487,9 +556,10 @@ def main():
                             w - 1))
             for r, line in enumerate(grid):
                 label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
-                rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))], w - 1))
+                rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))],
+                                w - 1))
+            rows.append("")
 
-        rows.append("")
         rows.append(seg([(LBL, " ── BY ACCOUNT ──")], w - 1))
         wide = w >= 62
         head = " %-20s %5s %5s %6s %6s" % ("ACCOUNT", "OPEN", "REVW",

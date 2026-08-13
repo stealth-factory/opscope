@@ -245,14 +245,15 @@ def meter(frac, n, on="█", off="░"):
     return on * k + off * (n - k)
 
 
-def vbars(columns, height):
+def vbars(columns, height, hi=None):
     """Vertical bar chart. `columns` is [(value, colour), ...].
 
     Each cell resolves an eighth of a row via the partial-block glyphs, so a
-    five-row chart has forty levels rather than five.
+    five-row chart has forty levels rather than five. Pass `hi` to fix the
+    full-scale value, so two charts can share a scale and stay comparable.
     """
     steps = " ▁▂▃▄▅▆▇█"
-    hi = max((v for v, _ in columns), default=0) or 1
+    hi = hi or max((v for v, _ in columns), default=0) or 1
     rows = []
     for r in range(height):
         top = hi * (height - r) / float(height)
@@ -265,6 +266,36 @@ def vbars(columns, height):
                 ch = " "
             else:
                 ch = steps[max(1, int((value - bottom) / (top - bottom) * 8))]
+            line.append((colour, ch))
+        rows.append(line)
+    return rows
+
+
+def vbars_down(columns, height, hi=None):
+    """Bar chart hanging downward from a baseline above it.
+
+    Paired with `vbars` and a shared `hi`, this makes a diverging chart: one
+    series growing up, another down, one column per day.
+
+    The partial-block glyphs are all bottom-anchored, so a downward bar cannot
+    resolve an eighth of a cell the way `vbars` does - only `▀` exists as a
+    top-anchored partial. Half a cell is ample once peaks are scaled, and the
+    alternative (inverting foreground and background) needs the terminal's
+    background painted, which these widgets deliberately never do.
+    """
+    hi = hi or max((v for v, _ in columns), default=0) or 1
+    rows = []
+    for r in range(height):
+        full = hi * (r + 1) / float(height)     # value that fills this row
+        empty = hi * r / float(height)          # value at which it starts
+        line = []
+        for value, colour in columns:
+            if value >= full:
+                ch = "█"
+            elif value <= empty:
+                ch = " "
+            else:
+                ch = "▀" if (value - empty) / (full - empty) >= 0.5 else " "
             line.append((colour, ch))
         rows.append(line)
     return rows
