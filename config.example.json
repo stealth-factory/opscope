@@ -69,9 +69,13 @@
     "refresh": 120
   },
   "pr": {
-    "_comment": "Reuses github.token - no second credential. query is a GitHub search; anything on the command line is appended to it.",
-    "query": "is:open is:pr involves:@me",
-    "limit": 100,
+    "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "sources": {
+      "orgs": "is:open is:pr @mine",
+      "authored": "is:open is:pr author:@me",
+      "assigned": "is:open is:pr assignee:@me"
+    },
+    "limit": 50,
     "refresh": 60
   }
 }

@@ -51,14 +51,23 @@ _GH = load_config("github", {"token": "", "token_env": "GITHUB_TOKEN"})
 _CFG = load_config("pr", {
     "token": "",
     "token_env": "GITHUB_TOKEN",
-    "query": "is:open is:pr involves:@me",
-    "limit": 100,
+    # GitHub search has no OR, so anything that is a union of conditions has
+    # to be several searches merged. Each entry here is one search; results
+    # are pooled and de-duplicated. `@mine` expands to every org you belong
+    # to plus your own account, as owner qualifiers.
+    "sources": {
+        "orgs": "is:open is:pr @mine",
+        "authored": "is:open is:pr author:@me",
+        "assigned": "is:open is:pr assignee:@me",
+    },
+    "limit": 50,           # per source; 3 x 100 nodes returns HTTP 502
     "refresh": 60,
 })
 
 REFRESH = float(_CFG["refresh"])
 API = "https://api.github.com/graphql"
 SORTS = ("updated", "created")
+
 SPARK = "▁▂▃▄▅▆▇█"
 OPENED_DAYS = 30   # width of the opened-per-day chart
 
@@ -114,22 +123,29 @@ def graphql(query, tok, variables=None):
     return data["data"]
 
 
-LIST_QUERY = """
-query($q: String!, $n: Int!) {
-  rateLimit { remaining }
-  search(query: $q, type: ISSUE, first: $n) {
-    issueCount
-    nodes { ... on PullRequest {
+PR_FIELDS = """
       number title url isDraft createdAt updatedAt
       additions deletions changedFiles
       author { login }
       repository { nameWithOwner }
       headRefName baseRefName reviewDecision mergeable
       stackEntry { position stack { number size } }
-      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-    } }
-  }
-}"""
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"""
+
+
+def list_query(queries, limit):
+    """One request, one aliased search per source.
+
+    The ceiling is on result nodes rather than field complexity: three
+    searches of 100 return HTTP 502 with or without the check rollup, three
+    of 50 do not. So the page size is per source and deliberately modest.
+    """
+    parts = ["rateLimit { remaining }"]
+    for i, q in enumerate(queries):
+        parts.append('s%d: search(query: %s, type: ISSUE, first: %d) '
+                     '{ issueCount nodes { ... on PullRequest { %s } } }'
+                     % (i, json.dumps(q), limit, PR_FIELDS))
+    return "{ %s }" % " ".join(parts)
 
 DETAIL_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -232,11 +248,15 @@ def stack_of(pr, repo_prs):
 
 
 class Store(object):
-    def __init__(self, query):
+    def __init__(self, extra):
         self.lock = threading.Lock()
-        self.query = query
+        self.extra = extra
+        self.viewer = None
+        self.orgs = []
+        self.query = ""
         self.prs = []
         self.total = 0
+        self.capped = []
         self.detail = None          # the open PR's full record
         self.stack_rows = []        # (depth, pr, is_current) for the stack map
         self.want = None            # (owner, name, number) to fetch detail for
@@ -249,7 +269,22 @@ class Store(object):
         with self.lock:
             return (list(self.prs), self.total, self.detail,
                     list(self.stack_rows), self.loading_detail, self.error,
-                    self.fetched)
+                    self.fetched, self.query)
+
+    def searches(self):
+        """Each configured source, with `@mine` expanded and args appended.
+
+        Repeated qualifiers of the same kind are OR'd by GitHub, so one
+        search covers every org and your own account at once; relationships
+        that reach outside them - authored, assigned - need their own.
+        """
+        mine = " ".join(["org:%s" % o for o in self.orgs]
+                        + (["user:%s" % self.viewer] if self.viewer else []))
+        out = []
+        for name, q in _CFG["sources"].items():
+            out.append((name, " ".join([q.replace("@mine", mine)]
+                                       + self.extra)))
+        return out
 
     def open_detail(self, pr):
         with self.lock:
@@ -294,15 +329,33 @@ class Store(object):
             self.wake.clear()
 
     def fetch_list(self, tok, source):
-        d = graphql(LIST_QUERY, tok, {"q": self.query,
-                                      "n": int(_CFG["limit"])})
+        if self.viewer is None:
+            who = graphql("{ viewer { login organizations(first:20)"
+                          " { nodes { login } } } }", tok)["viewer"]
+            with self.lock:
+                self.viewer = who["login"]
+                self.orgs = [o["login"] for o in who["organizations"]["nodes"]]
+        pairs = self.searches()
+        d = graphql(list_query([q for _n, q in pairs], int(_CFG["limit"])), tok)
         rate = d.get("rateLimit") or {}
         if rate.get("remaining") is not None:
             _RATE["remaining"] = rate["remaining"]
-        nodes = [n for n in d["search"]["nodes"] if n]
+        # pool the sources, remembering which found each PR and noting when a
+        # source filled its page, so a truncated union is not read as a total
+        pool, capped = {}, []
+        for i, (name, _q) in enumerate(pairs):
+            block = d["s%d" % i]
+            got = [n for n in block["nodes"] if n]
+            if block["issueCount"] > len(got):
+                capped.append(name)
+            for n in got:
+                pool.setdefault(n["url"], dict(n, sources=[]))["sources"].append(name)
+        nodes = list(pool.values())
         with self.lock:
+            self.query = ", ".join(n for n, _q in pairs)
+            self.capped = capped
             self.prs = nodes
-            self.total = d["search"]["issueCount"]
+            self.total = len(nodes)
             self.fetched = time.time()
             self.error = (config_token_warning() if source == "config" else None)
 
@@ -556,9 +609,7 @@ def main():
         global REFRESH
         REFRESH = float(args[1])
         args = args[2:]
-    query = " ".join([_CFG["query"]] + args) if args else _CFG["query"]
-
-    store = Store(query)
+    store = Store(args)
     threading.Thread(target=store.run, daemon=True).start()
     setup()
     keyboard = Keyboard()
@@ -568,12 +619,16 @@ def main():
     show_stats = True
     stack_sel = 0
     copied, copied_at = "", 0.0
+    source_filter = "all"
 
     while True:
         tick += 1
-        prs, total, detail, stack_rows, loading, err, fetched = store.snapshot()
+        (prs, total, detail, stack_rows, loading, err, fetched,
+         active_query) = store.snapshot()
         shown = [p for p in sort_prs(prs, sort_field, newest_first)
-                 if matches(p, needle)]
+                 if matches(p, needle)
+                 and (source_filter == "all"
+                      or source_filter in (p.get("sources") or []))]
 
         for key in keyboard.poll():
             if typing:
@@ -624,6 +679,11 @@ def main():
                     copied_at = time.time()
             elif key == "r":
                 store.wake.set()
+            elif key == "f":
+                # every PR remembers which sources found it, so narrowing to
+                # one is instant and costs no request
+                names = ["all"] + list(_CFG["sources"].keys())
+                source_filter = cycle(names, source_filter)
             elif key == "s":
                 sort_field = cycle(SORTS, sort_field)
             elif key == "o":
@@ -644,7 +704,7 @@ def main():
         w, h = size()
         rows = [title("pr watch", w, PR)]
         head = [(DIM, " %d of %d" % (len(shown), total)),
-                (DIM, " shown" if needle else " open"),
+                (DIM, " shown" if needle or source_filter != "all" else " open"),
                 (DIM, "   updated %s ago" % ago(
                     datetime.datetime.fromtimestamp(fetched,
                                                     datetime.timezone.utc)
@@ -675,12 +735,14 @@ def main():
             if show_stats and h >= 30:
                 rows += stats_view(shown, w)
             rows += list_view(shown, selected, sort_field, newest_first,
-                              needle, typing, w, h, tick, loading)
+                              needle, typing, w, h, tick, not fetched,
+                              source_filter)
             hints = [[(ACCENT, "↑↓"), (DIM, " select")], [(DIM, "[↵] open")],
                      [(DIM, "[/]filter")],
                      [(DIM, "[s]ort %s" % sort_field)],
                      [(DIM, "[o]rder %s" % ("newest" if newest_first
                                             else "oldest"))],
+                     [(DIM, "[f]rom %s" % source_filter)],
                      [(DIM, "[t]stats %s" % ("on" if show_stats else "off"))],
                      [(DIM, "[c]opy url")], [(DIM, "[r]efresh")],
                      [(DIM, "[q]uit")]]
@@ -697,15 +759,26 @@ def main():
 
 
 def list_view(prs, selected, sort_field, newest_first, needle, typing,
-              w, h, tick, loading):
+              w, h, tick, waiting, source_filter="all"):
     rows = [""]
     arrow = "↓" if newest_first else "↑"
     rows.append(seg([(LBL, " ── OPEN PRs ── "),
                      (DIM, "by %s %s" % (sort_field, arrow)),
+                     (DIM, "   from %s" % source_filter
+                      if source_filter != "all" else ""),
                      (ACCENT, "   /%s" % needle if needle else "")], w - 1))
     if not prs:
-        rows.append(seg([(DIM, "  nothing matches" if needle
-                          else "  collecting…")], w - 1))
+        # "collecting" is only true before the first fetch: an empty filter
+        # or an empty source is a result, not a wait
+        if needle:
+            why = "  nothing matches /%s" % needle
+        elif source_filter != "all":
+            why = "  no open PRs from %s" % source_filter
+        elif waiting:
+            why = "  collecting…"
+        else:
+            why = "  no open PRs"
+        rows.append(seg([(DIM, why)], w - 1))
         return rows
 
     # Columns are budgeted rather than guessed: the fixed ones are summed and

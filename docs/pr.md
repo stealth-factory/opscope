@@ -86,12 +86,47 @@ spread is wide: with an outlier at 3.9 years, everything under a couple of
 months lands on the same lowest block. `latency.py` solves the same problem
 with a log scale; this chart has not adopted one yet.
 
-## The list
+## Which PRs, and why it takes three searches
 
-Every PR matching `pr.query`, which defaults to `is:open is:pr involves:@me` —
-everything you opened, were mentioned on, or were asked to review. That default
-matters: the same account has **625 open PRs** across its organisations and 33
-that involve this user. A list of 625 is a haystack, not a dashboard.
+GitHub search has **no `OR`**, so anything that is a union of conditions has to
+be several searches pooled. Each entry in `pr.sources` is one search; results
+are merged and de-duplicated by URL, and every PR remembers which sources found
+it.
+
+```json
+"sources": {
+  "orgs":     "is:open is:pr @mine",
+  "authored": "is:open is:pr author:@me",
+  "assigned": "is:open is:pr assignee:@me"
+}
+```
+
+`@mine` expands to every org you belong to plus your own account, as owner
+qualifiers — repeated qualifiers of the same kind *are* OR'd by GitHub, so one
+search covers all of them. That gives everything in your orgs and your personal
+repos. The other two reach outside those, for work that is yours wherever it
+lives.
+
+Measured on one account: `orgs` finds 50, `authored` 15, and the union is 55 —
+so **five PRs the author filed outside their own organisations** would have been
+missed by scoping alone, and are exactly what the extra searches are for.
+
+The earlier default was a single `involves:@me`, which is the widest
+relationship qualifier there is — author, assignee, mentioned, *or commented on
+once*. That is how a pull request in a stranger's repository, commented on 274
+days ago, ended up on the board. It has no scope attached, so nothing confined
+it to code you have a stake in.
+
+`f` cycles which source is shown — `all`, then each by name. It is instant and
+costs no request, because the pooling already recorded the answer.
+
+**Page size is 50 per source, deliberately.** Three searches of 100 return HTTP
+502; three of 50 do not. The ceiling is on result *nodes*, not field
+complexity — dropping the check rollup does not help, halving the page does.
+When a source fills its page the header says so rather than presenting a
+truncated union as a total.
+
+## The list
 
 Columns are budgeted rather than guessed — the fixed ones are summed and the
 title takes exactly what is left — so nothing runs off the right edge or into
@@ -110,7 +145,8 @@ two disagreed by years on the same PR.
 |---|---|
 | `s` | sort by **updated** or **created** |
 | `o` | reverse the order |
-| `/` | filter |
+| `/` | filter by text |
+| `f` | show one source, or all |
 | `t` | show or hide the stats |
 | `↑` `↓` | in a PR view, move through its stack |
 | `↵` | in a PR view, open the stack row under the cursor |
@@ -220,15 +256,20 @@ account.
 
 ```json
 "pr": {
-  "query": "is:open is:pr involves:@me",
-  "limit": 100,
+  "sources": {
+    "orgs":     "is:open is:pr @mine",
+    "authored": "is:open is:pr author:@me",
+    "assigned": "is:open is:pr assignee:@me"
+  },
+  "limit": 50,
   "refresh": 60
 }
 ```
 
-Anything on the command line is appended to `query`, so `./pr.py org:acme`
-narrows to one organisation and `./pr.py author:@me` to your own PRs, without
-editing config.
+Add, remove or rename sources freely — `review-requested:@me` and
+`is:open is:pr org:acme` are both reasonable entries, and the names are what
+`f` cycles through. Anything on the command line is appended to *every* source,
+so `./pr.py org:acme` narrows the lot without editing config.
 
 ```sh
 ./pr.py                          # everything you are involved in
