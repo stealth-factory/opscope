@@ -156,7 +156,16 @@ number it cannot justify:
   shows real numbers while the ones behind it still shimmer.
 - The flow chart's totals are only shown once **every** account has reported for
   the current window — summing a half-updated board would add two windows
-  together. Until then the heading reads `counting 90d…`.
+  together. Until then the heading reads `counting 90d…` and its bars bounce
+  like a level meter, in pale versions of their own colours rather than grey,
+  so the two halves stay legible while they wait. When the figures land the
+  bars **settle** onto them over about two seconds and the colour comes up to
+  full, rather than the chart cutting from placeholder to data.
+
+Both sides of the flow chart always draw three rows, even when the merged half
+never uses its full height. Trimming the unused rows would make the chart change
+height at the end of the settle — precisely the moment it should be still — and
+a shorter axis on one side would mean the two halves no longer shared a scale.
 
 ## Cost
 

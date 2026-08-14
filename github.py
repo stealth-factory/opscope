@@ -53,7 +53,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bar, bg, big, braille_plot,
-                    config_token_warning, cycle, draw,
+                    config_token_warning, cycle, dance, draw, mix,
                     heat, load_config, maybe_help, meter, pack_hints, pad, rgb,
                     seg, setup, size, skeleton, stacked_bar, title, vbars,
                     vbars_down)
@@ -80,6 +80,12 @@ TXT = rgb(225, 235, 245)
 LBL = rgb(130, 165, 200)
 ACCENT = rgb(150, 210, 255)
 PR = rgb(180, 160, 255)
+# the chart fades from these into the real colours as figures land: pale
+# enough to read as "not yet", tinted enough to still say which half is which
+PR_RGB, OK_RGB = (180, 160, 255), (90, 240, 160)
+GHOST = (96, 106, 124)
+LOAD_PR, LOAD_OK = mix(GHOST, PR_RGB, 0.45), mix(GHOST, OK_RGB, 0.45)
+SETTLE_FRAMES = 8
 SPARK = "▁▂▃▄▅▆▇█"
 
 
@@ -456,6 +462,7 @@ def main():
 
     selected = 0
     tick = 0
+    settle_t, settle_from = 0, None
     while True:
         tick += 1
         for key in keyboard.poll():
@@ -605,21 +612,37 @@ def main():
                              (OK, "▼ %d merged"
                               % sum(merged_all.get(d, 0) for d in days)),
                              (DIM, "   peak %d/day" % span_hi)], w - 1))
+        # While the figures are still arriving the bars bounce like a level
+        # meter in pale versions of their own colours, then settle onto the
+        # real values rather than cutting to them. Three rows each side, always
+        # - trimming the unused half would make the chart change height at the
+        # end of the animation, which is exactly when it should be still.
         if chart_stale:
-            for _ in range(5):
-                rows.append(seg([(RST, " ")] + skeleton(chart_cols, tick),
-                                w - 1))
+            hu = dance(chart_cols, tick)
+            hd = dance(chart_cols, tick, phase=2.1)
+            cu, cd = LOAD_PR, LOAD_OK
+            settle_from, settle_t = (hu, hd), 0
         else:
-            for line in vbars(up, 3, hi=span_hi):
-                rows.append(seg([(RST, " ")] + line, w - 1))
-            # an explicit baseline: without it the two series abut and the eye
-            # cannot tell which row the bars grow from
-            rows.append(seg([(RST, " "), (GRID, "─" * chart_cols)], w - 1))
-            below = vbars_down(down, 3, hi=span_hi)
-            while len(below) > 1 and not "".join(c for _, c in below[-1]).strip():
-                below.pop()          # drop headroom the merged side never uses
-            for line in below:
-                rows.append(seg([(RST, " ")] + line, w - 1))
+            real_u = [v / float(span_hi) for v, _ in up]
+            real_d = [v / float(span_hi) for v, _ in down]
+            if (settle_from and settle_t < SETTLE_FRAMES
+                    and len(settle_from[0]) == chart_cols):
+                settle_t += 1
+                q = settle_t / float(SETTLE_FRAMES)
+                q = q * q * (3 - 2 * q)          # ease in and out of the move
+                hu = [a + (b - a) * q for a, b in zip(settle_from[0], real_u)]
+                hd = [a + (b - a) * q for a, b in zip(settle_from[1], real_d)]
+                cu, cd = mix(GHOST, PR_RGB, 0.45 + 0.55 * q), mix(
+                    GHOST, OK_RGB, 0.45 + 0.55 * q)
+            else:
+                hu, hd, cu, cd = real_u, real_d, PR, OK
+        for line in vbars([(v, cu) for v in hu], 3, hi=1.0):
+            rows.append(seg([(RST, " ")] + line, w - 1))
+        # an explicit baseline: without it the two series abut and the eye
+        # cannot tell which row the bars grow from
+        rows.append(seg([(RST, " "), (GRID, "─" * chart_cols)], w - 1))
+        for line in vbars_down([(v, cd) for v in hd], 3, hi=1.0):
+            rows.append(seg([(RST, " ")] + line, w - 1))
         left = "%dd ago" % len(days)
         rows.append(seg([(DIM, " " + left),
                          (DIM, " " * max(1, chart_cols - len(left) - 5)),

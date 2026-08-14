@@ -17,6 +17,7 @@
 import atexit
 import base64
 import json
+import math
 import os
 import re
 import select
@@ -317,6 +318,28 @@ def vbars_down(columns, height, hi=None):
             line.append((colour, ch))
         rows.append(line)
     return rows
+
+
+def dance(width, tick, phase=0.0):
+    """Column heights in 0..1 bouncing like a level meter, for pending data.
+
+    Two sine waves of different periods per column, so neighbours move
+    together enough to read as one instrument but never march in lockstep.
+    Deterministic in `tick`, so every frame is reproducible and no random
+    source is needed.
+    """
+    out = []
+    for i in range(width):
+        a = math.sin(tick * 0.55 + i * 0.85 + phase)
+        b = math.sin(tick * 0.31 + i * 0.41 + phase * 1.7)
+        out.append(min(1.0, max(0.08, 0.5 + 0.33 * a + 0.17 * b)))
+    return out
+
+
+def mix(c1, c2, t):
+    """Blend two (r, g, b) tuples, for fading a placeholder into real data."""
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    return rgb(*[int(round(c1[i] + (c2[i] - c1[i]) * t)) for i in range(3)])
 
 
 def skeleton(width, tick, span=7):
