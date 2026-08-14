@@ -6,6 +6,9 @@ running, and whether issues are being closed faster than they arrive.
 ```
 ╺━ LINEAR OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  14 teams   updated 1m ago   2490 req left/hr
+ ── HOW LONG ── all teams · median of 88 completed in 14d
+  lead time 10.9h    created → completed     cycle time 3.7h     started → completed
+
  ── OPEN ── 1221 issues open   (any age)
  █████████████████████████████████████████████████████████████████████████████████
  ▇ triage 704 (58%)   ▇ backlog 314 (26%)   ▇ todo 155 (13%)   ▇ in progress 48 (4%)
@@ -27,9 +30,6 @@ running, and whether issues are being closed faster than they arrive.
 
 
  14d ago                                                         today
-
- ── HOW LONG ── median over 88 completed
-  lead time 10.9h   created → completed     cycle time 3.7h    started → completed
 
  ── BY TEAM ──   1-8 of 14
  TEAM                    OPEN TRIAGE   DOING DONE14D
@@ -54,6 +54,16 @@ excluded at the query, so the total counts work that is genuinely outstanding.
 
 ## Sections
 
+**How long** — median lead time (created → completed) and median cycle time
+(started → completed) over everything finished in the window. It leads the
+board because it is the one figure that says whether the machine is getting
+faster or slower.
+
+The heading says **all teams** deliberately: it is an aggregate over the whole
+workspace, not the team highlighted in the table below, and without saying so it
+would read as the latter. Medians rather than means, because one issue that sat
+open for a month drags a mean somewhere unrepresentative.
+
 **Open** — one bar over everything outstanding at any age, split triage /
 backlog / todo / in progress. Not windowed: it answers "how much is there right
 now", and does not move when you change the window.
@@ -76,10 +86,6 @@ breaks ties.
 down, one bar per day, both directions on a shared scale. Read together they
 say whether the queue is filling faster than it drains. In the board above, 297
 created against 88 completed.
-
-**How long** — median lead time (created → completed) and median cycle time
-(started → completed) over everything finished in the window. Medians, because
-one issue that sat open for a month drags a mean somewhere unrepresentative.
 
 **By team** — ranked by open volume, scrolling when focused and there are more
 teams than rows. `DONE14D` follows the window.

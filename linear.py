@@ -415,6 +415,29 @@ def main():
             time.sleep(0.4)
             continue
 
+        # ── how long work takes, across every team ──────────────────────
+        # Leads the board: it is the one figure that says whether the machine
+        # is getting faster or slower, and it is an aggregate over all teams
+        # rather than any one of them - which the heading has to say, or it
+        # reads as whichever team happens to be selected below.
+        med_lead, med_cycle = median(lead), median(ctime)
+        rows.append(seg([(LBL, " ── HOW LONG ── "),
+                         (DIM, "all teams · "),
+                         (DIM, "counting…" if stale
+                          else "median of %d completed in %dd"
+                          % (len(lead), store.days))], w - 1))
+        if stale:
+            rows.append(seg([(DIM, "  lead time "), (DIM, pad("···", 9)),
+                             (DIM, "created → completed     "),
+                             (DIM, "cycle time "), (DIM, pad("···", 9)),
+                             (DIM, "started → completed")], w - 1))
+        else:
+            rows.append(seg([(DIM, "  lead time "), (TXT, pad(dur(med_lead), 9)),
+                             (DIM, "created → completed     "),
+                             (DIM, "cycle time "), (TXT, pad(dur(med_cycle), 9)),
+                             (DIM, "started → completed")], w - 1))
+        rows.append("")
+
         # ── what is outstanding right now ────────────────────────────────
         total_open = sum(states[s] for s in STATE_ORDER)
         rows.append(seg([(LBL, " ── OPEN ── "),
@@ -567,16 +590,6 @@ def main():
         rows.append(seg([(DIM, " " + left_lbl),
                          (DIM, " " * max(1, chart_cols - len(left_lbl) - 5)),
                          (DIM, "today")], w - 1))
-
-        # ── how long things take ────────────────────────────────────────
-        rows.append("")
-        med_lead, med_cycle = median(lead), median(ctime)
-        rows.append(seg([(LBL, " ── HOW LONG ── "),
-                         (DIM, "median over %d completed" % len(lead))], w - 1))
-        rows.append(seg([(DIM, "  lead time "), (TXT, pad(dur(med_lead), 8)),
-                         (DIM, "created → completed     "),
-                         (DIM, "cycle time "), (TXT, pad(dur(med_cycle), 8)),
-                         (DIM, "started → completed")], w - 1))
 
         # ── by team ─────────────────────────────────────────────────────
         rows.append("")
