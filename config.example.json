@@ -67,5 +67,11 @@
     "exclude_teams": [],
     "window_days": 14,
     "refresh": 120
+  },
+  "pr": {
+    "_comment": "Reuses github.token - no second credential. query is a GitHub search; anything on the command line is appended to it.",
+    "query": "is:open is:pr involves:@me",
+    "limit": 100,
+    "refresh": 60
   }
 }
