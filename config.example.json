@@ -59,5 +59,13 @@
     "accounts": [],
     "window_days": 7,
     "refresh": 120
+  },
+  "linear": {
+    "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
+    "token": "",
+    "token_env": "LINEAR_API_KEY",
+    "exclude_teams": [],
+    "window_days": 14,
+    "refresh": 120
   }
 }

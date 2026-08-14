@@ -38,6 +38,7 @@ nothing at all — it just looks good, and it knows it.
 | **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
 | **`herdr-panes.py`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
 | **`github.py`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
+| **`linear.py`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
 | **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
@@ -55,7 +56,7 @@ multiplexer — each is an ordinary terminal program. Tile them however you like
 
 ## Building the wall
 
-Seven widgets tile into whatever space you have. A layout that works on a wide
+Eight widgets tile into whatever space you have. A layout that works on a wide
 screen:
 
 ```
@@ -80,9 +81,11 @@ This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
-**Two widgets need a token:** `deployments.py` wants a Vercel token from
-Account Settings → Tokens, and `github.py` a *classic* GitHub PAT with `repo` and
-`read:org` (fine-grained tokens reach only one org each). Every other widget runs with no configuration at all.
+**Three widgets need a token:** `deployments.py` wants a Vercel token from
+Account Settings → Tokens, `github.py` a *classic* GitHub PAT with `repo` and
+`read:org` (fine-grained tokens reach only one org each), and `linear.py` a
+personal API key from Settings → Security & access. Every other widget runs
+with no configuration at all.
 
 ## Requirements
 
