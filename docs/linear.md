@@ -7,9 +7,9 @@ running, and whether issues are being closed faster than they arrive.
 ╺━ LINEAR OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  14 teams   updated 1m ago   2490 req left/hr
  ── HOW LONG ── all teams · median of 88 completed in 14d
-  lead time 10.9h    created → completed     cycle time 3.7h     started → completed
-  quickest APP-52 18m                           slowest WEB-44 81.9d
-  oldest open STU-97 2.8y                       oldest in progress STU-112 1.9y
+  lead (created→completed)  10.9h              cycle (started→completed) 3.7h
+  quickest                  APP-52 18m         slowest                   WEB-44 81.9d
+  oldest open               STU-97 2.8y        oldest in progress        STU-112 1.9y
 
  ── OPEN ── 1221 issues open   (any age)
  █████████████████████████████████████████████████████████████████████████████████
@@ -65,6 +65,12 @@ The heading says **all teams** deliberately: it is an aggregate over the whole
 workspace, not the team highlighted in the table below, and without saying so it
 would read as the latter. Medians rather than means, because one issue that sat
 open for a month drags a mean somewhere unrepresentative.
+
+Every figure in the section sits on one grid, two columns wide where the pane
+allows and one where it does not, with each cell a fixed width so a long
+identifier cannot push the next column out of line. The `created→completed`
+and `started→completed` definitions ride with the labels they define rather
+than trailing after the values.
 
 Beneath the medians are the four extremes, each **naming the issue** rather than
 just the number — a median describes the distribution, these tell you where to

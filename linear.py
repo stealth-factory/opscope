@@ -461,38 +461,41 @@ def main():
                          (DIM, "counting…" if stale
                           else "median of %d completed in %dd"
                           % (len(lead), store.days))], w - 1))
-        if stale:
-            rows.append(seg([(DIM, "  lead time "), (DIM, pad("···", 9)),
-                             (DIM, "created → completed     "),
-                             (DIM, "cycle time "), (DIM, pad("···", 9)),
-                             (DIM, "started → completed")], w - 1))
-        else:
-            rows.append(seg([(DIM, "  lead time "), (TXT, pad(dur(med_lead), 9)),
-                             (DIM, "created → completed     "),
-                             (DIM, "cycle time "), (TXT, pad(dur(med_cycle), 9)),
-                             (DIM, "started → completed")], w - 1))
-            # The median describes the distribution; these name the issue to
-            # go and look at. "oldest open" and "oldest in progress" are the
-            # two that are actionable right now - the others are history.
-            def extreme(label, pair, colour):
-                if not pair:
-                    return (label, "--", DIM)
-                hours, ident = pair
-                return (label, "%s %s" % (ident or "?", dur(hours)), colour)
+        # Every figure here goes through one grid. The medians used to be
+        # hand-padded and drifted out of step with the extremes beneath them,
+        # and the arrow definitions floated after the values instead of
+        # attaching to the terms they define.
+        def extreme(label, pair, colour):
+            if stale:
+                return (label, "···", DIM)
+            if not pair:
+                return (label, "--", DIM)
+            hours, ident = pair
+            return (label, "%s %s" % (ident or "?", dur(hours)), colour)
 
-            cells = [extreme("quickest", quickest, OK),
-                     extreme("slowest", slowest, WARN),
-                     extreme("oldest open", oldest_open, BAD),
-                     extreme("oldest in progress", oldest_wip, WARN)]
-            ncols = 2 if w >= 76 else 1
-            cw = (w - 2) // ncols
-            for n in range(0, len(cells), ncols):
-                line = [(RST, " ")]
-                for label, value, colour in cells[n:n + ncols]:
-                    used = len(label) + 1 + len(value)
-                    line += [(DIM, " " + label + " "), (colour, value),
-                             (RST, " " * max(2, cw - used - 1))]
-                rows.append(seg(line, w - 1))
+        cells = [
+            ("lead (created→completed)",
+             "···" if stale else dur(med_lead), DIM if stale else TXT),
+            ("cycle (started→completed)",
+             "···" if stale else dur(med_cycle), DIM if stale else TXT),
+            extreme("quickest", quickest, OK),
+            extreme("slowest", slowest, WARN),
+            extreme("oldest open", oldest_open, BAD),
+            extreme("oldest in progress", oldest_wip, WARN),
+        ]
+        label_w = max(len(x[0]) for x in cells)
+        # Two columns only when a value still gets room for the longest thing
+        # it holds - an identifier and a duration. Cells are a fixed width so
+        # a long value cannot push the next column out of line.
+        ncols = 2 if (w - 2) // 2 - label_w - 3 >= 15 else 1
+        cw = (w - 2) // ncols
+        val_w = max(6, cw - label_w - 3)
+        for n in range(0, len(cells), ncols):
+            line = [(RST, " ")]
+            for label, value, colour in cells[n:n + ncols]:
+                line += [(DIM, " " + pad(label, label_w) + " "),
+                         (colour, pad(value, val_w))]
+            rows.append(seg(line, w - 1))
         rows.append("")
 
         # ── what is outstanding right now ────────────────────────────────
