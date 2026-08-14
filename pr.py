@@ -42,7 +42,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, config_token_warning, cycle, draw, heat,
+from common import (RST, Keyboard, bg, clipboard, config_token_warning, cycle,
+                    draw, heat,
                     load_config, maybe_help, pack_hints, pad, rgb, seg, setup,
                     size, skeleton, stacked_bar, title, vbars)
 
@@ -566,6 +567,7 @@ def main():
     needle, typing = "", False
     show_stats = True
     stack_sel = 0
+    copied, copied_at = "", 0.0
 
     while True:
         tick += 1
@@ -611,6 +613,15 @@ def main():
                         stack_sel = 0
                 elif shown and not detail and not loading:
                     store.open_detail(shown[min(selected, len(shown) - 1)])
+            elif key == "c":
+                # the URL of whatever is on screen: the open PR in the
+                # dashboard, the highlighted row in the list
+                target = detail if detail else (
+                    shown[min(selected, len(shown) - 1)] if shown else None)
+                url = (target or {}).get("url")
+                if url:
+                    copied = url if clipboard(url) else "no clipboard: " + url
+                    copied_at = time.time()
             elif key == "r":
                 store.wake.set()
             elif key == "s":
@@ -640,6 +651,9 @@ def main():
                     if fetched else None))]
         if _RATE["remaining"] is not None:
             head.append((DIM, "   %d api" % _RATE["remaining"]))
+        if copied and time.time() - copied_at < 4:
+            head.append((OK, "   copied "))
+            head.append((DIM, copied[:max(10, w - 46)]))
         rows.append(seg(head, w - 1))
         if err:
             rows.append(seg([(BAD, " ! " + err)], w - 1))
@@ -649,8 +663,8 @@ def main():
                 stack_sel = max(0, min(stack_sel, len(stack_rows) - 1))
             rows += detail_view(detail, stack_rows, stack_sel, loading, w, h,
                                 tick)
-            hints = [[(DIM, "[esc] back")], [(DIM, "[r]efresh")],
-                     [(DIM, "[q]uit")]]
+            hints = [[(DIM, "[c]opy url")], [(DIM, "[esc] back")],
+                     [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
             if stack_rows:
                 hints = ([[(ACCENT, "↑↓"), (DIM, " stack")],
                           [(DIM, "[↵] open it")]] + hints)
@@ -668,7 +682,8 @@ def main():
                      [(DIM, "[o]rder %s" % ("newest" if newest_first
                                             else "oldest"))],
                      [(DIM, "[t]stats %s" % ("on" if show_stats else "off"))],
-                     [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+                     [(DIM, "[c]opy url")], [(DIM, "[r]efresh")],
+                     [(DIM, "[q]uit")]]
         if typing:
             hints = [[(ACCENT, "/" + needle + "▌")],
                      [(DIM, "[↵] keep")], [(DIM, "[esc] clear")]]

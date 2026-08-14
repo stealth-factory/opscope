@@ -114,6 +114,7 @@ two disagreed by years on the same PR.
 | `t` | show or hide the stats |
 | `↑` `↓` | in a PR view, move through its stack |
 | `↵` | in a PR view, open the stack row under the cursor |
+| `c` | copy the PR's URL |
 
 Sorting is done locally on the fetched set, so both keys are instant and cost
 no request.
@@ -122,6 +123,20 @@ no request.
 `q`, which is why the other keys stop working until you leave. `↵` keeps the
 filter and returns to navigating; `esc` clears it. The match is a substring
 against number, title, author, repository and both branch names.
+
+## Copying
+
+`c` copies a PR's URL — the highlighted row in the list, the open PR in the
+dashboard — through **OSC 52**, so the terminal emulator performs the copy and
+the text lands on the clipboard of the machine you are sitting at, not the
+server the widget runs on. That is the only mechanism that works over SSH.
+
+The header confirms with `copied <url>` for a few seconds. If stdout is not a
+terminal, or the multiplexer refuses to forward the escape, the confirmation
+says `no clipboard:` and shows the URL instead of pretending it worked.
+
+In a stack, `c` copies the PR **on screen** (the `●` row). To copy a different
+one, move the cursor to it and press `↵` first — then it is the one on screen.
 
 ## The dashboard
 
