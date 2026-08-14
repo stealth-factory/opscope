@@ -745,7 +745,7 @@ def main():
             if stack_rows:
                 stack_sel = max(0, min(stack_sel, len(stack_rows) - 1))
             rows += detail_view(detail, stack_rows, stack_sel, loading, w, h,
-                                tick, stages, store.target)
+                                tick, stages, store.target, top=len(rows))
             hints = [[(DIM, "[c]opy url")], [(DIM, "[esc] back")],
                      [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
             if stack_rows:
@@ -759,7 +759,7 @@ def main():
                 rows += stats_view(shown, w)
             rows += list_view(shown, selected, sort_field, newest_first,
                               needle, typing, w, h, tick, not fetched,
-                              source_filter)
+                              source_filter, top=len(rows))
             hints = [[(ACCENT, "↑↓"), (DIM, " select")], [(DIM, "[↵] open")],
                      [(DIM, "[/]filter")],
                      [(DIM, "[s]ort %s" % sort_field)],
@@ -782,7 +782,7 @@ def main():
 
 
 def list_view(prs, selected, sort_field, newest_first, needle, typing,
-              w, h, tick, waiting, source_filter="all"):
+              w, h, tick, waiting, source_filter="all", top=0):
     rows = [""]
     arrow = "↓" if newest_first else "↑"
     rows.append(seg([(LBL, " ── OPEN PRs ── "),
@@ -825,7 +825,11 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
         head += "%*s" % (size_w, "SIZE")
     rows.append(DIM + pad(head, w - 1))
 
-    room = max(1, h - len(rows) - 3)
+    # `top` is what was drawn above this view. Without it the window is sized
+    # as though the list began at the top of the screen, so it renders far more
+    # rows than are visible, the caller truncates the overflow, and the
+    # selection scrolls off the bottom while `first` is still 0.
+    room = max(1, h - top - len(rows) - 3)
     first = 0
     if len(prs) > room:
         first = min(max(0, selected - room // 2), len(prs) - room)
@@ -862,7 +866,7 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
 
 
 def detail_view(pr, stack_rows, stack_sel, loading, w, h, tick, stages=(),
-                target=""):
+                target="", top=0):
     rows = [""]
     if loading or not pr:
         # A shimmer says "wait" and nothing else. The open really does run in
@@ -993,7 +997,7 @@ def detail_view(pr, stack_rows, stack_sel, loading, w, h, tick, stages=(),
         rows.append("")
         # the stack scrolls: eleven-deep stacks exist, and a pane that has
         # already spent its height on checks cannot show them all
-        room = max(3, h - len(rows) - 6)
+        room = max(3, h - top - len(rows) - 4)
         first = 0
         if len(stack_rows) > room:
             first = min(max(0, stack_sel - room // 2), len(stack_rows) - room)
