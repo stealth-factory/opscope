@@ -8,6 +8,8 @@ running, and whether issues are being closed faster than they arrive.
  14 teams   updated 1m ago   2490 req left/hr
  ── HOW LONG ── all teams · median of 88 completed in 14d
   lead time 10.9h    created → completed     cycle time 3.7h     started → completed
+  quickest APP-52 18m                           slowest WEB-44 81.9d
+  oldest open STU-97 2.8y                       oldest in progress STU-112 1.9y
 
  ── OPEN ── 1221 issues open   (any age)
  █████████████████████████████████████████████████████████████████████████████████
@@ -63,6 +65,21 @@ The heading says **all teams** deliberately: it is an aggregate over the whole
 workspace, not the team highlighted in the table below, and without saying so it
 would read as the latter. Medians rather than means, because one issue that sat
 open for a month drags a mean somewhere unrepresentative.
+
+Beneath the medians are the four extremes, each **naming the issue** rather than
+just the number — a median describes the distribution, these tell you where to
+go and look:
+
+| | |
+|---|---|
+| `quickest` / `slowest` | fastest and slowest lead time among issues *completed* in the window. History: they say how wide the spread is behind that median. |
+| `oldest open` | the issue that has been open longest, at any age. |
+| `oldest in progress` | the issue that has been *started* longest without finishing. |
+
+The last two are the actionable pair, and they are the reason this is worth
+showing: an issue in progress for `1.9y` is not in progress. Durations roll over
+to years because these figures reach them — `1021.6d` is arithmetic, `2.8y` is a
+decision.
 
 **Open** — one bar over everything outstanding at any age, split triage /
 backlog / todo / in progress. Not windowed: it answers "how much is there right

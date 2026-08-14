@@ -170,7 +170,7 @@ query($after: String, $since: DateTimeOrDuration!) {
 DONE_QUERY = """
 query($after: String, $since: DateTimeOrDuration!) {
   issues(first: %d, after: $after, filter: { completedAt: { gte: $since } }) {
-    nodes { completedAt startedAt createdAt team { key } }
+    nodes { identifier completedAt startedAt createdAt team { key } }
     pageInfo { hasNextPage endCursor }
   }
 }""" % PAGE
@@ -221,6 +221,10 @@ class Store(object):
         self.completed = collections.Counter()
         self.lead = []            # created -> completed, in hours
         self.cycle_time = []      # started -> completed, in hours
+        # extremes, each as (hours, identifier): a median says the shape of
+        # the distribution, these say which issue to go and look at
+        self.quickest = self.slowest = None
+        self.oldest_open = self.oldest_wip = None
         self.window = None        # which window the counters describe
         self.truncated = False
         self.error = None
@@ -233,8 +237,10 @@ class Store(object):
                     dict(self.by_team), list(self.cycles),
                     collections.Counter(self.created),
                     collections.Counter(self.completed), list(self.lead),
-                    list(self.cycle_time), self.window, self.truncated,
-                    self.error, self.fetched)
+                    list(self.cycle_time),
+                    (self.quickest, self.slowest, self.oldest_open,
+                     self.oldest_wip),
+                    self.window, self.truncated, self.error, self.fetched)
 
     def wanted(self, key):
         if self.keep:
@@ -280,6 +286,8 @@ class Store(object):
         rows, capped = pages(tok, OPEN_QUERY, ["issues"])
         states = collections.Counter()
         by_team = {}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        oldest_open = oldest_wip = None
         for it in rows:
             key = (it.get("team") or {}).get("key")
             if key not in keys:
@@ -291,6 +299,16 @@ class Store(object):
             slot = by_team.setdefault(key, collections.Counter())
             slot[st] += 1
             slot["open"] += 1
+            born = parse(it.get("createdAt"))
+            if born:
+                age = (now - born).total_seconds() / 3600.0
+                if oldest_open is None or age > oldest_open[0]:
+                    oldest_open = (age, it.get("identifier"))
+            began = parse(it.get("startedAt"))
+            if st == "started" and began:
+                age = (now - began).total_seconds() / 3600.0
+                if oldest_wip is None or age > oldest_wip[0]:
+                    oldest_wip = (age, it.get("identifier"))
 
         # the running cycles, each already carrying its own burndown
         cyc = [c for c in graphql(CYCLES_QUERY, tok)["cycles"]["nodes"]
@@ -301,6 +319,7 @@ class Store(object):
         done, cap3 = pages(tok, DONE_QUERY, ["issues"], {"since": since})
         created, completed = collections.Counter(), collections.Counter()
         lead, ctime = [], []
+        quickest = slowest = None
         for it in made:
             if (it.get("team") or {}).get("key") in keys:
                 created[day(it["createdAt"])] += 1
@@ -310,7 +329,12 @@ class Store(object):
             completed[day(it["completedAt"])] += 1
             fin = parse(it.get("completedAt"))
             if fin and parse(it.get("createdAt")):
-                lead.append((fin - parse(it["createdAt"])).total_seconds() / 3600.0)
+                hrs = (fin - parse(it["createdAt"])).total_seconds() / 3600.0
+                lead.append(hrs)
+                if quickest is None or hrs < quickest[0]:
+                    quickest = (hrs, it.get("identifier"))
+                if slowest is None or hrs > slowest[0]:
+                    slowest = (hrs, it.get("identifier"))
             if fin and parse(it.get("startedAt")):
                 ctime.append((fin - parse(it["startedAt"])).total_seconds() / 3600.0)
 
@@ -323,6 +347,8 @@ class Store(object):
             self.states, self.by_team, self.cycles = states, by_team, cyc
             self.created, self.completed = created, completed
             self.lead, self.cycle_time = lead, ctime
+            self.quickest, self.slowest = quickest, slowest
+            self.oldest_open, self.oldest_wip = oldest_open, oldest_wip
             self.window = days_now
             self.truncated = capped or cap2 or cap3
             self.fetched = time.time()
@@ -340,13 +366,21 @@ def parse(ts):
 
 
 def dur(hours):
+    """A span at whatever unit keeps it readable.
+
+    Rolls over to years because these figures reach them: an issue open for
+    "1021.6d" is arithmetic, one open for "2.8y" is a decision.
+    """
     if hours is None:
         return "--"
     if hours < 1:
         return "%dm" % max(1, int(hours * 60))
     if hours < 48:
         return "%.1fh" % hours
-    return "%.1fd" % (hours / 24.0)
+    days = hours / 24.0
+    if days < 365:
+        return "%.1fd" % days
+    return "%.1fy" % (days / 365.0)
 
 
 def median(xs):
@@ -395,7 +429,8 @@ def main():
 
         w, h = size()
         (teams, states, by_team, cycles, created, completed, lead, ctime,
-         window, truncated, err, fetched) = store.snapshot()
+         extremes, window, truncated, err, fetched) = store.snapshot()
+        quickest, slowest, oldest_open, oldest_wip = extremes
         stale = window != store.days
         rows = [title("linear ops", w, NEW)]
 
@@ -436,6 +471,28 @@ def main():
                              (DIM, "created → completed     "),
                              (DIM, "cycle time "), (TXT, pad(dur(med_cycle), 9)),
                              (DIM, "started → completed")], w - 1))
+            # The median describes the distribution; these name the issue to
+            # go and look at. "oldest open" and "oldest in progress" are the
+            # two that are actionable right now - the others are history.
+            def extreme(label, pair, colour):
+                if not pair:
+                    return (label, "--", DIM)
+                hours, ident = pair
+                return (label, "%s %s" % (ident or "?", dur(hours)), colour)
+
+            cells = [extreme("quickest", quickest, OK),
+                     extreme("slowest", slowest, WARN),
+                     extreme("oldest open", oldest_open, BAD),
+                     extreme("oldest in progress", oldest_wip, WARN)]
+            ncols = 2 if w >= 76 else 1
+            cw = (w - 2) // ncols
+            for n in range(0, len(cells), ncols):
+                line = [(RST, " ")]
+                for label, value, colour in cells[n:n + ncols]:
+                    used = len(label) + 1 + len(value)
+                    line += [(DIM, " " + label + " "), (colour, value),
+                             (RST, " " * max(2, cw - used - 1))]
+                rows.append(seg(line, w - 1))
         rows.append("")
 
         # ── what is outstanding right now ────────────────────────────────
