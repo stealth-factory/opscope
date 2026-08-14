@@ -77,5 +77,9 @@
     },
     "limit": 50,
     "refresh": 60
+  },
+  "usage": {
+    "_comment": "Reads local agent state only - no network, no credentials.",
+    "refresh": 30
   }
 }

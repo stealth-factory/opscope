@@ -40,6 +40,7 @@ nothing at all — it just looks good, and it knows it.
 | **`github.py`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
 | **`pr.py`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
 | **`linear.py`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
+| **`usage.py`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — one tab per agent, from local files only. | — | [read →](docs/usage.md) |
 | **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
@@ -57,7 +58,7 @@ multiplexer — each is an ordinary terminal program. Tile them however you like
 
 ## Building the wall
 
-Nine widgets tile into whatever space you have. A layout that works on a wide
+Ten widgets tile into whatever space you have. A layout that works on a wide
 screen:
 
 ```
