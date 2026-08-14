@@ -78,6 +78,7 @@ NEW_RGB, OK_RGB = (180, 160, 255), (90, 240, 160)
 GHOST = (96, 106, 124)
 LOAD_NEW, LOAD_OK = mix(GHOST, NEW_RGB, 0.45), mix(GHOST, OK_RGB, 0.45)
 SETTLE_FRAMES = 8
+CHURN_DAYS = 6     # tail of a cycle's history that counts as "lately"
 
 # Linear's own vocabulary, in the order work moves through it
 STATE_ORDER = ("triage", "backlog", "unstarted", "started")
@@ -367,7 +368,11 @@ def main():
     threading.Thread(target=store.run, daemon=True).start()
     setup()
     keyboard = Keyboard()
-    selected, tick = 0, 0
+    # Two sections scroll, so the arrows need to know which one they are in.
+    # Tab moves the focus; the focused heading says so and carries the range.
+    CYCLES, TEAMS = 0, 1
+    focus, sel = CYCLES, [0, 0]
+    tick = 0
     settle_t, settle_from = 0, None
 
     while True:
@@ -381,10 +386,12 @@ def main():
                 with store.lock:
                     store.days = cycle(WINDOWS, store.days)
                 store.wake.set()
+            elif key == "tab":
+                focus = TEAMS if focus == CYCLES else CYCLES
             elif key == "up":
-                selected = max(0, selected - 1)
+                sel[focus] = max(0, sel[focus] - 1)
             elif key == "down":
-                selected += 1
+                sel[focus] += 1
 
         w, h = size()
         (teams, states, by_team, cycles, created, completed, lead, ctime,
@@ -429,25 +436,43 @@ def main():
 
         # ── the running cycles, each with its own burndown ───────────────
         rows.append("")
-        # Ending soonest first, and cycles nobody has put anything in last:
-        # an empty cycle is an open window, not work in flight, and letting
-        # one sit above a cycle that is 72% done two days from its end would
-        # bury the row worth reading.
-        def urgency(c):
+        # Busiest first. The burndown arrays already say where the action is:
+        # day-over-day movement in completed scope and in scope itself, summed
+        # over the tail. A cycle nothing has touched in a week is not
+        # interesting however close its deadline, and an empty one scores zero
+        # and sinks without needing a special case. Deadline breaks ties.
+        def churn(c):
+            moved = 0.0
+            for series in ("completedScopeHistory", "scopeHistory"):
+                tail = (c.get(series) or [])[-CHURN_DAYS:]
+                moved += sum(abs(tail[i] - tail[i - 1])
+                             for i in range(1, len(tail)))
             ends = parse(c.get("endsAt"))
             left = ((ends - datetime.datetime.now(datetime.timezone.utc)).days
                     if ends else 999)
-            return (not (c.get("scopeHistory") or [0])[-1], left)
+            return (-moved, left)
 
-        ranked_cycles = sorted(cycles, key=urgency)
+        ranked_cycles = sorted(cycles, key=churn)
+        if ranked_cycles:
+            sel[CYCLES] = max(0, min(sel[CYCLES], len(ranked_cycles) - 1))
         shown = max(2, min(6, (h - len(rows)) // 4))
-        rows.append(seg([(LBL, " ── ACTIVE CYCLES ── "),
+        cfirst = 0
+        if len(ranked_cycles) > shown:
+            cfirst = min(max(0, sel[CYCLES] - shown // 2),
+                         len(ranked_cycles) - shown)
+        here_now = focus == CYCLES
+        rows.append(seg([(ACCENT if here_now else LBL, " ── ACTIVE CYCLES ── "),
                          (DIM, "%d running" % len(cycles)),
-                         (DIM, ", showing %d" % shown
-                          if len(cycles) > shown else "")], w - 1))
+                         (ACCENT if here_now else DIM,
+                          ("   %s%d-%d of %d"
+                           % ("↑↓ " if here_now else "",
+                              cfirst + 1,
+                              min(cfirst + shown, len(ranked_cycles)),
+                              len(ranked_cycles)))
+                          if len(ranked_cycles) > shown else "")], w - 1))
         if not cycles:
             rows.append(seg([(DIM, "  no cycle is running in any team")], w - 1))
-        for c in ranked_cycles[:shown]:
+        for ci, c in list(enumerate(ranked_cycles))[cfirst:cfirst + shown]:
             scope = (c.get("scopeHistory") or [0])[-1]
             done = (c.get("completedScopeHistory") or [0])[-1]
             opened_at = (c.get("scopeHistory") or [0])[0]
@@ -457,18 +482,24 @@ def main():
             frac = (done / float(scope)) if scope else 0.0
             name = "%s %s" % ((c.get("team") or {}).get("key", "?"),
                               c.get("name") or ("Cycle %g" % (c.get("number") or 0)))
-            line = [(TXT, " " + pad(name, 18)),
-                    (heat(frac), meter(frac, max(8, min(28, w - 54)))),
-                    (heat(frac) if scope else DIM,
+            on = focus == CYCLES and ci == sel[CYCLES]
+            tint = bg(38, 56, 76) if on else ""
+            line = [(tint + (ACCENT if on else TXT),
+                     ("▸" if on else " ") + pad(name, 18)),
+                    (tint + heat(frac), meter(frac, max(8, min(28, w - 54)))),
+                    (tint + (heat(frac) if scope else DIM),
                      " %3s" % ("%.0f%%" % (frac * 100) if scope else "--")),
-                    (DIM, "  %g/%g pts" % (done, scope) if scope
+                    (tint + DIM, "  %g/%g pts" % (done, scope) if scope
                      else "  nothing scoped")]
             if left is not None:
-                line.append((WARN if left <= 2 else DIM, "  %dd left" % left))
+                line.append((tint + (WARN if left <= 2 else DIM),
+                             "  %dd left" % left))
             # scope added after the cycle opened is the number that explains a
             # cycle that is working hard and still slipping
             if scope > opened_at:
-                line.append((BAD, "  +%g added" % (scope - opened_at)))
+                line.append((tint + BAD, "  +%g added" % (scope - opened_at)))
+            if on:
+                line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
 
         # ── arrivals against departures ─────────────────────────────────
@@ -551,21 +582,25 @@ def main():
         rows.append("")
         ranked = sorted(teams, key=lambda t: (
             -(by_team.get(t["key"], {}).get("open", 0)), t["key"]))
-        selected = max(0, min(selected, len(ranked) - 1)) if ranked else 0
+        if ranked:
+            sel[TEAMS] = max(0, min(sel[TEAMS], len(ranked) - 1))
         room = max(1, h - 5 - len(rows))
         first = 0
         if len(ranked) > room:
-            first = min(max(0, selected - room // 2), len(ranked) - room)
-        counter = ("   %d-%d of %d" % (first + 1, min(first + room, len(ranked)),
-                                       len(ranked))
+            first = min(max(0, sel[TEAMS] - room // 2), len(ranked) - room)
+        on_teams = focus == TEAMS
+        counter = ("   %s%d-%d of %d"
+                   % ("↑↓ " if on_teams else "", first + 1,
+                      min(first + room, len(ranked)), len(ranked))
                    if len(ranked) > room else "")
-        rows.append(seg([(LBL, " ── BY TEAM ──"), (DIM, counter)], w - 1))
+        rows.append(seg([(ACCENT if on_teams else LBL, " ── BY TEAM ──"),
+                         (ACCENT if on_teams else DIM, counter)], w - 1))
         rows.append(DIM + pad(" %-22s%6s%7s%8s%8s"
                               % ("TEAM", "OPEN", "TRIAGE", "DOING", "DONE%dD"
                                  % store.days), w - 1))
         for i, t in list(enumerate(ranked))[first:first + room]:
             c = by_team.get(t["key"], collections.Counter())
-            here = i == selected
+            here = on_teams and i == sel[TEAMS]
             tint = bg(38, 56, 76) if here else ""
             rows.append(seg([
                 (tint + (ACCENT if here else TXT),
@@ -576,7 +611,8 @@ def main():
                 (tint + (OK if c.get("done") else DIM), "%8d" % c.get("done", 0)),
             ] + ([(tint, " " * w)] if here else []), w - 1))
 
-        hints = [[(ACCENT, "↑↓"), (DIM, " team")], [(DIM, "[w]indow")],
+        hints = [[(ACCENT, "↑↓"), (DIM, " scroll")],
+                 [(DIM, "[tab] section")], [(DIM, "[w]indow")],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         footer = [" " + line for line in pack_hints(hints, w - 2)]
         rows = rows[:h - len(footer)]

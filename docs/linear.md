@@ -10,13 +10,13 @@ running, and whether issues are being closed faster than they arrive.
  █████████████████████████████████████████████████████████████████████████████████
  ▇ triage 704 (58%)   ▇ backlog 314 (26%)   ▇ todo 155 (13%)   ▇ in progress 48 (4%)
 
- ── ACTIVE CYCLES ── 11 running, showing 6
+ ── ACTIVE CYCLES ── 11 running   ↑↓ 1-6 of 11
+▸WEB Cycle 3       ████████████████████░░░░░░░░ 72%  205/284 pts  2d left  +175 added
+ CLI Cycle 16      ████████████░░░░░░░░░░░░░░░░ 43%  3/7 pts  9d left  +3 added
  LAB Cycle 3       █████████░░░░░░░░░░░░░░░░░░░ 33%  1/3 pts  2d left
- WEB Cycle 3       ████████████████████░░░░░░░░ 72%  205/284 pts  2d left  +175 added
  SIT Cycle 3       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0%  0/6 pts  2d left
  OPS Cycle 111     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0%  0/8 pts  2d left
  STU Cycle 46      ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0%  0/63 pts  2d left
- MED Cycle 16      ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0%  0/1 pts  9d left
 
  ── ISSUE FLOW ── 14d · ▲ 297 created · ▼ 88 completed   peak 66/day
            ▁▁▁▁      ▇▇▇▇                ████
@@ -33,7 +33,7 @@ running, and whether issues are being closed faster than they arrive.
 
  ── BY TEAM ──   1-8 of 14
  TEAM                    OPEN TRIAGE   DOING DONE14D
-▸OPS  Ops Intake          703    675       0       0
+ OPS  Ops Intake          703    675       0       0
  STU  Studio              140     22      14       0
  WEB  Web App             125      1      20      75
  LIB  Libraries           105      6       3       0
@@ -63,10 +63,14 @@ bar, points completed against scope, and days remaining.
 
 `+175 added` is the number to watch: scope added *after* the cycle opened. A
 cycle can be worked hard and still slip, and this is the column that says which
-of the two happened. Cycles are ordered by the soonest to end, with any that
-have nothing scoped sorted last — an empty cycle is an open window, not work in
-flight, and letting one sit above a cycle 72% done two days from its deadline
-buries the row worth reading.
+of the two happened.
+
+**Cycles are ordered by how much is actually moving in them**, not by deadline.
+The burndown arrays already answer that: day-over-day movement in completed
+scope and in scope itself, summed over the last six entries. A cycle nobody has
+touched in a week is not where the action is however close its end date, and an
+empty cycle scores zero and sinks without needing a special case. The deadline
+breaks ties.
 
 **Issue flow** — the diverging chart: created growing up, completed growing
 down, one bar per day, both directions on a shared scale. Read together they
@@ -77,7 +81,7 @@ created against 88 completed.
 (started → completed) over everything finished in the window. Medians, because
 one issue that sat open for a month drags a mean somewhere unrepresentative.
 
-**By team** — ranked by open volume, scrolling under `↑` `↓` when there are more
+**By team** — ranked by open volume, scrolling when focused and there are more
 teams than rows. `DONE14D` follows the window.
 
 ## Cost
@@ -99,9 +103,14 @@ reporting a smaller number.
 
 ## Keys
 
+Two sections scroll — the cycles and the team table — so the arrows need to
+know which one they are in. `tab` moves the focus, and the focused heading says
+so by carrying the `↑↓` marker and its visible range.
+
 | Key | Action |
 |---|---|
-| `↑` `↓` | select a team |
+| `tab` | move focus between the cycles and the team table |
+| `↑` `↓` | scroll the focused section |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |
