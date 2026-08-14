@@ -565,6 +565,7 @@ def main():
     sort_field, newest_first = SORTS[0], True
     needle, typing = "", False
     show_stats = True
+    stack_sel = 0
 
     while True:
         tick += 1
@@ -592,10 +593,23 @@ def main():
             elif key == "esc":
                 if detail or loading:
                     store.close_detail()
+                    stack_sel = 0
                 else:
                     needle = ""
             elif key == "enter":
-                if shown and not detail and not loading:
+                if detail and stack_rows:
+                    # walk the stack from inside the stack: the row under the
+                    # cursor becomes the PR on screen
+                    node = stack_rows[min(stack_sel,
+                                          len(stack_rows) - 1)][1]
+                    owner_repo = "/".join(
+                        (detail.get("url") or "").split("/")[3:5])
+                    if owner_repo and node["number"] != detail["number"]:
+                        store.open_detail({"repository":
+                                           {"nameWithOwner": owner_repo},
+                                           "number": node["number"]})
+                        stack_sel = 0
+                elif shown and not detail and not loading:
                     store.open_detail(shown[min(selected, len(shown) - 1)])
             elif key == "r":
                 store.wake.set()
@@ -606,9 +620,15 @@ def main():
             elif key == "t":
                 show_stats = not show_stats
             elif key == "up":
-                selected = max(0, selected - 1)
+                if detail:
+                    stack_sel = max(0, stack_sel - 1)
+                else:
+                    selected = max(0, selected - 1)
             elif key == "down":
-                selected += 1
+                if detail:
+                    stack_sel += 1
+                else:
+                    selected += 1
 
         w, h = size()
         rows = [title("pr watch", w, PR)]
@@ -625,9 +645,15 @@ def main():
             rows.append(seg([(BAD, " ! " + err)], w - 1))
 
         if detail or loading:
-            rows += detail_view(detail, stack_rows, loading, w, h, tick)
+            if stack_rows:
+                stack_sel = max(0, min(stack_sel, len(stack_rows) - 1))
+            rows += detail_view(detail, stack_rows, stack_sel, loading, w, h,
+                                tick)
             hints = [[(DIM, "[esc] back")], [(DIM, "[r]efresh")],
                      [(DIM, "[q]uit")]]
+            if stack_rows:
+                hints = ([[(ACCENT, "↑↓"), (DIM, " stack")],
+                          [(DIM, "[↵] open it")]] + hints)
         else:
             selected = max(0, min(selected, len(shown) - 1)) if shown else 0
             # the stats cost eight rows; below thirty they would leave the
@@ -724,7 +750,7 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
     return rows
 
 
-def detail_view(pr, stack_rows, loading, w, h, tick):
+def detail_view(pr, stack_rows, stack_sel, loading, w, h, tick):
     rows = [""]
     if loading or not pr:
         rows.append(seg([(LBL, " ── PULL REQUEST ── "), (DIM, "opening…")],
@@ -837,38 +863,55 @@ def detail_view(pr, stack_rows, loading, w, h, tick):
     if stack_rows:
         native = bool(pr.get("stack"))
         rows.append("")
+        # the stack scrolls: eleven-deep stacks exist, and a pane that has
+        # already spent its height on checks cannot show them all
+        room = max(3, h - len(rows) - 6)
+        first = 0
+        if len(stack_rows) > room:
+            first = min(max(0, stack_sel - room // 2), len(stack_rows) - room)
         rows.append(seg([(LBL, " ── STACK ── "),
                          (DIM, "%d pull requests · %s" % (
                              len(stack_rows),
-                             "from GitHub" if native else "inferred from branches"))],
-                        w - 1))
+                             "from GitHub" if native
+                             else "inferred from branches")),
+                         (ACCENT, "   ↑↓ %d-%d of %d"
+                          % (first + 1, min(first + room, len(stack_rows)),
+                             len(stack_rows))
+                          if len(stack_rows) > room else "")], w - 1))
         rows.append(seg([(DIM, "  merge bottom-up: "),
-                         (TXT, "the one nearest the base branch first")], w - 1))
+                         (TXT, "the one nearest the base branch first"),
+                         (DIM, "   ▸ cursor · ● on screen")], w - 1))
         base = pr.get("baseRefName") if not native else (
             pr["stack"].get("baseRefName") or "")
         rows.append(seg([(DIM, "  "), (ACCENT, base or "trunk")], w - 1))
-        for twig, node, is_here, position in stack_rows:
+        for idx, (twig, node, is_here, position) in list(
+                enumerate(stack_rows))[first:first + room]:
             lab, col = REVIEW_LABEL.get(node.get("reviewDecision"),
                                         REVIEW_LABEL[None])
             merge = node.get("mergeable")
             mlab, mcol = (("CONFLICT", BAD) if merge == "CONFLICTING"
                           else ("ok", OK) if merge == "MERGEABLE"
                           else ("…", DIM))
-            tint = bg(38, 56, 76) if is_here else ""
+            on_cursor = idx == stack_sel
+            tint = bg(38, 56, 76) if on_cursor else ""
             name = (node.get("title") or "")
             if position:
                 name = "%d. %s" % (position, name)
-            # a marker as well as the tint: which PR you are looking at should
-            # not depend on colour surviving
+            # two gutter marks, because they answer different questions:
+            # ▸ is where the cursor is, ● is the PR actually on screen. One
+            # symbol plus a colour could not say both.
+            gutter = ("▸" if on_cursor else " ") + ("●" if is_here else " ")
             rows.append(seg([
-                (tint + DIM, (" ▸" if is_here else "  ") + twig),
-                (tint + (ACCENT if is_here else PR), "#%-5d " % node["number"]),
-                (tint + (TXT if is_here else DIM),
+                (tint + (ACCENT if on_cursor else DIM), gutter),
+                (tint + DIM, twig),
+                (tint + (ACCENT if on_cursor else PR),
+                 "#%-5d " % node["number"]),
+                (tint + (TXT if (is_here or on_cursor) else DIM),
                  pad(name[:max(10, w - 34 - len(twig))],
                      max(10, w - 34 - len(twig)))),
                 (tint + col, "%13s" % lab),
                 (tint + mcol, "%10s" % mlab),
-            ] + ([(tint, " " * w)] if is_here else []), w - 1))
+            ] + ([(tint, " " * w)] if on_cursor else []), w - 1))
     return rows
 
 

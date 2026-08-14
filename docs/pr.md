@@ -112,6 +112,8 @@ two disagreed by years on the same PR.
 | `o` | reverse the order |
 | `/` | filter |
 | `t` | show or hide the stats |
+| `↑` `↓` | in a PR view, move through its stack |
+| `↵` | in a PR view, open the stack row under the cursor |
 
 Sorting is done locally on the fetched set, so both keys are instant and cost
 no request.
@@ -165,8 +167,15 @@ off it — so it draws with real connectors:
      └─ #8     Upgrade dependencies                                 —  CONFLICT
 ```
 
-`▸` marks the PR you opened — a marker as well as the row tint, so which one
-you are looking at does not depend on colour surviving a screenshot.
+Two gutter marks, because they answer different questions: **`▸` is the
+cursor**, **`●` is the PR currently on screen**. One symbol plus a colour could
+not say both, and after walking a few steps up a stack they are rarely the same
+row.
+
+`↑` `↓` move the cursor through the stack and **`↵` opens whatever it lands
+on**, so a stack can be walked from inside itself without going back to the
+list. The stack scrolls when it is taller than the space left after the checks
+— eleven-deep stacks exist — and the heading counts what is shown.
 
 **Merge bottom-up**: the PR nearest the base branch first, then rebase or
 retarget what sat on it. A child merged before its parent drags in commits
