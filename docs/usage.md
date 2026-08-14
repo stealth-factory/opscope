@@ -25,6 +25,15 @@ per agent, read entirely from local state. No network, no credentials.
  ▃▃██▃▃▅▅▆▆▄▄▄▄██▂▂▂▂▆▆██████████████
  ─────────────────────────────────────
  07-16                           08-12
+
+ ── TOKENS / DAY ── peak 3.3B on 08-01
+       Mon Tue Wed Thu Fri Sat Sun
+ 07-13  ·   ·   ·  ░░  ▒▒  ░░   ·
+ 07-20 ░░  ░░  ░░  ░░  ▒▒  ░░  ░░
+ 07-27 ▒▒  ▒▒  ░░  ░░  ▒▒  ██  ▒▒
+ 08-03 ▒▒  ░░  ▒▒  ░░  ░░  ░░  ░░
+ 08-10  ·  ░░  ░░   ·   ·   ·   ·
+  less ░░▒▒▓▓██ more
 ```
 
 ## Why tabs
@@ -46,6 +55,14 @@ reads without colour. A `·` marks an agent that is installed.
 **Claude Code** — the real one. `~/.claude/stats-cache.json` carries per-model
 token counts (input, output, cache read, cache written), total sessions and
 messages, and around four weeks of daily activity. All of it is spend.
+
+The **tokens-per-day calendar** runs weeks down and weekdays across, which is
+the opposite of the contribution calendar in `github.py`. That one is a year
+wide, so weekday-rows and week-columns fits; four weeks that way would be four
+columns and a mostly empty pane. Same idea, turned to suit the range the data
+actually has. Intensity is carried by the shading glyph as well as the colour,
+and a `·` marks a day the file has no entry for — distinct from a day that
+recorded zero.
 
 **Cursor** — `ai-tracking/ai-code-tracking.db` records *authorship*: how many
 edits the agent made, across how many conversations, and how many lines in

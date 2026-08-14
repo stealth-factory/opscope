@@ -197,6 +197,52 @@ def tab_bar(active, installed, w):
     return seg(parts, w - 1)
 
 
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def token_heatmap(daily, w):
+    """Tokens per day as a wall calendar: weeks down, weekdays across.
+
+    github.py draws its contribution calendar the other way round - weekday
+    rows, week columns - because a year is fifty-two columns wide. Four weeks
+    would be four columns and mostly empty pane, so this one turns it: the
+    same data, laid out for the range it actually has.
+
+    Intensity is in the glyph as well as the colour, so the shape survives a
+    screenshot or a `pane read`.
+    """
+    levels = " ░▒▓█"
+    totals = {}
+    for entry in daily:
+        try:
+            day = datetime.date.fromisoformat(entry["date"])
+        except (ValueError, KeyError):
+            continue
+        totals[day] = sum((entry.get("tokensByModel") or {}).values())
+    if not totals:
+        return [], 0, None
+    peak = max(totals.values()) or 1
+    best = max(totals, key=totals.get)
+    first = min(totals) - datetime.timedelta(days=min(totals).weekday())
+    last = max(totals)
+    rows = []
+    week = first
+    while week <= last:
+        cells = [(DIM, " %s " % week.strftime("%m-%d"))]
+        for i in range(7):
+            day = week + datetime.timedelta(days=i)
+            n = totals.get(day)
+            if n is None:
+                cells.append((GRID, " ·  "))
+                continue
+            frac = n / float(peak)
+            lvl = 0 if not n else min(4, 1 + int(frac * 3.99))
+            cells.append((heat(frac), levels[lvl] * 2 + "  "))
+        rows.append(cells)
+        week += datetime.timedelta(days=7)
+    return rows, peak, best
+
+
 def claude_tab(state, w, h):
     rows = []
     if not state.get("ok"):
@@ -268,6 +314,22 @@ def claude_tab(state, w, h):
         rows.append(seg([(DIM, " " + left),
                          (DIM, " " * max(1, len(cols) - len(left) - len(right))),
                          (DIM, right)], w - 1))
+
+    # ── tokens per day, as a calendar ───────────────────────────────────
+    grid, peak, best = token_heatmap(d.get("dailyModelTokens") or [], w)
+    if grid and h > 26:
+        rows.append("")
+        rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
+                         (DIM, "peak "), (AGENT, big_num(peak)),
+                         (DIM, " on %s" % (best.strftime("%m-%d") if best
+                                           else "--"))], w - 1))
+        rows.append(seg([(DIM, "       ")] +
+                        [(DIM, "%-4s" % x) for x in WEEKDAYS], w - 1))
+        for line in grid:
+            rows.append(seg(line, w - 1))
+        rows.append(seg([(DIM, "  less "), (heat(0.05), "░░"),
+                         (heat(0.35), "▒▒"), (heat(0.65), "▓▓"),
+                         (heat(1.0), "██"), (DIM, " more")], w - 1))
 
     rows.append("")
     rows.append(seg([(DIM, "  This file records what was spent. It carries no"
