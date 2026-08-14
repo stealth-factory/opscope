@@ -459,6 +459,7 @@ def stats_view(prs, w):
     if peak:
         for line in vbars(cols, 3):
             rows.append(seg([(RST, " ")] + line, w - 1))
+        rows.append(seg([(RST, " "), (GRID, "─" * len(cols))], w - 1))
         left = "%dd ago" % OPENED_DAYS
         rows.append(seg([(DIM, " " + left),
                          (DIM, " " * max(1, len(cols) - len(left) - 5)),
@@ -488,13 +489,35 @@ def stats_view(prs, w):
                      (DIM, "   idle median "), (TXT, span(at(idles, 0.5)))],
                     w - 1))
     if ages:
-        # one cell per open PR, oldest on the right: the shape of the tail is
-        # the point, and a backlog that ends in a wall of full blocks is a
-        # different problem from one that slopes
-        hi = max(x[0] for x in ages) or 1
-        spark = "".join(SPARK[min(7, int(x[0] / hi * 7.99))]
-                        for x in ages[-max(10, min(len(ages), w - 4)):])
-        rows.append(seg([(RST, " "), (heat(0.4), spark)], w - 1))
+        # One bar per open PR, youngest left to oldest right - the x axis is
+        # rank, not time. It fills the pane and carries a baseline and end
+        # labels, because a sparkline that stops in the middle of the screen
+        # gives no way to tell where the chart ends and the blank begins.
+        room = max(10, w - 3)
+        drawn = ages[-room:] if len(ages) > room else ages
+        # spread the remainder across the leftmost bars so the chart reaches
+        # the right edge exactly: stopping short of it left no way to tell a
+        # finished chart from a truncated one
+        if len(drawn) >= room:
+            slot, extra = 1, 0
+        else:
+            slot, extra = divmod(room, len(drawn))
+        hi = max(x[0] for x in drawn) or 1
+        bars = []
+        for i, (hours, _pr) in enumerate(drawn):
+            wide_bar = slot + (1 if i < extra else 0)
+            bars.extend([SPARK[min(7, int(hours / hi * 7.99))]] * wide_bar)
+        rows.append(seg([(RST, " "), (heat(0.4), "".join(bars))], w - 1))
+        rows.append(seg([(RST, " "), (GRID, "─" * len(bars))], w - 1))
+        left = "youngest %s" % span(drawn[0][0])
+        right = "oldest %s" % span(drawn[-1][0])
+        note = ("%d of %d PRs" % (len(drawn), len(ages))
+                if len(drawn) < len(ages) else "%d PRs" % len(drawn))
+        mid = max(1, len(bars) - len(left) - len(right) - len(note) - 2)
+        rows.append(seg([(DIM, " " + left),
+                         (DIM, " " * (mid // 2)), (GRID, note),
+                         (DIM, " " * (mid - mid // 2 + 2)),
+                         (DIM, right)], w - 1))
     fattest = max(prs, key=lambda p: (p.get("additions") or 0)
                   + (p.get("deletions") or 0))
     old_txt, old_col = worst(ages, WARN)

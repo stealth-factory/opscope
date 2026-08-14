@@ -16,8 +16,10 @@ you open.
                                                                         ██             ▂▂
  30d ago                                                                            today
 
- ── AGE ── median 52d  p95 1.9y  max 3.9y   idle median 52d
- ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▃▃▃▄▄█
+ ── AGE ── median 53d  p95 1.9y  max 3.9y   idle median 53d
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▃▃▃▃▃▃▃▄▄▄▄▄██
+ ────────────────────────────────────────────────────────────────────────────
+ youngest 7h                      33 PRs                          oldest 3.9y
   oldest #712 3.9y     untouched longest #7 1.2y       biggest #26 +41296/-27883
 
  ── OPEN PRs ── by updated ↓
@@ -64,10 +66,25 @@ this is the one number that says something can be done right now.
 Not a throughput chart: it is the shape of the backlog's arrival, so a spike
 means a batch landed and never left.
 
-**Age** — median, p95 and max, then one cell per open PR with the oldest on the
-right. The shape of the tail is the point; a backlog that ends in a wall of
-full blocks is a different problem from one that slopes. Underneath, the three
-worth naming: oldest, untouched longest, and biggest by diff.
+**Age** — median, p95 and max, then **one bar per open PR, youngest on the left
+and oldest on the right**. The x axis is *rank, not time*: neighbouring bars are
+adjacent in the sorted order, not a day apart. The shape of the tail is the
+point — a backlog ending in a wall of full blocks is a different problem from
+one that slopes.
+
+Both charts carry a **baseline rule and end labels**, and the age chart spreads
+its bars to reach the right edge exactly. Without that a short chart simply
+stopped mid-pane with no way to tell a finished chart from a truncated one.
+When there are more PRs than columns the oldest are kept and the middle label
+says so — `28 of 140 PRs` rather than silently dropping the rest.
+
+Underneath, the three worth naming: oldest, untouched longest, and biggest by
+diff.
+
+Heights are **linear against the oldest PR**, which is worth knowing when the
+spread is wide: with an outlier at 3.9 years, everything under a couple of
+months lands on the same lowest block. `latency.py` solves the same problem
+with a log scale; this chart has not adopted one yet.
 
 ## The list
 
