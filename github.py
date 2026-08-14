@@ -575,23 +575,30 @@ def main():
         gap = 1 if slot >= 3 else 0
         barw = slot - gap
 
-        def spread(counter, colour):
+        def spread(per_day):
+            """One value per day, widened to the bar it will be drawn as.
+
+            Everything the chart draws goes through this, the loading
+            animation included, so the placeholder has exactly the bars the
+            real chart will have - same count, same width, same gaps.
+            """
             cols = []
-            for n, d in enumerate(days):
-                cols.extend([(counter.get(d, 0), colour)] * barw)
-                if gap and n < len(days) - 1:
-                    cols.extend([(0, colour)] * gap)
+            for n, v in enumerate(per_day):
+                cols.extend([v] * barw)
+                if gap and n < len(per_day) - 1:
+                    cols.extend([0] * gap)
             return cols
 
         # One chart, two directions: PRs opened grow up, PRs merged grow down
         # from a shared baseline. Read together they answer whether the queue
         # is filling faster than it drains - which two separate charts made
         # you compare by eye across a heading.
-        up = spread(opened_all, PR)
-        down = spread(merged_all, OK)
+        opened_day = [opened_all.get(d, 0) for d in days]
+        merged_day = [merged_all.get(d, 0) for d in days]
+        up, down = spread(opened_day), spread(merged_day)
         chart_cols = len(up)
         # One scale both ways, or the comparison lies.
-        span_hi = max([v for v, _ in up + down], default=0) or 1
+        span_hi = max(up + down) or 1
         # A narrow pane cannot draw 90 columns, so the chart shows the most
         # recent days that fit and says so - the totals are of what is drawn,
         # not of the window, and would otherwise contradict the merge rate.
@@ -606,11 +613,9 @@ def main():
             # totals come from the days themselves: a day spans several
             # columns now, so summing the columns would multiply by bar width
             rows.append(seg([(LBL, " ── PR FLOW ── "), (DIM, "%s · " % span),
-                             (PR, "▲ %d opened"
-                              % sum(opened_all.get(d, 0) for d in days)),
+                             (PR, "▲ %d opened" % sum(opened_day)),
                              (DIM, " · "),
-                             (OK, "▼ %d merged"
-                              % sum(merged_all.get(d, 0) for d in days)),
+                             (OK, "▼ %d merged" % sum(merged_day)),
                              (DIM, "   peak %d/day" % span_hi)], w - 1))
         # While the figures are still arriving the bars bounce like a level
         # meter in pale versions of their own colours, then settle onto the
@@ -618,13 +623,15 @@ def main():
         # - trimming the unused half would make the chart change height at the
         # end of the animation, which is exactly when it should be still.
         if chart_stale:
-            hu = dance(chart_cols, tick)
-            hd = dance(chart_cols, tick, phase=2.1)
+            # dance per day, then widen: bouncing each column on its own would
+            # show a twelve-column day as twelve separate thin bars
+            hu = spread(dance(len(days), tick))
+            hd = spread(dance(len(days), tick, phase=2.1))
             cu, cd = LOAD_PR, LOAD_OK
             settle_from, settle_t = (hu, hd), 0
         else:
-            real_u = [v / float(span_hi) for v, _ in up]
-            real_d = [v / float(span_hi) for v, _ in down]
+            real_u = [v / float(span_hi) for v in up]
+            real_d = [v / float(span_hi) for v in down]
             if (settle_from and settle_t < SETTLE_FRAMES
                     and len(settle_from[0]) == chart_cols):
                 settle_t += 1

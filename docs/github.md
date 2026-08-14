@@ -162,6 +162,11 @@ number it cannot justify:
   bars **settle** onto them over about two seconds and the colour comes up to
   full, rather than the chart cutting from placeholder to data.
 
+  The placeholder is the same chart, not a stand-in for one: the day count and
+  bar width follow from the window and the pane, neither of which needs any
+  data, so the loader draws exactly the bars the finished chart will have and
+  each one simply moves into place.
+
 Both sides of the flow chart always draw three rows, even when the merged half
 never uses its full height. Trimming the unused rows would make the chart change
 height at the end of the settle — precisely the moment it should be still — and
