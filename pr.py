@@ -44,7 +44,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bg, config_token_warning, cycle, draw, heat,
                     load_config, maybe_help, pack_hints, pad, rgb, seg, setup,
-                    size, skeleton, title)
+                    size, skeleton, stacked_bar, title, vbars)
 
 _GH = load_config("github", {"token": "", "token_env": "GITHUB_TOKEN"})
 _CFG = load_config("pr", {
@@ -58,6 +58,8 @@ _CFG = load_config("pr", {
 REFRESH = float(_CFG["refresh"])
 API = "https://api.github.com/graphql"
 SORTS = ("updated", "created")
+SPARK = "▁▂▃▄▅▆▇█"
+OPENED_DAYS = 30   # width of the opened-per-day chart
 
 OK = rgb(90, 240, 160)
 WARN = rgb(255, 200, 90)
@@ -352,6 +354,160 @@ class Store(object):
             self.loading_detail = False
 
 
+def hours_since(ts):
+    when = parse(ts)
+    if not when:
+        return None
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - when).total_seconds() / 3600.0
+
+
+def span(hours):
+    if hours is None:
+        return "--"
+    if hours < 48:
+        return "%dh" % int(hours)
+    days = hours / 24.0
+    return "%dd" % int(days) if days < 365 else "%.1fy" % (days / 365.0)
+
+
+def ready_to_merge(pr):
+    """Approved, green, no conflict, not a draft - the actionable count.
+
+    Everything else on this board describes work in flight; this is the one
+    number that says something can be done right now.
+    """
+    return (pr.get("reviewDecision") == "APPROVED"
+            and rollup(pr) in ("SUCCESS", None)
+            and pr.get("mergeable") != "CONFLICTING"
+            and not pr.get("isDraft"))
+
+
+def stats_view(prs, w):
+    """Shape and age of whatever the list is currently showing."""
+    rows = [""]
+    if not prs:
+        return rows
+    n = len(prs)
+    review = {"APPROVED": 0, "CHANGES_REQUESTED": 0, "REVIEW_REQUIRED": 0,
+              None: 0}
+    checks = {"SUCCESS": 0, "FAILURE": 0, "PENDING": 0, "other": 0}
+    drafts = conflicts = ready = 0
+    for pr in prs:
+        review[pr.get("reviewDecision") if pr.get("reviewDecision") in review
+               else None] += 1
+        state = rollup(pr)
+        checks[state if state in checks else "other"] += 1
+        drafts += 1 if pr.get("isDraft") else 0
+        conflicts += 1 if pr.get("mergeable") == "CONFLICTING" else 0
+        ready += 1 if ready_to_merge(pr) else 0
+
+    rows.append(seg([(LBL, " ── STATE ── "), (TXT, "%d" % n),
+                     (DIM, " shown · "), (DIM, "%d draft" % drafts),
+                     (DIM, " · "),
+                     (BAD if conflicts else DIM, "%d conflicting" % conflicts),
+                     (DIM, " · "),
+                     (OK if ready else DIM, "%d ready to merge" % ready)],
+                    w - 1))
+    order = [("APPROVED", OK), ("CHANGES_REQUESTED", BAD),
+             ("REVIEW_REQUIRED", WARN), (None, DIM)]
+    parts = [(review[k] / float(n), c) for k, c in order if review[k]]
+    rows.append(seg([(RST, " ")] + stacked_bar(parts, max(10, w - 3)), w - 1))
+    key = [(RST, " ")]
+    for k, colour in order:
+        if review[k]:
+            key += [(colour, "▇ "), (TXT, REVIEW_LABEL[k][0]),
+                    (DIM, " %d   " % review[k])]
+    for k, colour, label in (("SUCCESS", OK, "checks pass"),
+                             ("FAILURE", BAD, "checks FAIL"),
+                             ("PENDING", WARN, "running")):
+        if checks[k]:
+            key += [(colour, "· "), (TXT, label), (DIM, " %d   " % checks[k])]
+    rows.append(seg(key, w - 1))
+
+    ages = sorted((hours_since(p.get("createdAt")), p) for p in prs
+                  if hours_since(p.get("createdAt")) is not None)
+    idles = [(hours_since(p.get("updatedAt")), p) for p in prs
+             if hours_since(p.get("updatedAt")) is not None]
+
+    # ── when the open ones arrived ──────────────────────────────────────
+    today = datetime.date.today()
+    days = [(today - datetime.timedelta(days=k)).isoformat()
+            for k in range(OPENED_DAYS - 1, -1, -1)]
+    per_day = dict((d, 0) for d in days)
+    inside = 0
+    for pr in prs:
+        key = (pr.get("createdAt") or "")[:10]
+        if key in per_day:
+            per_day[key] += 1
+            inside += 1
+    avail = max(10, w - 3)
+    slot = max(1, avail // len(days))
+    gap = 1 if slot >= 3 else 0
+    barw = slot - gap
+    cols = []
+    for i, d in enumerate(days):
+        cols.extend([(per_day[d], PR)] * barw)
+        if gap and i < len(days) - 1:
+            cols.extend([(0, PR)] * gap)
+    peak = max(per_day.values()) if per_day else 0
+    rows.append("")
+    rows.append(seg([(LBL, " ── OPENED / DAY ── "),
+                     (DIM, "last %dd · " % OPENED_DAYS),
+                     (TXT, "%d" % inside), (DIM, " of %d still open · " % n),
+                     (DIM, "peak %d/day" % peak)], w - 1))
+    if peak:
+        for line in vbars(cols, 3):
+            rows.append(seg([(RST, " ")] + line, w - 1))
+        left = "%dd ago" % OPENED_DAYS
+        rows.append(seg([(DIM, " " + left),
+                         (DIM, " " * max(1, len(cols) - len(left) - 5)),
+                         (DIM, "today")], w - 1))
+    else:
+        rows.append(seg([(DIM, "  none of the open PRs were opened in the "
+                               "last %dd" % OPENED_DAYS)], w - 1))
+
+    # ── how old they are ────────────────────────────────────────────────
+    def at(pairs, frac):
+        if not pairs:
+            return None
+        vals = sorted(x[0] for x in pairs)
+        return vals[min(len(vals) - 1, int(len(vals) * frac))]
+
+    def worst(pairs, colour):
+        if not pairs:
+            return ("--", DIM)
+        hours, pr = max(pairs, key=lambda x: x[0])
+        return ("#%d %s" % (pr["number"], span(hours)), colour)
+
+    rows.append("")
+    rows.append(seg([(LBL, " ── AGE ── "),
+                     (DIM, "median "), (TXT, span(at(ages, 0.5))),
+                     (DIM, "  p95 "), (TXT, span(at(ages, 0.95))),
+                     (DIM, "  max "), (WARN, span(at(ages, 1.0))),
+                     (DIM, "   idle median "), (TXT, span(at(idles, 0.5)))],
+                    w - 1))
+    if ages:
+        # one cell per open PR, oldest on the right: the shape of the tail is
+        # the point, and a backlog that ends in a wall of full blocks is a
+        # different problem from one that slopes
+        hi = max(x[0] for x in ages) or 1
+        spark = "".join(SPARK[min(7, int(x[0] / hi * 7.99))]
+                        for x in ages[-max(10, min(len(ages), w - 4)):])
+        rows.append(seg([(RST, " "), (heat(0.4), spark)], w - 1))
+    fattest = max(prs, key=lambda p: (p.get("additions") or 0)
+                  + (p.get("deletions") or 0))
+    old_txt, old_col = worst(ages, WARN)
+    idle_txt, idle_col = worst(idles, WARN)
+    rows.append(seg([(DIM, "  oldest "), (old_col, pad(old_txt, 12)),
+                     (DIM, "  untouched longest "), (idle_col, pad(idle_txt, 12)),
+                     (DIM, "  biggest "),
+                     (TXT, "#%d +%d/-%d" % (fattest["number"],
+                                            fattest["additions"],
+                                            fattest["deletions"]))], w - 1))
+    return rows
+
+
 def sort_prs(prs, field, newest_first):
     key = "updatedAt" if field == "updated" else "createdAt"
     return sorted(prs, key=lambda p: p.get(key) or "", reverse=newest_first)
@@ -385,6 +541,7 @@ def main():
     selected, tick, first = 0, 0, 0
     sort_field, newest_first = SORTS[0], True
     needle, typing = "", False
+    show_stats = True
 
     while True:
         tick += 1
@@ -423,6 +580,8 @@ def main():
                 sort_field = cycle(SORTS, sort_field)
             elif key == "o":
                 newest_first = not newest_first
+            elif key == "t":
+                show_stats = not show_stats
             elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
@@ -448,6 +607,10 @@ def main():
                      [(DIM, "[q]uit")]]
         else:
             selected = max(0, min(selected, len(shown) - 1)) if shown else 0
+            # the stats cost eight rows; below thirty they would leave the
+            # list too short to be a list, so they stand down without asking
+            if show_stats and h >= 30:
+                rows += stats_view(shown, w)
             rows += list_view(shown, selected, sort_field, newest_first,
                               needle, typing, w, h, tick, loading)
             hints = [[(ACCENT, "↑↓"), (DIM, " select")], [(DIM, "[↵] open")],
@@ -455,6 +618,7 @@ def main():
                      [(DIM, "[s]ort %s" % sort_field)],
                      [(DIM, "[o]rder %s" % ("newest" if newest_first
                                             else "oldest"))],
+                     [(DIM, "[t]stats %s" % ("on" if show_stats else "off"))],
                      [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         if typing:
             hints = [[(ACCENT, "/" + needle + "▌")],
@@ -491,7 +655,12 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
     head = " %-7s" % "PR"
     if repo_w:
         head += "%-*s" % (repo_w, "REPO")
-    head += "%-*s%13s%8s%6s" % (title_w, "TITLE", "REVIEW", "CHECKS", "AGE")
+    # the time column follows the sort, so the number you ordered by is the
+    # number you can see. Labelling both "AGE" had it reporting idle time
+    # while the stats above reported true age, and the two disagreed.
+    when_label = "AGE" if sort_field == "created" else "IDLE"
+    head += "%-*s%13s%8s%6s" % (title_w, "TITLE", "REVIEW", "CHECKS",
+                                when_label)
     if size_w:
         head += "%*s" % (size_w, "SIZE")
     rows.append(DIM + pad(head, w - 1))
@@ -519,7 +688,9 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
         line += [(tint + TXT, pad(name[:title_w - 1], title_w)),
                  (tint + rcol, "%13s" % rlabel),
                  (tint + ccol, "%8s" % clabel),
-                 (tint + DIM, "%6s" % ago(pr.get("updatedAt")))]
+                 (tint + DIM, "%6s" % ago(pr.get(
+                     "createdAt" if sort_field == "created"
+                     else "updatedAt")))]
         if size_w:
             line.append((tint + DIM, "%*s" % (size_w, "+%d/-%d"
                                               % (pr["additions"],

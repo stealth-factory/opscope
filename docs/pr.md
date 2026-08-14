@@ -6,8 +6,22 @@ you open.
 ```
 ╺━ PR WATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  33 of 33 open   updated 1m ago   4567 api
+ ── STATE ── 34 shown · 10 draft · 9 conflicting · 1 ready to merge
+ ████████████████████████████████████████████████████████████████████████████████████████████████
+ ▇ approved 2   ▇ CHANGES REQ 1   ▇ needs review 27   · checks pass 24   · checks FAIL 6
+
+ ── OPENED / DAY ── last 30d · 12 of 34 still open · peak 11/day
+                                                                        ██
+                                                                        ██
+                                                                        ██             ▂▂
+ 30d ago                                                                            today
+
+ ── AGE ── median 52d  p95 1.9y  max 3.9y   idle median 52d
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▃▃▃▄▄█
+  oldest #712 3.9y     untouched longest #7 1.2y       biggest #26 +41296/-27883
+
  ── OPEN PRs ── by updated ↓
- PR     REPO              TITLE                                    REVIEW  CHECKS   AGE        SIZE
+ PR     REPO              TITLE                                    REVIEW  CHECKS  IDLE        SIZE
 ▸#493   web-app           feat(analytics): stamp every hit        approved    pass    1m    +214/-18
  #538   web-app           draft · feat(seo): give each oper   needs review    pass    4d   +1514/-79
  #501   web-app           test(analytics): guard the GA4 r       approved    pass    4d     +48/-12
@@ -35,6 +49,26 @@ Open one and it becomes a dashboard:
   CodeQL                                                             pass      2s
 ```
 
+## The stats
+
+Three sections above the list, all computed from data already fetched, so they
+cost nothing. `t` toggles them, and they stand down on their own below thirty
+rows rather than leaving the list too short to be a list.
+
+**State** — a bar over the review decisions, with drafts, conflicts, and
+**ready to merge** called out. That last one is approved, green, unconflicted
+and not a draft: everything else on the board describes work in flight, and
+this is the one number that says something can be done right now.
+
+**Opened / day** — when the *still-open* PRs arrived, over the last 30 days.
+Not a throughput chart: it is the shape of the backlog's arrival, so a spike
+means a batch landed and never left.
+
+**Age** — median, p95 and max, then one cell per open PR with the oldest on the
+right. The shape of the tail is the point; a backlog that ends in a wall of
+full blocks is a different problem from one that slopes. Underneath, the three
+worth naming: oldest, untouched longest, and biggest by diff.
+
 ## The list
 
 Every PR matching `pr.query`, which defaults to `is:open is:pr involves:@me` —
@@ -48,6 +82,11 @@ its neighbour. The repo and size columns drop below 96 columns.
 
 `⣿` before a title marks a PR that GitHub reports as part of a stack.
 
+The time column **follows the sort**: sorting by `created` shows `AGE`, sorting
+by `updated` shows `IDLE`. Labelling both of them "AGE" had the column
+reporting time-since-update while the stats above reported true age, and the
+two disagreed by years on the same PR.
+
 ## Sorting and filtering
 
 | Key | |
@@ -55,6 +94,7 @@ its neighbour. The repo and size columns drop below 96 columns.
 | `s` | sort by **updated** or **created** |
 | `o` | reverse the order |
 | `/` | filter |
+| `t` | show or hide the stats |
 
 Sorting is done locally on the fetched set, so both keys are instant and cost
 no request.
