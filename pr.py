@@ -67,6 +67,7 @@ _CFG = load_config("pr", {
 REFRESH = float(_CFG["refresh"])
 API = "https://api.github.com/graphql"
 SORTS = ("updated", "created")
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 SPARK = "▁▂▃▄▅▆▇█"
 OPENED_DAYS = 30   # width of the opened-per-day chart
@@ -257,10 +258,12 @@ class Store(object):
         self.prs = []
         self.total = 0
         self.capped = []
+        self.target = ""
         self.detail = None          # the open PR's full record
         self.stack_rows = []        # (depth, pr, is_current) for the stack map
         self.want = None            # (owner, name, number) to fetch detail for
         self.loading_detail = False
+        self.stages = []            # what the open is actually doing, live
         self.error = None
         self.fetched = 0
         self.wake = threading.Event()
@@ -269,7 +272,7 @@ class Store(object):
         with self.lock:
             return (list(self.prs), self.total, self.detail,
                     list(self.stack_rows), self.loading_detail, self.error,
-                    self.fetched, self.query)
+                    self.fetched, self.query, list(self.stages))
 
     def searches(self):
         """Each configured source, with `@mine` expanded and args appended.
@@ -292,12 +295,15 @@ class Store(object):
             self.want = (owner, name, pr["number"])
             self.detail, self.stack_rows = None, []
             self.loading_detail = True
+            self.target = "%s/%s #%d" % (owner, name, pr["number"])
+            self.stages = []
         self.wake.set()
 
     def close_detail(self):
         with self.lock:
             self.want, self.detail, self.stack_rows = None, None, []
             self.loading_detail = False
+            self.stages = []
 
     def run(self):
         while True:
@@ -359,15 +365,30 @@ class Store(object):
             self.fetched = time.time()
             self.error = (config_token_warning() if source == "config" else None)
 
+    def stage(self, label, state, started=None):
+        """Record what the open is doing, so the wait can show real work."""
+        with self.lock:
+            for st in self.stages:
+                if st["label"] == label:
+                    st["state"] = state
+                    st["took"] = time.time() - (started or st["t0"])
+                    return st["t0"]
+            self.stages.append({"label": label, "state": state,
+                                "t0": time.time(), "took": 0.0})
+            return self.stages[-1]["t0"]
+
     def fetch_detail(self, tok, want):
         owner, name, number = want
+        t0 = self.stage("pull request, checks, reviews", "running")
         d = graphql(DETAIL_QUERY, tok, {"owner": owner, "name": name,
                                         "number": number})
+        self.stage("pull request, checks, reviews", "done", t0)
         pr = (d.get("repository") or {}).get("pullRequest")
         rows = []
         if pr:
             native = pr.get("stack")
             if native:
+                self.stage("stack, from GitHub", "done")
                 # GitHub hands the order over directly, position 1 nearest the
                 # base. A native stack is a line, not a tree, so it draws flat
                 # - eleven levels of indentation would be unreadable and would
@@ -380,8 +401,10 @@ class Store(object):
                     rows.append((twig, child, child["number"] == number,
                                  e.get("position")))
             else:
+                t1 = self.stage("stack, from open branches", "running")
                 repo = graphql(REPO_PRS_QUERY, tok,
                                {"owner": owner, "name": name})
+                self.stage("stack, from open branches", "done", t1)
                 others = (repo.get("repository") or {}).get(
                     "pullRequests", {}).get("nodes", [])
                 root, parent, kids = stack_of(pr, others)
@@ -624,7 +647,7 @@ def main():
     while True:
         tick += 1
         (prs, total, detail, stack_rows, loading, err, fetched,
-         active_query) = store.snapshot()
+         active_query, stages) = store.snapshot()
         shown = [p for p in sort_prs(prs, sort_field, newest_first)
                  if matches(p, needle)
                  and (source_filter == "all"
@@ -722,7 +745,7 @@ def main():
             if stack_rows:
                 stack_sel = max(0, min(stack_sel, len(stack_rows) - 1))
             rows += detail_view(detail, stack_rows, stack_sel, loading, w, h,
-                                tick)
+                                tick, stages, store.target)
             hints = [[(DIM, "[c]opy url")], [(DIM, "[esc] back")],
                      [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
             if stack_rows:
@@ -838,14 +861,31 @@ def list_view(prs, selected, sort_field, newest_first, needle, typing,
     return rows
 
 
-def detail_view(pr, stack_rows, stack_sel, loading, w, h, tick):
+def detail_view(pr, stack_rows, stack_sel, loading, w, h, tick, stages=(),
+                target=""):
     rows = [""]
     if loading or not pr:
-        rows.append(seg([(LBL, " ── PULL REQUEST ── "), (DIM, "opening…")],
+        # A shimmer says "wait" and nothing else. The open really does run in
+        # stages, so show them: a spinner on the one in flight, a tick and a
+        # duration on the ones behind it. Honest, and it reads like a machine
+        # doing something rather than a placeholder.
+        rows.append(seg([(LBL, " ── OPENING ── "), (ACCENT, target)], w - 1))
+        rows.append("")
+        spin = SPINNER[tick % len(SPINNER)]
+        for st in stages:
+            done = st["state"] == "done"
+            rows.append(seg([
+                (OK if done else ACCENT, "   %s  " % ("✓" if done else spin)),
+                (TXT if done else DIM, pad(st["label"], max(20, w - 22))),
+                (DIM, "%6s" % ("%.1fs" % st["took"] if st["took"] else ""))],
+                w - 1))
+        if not stages:
+            rows.append(seg([(ACCENT, "   %s  " % spin),
+                             (DIM, "connecting")], w - 1))
+        rows.append("")
+        # one sweeping line rather than four fat bars of shimmer
+        rows.append(seg([(RST, "  ")] + skeleton(max(10, w - 6), tick * 2),
                         w - 1))
-        for _ in range(4):
-            rows.append(seg([(RST, " ")] + skeleton(max(10, w - 4), tick),
-                            w - 1))
         return rows
 
     draft = " · draft" if pr.get("isDraft") else ""

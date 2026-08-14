@@ -174,6 +174,28 @@ says `no clipboard:` and shows the URL instead of pretending it worked.
 In a stack, `c` copies the PR **on screen** (the `●` row). To copy a different
 one, move the cursor to it and press `↵` first — then it is the one on screen.
 
+## Opening a PR
+
+Detail is fetched on demand, and the wait shows the work rather than a
+placeholder:
+
+```
+ ── OPENING ── acme/web-app #536
+
+   ✓  pull request, checks, reviews                    1.4s
+   ⠼  stack, from open branches
+```
+
+A braille spinner sits on the stage in flight; finished stages get a tick and
+their actual duration. The stages are the real requests — the pull request
+query, then the repository sweep that reconstructs a stack — so a PR whose
+stack GitHub already knows shows `stack, from GitHub` and no second wait.
+
+This replaced a block of shimmering bars. A shimmer says "wait" and nothing
+else; a trace says what is being waited on, which is both more useful and more
+like a machine doing something. One thin sweeping line is kept underneath for
+motion.
+
 ## The dashboard
 
 **Status grid** — review decision, merge state, unresolved threads, size,
