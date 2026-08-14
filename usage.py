@@ -201,15 +201,14 @@ WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 def token_heatmap(daily, w):
-    """Tokens per day as a wall calendar: weeks down, weekdays across.
+    """Tokens per day, laid out like the contribution calendar in github.py:
+    weekdays down the side, weeks across.
 
-    github.py draws its contribution calendar the other way round - weekday
-    rows, week columns - because a year is fifty-two columns wide. Four weeks
-    would be four columns and mostly empty pane, so this one turns it: the
-    same data, laid out for the range it actually has.
-
-    Intensity is in the glyph as well as the colour, so the shape survives a
-    screenshot or a `pane read`.
+    That pane spans a year, so its cells are one character wide and its columns
+    go unlabelled - there is no room for fifty-two dates. Four weeks of
+    retained history can afford wider cells and a date over each column, which
+    is the only difference. Intensity is in the shading glyph as well as the
+    colour, so the shape survives a screenshot or a `pane read`.
     """
     levels = " ░▒▓█"
     totals = {}
@@ -224,22 +223,29 @@ def token_heatmap(daily, w):
     peak = max(totals.values()) or 1
     best = max(totals, key=totals.get)
     first = min(totals) - datetime.timedelta(days=min(totals).weekday())
-    last = max(totals)
-    rows = []
+    weeks = []
     week = first
-    while week <= last:
-        cells = [(DIM, " %s " % week.strftime("%m-%d"))]
-        for i in range(7):
+    while week <= max(totals):
+        weeks.append(week)
+        week += datetime.timedelta(days=7)
+    # as many weeks as fit, newest kept
+    cell = 6 if w >= 6 * len(weeks) + 10 else 4
+    weeks = weeks[-max(1, (w - 8) // cell):]
+
+    rows = [[(DIM, "      ")] + [(DIM, pad(x.strftime("%m-%d"), cell))
+                                 for x in weeks]]
+    for i, name in enumerate(WEEKDAYS):
+        line = [(DIM, " %-5s" % name)]
+        for week in weeks:
             day = week + datetime.timedelta(days=i)
             n = totals.get(day)
             if n is None:
-                cells.append((GRID, " ·  "))
+                line.append((GRID, pad("  ·", cell)))
                 continue
             frac = n / float(peak)
             lvl = 0 if not n else min(4, 1 + int(frac * 3.99))
-            cells.append((heat(frac), levels[lvl] * 2 + "  "))
-        rows.append(cells)
-        week += datetime.timedelta(days=7)
+            line.append((heat(frac), pad("  " + levels[lvl] * 2, cell)))
+        rows.append(line)
     return rows, peak, best
 
 
@@ -323,8 +329,6 @@ def claude_tab(state, w, h):
                          (DIM, "peak "), (AGENT, big_num(peak)),
                          (DIM, " on %s" % (best.strftime("%m-%d") if best
                                            else "--"))], w - 1))
-        rows.append(seg([(DIM, "       ")] +
-                        [(DIM, "%-4s" % x) for x in WEEKDAYS], w - 1))
         for line in grid:
             rows.append(seg(line, w - 1))
         rows.append(seg([(DIM, "  less "), (heat(0.05), "░░"),
