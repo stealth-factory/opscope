@@ -30,7 +30,8 @@ Cursor each publish one over an endpoint, fetched with the credential that
 agent already holds and sent only to that agent's own host. Nothing here is
 inferred from a number that was not published.
 
-Keys: left/right or tab switch agent, r refreshes now, q quits.
+Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
+the page, home/end to either edge, r refreshes now, q quits.
 """
 import datetime
 import json
@@ -750,7 +751,7 @@ def codex_tab(state, w, h):
                          (DIM, "%.0f tok/s" % rates[-1])], w - 1))
     grid, peak, best, facts = day_calendar(state.get("daily") or {}, w,
                                            CODEX_STEPS)
-    if grid and h > 30:
+    if grid:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
@@ -917,7 +918,7 @@ def grok_tab(state, w, h):
                     w - 1))
     grid, peak, best, facts = day_calendar(state.get("daily") or {}, w,
                                            GROK_STEPS)
-    if grid and h > 24:
+    if grid:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
@@ -1235,7 +1236,7 @@ def claude_tab(state, w, h):
                             w - 1))
 
     # 26 days of activity, straight from the file
-    if daily and h > 20:
+    if daily:
         rows.append("")
         counts = [x.get("messageCount") or 0 for x in daily]
         peak = max(counts) or 1
@@ -1271,7 +1272,7 @@ def claude_tab(state, w, h):
                         w - 1))
 
     # ── tokens per day, as a calendar ───────────────────────────────────
-    if grid and h > 26:
+    if grid:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
@@ -1367,8 +1368,7 @@ def cursor_tab(state, w, h):
                 + cursor_spend_rows(state.get("spend"), w)
                 or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
     rows = cursor_quota(state.get("live"), w)
-    if h > 30:
-        rows += cursor_spend_rows(state.get("spend"), w)
+    rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"
                   % ago((state.get("last") or 0) / 1000.0
@@ -1450,8 +1450,15 @@ def main():
     setup()
     keyboard = Keyboard()
     active = 0
+    # One offset per tab. Switching away and back keeps your place, which
+    # matters when a tab is forty rows and you were reading the bottom of it.
+    offsets = {}
 
     while True:
+        # Scrolling is applied after the frame is built, not here: a page is
+        # however many body rows this pane turned out to have, and that is
+        # not known until the tab has been rendered and the footer packed.
+        moves = []
         for key in keyboard.poll():
             if key in ("q", "Q"):
                 raise SystemExit(0)
@@ -1459,6 +1466,18 @@ def main():
                 active += 1
             elif key in ("left", "h"):
                 active -= 1
+            elif key in ("up", "k"):
+                moves.append(-1)
+            elif key in ("down", "j"):
+                moves.append(1)
+            elif key == "pgup":
+                moves.append("-page")
+            elif key == "pgdn":
+                moves.append("+page")
+            elif key == "home":
+                moves.append("top")
+            elif key == "end":
+                moves.append("bottom")
             elif key == "r":
                 store.wake.set()
 
@@ -1469,11 +1488,16 @@ def main():
         active %= len(tabs)          # wraps in both directions
         extra = [n for n in ORDER
                  if (installed.get(n) or {}).get("present") and n not in tabs]
-        rows.append(seg([(DIM, " local state · live quota · read %s ago"
-                          % ago(fetched)),
-                         (DIM, "   · = detected"),
-                         (DIM, "   %d hidden by config" % len(extra)
-                          if extra else "")], w - 1))
+        def status(where=""):
+            return seg([(DIM, " local state · live quota · read %s ago"
+                         % ago(fetched)),
+                        (DIM, "   · = detected"),
+                        (DIM, "   %d hidden by config" % len(extra)
+                         if extra else ""),
+                        (ACCENT, where)], w - 1)
+
+        status_at = len(rows)        # filled in once the scroll is resolved
+        rows.append(status())
         gripe = err or config_complaints(installed)
         if gripe:
             rows.append(seg([(BAD, " ! " + gripe)], w - 1))
@@ -1482,24 +1506,61 @@ def main():
 
         name = tabs[active]
         if name == "claude":
-            rows += claude_tab(claude, w, h)
+            body = claude_tab(claude, w, h)
         elif name == "cursor":
-            rows += cursor_tab(cursor, w, h)
+            body = cursor_tab(cursor, w, h)
         elif name == "codex":
-            rows += codex_tab(codex, w, h)
+            body = codex_tab(codex, w, h)
         elif name == "grok":
-            rows += grok_tab(grok, w, h)
+            body = grok_tab(grok, w, h)
         else:
-            rows += elsewhere_tab(name, installed, w, h)
+            body = elsewhere_tab(name, installed, w, h)
 
-        hints = [[(ACCENT, "←→"), (DIM, " agent")], [(DIM, "[r]efresh")],
-                 [(DIM, "[q]uit")]]
+        hints = [[(ACCENT, "←→"), (DIM, " agent")],
+                 [(ACCENT, "↑↓"), (DIM, " scroll")],
+                 [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+        # The footer is packed once, with the scroll hint always counted, so
+        # the body's height does not change when scrolling becomes possible.
+        # Sizing it against a shorter footer and then growing the footer would
+        # move the fold under the reader's cursor.
+        reserved = len(pack_hints(hints, w - 2))
+        avail = max(1, h - len(rows) - reserved)
+        top = max(0, len(body) - avail)
+        off = min(offsets.get(name, 0), top)
+        for move in moves:
+            if move == "top":
+                off = 0
+            elif move == "bottom":
+                off = top
+            elif move == "-page":
+                off -= max(1, avail - 1)
+            elif move == "+page":
+                off += max(1, avail - 1)
+            else:
+                off += move
+        off = max(0, min(off, top))
+        offsets[name] = off
+
+        view = body[off:off + avail]
+        if top:
+            # Never let a partial view read as the whole tab, and say which
+            # way there is more: an arrow that is simply absent at the top of
+            # a long tab looks the same as a tab that ends there.
+            rows[status_at] = status("   %d-%d of %d %s%s"
+                                     % (off + 1, off + len(view), len(body),
+                                        "▲" if off else " ",
+                                        "▼" if off < top else " "))
+        else:
+            hints = [x for x in hints if x[0][1] != "↑↓"]
         footer = [" " + line for line in pack_hints(hints, w - 2)]
-        rows = rows[:h - len(footer)]
+        # Padded back to the height already reserved, so dropping the scroll
+        # hint does not lift the footer off the bottom of the pane.
+        footer = [""] * (reserved - len(footer)) + footer
+        rows += view
         while len(rows) < h - len(footer):
             rows.append("")
         rows.extend(footer)
-        draw(rows, w, h)
+        draw(rows[:h], w, h)
         time.sleep(0.3)
 
 

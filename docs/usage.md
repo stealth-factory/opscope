@@ -337,11 +337,41 @@ empty rather than full of plausible zeros.
 Claude Code's `stats-cache.json` is still a spend-only file — it carries no
 limit and no reset. Its quota block comes from somewhere else entirely, above.
 
+## Scrolling
+
+A tab is as long as it is — forty-five rows for Claude — and a pane on a wall
+is rarely that tall. `↑` `↓` move through the body while the title, the tab bar
+and the footer stay put, so you never lose which agent you are looking at.
+
+```
+ local state · live quota · read 2s ago   · = detected   9-27 of 45 ▲▼
+```
+
+The header says which rows you are on out of how many, and the arrows say which
+way there is more. Both matter: a partial view that looks complete is the same
+failure as a truncated total, and an arrow that is merely *absent* at the top of
+a long tab reads identically to a tab that ends there.
+
+Each tab keeps **its own offset**, so switching away and back returns you to
+where you were reading rather than to the top.
+
+This replaced a set of height thresholds. Sections used to disappear on a short
+pane — the token calendar below 26 rows, Cursor's spend below 30 — which was
+the right call when anything past the fold was gone for good. Now that the
+content is reachable, hiding it would be the only thing making it unreachable.
+
+The scroll hint appears **only when there is something to scroll**, but the
+space for it is reserved either way, so the fold does not move under you when a
+refresh makes a tab a row longer.
+
 ## Keys
 
 | Key | Action |
 |---|---|
 | `←` `→` / `tab` | switch agent |
+| `↑` `↓` | scroll the tab |
+| `pgup` `pgdn` | scroll a page |
+| `home` `end` | jump to the top or bottom |
 | `r` | re-read the files now |
 | `q` | quit |
 
@@ -349,7 +379,9 @@ limit and no reset. Its quota block comes from somewhere else entirely, above.
 
 Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
-never changes. The only network call is the Codex quota one.
+never changes. There are four quota calls — Claude, Codex, and two for Cursor
+— each held for two minutes, so a pane left open all day makes about 120
+requests an hour between them, whichever tab is on screen.
 
 ## Which agents appear
 
