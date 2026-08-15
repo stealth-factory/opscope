@@ -74,6 +74,9 @@ def shade(frac):
 
 CLAUDE_STATS = os.path.expanduser("~/.claude/stats-cache.json")
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
+CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
+RATE_FILES = 3           # newest transcripts to sample for a rate
+MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
 COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
 TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
@@ -131,7 +134,60 @@ def read_claude():
             d = json.load(f)
     except (OSError, ValueError) as e:
         return {"ok": False, "why": "%s" % type(e).__name__}
-    return {"ok": True, "mtime": stat.st_mtime, "data": d}
+    rates, sampled = claude_rates()
+    return {"ok": True, "mtime": stat.st_mtime, "data": d,
+            "rates": rates, "sampled": sampled}
+
+
+def claude_rates():
+    """Output tokens per second, from the newest transcripts.
+
+    A turn is a `user` record followed by an `assistant` one, and the rate is
+    that assistant's output tokens over the gap between them. Measuring from
+    *any* previous record instead inflates it wildly - two assistant records
+    can be milliseconds apart while the second reports a whole turn's output -
+    and even with the right boundary a few gaps are impossible, 1073 tokens in
+    0.07s among them, where the timestamps plainly do not bracket generation.
+
+    So the median is what gets shown. It sits at 74-75 whichever way the
+    outliers are trimmed, which is the reason to trust it; the maximum moves
+    from 15328 to 800 on the same data, which is the reason not to show one.
+    """
+    files = sorted(glob.glob(CLAUDE_TRANSCRIPTS), key=os.path.getmtime,
+                   reverse=True)[:RATE_FILES]
+    out, sampled = [], 0
+    for path in files:
+        prev, prev_type = None, None
+        lines = tail_lines(path, 4 * 1024 * 1024)
+        sampled += 1
+        for line in lines:
+            if '"timestamp"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            ts, typ = d.get("timestamp"), d.get("type")
+            if (typ == "assistant" and ts and prev and prev_type == "user"
+                    and not d.get("isAbortedMidStream")):
+                tok = ((d.get("message") or {}).get("usage")
+                       or {}).get("output_tokens") or 0
+                if tok:
+                    try:
+                        a = datetime.datetime.fromisoformat(
+                            prev.replace("Z", "+00:00"))
+                        b = datetime.datetime.fromisoformat(
+                            ts.replace("Z", "+00:00"))
+                    except ValueError:
+                        prev, prev_type = ts, typ
+                        continue
+                    gap = (b - a).total_seconds()
+                    if MIN_GAP <= gap < 300:
+                        out.append(tok / gap)
+            if ts:
+                prev, prev_type = ts, typ
+    out.sort()
+    return out, sampled
 
 
 def read_cursor():
@@ -532,6 +588,20 @@ def claude_tab(state, w, h):
         rows.append(seg([(DIM, " " + left),
                          (DIM, " " * max(1, len(cols) - len(left) - len(right))),
                          (DIM, right)], w - 1))
+
+    # ── how fast it generates ───────────────────────────────────────────
+    rates = state.get("rates") or []
+    if rates:
+        med = rates[len(rates) // 2]
+        p90 = rates[min(len(rates) - 1, int(len(rates) * 0.9))]
+        rows.append("")
+        rows.append(seg([(LBL, " ── OUTPUT RATE ── "),
+                         (DIM, "%d turns across %d transcripts"
+                          % (len(rates), state.get("sampled", 0)))], w - 1))
+        rows.append(seg([(DIM, "  median "), (AGENT, "%.0f" % med),
+                         (DIM, " tok/s   p90 "), (TXT, "%.0f" % p90),
+                         (DIM, "   request to response, tools included")],
+                        w - 1))
 
     # ── tokens per day, as a calendar ───────────────────────────────────
     if grid and h > 26:

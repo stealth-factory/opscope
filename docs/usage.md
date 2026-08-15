@@ -128,12 +128,22 @@ letting the number imply more precision than it has.
 **Copilot** would be exact, once there is data: `inter_token_latency_ms` and
 `time_to_first_token_ms` are recorded per turn, so no inference is needed.
 
-**Claude Code** carries per-message `usage` and timestamps in its transcripts,
-so a rate is derivable — but naively differencing consecutive records gives
-nonsense: a quick pass produced a maximum of 21,183 tokens/second, because two
-assistant records can be milliseconds apart while one of them reports a whole
-turn's output. Doing it properly means reconstructing turn boundaries, and
-until that is done the Claude tab shows no rate rather than a wrong one.
+**Claude Code** is computed too, and getting it right took two attempts. A turn
+is a `user` record followed by an `assistant` one, and the rate is that
+assistant's output tokens over the gap between them. Measuring from *any*
+previous record instead inflates it wildly — two assistant records can be
+milliseconds apart while the second reports a whole turn's output, which
+produced a maximum of 21,183 tokens/second.
+
+Even with the right boundary a few gaps remain impossible — 1,073 tokens in
+0.07 seconds among them — where the timestamps plainly do not bracket
+generation. So **only the median and p90 are shown, never a maximum**: the
+median sits at 74–75 however the outliers are trimmed, which is the reason to
+trust it, while the maximum moves from 15,328 to 800 on the same data, which is
+the reason not to publish one.
+
+Transcripts run to tens of megabytes, so it samples the tail of the three most
+recently touched.
 
 **Cursor and Grok** record no tokens at all, so there is nothing to divide.
 
