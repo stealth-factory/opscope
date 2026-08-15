@@ -252,10 +252,38 @@ Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
 never changes. The only network call is the Codex quota one.
 
-## Configuration
+## Which agents appear
+
+By default it **discovers** them: an agent gets a tab when its CLI is on
+`PATH` **or** it has left state behind. Both, because either alone is wrong —
+a CLI installed under another name would vanish, and an agent uninstalled last
+week still has history worth reading.
 
 ```json
 "usage": {
+  "agents": [],
+  "exclude_agents": [],
   "refresh": 30
 }
 ```
+
+| | |
+|---|---|
+| `agents: []` | discover whatever this machine has — the default |
+| `agents: ["codex", "claude"]` | exactly these, in this order, installed or not. Listing them is also how you turn discovery off |
+| `exclude_agents: ["copilot"]` | drop one either way |
+
+Naming an agent is how you say *"keep the tab even though it is not installed
+yet"* — if you listed it, you want it. That is the same
+empty-means-discover idiom as `github.accounts` and `linear.exclude_teams`, so
+it needs learning once.
+
+The header says how many detected agents the config is hiding, so discovery
+stays visible rather than magic, and a name that matches no known agent is
+called out — `unknown agent in config: nonsence (known: claude, codex, …)` —
+rather than silently ignored. If the settings would leave no tabs at all it
+shows everything instead, because an empty widget teaches nothing and the
+likeliest cause is a typo.
+
+Adding support for a new agent is one entry in `AGENTS`, giving the binaries
+to look for and the paths that prove it has run.

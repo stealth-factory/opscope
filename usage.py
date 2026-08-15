@@ -48,6 +48,13 @@ from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, mix,
                     title, vbars)
 
 _CFG = load_config("usage", {
+    # Empty discovers whatever this machine has, which is the default and
+    # what most people want. Naming agents instead pins the set and its order
+    # - listing one is how you say "keep the tab even though it is not
+    # installed yet", and it is also how you turn discovery off. The same
+    # empty-means-discover idiom as github.accounts and linear.exclude_teams.
+    "agents": [],
+    "exclude_agents": [],
     "refresh": 30,
 })
 
@@ -710,9 +717,7 @@ class Store(object):
         while True:
             claude, cursor, codex = read_claude(), read_cursor(), read_codex()
             grok = read_grok()
-            found = {}
-            for name in ("claude", "codex", "copilot", "cursor-agent", "grok"):
-                found[name] = bool(shutil.which(name))
+            found = detect_agents()
             with self.lock:
                 self.claude, self.cursor, self.codex = claude, cursor, codex
                 self.grok = grok
@@ -722,16 +727,71 @@ class Store(object):
             self.wake.clear()
 
 
-TABS = ("claude", "codex", "cursor", "grok", "copilot")
+# What we know how to read, and how to tell it is here. An agent counts as
+# present if its CLI is on PATH *or* it has left state behind: an uninstalled
+# agent whose history is still on disk is worth showing, and a CLI installed
+# under a different name would otherwise vanish.
+AGENTS = {
+    "claude": {"label": "Claude Code", "bins": ("claude",),
+               "paths": (CLAUDE_STATS,)},
+    "codex": {"label": "OpenAI Codex", "bins": ("codex",),
+              "paths": (os.path.expanduser("~/.codex/sessions"),)},
+    "cursor": {"label": "Cursor", "bins": ("cursor-agent", "cursor"),
+               "paths": (CURSOR_DB,)},
+    "grok": {"label": "Grok", "bins": ("grok",),
+             "paths": (os.path.expanduser("~/.grok"),)},
+    "copilot": {"label": "GitHub Copilot", "bins": ("copilot",),
+                "paths": (COPILOT_DB,)},
+}
+ORDER = ("claude", "codex", "cursor", "grok", "copilot")
 
 
-def tab_bar(active, installed, w):
+def detect_agents():
+    """Which agents this machine has, by binary or by leftover state."""
+    found = {}
+    for name, spec in AGENTS.items():
+        binary = next((b for b in spec["bins"] if shutil.which(b)), None)
+        data = next((p for p in spec["paths"] if os.path.exists(p)), None)
+        found[name] = {"bin": binary, "data": data,
+                       "present": bool(binary or data)}
+    return found
+
+
+def visible_agents(found):
+    """The tabs to draw.
+
+    Empty `agents` discovers: every agent this machine actually has. Naming
+    them instead fixes both the set and the order, whether or not they are
+    installed - if you listed it, you want the tab. `exclude_agents` drops one
+    either way.
+
+    Falls back to everything known if the result would be empty, because a
+    widget with no tabs teaches nothing and the likeliest cause is a typo in
+    the config rather than a machine with no agents on it.
+    """
+    drop = set(_CFG["exclude_agents"] or [])
+    named = [n for n in (_CFG["agents"] or []) if n in AGENTS]
+    chosen = named or [n for n in ORDER if found.get(n, {}).get("present")]
+    shown = tuple(n for n in chosen if n not in drop)
+    return shown or ORDER
+
+
+def config_complaints(found):
+    """Names in the config that match no agent we know how to read."""
+    known = set(AGENTS)
+    bad = [n for n in (list(_CFG["agents"] or [])
+                       + list(_CFG["exclude_agents"] or [])) if n not in known]
+    return ("unknown agent in config: %s (known: %s)"
+            % (", ".join(sorted(set(bad))), ", ".join(ORDER))) if bad else None
+
+
+def tab_bar(active, installed, tabs, w):
     # brackets as well as the tint: which tab is open must not depend on a
     # background colour surviving. A dot marks an agent that is installed.
     parts = [(RST, " ")]
-    for name in TABS:
+    for name in tabs:
         here = name == active
-        have = installed.get(name if name != "cursor" else "cursor-agent", False)
+        have = (installed.get(name) or {}).get("present", False)
         parts.append((bg(38, 56, 76) + ACCENT if here else DIM,
                       ("[%s]" if here else " %s ") % name.upper()))
         parts.append((OK if have else GRID, "·" if have else " "))
@@ -1084,7 +1144,7 @@ def cursor_tab(state, w, h):
 
 def elsewhere_tab(name, installed, w, h):
     label, lines = ELSEWHERE[name]
-    have = installed.get(name if name != "cursor" else "cursor-agent")
+    have = (installed.get(name) or {}).get("present")
     rows = [seg([(LBL, " ── %s ── " % label.upper()),
                  (OK if have else DIM,
                   "installed" if have else "not installed")], w - 1), ""]
@@ -1116,23 +1176,30 @@ def main():
             if key in ("q", "Q"):
                 raise SystemExit(0)
             if key in ("right", "tab", "l"):
-                active = (active + 1) % len(TABS)
+                active += 1
             elif key in ("left", "h"):
-                active = (active - 1) % len(TABS)
+                active -= 1
             elif key == "r":
                 store.wake.set()
 
         w, h = size()
         claude, cursor, codex, grok, installed, fetched, err = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
+        tabs = visible_agents(installed)
+        active %= len(tabs)          # wraps in both directions
+        extra = [n for n in ORDER
+                 if (installed.get(n) or {}).get("present") and n not in tabs]
         rows.append(seg([(DIM, " local state only · read %s ago" % ago(fetched)),
-                         (DIM, "   · = installed")], w - 1))
-        if err:
-            rows.append(seg([(BAD, " ! " + err)], w - 1))
-        rows.append(tab_bar(TABS[active], installed, w))
+                         (DIM, "   · = detected"),
+                         (DIM, "   %d hidden by config" % len(extra)
+                          if extra else "")], w - 1))
+        gripe = err or config_complaints(installed)
+        if gripe:
+            rows.append(seg([(BAD, " ! " + gripe)], w - 1))
+        rows.append(tab_bar(tabs[active], installed, tabs, w))
         rows.append("")
 
-        name = TABS[active]
+        name = tabs[active]
         if name == "claude":
             rows += claude_tab(claude, w, h)
         elif name == "cursor":
