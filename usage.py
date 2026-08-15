@@ -24,8 +24,11 @@ exposes nothing says so rather than showing a plausible zero.
 
     python3 usage.py [-n SECONDS]
 
-Everything here is read from local state files. No network, no credentials,
-and nothing is inferred from a number that was not published.
+Most of this is read from local state files. The exception is the remaining
+quota, which no agent writes to disk in a current form: Claude, Codex and
+Cursor each publish one over an endpoint, fetched with the credential that
+agent already holds and sent only to that agent's own host. Nothing here is
+inferred from a number that was not published.
 
 Keys: left/right or tab switch agent, r refreshes now, q quits.
 """
@@ -88,6 +91,12 @@ def shade(frac, steps=HEAT_STEPS):
 
 
 CLAUDE_STATS = os.path.expanduser("~/.claude/stats-cache.json")
+CLAUDE_CREDS = os.path.expanduser("~/.claude/.credentials.json")
+CLAUDE_CONFIG = os.path.expanduser("~/.claude.json")
+CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
+# The windows are not stated in limits[], but the same response names them in
+# its own top-level keys: five_hour and seven_day.
+CLAUDE_WINDOW = {"session": "5h", "weekly": "7d"}
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 RATE_FILES = 3           # newest transcripts to sample for a rate
@@ -149,22 +158,150 @@ def ago(when):
     return "%dd" % int(s // 86400)
 
 
-def read_claude():
-    """Claude Code's own stats cache.
+def claude_live():
+    """Rate-limit utilization, live from the endpoint /usage itself calls.
 
-    It records what was spent - tokens, messages, sessions - and nothing about
-    what is left. There is no limit or reset in the file, so this pane does not
-    claim to know one.
+    The OAuth token is the one Claude Code already holds. It goes only to
+    Anthropic, is never printed, and an expired one is not used at all: the
+    refresh token sits beside it, but spending it would race Claude Code's
+    own credential handling for a number that has a local cache anyway.
     """
+    try:
+        with open(CLAUDE_CREDS) as f:
+            o = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except (OSError, ValueError):
+        return None
+    tok = o.get("accessToken")
+    if not tok or (o.get("expiresAt") or 0) / 1000.0 <= time.time():
+        return None
+    req = urllib.request.Request(CLAUDE_USAGE_API, headers={
+        "Authorization": "Bearer " + tok, "User-Agent": "terminal-toys"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return {"u": json.load(r), "source": "live", "at": time.time(),
+                    "plan": o.get("subscriptionType") or ""}
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def claude_stale():
+    """What Claude Code last fetched, for when the live call cannot run.
+
+    It is a cache with a timestamp, so it is shown with its age - and a
+    window whose reset has already gone by is said to have passed rather
+    than counted down to, because a stale five-hour window describes a
+    period that has ended.
+    """
+    try:
+        with open(CLAUDE_CONFIG) as f:
+            c = (json.load(f) or {}).get("cachedUsageUtilization") or {}
+    except (OSError, ValueError):
+        return None
+    if not c.get("utilization"):
+        return None
+    return {"u": c["utilization"], "source": "cached",
+            "at": (c.get("fetchedAtMs") or 0) / 1000.0, "plan": ""}
+
+
+def read_claude():
+    """Claude Code's own stats cache, plus what is left of the limits.
+
+    The cache records what was spent - tokens, messages, sessions - and
+    carries no limit at all. The remaining quota is a separate reading
+    entirely, and account-wide rather than about this machine.
+    """
+    quota = cached("claude", lambda: claude_live() or claude_stale())
     try:
         stat = os.stat(CLAUDE_STATS)
         with open(CLAUDE_STATS) as f:
             d = json.load(f)
     except (OSError, ValueError) as e:
-        return {"ok": False, "why": "%s" % type(e).__name__}
+        return {"ok": False, "why": "%s" % type(e).__name__, "quota": quota}
     rates, sampled = claude_rates()
-    return {"ok": True, "mtime": stat.st_mtime, "data": d,
+    return {"ok": True, "mtime": stat.st_mtime, "data": d, "quota": quota,
             "rates": rates, "sampled": sampled}
+
+
+def iso_epoch(s):
+    try:
+        return datetime.datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def left_span(secs):
+    d, r = divmod(int(secs), 86400)
+    h, r = divmod(r, 3600)
+    if d:
+        return "%dd %dh" % (d, h)
+    return "%dh %dm" % (h, r // 60) if h else "%dm" % (r // 60)
+
+
+def claude_quota(q, w):
+    """The windows Claude Code's own /usage shows.
+
+    Read from limits[], which is the server's own curated list: the rest of
+    the response carries a dozen null pools with names like nimbus_quill and
+    iguana_necktie that /usage does not render either. Each entry names
+    itself, so a model-scoped weekly limit arrives labelled Fable or Opus
+    without this having to know either name.
+    """
+    if not q:
+        return []
+    u = q.get("u") or {}
+    lanes = [l for l in (u.get("limits") or []) if l.get("percent") is not None]
+    if not lanes:
+        return []
+    live = q.get("source") == "live"
+    rows = [seg([(LBL, " ── QUOTA ── "),
+                 (OK if live else WARN,
+                  "live" if live else "cached %s ago" % ago(q.get("at"))),
+                 (DIM, " · account-wide, not this machine   "),
+                 (DIM, q.get("plan") or "")], w - 1)]
+
+    def label(l):
+        scope = ((l.get("scope") or {}).get("model") or {}).get("display_name")
+        group = l.get("group") or ""
+        name = scope or ("overall" if l.get("kind") == "weekly_all"
+                         else group or l.get("kind") or "?")
+        return ("%s %s" % (name, CLAUDE_WINDOW.get(group, ""))).strip()
+
+    texts = [label(l) for l in lanes]
+    label_w = max(9, max(len(t) for t in texts))
+    for l, text in zip(lanes, texts):
+        pct = float(l.get("percent") or 0)
+        used = max(0.0, min(1.0, pct / 100.0))
+        ts = iso_epoch(l.get("resets_at"))
+        when = ""
+        if ts:
+            left = ts - time.time()
+            when = ("resets in " + left_span(left) if left > 0
+                    else "resetting" if live else "already reset")
+        sev = (l.get("severity") or "normal").lower()
+        bar = meter(used, max(8, w - 27 - label_w))
+        filled = bar.count("█")
+        # is_active marks the limit currently doing the binding - the one that
+        # will stop you first - so it is the one worth reading brightly.
+        rows.append(seg([(TXT if l.get("is_active") else DIM,
+                          " " + pad(text, label_w) + " "),
+                         (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                         (heat(used), " %3.0f%%" % pct),
+                         (BAD if sev not in ("normal", "") else DIM,
+                          "  " + (when if sev in ("normal", "")
+                                  else "%s · %s" % (sev, when)))], w - 1))
+    extra = u.get("extra_usage") or {}
+    spend = u.get("spend") or {}
+    if extra.get("is_enabled") and spend.get("limit"):
+        def money(m):
+            return "%.2f" % ((m.get("amount_minor") or 0) /
+                             (10.0 ** (m.get("exponent") or 2)))
+        rows.append(seg([(DIM, "  extra usage "),
+                         (TXT, money(spend.get("used") or {})),
+                         (DIM, " of "), (TXT, money(spend["limit"])),
+                         (DIM, " " + ((spend["limit"].get("currency")) or "")),
+                         (DIM, " monthly")], w - 1))
+    rows.append("")
+    return rows
 
 
 def claude_rates():
@@ -280,7 +417,8 @@ def read_cursor():
     """Cursor's AI code tracking: how much code it wrote, not what it cost."""
     if not os.path.exists(CURSOR_DB):
         return {"ok": False, "why": "no tracking database",
-                "live": cursor_live(), "spend": cursor_spend()}
+                "live": cached("cursor", cursor_live),
+                "spend": cached("cursor-spend", cursor_spend)}
     try:
         con = sqlite3.connect("file:%s?mode=ro" % CURSOR_DB, uri=True)
         rows = con.execute(
@@ -297,7 +435,8 @@ def read_cursor():
         con.close()
     except sqlite3.Error as e:
         return {"ok": False, "why": str(e)[:40]}
-    return {"ok": True, "live": cursor_live(), "spend": cursor_spend(),
+    return {"ok": True, "live": cached("cursor", cursor_live),
+                "spend": cached("cursor-spend", cursor_spend),
             "hashes": rows[0], "conversations": rows[1],
             "models": rows[2], "by_model": by_model,
             "commits": commits[0] or 0, "lines": commits[1] or 0,
@@ -324,6 +463,26 @@ def tail_lines(path, size=TAIL):
 CODEX_AUTH = os.path.expanduser("~/.codex/auth.json")
 CODEX_USAGE_API = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_CACHE = {}
+
+LIVE_TTL = 120
+_LIVE = {}
+
+
+def cached(key, fn, ttl=LIVE_TTL):
+    """Hold a live quota reading for a while.
+
+    The pane redraws every 30 seconds; these windows move over hours, and
+    three tabs between them were making five requests a minute to say the
+    same thing. A failure is cached too, so a dead endpoint is retried once
+    a couple of minutes rather than on every frame.
+    """
+    now = time.time()
+    hit = _LIVE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    val = fn()
+    _LIVE[key] = (now, val)
+    return val
 
 
 def codex_live():
@@ -455,7 +614,7 @@ def read_codex():
     rates.sort()
     return {"ok": True, "sessions": counted, "files": len(files),
             "total": total, "rates": rates, "daily": daily,
-            "limits": limits, "limits_at": limits_at, "live": codex_live(),
+            "limits": limits, "limits_at": limits_at, "live": cached("codex", codex_live),
             "last": os.path.getmtime(files[-1])}
 
 
@@ -1001,9 +1160,10 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
 
 
 def claude_tab(state, w, h):
-    rows = []
+    rows = claude_quota(state.get("quota"), w)
     if not state.get("ok"):
-        return [seg([(BAD, "  no stats cache: %s" % state.get("why"))], w - 1)]
+        return rows + [seg([(BAD, "  no stats cache: %s"
+                             % state.get("why"))], w - 1)]
     d = state["data"]
     mu = d.get("modelUsage") or {}
     daily = d.get("dailyActivity") or []
@@ -1162,10 +1322,16 @@ def cursor_quota(live, w):
                          (rgb(*colour), " %3.0f%%" % pct)], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:
+        # Deliberately dollars rather than a fourth bar. This is spend against
+        # the plan limit - a different denominator from the three lanes above,
+        # which are the server's own percentages - and drawing it as a bar
+        # beside them would invite reading 12% and 2% as the same scale.
+        left = plan.get("remaining")
         rows.append(seg([(DIM, "  spend "),
                          (TXT, "$%.2f" % ((spend or 0) / 100.0)),
-                         (DIM, " of "), (TXT, "$%.2f" % (limit / 100.0))],
-                        w - 1))
+                         (DIM, " of "), (TXT, "$%.2f" % (limit / 100.0)),
+                         (DIM, "   $%.2f left" % (left / 100.0)
+                          if left is not None else "")], w - 1))
     rows.append("")
     return rows
 
@@ -1303,7 +1469,8 @@ def main():
         active %= len(tabs)          # wraps in both directions
         extra = [n for n in ORDER
                  if (installed.get(n) or {}).get("present") and n not in tabs]
-        rows.append(seg([(DIM, " local state only · read %s ago" % ago(fetched)),
+        rows.append(seg([(DIM, " local state · live quota · read %s ago"
+                          % ago(fetched)),
                          (DIM, "   · = detected"),
                          (DIM, "   %d hidden by config" % len(extra)
                           if extra else "")], w - 1))

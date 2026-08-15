@@ -1,12 +1,19 @@
 # `usage.py`
 
 How much the coding agents on this machine have actually been used — one tab
-per agent, from each agent's own local state, plus one live quota call.
+per agent, from each agent's own local state, plus a live quota reading for
+the three that publish one.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- local state only · read 16s ago   · = installed
+ local state · live quota · read 16s ago   · = installed
  [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
+
+ ── QUOTA ── live · account-wide, not this machine   max
+ session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
+ overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
+ Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
+  extra usage 0.00 of 50.00 AUD monthly
 
  ── SUMMARY ── all time · since 2026-07-16
  Favorite model  opus-5      Total tokens    20.6B
@@ -84,6 +91,38 @@ column, and the widget picks the cell width from the pane. Intensity is carried
 by the shading glyph as well as the colour, and a `·` marks a day the file has
 no entry for — distinct from a day that recorded zero.
 
+The **quota block** answers a different question from everything below it —
+what is *left*, account-wide, rather than what this machine spent — and it is
+the same set of windows Claude Code's own `/usage` shows.
+
+```
+GET https://api.anthropic.com/api/oauth/usage
+Authorization: Bearer <accessToken from ~/.claude/.credentials.json>
+```
+
+The lanes come from the response's **`limits`** array, not from the top-level
+keys beside it. That array is the server's own curated list; the rest of the
+response carries a dozen mostly-null pools with names like `nimbus_quill` and
+`iguana_necktie` that `/usage` does not render either. Each entry names itself
+— `kind`, `group`, `percent`, `severity`, `resets_at` and a `scope` — so a
+model-scoped weekly limit arrives labelled **Fable** without this code knowing
+that name, and an Opus-scoped one would appear the same way.
+
+`is_active` marks the limit that will stop you first, and that lane is the one
+drawn brightly. A `severity` other than `normal` is printed as a word beside
+the reset, because a colour alone cannot say *why* a bar is red.
+
+**The fallback is where the care went.** Claude Code caches the same structure
+in `~/.claude.json` under `cachedUsageUtilization`, with a `fetchedAtMs`. It is
+used when the token has expired or the call fails — but it is labelled `cached
+10h ago`, and any window whose reset has already gone by says **`already
+reset`** instead of counting down. A stale five-hour window otherwise describes
+a period that has ended, which is precisely the kind of number this repo exists
+not to draw. Measured here, the cache read 11% while the live call read 22%.
+
+The `extra_usage` line is the monthly credit allowance and its currency, shown
+only when it is enabled.
+
 **Cursor** — both quota and authorship.
 
 The quota is the same three lanes `cursor-agent`'s own in-session Usage view
@@ -100,6 +139,20 @@ Authorization: Bearer <accessToken from ~/.config/cursor/auth.json>
 which is the credential the widget reuses. That endpoint is **undocumented**,
 discovered by reading the CLI bundle, and versioned only by it — so every
 failure is silent and the tab falls back to authorship alone.
+
+**The percentages and the dollars have different denominators**, which is
+Cursor's own doing and worth stating. The three lanes are the server's
+`totalPercentUsed` / `autoPercentUsed` / `apiPercentUsed` verbatim; the spend
+line is `totalSpend` against `limit`. On this account those read 2% and
+`$48.80 of $400.00` — which is 12% — at the same moment.
+
+The lanes match what `cursor-agent` itself draws: its bundle computes each bar
+as `percentage !== undefined ? percentage : used/limit*100`, and since the
+server sends every percentage, the fallback never fires. The response also
+carries a `displayMessage` — *"You've used 12% of your included usage"* — which
+is the spend figure in a sentence. Both numbers are real and neither is
+rewritten here; the spend line stays in dollars rather than becoming a fourth
+bar, so 12% and 2% are never put on one scale.
 
 `GetAggregatedUsageEvents` on the same service supplies a **spend** section:
 per-model input, output and cache tokens with Cursor's own `totalCents` — not
@@ -142,8 +195,12 @@ event's own timestamp gives per-day figures; taking the running total alone
 would credit a whole session to whichever day it was read on. That drives a
 totals line and a calendar in a blue ramp.
 
-No quota: nothing on disk records a limit, and `grok du` reports **disk** use —
-the name is a coincidence worth not falling for.
+The weekly quota is real but is **not** in the session transcripts: it arrives
+on the client log at `~/.grok/logs/unified.jsonl`, as a `.ctx.config` carrying
+`creditUsagePercent` and a `currentPeriod` of `USAGE_PERIOD_TYPE_WEEKLY`.
+Looking only at `sessions/` is what made this tab say "no quota" for a while.
+`grok du` reports **disk** use — the name is a coincidence worth not falling
+for.
 
 ## On tokens per second
 
@@ -232,10 +289,23 @@ the endpoint. Its `codexbar-cli` would cover far more of them; it is not used
 here because the widget stays dependency-free, but it is the obvious thing to
 reach for if this ever needs to cover providers whose numbers are not on disk.
 
-**This is the one place the widget touches the network or a credential.** The
-token goes only to the host Codex itself talks to, is never printed, and any
-failure — expired token, no network — falls back to the rollout snapshot
-rather than showing nothing.
+## The three network calls, and the rule they follow
+
+Claude, Codex and Cursor each publish a live quota, and each is fetched with a
+credential the agent itself already holds — read-only, sent **only to that
+agent's own host**, never printed, and never refreshed or rewritten. Claude's
+OAuth token sits beside a refresh token that is deliberately left alone:
+spending it would race Claude Code's own credential handling for a number that
+has a local cache anyway.
+
+Every one of them falls back rather than failing: Codex to the rollout
+snapshot, Claude to `cachedUsageUtilization`, Cursor to authorship alone. The
+header always says which you are looking at.
+
+A reading is held for **two minutes** (`LIVE_TTL`). The pane redraws every 30
+seconds and these windows move over hours, so the earlier code was making six
+requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
+endpoint is retried occasionally instead of on every frame.
 
 ## On colour
 
@@ -256,16 +326,16 @@ saying what a row is.
 
 ## The thing this widget does not do
 
-**It shows no remaining quota for Claude Code, Cursor or Grok**, because none
-of them publish one. Claude Code's file records what was spent and carries no
-limit and no reset. (Codex is the exception, above.)
+**Copilot shows no quota**, because nothing it writes locally records one —
+and its usage table is empty here besides.
 
-Showing "73% of your limit" would mean inventing the denominator. The pane says
-what was spent and stops there — which is the whole point of the repo, and the
-reason the empty tabs are empty rather than full of plausible zeros.
+Nothing on this pane invents a denominator. Where an agent publishes a limit it
+is shown against that limit; where it does not, the tab says what was spent and
+stops. That is the whole point of the repo, and the reason an empty tab is
+empty rather than full of plausible zeros.
 
-If a future release of any of these writes a limit to disk, or exposes one over
-an API, the tab has somewhere obvious to put it.
+Claude Code's `stats-cache.json` is still a spend-only file — it carries no
+limit and no reset. Its quota block comes from somewhere else entirely, above.
 
 ## Keys
 
