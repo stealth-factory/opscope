@@ -53,9 +53,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bar, bg, clipboard, config_paths, cycle,
-                    draw, load_config, maybe_help, pack_hints, pad, rgb, seg,
-                    setup, size, title)
+from common import (RST, Keyboard, bar, bg, clipboard, config_paths,
+                    config_token_warning, cycle, draw, load_config, maybe_help,
+                    pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("deployments", {
     "token": "",             # a Vercel token; keep it in config.json, not here
@@ -122,8 +122,16 @@ def api(path, tok):
 
 
 def discover_teams(tok):
+    """Every team the token can see, so deployments are not just personal.
+
+    Returning [] on failure is deliberate - the personal scope still works -
+    but it also hid a caller passing token()'s whole tuple instead of its
+    first element, so the bare except now names what went wrong.
+    """
     try:
         return [t["id"] for t in api("/v2/teams", tok).get("teams", [])]
+    except TypeError:
+        raise                        # a programming error, not a network one
     except Exception:
         return []
 
@@ -160,6 +168,14 @@ class Store(object):
             return list(self.deployments), self.error, self.fetched_at
 
     def run(self):
+        try:
+            self.poll()
+        except Exception as e:                  # a daemon thread that dies
+            with self.lock:                     # silently looks like "no data"
+                self.error = "poller stopped: %s: %s" % (type(e).__name__,
+                                                         str(e)[:60])
+
+    def poll(self):
         while True:
             tok, source = token()
             if not tok:
@@ -396,7 +412,7 @@ def main():
 
     setup()
     keyboard = Keyboard()
-    tok = token()
+    tok, _source = token()          # token() returns (value, where it came from)
     if tok and not teams:
         teams = discover_teams(tok)
     store = Store(teams, projects)
