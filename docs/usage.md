@@ -1,7 +1,7 @@
 # `usage.py`
 
 How much the coding agents on this machine have actually been used — one tab
-per agent, read entirely from local state. No network, no credentials.
+per agent, from each agent's own local state, plus one live quota call.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -147,11 +147,43 @@ recently touched.
 
 **Cursor and Grok** record no tokens at all, so there is nothing to divide.
 
+## Codex quota is the exception: it is real, live and account-wide
+
+Every other number here is local consumption. Codex publishes an actual
+**remaining quota**, and two ways to get it.
+
+The rollouts record a `rate_limits` snapshot the server sends back with each
+response — `used_percent`, the window length, and `resets_at`. That is real but
+only as fresh as the last time Codex ran.
+
+Better, and what the widget prefers: the same endpoint the Codex CLI itself
+uses. Read the OAuth token from `~/.codex/auth.json` and
+
+```
+GET https://chatgpt.com/backend-api/wham/usage
+Authorization: Bearer <token>
+```
+
+which returns `plan_type`, `credits`, and a `rate_limit` with primary and
+secondary windows. The header says `live` or `from the last session` so it is
+never ambiguous which you are looking at.
+
+This method came from reading how [CodexBar](https://github.com/steipete/CodexBar)
+does it — a menu-bar app that does this for twenty-odd providers, and documents
+the endpoint. Its `codexbar-cli` would cover far more of them; it is not used
+here because the widget stays dependency-free, but it is the obvious thing to
+reach for if this ever needs to cover providers whose numbers are not on disk.
+
+**This is the one place the widget touches the network or a credential.** The
+token goes only to the host Codex itself talks to, is never printed, and any
+failure — expired token, no network — falls back to the rollout snapshot
+rather than showing nothing.
+
 ## The thing this widget does not do
 
-**It does not show remaining quota, for any agent, because none of them publish
-one to disk.** Claude Code's file records what was spent and carries no limit
-and no reset; the others record nothing at all.
+**It shows no remaining quota for Claude Code, Cursor or Grok**, because none
+of them publish one. Claude Code's file records what was spent and carries no
+limit and no reset. (Codex is the exception, above.)
 
 Showing "73% of your limit" would mean inventing the denominator. The pane says
 what was spent and stops there — which is the whole point of the repo, and the
@@ -170,9 +202,9 @@ an API, the tab has somewhere obvious to put it.
 
 ## Cost
 
-None worth measuring. It reads two local files — a small JSON and a read-only
-SQLite query — every 30 seconds, and shells out to nothing. It needs no
-credentials, so it is the one widget here that cannot leak anything.
+Small. Local files are read every 30 seconds; Codex rollouts are parsed once
+each and cached on mtime and size, because one is 29MB and a finished rollout
+never changes. The only network call is the Codex quota one.
 
 ## Configuration
 

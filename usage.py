@@ -36,6 +36,8 @@ import glob
 import shutil
 import sqlite3
 import sys
+import urllib.error
+import urllib.request
 import threading
 import time
 
@@ -233,6 +235,85 @@ def tail_lines(path, size=TAIL):
         return []
 
 
+CODEX_AUTH = os.path.expanduser("~/.codex/auth.json")
+CODEX_USAGE_API = "https://chatgpt.com/backend-api/wham/usage"
+_CODEX_CACHE = {}
+
+
+def codex_live():
+    """Account-wide quota, live from the same endpoint the Codex CLI uses.
+
+    The rollouts carry a rate_limits snapshot, but only from whenever Codex
+    last ran - it can be days stale. This is the current figure, and it is the
+    account rather than this machine.
+
+    The token comes from ~/.codex/auth.json and goes to the same host Codex
+    itself talks to; it is never printed. Any failure falls back to the
+    snapshot, so an expired token costs nothing but freshness.
+
+    Found by reading how CodexBar does it (github.com/steipete/CodexBar),
+    which documents this endpoint.
+    """
+    try:
+        with open(CODEX_AUTH) as f:
+            auth = json.load(f)
+    except (OSError, ValueError):
+        return None
+    tok = (auth.get("tokens") or {}).get("access_token") or auth.get("access_token")
+    if not tok:
+        return None
+    req = urllib.request.Request(CODEX_USAGE_API, headers={
+        "Authorization": "Bearer " + tok, "User-Agent": "terminal-toys"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def scan_rollout(path):
+    """Per-day tokens, the running total, and the newest quota snapshot.
+
+    Cached on (mtime, size): a finished rollout never changes, and some run to
+    30MB, so the full parse happens once per file rather than every refresh.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime, st.st_size)
+    hit = _CODEX_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    daily = {}
+    total, limits, limits_at = None, None, None
+    try:
+        with open(path, errors="ignore") as f:
+            for line in f:
+                if '"token_count"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                info = (d.get("payload") or {}).get("info") or {}
+                last = info.get("last_token_usage") or {}
+                ts = d.get("timestamp") or ""
+                if last.get("total_tokens") and ts[:10]:
+                    daily[ts[:10]] = daily.get(ts[:10], 0) + last["total_tokens"]
+                if info.get("total_token_usage"):
+                    total = info["total_token_usage"]
+                rl = d.get("payload", {}).get("rate_limits") or info.get("rate_limits")
+                if rl:
+                    limits, limits_at = rl, ts
+    except OSError:
+        return None
+    out = {"daily": daily, "total": total, "limits": limits,
+           "limits_at": limits_at, "mtime": st.st_mtime}
+    _CODEX_CACHE[path] = (key, out)
+    return out
+
+
 def read_codex():
     """Codex rollouts carry token_count events with running and per-turn use.
 
@@ -247,23 +328,20 @@ def read_codex():
              "reasoning_output_tokens": 0, "total_tokens": 0,
              "cached_input_tokens": 0}
     counted = 0
+    daily = {}
+    limits, limits_at = None, ""
     for path in files:
-        last = None
-        for line in tail_lines(path):
-            if '"token_count"' not in line:
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            u = ((d.get("payload") or {}).get("info") or {}).get(
-                "total_token_usage")
-            if u:
-                last = u
-        if last:
+        got = scan_rollout(path)
+        if not got:
+            continue
+        if got["total"]:
             counted += 1
             for k in total:
-                total[k] += last.get(k, 0)
+                total[k] += got["total"].get(k, 0)
+        for day, n in got["daily"].items():
+            daily[day] = daily.get(day, 0) + n
+        if got["limits"] and (got["limits_at"] or "") > limits_at:
+            limits, limits_at = got["limits"], got["limits_at"]
 
     # per-turn rate, from the newest rollout only
     rates, prev = [], None
@@ -290,7 +368,8 @@ def read_codex():
         prev = ts or prev
     rates.sort()
     return {"ok": True, "sessions": counted, "files": len(files),
-            "total": total, "rates": rates,
+            "total": total, "rates": rates, "daily": daily,
+            "limits": limits, "limits_at": limits_at, "live": codex_live(),
             "last": os.path.getmtime(files[-1])}
 
 
@@ -298,9 +377,57 @@ def codex_tab(state, w, h):
     if not state.get("ok"):
         return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
     t = state["total"]
-    rows = [seg([(LBL, " ── TOTALS ── "),
-                 (DIM, "%d sessions · newest %s ago"
-                  % (state["sessions"], ago(state["last"])))], w - 1)]
+    rows = []
+    # The one genuine quota figure any of these agents publishes: the server
+    # sends it back with each response and the rollout records it. It is a
+    # snapshot from whenever Codex last ran, not a live reading, so it is
+    # dated.
+    live = state.get("live") or {}
+    lanes, source, plan = [], "", live.get("plan_type") or ""
+    if live.get("rate_limit"):
+        source = "live"
+        for key, name in (("primary_window", "primary"),
+                          ("secondary_window", "secondary")):
+            win = (live["rate_limit"] or {}).get(key)
+            if win and win.get("used_percent") is not None:
+                lanes.append((name, win["used_percent"],
+                              win.get("limit_window_seconds"),
+                              win.get("reset_at")))
+    elif (state.get("limits") or {}).get("primary"):
+        source = "from the last session"
+        win = state["limits"]["primary"]
+        lanes.append(("primary", win.get("used_percent"),
+                      (win.get("window_minutes") or 0) * 60,
+                      win.get("resets_at")))
+    if lanes:
+        rows.append(seg([(LBL, " ── QUOTA ── "),
+                         (OK if source == "live" else WARN, source),
+                         (DIM, " · account-wide, not this machine"),
+                         (DIM, "   %s" % plan if plan else "")], w - 1))
+        for name, pct, window, reset in lanes:
+            secs = int(window or 0)
+            wname = ("%dd" % (secs // 86400) if secs >= 86400
+                     else "%dh" % (secs // 3600) if secs else "?")
+            when = ""
+            if reset:
+                left = reset - time.time()
+                when = ("resets in %dd %dh" % (left // 86400,
+                                               (left % 86400) // 3600)
+                        if left > 0 else "resetting")
+            used = (pct or 0) / 100.0
+            rows.append(seg([(DIM, " %-9s" % wname),
+                             (heat(1.0 - used), meter(used, max(8, w - 34))),
+                             (heat(1.0 - used), " %3.0f%%" % (pct or 0)),
+                             (DIM, "  " + when)], w - 1))
+        credits = live.get("credits") or (state.get("limits") or {}).get("credits") or {}
+        if credits:
+            rows.append(seg([(DIM, "  credits "),
+                             (TXT, "unlimited" if credits.get("unlimited")
+                              else str(credits.get("balance") or "0"))], w - 1))
+        rows.append("")
+    rows.append(seg([(LBL, " ── TOTALS ── "),
+                     (DIM, "%d sessions · newest %s ago"
+                      % (state["sessions"], ago(state["last"])))], w - 1))
     cells = [("input tokens", big_num(t["input_tokens"]), TXT),
              ("output tokens", big_num(t["output_tokens"]), AGENT),
              ("reasoning tokens", big_num(t["reasoning_output_tokens"]), TXT),
@@ -340,11 +467,23 @@ def codex_tab(state, w, h):
         rows.append(seg([(DIM, " 0 tok/s"),
                          (DIM, " " * max(1, len(buckets) - 18)),
                          (DIM, "%.0f tok/s" % rates[-1])], w - 1))
+    grid, peak, best, facts = day_calendar(state.get("daily") or {}, w)
+    if grid and h > 30:
+        rows.append("")
+        rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
+                         (DIM, "peak "), (AGENT, big_num(peak)),
+                         (DIM, " on %s" % (best.strftime("%b %-d") if best
+                                           else "--"))], w - 1))
+        for line in grid:
+            rows.append(seg(line, w - 1))
+        rows.append(seg([(DIM, "  Less ")]
+                        + [(rgb(*c), "█") for c in HEAT_STEPS]
+                        + [(DIM, " More")], w - 1))
     rows.append("")
-    rows.append(seg([(DIM, "  Rate is wall-clock between turn boundaries, so"
-                           " it includes")], w - 1))
-    rows.append(seg([(DIM, "  tool calls and thinking - not raw decode"
-                           " speed.")], w - 1))
+    rows.append(seg([(DIM, "  Tokens and rate are measured here, from the"
+                           " rollouts. Quota is")], w - 1))
+    rows.append(seg([(DIM, "  the account's, fetched from the same endpoint"
+                           " the Codex CLI uses.")], w - 1))
     return rows
 
 
@@ -424,6 +563,13 @@ MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
 
 
 def token_heatmap(daily, w):
+    """Claude's shape: a list of {date, tokensByModel} records."""
+    return day_calendar(
+        dict((e["date"], sum((e.get("tokensByModel") or {}).values()))
+             for e in daily if e.get("date")), w)
+
+
+def day_calendar(totals_by_date, w):
     """Tokens per day, drawn the way Claude Code's own /stats draws it.
 
     Weekday rows with only Mon, Wed and Fri labelled; one cell per day; months
@@ -435,12 +581,11 @@ def token_heatmap(daily, w):
     of dots with a fortnight of colour at the right-hand end says that plainly.
     """
     totals = {}
-    for entry in daily:
+    for key, value in (totals_by_date or {}).items():
         try:
-            day = datetime.date.fromisoformat(entry["date"])
-        except (ValueError, KeyError):
+            totals[datetime.date.fromisoformat(key)] = value
+        except (ValueError, TypeError):
             continue
-        totals[day] = sum((entry.get("tokensByModel") or {}).values())
     if not totals:
         return [], 0, None, {}
     peak = max(totals.values()) or 1
@@ -454,13 +599,16 @@ def token_heatmap(daily, w):
 
     # month names sit over the week their month starts in, three characters
     # wide like /stats - a single initial is not a label, it is a hint
+    # a month label needs three clear cells; without checking where the last
+    # one ended, a short month writes over its neighbour and produces "JJul"
     strip = [" "] * len(starts)
-    seen = None
+    seen, wrote_to = None, -1
     for x, wk in enumerate(starts):
-        if wk.month != seen and x + 3 <= len(strip):
+        if wk.month != seen and x > wrote_to and x + 3 <= len(strip):
             seen = wk.month
             for k, ch in enumerate(MONTHS[wk.month - 1]):
                 strip[x + k] = ch
+            wrote_to = x + 3
     rows = [[(DIM, "     " + "".join(strip))]]
     for i in range(7):
         label = {0: "Mon", 2: "Wed", 4: "Fri"}.get(i, "")
