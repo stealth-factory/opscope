@@ -101,6 +101,11 @@ which is the credential the widget reuses. That endpoint is **undocumented**,
 discovered by reading the CLI bundle, and versioned only by it — so every
 failure is silent and the tab falls back to authorship alone.
 
+`GetAggregatedUsageEvents` on the same service supplies a **spend** section:
+per-model input, output and cache tokens with Cursor's own `totalCents` — not
+an estimate — over the last 30 days. It is what the plan percentages are made
+of, and answers which model actually spent the money.
+
 `ai-tracking/ai-code-tracking.db` supplies the authorship half: how many edits
 the agent made, across how many conversations, and how many lines in scored
 commits came from the agent rather than by hand. A different question from
@@ -130,8 +135,15 @@ It is simply **empty** on this machine, so the tab says so rather than drawing
 an empty chart. The moment the CLI is used here it has real numbers, and better
 ones than anywhere else.
 
-**Grok** — nothing found. `grok du` reports **disk** use, not quota; the name
-is a coincidence worth not falling for.
+**Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
+carries a running `totalTokens` on each session event alongside an
+`agentTimestampMs`. Differencing consecutive events and bucketing by the
+event's own timestamp gives per-day figures; taking the running total alone
+would credit a whole session to whichever day it was read on. That drives a
+totals line and a calendar in a blue ramp.
+
+No quota: nothing on disk records a limit, and `grok du` reports **disk** use —
+the name is a coincidence worth not falling for.
 
 ## On tokens per second
 

@@ -33,6 +33,7 @@ import datetime
 import json
 import os
 import glob
+import re
 import shutil
 import sqlite3
 import sys
@@ -70,6 +71,7 @@ AGENT = rgb(180, 160, 255)
 # heading - the steps are the same four, only the colour differs.
 HEAT_STEPS = ((74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84))
 CODEX_STEPS = ((66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250))
+GROK_STEPS = ((44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250))
 EMPTY_CELL = rgb(58, 66, 80)
 
 
@@ -93,9 +95,10 @@ CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
 CURSOR_LANES = (("included", (126, 208, 176)),
                 ("auto", (138, 168, 204)),
                 ("api", (217, 160, 192)))
+GROK_SESSIONS = os.path.expanduser("~/.grok/sessions/**/updates.jsonl")
 CURSOR_AUTH = os.path.expanduser("~/.config/cursor/auth.json")
-CURSOR_USAGE_API = ("https://api2.cursor.sh"
-                    "/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
+CURSOR_RPC = "https://api2.cursor.sh/aiserver.v1.DashboardService/%s"
+CURSOR_USAGE_API = CURSOR_RPC % "GetCurrentPeriodUsage"
 
 
 # For the comparison line. A rough token count for War and Peace - the book is
@@ -224,22 +227,51 @@ def cursor_live():
         return None
     if not tok:
         return None
-    req = urllib.request.Request(CURSOR_USAGE_API, data=b"{}", headers={
+    return cursor_rpc("GetCurrentPeriodUsage", {}, tok)
+
+
+def cursor_token():
+    try:
+        with open(CURSOR_AUTH) as f:
+            return json.load(f).get("accessToken")
+    except (OSError, ValueError):
+        return None
+
+
+def cursor_rpc(method, body, tok=None):
+    tok = tok or cursor_token()
+    if not tok:
+        return None
+    req = urllib.request.Request(CURSOR_RPC % method,
+                                 data=json.dumps(body).encode(), headers={
         "Authorization": "Bearer " + tok,
         "Content-Type": "application/json",
         "Connect-Protocol-Version": "1",
         "User-Agent": "terminal-toys"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=25) as r:
             return json.load(r)
     except (urllib.error.URLError, ValueError, OSError):
         return None
 
 
+def cursor_spend(days=30):
+    """Per-model tokens and real cost over a window.
+
+    This is what the plan percentages are made of: which model spent the
+    money. `totalCents` is Cursor's own figure, not an estimate.
+    """
+    now = int(time.time() * 1000)
+    return cursor_rpc("GetAggregatedUsageEvents",
+                      {"startDate": str(now - days * 86400 * 1000),
+                       "endDate": str(now)})
+
+
 def read_cursor():
     """Cursor's AI code tracking: how much code it wrote, not what it cost."""
     if not os.path.exists(CURSOR_DB):
-        return {"ok": False, "why": "no tracking database", "live": cursor_live()}
+        return {"ok": False, "why": "no tracking database",
+                "live": cursor_live(), "spend": cursor_spend()}
     try:
         con = sqlite3.connect("file:%s?mode=ro" % CURSOR_DB, uri=True)
         rows = con.execute(
@@ -256,7 +288,7 @@ def read_cursor():
         con.close()
     except sqlite3.Error as e:
         return {"ok": False, "why": str(e)[:40]}
-    return {"ok": True, "live": cursor_live(),
+    return {"ok": True, "live": cursor_live(), "spend": cursor_spend(),
             "hashes": rows[0], "conversations": rows[1],
             "models": rows[2], "by_model": by_model,
             "commits": commits[0] or 0, "lines": commits[1] or 0,
@@ -537,6 +569,95 @@ def codex_tab(state, w, h):
     return rows
 
 
+_GROK_CACHE = {}
+
+
+def read_grok():
+    """Grok logs a running totalTokens on each session event.
+
+    Deltas between consecutive events, bucketed by the event's own timestamp,
+    give per-day figures; the running total alone would credit an entire
+    session to whichever day it happened to be read on. Cached per file on
+    mtime and size, like the Codex rollouts.
+    """
+    files = glob.glob(GROK_SESSIONS, recursive=True)
+    if not files:
+        return {"ok": False, "why": "no sessions on disk"}
+    total, daily, sessions, newest = 0, {}, 0, 0
+    for path in files:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        key = (st.st_mtime, st.st_size)
+        hit = _GROK_CACHE.get(path)
+        if hit and hit[0] == key:
+            got = hit[1]
+        else:
+            got, prev = {"total": 0, "daily": {}}, 0
+            try:
+                with open(path, errors="ignore") as f:
+                    for line in f:
+                        m = re.search(r'"totalTokens":(\d+)', line)
+                        if not m:
+                            continue
+                        value = int(m.group(1))
+                        step = value - prev
+                        prev = max(prev, value)
+                        if step <= 0:
+                            continue
+                        when = re.search(r'"agentTimestampMs":(\d+)', line)
+                        if not when:
+                            continue
+                        day = datetime.datetime.fromtimestamp(
+                            int(when.group(1)) / 1000.0,
+                            datetime.timezone.utc).date().isoformat()
+                        got["daily"][day] = got["daily"].get(day, 0) + step
+                        got["total"] += step
+            except OSError:
+                continue
+            _GROK_CACHE[path] = (key, got)
+        if got["total"]:
+            sessions += 1
+            total += got["total"]
+            for day, n in got["daily"].items():
+                daily[day] = daily.get(day, 0) + n
+        newest = max(newest, st.st_mtime)
+    return {"ok": True, "sessions": sessions, "files": len(files),
+            "total": total, "daily": daily, "last": newest}
+
+
+def grok_tab(state, w, h):
+    if not state.get("ok"):
+        return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
+    rows = [seg([(LBL, " ── TOTALS ── "),
+                 (DIM, "%d sessions · newest %s ago"
+                  % (state["sessions"], ago(state["last"])))], w - 1)]
+    rows.append(seg([(DIM, "  tokens "), (AGENT, big_num(state["total"])),
+                     (DIM, "   across %d session files" % state["files"])],
+                    w - 1))
+    grid, peak, best, facts = day_calendar(state.get("daily") or {}, w,
+                                           GROK_STEPS)
+    if grid and h > 24:
+        rows.append("")
+        rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
+                         (DIM, "peak "), (AGENT, big_num(peak)),
+                         (DIM, " on %s" % (best.strftime("%b %-d") if best
+                                           else "--"))], w - 1))
+        for line in grid:
+            rows.append(seg(line, w - 1))
+        rows.append(seg([(DIM, "  Less ")]
+                        + [(rgb(*c), "█") for c in GROK_STEPS]
+                        + [(DIM, " More")], w - 1))
+    rows.append("")
+    rows.append(seg([(DIM, "  Totals are a running count per session, summed"
+                           " as deltas so a")], w - 1))
+    rows.append(seg([(DIM, "  session spanning days lands on the right ones."
+                           " No quota is")], w - 1))
+    rows.append(seg([(DIM, "  published anywhere on disk.")], w - 1))
+    return rows
+
+
 # Agents whose usage exists but is not readable from outside their session.
 # Naming where the number actually lives beats showing an empty gauge.
 ELSEWHERE = {
@@ -552,11 +673,7 @@ ELSEWHERE = {
                  "The moment the CLI is used here, this tab has real numbers",
                  "and better ones than anywhere else."]),
 
-    "grok": ("Grok",
-             ["~/.grok keeps sessions and config. `grok du` reports disk use,",
-              "not quota - the name is a coincidence worth not falling for.",
-              "",
-              "No usage or limit state was found on disk."]),
+
 }
 
 
@@ -566,6 +683,7 @@ class Store(object):
         self.claude = {}
         self.cursor = {}
         self.codex = {}
+        self.grok = {}
         self.installed = {}
         self.fetched = 0
         self.wake = threading.Event()
@@ -573,16 +691,18 @@ class Store(object):
     def snapshot(self):
         with self.lock:
             return (dict(self.claude), dict(self.cursor), dict(self.codex),
-                    dict(self.installed), self.fetched)
+                    dict(self.grok), dict(self.installed), self.fetched)
 
     def run(self):
         while True:
             claude, cursor, codex = read_claude(), read_cursor(), read_codex()
+            grok = read_grok()
             found = {}
             for name in ("claude", "codex", "copilot", "cursor-agent", "grok"):
                 found[name] = bool(shutil.which(name))
             with self.lock:
                 self.claude, self.cursor, self.codex = claude, cursor, codex
+                self.grok = grok
                 self.installed = found
                 self.fetched = time.time()
             self.wake.wait(REFRESH)
@@ -863,11 +983,39 @@ def cursor_quota(live, w):
     return rows
 
 
+def cursor_spend_rows(spend, w):
+    """Where the money went, per model, over the last 30 days."""
+    if not spend or not spend.get("aggregations"):
+        return []
+    rows = [seg([(LBL, " ── SPEND ── "), (DIM, "last 30d · "),
+                 (AGENT, "$%.2f" % (float(spend.get("totalCostCents") or 0) / 100)),
+                 (DIM, "  in "), (TXT, big_num(int(spend.get("totalInputTokens") or 0))),
+                 (DIM, " · out "), (TXT, big_num(int(spend.get("totalOutputTokens") or 0))),
+                 (DIM, " · cache "),
+                 (TXT, big_num(int(spend.get("totalCacheReadTokens") or 0)))],
+                w - 1)]
+    models = sorted(spend["aggregations"],
+                    key=lambda a: -float(a.get("totalCents") or 0))
+    top = float(models[0].get("totalCents") or 1)
+    for a in models[:6]:
+        cents = float(a.get("totalCents") or 0)
+        bar = meter(cents / top if top else 0, max(6, w - 44))
+        filled = bar.count("█")
+        rows.append(seg([(TXT, "  " + pad(str(a.get("modelIntent") or "?"), 26)),
+                         (AGENT, "%9s " % ("$%.2f" % (cents / 100))),
+                         (AGENT, bar[:filled]), (GRID, bar[filled:])], w - 1))
+    rows.append("")
+    return rows
+
+
 def cursor_tab(state, w, h):
     if not state.get("ok"):
         return (cursor_quota(state.get("live"), w)
+                + cursor_spend_rows(state.get("spend"), w)
                 or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
     rows = cursor_quota(state.get("live"), w)
+    if h > 30:
+        rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"
                   % ago((state.get("last") or 0) / 1000.0
@@ -962,7 +1110,7 @@ def main():
                 store.wake.set()
 
         w, h = size()
-        claude, cursor, codex, installed, fetched = store.snapshot()
+        claude, cursor, codex, grok, installed, fetched = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
         rows.append(seg([(DIM, " local state only · read %s ago" % ago(fetched)),
                          (DIM, "   · = installed")], w - 1))
@@ -976,6 +1124,8 @@ def main():
             rows += cursor_tab(cursor, w, h)
         elif name == "codex":
             rows += codex_tab(codex, w, h)
+        elif name == "grok":
+            rows += grok_tab(grok, w, h)
         else:
             rows += elsewhere_tab(name, installed, w, h)
 
