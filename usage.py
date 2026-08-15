@@ -472,17 +472,26 @@ def codex_tab(state, w, h):
     lanes, source, plan = [], "", live.get("plan_type") or ""
     if live.get("rate_limit"):
         source = "live"
-        for key, name in (("primary_window", "primary"),
-                          ("secondary_window", "secondary")):
+        for key in ("primary_window", "secondary_window"):
             win = (live["rate_limit"] or {}).get(key)
             if win and win.get("used_percent") is not None:
-                lanes.append((name, win["used_percent"],
+                lanes.append(("", win["used_percent"],
                               win.get("limit_window_seconds"),
                               win.get("reset_at")))
+        # Some features meter separately from the account's general usage -
+        # Spark is one - and each arrives named, with its own window and
+        # reset. Rendering the list rather than the one name we know keeps
+        # any future feature working without an edit.
+        for extra in live.get("additional_rate_limits") or []:
+            win = ((extra.get("rate_limit") or {}).get("primary_window") or {})
+            if win.get("used_percent") is None:
+                continue
+            lanes.append((extra.get("limit_name") or "?", win["used_percent"],
+                          win.get("limit_window_seconds"), win.get("reset_at")))
     elif (state.get("limits") or {}).get("primary"):
         source = "from the last session"
         win = state["limits"]["primary"]
-        lanes.append(("primary", win.get("used_percent"),
+        lanes.append(("", win.get("used_percent"),
                       (win.get("window_minutes") or 0) * 60,
                       win.get("resets_at")))
     if lanes:
@@ -490,6 +499,7 @@ def codex_tab(state, w, h):
                          (OK if source == "live" else WARN, source),
                          (DIM, " · account-wide, not this machine"),
                          (DIM, "   %s" % plan if plan else "")], w - 1))
+        prepared = []
         for name, pct, window, reset in lanes:
             secs = int(window or 0)
             wname = ("%dd" % (secs // 86400) if secs >= 86400
@@ -500,12 +510,34 @@ def codex_tab(state, w, h):
                 when = ("resets in %dd %dh" % (left // 86400,
                                                (left % 86400) // 3600)
                         if left > 0 else "resetting")
+            prepared.append((name, wname, pct, when))
+
+        # Alone, the account-wide lanes are told apart by their window and a
+        # bare "7d" is clear enough. Beside a named one it is not, so it says
+        # what it covers only when there is something to confuse it with.
+        named = any(name for name, _, _, _ in prepared)
+
+        def labels(short):
+            """Spell a feature out while there is room; below that the last
+            segment carries it - GPT-5.3-Codex-Spark is Spark."""
+            out = []
+            for name, wname, _, _ in prepared:
+                n = name.rsplit("-", 1)[-1] if (short and name) else name
+                out.append(("%s %s" % (n or ("overall" if named else ""),
+                                       wname)).strip())
+            return out
+
+        lab = labels(False)
+        if w - 26 - max(len(x) for x in lab) < 20:
+            lab = labels(True)
+        label_w = max(9, max(len(x) for x in lab))
+        for (_, _, pct, when), text in zip(prepared, lab):
             used = (pct or 0) / 100.0
             # heat(used), not heat(1 - used): red belongs at a quota nearly
             # spent, and the inverse painted a 26%-used week amber
-            bar = meter(used, max(8, w - 34))
+            bar = meter(used, max(8, w - 26 - label_w))
             filled = bar.count("█")
-            rows.append(seg([(DIM, " %-9s" % wname),
+            rows.append(seg([(DIM, " " + pad(text, label_w) + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
                              (heat(used), " %3.0f%%" % (pct or 0)),
                              (DIM, "  " + when)], w - 1))

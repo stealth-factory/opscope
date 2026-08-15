@@ -197,6 +197,35 @@ which returns `plan_type`, `credits`, and a `rate_limit` with primary and
 secondary windows. The header says `live` or `from the last session` so it is
 never ambiguous which you are looking at.
 
+**Some features meter separately**, and arrive in the same response under
+`additional_rate_limits` — each with its own `limit_name`, window and reset.
+`GPT-5.3-Codex-Spark` is one: a second weekly allowance that the account-wide
+percentage says nothing about, so spending all of one leaves the other
+untouched.
+
+```
+ ── QUOTA ── live · account-wide, not this machine   pro
+ overall 7d ████████░░░░░░░░░░░░░░░░░░░░  27%  resets in 4d 5h
+ Spark 7d   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%  resets in 6d 23h
+```
+
+The list is rendered as it arrives rather than looking for the one name we
+know, so a feature added later appears without an edit. A lane spells its
+feature out when the pane is wide enough — `GPT-5.3-Codex-Spark 7d` — and falls
+back to the last segment when it is not. `overall` labels the account-wide
+lanes **only** when a named one sits beside them; alone, the window tells them
+apart and the word would be noise.
+
+These extra limits are **live-only**. The snapshot recorded in the rollouts
+carries `primary`, `secondary` and `limit_name` but no `additional_rate_limits`,
+so a fallback reading shows the account-wide windows and nothing else — which
+is why the source label matters.
+
+Spark is a *model* (`gpt-5.3-codex-spark`, "ultra-fast coding model", 128k
+context, not on the API), and rollouts do record which model ran each turn in
+`payload.model`. Nothing on this machine has used it, so its lane reads 0% —
+a real zero, from the server, not an absent number drawn as one.
+
 This method came from reading how [CodexBar](https://github.com/steipete/CodexBar)
 does it — a menu-bar app that does this for twenty-odd providers, and documents
 the endpoint. Its `codexbar-cli` would cover far more of them; it is not used
