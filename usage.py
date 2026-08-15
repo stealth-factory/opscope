@@ -79,6 +79,23 @@ TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
 
 
+# For the comparison line. A rough token count for War and Peace - the book is
+# about 587k words, which lands near this once tokenised. Stated here because a
+# comparison built on an unnamed constant is just a number with a story.
+WAR_AND_PEACE_TOKENS = 730_000
+
+
+def span_ms(ms):
+    """A duration in milliseconds as days, hours and minutes."""
+    s = int((ms or 0) / 1000)
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m = s // 60
+    if d:
+        return "%dd %dh %dm" % (d, h, m)
+    return "%dh %dm" % (h, m) if h else "%dm" % m
+
+
 def big_num(n):
     """Token counts run to billions; nobody reads eleven digits."""
     n = float(n or 0)
@@ -435,26 +452,48 @@ def claude_tab(state, w, h):
     cache_r = sum(v.get("cacheReadInputTokens") or 0 for v in mu.values())
     cache_w = sum(v.get("cacheCreationInputTokens") or 0 for v in mu.values())
 
-    rows.append(seg([(LBL, " ── TOTALS ── "),
-                     (DIM, "since %s · cache written %s ago"
-                      % ((d.get("firstSessionDate") or "")[:10],
-                         ago(state.get("mtime"))))], w - 1))
-    cells = [("sessions", "%d" % (d.get("totalSessions") or 0), TXT),
-             ("messages", "%s" % f"{d.get('totalMessages') or 0:,}", TXT),
-             ("output tokens", big_num(out_tok), AGENT),
-             ("input tokens", big_num(in_tok), TXT),
-             ("cache read", big_num(cache_r), DIM),
-             ("cache written", big_num(cache_w), DIM)]
-    label_w = max(len(c[0]) for c in cells)
-    ncols = 2 if (w - 2) // 2 - label_w - 3 >= 8 else 1
-    cw = (w - 2) // ncols
-    val_w = max(5, cw - label_w - 3)
-    for i in range(0, len(cells), ncols):
-        line = [(RST, " ")]
-        for label, value, colour in cells[i:i + ncols]:
-            line += [(DIM, " " + pad(label, label_w) + " "),
-                     (colour, pad(value, val_w))]
-        rows.append(seg(line, w - 1))
+    # the heatmap is computed first: its streaks and active-day counts belong
+    # in the summary above it, not only beside the calendar
+    grid, peak, best, facts = token_heatmap(d.get("dailyModelTokens") or [], w)
+
+    ls = d.get("longestSession") or {}
+    fav = max(mu, key=lambda k: mu[k].get("outputTokens") or 0) if mu else "—"
+    all_tokens = in_tok + out_tok + cache_r + cache_w
+    rows.append(seg([(LBL, " ── SUMMARY ── "),
+                     (DIM, "all time · since %s"
+                      % (d.get("firstSessionDate") or "")[:10])], w - 1))
+    pairs = [
+        ("Favorite model", fav.replace("claude-", ""), AGENT,
+         "Total tokens", big_num(all_tokens), AGENT),
+        ("Sessions", "%d" % (d.get("totalSessions") or 0), TXT,
+         "Longest session", span_ms(ls.get("duration")), TXT),
+        ("Active days", "%d/%d" % (facts.get("active", 0), facts.get("span", 0))
+         if facts else "—", TXT,
+         "Longest streak", "%d days" % facts.get("longest", 0) if facts else "—",
+         TXT),
+        ("Most active day", best.strftime("%b %-d") if best else "—", TXT,
+         "Current streak", "%d days" % facts.get("current", 0) if facts else "—",
+         OK if facts.get("current") else DIM),
+    ]
+    lw = max(max(len(a), len(c)) for a, _b, _bc, c, _d2, _dc in pairs)
+    half = (w - 3) // 2
+    vw = max(6, half - lw - 2)
+    for a, b, bc, c, e, ec in pairs:
+        rows.append(seg([(DIM, " " + pad(a, lw) + " "), (bc, pad(b, vw)),
+                         (DIM, " " + pad(c, lw) + " "), (ec, pad(e, vw))],
+                        w - 1))
+    rows.append(seg([(DIM, "  Input "), (TXT, big_num(in_tok)),
+                     (DIM, " · Output "), (TXT, big_num(out_tok)),
+                     (DIM, " · Cache read "), (TXT, big_num(cache_r)),
+                     (DIM, " · Cache written "), (TXT, big_num(cache_w))],
+                    w - 1))
+    spoken = in_tok + out_tok
+    if spoken > WAR_AND_PEACE_TOKENS:
+        rows.append("")
+        rows.append(seg([(ACCENT, "  Your input and output are ~%dx the tokens"
+                          " in War and Peace"
+                          % round(spoken / float(WAR_AND_PEACE_TOKENS)))],
+                        w - 1))
 
     # which model did the work
     rows.append("")
@@ -495,7 +534,6 @@ def claude_tab(state, w, h):
                          (DIM, right)], w - 1))
 
     # ── tokens per day, as a calendar ───────────────────────────────────
-    grid, peak, best, facts = token_heatmap(d.get("dailyModelTokens") or [], w)
     if grid and h > 26:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
@@ -507,14 +545,7 @@ def claude_tab(state, w, h):
         rows.append(seg([(DIM, "  Less ")]
                         + [(rgb(*c), "█") for c in HEAT_STEPS]
                         + [(DIM, " More")], w - 1))
-        rows.append(seg([(DIM, "  active days "),
-                         (TXT, "%d" % facts["active"]),
-                         (DIM, "/%d" % facts["span"]),
-                         (DIM, "   longest streak "),
-                         (TXT, "%d" % facts["longest"]),
-                         (DIM, "   current "),
-                         (OK if facts["current"] else DIM,
-                          "%d" % facts["current"])], w - 1))
+
 
     rows.append("")
     rows.append(seg([(DIM, "  This file records what was spent. It carries no"
