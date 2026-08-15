@@ -969,15 +969,17 @@ def copilot_live():
     """
     tok = copilot_token()
     if not tok:
-        return None
+        return {"why": "no token in ~/.copilot/config.json"}
     req = urllib.request.Request(COPILOT_USER_API, headers={
         "Authorization": "token " + tok, "User-Agent": "terminal-toys",
         "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return json.load(r)
-    except (urllib.error.URLError, ValueError, OSError):
-        return None
+            return {"data": json.load(r)}
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        # Which of the two went wrong matters: blaming the config file for a
+        # dropped connection sends the reader to edit a file that is fine.
+        return {"why": "quota request failed: %s" % str(e)[:40]}
 
 
 def read_copilot():
@@ -987,7 +989,8 @@ def read_copilot():
     over the network, while the per-turn detail is this machine's and is
     frequently empty. Either can be present without the other.
     """
-    out = {"ok": True, "live": cached("copilot", copilot_live),
+    got = cached("copilot", copilot_live) or {}
+    out = {"ok": True, "live": got.get("data"), "live_why": got.get("why"),
            "sessions": 0, "events": 0, "usage": None}
     if not os.path.exists(COPILOT_DB):
         out["why"] = "no session store"
@@ -1068,9 +1071,8 @@ def copilot_tab(state, w, h):
                                  (WARN, "   %d over" % q["overage_count"]
                                   if q.get("overage_count") else "")], w - 1))
         rows.append("")
-    elif state.get("live") is None:
-        rows.append(seg([(WARN, "  no quota: could not read the CLI's token"
-                                " from ~/.copilot/config.json")], w - 1))
+    elif state.get("live_why"):
+        rows.append(seg([(WARN, "  no quota: " + state["live_why"])], w - 1))
         rows.append("")
 
     use = state.get("usage")
