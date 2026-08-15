@@ -82,6 +82,13 @@ MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
 COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
 TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
+# One hue per lane, as cursor-agent's own Usage view does it. These are
+# categories rather than one gauge, so a green-to-red severity ramp would
+# imply a relationship between them that does not exist - and each bar is
+# labelled and carries its own percentage, so the colour is decoration.
+CURSOR_LANES = (("included", (126, 208, 176)),
+                ("auto", (138, 168, 204)),
+                ("api", (217, 160, 192)))
 CURSOR_AUTH = os.path.expanduser("~/.config/cursor/auth.json")
 CURSOR_USAGE_API = ("https://api2.cursor.sh"
                     "/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
@@ -449,9 +456,13 @@ def codex_tab(state, w, h):
                                                (left % 86400) // 3600)
                         if left > 0 else "resetting")
             used = (pct or 0) / 100.0
+            # heat(used), not heat(1 - used): red belongs at a quota nearly
+            # spent, and the inverse painted a 26%-used week amber
+            bar = meter(used, max(8, w - 34))
+            filled = bar.count("█")
             rows.append(seg([(DIM, " %-9s" % wname),
-                             (heat(1.0 - used), meter(used, max(8, w - 34))),
-                             (heat(1.0 - used), " %3.0f%%" % (pct or 0)),
+                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                             (heat(used), " %3.0f%%" % (pct or 0)),
                              (DIM, "  " + when)], w - 1))
         credits = live.get("credits") or (state.get("limits") or {}).get("credits") or {}
         if credits:
@@ -743,10 +754,12 @@ def claude_tab(state, w, h):
         top = ranked[0][1].get("outputTokens") or 1
         for name, v in ranked[:5]:
             tok = v.get("outputTokens") or 0
+            share = tok / float(top)
+            bar = meter(share, max(6, w - 34))
+            filled = bar.count("█")
             rows.append(seg([(TXT, "  " + pad(name.replace("claude-", ""), 20)),
                              (AGENT, "%7s " % big_num(tok)),
-                             (heat(tok / float(top)),
-                              meter(tok / float(top), max(6, w - 34)))],
+                             (AGENT, bar[:filled]), (GRID, bar[filled:])],
                             w - 1))
 
     # 26 days of activity, straight from the file
@@ -821,16 +834,20 @@ def cursor_quota(live, w):
     rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
                      (DIM, " · account-wide, not this machine   "),
                      (DIM, when)], w - 1))
-    lanes = (("included", plan.get("totalPercentUsed")),
-             ("auto", plan.get("autoPercentUsed")),
-             ("api", plan.get("apiPercentUsed")))
-    for name, pct in lanes:
+    values = {"included": plan.get("totalPercentUsed"),
+              "auto": plan.get("autoPercentUsed"),
+              "api": plan.get("apiPercentUsed")}
+    for name, colour in CURSOR_LANES:
+        pct = values.get(name)
         if pct is None:
             continue
         used = max(0.0, min(1.0, pct / 100.0))
+        bar = meter(used, max(8, w - 30))
+        filled = bar.count("█")
         rows.append(seg([(DIM, " %-9s" % name),
-                         (heat(1.0 - used), meter(used, max(8, w - 30))),
-                         (heat(1.0 - used), " %3.0f%%" % pct)], w - 1))
+                         (rgb(*colour), bar[:filled]),
+                         (GRID, bar[filled:]),
+                         (rgb(*colour), " %3.0f%%" % pct)], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:
         rows.append(seg([(DIM, "  spend "),
@@ -885,10 +902,12 @@ def cursor_tab(state, w, h):
                         w - 1))
         top = state["by_model"][0][1] or 1
         for name, n in state["by_model"][:5]:
+            bar = meter(n / float(top), max(6, w - 36))
+            filled = bar.count("█")
             rows.append(seg([(TXT, "  " + pad(str(name or "?"), 22)),
                              (AGENT, "%7s " % f"{n:,}"),
-                             (heat(n / float(top)),
-                              meter(n / float(top), max(6, w - 36)))], w - 1))
+                             (AGENT, bar[:filled]), (GRID, bar[filled:])],
+                            w - 1))
     rows.append("")
     rows.append(seg([(DIM, "  Authorship, not spend: this is how much code the"
                            " agent wrote,")], w - 1))

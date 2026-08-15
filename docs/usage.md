@@ -196,6 +196,21 @@ token goes only to the host Codex itself talks to, is never printed, and any
 failure — expired token, no network — falls back to the rollout snapshot
 rather than showing nothing.
 
+## On colour
+
+Red means something is wrong, and nothing else. It appears on an error, and on
+a quota bar as it approaches empty — that is all.
+
+Everything else is either one hue at varying intensity (the token calendars,
+the model rankings) or a set of distinct hues for things that are genuinely
+different categories (Cursor's included / auto / api lanes, which follow the
+palette `cursor-agent` uses for the same three). A ranking bar coloured
+green-through-red implies the largest is the worst, which it is not; it is
+simply the largest.
+
+Every bar carries its label and its number, so colour is never the only thing
+saying what a row is.
+
 ## The thing this widget does not do
 
 **It shows no remaining quota for Claude Code, Cursor or Grok**, because none
