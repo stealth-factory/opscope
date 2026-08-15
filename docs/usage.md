@@ -22,8 +22,6 @@ the three that publish one.
  Most active day Aug 1       Current streak  4 days
   Input 891.2k · Output 53.6M · Cache read 20.1B · Cache written 501.6M
 
-  Your input and output are ~75x the tokens in War and Peace
-
  ── BY MODEL ── output tokens
   opus-5                27.9M ████████████████████████████
   opus-4-8              15.0M ███████████████░░░░░░░░░░░░░
@@ -75,10 +73,6 @@ longest session, active days, both streaks and the most active day. Rendering
 it against a `/stats` screenshot taken the same week agrees on every figure the
 cache had settled — 31 sessions, a longest session of `4d 10h 52m`, a longest
 streak of 21 days, Aug 1 as the busiest day.
-
-The comparison line divides input plus output by **730,000 tokens**, a rough
-count for *War and Peace*. The constant is named in the source, because a
-comparison built on an unnamed number is just a number with a story attached.
 
 The **tokens-per-day calendar** is laid out like the contribution calendar in
 `github.py` — weekdays down the side, weeks across — so the two read the same

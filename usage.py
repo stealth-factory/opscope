@@ -120,12 +120,6 @@ CURSOR_RPC = "https://api2.cursor.sh/aiserver.v1.DashboardService/%s"
 CURSOR_USAGE_API = CURSOR_RPC % "GetCurrentPeriodUsage"
 
 
-# For the comparison line. A rough token count for War and Peace - the book is
-# about 587k words, which lands near this once tokenised. Stated here because a
-# comparison built on an unnamed constant is just a number with a story.
-WAR_AND_PEACE_TOKENS = 730_000
-
-
 def span_ms(ms):
     """A duration in milliseconds as days, hours and minutes."""
     s = int((ms or 0) / 1000)
@@ -1209,14 +1203,6 @@ def claude_tab(state, w, h):
                      (DIM, " · Cache read "), (TXT, big_num(cache_r)),
                      (DIM, " · Cache written "), (TXT, big_num(cache_w))],
                     w - 1))
-    spoken = in_tok + out_tok
-    if spoken > WAR_AND_PEACE_TOKENS:
-        rows.append("")
-        rows.append(seg([(ACCENT, "  Your input and output are ~%dx the tokens"
-                          " in War and Peace"
-                          % round(spoken / float(WAR_AND_PEACE_TOKENS)))],
-                        w - 1))
-
     # which model did the work
     rows.append("")
     ranked = sorted(mu.items(), key=lambda kv: -(kv[1].get("outputTokens") or 0))
