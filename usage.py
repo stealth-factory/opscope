@@ -103,6 +103,8 @@ CURSOR_LANES = (("included", (126, 208, 176)),
                 ("auto", (138, 168, 204)),
                 ("api", (217, 160, 192)))
 GROK_SESSIONS = os.path.expanduser("~/.grok/sessions/**/updates.jsonl")
+# the quota is not in the session transcripts: it arrives on the client log
+GROK_LOG = os.path.expanduser("~/.grok/logs/unified.jsonl")
 CURSOR_AUTH = os.path.expanduser("~/.config/cursor/auth.json")
 CURSOR_RPC = "https://api2.cursor.sh/aiserver.v1.DashboardService/%s"
 CURSOR_USAGE_API = CURSOR_RPC % "GetCurrentPeriodUsage"
@@ -579,6 +581,43 @@ def codex_tab(state, w, h):
 _GROK_CACHE = {}
 
 
+def grok_quota():
+    """Grok's weekly credit window, as its own CLI receives it.
+
+    Not hidden and not inferred: the server sends it, and the CLI writes it
+    into the session log under `.ctx.config`. An earlier pass here concluded
+    no quota existed, having grepped for limit/quota/remaining/reset - the
+    keys are `creditUsagePercent` and `currentPeriod`, so the search missed
+    them and the tab said so in print for a day.
+    """
+    best = None
+    for path in [GROK_LOG] if os.path.exists(GROK_LOG) else []:
+        for line in tail_lines(path, 2 * 1024 * 1024):
+            if "creditUsagePercent" not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            ctx = d.get("ctx") if isinstance(d, dict) else None
+            cfg = (ctx or {}).get("config") if isinstance(ctx, dict) else None
+            if not isinstance(cfg, dict) or "creditUsagePercent" not in cfg:
+                continue
+            period = cfg.get("currentPeriod") or {}
+            when = period.get("start") or ""
+            if best is None or when >= best["start"]:
+                best = {"percent": cfg.get("creditUsagePercent"),
+                        "kind": period.get("type") or "",
+                        "start": when, "end": period.get("end") or "",
+                        "tier": (ctx or {}).get("subscriptionTier") or "",
+                        "on_demand_used": (cfg.get("onDemandUsed") or {}).get("val"),
+                        "on_demand_cap": (cfg.get("onDemandCap") or {}).get("val"),
+                        "prepaid": (cfg.get("prepaidBalance") or {}).get("val")}
+        if best:
+            break
+    return best
+
+
 def read_grok():
     """Grok logs a running totalTokens on each session event.
 
@@ -631,15 +670,57 @@ def read_grok():
                 daily[day] = daily.get(day, 0) + n
         newest = max(newest, st.st_mtime)
     return {"ok": True, "sessions": sessions, "files": len(files),
-            "total": total, "daily": daily, "last": newest}
+            "total": total, "daily": daily, "last": newest,
+            "quota": grok_quota()}
 
 
 def grok_tab(state, w, h):
     if not state.get("ok"):
         return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
-    rows = [seg([(LBL, " ── TOTALS ── "),
-                 (DIM, "%d sessions · newest %s ago"
-                  % (state["sessions"], ago(state["last"])))], w - 1)]
+    rows = []
+    q = state.get("quota")
+    if q and q.get("percent") is not None:
+        # The one real remaining-quota figure in this widget: everything else
+        # here counts what was spent. It leads the tab for that reason.
+        used = float(q["percent"]) / 100.0
+        left = None
+        try:
+            end = datetime.datetime.fromisoformat(q["end"])
+            left = (end - datetime.datetime.now(
+                datetime.timezone.utc)).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            pass
+        period = ("weekly" if "WEEKLY" in (q.get("kind") or "")
+                  else (q.get("kind") or "").replace(
+                      "USAGE_PERIOD_TYPE_", "").lower() or "current")
+        rows.append(seg([(LBL, " ── %s QUOTA ── " % period.upper()),
+                         (TXT, q.get("tier") or "?"),
+                         (DIM, " · resets in %.1f days" % left
+                          if left is not None and left >= 0 else "")], w - 1))
+        rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"])),
+                         (heat(used), meter(used, max(10, w - 30))),
+                         (DIM, "  credits used")], w - 1))
+        span = ""
+        for key, label in (("start", ""), ("end", " → ")):
+            try:
+                span += label + datetime.datetime.fromisoformat(
+                    q[key]).strftime("%-d %b")
+            except (ValueError, TypeError, KeyError):
+                span = ""
+                break
+        extras = []
+        if q.get("on_demand_cap"):
+            extras.append("on-demand %s/%s" % (q.get("on_demand_used"),
+                                               q["on_demand_cap"]))
+        if q.get("prepaid"):
+            extras.append("prepaid %s" % q["prepaid"])
+        rows.append(seg([(DIM, "  window "), (TXT, span or "?"),
+                         (DIM, "   " + " · ".join(extras) if extras else "")],
+                        w - 1))
+        rows.append("")
+    rows.append(seg([(LBL, " ── TOTALS ── "),
+                     (DIM, "%d sessions · newest %s ago"
+                      % (state["sessions"], ago(state["last"])))], w - 1))
     rows.append(seg([(DIM, "  tokens "), (AGENT, big_num(state["total"])),
                      (DIM, "   across %d session files" % state["files"])],
                     w - 1))
@@ -659,9 +740,10 @@ def grok_tab(state, w, h):
     rows.append("")
     rows.append(seg([(DIM, "  Totals are a running count per session, summed"
                            " as deltas so a")], w - 1))
-    rows.append(seg([(DIM, "  session spanning days lands on the right ones."
-                           " No quota is")], w - 1))
-    rows.append(seg([(DIM, "  published anywhere on disk.")], w - 1))
+    rows.append(seg([(DIM, "  session spanning days lands on the right one."
+                           " The quota above is")], w - 1))
+    rows.append(seg([(DIM, "  the server's own figure, read from the client"
+                           " log - not inferred.")], w - 1))
     return rows
 
 
