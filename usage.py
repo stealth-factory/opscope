@@ -65,13 +65,17 @@ AGENT = rgb(180, 160, 255)
 # One hue, four steps, the way /stats and the contribution calendar do it.
 # heat() runs green to amber to red, which reads as a change of *kind* rather
 # than of amount - wrong for "more of the same thing".
+# Claude keeps the terracotta of its own /stats. Codex gets a white ramp, so
+# two calendars side by side are told apart by hue rather than by reading the
+# heading - the steps are the same four, only the colour differs.
 HEAT_STEPS = ((74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84))
+CODEX_STEPS = ((66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250))
 EMPTY_CELL = rgb(58, 66, 80)
 
 
-def shade(frac):
+def shade(frac, steps=HEAT_STEPS):
     """Which of the four steps a day falls in."""
-    return rgb(*HEAT_STEPS[min(3, max(0, int(frac * 3.999)))])
+    return rgb(*steps[min(3, max(0, int(frac * 3.999)))])
 
 
 CLAUDE_STATS = os.path.expanduser("~/.claude/stats-cache.json")
@@ -512,7 +516,8 @@ def codex_tab(state, w, h):
         rows.append(seg([(DIM, " 0 tok/s"),
                          (DIM, " " * max(1, len(buckets) - 18)),
                          (DIM, "%.0f tok/s" % rates[-1])], w - 1))
-    grid, peak, best, facts = day_calendar(state.get("daily") or {}, w)
+    grid, peak, best, facts = day_calendar(state.get("daily") or {}, w,
+                                           CODEX_STEPS)
     if grid and h > 30:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
@@ -522,7 +527,7 @@ def codex_tab(state, w, h):
         for line in grid:
             rows.append(seg(line, w - 1))
         rows.append(seg([(DIM, "  Less ")]
-                        + [(rgb(*c), "█") for c in HEAT_STEPS]
+                        + [(rgb(*c), "█") for c in CODEX_STEPS]
                         + [(DIM, " More")], w - 1))
     rows.append("")
     rows.append(seg([(DIM, "  Tokens and rate are measured here, from the"
@@ -614,7 +619,7 @@ def token_heatmap(daily, w):
              for e in daily if e.get("date")), w)
 
 
-def day_calendar(totals_by_date, w):
+def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
     """Tokens per day, drawn the way Claude Code's own /stats draws it.
 
     Weekday rows with only Mon, Wed and Fri labelled; one cell per day; months
@@ -664,7 +669,7 @@ def day_calendar(totals_by_date, w):
             if n is None:
                 line.append((EMPTY_CELL, "·"))
             else:
-                line.append((shade((n / float(peak)) ** 0.5), "█"))
+                line.append((shade((n / float(peak)) ** 0.5, steps), "█"))
         rows.append(line)
 
     # active out of days in the range, not out of days the file happens to

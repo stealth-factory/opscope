@@ -202,7 +202,9 @@ Red means something is wrong, and nothing else. It appears on an error, and on
 a quota bar as it approaches empty — that is all.
 
 Everything else is either one hue at varying intensity (the token calendars,
-the model rankings) or a set of distinct hues for things that are genuinely
+the model rankings — Claude's calendar keeps the terracotta of its own
+`/stats`, Codex's runs dark-grey to white, so two of them side by side are
+told apart by hue rather than by reading the heading) or a set of distinct hues for things that are genuinely
 different categories (Cursor's included / auto / api lanes, which follow the
 palette `cursor-agent` uses for the same three). A ranking bar coloured
 green-through-red implies the largest is the worst, which it is not; it is
