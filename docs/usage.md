@@ -84,10 +84,27 @@ column, and the widget picks the cell width from the pane. Intensity is carried
 by the shading glyph as well as the colour, and a `·` marks a day the file has
 no entry for — distinct from a day that recorded zero.
 
-**Cursor** — `ai-tracking/ai-code-tracking.db` records *authorship*: how many
-edits the agent made, across how many conversations, and how many lines in
-scored commits came from the agent versus by hand. That is a different question
-from cost, and the tab says so rather than letting it pass as usage.
+**Cursor** — both quota and authorship.
+
+The quota is the same three lanes `cursor-agent`'s own in-session Usage view
+shows — included, auto, api — plus spend against the plan limit and the billing
+cycle reset. It is **not** the documented `cursor.com/api/usage-summary`: that
+one wants a browser cookie and returns 401 to everything this machine holds.
+The CLI instead speaks Connect to
+
+```
+POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
+Authorization: Bearer <accessToken from ~/.config/cursor/auth.json>
+```
+
+which is the credential the widget reuses. That endpoint is **undocumented**,
+discovered by reading the CLI bundle, and versioned only by it — so every
+failure is silent and the tab falls back to authorship alone.
+
+`ai-tracking/ai-code-tracking.db` supplies the authorship half: how many edits
+the agent made, across how many conversations, and how many lines in scored
+commits came from the agent rather than by hand. A different question from
+cost, and labelled as such.
 
 **Codex** — real, and it took a second look to find. `~/.codex/logs_2.sqlite`
 is diagnostics with no counters, which is where the first search stopped. The

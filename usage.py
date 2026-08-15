@@ -82,6 +82,9 @@ MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
 COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
 TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
+CURSOR_AUTH = os.path.expanduser("~/.config/cursor/auth.json")
+CURSOR_USAGE_API = ("https://api2.cursor.sh"
+                    "/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
 
 
 # For the comparison line. A rough token count for War and Peace - the book is
@@ -192,10 +195,40 @@ def claude_rates():
     return out, sampled
 
 
+def cursor_live():
+    """Plan usage, from the endpoint cursor-agent's own Usage view calls.
+
+    Not the documented cursor.com dashboard API - that one wants a browser
+    cookie and returns 401 to anything this machine has. The CLI talks Connect
+    to aiserver.v1.DashboardService with the bearer token it stores in
+    ~/.config/cursor/auth.json, which is the credential this reuses.
+
+    Undocumented and versioned only by the CLI bundle it was read out of, so
+    every failure is silent and the tab simply falls back to authorship.
+    """
+    try:
+        with open(CURSOR_AUTH) as f:
+            tok = json.load(f).get("accessToken")
+    except (OSError, ValueError):
+        return None
+    if not tok:
+        return None
+    req = urllib.request.Request(CURSOR_USAGE_API, data=b"{}", headers={
+        "Authorization": "Bearer " + tok,
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        "User-Agent": "terminal-toys"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
 def read_cursor():
     """Cursor's AI code tracking: how much code it wrote, not what it cost."""
     if not os.path.exists(CURSOR_DB):
-        return {"ok": False, "why": "no tracking database"}
+        return {"ok": False, "why": "no tracking database", "live": cursor_live()}
     try:
         con = sqlite3.connect("file:%s?mode=ro" % CURSOR_DB, uri=True)
         rows = con.execute(
@@ -212,7 +245,8 @@ def read_cursor():
         con.close()
     except sqlite3.Error as e:
         return {"ok": False, "why": str(e)[:40]}
-    return {"ok": True, "hashes": rows[0], "conversations": rows[1],
+    return {"ok": True, "live": cursor_live(),
+            "hashes": rows[0], "conversations": rows[1],
             "models": rows[2], "by_model": by_model,
             "commits": commits[0] or 0, "lines": commits[1] or 0,
             "human_lines": commits[2] or 0, "last": recent}
@@ -773,13 +807,49 @@ def claude_tab(state, w, h):
     return rows
 
 
+def cursor_quota(live, w):
+    """The three lanes cursor-agent's Usage view shows, plus the cycle."""
+    plan = (live or {}).get("planUsage") or {}
+    if not plan:
+        return []
+    rows = []
+    ends = live.get("billingCycleEnd")
+    when = ""
+    if ends:
+        left = int(ends) / 1000.0 - time.time()
+        when = ("resets in %dd" % (left // 86400)) if left > 0 else "resetting"
+    rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
+                     (DIM, " · account-wide, not this machine   "),
+                     (DIM, when)], w - 1))
+    lanes = (("included", plan.get("totalPercentUsed")),
+             ("auto", plan.get("autoPercentUsed")),
+             ("api", plan.get("apiPercentUsed")))
+    for name, pct in lanes:
+        if pct is None:
+            continue
+        used = max(0.0, min(1.0, pct / 100.0))
+        rows.append(seg([(DIM, " %-9s" % name),
+                         (heat(1.0 - used), meter(used, max(8, w - 30))),
+                         (heat(1.0 - used), " %3.0f%%" % pct)], w - 1))
+    limit, spend = plan.get("limit"), plan.get("totalSpend")
+    if limit:
+        rows.append(seg([(DIM, "  spend "),
+                         (TXT, "$%.2f" % ((spend or 0) / 100.0)),
+                         (DIM, " of "), (TXT, "$%.2f" % (limit / 100.0))],
+                        w - 1))
+    rows.append("")
+    return rows
+
+
 def cursor_tab(state, w, h):
     if not state.get("ok"):
-        return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
-    rows = [seg([(LBL, " ── AI-WRITTEN CODE ── "),
+        return (cursor_quota(state.get("live"), w)
+                or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
+    rows = cursor_quota(state.get("live"), w)
+    rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"
                   % ago((state.get("last") or 0) / 1000.0
-                        if state.get("last") else None))], w - 1)]
+                        if state.get("last") else None))], w - 1))
     ai, human = state["lines"], state["human_lines"]
     total = ai + human
     cells = [("tracked edits", f"{state['hashes']:,}", AGENT),
