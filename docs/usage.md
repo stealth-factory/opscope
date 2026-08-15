@@ -2,7 +2,7 @@
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
-the three that publish one.
+the four that publish one.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -178,9 +178,35 @@ reasoning tokens, AI credits as `total_nano_aiu`, a `request_multiplier`, and �
 uniquely among these agents — `duration_ms`, `time_to_first_token_ms` and
 `inter_token_latency_ms`. It is the best-shaped usage data of the lot.
 
-It is simply **empty** on this machine, so the tab says so rather than drawing
-an empty chart. The moment the CLI is used here it has real numbers, and better
-ones than anywhere else.
+It is simply **empty** on this machine — two sessions, zero turns — so that
+half of the tab says so rather than drawing an empty chart. The moment a turn
+is recorded here it has real numbers, and better ones than anywhere else.
+
+**The quota half does not depend on it**, which is the point that took a second
+look. Copilot's remaining allowance is not in the session store at all; it is on
+the account, and the CLI reads it from
+
+```
+GET https://api.github.com/copilot_internal/user
+Authorization: token <copilotTokens from ~/.copilot/config.json>
+```
+
+That file is JSON with `//` comments at the top, so it has to be stripped
+before parsing, and the tokens are keyed by host and login because one machine
+can be signed in to github.com and an Enterprise host at once.
+
+The response carries `copilot_plan`, `quota_reset_date` and a
+`quota_snapshots` object — one entry per pool, each naming itself. On this
+account: **premium interactions 7,103 of 10,000 used**, with chat and
+completions `unlimited`.
+
+An unlimited pool gets **no bar**. It has no denominator, and drawing one as an
+empty gauge would invent the limit the field explicitly denies. The pools are
+rendered from the list, so a new one appears without an edit, and the metered
+ones sort first — an unlimited pool is not news.
+
+The API reports `percent_remaining`; the pane shows what is *spent*, like every
+other tab, so that red always means the same thing across the wall.
 
 **Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
 carries a running `totalTokens` on each session event alongside an
@@ -320,9 +346,6 @@ saying what a row is.
 
 ## The thing this widget does not do
 
-**Copilot shows no quota**, because nothing it writes locally records one —
-and its usage table is empty here besides.
-
 Nothing on this pane invents a denominator. Where an agent publishes a limit it
 is shown against that limit; where it does not, the tab says what was spent and
 stops. That is the whole point of the repo, and the reason an empty tab is
@@ -373,8 +396,8 @@ refresh makes a tab a row longer.
 
 Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
-never changes. There are four quota calls — Claude, Codex, and two for Cursor
-— each held for two minutes, so a pane left open all day makes about 120
+never changes. There are five quota calls — Claude, Codex, Copilot and two for
+Cursor — each held for two minutes, so a pane left open all day makes about 150
 requests an hour between them, whichever tab is on screen.
 
 ## Which agents appear

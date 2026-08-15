@@ -25,9 +25,9 @@ exposes nothing says so rather than showing a plausible zero.
     python3 usage.py [-n SECONDS]
 
 Most of this is read from local state files. The exception is the remaining
-quota, which no agent writes to disk in a current form: Claude, Codex and
-Cursor each publish one over an endpoint, fetched with the credential that
-agent already holds and sent only to that agent's own host. Nothing here is
+quota, which no agent writes to disk in a current form: Claude, Codex, Cursor
+and Copilot each publish one over an endpoint, fetched with the credential
+that agent already holds and sent only to that agent's own host. Nothing here is
 inferred from a number that was not published.
 
 Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
@@ -103,6 +103,8 @@ CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 RATE_FILES = 3           # newest transcripts to sample for a rate
 MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
 COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
+COPILOT_CONFIG = os.path.expanduser("~/.copilot/config.json")
+COPILOT_USER_API = "https://api.github.com/copilot_internal/user"
 TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
 # One hue per lane, as cursor-agent's own Usage view does it. These are
@@ -935,21 +937,195 @@ def grok_tab(state, w, h):
 
 # Agents whose usage exists but is not readable from outside their session.
 # Naming where the number actually lives beats showing an empty gauge.
-ELSEWHERE = {
-    "copilot": ("GitHub Copilot",
-                ["It does keep usage locally, in the session store at",
-                 "~/.copilot/session-store.db. The assistant_usage_events",
-                 "table carries per-turn input, output, cache and reasoning",
-                 "tokens, AI credits as total_nano_aiu, and - uniquely among",
-                 "these agents - duration_ms, time_to_first_token_ms and",
-                 "inter_token_latency_ms.",
-                 "",
-                 "It is empty on this machine, so there is nothing to draw.",
-                 "The moment the CLI is used here, this tab has real numbers",
-                 "and better ones than anywhere else."]),
+ELSEWHERE = {}
 
 
-}
+def copilot_token():
+    """The CLI keeps its OAuth token in ~/.copilot/config.json.
+
+    That file is JSON with `//` comments on top, which json.load refuses, so
+    the comments come off first. Keyed by host and login, because one machine
+    can be signed in to github.com and an Enterprise host at once.
+    """
+    try:
+        with open(COPILOT_CONFIG) as f:
+            raw = re.sub(r"^\s*//.*$", "", f.read(), flags=re.M)
+        toks = (json.loads(raw) or {}).get("copilotTokens") or {}
+    except (OSError, ValueError):
+        return None
+    for host, tok in toks.items():
+        if tok:
+            return tok
+    return None
+
+
+def copilot_live():
+    """Entitlement and quota, from the endpoint the Copilot CLI itself uses.
+
+    This is where Copilot's remaining quota actually lives. The session store
+    records what was spent per turn and is empty on plenty of machines; this
+    is the account's standing, and it answers the only question a limit pane
+    is really asked.
+    """
+    tok = copilot_token()
+    if not tok:
+        return None
+    req = urllib.request.Request(COPILOT_USER_API, headers={
+        "Authorization": "token " + tok, "User-Agent": "terminal-toys",
+        "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def read_copilot():
+    """Live quota, plus whatever the local session store has recorded.
+
+    The two halves are independent: the quota is the account's and arrives
+    over the network, while the per-turn detail is this machine's and is
+    frequently empty. Either can be present without the other.
+    """
+    out = {"ok": True, "live": cached("copilot", copilot_live),
+           "sessions": 0, "events": 0, "usage": None}
+    if not os.path.exists(COPILOT_DB):
+        out["why"] = "no session store"
+        return out
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % COPILOT_DB, uri=True)
+        out["sessions"] = con.execute(
+            "select count(*) from sessions").fetchone()[0]
+        row = con.execute(
+            "select count(*), sum(input_tokens), sum(output_tokens),"
+            " sum(cache_read_tokens), sum(reasoning_tokens),"
+            " sum(total_nano_aiu), avg(time_to_first_token_ms),"
+            " avg(inter_token_latency_ms), sum(duration_ms)"
+            " from assistant_usage_events").fetchone()
+        out["events"] = row[0] or 0
+        if out["events"]:
+            out["usage"] = {
+                "input": row[1] or 0, "output": row[2] or 0,
+                "cache": row[3] or 0, "reasoning": row[4] or 0,
+                "nano_aiu": row[5] or 0, "ttft": row[6] or 0,
+                "itl": row[7] or 0, "ms": row[8] or 0,
+            }
+            out["models"] = con.execute(
+                "select model, count(*), sum(output_tokens)"
+                " from assistant_usage_events group by model"
+                " order by 3 desc limit 6").fetchall()
+        con.close()
+    except sqlite3.Error as e:
+        out["why"] = str(e)[:40]
+    return out
+
+
+def copilot_tab(state, w, h):
+    live = state.get("live") or {}
+    rows = []
+    snaps = live.get("quota_snapshots") or {}
+    if snaps:
+        plan = live.get("copilot_plan") or ""
+        # A monthly quota reset arrives as a bare date; days remaining is the
+        # form every other tab here uses, and the one anyone reads.
+        reset, when = live.get("quota_reset_date") or "", ""
+        stamp = iso_epoch(reset + "T00:00:00") if reset else None
+        if stamp:
+            days = int((stamp - time.time()) // 86400)
+            when = "resets in %dd" % days if days > 0 else "resets today"
+        rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
+                         (DIM, " · account-wide   "), (DIM, plan),
+                         (DIM, "  " + when)], w - 1))
+        label_w = max(9, max(len(k) for k in snaps))
+        for key in sorted(snaps, key=lambda k: (snaps[k].get("unlimited"), k)):
+            q = snaps[key] or {}
+            name = pad(key.replace("_", " "), label_w)
+            if q.get("unlimited"):
+                # No denominator, so no bar. An unlimited pool drawn as an
+                # empty gauge invents a limit that was explicitly denied.
+                rows.append(seg([(DIM, " " + name + " "),
+                                 (OK, "unlimited")], w - 1))
+                continue
+            ent = q.get("entitlement") or 0
+            used_n = q.get("credits_used")
+            # percent_remaining is what the API gives; every other tab here
+            # shows what is spent, and red belongs at the empty end.
+            pct = 100.0 - float(q.get("percent_remaining") or 0)
+            used = max(0.0, min(1.0, pct / 100.0))
+            bar = meter(used, max(8, w - 30 - label_w))
+            filled = bar.count("█")
+            rows.append(seg([(DIM, " " + name + " "),
+                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                             (heat(used), " %3.0f%%" % pct)], w - 1))
+            if ent:
+                rows.append(seg([(DIM, " " + " " * label_w + "  "),
+                                 (TXT, "{:,}".format(int(used_n or 0))),
+                                 (DIM, " of "), (TXT, "{:,}".format(int(ent))),
+                                 (DIM, " · "),
+                                 (TXT, "{:,}".format(int(q.get("remaining")
+                                                         or 0))),
+                                 (DIM, " left"),
+                                 (WARN, "   %d over" % q["overage_count"]
+                                  if q.get("overage_count") else "")], w - 1))
+        rows.append("")
+    elif state.get("live") is None:
+        rows.append(seg([(WARN, "  no quota: could not read the CLI's token"
+                                " from ~/.copilot/config.json")], w - 1))
+        rows.append("")
+
+    use = state.get("usage")
+    if use:
+        rows.append(seg([(LBL, " ── SPENT ── "),
+                         (DIM, "%d turns across %d sessions"
+                          % (state["events"], state["sessions"]))], w - 1))
+        cells = [("input tokens", big_num(use["input"]), TXT),
+                 ("output tokens", big_num(use["output"]), AGENT),
+                 ("cache read", big_num(use["cache"]), DIM),
+                 ("reasoning tokens", big_num(use["reasoning"]), TXT),
+                 # total_nano_aiu is billionths of an AI unit
+                 ("AI units", "%.3f" % (use["nano_aiu"] / 1e9), TXT),
+                 ("time generating", span_ms(use["ms"]), DIM)]
+        label_w = max(len(c[0]) for c in cells)
+        ncols = 2 if (w - 2) // 2 - label_w - 3 >= 8 else 1
+        cw = (w - 2) // ncols
+        val_w = max(5, cw - label_w - 3)
+        for i in range(0, len(cells), ncols):
+            line = [(RST, " ")]
+            for lab, value, colour in cells[i:i + ncols]:
+                line += [(DIM, " " + pad(lab, label_w) + " "),
+                         (colour, pad(value, val_w))]
+            rows.append(seg(line, w - 1))
+        rows.append("")
+        # The one agent that measures this rather than leaving it to be
+        # inferred from timestamps, which is why it is stated flatly.
+        rows.append(seg([(LBL, " ── LATENCY ── "),
+                         (DIM, "measured by Copilot, not inferred")], w - 1))
+        rows.append(seg([(DIM, "  first token "),
+                         (TXT, "%.0f ms" % use["ttft"]),
+                         (DIM, "   between tokens "),
+                         (TXT, "%.1f ms" % use["itl"])], w - 1))
+        rows.append("")
+        for model, n, out_tok in (state.get("models") or []):
+            rows.append(seg([(TXT, "  " + pad(str(model or "?"), 28)),
+                             (DIM, "%5d turns  " % n),
+                             (AGENT, big_num(out_tok))], w - 1))
+    else:
+        rows.append(seg([(LBL, " ── SPENT ── "), (DIM, "nothing recorded")],
+                        w - 1))
+        rows.append("")
+        for line in (
+                "The session store has the richest schema of any agent here:",
+                "assistant_usage_events records per-turn input, output, cache",
+                "and reasoning tokens, credits as total_nano_aiu, and - alone",
+                "among these agents - duration, time to first token and",
+                "inter-token latency.",
+                "",
+                "It has %d sessions and no turns on this machine, so there is"
+                % state.get("sessions", 0),
+                "nothing to total. The quota above is the account's and is",
+                "real; this half fills in the moment a turn is recorded here."):
+            rows.append(seg([(DIM if line else RST, "  " + line)], w - 1))
+    return rows
 
 
 class Store(object):
@@ -959,6 +1135,7 @@ class Store(object):
         self.cursor = {}
         self.codex = {}
         self.grok = {}
+        self.copilot = {}
         self.installed = {}
         self.error = None
         self.fetched = 0
@@ -967,8 +1144,8 @@ class Store(object):
     def snapshot(self):
         with self.lock:
             return (dict(self.claude), dict(self.cursor), dict(self.codex),
-                    dict(self.grok), dict(self.installed), self.fetched,
-                    self.error)
+                    dict(self.grok), dict(self.copilot),
+                    dict(self.installed), self.fetched, self.error)
 
     def run(self):
         # A daemon thread that raises just stops, and a dead poller looks
@@ -984,11 +1161,11 @@ class Store(object):
     def poll(self):
         while True:
             claude, cursor, codex = read_claude(), read_cursor(), read_codex()
-            grok = read_grok()
+            grok, copilot = read_grok(), read_copilot()
             found = detect_agents()
             with self.lock:
                 self.claude, self.cursor, self.codex = claude, cursor, codex
-                self.grok = grok
+                self.grok, self.copilot = grok, copilot
                 self.installed = found
                 self.fetched = time.time()
             self.wake.wait(REFRESH)
@@ -1009,7 +1186,7 @@ AGENTS = {
     "grok": {"label": "Grok", "bins": ("grok",),
              "paths": (os.path.expanduser("~/.grok"),)},
     "copilot": {"label": "GitHub Copilot", "bins": ("copilot",),
-                "paths": (COPILOT_DB,)},
+                "paths": (COPILOT_DB, COPILOT_CONFIG)},
 }
 ORDER = ("claude", "codex", "cursor", "grok", "copilot")
 
@@ -1409,7 +1586,10 @@ def cursor_tab(state, w, h):
 
 
 def elsewhere_tab(name, installed, w, h):
-    label, lines = ELSEWHERE[name]
+    # Every agent in AGENTS now has a reader, so this is a backstop for one
+    # added without one - it says so rather than raising in the draw loop.
+    label, lines = ELSEWHERE.get(
+        name, (name, ["No reader for this agent yet."]))
     have = (installed.get(name) or {}).get("present")
     rows = [seg([(LBL, " ── %s ── " % label.upper()),
                  (OK if have else DIM,
@@ -1468,7 +1648,8 @@ def main():
                 store.wake.set()
 
         w, h = size()
-        claude, cursor, codex, grok, installed, fetched, err = store.snapshot()
+        (claude, cursor, codex, grok, copilot,
+         installed, fetched, err) = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
         tabs = visible_agents(installed)
         active %= len(tabs)          # wraps in both directions
@@ -1499,6 +1680,8 @@ def main():
             body = codex_tab(codex, w, h)
         elif name == "grok":
             body = grok_tab(grok, w, h)
+        elif name == "copilot":
+            body = copilot_tab(copilot, w, h)
         else:
             body = elsewhere_tab(name, installed, w, h)
 
