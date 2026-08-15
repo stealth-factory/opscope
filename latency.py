@@ -198,7 +198,19 @@ def log_event(color, host, kind, detail):
 
 
 def reader(t):
-    """Run ping forever, feeding samples into the target."""
+    """Run ping forever, feeding samples into the target.
+
+    Wrapped, because this runs in a daemon thread: if it raises, the thread
+    vanishes and the host simply stops updating, which reads as a quiet link
+    rather than as a broken widget.
+    """
+    try:
+        _reader(t)
+    except Exception as e:
+        t.dead = "reader stopped: %s: %s" % (type(e).__name__, str(e)[:50])
+
+
+def _reader(t):
     down_since = None
     while True:
         try:

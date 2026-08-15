@@ -200,6 +200,17 @@ class Store(object):
         return out
 
     def run(self):
+        # A daemon thread that raises just stops, and a dead poller looks
+        # exactly like a source with no data - which is how deployments.py
+        # showed "0 deploys" for a day after an import went missing.
+        try:
+            self.poll()
+        except Exception as e:
+            with self.lock:
+                self.error = "poller stopped: %s: %s" % (type(e).__name__,
+                                                         str(e)[:70])
+
+    def poll(self):
         hz = os.sysconf("SC_CLK_TCK")
         while True:
             res = herdr("workspace", "list")

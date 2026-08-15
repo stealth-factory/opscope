@@ -34,8 +34,27 @@ than faked. `matrix.py` is the sole exception and computes nothing on purpose.
   a counter resets, and never present a partial result as a total.
 - Every widget has a doc in `docs/` and a row in the README table.
 
+## Before you commit
+
+Run `python3 check.py`. It checks the things `compile()` cannot, and every
+check in it exists because something shipped broken and looked, on screen,
+exactly like "there is no data":
+
+- **unbound names** — a missing import only raises when the line runs, and in a
+  poll thread that means silence;
+- **unguarded pollers** — a daemon thread that raises simply stops;
+- **dead config keys** — a key in the example no widget reads;
+- **missing docs / README rows**, and **footer keys absent from the doc**.
+
 ## Gotchas paid for already
 
+- **A background thread that dies is invisible.** Wrap every poller so it
+  records why it stopped; otherwise the pane shows no data and no error, which
+  is indistinguishable from a source that has none. `deployments.py` sat like
+  that for a day.
+- **Never let a bare `except` swallow a programming error.** `discover_teams`
+  turned a `TypeError` from passing the wrong type into "no teams found", and
+  the board quietly showed 3 projects instead of 21.
 - **Restart the pane after editing.** A running widget keeps the old code;
   compare process start time against file mtime before believing a fix works.
 - **Verify syntax with `compile()`, not `ast.parse()`.** Errors like `global X`

@@ -685,15 +685,28 @@ class Store(object):
         self.codex = {}
         self.grok = {}
         self.installed = {}
+        self.error = None
         self.fetched = 0
         self.wake = threading.Event()
 
     def snapshot(self):
         with self.lock:
             return (dict(self.claude), dict(self.cursor), dict(self.codex),
-                    dict(self.grok), dict(self.installed), self.fetched)
+                    dict(self.grok), dict(self.installed), self.fetched,
+                    self.error)
 
     def run(self):
+        # A daemon thread that raises just stops, and a dead poller looks
+        # exactly like a source with no data - which is how deployments.py
+        # showed "0 deploys" for a day after an import went missing.
+        try:
+            self.poll()
+        except Exception as e:
+            with self.lock:
+                self.error = "poller stopped: %s: %s" % (type(e).__name__,
+                                                         str(e)[:70])
+
+    def poll(self):
         while True:
             claude, cursor, codex = read_claude(), read_cursor(), read_codex()
             grok = read_grok()
@@ -1110,10 +1123,12 @@ def main():
                 store.wake.set()
 
         w, h = size()
-        claude, cursor, codex, grok, installed, fetched = store.snapshot()
+        claude, cursor, codex, grok, installed, fetched, err = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
         rows.append(seg([(DIM, " local state only · read %s ago" % ago(fetched)),
                          (DIM, "   · = installed")], w - 1))
+        if err:
+            rows.append(seg([(BAD, " ! " + err)], w - 1))
         rows.append(tab_bar(TABS[active], installed, w))
         rows.append("")
 
