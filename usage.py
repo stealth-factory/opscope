@@ -32,6 +32,7 @@ Keys: left/right or tab switch agent, r refreshes now, q quits.
 import datetime
 import json
 import os
+import glob
 import shutil
 import sqlite3
 import sys
@@ -39,7 +40,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help,
+from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, mix,
                     meter, pack_hints, pad, rgb, seg, setup, size, stacked_bar,
                     title, vbars)
 
@@ -59,7 +60,22 @@ LBL = rgb(130, 165, 200)
 ACCENT = rgb(150, 210, 255)
 AGENT = rgb(180, 160, 255)
 
+# One hue, four steps, the way /stats and the contribution calendar do it.
+# heat() runs green to amber to red, which reads as a change of *kind* rather
+# than of amount - wrong for "more of the same thing".
+HEAT_STEPS = ((74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84))
+EMPTY_CELL = rgb(58, 66, 80)
+
+
+def shade(frac):
+    """Which of the four steps a day falls in."""
+    return rgb(*HEAT_STEPS[min(3, max(0, int(frac * 3.999)))])
+
+
 CLAUDE_STATS = os.path.expanduser("~/.claude/stats-cache.json")
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
+COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
+TAIL = 256 * 1024        # enough to reach the last token_count in a rollout
 CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
 
 
@@ -127,24 +143,153 @@ def read_cursor():
             "human_lines": commits[2] or 0, "last": recent}
 
 
+def tail_lines(path, size=TAIL):
+    """The last `size` bytes as lines, for files that run to tens of MB.
+
+    A rollout carries its running total on every token_count event, so the
+    newest one is all that is needed - reading 30MB per refresh to learn a
+    number that is repeated at the end would be daft.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            end = f.tell()
+            f.seek(max(0, end - size))
+            return f.read().decode("utf-8", "ignore").split("\n")
+    except OSError:
+        return []
+
+
+def read_codex():
+    """Codex rollouts carry token_count events with running and per-turn use.
+
+    ~/.codex/logs is diagnostics and has no counters, which is where an
+    earlier look stopped. The sessions directory is the one that counts.
+    """
+    files = sorted(glob.glob(CODEX_SESSIONS, recursive=True),
+                   key=os.path.getmtime)
+    if not files:
+        return {"ok": False, "why": "no session rollouts"}
+    total = {"input_tokens": 0, "output_tokens": 0,
+             "reasoning_output_tokens": 0, "total_tokens": 0,
+             "cached_input_tokens": 0}
+    counted = 0
+    for path in files:
+        last = None
+        for line in tail_lines(path):
+            if '"token_count"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            u = ((d.get("payload") or {}).get("info") or {}).get(
+                "total_token_usage")
+            if u:
+                last = u
+        if last:
+            counted += 1
+            for k in total:
+                total[k] += last.get(k, 0)
+
+    # per-turn rate, from the newest rollout only
+    rates, prev = [], None
+    for line in tail_lines(files[-1], 4 * 1024 * 1024):
+        if '"token_count"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        u = ((d.get("payload") or {}).get("info") or {}).get(
+            "last_token_usage") or {}
+        out, ts = u.get("output_tokens") or 0, d.get("timestamp")
+        if ts and prev and out:
+            try:
+                a = datetime.datetime.fromisoformat(prev.replace("Z", "+00:00"))
+                b = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                prev = ts
+                continue
+            gap = (b - a).total_seconds()
+            if 0.5 < gap < 300:
+                rates.append(out / gap)
+        prev = ts or prev
+    rates.sort()
+    return {"ok": True, "sessions": counted, "files": len(files),
+            "total": total, "rates": rates,
+            "last": os.path.getmtime(files[-1])}
+
+
+def codex_tab(state, w, h):
+    if not state.get("ok"):
+        return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
+    t = state["total"]
+    rows = [seg([(LBL, " ── TOTALS ── "),
+                 (DIM, "%d sessions · newest %s ago"
+                  % (state["sessions"], ago(state["last"])))], w - 1)]
+    cells = [("input tokens", big_num(t["input_tokens"]), TXT),
+             ("output tokens", big_num(t["output_tokens"]), AGENT),
+             ("reasoning tokens", big_num(t["reasoning_output_tokens"]), TXT),
+             ("cached input", big_num(t["cached_input_tokens"]), DIM),
+             ("all tokens", big_num(t["total_tokens"]), TXT),
+             ("rollout files", "%d" % state["files"], DIM)]
+    label_w = max(len(c[0]) for c in cells)
+    ncols = 2 if (w - 2) // 2 - label_w - 3 >= 8 else 1
+    cw = (w - 2) // ncols
+    val_w = max(5, cw - label_w - 3)
+    for i in range(0, len(cells), ncols):
+        line = [(RST, " ")]
+        for label, value, colour in cells[i:i + ncols]:
+            line += [(DIM, " " + pad(label, label_w) + " "),
+                     (colour, pad(value, val_w))]
+        rows.append(seg(line, w - 1))
+
+    rates = state["rates"]
+    rows.append("")
+    if rates:
+        med = rates[len(rates) // 2]
+        p90 = rates[min(len(rates) - 1, int(len(rates) * 0.9))]
+        rows.append(seg([(LBL, " ── OUTPUT RATE ── "),
+                         (DIM, "newest session, %d turns" % len(rates))], w - 1))
+        rows.append(seg([(DIM, "  median "), (AGENT, "%.0f" % med),
+                         (DIM, " tok/s   p90 "), (TXT, "%.0f" % p90),
+                         (DIM, "   max "), (TXT, "%.0f" % rates[-1])], w - 1))
+        hi = rates[-1] or 1
+        buckets = [0] * max(10, min(len(rates), w - 6))
+        for r in rates:
+            buckets[min(len(buckets) - 1,
+                        int(r / hi * (len(buckets) - 1)))] += 1
+        top = max(buckets) or 1
+        for line in vbars([(b, AGENT) for b in buckets], 3):
+            rows.append(seg([(RST, " ")] + line, w - 1))
+        rows.append(seg([(RST, " "), (GRID, "─" * len(buckets))], w - 1))
+        rows.append(seg([(DIM, " 0 tok/s"),
+                         (DIM, " " * max(1, len(buckets) - 18)),
+                         (DIM, "%.0f tok/s" % rates[-1])], w - 1))
+    rows.append("")
+    rows.append(seg([(DIM, "  Rate is wall-clock between turn boundaries, so"
+                           " it includes")], w - 1))
+    rows.append(seg([(DIM, "  tool calls and thinking - not raw decode"
+                           " speed.")], w - 1))
+    return rows
+
+
 # Agents whose usage exists but is not readable from outside their session.
 # Naming where the number actually lives beats showing an empty gauge.
 ELSEWHERE = {
     "copilot": ("GitHub Copilot",
-                ["AI credits are shown live in the session footer, and by",
-                 "/usage and /statusline with the `quota` option.",
+                ["It does keep usage locally, in the session store at",
+                 "~/.copilot/session-store.db. The assistant_usage_events",
+                 "table carries per-turn input, output, cache and reasoning",
+                 "tokens, AI credits as total_nano_aiu, and - uniquely among",
+                 "these agents - duration_ms, time_to_first_token_ms and",
+                 "inter_token_latency_ms.",
                  "",
-                 "Not reachable from here: there is no CLI subcommand for it,",
-                 "and the REST endpoints for a personal plan return 404.",
-                 "Organisation-level Copilot metrics do have an API - that",
-                 "would be a different widget, about a team rather than you."]),
-    "codex": ("OpenAI Codex",
-              ["~/.codex holds sessions, history and a logs database, but the",
-               "logs are diagnostics - level, target, module - with no usage",
-               "counters in them.",
-               "",
-               "Rate limits are reported inside the running CLI. Nothing on",
-               "disk records what is left."]),
+                 "It is empty on this machine, so there is nothing to draw.",
+                 "The moment the CLI is used here, this tab has real numbers",
+                 "and better ones than anywhere else."]),
+
     "grok": ("Grok",
              ["~/.grok keeps sessions and config. `grok du` reports disk use,",
               "not quota - the name is a coincidence worth not falling for.",
@@ -158,30 +303,31 @@ class Store(object):
         self.lock = threading.Lock()
         self.claude = {}
         self.cursor = {}
+        self.codex = {}
         self.installed = {}
         self.fetched = 0
         self.wake = threading.Event()
 
     def snapshot(self):
         with self.lock:
-            return (dict(self.claude), dict(self.cursor),
+            return (dict(self.claude), dict(self.cursor), dict(self.codex),
                     dict(self.installed), self.fetched)
 
     def run(self):
         while True:
-            claude, cursor = read_claude(), read_cursor()
+            claude, cursor, codex = read_claude(), read_cursor(), read_codex()
             found = {}
             for name in ("claude", "codex", "copilot", "cursor-agent", "grok"):
                 found[name] = bool(shutil.which(name))
             with self.lock:
-                self.claude, self.cursor = claude, cursor
+                self.claude, self.cursor, self.codex = claude, cursor, codex
                 self.installed = found
                 self.fetched = time.time()
             self.wake.wait(REFRESH)
             self.wake.clear()
 
 
-TABS = ("claude", "cursor", "copilot", "codex", "grok")
+TABS = ("claude", "codex", "cursor", "grok", "copilot")
 
 
 def tab_bar(active, installed, w):
@@ -200,17 +346,21 @@ def tab_bar(active, installed, w):
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-def token_heatmap(daily, w):
-    """Tokens per day, laid out like the contribution calendar in github.py:
-    weekdays down the side, weeks across.
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-    That pane spans a year, so its cells are one character wide and its columns
-    go unlabelled - there is no room for fifty-two dates. Four weeks of
-    retained history can afford wider cells and a date over each column, which
-    is the only difference. Intensity is in the shading glyph as well as the
-    colour, so the shape survives a screenshot or a `pane read`.
+
+def token_heatmap(daily, w):
+    """Tokens per day, drawn the way Claude Code's own /stats draws it.
+
+    Weekday rows with only Mon, Wed and Fri labelled; one cell per day; months
+    named across the top; solid blocks in four steps of a single hue, and a dim
+    dot for a day the file has no entry for.
+
+    The grid spans the whole window even where there is no data, because the
+    emptiness is information: this cache retains about four weeks, and a year
+    of dots with a fortnight of colour at the right-hand end says that plainly.
     """
-    levels = " ░▒▓█"
     totals = {}
     for entry in daily:
         try:
@@ -219,34 +369,57 @@ def token_heatmap(daily, w):
             continue
         totals[day] = sum((entry.get("tokensByModel") or {}).values())
     if not totals:
-        return [], 0, None
+        return [], 0, None, {}
     peak = max(totals.values()) or 1
     best = max(totals, key=totals.get)
-    first = min(totals) - datetime.timedelta(days=min(totals).weekday())
-    weeks = []
-    week = first
-    while week <= max(totals):
-        weeks.append(week)
-        week += datetime.timedelta(days=7)
-    # as many weeks as fit, newest kept
-    cell = 6 if w >= 6 * len(weeks) + 10 else 4
-    weeks = weeks[-max(1, (w - 8) // cell):]
 
-    rows = [[(DIM, "      ")] + [(DIM, pad(x.strftime("%m-%d"), cell))
-                                 for x in weeks]]
-    for i, name in enumerate(WEEKDAYS):
-        line = [(DIM, " %-5s" % name)]
-        for week in weeks:
-            day = week + datetime.timedelta(days=i)
+    last = max(totals)
+    weeks_fit = max(4, w - 7)
+    end_week = last - datetime.timedelta(days=last.weekday())
+    starts = [end_week - datetime.timedelta(days=7 * i)
+              for i in range(weeks_fit - 1, -1, -1)]
+
+    # month names sit over the week their month starts in, three characters
+    # wide like /stats - a single initial is not a label, it is a hint
+    strip = [" "] * len(starts)
+    seen = None
+    for x, wk in enumerate(starts):
+        if wk.month != seen and x + 3 <= len(strip):
+            seen = wk.month
+            for k, ch in enumerate(MONTHS[wk.month - 1]):
+                strip[x + k] = ch
+    rows = [[(DIM, "     " + "".join(strip))]]
+    for i in range(7):
+        label = {0: "Mon", 2: "Wed", 4: "Fri"}.get(i, "")
+        line = [(DIM, " %-4s" % label)]
+        for wk in starts:
+            day = wk + datetime.timedelta(days=i)
             n = totals.get(day)
             if n is None:
-                line.append((GRID, pad("  ·", cell)))
-                continue
-            frac = n / float(peak)
-            lvl = 0 if not n else min(4, 1 + int(frac * 3.99))
-            line.append((heat(frac), pad("  " + levels[lvl] * 2, cell)))
+                line.append((EMPTY_CELL, "·"))
+            else:
+                line.append((shade((n / float(peak)) ** 0.5), "█"))
         rows.append(line)
-    return rows, peak, best
+
+    # active out of days in the range, not out of days the file happens to
+    # list - otherwise every day is active by construction and the ratio says
+    # nothing
+    span = (max(totals) - min(totals)).days + 1
+    active = sum(1 for v in totals.values() if v)
+    run = best_run = 0
+    for i in range(span):
+        day = min(totals) + datetime.timedelta(days=i)
+        run = run + 1 if totals.get(day) else 0
+        best_run = max(best_run, run)
+    current = 0
+    for i in range(span):
+        day = max(totals) - datetime.timedelta(days=i)
+        if not totals.get(day):
+            break
+        current += 1
+    facts = {"active": active, "span": span,
+             "longest": best_run, "current": current}
+    return rows, peak, best, facts
 
 
 def claude_tab(state, w, h):
@@ -322,18 +495,26 @@ def claude_tab(state, w, h):
                          (DIM, right)], w - 1))
 
     # ── tokens per day, as a calendar ───────────────────────────────────
-    grid, peak, best = token_heatmap(d.get("dailyModelTokens") or [], w)
+    grid, peak, best, facts = token_heatmap(d.get("dailyModelTokens") or [], w)
     if grid and h > 26:
         rows.append("")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
-                         (DIM, " on %s" % (best.strftime("%m-%d") if best
+                         (DIM, " on %s" % (best.strftime("%b %-d") if best
                                            else "--"))], w - 1))
         for line in grid:
             rows.append(seg(line, w - 1))
-        rows.append(seg([(DIM, "  less "), (heat(0.05), "░░"),
-                         (heat(0.35), "▒▒"), (heat(0.65), "▓▓"),
-                         (heat(1.0), "██"), (DIM, " more")], w - 1))
+        rows.append(seg([(DIM, "  Less ")]
+                        + [(rgb(*c), "█") for c in HEAT_STEPS]
+                        + [(DIM, " More")], w - 1))
+        rows.append(seg([(DIM, "  active days "),
+                         (TXT, "%d" % facts["active"]),
+                         (DIM, "/%d" % facts["span"]),
+                         (DIM, "   longest streak "),
+                         (TXT, "%d" % facts["longest"]),
+                         (DIM, "   current "),
+                         (OK if facts["current"] else DIM,
+                          "%d" % facts["current"])], w - 1))
 
     rows.append("")
     rows.append(seg([(DIM, "  This file records what was spent. It carries no"
@@ -438,7 +619,7 @@ def main():
                 store.wake.set()
 
         w, h = size()
-        claude, cursor, installed, fetched = store.snapshot()
+        claude, cursor, codex, installed, fetched = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
         rows.append(seg([(DIM, " local state only · read %s ago" % ago(fetched)),
                          (DIM, "   · = installed")], w - 1))
@@ -450,6 +631,8 @@ def main():
             rows += claude_tab(claude, w, h)
         elif name == "cursor":
             rows += cursor_tab(cursor, w, h)
+        elif name == "codex":
+            rows += codex_tab(codex, w, h)
         else:
             rows += elsewhere_tab(name, installed, w, h)
 

@@ -6,7 +6,7 @@ per agent, read entirely from local state. No network, no credentials.
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  local state only · read 16s ago   · = installed
- [CLAUDE]· CURSOR · COPILOT · CODEX · GROK ·
+ [CLAUDE]· CODEX · CURSOR · GROK · COPILOT ·
 
  ── TOTALS ── since 2026-07-16 · cache written 1d ago
   sessions      24           messages      44,417
@@ -74,17 +74,53 @@ edits the agent made, across how many conversations, and how many lines in
 scored commits came from the agent versus by hand. That is a different question
 from cost, and the tab says so rather than letting it pass as usage.
 
-**Copilot, Codex, Grok** — nothing readable. Each tab names where the number
-really lives instead:
+**Codex** — real, and it took a second look to find. `~/.codex/logs_2.sqlite`
+is diagnostics with no counters, which is where the first search stopped. The
+answer is in `~/.codex/sessions/**/*.jsonl`: every rollout carries
+`event_msg / token_count` events with both a running total and the last turn's
+usage, timestamped.
 
-- Copilot shows AI credits in its session footer and via `/usage`; there is no
-  CLI subcommand, and the REST endpoints for a personal plan return 404.
-  Organisation-level Copilot metrics *do* have an API, but that is a widget
-  about a team rather than about you.
-- Codex keeps sessions, history and a logs database, but the logs are
-  diagnostics — level, target, module — with no usage counters.
-- Grok keeps sessions and config. `grok du` reports **disk** use, not quota;
-  the name is a coincidence worth not falling for.
+That gives totals *and* an **output rate** — output tokens divided by the
+wall-clock gap between turn boundaries. On this machine: 659.9M input, 1.3M
+output across 28 sessions, and a median of 30 tok/s in the newest one.
+
+The running total is repeated on every event, so only the tail of each rollout
+is read — some are 30MB and re-reading them every refresh to learn a number
+printed at the end would be daft.
+
+**Copilot** — it *does* keep usage locally, in `~/.copilot/session-store.db`.
+The `assistant_usage_events` table carries per-turn input, output, cache and
+reasoning tokens, AI credits as `total_nano_aiu`, a `request_multiplier`, and —
+uniquely among these agents — `duration_ms`, `time_to_first_token_ms` and
+`inter_token_latency_ms`. It is the best-shaped usage data of the lot.
+
+It is simply **empty** on this machine, so the tab says so rather than drawing
+an empty chart. The moment the CLI is used here it has real numbers, and better
+ones than anywhere else.
+
+**Grok** — nothing found. `grok du` reports **disk** use, not quota; the name
+is a coincidence worth not falling for.
+
+## On tokens per second
+
+Two agents can answer it, and they answer different questions.
+
+**Codex** is computed here: output tokens over the wall-clock gap between turn
+boundaries. That includes tool calls and thinking, so it is a *throughput*
+figure and not raw decode speed — the pane says so under the chart rather than
+letting the number imply more precision than it has.
+
+**Copilot** would be exact, once there is data: `inter_token_latency_ms` and
+`time_to_first_token_ms` are recorded per turn, so no inference is needed.
+
+**Claude Code** carries per-message `usage` and timestamps in its transcripts,
+so a rate is derivable — but naively differencing consecutive records gives
+nonsense: a quick pass produced a maximum of 21,183 tokens/second, because two
+assistant records can be milliseconds apart while one of them reports a whole
+turn's output. Doing it properly means reconstructing turn boundaries, and
+until that is done the Claude tab shows no rate rather than a wrong one.
+
+**Cursor and Grok** record no tokens at all, so there is nothing to divide.
 
 ## The thing this widget does not do
 
