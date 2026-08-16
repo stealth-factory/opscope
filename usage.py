@@ -48,8 +48,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help, mix,
-                    meter, pack_hints, pad, rgb, seg, setup, size, stacked_bar,
-                    title, vbars)
+                    meter, pack_hints, pad, rgb, seg, setup, size, spread,
+                    stacked_bar, title, vbars)
 
 _CFG = load_config("usage", {
     # Empty discovers whatever this machine has, which is the default and
@@ -2732,10 +2732,9 @@ def claude_tab(state, w, h):
                          (DIM, "%dd · peak %s" % (len(daily), f"{peak:,}"))],
                         w - 1))
         avail = max(10, w - 3)
-        slot = max(1, avail // len(counts))
         cols = []
-        for c in counts:
-            cols.extend([(c, AGENT)] * slot)
+        for c, wide in zip(counts, spread(len(counts), avail)):
+            cols.extend([(c, AGENT)] * wide)
         for line in vbars(cols, 3):
             rows.append(seg([(RST, " ")] + line, w - 1))
         rows.append(seg([(RST, " "), (GRID, "─" * len(cols))], w - 1))
@@ -2907,10 +2906,9 @@ def cursor_daily_rows(events, w):
                                       % (by_day.get(today, 0.0) / 100.0))],
                 w - 1)]
     avail = max(10, w - 3)
-    slot = max(1, avail // len(cents))
     cols = []
-    for c in cents:
-        cols.extend([(c, AGENT)] * slot)
+    for c, wide in zip(cents, spread(len(cents), avail)):
+        cols.extend([(c, AGENT)] * wide)
     for line in vbars(cols, 3, hi=peak):
         rows.append(seg([(RST, " ")] + line, w - 1))
     rows.append(seg([(RST, " "), (GRID, "─" * len(cols))], w - 1))

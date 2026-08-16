@@ -264,6 +264,25 @@ def meter(frac, n, on="█", off="░"):
     return on * k + off * (n - k)
 
 
+def spread(count, room):
+    """Cell widths for `count` bars that fill `room` columns exactly.
+
+    The remainder goes to the leftmost bars rather than being dropped on the
+    floor by integer division: stopping short of the right edge leaves no way
+    to tell a finished chart from a truncated one. Twenty-eight days across
+    fifty-nine columns is two cells each and three columns wasted, which
+    reads as a chart that gave up.
+    """
+    if count <= 0:
+        return []
+    if count >= room:
+        # One cell each and the caller decides what to drop: silently
+        # returning fewer widths than bars would lose data without saying so.
+        return [1] * count
+    slot, extra = divmod(room, count)
+    return [slot + (1 if i < extra else 0) for i in range(count)]
+
+
 def vbars(columns, height, hi=None):
     """Vertical bar chart. `columns` is [(value, colour), ...].
 
