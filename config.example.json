@@ -93,5 +93,17 @@
     "ports": [],
     "refresh": 2,
     "history": 120
+  },
+  "ports": {
+    "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` - parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+    "system_ports": [
+      22,
+      53,
+      123,
+      323,
+      631,
+      5353
+    ],
+    "refresh": 4
   }
 }
