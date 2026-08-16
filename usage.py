@@ -2645,11 +2645,13 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS, weeks=None):
     return rows, peak, best, facts
 
 
-def stats_lag(data, w):
+def stats_lag(data, room):
     """How far behind today the stats cache's own reckoning is.
 
-    The date it stopped at is the useful half but the first thing to go when
-    the pane is narrow; the number of days is what must survive.
+    `room` is the columns actually left on the line, measured by the caller
+    rather than guessed from the pane width - the text before this varies,
+    so a width threshold clipped at some widths and not others. The longest
+    phrasing that fits wins; the day count is the half that must survive.
     """
     last = (data or {}).get("lastComputedDate") or ""
     try:
@@ -2659,11 +2661,13 @@ def stats_lag(data, w):
     days = (datetime.date.today() - when).days
     if days <= 0:
         return ""
-    if w >= 72:
-        return "   cache is %dd behind, to %s" % (days, when.strftime("%b %-d"))
-    if w >= 56:
-        return "   cache %dd behind" % days
-    return "   -%dd" % days
+    for text in ("   cache is %dd behind, to %s"
+                 % (days, when.strftime("%b %-d")),
+                 "   cache %dd behind" % days,
+                 "  -%dd" % days):
+        if len(text) <= room:
+            return text
+    return ""
 
 
 def claude_metered(state, w):
@@ -2753,9 +2757,11 @@ def claude_tab(state, w, h):
         # Code recomputes on its own schedule - lastComputedDate can sit a
         # day or two back. Unlabelled, that gap reads as idle days rather
         # than as days the cache has not caught up with.
-        rows.append(seg([(LBL, " ── MESSAGES / DAY ── "),
-                         (DIM, "%dd · peak %s" % (len(daily), f"{peak:,}")),
-                         (WARN, stats_lag(d, w))], w - 1))
+        head, tail = " ── MESSAGES / DAY ── ", "%dd · peak %s" % (
+            len(daily), f"{peak:,}")
+        rows.append(seg([(LBL, head), (DIM, tail),
+                         (WARN, stats_lag(d, w - 1 - len(head) - len(tail)))],
+                        w - 1))
         avail = max(10, w - 3)
         cols = []
         for c, wide in zip(counts, spread(len(counts), avail)):
@@ -2786,11 +2792,15 @@ def claude_tab(state, w, h):
     # ── tokens per day, as a calendar ───────────────────────────────────
     if grid:
         rows.append("")
+        head = " ── TOKENS / DAY ── peak "
+        tail = "%s on %s" % (big_num(peak),
+                             best.strftime("%b %-d") if best else "--")
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
                          (DIM, " on %s" % (best.strftime("%b %-d") if best
                                            else "--")),
-                         (WARN, stats_lag(d, w))], w - 1))
+                         (WARN, stats_lag(d, w - 1 - len(head)
+                                          - len(tail)))], w - 1))
         for line in grid:
             rows.append(seg(line, w - 1))
         rows.append(seg([(DIM, "  Less ")]
