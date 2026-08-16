@@ -489,20 +489,17 @@ def ahead_of(value):
 def pct_colour(pct, ahead, hue):
     """What colour a quota's percentage is written in.
 
-    The agent's own colour by default, so the number matches the bar it sits
-    beside instead of being tinted by a gradient that made every figure
-    faintly warm. Red and amber are kept for the two ways a quota actually
-    goes wrong, which a gradient could not tell apart:
+    The agent's own colour, so the number matches the bar it sits beside
+    rather than being tinted by a gradient that made every figure faintly
+    warm and said nothing about time.
 
-      red   - nearly spent, whatever the pace. 92% gone is trouble even with
-              a fortnight left.
-      amber - behind the clock. 40% gone is fine unless the window is nearly
-              over, and the pace column is what knows that.
+    Red is the one exception, at 90% spent, because nearly empty is trouble
+    whatever the pace. Behind-the-clock deliberately does *not* colour this:
+    the pace cell beside it is already amber for exactly that, and a number
+    and its own explanation both turning yellow reads as two problems.
     """
     if pct >= 90:
         return BAD
-    if ahead is False:
-        return WARN
     return rgb(*hue) if hue else heat(pct / 100.0)
 
 
@@ -2611,6 +2608,7 @@ BAR_FLOOR = (30, 38, 52)
 # the cell a dark background makes the mark read the same on a full bar, an
 # empty track, or the boundary between them.
 PACE_MARK = bg(10, 12, 18) + rgb(238, 244, 252)
+NOBG = "\x1b[49m"            # default background again, and only that
 
 
 def blend(hue, t):
@@ -2665,9 +2663,9 @@ def paced_bar(used, elapsed, room, hue=None):
             # recognisably its agent's colour and still reads as a quantity
             # without counting cells.
             t = 0.51 + 0.49 * (i / float(max(1, filled - 1)))
-            parts.append((tint(hue, t) if hue else heat(used), ch))
+            parts.append((NOBG + (tint(hue, t) if hue else heat(used)), ch))
         else:
-            parts.append((tint(hue, 0.34) if hue else GRID, ch))
+            parts.append((NOBG + (tint(hue, 0.34) if hue else GRID), ch))
     # Runs of one colour are merged so a row is a handful of escapes rather
     # than one per cell.
     merged = []
@@ -2676,7 +2674,11 @@ def paced_bar(used, elapsed, room, hue=None):
             merged[-1] = (colour, merged[-1][1] + ch)
         else:
             merged.append((colour, ch))
-    return merged
+    # The mark is the one thing here that sets a background, so the run ends
+    # by putting it back. Without this the dark cell bled through everything
+    # drawn after it on the row - the rest of the bar, the percentage, the
+    # reset - which is exactly what a stray background looks like: broken.
+    return merged + [(NOBG, "")]
 
 
 def summary_tab(states, w, h):

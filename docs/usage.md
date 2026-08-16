@@ -891,15 +891,14 @@ at 4.99:1.
 being a gradient. The percentage is written in its agent's colour like the bar
 beside it, and turns:
 
-| | |
-|---|---|
-| **red** | at 90% or more spent — nearly empty is trouble whatever the pace, even with a fortnight left |
-| **amber** | when the pace column is negative — 40% spent is fine unless the window is nearly over |
+red at **90% or more spent**, because nearly empty is trouble whatever the
+pace. A green-through-red ramp did neither job: it made every figure faintly
+warm and said nothing at all about time.
 
-Those are the two ways a quota actually goes wrong, and a green-through-red
-ramp could not tell them apart: it made every figure faintly warm and said
-nothing about time. Copilot's `71%` reads amber not because 71 is a large
-number but because it will not last the month.
+Being behind the clock deliberately does **not** colour the percentage. The
+pace cell beside it is already amber for exactly that, and a number turning
+yellow next to its own explanation turning yellow reads as two problems rather
+than one. Amber appears once per row, on the figure that means it.
 
 The token calendars keep their own four-step single-hue ramps, and rankings are
 never green-through-red: that would imply the largest is the worst, which it is
