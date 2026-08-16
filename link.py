@@ -466,7 +466,7 @@ def fit(w, base, options):
     return seg([(colour, text) for text, colour in parts], w - 1)
 
 
-def detail_rows(row, names, w):
+def detail_rows(row, names, w, selected=False, hue=None, glyph="●"):
     """The selected session in full: who, how much, and how it is going.
 
     The table above answers "is anything wrong"; this answers "with what".
@@ -474,15 +474,27 @@ def detail_rows(row, names, w):
     about the whole session and changes by the hour, while the table's loss
     column is about the last two seconds.
     """
+    # `who` maps logins to an address, not to a socket, and two SSH sessions
+    # from one laptop share the address. Naming both against each socket read
+    # as "this connection is pts/0 and pts/35", which it is not - so the
+    # ttys are labelled as what they are: the logins from that address.
     users = names.get(row["ip"]) or []
-    label = ", ".join("%s on %s" % (u, t) for u, t in users[:2])
+    label = ""
+    if users:
+        label = "%s · login%s %s" % (
+            users[0][0], "" if len(users) == 1 else "s",
+            ", ".join(t for _u, t in users[:3]))
     lifetime = (100.0 * row["retrans_bytes"] / row["sent"]
                 if row["sent"] else 0.0)
     idle = min([x for x in (row.get("lastsnd"), row.get("lastrcv"))
                 if x is not None] or [None])
-    return [seg([(LBL, " ── SESSION ── "), (TXT, row["ip"]),
-                 (DIM, "  " + label if label else ""),
-                 (DIM, "   port %d" % row["port"])], w - 1),
+    tint = bg(28, 44, 62) if selected else ""
+    head = fit(w, [(" " + glyph + " ", tint + (hue or LBL)),
+                   (row["ip"], tint + TXT)],
+               [([("  · port %d" % row["port"], tint + DIM)], None),
+                ([("  " + users[0][0], tint + DIM)] if users else [],
+                 [("  " + label, tint + DIM)] if label else [])])
+    return [head,
             seg([(DIM, "  sent "), (TXT, size_of(row["sent"])),
                  (DIM, " · received "), (TXT, size_of(row["recv"])),
                  (DIM, " · achieved "), (TXT, rate(row.get("delivery")))],
@@ -493,11 +505,11 @@ def detail_rows(row, names, w):
             # "idle 0" at another.
             fit(w, [("  retransmitted ", DIM), ("%.2f%%" % lifetime, TXT)],
                 [([(" lifetime", DIM)], [(" over the session", DIM)]),
-                 ([(" · win ", DIM),
+                 ([(" · flight ", DIM),
                    ("%.0f" % row["cwnd"] if row["cwnd"] else "--", TXT)],
-                  [(" · window ", DIM),
+                  [(" · up to ", DIM),
                    ("%.0f" % row["cwnd"] if row["cwnd"] else "--", TXT),
-                   (" segments", DIM)]),
+                   (" packets in flight", DIM)]),
                  ([(" · idle ", DIM), (span(idle), TXT)], None)])]
 
 
@@ -555,16 +567,15 @@ def main():
                                    " or `ss` cannot see it.")], w - 1))
         else:
             rows.extend(table_rows(shown, names, history, w, selected))
-            # The session block sits directly under the table, and the chart
-            # goes last so it absorbs whatever height is left. The other way
-            # round left a fixed-height chart above the text and thirteen
-            # blank rows below it on a tall pane, which is not a layout, it
-            # is a hole.
-            if shown:
-                rows.append("")
-                rows.extend(detail_rows(shown[selected], names, w))
             rows.append("")
-            room = h - len(rows) - 4
+            # Chart first, session detail below it: the chart is what the
+            # widget is for, and the blocks are reference material you look
+            # down at. The detail area is sized to hold two blocks and
+            # scrolls with the selection, so a fourth machine connecting
+            # does not shrink the graph.
+            blocks, per = len(shown), 4
+            area = min(blocks * per, max(per, 2 * per))
+            room = h - len(rows) - 4 - area
             if room >= 5:
                 rows.extend(graph_rows(shown, history, w, room))
                 rows.append(seg([(DIM, " " * 7),
@@ -574,6 +585,18 @@ def main():
                 rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                                  (DIM, " " * max(1, w - 26)),
                                  (DIM, "now")], w - 1))
+            visible = max(1, area // per)
+            top = max(0, min(selected - visible + 1, blocks - visible))
+            top = max(0, top)
+            for i in range(top, min(blocks, top + visible)):
+                rows.append("")
+                rows.extend(detail_rows(shown[i], names, w, i == selected,
+                                        SESSION_HUES[i % len(SESSION_HUES)],
+                                        SERIES[i % len(SERIES)]))
+            if blocks > visible:
+                rows.append(seg([(DIM, "  %d-%d of %d · ↑↓ for the rest"
+                                  % (top + 1, min(blocks, top + visible),
+                                     blocks))], w - 1))
 
         while len(rows) < h - 2:
             rows.append("")
