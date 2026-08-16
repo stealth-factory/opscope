@@ -1739,9 +1739,11 @@ def antigravity_tab(state, w, h):
                          (colour, value)], w - 1))
     rows.append("")
     rows += no_local("No tokens or quota are recorded locally - only the"
-                     " conversations and steps above. Antigravity refreshes"
-                     " its quota into memory, in a server that is not kept"
-                     " between runs, so only the tier below can be known.",
+                     " conversations and steps above. Its own TUI does show"
+                     " weekly and five-hour limits per model group, fetched"
+                     " live via fetchQuotaStatus on"
+                     " businessaicode.googleapis.com; that call is not"
+                     " reachable from here yet, so only the tier below is.",
                      "", w)
     return rows
 

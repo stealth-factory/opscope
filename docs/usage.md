@@ -239,9 +239,27 @@ did, so the tab reports conversations, agent steps and prompts — real work
 done, but not cost.
 
 Its quota **is** real and never lands on disk. The log shows a
-`quota_manager.go` refreshing one on a loop, into memory, and the language
-server doing it is fetched per run and not kept. So the pane says what it can
-and does not guess at the rest.
+`quota_manager.go` refreshing one on a loop, into memory, and records only that
+it happened — never a value or a URL.
+
+The CLI's own TUI displays it: weekly and five-hour limits, per model group
+(Gemini models in one, Claude/GPT in another), each as a percentage with a
+refresh countdown. So it is fetched, not computed, and the endpoint is
+findable. It is in the binary — `~/.local/bin/agy`, 206MB of Go — as
+
+```
+POST https://businessaicode.googleapis.com/v1beta/{parent=projects/*/locations/*}:fetchQuotaStatus
+```
+
+with `google.cloud.businessaicode.v1beta.FetchQuotaStatusRequest` beside it.
+Calling that path directly with the CLI's own token answers **404 from a Google
+frontend**, so either the method is not routed publicly under that host or it
+wants something the descriptor does not spell out. There is no `agy usage`
+subcommand to shell out to either — the display is a slash command inside the
+interactive TUI.
+
+So the pane says what it can and names where the rest lives, rather than
+guessing at a URL until one sticks.
 
 The tier comes from the endpoint the CLI authenticates against:
 
