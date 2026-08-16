@@ -439,6 +439,38 @@ def table_rows(rows, names, history, w, selected):
     return out
 
 
+def detail_rows(row, names, w):
+    """The selected session in full: who, how much, and how it is going.
+
+    The table above answers "is anything wrong"; this answers "with what".
+    Lifetime loss lives here rather than in the table because it is a fact
+    about the whole session and changes by the hour, while the table's loss
+    column is about the last two seconds.
+    """
+    users = names.get(row["ip"]) or []
+    label = ", ".join("%s on %s" % (u, t) for u, t in users[:2])
+    lifetime = (100.0 * row["retrans_bytes"] / row["sent"]
+                if row["sent"] else 0.0)
+    idle = min([x for x in (row.get("lastsnd"), row.get("lastrcv"))
+                if x is not None] or [None])
+    return [seg([(LBL, " ── SESSION ── "), (TXT, row["ip"]),
+                 (DIM, "  " + label if label else ""),
+                 (DIM, "   port %d" % row["port"])], w - 1),
+            seg([(DIM, "  sent "), (TXT, size_of(row["sent"])),
+                 (DIM, " · received "), (TXT, size_of(row["recv"])),
+                 (DIM, " · achieved "), (TXT, rate(row.get("delivery")))],
+                w - 1),
+            seg([(DIM, "  retransmitted "), (TXT, "%.2f%%" % lifetime),
+                 (DIM, " over the session"),
+                 # "segments" is the first word to go: the number beside it
+                 # is the congestion window and the unit is guessable, while
+                 # a clipped idle time is a wrong number.
+                 (DIM, " · window " if w >= 58 else " · win "),
+                 (TXT, "%.0f" % row["cwnd"] if row["cwnd"] else "--"),
+                 (DIM, " segments" if w >= 74 else ""),
+                 (DIM, " · idle "), (TXT, span(idle))], w - 1)]
+
+
 def main():
     maybe_help(__doc__)
     global REFRESH
@@ -496,7 +528,10 @@ def main():
             rows.append("")
             # The chart takes whatever the table left, so a machine with one
             # session gets a tall graph and one with six still gets a graph.
-            room = h - len(rows) - 4
+            # A graph taller than about sixteen rows does not show more, it
+            # just stretches every swing over more of them; the space is
+            # better spent on what the selected session has actually done.
+            room = min(16, h - len(rows) - 4)
             if room >= 5:
                 rows.extend(graph_rows(shown, history, w, room))
                 rows.append(seg([(DIM, " " * 7), (GRID, "└" + "─" * max(10, w - 9))],
@@ -506,6 +541,9 @@ def main():
                 rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                                  (DIM, " " * max(1, w - 26)),
                                  (DIM, "now")], w - 1))
+            if shown and h - len(rows) >= 6:
+                rows.append("")
+                rows.extend(detail_rows(shown[selected], names, w))
 
         while len(rows) < h - 2:
             rows.append("")
