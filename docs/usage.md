@@ -2,7 +2,7 @@
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
-the four that publish one.
+the four that publish one and a subscription for the five that do.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -230,6 +230,44 @@ Each pool also carries its own `quota_reset_at`. It is `0` on this account —
 every pool is on the account-wide cycle — but when one is set and differs, that
 lane prints its own reset instead of inheriting the header's.
 
+**Antigravity** — a subscription, and no usage at all.
+
+It leaves plenty behind in `~/.gemini/antigravity-cli`: a conversation store
+per session, a prompt history, and logs. None of it counts a token. Each
+conversation is its own SQLite file whose `steps` table records what the agent
+did, so the tab reports conversations, agent steps and prompts — real work
+done, but not cost.
+
+Its quota **is** real and never lands on disk. The log shows a
+`quota_manager.go` refreshing one on a loop, into memory, and the language
+server doing it is fetched per run and not kept. So the pane says what it can
+and does not guess at the rest.
+
+The tier comes from the endpoint the CLI authenticates against:
+
+```
+POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist
+Authorization: Bearer <token.access_token from antigravity-oauth-token>
+```
+
+Two things about that call are worth writing down. Its access token expires
+**hourly** — beside a refresh token that is deliberately left alone, as
+Claude's is — so the section is simply absent between refreshes rather than
+stale.
+
+And the response is **gated on the client string**. Sent as plain
+`terminal-toys` it returns no tier at all, just an `ineligibleTiers` entry
+reading `UNSUPPORTED_CLIENT`. Sent as `terminal-toys (antigravity-cli)` it
+answers properly — the parenthesised form names the client being spoken for
+while still saying who is calling, which is the honest version of what would
+otherwise be a plain impersonation.
+
+What it returns is worth reading carefully: `currentTier` is `free-tier`
+while `paidTier` is `Google AI Ultra`. Those are different questions — which
+Code Assist tier this project sits on, and which Google AI plan the account
+holds — and they disagree here, so **both are shown** rather than one being
+picked as "the" plan.
+
 **Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
 carries a running `totalTokens` on each session event alongside an
 `agentTimestampMs`. Differencing consecutive events and bucketing by the
@@ -267,6 +305,7 @@ some tabs already finish on a blank and would otherwise leave two.
 | **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
 | **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
 | **Grok** | the client log | tier, billing period, on-demand and prepaid balances |
+| **Antigravity** | `loadCodeAssist` | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
 
 Grok's tier moved out of its quota heading to join them, so no agent states
 its plan in two different shapes.
@@ -486,9 +525,9 @@ refresh makes a tab a row longer.
 Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
 never changes. There are five quota calls — Claude, Codex, Copilot and two for
-Cursor — each held for two minutes, plus two subscription reads (Claude and
-Cursor) held for an hour. A pane left open all day makes about 152 requests an
-hour between them, whichever tab is on screen.
+Cursor — each held for two minutes, plus three subscription reads (Claude,
+Cursor and Antigravity) held for an hour. A pane left open all day makes about
+153 requests an hour between them, whichever tab is on screen.
 
 ## Which agents appear
 

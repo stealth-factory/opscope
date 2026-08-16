@@ -105,6 +105,12 @@ CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 RATE_FILES = 3           # newest transcripts to sample for a rate
 MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
+ANTIGRAVITY_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
+ANTIGRAVITY_TOKEN = os.path.join(ANTIGRAVITY_DIR, "antigravity-oauth-token")
+ANTIGRAVITY_CONVERSATIONS = os.path.join(ANTIGRAVITY_DIR, "conversations/*.db")
+ANTIGRAVITY_HISTORY = os.path.join(ANTIGRAVITY_DIR, "history.jsonl")
+CODE_ASSIST_API = ("https://cloudcode-pa.googleapis.com"
+                   "/v1internal:loadCodeAssist")
 COPILOT_DB = os.path.expanduser("~/.copilot/session-store.db")
 COPILOT_CONFIG = os.path.expanduser("~/.copilot/config.json")
 COPILOT_USER_API = "https://api.github.com/copilot_internal/user"
@@ -297,8 +303,9 @@ def iso_epoch(s):
     read as local time, which is why the callers here pass zoned strings.
     """
     try:
-        return datetime.datetime.fromisoformat(
-            re.sub(r"Z$", "+00:00", s)).timestamp()
+        # Go writes nanoseconds; fromisoformat takes 3 or 6 digits, not 9
+        s = re.sub(r"(\.\d{6})\d+", r"\1", re.sub(r"Z$", "+00:00", s))
+        return datetime.datetime.fromisoformat(s).timestamp()
     except (ValueError, TypeError, AttributeError):
         return None
 
@@ -1135,6 +1142,134 @@ def grok_tab(state, w, h):
 ELSEWHERE = {}
 
 
+def antigravity_live():
+    """Which Code Assist tier the account is on.
+
+    Antigravity keeps no quota and no token counts on disk - its language
+    server refreshes a quota into memory and is not even installed between
+    runs - so this endpoint is the only thing that can answer anything, and
+    what it answers is the subscription rather than the spend.
+
+    The access token expires hourly and Antigravity refreshes it; an expired
+    one is skipped rather than refreshed here, for the same reason Claude's
+    is: that is the CLI's job and racing it would be rude.
+    """
+    try:
+        with open(ANTIGRAVITY_TOKEN) as f:
+            tok = (json.load(f) or {}).get("token") or {}
+    except (OSError, ValueError):
+        return None
+    access = tok.get("access_token")
+    exp = iso_epoch(tok.get("expiry") or "")
+    if not access or (exp and exp <= time.time()):
+        return None
+    req = urllib.request.Request(
+        CODE_ASSIST_API, method="POST",
+        data=json.dumps({"metadata": {"pluginType": "GEMINI"}}).encode(),
+        headers={"Authorization": "Bearer " + access,
+                 "Content-Type": "application/json",
+                 # Google gates this response on the client string. Sent as
+                 # plain terminal-toys it answers UNSUPPORTED_CLIENT and
+                 # returns no tier at all; the parenthesised form is the
+                 # conventional way to name the client being spoken for
+                 # while still saying who is actually calling.
+                 "User-Agent": "terminal-toys (antigravity-cli)"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def read_antigravity():
+    """What the conversation stores record, which is activity and not cost.
+
+    Each conversation is its own SQLite file with a `steps` table - one row
+    per step the agent took - so the counts are real work done. No table
+    anywhere carries a token count.
+    """
+    out = {"ok": True, "live": cached("antigravity", antigravity_live,
+                                      ttl=PLAN_TTL),
+           "sessions": 0, "steps": 0, "prompts": 0, "last": 0}
+    files = glob.glob(ANTIGRAVITY_CONVERSATIONS)
+    out["sessions"] = len(files)
+    for path in files:
+        try:
+            out["last"] = max(out["last"], os.path.getmtime(path))
+            con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+            out["steps"] += con.execute(
+                "select count(*) from steps").fetchone()[0]
+            con.close()
+        except (sqlite3.Error, OSError):
+            continue
+    try:
+        with open(ANTIGRAVITY_HISTORY) as f:
+            out["prompts"] = sum(1 for line in f if line.strip())
+        out["last"] = max(out["last"], os.path.getmtime(ANTIGRAVITY_HISTORY))
+    except OSError:
+        pass
+    if not files and not out["prompts"]:
+        out["why"] = "no conversations recorded"
+    return out
+
+
+def antigravity_plan_rows(state, w):
+    live = state.get("live") or {}
+    cur = live.get("currentTier") or {}
+    paid = live.get("paidTier") or {}
+    if not cur and not paid:
+        return []
+    pairs = []
+    if cur.get("id"):
+        pairs.append(("code assist tier", cur["id"]))
+    # paidTier is the Google AI subscription behind the account, which is a
+    # different thing from the Code Assist tier and can disagree with it -
+    # free-tier here, while the account is on Ultra. Both are stated.
+    if paid.get("name"):
+        pairs.append(("google ai plan", paid["name"]))
+    if live.get("cloudaicompanionProject"):
+        pairs.append(("project", live["cloudaicompanionProject"]))
+    try:
+        with open(ANTIGRAVITY_TOKEN) as f:
+            method = (json.load(f) or {}).get("auth_method") or ""
+        if method:
+            pairs.append(("auth", method))
+    except (OSError, ValueError):
+        pass
+    return plan_rows(cur.get("name") or paid.get("name"), pairs, w)
+
+
+def antigravity_tab(state, w, h):
+    rows = []
+    if state.get("live") is None:
+        rows.append(seg([(WARN, "  no tier: the CLI's access token has"
+                                " expired or the call failed")], w - 1))
+        rows.append("")
+    rows.append(seg([(LBL, " ── ACTIVITY ── "),
+                     (DIM, "local · %s" % ("last %s ago" % ago(state["last"])
+                                           if state.get("last")
+                                           else "never run here"))], w - 1))
+    cells = [("conversations", "%d" % state.get("sessions", 0), TXT),
+             ("agent steps", "%d" % state.get("steps", 0), AGENT),
+             ("prompts", "%d" % state.get("prompts", 0), TXT)]
+    label_w = max(len(c[0]) for c in cells)
+    for label, value, colour in cells:
+        rows.append(seg([(DIM, "  " + pad(label, label_w) + "  "),
+                         (colour, value)], w - 1))
+    rows.append("")
+    for line in ("Antigravity records no tokens and no quota. Each",
+                 "conversation is its own SQLite store of the steps the",
+                 "agent took, and no table in it counts a token.",
+                 "",
+                 "Its quota is real but never lands on disk: the language",
+                 "server refreshes one into memory - the log says so, in",
+                 "quota_manager.go - and the server is not kept between",
+                 "runs. Nothing published answers what is left, so nothing",
+                 "here claims to. The tier below is what can be known."):
+        rows.append(seg([(DIM if line else RST, "  " + line)], w - 1))
+    return rows
+
+
 def copilot_token():
     """The CLI keeps its OAuth token in ~/.copilot/config.json.
 
@@ -1465,6 +1600,7 @@ class Store(object):
         self.codex = {}
         self.grok = {}
         self.copilot = {}
+        self.antigravity = {}
         self.installed = {}
         self.error = None
         self.fetched = 0
@@ -1474,7 +1610,8 @@ class Store(object):
         with self.lock:
             return (dict(self.claude), dict(self.cursor), dict(self.codex),
                     dict(self.grok), dict(self.copilot),
-                    dict(self.installed), self.fetched, self.error)
+                    dict(self.antigravity), dict(self.installed),
+                    self.fetched, self.error)
 
     def run(self):
         # A daemon thread that raises just stops, and a dead poller looks
@@ -1491,10 +1628,12 @@ class Store(object):
         while True:
             claude, cursor, codex = read_claude(), read_cursor(), read_codex()
             grok, copilot = read_grok(), read_copilot()
+            antigravity = read_antigravity()
             found = detect_agents()
             with self.lock:
                 self.claude, self.cursor, self.codex = claude, cursor, codex
                 self.grok, self.copilot = grok, copilot
+                self.antigravity = antigravity
                 self.installed = found
                 self.fetched = time.time()
             self.wake.wait(REFRESH)
@@ -1516,8 +1655,13 @@ AGENTS = {
              "paths": (os.path.expanduser("~/.grok"),)},
     "copilot": {"label": "GitHub Copilot", "bins": ("copilot",),
                 "paths": (COPILOT_DB, COPILOT_CONFIG)},
+    # No binary on PATH to look for: the CLI is launched by the IDE and its
+    # server is fetched per run, so the state directory is the only proof it
+    # is here - which is exactly why detection takes paths as well as bins.
+    "antigravity": {"label": "Antigravity", "bins": ("antigravity",),
+                    "paths": (ANTIGRAVITY_DIR,)},
 }
-ORDER = ("claude", "codex", "cursor", "grok", "copilot")
+ORDER = ("claude", "codex", "cursor", "grok", "copilot", "antigravity")
 
 
 def detect_agents():
@@ -1977,7 +2121,7 @@ def main():
                 store.wake.set()
 
         w, h = size()
-        (claude, cursor, codex, grok, copilot,
+        (claude, cursor, codex, grok, copilot, antigravity,
          installed, fetched, err) = store.snapshot()
         rows = [title("agent usage", w, AGENT)]
         tabs = visible_agents(installed)
@@ -2028,6 +2172,9 @@ def main():
         elif name == "copilot":
             body = copilot_tab(copilot, w, h)
             sub = copilot_plan_rows(copilot.get("live") or {}, w)
+        elif name == "antigravity":
+            body = antigravity_tab(antigravity, w, h)
+            sub = antigravity_plan_rows(antigravity, w)
         else:
             body = elsewhere_tab(name, installed, w, h)
         body = last_section(body, sub)
