@@ -247,6 +247,18 @@ def iso_day(s):
     return d.strftime("%-d %b %Y")
 
 
+def scope_phrase(w, used):
+    """The scope note, shortened before it can push a reset off the line.
+
+    "not this machine" is the point of the sentence, but it is also sixteen
+    characters, and seg() clips whatever runs past the pane. Losing the
+    clause leaves a shorter true line; losing the end of "resets in 15d"
+    leaves "resets in 1", which is a different and wrong number.
+    """
+    full = " · account-wide, not this machine   "
+    return full if used + len(full) <= w - 1 else " · account-wide   "
+
+
 def quota_window(reset_ts):
     """The span a monthly quota covers, worked back from its reset.
 
@@ -290,11 +302,11 @@ def claude_quota(q, w):
     if not lanes:
         return []
     live = q.get("source") == "live"
-    rows = [seg([(LBL, " ── QUOTA ── "),
-                 (OK if live else WARN,
-                  "live" if live else "cached %s ago" % ago(q.get("at"))),
-                 (DIM, " · account-wide, not this machine   "),
-                 (DIM, q.get("plan") or "")], w - 1)]
+    src = "live" if live else "cached %s ago" % ago(q.get("at"))
+    plan = q.get("plan") or ""
+    rows = [seg([(LBL, " ── QUOTA ── "), (OK if live else WARN, src),
+                 (DIM, scope_phrase(w, 13 + len(src) + len(plan))),
+                 (DIM, plan)], w - 1)]
 
     def label(l):
         scope = ((l.get("scope") or {}).get("model") or {}).get("display_name")
@@ -693,8 +705,8 @@ def codex_tab(state, w, h):
     if lanes:
         rows.append(seg([(LBL, " ── QUOTA ── "),
                          (OK if source == "live" else WARN, source),
-                         (DIM, " · account-wide, not this machine"),
-                         (DIM, "   %s" % plan if plan else "")], w - 1))
+                         (DIM, scope_phrase(w, 13 + len(source) + len(plan))),
+                         (DIM, plan)], w - 1))
         prepared = []
         for name, pct, window, reset in lanes:
             secs = int(window or 0)
@@ -1142,11 +1154,14 @@ def copilot_tab(state, w, h):
             days = int((stamp - time.time()) // 86400)
             when = "resets in %dd" % days if days > 0 else "resets today"
         rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
-                         (DIM, " · account-wide   "), (DIM, when)], w - 1))
+                         (DIM, " · account-wide")], w - 1))
+        # The reset sits with the window rather than on the header: they are
+        # two halves of the same cycle, and the header had no room for it.
         span = quota_window(stamp)
-        if span:
-            rows.append(seg([(DIM, "  window "), (TXT, span),
-                             (DIM, " · monthly")], w - 1))
+        if span or when:
+            rows.append(seg([(DIM, "  window "), (TXT, span or "—"),
+                             (DIM, " · monthly · " if span else " "),
+                             (DIM, when)], w - 1))
         label_w = max(9, max(len(k) for k in snaps))
         for key in sorted(snaps, key=lambda k: (snaps[k].get("unlimited"), k)):
             q = snaps[key] or {}
@@ -1590,7 +1605,7 @@ def cursor_quota(live, w):
         left = int(ends) / 1000.0 - time.time()
         when = ("resets in %dd" % (left // 86400)) if left > 0 else "resetting"
     rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
-                     (DIM, " · account-wide, not this machine   "),
+                     (DIM, scope_phrase(w, 17 + len(when))),
                      (DIM, when)], w - 1))
     values = {"included": plan.get("totalPercentUsed"),
               "auto": plan.get("autoPercentUsed"),
