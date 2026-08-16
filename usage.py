@@ -471,6 +471,25 @@ def lead(pct_used, window_secs, reset_ts):
     return elapsed - (pct_used or 0)
 
 
+def pct_text(pct):
+    """A percentage with enough precision to prove it is not a placeholder.
+
+    Every Antigravity lane rounded to "0%" - which is what an empty section
+    looks like - while one of them was genuinely 0.4% spent and another
+    0.03%. A real small number and no number at all have to be tellable
+    apart, so below 10% the figure keeps a decimal, and below 1% it keeps
+    two. A true zero stays a bare 0%.
+    """
+    pct = float(pct or 0)
+    if pct <= 0:
+        return "    0%"
+    if pct < 1:
+        return "%5.2f%%" % pct
+    if pct < 10:
+        return "%5.1f%%" % pct
+    return "%5.0f%%" % pct
+
+
 def pace_cell(value):
     """The signed cushion, coloured by whether it is one."""
     if value is None:
@@ -547,14 +566,14 @@ def claude_quota(q, w):
                     else "resetting" if live else "already reset")
         sev = (l.get("severity") or "normal").lower()
         window = CLAUDE_WINDOW_SECS.get(l.get("group") or "")
-        bar = meter(used, max(8, w - 33 - label_w))
+        bar = meter(used, max(8, w - 35 - label_w))
         filled = bar.count("█")
         # is_active marks the limit currently doing the binding - the one that
         # will stop you first - so it is the one worth reading brightly.
         rows.append(seg([(TXT if l.get("is_active") else DIM,
                           " " + pad(text, label_w) + " "),
                          (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                         (heat(used), " %3.0f%%" % pct),
+                         (heat(used), pct_text(pct)),
                          pace_cell(lead(pct, window, ts)),
                          (BAD if sev not in ("normal", "") else DIM,
                           "  " + (when if sev in ("normal", "")
@@ -1338,11 +1357,11 @@ def codex_tab(state, w, h):
             used = (pct or 0) / 100.0
             # heat(used), not heat(1 - used): red belongs at a quota nearly
             # spent, and the inverse painted a 26%-used week amber
-            bar = meter(used, max(8, w - 32 - label_w))
+            bar = meter(used, max(8, w - 34 - label_w))
             filled = bar.count("█")
             rows.append(seg([(DIM, " " + pad(text, label_w) + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), " %3.0f%%" % (pct or 0)),
+                             (heat(used), pct_text(pct)),
                              pace_cell(lead(pct, secs, reset)),
                              (DIM, "  " + when)], w - 1))
         rows.append("")
@@ -1800,9 +1819,15 @@ def antigravity_quota_rows(groups, w):
     """
     if not groups:
         return []
-    rows = [seg([(LBL, " ── QUOTA ── "), (OK, "live"),
-                 (DIM, " · account-wide, from the local language server")],
-                w - 1)]
+    # The long form names where the number comes from, which matters here
+    # more than elsewhere; the short one still says it is not this machine's
+    # own tally. Shortened before it can clip, as the other headers are.
+    note = " · account-wide, from the local language server"
+    for shorter in (" · from the local server", " · local"):
+        if 13 + len("live") + len(note) <= w - 1:
+            break
+        note = shorter
+    rows = [seg([(LBL, " ── QUOTA ── "), (OK, "live"), (DIM, note)], w - 1)]
     for group in groups:
         buckets = [b for b in (group.get("buckets") or [])
                    if b.get("remainingFraction") is not None]
@@ -1821,11 +1846,17 @@ def antigravity_quota_rows(groups, w):
                 left = reset - time.time()
                 when = ("resets in " + left_span(left) if left > 0
                         else "resetting")
-            bar = meter(used, max(8, w - 34 - label_w))
+            room = w - 36 - label_w
+            if room < 8:
+                # Below the bar's floor the row cannot shrink further, so the
+                # reset stands down rather than being cut in half.
+                when = ""
+                room = w - 20 - label_w
+            bar = meter(used, max(8, room))
             filled = bar.count("█")
             rows.append(seg([(DIM, "   " + pad(window, label_w) + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), " %3.0f%%" % pct),
+                             (heat(used), pct_text(pct)),
                              pace_cell(lead(pct,
                                             ANTIGRAVITY_WINDOWS.get(window),
                                             reset)),
@@ -2308,7 +2339,7 @@ def copilot_tab(state, w, h):
             # shows what is spent, and red belongs at the empty end.
             pct = 100.0 - float(q.get("percent_remaining") or 0)
             used = max(0.0, min(1.0, pct / 100.0))
-            bar = meter(used, max(8, w - 36 - label_w))
+            bar = meter(used, max(8, w - 38 - label_w))
             filled = bar.count("█")
             # The window is a calendar month, so its length is the gap
             # between this reset and the one before it.
@@ -2321,7 +2352,7 @@ def copilot_tab(state, w, h):
                 span = stamp - back.timestamp()
             rows.append(seg([(DIM, " " + name + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), " %3.0f%%" % pct),
+                             (heat(used), pct_text(pct)),
                              pace_cell(lead(pct, span, stamp))], w - 1))
             # A pool can carry its own reset, in which case it is not on the
             # account-wide cycle in the header and has to say so itself.
@@ -2332,13 +2363,15 @@ def copilot_tab(state, w, h):
                 own_when = ("   resets in " + left_span(left_s)
                             if left_s > 0 else "   resetting")
             if ent:
+                left_part = [(DIM, " · "),
+                             (TXT, "{:,}".format(int(q.get("remaining") or 0))),
+                             (DIM, " left")]
+                if label_w + 34 > w - 1:      # no room for the remainder
+                    left_part = []
                 rows.append(seg([(DIM, " " + " " * label_w + "  "),
                                  (TXT, "{:,}".format(int(used_n or 0))),
-                                 (DIM, " of "), (TXT, "{:,}".format(int(ent))),
-                                 (DIM, " · "),
-                                 (TXT, "{:,}".format(int(q.get("remaining")
-                                                         or 0))),
-                                 (DIM, " left"),
+                                 (DIM, " of "), (TXT, "{:,}".format(int(ent)))]
+                                + left_part + [
                                  (WARN, "   %d over" % q["overage_count"]
                                   if q.get("overage_count") else ""),
                                  (DIM, own_when)], w - 1))
@@ -2777,7 +2810,7 @@ def cursor_quota(live, w):
         if pct is None:
             continue
         used = max(0.0, min(1.0, pct / 100.0))
-        bar = meter(used, max(8, w - 38))
+        bar = meter(used, max(8, w - 40))
         filled = bar.count("█")
         # How far ahead of the clock you are: the share of the billing period
         # already gone, minus the share of the allowance spent. Positive is a
@@ -2787,7 +2820,7 @@ def cursor_quota(live, w):
         rows.append(seg([(DIM, " %-9s" % name),
                          (rgb(*colour), bar[:filled]),
                          (GRID, bar[filled:]),
-                         (rgb(*colour), " %3.0f%%" % pct),
+                         (rgb(*colour), pct_text(pct)),
                          pace_cell(lead(pct, cycle_secs, reset_ts))], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:
