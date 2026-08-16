@@ -2541,38 +2541,45 @@ def summary_tab(states, w, h):
             quiet.append(name)
     if not lanes:
         return no_local("No agent is publishing a quota right now.", "", w)
-    lanes.sort(key=lambda x: -x[2])
-    agent_w = max(len(x[0]) for x in lanes)
-    label_w = min(14, max(len(x[1]) for x in lanes))
+    # Grouped by provider, but the groups are ordered by their worst lane and
+    # so are the lanes inside them: the structure says who owns what, the
+    # ordering still answers which one runs out first.
+    groups = {}
+    for lane in lanes:
+        groups.setdefault(lane[0], []).append(lane)
+    order = sorted(groups, key=lambda n: -max(x[2] for x in groups[n]))
+    label_w = min(16, max(len(x[1]) for x in lanes))
     head = "%d limits across %d agents" % (len(lanes),
                                            len(ORDER) - len(quiet))
     if 14 + len(head) + 20 <= w - 1:
-        head += " · most spent first"
+        head += " · worst first"
     rows = [seg([(LBL, " ── QUOTAS ── "), (DIM, head)], w - 1)]
-    # 1 lead + agent + 1 + label + 1 + pct(6) + pace(6). The reset needs 16
-    # more and is the first thing dropped, being the only part a reader can
-    # infer from the bar beside it - but a stale marker is not droppable,
-    # since a number nobody labelled as old reads as current.
-    fixed = 15 + agent_w + label_w
+    # 2 lead + label + 1 + pct(6) + pace(6). The reset needs 16 more and is
+    # the first thing dropped, being the only part a reader can infer from
+    # the bar beside it - but a stale marker is not droppable, since a number
+    # nobody labelled as old reads as current.
+    fixed = 15 + label_w
     show_reset = (w - 1) - fixed - 8 >= 16
     tail = 16 if show_reset else (8 if any(x[5] for x in lanes) else 0)
     bar_room = max(8, (w - 1) - fixed - tail)
-    for name, label, pct, secs, reset, stale in lanes:
-        used = max(0.0, min(1.0, pct / 100.0))
-        bar = meter(used, bar_room)
-        filled = bar.count("█")
-        when, tint = "", DIM
-        if stale:
-            when, tint = "  cached", WARN
-        elif show_reset and reset:
-            left = reset - time.time()
-            when = ("  " + left_span(left)) if left > 0 else "  resetting"
-        rows.append(seg([(DIM, " " + pad(name, agent_w) + " "),
-                         (TXT, pad(label, label_w) + " "),
-                         (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                         (heat(used), pct_text(pct)),
-                         pace_cell(lead(pct, secs, reset)),
-                         (tint, when)], w - 1))
+    for name in order:
+        rows.append(seg([(TXT, "  " + name.upper())], w - 1))
+        for _, label, pct, secs, reset, stale in sorted(
+                groups[name], key=lambda x: -x[2]):
+            used = max(0.0, min(1.0, pct / 100.0))
+            bar = meter(used, bar_room)
+            filled = bar.count("█")
+            when, tint = "", DIM
+            if stale:
+                when, tint = "  cached", WARN
+            elif show_reset and reset:
+                left = reset - time.time()
+                when = ("  " + left_span(left)) if left > 0 else "  resetting"
+            rows.append(seg([(DIM, "   " + pad(label, label_w) + " "),
+                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                             (heat(used), pct_text(pct)),
+                             pace_cell(lead(pct, secs, reset)),
+                             (tint, when)], w - 1))
     if quiet:
         rows.append("")
         rows += no_local("No quota published by: " + ", ".join(quiet)
