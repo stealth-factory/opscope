@@ -354,6 +354,34 @@ model cache), and `codex-auto-review`. Without that, prefix matching would hand
 Spark `gpt-5.3-codex`'s rate — a number nobody published. They report as
 unpriced instead, and are named.
 
+### What each figure covers
+
+The METERED header states its **scope** first, because that is the thing most
+easily got wrong: the section sits directly under a `QUOTA` labelled
+*account-wide*, and a local figure beside it reads as the same scope unless it
+says otherwise.
+
+| | scope | why |
+|---|---|---|
+| **Cursor** | account-wide | its numbers come from Cursor's API, which bills the account |
+| **Claude** | this machine | transcripts are written where the agent ran |
+| **Codex** | this machine, CLI only | rollouts are local, and only the CLI writes them |
+| **Copilot** | this machine | the session store is local |
+
+Codex's is the one worth spelling out, and the pane does. Its own dashboard
+reports a 30-day total across **Desktop App, Desktop (Work), CLI, Cloud, Web,
+Mobile, GitHub Code Review, Exec** and *Uncategorized* — and the account-wide
+figure is several times what this pane can see, because every surface except
+the CLI leaves nothing on this disk. On one account the dashboard read
+`$3,400.37` where this pane read `$225.33`; both are correct, and they are
+answers to different questions.
+
+**That account-wide breakdown is not fetchable.** `/backend-api/codex/usage`
+exists — it answers 403 rather than 404 — but the 403 is HTML from bot
+protection rather than a JSON auth error, so it is a browser-only dashboard
+route, exactly like the `cursor.com` usage API this widget also could not use.
+The CLI's OAuth token opens `wham/usage` and nothing further.
+
 ### Where each agent's numbers come from
 
 **Cursor** needs no rate card — it publishes both sides. The raw events carry

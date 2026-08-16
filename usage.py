@@ -1254,7 +1254,11 @@ def codex_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
                          ("30 days", window_models(daily, 30))], w,
-                        agent="codex")
+                        agent="codex", scope="this machine",
+                        caveat="CLI rollouts only. Codex bills Cloud, Web,"
+                               " Desktop and the rest to the same account,"
+                               " and none of those leave anything on this"
+                               " disk to count.")
 
 
 def codex_tab(state, w, h):
@@ -1937,7 +1941,8 @@ def cost_of(tokens, rate):
                for kind in RATE_KINDS)
 
 
-def metered_block(where, windows, w, saves=None, note=""):
+def metered_block(where, windows, w, saves=None, note="", scope="",
+                  caveat=""):
     """The metered section: one row per window, each with its models under it.
 
     `windows` is [(label, cost, tokens, [(model, cost)])]. Two of them -
@@ -1950,8 +1955,17 @@ def metered_block(where, windows, w, saves=None, note=""):
     # and dropping the row leaves the reader to wonder which it was.
     if not any(x[1] or x[2] for x in windows):
         return []
-    rows = [seg([(LBL, " ── METERED ── "), (DIM, "at " + where),
+    # Scope first, because it is the thing most easily got wrong: this
+    # section sits under a QUOTA labelled "account-wide", and a local figure
+    # beside it reads as the same scope unless it says otherwise. Codex's
+    # own dashboard reports every surface - Desktop, Cloud, Web, the rest -
+    # and none of those leave anything on this disk.
+    rows = [seg([(LBL, " ── METERED ── "),
+                 (TXT, scope + " · " if scope else ""),
+                 (DIM, "at " + where),
                  (DIM, "   %s" % note if note else "")], w - 1)]
+    for line in (wrap_text(caveat, max(20, w - 4)) if caveat else []):
+        rows.append(seg([(DIM, "  " + line)], w - 1))
     label_w = max([len(x[0]) for x in windows]
                   + ([len("the plan saves")] if saves is not None else []))
     for label, cost, tokens, models in windows:
@@ -1975,7 +1989,7 @@ def metered_block(where, windows, w, saves=None, note=""):
     return rows
 
 
-def metered_rows(windows, w, note="", agent=None):
+def metered_rows(windows, w, note="", agent=None, scope="", caveat=""):
     """Cost a set of windows against the rate card.
 
     Each window is (label, [(model, tokens)]). Only models with a rate are
@@ -2021,7 +2035,8 @@ def metered_rows(windows, w, note="", agent=None):
     month = next((x[1] for x in built if x[0] == "30 days"), None)
     if paid and month:
         saves = month - float(paid)
-    rows = metered_block(where, built, w, saves=saves, note=note)
+    rows = metered_block(where, built, w, saves=saves, note=note,
+                         scope=scope, caveat=caveat)
     if missing and rows:
         rows.insert(len(rows) - 1,
                     seg([(WARN, "  %d model%s unpriced: "
@@ -2109,7 +2124,7 @@ def copilot_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
                          ("30 days", window_models(daily, 30))], w,
-                        note="local turns", agent="copilot")
+                        agent="copilot", scope="this machine")
 
 
 def copilot_tab(state, w, h):
@@ -2461,7 +2476,7 @@ def claude_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
                          ("30 days", window_models(daily, 30))], w,
-                        agent="claude")
+                        agent="claude", scope="this machine")
 
 
 def claude_tab(state, w, h):
@@ -2685,7 +2700,8 @@ def cursor_metered_rows(state, w):
     vendor = float(ev.get("vendor_cents") or 0)
     saves = (vendor - metered) / 100.0 if vendor and metered else None
     note = ("Cursor meters $%.2f of it" % (metered / 100.0)) if metered else ""
-    return metered_block("vendor rates", windows, w, saves=saves, note=note)
+    return metered_block("vendor rates", windows, w, saves=saves, note=note,
+                        scope="account-wide")
 
 
 def cursor_daily_rows(events, w):
