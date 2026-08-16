@@ -481,6 +481,31 @@ def lead(pct_used, window_secs, reset_ts):
     return elapsed - (pct_used or 0)
 
 
+def ahead_of(value):
+    """True when a pace figure says ahead, False when behind, None if unknown."""
+    return None if value is None else value >= 0
+
+
+def pct_colour(pct, ahead, hue):
+    """What colour a quota's percentage is written in.
+
+    The agent's own colour by default, so the number matches the bar it sits
+    beside instead of being tinted by a gradient that made every figure
+    faintly warm. Red and amber are kept for the two ways a quota actually
+    goes wrong, which a gradient could not tell apart:
+
+      red   - nearly spent, whatever the pace. 92% gone is trouble even with
+              a fortnight left.
+      amber - behind the clock. 40% gone is fine unless the window is nearly
+              over, and the pace column is what knows that.
+    """
+    if pct >= 90:
+        return BAD
+    if ahead is False:
+        return WARN
+    return rgb(*hue) if hue else heat(pct / 100.0)
+
+
 def pct_text(pct):
     """A percentage with enough precision to prove it is not a placeholder.
 
@@ -583,7 +608,8 @@ def claude_quota(q, w):
                         + paced_bar(used, elapsed_of(window, ts),
                                     max(8, w - 35 - label_w),
                                     AGENT_HUE["claude"])
-                        + [(heat(used), pct_text(pct)),
+                        + [(pct_colour(pct, ahead_of(lead(pct, window, ts)), AGENT_HUE["claude"]),
+                         pct_text(pct)),
                          pace_cell(lead(pct, window, ts)),
                          (BAD if sev not in ("normal", "") else DIM,
                           "  " + (when if sev in ("normal", "")
@@ -1371,7 +1397,8 @@ def codex_tab(state, w, h):
                             + paced_bar(used, elapsed_of(secs, reset),
                                         max(8, w - 34 - label_w),
                                         AGENT_HUE["codex"])
-                            + [(heat(used), pct_text(pct)),
+                            + [(pct_colour(pct, ahead_of(lead(pct, secs, reset)), AGENT_HUE["codex"]),
+                             pct_text(pct)),
                              pace_cell(lead(pct, secs, reset)),
                              (DIM, "  " + when)], w - 1))
         rows.append("")
@@ -1592,7 +1619,11 @@ def grok_tab(state, w, h):
         begin, finish = iso_epoch(q.get("start") or ""), iso_epoch(q.get("end") or "")
         if begin and finish and finish > begin:
             span, reset_ts = finish - begin, finish
-        rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"]))]
+        rows.append(seg([(pct_colour(float(q["percent"]),
+                                     ahead_of(lead(float(q["percent"]), span,
+                                                   reset_ts)),
+                                     AGENT_HUE["grok"]),
+                          " %-5s" % ("%.0f%%" % q["percent"]))]
                         + paced_bar(used, elapsed_of(span, reset_ts),
                                     max(10, w - 38), AGENT_HUE["grok"])
                         + [(DIM, "  credits used"),
@@ -1874,7 +1905,10 @@ def antigravity_quota_rows(groups, w):
                             + paced_bar(used, elapsed_of(
                                 ANTIGRAVITY_WINDOWS.get(window), reset),
                                 max(8, room), AGENT_HUE["antigravity"])
-                            + [(heat(used), pct_text(pct)),
+                            + [(pct_colour(pct, ahead_of(lead(
+                                    pct, ANTIGRAVITY_WINDOWS.get(window), reset)),
+                                    AGENT_HUE["antigravity"]),
+                                pct_text(pct)),
                              pace_cell(lead(pct,
                                             ANTIGRAVITY_WINDOWS.get(window),
                                             reset)),
@@ -2370,7 +2404,9 @@ def copilot_tab(state, w, h):
                             + paced_bar(used, elapsed_of(span, stamp),
                                         max(8, w - 38 - label_w),
                                         AGENT_HUE["copilot"])
-                            + [(heat(used), pct_text(pct)),
+                            + [(pct_colour(pct, ahead_of(lead(pct, span, stamp)),
+                                    AGENT_HUE["copilot"]),
+                                pct_text(pct)),
                                pace_cell(lead(pct, span, stamp))], w - 1))
             # A pool can carry its own reset, in which case it is not on the
             # account-wide cycle in the header and has to say so itself.
@@ -2531,6 +2567,27 @@ def detect_agents():
 
 
 SUMMARY_TAB = "+"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def loading_rows(w, tick):
+    """What to show before the first poll lands.
+
+    Every tab's empty state is a statement of fact - no stats cache, no
+    rollouts, no agent publishing a quota - and each of them is false while
+    the first read is still running. The first read is also the slow one:
+    520MB of Claude transcripts and five pages of Cursor events, some fifteen
+    seconds of it, which is more than long enough for a wrong answer to be
+    read and believed.
+    """
+    rows = [seg([(ACCENT, " " + SPINNER[tick % len(SPINNER)]),
+                 (TXT, "  reading local state and quotas")], w - 1), ""]
+    for line in ("The first pass is the slow one: Claude's transcripts run to"
+                 " hundreds of megabytes and Cursor's usage events are paged"
+                 " a thousand at a time. Both are cached afterwards.",):
+        for part in wrap_text(line, max(20, w - 4)):
+            rows.append(seg([(DIM, "  " + part)], w - 1))
+    return rows
 
 
 def elapsed_of(secs, reset):
@@ -2548,7 +2605,12 @@ def elapsed_of(secs, reset):
 # the darkest agent hue, and 0.34 leaves the empty track at least as visible
 # as the flat GRID it replaces (2.20:1 against 2.16:1).
 BAR_FLOOR = (30, 38, 52)
-PACE_MARK = rgb(10, 12, 18)   # the notch, dark enough to read on either side
+# The notch is white on its own dark cell rather than a bare foreground
+# colour. Plain white manages 1.2:1 against a full bar - the agent hues are
+# light themselves, so it disappears exactly where it matters - while giving
+# the cell a dark background makes the mark read the same on a full bar, an
+# empty track, or the boundary between them.
+PACE_MARK = bg(10, 12, 18) + rgb(238, 244, 252)
 
 
 def blend(hue, t):
@@ -2679,7 +2741,9 @@ def summary_tab(states, w, h):
             rows.append(seg([(DIM, "   " + pad(label, label_w) + " ")]
                             + paced_bar(used, gone, bar_room,
                                         AGENT_HUE.get(name))
-                            + [(heat(used), pct_text(pct)),
+                            + [(pct_colour(pct, ahead_of(lead(pct, secs, reset)),
+                                    AGENT_HUE.get(name)),
+                                pct_text(pct)),
                                pace_cell(lead(pct, secs, reset)),
                                (tint, when)], w - 1))
     if quiet:
@@ -3136,7 +3200,9 @@ def cursor_quota(live, w):
         rows.append(seg([(DIM, " %-9s" % name)]
                         + paced_bar(used, elapsed_of(cycle_secs, reset_ts),
                                     max(8, w - 40), hue)
-                        + [(rgb(*hue), pct_text(pct)),
+                        + [(pct_colour(pct, ahead_of(lead(pct, cycle_secs,
+                                                          reset_ts)), hue),
+                            pct_text(pct)),
                          pace_cell(lead(pct, cycle_secs, reset_ts))], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:
@@ -3355,11 +3421,13 @@ def main():
     setup()
     keyboard = Keyboard()
     active = 0
+    tick = 0
     # One offset per tab. Switching away and back keeps your place, which
     # matters when a tab is forty rows and you were reading the bottom of it.
     offsets = {}
 
     while True:
+        tick += 1
         # Scrolling is applied after the frame is built, not here: a page is
         # however many body rows this pane turned out to have, and that is
         # not known until the tab has been rendered and the footer packed.
@@ -3422,7 +3490,9 @@ def main():
         # appended here rather than by five tabs that each end differently.
         name = tabs[active]
         sub = []
-        if name == SUMMARY_TAB:
+        if not fetched:
+            body = loading_rows(w, tick)
+        elif name == SUMMARY_TAB:
             body = summary_tab({"claude": claude, "codex": codex,
                                 "cursor": cursor, "grok": grok,
                                 "copilot": copilot,

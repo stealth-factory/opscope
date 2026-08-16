@@ -844,7 +844,7 @@ It **replaces** a cell rather than adding one, so it costs no width, and it is
 a different glyph from the bar rather than only a different colour — it
 survives with colour off.
 
-**One colour on every bar**, a near-black notch. It was first tinted green when
+**One colour on every bar**: white on its own dark cell. It was first tinted green when
 the fill was behind it and amber when past, which was wrong twice over: a
 reference line that changes colour looks like the line has a state, when the
 state being reported is where the fill sits relative to it — and one amber mark
@@ -852,9 +852,11 @@ beside five green ones read as *that agent's mark meaning something different*
 rather than that agent being behind. The relationship is already legible from
 the geometry, and the `-20%` column states it.
 
-Near-black rather than a light neutral because the agent hues are themselves
-light: white vanishes inside a full bar at 1.04:1, while this holds **7.6:1**
-there and **2.3:1** on the empty track.
+Plain white would not do it — the agent hues are themselves light, so white
+foreground on a full bar manages **1.04:1** and disappears exactly where it
+matters. Giving the mark's own cell a dark background instead makes it read
+identically on a full bar, an empty track, or the boundary between them, at
+**17.7:1**, and costs no width.
 
 No mark is drawn when the window is unknown, or when a reading is **cached**
 and its window may already have closed: a pace computed from a window that has
@@ -885,12 +887,19 @@ agent hue, and `0.34` leaves the empty track at least as visible as the flat
 grey it replaced (2.20:1 against 2.16:1). Cursor's dimmest lane clears WCAG AA
 at 4.99:1.
 
-**Red still means something is wrong, and nothing else.** Moving identity onto
-the bar did not take severity off the row: it moved to the two places that
-carry it better — the **percentage**, which keeps the green-through-red heat,
-and the **pace mark**, green when the fill is behind it and amber when past. A
-bar that is 71% full in Copilot purple, with an amber mark behind the fill and
-`71%` in red beside it, says both things at once.
+**Red still means something is wrong, and nothing else** — it just stopped
+being a gradient. The percentage is written in its agent's colour like the bar
+beside it, and turns:
+
+| | |
+|---|---|
+| **red** | at 90% or more spent — nearly empty is trouble whatever the pace, even with a fortnight left |
+| **amber** | when the pace column is negative — 40% spent is fine unless the window is nearly over |
+
+Those are the two ways a quota actually goes wrong, and a green-through-red
+ramp could not tell them apart: it made every figure faintly warm and said
+nothing about time. Copilot's `71%` reads amber not because 71 is a large
+number but because it will not last the month.
 
 The token calendars keep their own four-step single-hue ramps, and rankings are
 never green-through-red: that would imply the largest is the worst, which it is
