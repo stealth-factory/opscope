@@ -439,6 +439,33 @@ def table_rows(rows, names, history, w, selected):
     return out
 
 
+def fit(w, base, options):
+    """Build a line from a required head plus optional parts, longest first.
+
+    Each option is (short, long): the long form is taken when the whole line
+    still fits, otherwise the short one, otherwise nothing. Width thresholds
+    were doing this by eye and getting it wrong - the numbers on this line
+    vary in length, so a threshold tuned at one pane size clipped "idle 0s"
+    into "idle 0" at another.
+    """
+    parts = list(base)
+
+    def width(extra):
+        return sum(len(t) for t, _c in parts + extra)
+
+    for i, (short, long) in enumerate(options):
+        # Whatever is still to come gets its shortest form reserved before
+        # this one is allowed to take its longest. Without that, a middle
+        # option spent the width on "segments" and pushed the idle time off
+        # the end - dropping a fact to spell out a unit.
+        rest = sum(len(t) for nxt, _l in options[i + 1:] for t, _c in (nxt or []))
+        for candidate in (long, short):
+            if candidate and width(candidate) + rest <= w - 1:
+                parts.extend(candidate)
+                break
+    return seg([(colour, text) for text, colour in parts], w - 1)
+
+
 def detail_rows(row, names, w):
     """The selected session in full: who, how much, and how it is going.
 
@@ -460,15 +487,18 @@ def detail_rows(row, names, w):
                  (DIM, " · received "), (TXT, size_of(row["recv"])),
                  (DIM, " · achieved "), (TXT, rate(row.get("delivery")))],
                 w - 1),
-            seg([(DIM, "  retransmitted "), (TXT, "%.2f%%" % lifetime),
-                 (DIM, " over the session"),
-                 # "segments" is the first word to go: the number beside it
-                 # is the congestion window and the unit is guessable, while
-                 # a clipped idle time is a wrong number.
-                 (DIM, " · window " if w >= 58 else " · win "),
-                 (TXT, "%.0f" % row["cwnd"] if row["cwnd"] else "--"),
-                 (DIM, " segments" if w >= 74 else ""),
-                 (DIM, " · idle "), (TXT, span(idle))], w - 1)]
+            # Built shortest-first and grown while it fits, rather than
+            # trimmed by width thresholds: the numbers vary in length, so a
+            # threshold that held at one window size cut "idle 0s" to
+            # "idle 0" at another.
+            fit(w, [("  retransmitted ", DIM), ("%.2f%%" % lifetime, TXT)],
+                [([(" lifetime", DIM)], [(" over the session", DIM)]),
+                 ([(" · win ", DIM),
+                   ("%.0f" % row["cwnd"] if row["cwnd"] else "--", TXT)],
+                  [(" · window ", DIM),
+                   ("%.0f" % row["cwnd"] if row["cwnd"] else "--", TXT),
+                   (" segments", DIM)]),
+                 ([(" · idle ", DIM), (span(idle), TXT)], None)])]
 
 
 def main():
@@ -525,25 +555,25 @@ def main():
                                    " or `ss` cannot see it.")], w - 1))
         else:
             rows.extend(table_rows(shown, names, history, w, selected))
+            # The session block sits directly under the table, and the chart
+            # goes last so it absorbs whatever height is left. The other way
+            # round left a fixed-height chart above the text and thirteen
+            # blank rows below it on a tall pane, which is not a layout, it
+            # is a hole.
+            if shown:
+                rows.append("")
+                rows.extend(detail_rows(shown[selected], names, w))
             rows.append("")
-            # The chart takes whatever the table left, so a machine with one
-            # session gets a tall graph and one with six still gets a graph.
-            # A graph taller than about sixteen rows does not show more, it
-            # just stretches every swing over more of them; the space is
-            # better spent on what the selected session has actually done.
-            room = min(16, h - len(rows) - 4)
+            room = h - len(rows) - 4
             if room >= 5:
                 rows.extend(graph_rows(shown, history, w, room))
-                rows.append(seg([(DIM, " " * 7), (GRID, "└" + "─" * max(10, w - 9))],
-                                w - 1))
+                rows.append(seg([(DIM, " " * 7),
+                                 (GRID, "└" + "─" * max(10, w - 9))], w - 1))
                 oldest = REFRESH * max([len(history.get(r["peer"]) or [])
                                         for r in shown] or [0])
                 rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                                  (DIM, " " * max(1, w - 26)),
                                  (DIM, "now")], w - 1))
-            if shown and h - len(rows) >= 6:
-                rows.append("")
-                rows.extend(detail_rows(shown[selected], names, w))
 
         while len(rows) < h - 2:
             rows.append("")
