@@ -2645,6 +2645,27 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS, weeks=None):
     return rows, peak, best, facts
 
 
+def stats_lag(data, w):
+    """How far behind today the stats cache's own reckoning is.
+
+    The date it stopped at is the useful half but the first thing to go when
+    the pane is narrow; the number of days is what must survive.
+    """
+    last = (data or {}).get("lastComputedDate") or ""
+    try:
+        when = datetime.date.fromisoformat(last)
+    except (ValueError, TypeError):
+        return ""
+    days = (datetime.date.today() - when).days
+    if days <= 0:
+        return ""
+    if w >= 72:
+        return "   cache is %dd behind, to %s" % (days, when.strftime("%b %-d"))
+    if w >= 56:
+        return "   cache %dd behind" % days
+    return "   -%dd" % days
+
+
 def claude_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
@@ -2728,9 +2749,13 @@ def claude_tab(state, w, h):
         rows.append("")
         counts = [x.get("messageCount") or 0 for x in daily]
         peak = max(counts) or 1
+        # Both charts on this tab come from stats-cache.json, which Claude
+        # Code recomputes on its own schedule - lastComputedDate can sit a
+        # day or two back. Unlabelled, that gap reads as idle days rather
+        # than as days the cache has not caught up with.
         rows.append(seg([(LBL, " ── MESSAGES / DAY ── "),
-                         (DIM, "%dd · peak %s" % (len(daily), f"{peak:,}"))],
-                        w - 1))
+                         (DIM, "%dd · peak %s" % (len(daily), f"{peak:,}")),
+                         (WARN, stats_lag(d, w))], w - 1))
         avail = max(10, w - 3)
         cols = []
         for c, wide in zip(counts, spread(len(counts), avail)):
@@ -2764,7 +2789,8 @@ def claude_tab(state, w, h):
         rows.append(seg([(LBL, " ── TOKENS / DAY ── "),
                          (DIM, "peak "), (AGENT, big_num(peak)),
                          (DIM, " on %s" % (best.strftime("%b %-d") if best
-                                           else "--"))], w - 1))
+                                           else "--")),
+                         (WARN, stats_lag(d, w))], w - 1))
         for line in grid:
             rows.append(seg(line, w - 1))
         rows.append(seg([(DIM, "  Less ")]
