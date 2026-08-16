@@ -229,9 +229,10 @@ CURSOR_DB = os.path.expanduser("~/.cursor/ai-tracking/ai-code-tracking.db")
 # categories rather than one gauge, so a green-to-red severity ramp would
 # imply a relationship between them that does not exist - and each bar is
 # labelled and carries its own percentage, so the colour is decoration.
-CURSOR_LANES = (("included", (126, 208, 176)),
-                ("auto", (138, 168, 204)),
-                ("api", (217, 160, 192)))
+# Three tints of Cursor's own colour rather than three unrelated hues. They
+# are still categories, not a severity ramp, so they stay distinguishable -
+# but they now read as Cursor's, which three borrowed colours never did.
+CURSOR_LANE_STOPS = (("included", 1.0), ("auto", 0.80), ("api", 0.62))
 GROK_SESSIONS = os.path.expanduser("~/.grok/sessions/**/updates.jsonl")
 # the quota is not in the session transcripts: it arrives on the client log
 GROK_LOG = os.path.expanduser("~/.grok/logs/unified.jsonl")
@@ -580,7 +581,8 @@ def claude_quota(q, w):
         rows.append(seg([(TXT if l.get("is_active") else DIM,
                           " " + pad(text, label_w) + " ")]
                         + paced_bar(used, elapsed_of(window, ts),
-                                    max(8, w - 35 - label_w))
+                                    max(8, w - 35 - label_w),
+                                    AGENT_HUE["claude"])
                         + [(heat(used), pct_text(pct)),
                          pace_cell(lead(pct, window, ts)),
                          (BAD if sev not in ("normal", "") else DIM,
@@ -1367,7 +1369,8 @@ def codex_tab(state, w, h):
             # spent, and the inverse painted a 26%-used week amber
             rows.append(seg([(DIM, " " + pad(text, label_w) + " ")]
                             + paced_bar(used, elapsed_of(secs, reset),
-                                        max(8, w - 34 - label_w))
+                                        max(8, w - 34 - label_w),
+                                        AGENT_HUE["codex"])
                             + [(heat(used), pct_text(pct)),
                              pace_cell(lead(pct, secs, reset)),
                              (DIM, "  " + when)], w - 1))
@@ -1591,7 +1594,7 @@ def grok_tab(state, w, h):
             span, reset_ts = finish - begin, finish
         rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"]))]
                         + paced_bar(used, elapsed_of(span, reset_ts),
-                                    max(10, w - 38))
+                                    max(10, w - 38), AGENT_HUE["grok"])
                         + [(DIM, "  credits used"),
                            pace_cell(lead(float(q["percent"]), span,
                                           reset_ts))], w - 1))
@@ -1870,7 +1873,7 @@ def antigravity_quota_rows(groups, w):
             rows.append(seg([(DIM, "   " + pad(window, label_w) + " ")]
                             + paced_bar(used, elapsed_of(
                                 ANTIGRAVITY_WINDOWS.get(window), reset),
-                                max(8, room))
+                                max(8, room), AGENT_HUE["antigravity"])
                             + [(heat(used), pct_text(pct)),
                              pace_cell(lead(pct,
                                             ANTIGRAVITY_WINDOWS.get(window),
@@ -2365,7 +2368,8 @@ def copilot_tab(state, w, h):
                 span = stamp - back.timestamp()
             rows.append(seg([(DIM, " " + name + " ")]
                             + paced_bar(used, elapsed_of(span, stamp),
-                                        max(8, w - 38 - label_w))
+                                        max(8, w - 38 - label_w),
+                                        AGENT_HUE["copilot"])
                             + [(heat(used), pct_text(pct)),
                                pace_cell(lead(pct, span, stamp))], w - 1))
             # A pool can carry its own reset, in which case it is not on the
@@ -2539,7 +2543,29 @@ def elapsed_of(secs, reset):
     return (secs - left) / secs
 
 
-def paced_bar(used, elapsed, room):
+# The dark end of every agent ramp. The two stops above it are measured, not
+# picked: 0.51 keeps the dimmest filled cell at 3:1 against the background for
+# the darkest agent hue, and 0.34 leaves the empty track at least as visible
+# as the flat GRID it replaces (2.20:1 against 2.16:1).
+BAR_FLOOR = (30, 38, 52)
+
+
+def blend(hue, t):
+    """A tint of an agent's colour as a tuple, t running dark to full."""
+    return tuple(int(round(BAR_FLOOR[i] + (hue[i] - BAR_FLOOR[i]) * t))
+                 for i in range(3))
+
+
+def tint(hue, t):
+    """A tint of an agent's colour, t running dark to full.
+
+    Not `shade` - that name is taken by the calendars' four-step ramp, and
+    two functions of the same name meant the heatmaps drew with this one.
+    """
+    return rgb(*blend(hue, t))
+
+
+def paced_bar(used, elapsed, room, hue=None):
     """A quota bar with a mark where an even burn would have reached by now.
 
     The percentage alone cannot separate a lane that is 71% spent with three
@@ -2554,16 +2580,33 @@ def paced_bar(used, elapsed, room):
     """
     bar = meter(used, room)
     filled = bar.count("█")
-    if elapsed is None:
-        return [(heat(used), bar[:filled]), (GRID, bar[filled:])]
-    at = max(0, min(room - 1, int(round(elapsed * room))))
-    ahead = used <= elapsed
-    mark = (OK if ahead else WARN, "┃")
-    if at < filled:
-        return [(heat(used), bar[:at]), mark,
-                (heat(used), bar[at + 1:filled]), (GRID, bar[filled:])]
-    return [(heat(used), bar[:filled]), (GRID, bar[filled:at]), mark,
-            (GRID, bar[at + 1:])]
+    at = None
+    if elapsed is not None:
+        at = max(0, min(room - 1, int(round(elapsed * room))))
+    parts = []
+    for i, ch in enumerate(bar):
+        if i == at:
+            # The pace mark keeps its own green/amber: it is the one thing
+            # here that reports trouble, and trouble does not take on the
+            # colour of whoever is in trouble.
+            parts.append((OK if used <= (elapsed or 0) else WARN, "┃"))
+        elif i < filled:
+            # Filled cells run dark to full across the fill, so the bar is
+            # recognisably its agent's colour and still reads as a quantity
+            # without counting cells.
+            t = 0.51 + 0.49 * (i / float(max(1, filled - 1)))
+            parts.append((tint(hue, t) if hue else heat(used), ch))
+        else:
+            parts.append((tint(hue, 0.34) if hue else GRID, ch))
+    # Runs of one colour are merged so a row is a handful of escapes rather
+    # than one per cell.
+    merged = []
+    for colour, ch in parts:
+        if merged and merged[-1][0] == colour:
+            merged[-1] = (colour, merged[-1][1] + ch)
+        else:
+            merged.append((colour, ch))
+    return merged
 
 
 def summary_tab(states, w, h):
@@ -2626,7 +2669,8 @@ def summary_tab(states, w, h):
                 left = reset - time.time()
                 when = ("  " + left_span(left)) if left > 0 else "  resetting"
             rows.append(seg([(DIM, "   " + pad(label, label_w) + " ")]
-                            + paced_bar(used, gone, bar_room)
+                            + paced_bar(used, gone, bar_room,
+                                        AGENT_HUE.get(name))
                             + [(heat(used), pct_text(pct)),
                                pace_cell(lead(pct, secs, reset)),
                                (tint, when)], w - 1))
@@ -3070,22 +3114,21 @@ def cursor_quota(live, w):
     values = {"included": plan.get("totalPercentUsed"),
               "auto": plan.get("autoPercentUsed"),
               "api": plan.get("apiPercentUsed")}
-    for name, colour in CURSOR_LANES:
+    for name, stop in CURSOR_LANE_STOPS:
         pct = values.get(name)
         if pct is None:
             continue
         used = max(0.0, min(1.0, pct / 100.0))
-        bar = meter(used, max(8, w - 40))
-        filled = bar.count("█")
+        hue = blend(AGENT_HUE["cursor"], stop)
         # How far ahead of the clock you are: the share of the billing period
         # already gone, minus the share of the allowance spent. Positive is a
         # cushion, negative means this lane runs out before the cycle does.
         # It is what CodexBar calls "in reserve", and it is pure arithmetic on
         # the cycle dates - nothing new is fetched for it.
-        rows.append(seg([(DIM, " %-9s" % name),
-                         (rgb(*colour), bar[:filled]),
-                         (GRID, bar[filled:]),
-                         (rgb(*colour), pct_text(pct)),
+        rows.append(seg([(DIM, " %-9s" % name)]
+                        + paced_bar(used, elapsed_of(cycle_secs, reset_ts),
+                                    max(8, w - 40), hue)
+                        + [(rgb(*hue), pct_text(pct)),
                          pace_cell(lead(pct, cycle_secs, reset_ts))], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:

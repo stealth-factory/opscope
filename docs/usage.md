@@ -857,20 +857,37 @@ own dollar line already says.
 
 ## On colour
 
-Red means something is wrong, and nothing else. It appears on an error, and on
-a quota bar as it approaches empty — that is all.
+**Every quota bar is drawn in its own agent's colour**, dark at the left of the
+fill and full at the right, so a row says whose it is before you read the
+heading — and on the `+` tab, where six agents share a screen, without one.
+Claude keeps the terracotta of its own `/stats`, Codex its dark-grey-to-white,
+Grok its blue, Cursor its green; Copilot and Antigravity have no calendar to
+borrow from and were given hues clear of the amber and red reserved below.
 
-Everything else is either one hue at varying intensity (the token calendars,
-the model rankings — Claude's calendar keeps the terracotta of its own
-`/stats`, Codex's runs dark-grey to white, so two of them side by side are
-told apart by hue rather than by reading the heading) or a set of distinct hues for things that are genuinely
-different categories (Cursor's included / auto / api lanes, which follow the
-palette `cursor-agent` uses for the same three). A ranking bar coloured
-green-through-red implies the largest is the worst, which it is not; it is
-simply the largest.
+Cursor's three lanes are **three tints of that one green** rather than three
+unrelated hues. They are still categories, not a ramp, so they stay
+distinguishable — but they now read as Cursor's, which three borrowed colours
+never did.
+
+The two stops of that ramp are measured rather than chosen: `0.51` keeps the
+dimmest filled cell at **3:1** against the terminal background for the darkest
+agent hue, and `0.34` leaves the empty track at least as visible as the flat
+grey it replaced (2.20:1 against 2.16:1). Cursor's dimmest lane clears WCAG AA
+at 4.99:1.
+
+**Red still means something is wrong, and nothing else.** Moving identity onto
+the bar did not take severity off the row: it moved to the two places that
+carry it better — the **percentage**, which keeps the green-through-red heat,
+and the **pace mark**, green when the fill is behind it and amber when past. A
+bar that is 71% full in Copilot purple, with an amber mark behind the fill and
+`71%` in red beside it, says both things at once.
+
+The token calendars keep their own four-step single-hue ramps, and rankings are
+never green-through-red: that would imply the largest is the worst, which it is
+not — it is simply the largest.
 
 Every bar carries its label and its number, so colour is never the only thing
-saying what a row is.
+saying what a row is, and the pace mark is a glyph before it is a colour.
 
 ## The thing this widget does not do
 
