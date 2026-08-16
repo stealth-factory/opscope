@@ -1399,17 +1399,24 @@ def codex_tab(state, w, h):
                          (DIM, " tok/s   p90 "), (TXT, "%.0f" % p90),
                          (DIM, "   max "), (TXT, "%.0f" % rates[-1])], w - 1))
         hi = rates[-1] or 1
+        # The bucket count stays tied to the sample count - twenty-eight
+        # turns spread over fifty columns is a comb, not a distribution -
+        # but each bucket is then drawn as wide as the pane allows, so the
+        # chart fills its line instead of stopping a third of the way in.
         buckets = [0] * max(10, min(len(rates), w - 6))
         for r in rates:
             buckets[min(len(buckets) - 1,
                         int(r / hi * (len(buckets) - 1)))] += 1
-        top = max(buckets) or 1
-        for line in vbars([(b, AGENT) for b in buckets], 3):
+        cols = []
+        for b, wide in zip(buckets, spread(len(buckets), max(10, w - 3))):
+            cols.extend([(b, AGENT)] * wide)
+        for line in vbars(cols, 3):
             rows.append(seg([(RST, " ")] + line, w - 1))
-        rows.append(seg([(RST, " "), (GRID, "─" * len(buckets))], w - 1))
+        rows.append(seg([(RST, " "), (GRID, "─" * len(cols))], w - 1))
+        right = "%.0f tok/s" % rates[-1]
         rows.append(seg([(DIM, " 0 tok/s"),
-                         (DIM, " " * max(1, len(buckets) - 18)),
-                         (DIM, "%.0f tok/s" % rates[-1])], w - 1))
+                         (DIM, " " * max(1, len(cols) - 8 - len(right))),
+                         (DIM, right)], w - 1))
     grid, peak, best, facts = day_calendar(state.get("daily") or {}, w,
                                            CODEX_STEPS)
     if grid:
