@@ -175,6 +175,7 @@ def sessions():
             "mss": num(m.get("mss")),
             "lastsnd": num(m.get("lastsnd")),
             "lastrcv": num(m.get("lastrcv")),
+            "raw": m,
         })
         head = None
     return found
@@ -317,7 +318,7 @@ def colour_for(ratio, loss):
 SERIES = "●▲■◆✚✦"          # one glyph per session, so the plot reads mono
 
 
-def build_graph(rows, history, gw, gh):
+def build_graph(rows, history, gw, gh, start=0):
     """Log-scale multi-series plot of round-trip time.
 
     Log because the sessions on one machine can differ by two orders of
@@ -333,7 +334,10 @@ def build_graph(rows, history, gw, gh):
         vals = list(history.get(row["peer"]) or [])[-gw:]
         if not vals:
             continue
-        series.append((i, vals))
+        # `start` keeps a session's glyph and hue the same on its own screen
+        # as in the list: opening the ▲ row and finding a ● chart reads as a
+        # different connection.
+        series.append((start + i, vals))
         lo = min(vals) if lo is None else min(lo, min(vals))
         hi = max(vals) if hi is None else max(hi, max(vals))
     if lo is None:
@@ -371,10 +375,10 @@ def build_graph(rows, history, gw, gh):
     return grid, tone, (lo, hi)
 
 
-def graph_rows(rows, history, w, h):
+def graph_rows(rows, history, w, h, start=0):
     gw = max(10, w - 9)
     gh = max(4, h)
-    grid, tone, bounds = build_graph(rows, history, gw, gh)
+    grid, tone, bounds = build_graph(rows, history, gw, gh, start)
     if bounds is None:
         return grid
     import math
@@ -513,6 +517,83 @@ def detail_rows(row, names, w, selected=False, hue=None, glyph="●"):
                  ([(" · idle ", DIM), (span(idle), TXT)], None)])]
 
 
+def detail_view(row, names, history, w, h, idx=0):
+    """One connection, in full.
+
+    The list answers "is anything wrong"; this answers "with what, and how
+    badly". Everything here is a number the kernel already keeps for this
+    socket - nothing is derived beyond the two percentages, and both say
+    what they are measured over.
+    """
+    raw = row.get("raw") or {}
+    users = names.get(row["ip"]) or []
+    rows = [title("connection", w, LINK)]
+    rows.append(seg([(SESSION_HUES[idx % len(SESSION_HUES)],
+                      " " + SERIES[idx % len(SERIES)] + " "),
+                     (TXT, row["ip"]),
+                     (DIM, "  · port %d" % row["port"]),
+                     (DIM, ("  " + users[0][0]) if users else "")], w - 1))
+    if users:
+        rows.append(seg([(DIM, "  logins from this address: "),
+                         (TXT, ", ".join(t for _u, t in users))], w - 1))
+    rows.append("")
+
+    def field(label, value, colour=TXT, note=""):
+        if value in (None, "", "--"):
+            return
+        rows.append(seg([(DIM, "  %-16s" % label), (colour, str(value)),
+                         (DIM, "   " + note if note else "")], w - 1))
+
+    ratio = quality(row)
+    field("round trip", ms(row["rtt"]) if row["rtt"] else None,
+          colour_for(ratio, row.get("recent_loss")),
+          "%.1fx this path's best" % ratio if ratio else "")
+    field("best ever", ms(row["floor"]) if row["floor"] else None, DIM,
+          "the floor; the gap above it is congestion")
+    field("jitter", ms(row["jitter"]) if row["jitter"] else None, DIM,
+          "variation in the round trip")
+    field("timeout", ms(num(raw.get("rto"))) if raw.get("rto") else None, DIM,
+          "how long before a lost packet is resent")
+    rows.append("")
+
+    lifetime = (100.0 * row["retrans_bytes"] / row["sent"]
+                if row["sent"] else 0.0)
+    loss = row.get("recent_loss")
+    field("loss just now", "%.2f%%" % loss if loss is not None else None,
+          BAD if (loss or 0) >= 0.5 else TXT, "resent since the last look")
+    field("loss lifetime", "%.2f%%" % lifetime, DIM,
+          "%s resent of %s" % (size_of(row["retrans_bytes"]),
+                               size_of(row["sent"])))
+    field("reordering", raw.get("reord_seen"), DIM,
+          "times packets arrived out of order")
+    rows.append("")
+
+    field("sent", size_of(row["sent"]), TXT)
+    field("received", size_of(row["recv"]), TXT)
+    field("achieved", rate(row.get("delivery")), TXT,
+          "what it has delivered, not its capacity")
+    field("pacing at", rate(num(raw.get("pacing_rate"))), DIM,
+          "the rate the kernel is willing to send at")
+    field("in flight", raw.get("cwnd"), DIM,
+          "packets allowed unacknowledged at once")
+    field("packet size", "%s bytes" % raw["mss"] if raw.get("mss") else None,
+          DIM)
+    idle = min([x for x in (row.get("lastsnd"), row.get("lastrcv"))
+                if x is not None] or [None])
+    field("idle", span(idle), DIM, "since anything crossed either way")
+    rows.append("")
+
+    room = h - len(rows) - 4
+    if room >= 5:
+        rows.extend(graph_rows([row], history, w, room, idx))
+        rows.append(seg([(DIM, " " * 7),
+                         (GRID, "└" + "─" * max(10, w - 9))], w - 1))
+        oldest = REFRESH * len(history.get(row["peer"]) or [])
+        rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
+                         (DIM, " " * max(1, w - 26)), (DIM, "now")], w - 1))
+    return rows
+
+
 def main():
     maybe_help(__doc__)
     global REFRESH
@@ -530,7 +611,7 @@ def main():
     keyboard = Keyboard()
     store = Store()
     threading.Thread(target=store.run, daemon=True).start()
-    selected, hide_idle, tick = 0, False, 0
+    selected, hide_idle, tick, view = 0, False, 0, None
 
     while True:
         tick += 1
@@ -541,6 +622,10 @@ def main():
                 selected -= 1
             elif key in ("down", "j"):
                 selected += 1
+            elif key in ("enter", "i"):
+                view = None if view else "detail"
+            elif key == "esc":
+                view = None
             elif key == "o":
                 hide_idle = not hide_idle
             elif key == "r":
@@ -551,6 +636,19 @@ def main():
         shown = [r for r in rows_all
                  if not (hide_idle and (r.get("lastrcv") or 0) > IDLE_AFTER * 1000)]
         selected = max(0, min(selected, len(shown) - 1)) if shown else 0
+
+        # One connection in full, on its own screen. The list is for
+        # noticing; this is for looking into, and the two want different
+        # amounts of room for the same chart.
+        if view and shown:
+            pick = min(selected, len(shown) - 1)
+            draw(detail_view(shown[pick], names, history, w, h, pick)
+                 + [""] * 2
+                 + [" " + line for line in
+                    pack_hints([[(DIM, "[esc] back")], [(DIM, "[r]efresh")],
+                                [(DIM, "[q]uit")]], w - 2)], w, h)
+            time.sleep(0.2)
+            continue
 
         rows = [title("connections", w, LINK)]
         rows.append(seg([(DIM, " %d inbound" % len(rows_all)),
@@ -568,14 +666,7 @@ def main():
         else:
             rows.extend(table_rows(shown, names, history, w, selected))
             rows.append("")
-            # Chart first, session detail below it: the chart is what the
-            # widget is for, and the blocks are reference material you look
-            # down at. The detail area is sized to hold two blocks and
-            # scrolls with the selection, so a fourth machine connecting
-            # does not shrink the graph.
-            blocks, per = len(shown), 4
-            area = min(blocks * per, max(per, 2 * per))
-            room = h - len(rows) - 4 - area
+            room = h - len(rows) - 4
             if room >= 5:
                 rows.extend(graph_rows(shown, history, w, room))
                 rows.append(seg([(DIM, " " * 7),
@@ -585,22 +676,11 @@ def main():
                 rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                                  (DIM, " " * max(1, w - 26)),
                                  (DIM, "now")], w - 1))
-            visible = max(1, area // per)
-            top = max(0, min(selected - visible + 1, blocks - visible))
-            top = max(0, top)
-            for i in range(top, min(blocks, top + visible)):
-                rows.append("")
-                rows.extend(detail_rows(shown[i], names, w, i == selected,
-                                        SESSION_HUES[i % len(SESSION_HUES)],
-                                        SERIES[i % len(SERIES)]))
-            if blocks > visible:
-                rows.append(seg([(DIM, "  %d-%d of %d · ↑↓ for the rest"
-                                  % (top + 1, min(blocks, top + visible),
-                                     blocks))], w - 1))
 
         while len(rows) < h - 2:
             rows.append("")
         hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(DIM, "[↵] open")],
                  [(DIM, "[o]%s idle" % ("show" if hide_idle else "hide"))],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         for line in pack_hints(hints, w - 2):

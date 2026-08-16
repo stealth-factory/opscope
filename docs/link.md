@@ -96,9 +96,27 @@ are still true about the path, just not about the terminal.
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a session |
+| `↵` / `i` | open that connection on its own screen |
+| `esc` | back to the list |
 | `o` | hide or show sessions idle over five minutes |
 | `r` | re-read now |
 | `q` | quit |
+
+## Two screens
+
+The list is for noticing; the second screen is for looking into. Opening a
+session gives it the whole pane: every figure the kernel keeps for that socket,
+labelled in words rather than in `ss` abbreviations, and a chart of nothing but
+that connection.
+
+Some of it only makes sense with room to explain, which is why it lives here
+rather than in the table — `timeout` is how long before a lost packet is
+resent, `in flight` is how much the kernel will leave unacknowledged at once
+and collapses before your typing starts to feel bad, `pacing at` is the rate it
+is willing to send at as distinct from what it achieved.
+
+A session keeps its glyph and colour across both screens. Opening the `▲` row
+and finding a `●` chart reads as a different connection.
 
 ## Cost
 
