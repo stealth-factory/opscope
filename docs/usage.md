@@ -45,6 +45,12 @@ the four that publish one.
  Sat    ░░    ░░    ██    ░░    ·
  Sun    ·     ░░    ▒▒    ░░    ·
   less ░░▒▒▓▓██ more
+
+ ── SUBSCRIPTION ── max
+  member since     8 Mar 2024 · 2.4y ago
+  status           active
+  rate limit tier  default_claude_max_20x
+  billing          stripe subscription
 ```
 
 ## Why tabs
@@ -240,10 +246,19 @@ for.
 
 ## Which subscription, and since when
 
-Every tab that shows a quota now says what the quota is *of*. A percentage
-without its plan is half a fact: an enterprise seat is why two of Copilot's
-three pools come back unlimited, and Cursor's `$400.00` limit means nothing
-until you know that is what Ultra includes for `$200/mo`.
+**Every tab ends with a `SUBSCRIPTION` section**, in the same shape and the
+same place. A percentage without its plan is half a fact: an enterprise seat is
+why two of Copilot's three pools come back unlimited, and Cursor's `$400.00`
+limit means nothing until you know that is what Ultra includes for `$200/mo`.
+
+It goes **last** rather than first because it is context for the whole tab, not
+the headline. What is left of the quota, and what was spent, are what anyone
+opens the pane to see; which plan those belong to is the footnote that makes
+them legible, and it changes about once a year.
+
+The section is appended in one place rather than by five tabs that each end
+differently, which is also what keeps the blank line before it consistent —
+some tabs already finish on a blank and would otherwise leave two.
 
 | | where it comes from | what it says |
 |---|---|---|
@@ -251,9 +266,12 @@ until you know that is what Ultra includes for `$200/mo`.
 | **Cursor** | `GetPlanInfo` on the same Connect service | plan name, price, included amount, who bills it |
 | **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
 | **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
-| **Grok** | the client log | tier and billing period, which it already showed |
+| **Grok** | the client log | tier, billing period, on-demand and prepaid balances |
 
-Codex gets three lines rather than a section because three lines is all it
+Grok's tier moved out of its quota heading to join them, so no agent states
+its plan in two different shapes.
+
+Codex's section is three lines rather than six because three lines is all it
 publishes. Its `approx_local_messages` and `approx_cloud_messages` read zero
 here for a real reason — they are estimates derived from a credit balance, and
 the balance is zero.

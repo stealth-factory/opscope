@@ -747,6 +747,29 @@ def read_codex():
             "last": os.path.getmtime(files[-1])}
 
 
+def codex_plan_rows(state, w):
+    """Plan type and a credit balance - all Codex publishes about the plan.
+
+    Three lines rather than the section Copilot and Cursor get, because
+    three lines is genuinely all there is. Credits belong here rather than
+    under the quota bars: they are what the plan grants, not a window.
+    """
+    live = state.get("live") or {}
+    plan = live.get("plan_type") or (state.get("limits") or {}).get("plan_type")
+    credits = (live.get("credits")
+               or (state.get("limits") or {}).get("credits") or {})
+    pairs = []
+    if credits:
+        pairs.append(("credits", "unlimited" if credits.get("unlimited")
+                      else str(credits.get("balance") or "0")))
+    if (live.get("spend_control") or {}).get("individual_limit"):
+        pairs.append(("spend limit",
+                      str(live["spend_control"]["individual_limit"])))
+    if not plan and not pairs:
+        return []
+    return plan_rows(plan, pairs, w)
+
+
 def codex_tab(state, w, h):
     if not state.get("ok"):
         return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
@@ -833,18 +856,6 @@ def codex_tab(state, w, h):
         # Everything Codex publishes about the subscription itself: a plan
         # word and a credit balance, which is why this is three lines and
         # not the section Copilot and Cursor get. Credits live here rather
-        # than under the bars: they are what the plan grants, not a window.
-        credits = (live.get("credits")
-                   or (state.get("limits") or {}).get("credits") or {})
-        pairs = []
-        if credits:
-            pairs.append(("credits", "unlimited" if credits.get("unlimited")
-                          else str(credits.get("balance") or "0")))
-        if (live.get("spend_control") or {}).get("individual_limit"):
-            pairs.append(("spend limit",
-                          str(live["spend_control"]["individual_limit"])))
-        if plan or pairs:
-            rows.extend(plan_rows(plan, pairs, w))
     rows.append(seg([(LBL, " ── TOTALS ── "),
                      (DIM, "%d sessions · newest %s ago"
                       % (state["sessions"], ago(state["last"])))], w - 1))
@@ -1004,6 +1015,27 @@ def read_grok():
             "quota": grok_quota()}
 
 
+def grok_plan_rows(q, w):
+    """Grok states its tier and the kind of period it bills in, and no more.
+
+    Both arrive on the client log beside the credit percentage, so this
+    costs nothing extra to show.
+    """
+    if not q:
+        return []
+    pairs = []
+    kind = (q.get("kind") or "").replace("USAGE_PERIOD_TYPE_", "").lower()
+    if kind:
+        pairs.append(("billing period", kind))
+    cap = q.get("on_demand_cap")
+    if cap is not None:
+        pairs.append(("on-demand", "%s of %s used"
+                      % (q.get("on_demand_used") or 0, cap)))
+    if q.get("prepaid") is not None:
+        pairs.append(("prepaid balance", str(q["prepaid"])))
+    return plan_rows(q.get("tier"), pairs, w)
+
+
 def grok_tab(state, w, h):
     if not state.get("ok"):
         return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
@@ -1024,8 +1056,7 @@ def grok_tab(state, w, h):
                   else (q.get("kind") or "").replace(
                       "USAGE_PERIOD_TYPE_", "").lower() or "current")
         rows.append(seg([(LBL, " ── %s QUOTA ── " % period.upper()),
-                         (TXT, q.get("tier") or "?"),
-                         (DIM, " · resets in %.1f days" % left
+                         (DIM, "resets in %.1f days" % left
                           if left is not None and left >= 0 else "")], w - 1))
         rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"])),
                          (heat(used), meter(used, max(10, w - 30))),
@@ -1235,8 +1266,21 @@ def plan_rows(headline, pairs, w, note="", wrapped=None):
             rows.append(seg([(DIM, "  " + pad(wrapped[0] if not i else "",
                                               label_w) + "  "),
                              (OK, " · ".join(part))], w - 1))
-    rows.append("")
     return rows
+
+
+def last_section(rows, block):
+    """Put a section at the end of a tab with exactly one blank before it.
+
+    Every tab ends with its subscription block, so the separator is owned in
+    one place rather than by five callers who each end differently - some
+    already finish on a blank line and would otherwise leave two.
+    """
+    if not block:
+        return rows
+    while rows and rows[-1] == "":
+        rows.pop()
+    return rows + [""] + block
 
 
 def copilot_plan_rows(live, w):
@@ -1335,9 +1379,6 @@ def copilot_tab(state, w, h):
     elif state.get("live_why"):
         rows.append(seg([(WARN, "  no quota: " + state["live_why"])], w - 1))
         rows.append("")
-
-    if live:
-        rows += copilot_plan_rows(live, w)
 
     use = state.get("usage")
     if use:
@@ -1599,8 +1640,6 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
 
 def claude_tab(state, w, h):
     rows = claude_quota(state.get("quota"), w)
-    if state.get("profile"):
-        rows += claude_plan_rows(state["profile"], w)
     if not state.get("ok"):
         return rows + [seg([(BAD, "  no stats cache: %s"
                              % state.get("why"))], w - 1)]
@@ -1796,11 +1835,9 @@ def cursor_spend_rows(spend, w):
 def cursor_tab(state, w, h):
     if not state.get("ok"):
         return (cursor_quota(state.get("live"), w)
-                + cursor_plan_rows(state.get("plan"), w)
                 + cursor_spend_rows(state.get("spend"), w)
                 or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
     rows = cursor_quota(state.get("live"), w)
-    rows += cursor_plan_rows(state.get("plan"), w)
     rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"
@@ -1941,19 +1978,31 @@ def main():
         rows.append(tab_bar(tabs[active], installed, tabs, w))
         rows.append("")
 
+        # Every agent ends on the same section, in the same place. Which
+        # subscription a quota belongs to is context for the whole tab, not
+        # the headline, so it sits under the numbers it explains - and it is
+        # appended here rather than by five tabs that each end differently.
         name = tabs[active]
+        sub = []
         if name == "claude":
             body = claude_tab(claude, w, h)
+            if claude.get("profile"):
+                sub = claude_plan_rows(claude["profile"], w)
         elif name == "cursor":
             body = cursor_tab(cursor, w, h)
+            sub = cursor_plan_rows(cursor.get("plan"), w)
         elif name == "codex":
             body = codex_tab(codex, w, h)
+            sub = codex_plan_rows(codex, w)
         elif name == "grok":
             body = grok_tab(grok, w, h)
+            sub = grok_plan_rows(grok.get("quota"), w)
         elif name == "copilot":
             body = copilot_tab(copilot, w, h)
+            sub = copilot_plan_rows(copilot.get("live") or {}, w)
         else:
             body = elsewhere_tab(name, installed, w, h)
+        body = last_section(body, sub)
 
         hints = [[(ACCENT, "←→"), (DIM, " agent")],
                  [(ACCENT, "↑↓"), (DIM, " scroll")],
