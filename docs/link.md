@@ -1,0 +1,127 @@
+# `link.py`
+
+How good the connection is between this machine and whoever is connected to
+it — measured, not probed.
+
+```
+╺━ CONNECTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 2 inbound · measured by the kernel, nothing sent   every 2s
+
+  PEER                  NOW   FLOOR  JITTER    LOSS  ACHIEVED   IDLE
+● 198.51.100.20 will   41ms    20ms    20ms   0.00%   3.3Mbps     0s
+▲ 100.64.0.24          55ms    40ms    27ms   0.00% 526.6kbps     5m
+
+   73ms│
+       │                                                ●
+       │                                               ▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+       │                                                ││
+   39ms│                                                ││ ●     ●  ●
+       │                                               ● ● │● ●   ● ●
+       └──────────────────────────────────────────────────────────────
+        4m ago                                                     now
+```
+
+## Why this is not the latency monitor
+
+`latency.py` measures paths it was told to measure, by sending pings. This one
+measures the path **you are on**, and sends nothing at all.
+
+Every established TCP connection has a kernel that has been timing it since it
+opened. `ss -tin` hands that over: smoothed round-trip time and its variance,
+the best round trip the path has ever managed, retransmitted bytes, the
+delivery rate actually achieved, the congestion window. All of it measured on
+the packets your session was already sending.
+
+So this widget adds no traffic to the link it is describing — which matters,
+because a probe that competes with the session it measures is measuring itself.
+
+## Which sessions
+
+Every established connection arriving at a port this machine **listens on**.
+That is SSH, and anything else accepting terminals, found without naming a
+single port number: inbound is defined by "came to a port we answer on", so a
+terminal server on some high port is included the day it starts listening.
+
+Loopback is excluded. `::ffff:127.0.0.1` — an IPv4 address wearing an IPv6 hat
+— slipped past the first version of that filter and put a 22-microsecond local
+socket on the chart, which flattened every real session against the top of a
+log axis.
+
+**It cannot tell you which session is yours.** The widget runs in a pane owned
+by the terminal server, not by your `sshd`, so there is no honest way to point
+at one row and say "this is you". With one session connected, it is you. With
+several, they are all listed and none is marked — which is the useful answer
+anyway when the question is "how is everything reaching this box".
+
+## The columns
+
+| | |
+|---|---|
+| **NOW** | the kernel's smoothed round-trip time, this instant |
+| **FLOOR** | `minrtt` — the best this path has ever done. The *gap* between it and NOW is the congestion, and it is why NOW alone means little |
+| **JITTER** | RTT variance. A steady 90ms link types better than one flapping between 20 and 90 |
+| **LOSS** | retransmitted bytes **since the last poll**, not since the connection opened. A session running for a day has long forgiven whatever went wrong at breakfast |
+| **ACHIEVED** | `delivery_rate` — what the connection *has* delivered. Not capacity: measuring that means flooding the link, which this repo will not do to a link someone is typing on |
+
+Colour is judged against the socket's own floor rather than a fixed threshold:
+40ms is excellent from another continent and poor from the next rack, and the
+kernel already knows which this is. Amber past 1.6× the floor, red past 3× or
+above half a percent of loss.
+
+## The chart
+
+Log scale, one column per sample, newest on the right, one glyph and hue per
+session so the trace reads without colour. Log because the sessions on one
+machine can differ by two orders of magnitude — a laptop across town and a
+phone across an ocean — and a linear axis draws the near one as a flat line
+along the bottom.
+
+Only the top, middle and bottom rows carry an axis label: a number on every
+row is a table pretending to be an axis.
+
+## What it cannot see
+
+**mosh is invisible.** It is UDP, and none of this exists for a UDP socket —
+there is no retransmission, no congestion window, no kernel RTT to read. A
+mosh session simply does not appear, which is the honest outcome, and worth
+knowing before concluding nobody is connected.
+
+The same is true of anything else that carries a session over UDP, including
+some VPN-tunnelled setups where the TCP socket the kernel sees is the tunnel's
+rather than the session's — in that case the numbers describe the tunnel, and
+are still true about the path, just not about the terminal.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | select a session |
+| `o` | hide or show sessions idle over five minutes |
+| `r` | re-read now |
+| `q` | quit |
+
+## Cost
+
+One `ss` invocation per refresh, default every two seconds, and one `who`.
+**No network traffic whatsoever** — every number is read from the kernel's
+existing accounting for sockets that already exist.
+
+## Configuration
+
+```json
+"link": {
+  "ports": [],
+  "refresh": 2,
+  "history": 120
+}
+```
+
+`ports` empty means every port this machine listens on, which is the useful
+default. Naming ports instead pins the set — worth doing if something else
+here accepts connections you would rather not watch. `history` is how many
+samples the chart remembers.
+
+## Needs
+
+`ss`, from iproute2, and `who`. Both are standard on Linux. The widget exits
+with a message rather than drawing an empty frame if `ss` is missing.

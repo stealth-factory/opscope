@@ -87,5 +87,11 @@
     "rates": {},
     "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
     "plan_cost": {}
+  },
+  "link": {
+    "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+    "ports": [],
+    "refresh": 2,
+    "history": 120
   }
 }
