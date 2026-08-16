@@ -233,6 +233,20 @@ def iso_epoch(s):
         return None
 
 
+def iso_day(s):
+    """A date, kept in the zone it arrived in.
+
+    assigned_date carries the account's own offset. Converting it to this
+    machine's zone can move it a day - 3 Jun at 12:10 -07:00 is 4 Jun in UTC -
+    and then the pane disagrees with what GitHub shows for the same seat.
+    """
+    try:
+        d = datetime.datetime.fromisoformat(re.sub(r"Z$", "+00:00", s))
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    return d.strftime("%-d %b %Y")
+
+
 def quota_window(reset_ts):
     """The span a monthly quota covers, worked back from its reset.
 
@@ -1049,12 +1063,73 @@ def read_copilot():
     return out
 
 
+# The account's own description of itself. Names are what the API returns,
+# shortened only where it repeats itself.
+COPILOT_FEATURES = (("chat_enabled", "chat"),
+                    ("cli_enabled", "cli"),
+                    ("is_mcp_enabled", "mcp"),
+                    ("cli_remote_control_enabled", "remote control"),
+                    ("cloud_session_storage_enabled", "cloud sessions"),
+                    ("copilot_app_enabled", "app"),
+                    ("editor_preview_features_enabled", "editor previews"),
+                    ("copilotignore_enabled", "copilotignore"))
+
+
+def copilot_plan_rows(live, w):
+    """Which subscription this quota belongs to, and since when.
+
+    A percentage means little without the seat behind it: an enterprise seat
+    is why two of the three pools come back unlimited, and the assignment
+    date is the only thing here that says how long it has been so.
+    """
+    rows = [seg([(LBL, " ── SUBSCRIPTION ── "),
+                 (TXT, live.get("copilot_plan") or "unknown"),
+                 (WARN, "   upgradeable" if live.get("can_upgrade_plan")
+                  else "")], w - 1)]
+    pairs = []
+    since = iso_epoch(live.get("assigned_date") or "")
+    day = iso_day(live.get("assigned_date") or "")
+    if since and day:
+        pairs.append(("seat since", "%s · %s ago" % (day, ago(since))))
+    orgs = [o.get("name") or o.get("login")
+            for o in (live.get("organization_list") or []) if o]
+    if orgs:
+        pairs.append(("organisation", ", ".join(orgs)))
+    if live.get("login"):
+        pairs.append(("account", live["login"]))
+    if live.get("access_type_sku"):
+        pairs.append(("sku", live["access_type_sku"]))
+    if live.get("token_based_billing"):
+        pairs.append(("billing", "token-based"))
+    label_w = max(len(k) for k, _ in pairs) if pairs else 0
+    for key, value in pairs:
+        rows.append(seg([(DIM, "  " + pad(key, label_w) + "  "),
+                         (TXT, value)], w - 1))
+    # Wrapped rather than clipped: a truncated list reads as a shorter one,
+    # and only the first line takes the label so the column stays readable.
+    on = [name for flag, name in COPILOT_FEATURES if live.get(flag)]
+    budget = max(10, w - label_w - 6)
+    lines, line = [], []
+    for name in on:
+        if line and len(" · ".join(line + [name])) > budget:
+            lines.append(line)
+            line = []
+        line.append(name)
+    if line:
+        lines.append(line)
+    for i, part in enumerate(lines):
+        rows.append(seg([(DIM, "  " + pad("enabled" if not i else "",
+                                          label_w) + "  "),
+                         (OK, " · ".join(part))], w - 1))
+    rows.append("")
+    return rows
+
+
 def copilot_tab(state, w, h):
     live = state.get("live") or {}
     rows = []
     snaps = live.get("quota_snapshots") or {}
     if snaps:
-        plan = live.get("copilot_plan") or ""
         # A monthly quota reset arrives as a bare date; days remaining is the
         # form every other tab here uses, and the one anyone reads.
         # quota_reset_date_utc, not quota_reset_date: the bare date carries
@@ -1067,8 +1142,7 @@ def copilot_tab(state, w, h):
             days = int((stamp - time.time()) // 86400)
             when = "resets in %dd" % days if days > 0 else "resets today"
         rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
-                         (DIM, " · account-wide   "), (DIM, plan),
-                         (DIM, "  " + when)], w - 1))
+                         (DIM, " · account-wide   "), (DIM, when)], w - 1))
         span = quota_window(stamp)
         if span:
             rows.append(seg([(DIM, "  window "), (TXT, span),
@@ -1117,6 +1191,9 @@ def copilot_tab(state, w, h):
     elif state.get("live_why"):
         rows.append(seg([(WARN, "  no quota: " + state["live_why"])], w - 1))
         rows.append("")
+
+    if live:
+        rows += copilot_plan_rows(live, w)
 
     use = state.get("usage")
     if use:
