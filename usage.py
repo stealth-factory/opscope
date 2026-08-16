@@ -72,6 +72,47 @@ REFRESH = float(_CFG["refresh"])
 RATES = _CFG["rates"] or {}
 RATE_KINDS = ("input", "output", "cache_read", "cache_write")
 
+# Anthropic's published list prices, US$ per million tokens, copied from
+# platform.claude.com/docs/en/docs/about-claude/pricing on the date below.
+# They are shipped because they are published facts with a citable source,
+# not a guess - but they go stale silently, so the date is carried onto the
+# screen with them and config overrides any line.
+#
+# cache_write uses the 5-minute write rate (1.25x input), which is what
+# Claude Code takes by default; a 1-hour write is 2x and the cache does not
+# record which kind it was, so the cheaper, commoner one is assumed and
+# said so here rather than quietly averaged.
+LIST_RATES_AS_OF = "Aug 2026"
+LIST_RATES_SOURCE = "platform.claude.com pricing"
+LIST_RATES = {
+    "claude-fable-5":   {"input": 10, "output": 50, "cache_write": 12.50,
+                         "cache_read": 1},
+    "claude-mythos-5":  {"input": 10, "output": 50, "cache_write": 12.50,
+                         "cache_read": 1},
+    "claude-opus-5":    {"input": 5, "output": 25, "cache_write": 6.25,
+                         "cache_read": 0.50},
+    "claude-opus-4-8":  {"input": 5, "output": 25, "cache_write": 6.25,
+                         "cache_read": 0.50},
+    "claude-opus-4-7":  {"input": 5, "output": 25, "cache_write": 6.25,
+                         "cache_read": 0.50},
+    "claude-opus-4-6":  {"input": 5, "output": 25, "cache_write": 6.25,
+                         "cache_read": 0.50},
+    "claude-opus-4-5":  {"input": 5, "output": 25, "cache_write": 6.25,
+                         "cache_read": 0.50},
+    "claude-opus-4-1":  {"input": 15, "output": 75, "cache_write": 18.75,
+                         "cache_read": 1.50},
+    "claude-sonnet-5":  {"input": 2, "output": 10, "cache_write": 2.50,
+                         "cache_read": 0.20},
+    "claude-sonnet-4-6": {"input": 3, "output": 15, "cache_write": 3.75,
+                          "cache_read": 0.30},
+    "claude-sonnet-4-5": {"input": 3, "output": 15, "cache_write": 3.75,
+                          "cache_read": 0.30},
+    "claude-haiku-4-5": {"input": 1, "output": 5, "cache_write": 1.25,
+                         "cache_read": 0.10},
+    "claude-haiku-3-5": {"input": 0.80, "output": 4, "cache_write": 1,
+                         "cache_read": 0.08},
+}
+
 OK = rgb(90, 240, 160)
 WARN = rgb(255, 200, 90)
 BAD = rgb(255, 100, 110)
@@ -1562,21 +1603,28 @@ def no_local(what, run, w):
 
 
 def rate_for(model):
-    """The configured rate for a model: exact name, then longest prefix.
+    """The rate for a model, and where it came from.
 
-    Keyed by model rather than by agent, because a model has one list price
-    wherever it ran - the same claude-sonnet-5 rate prices Copilot's turns
-    and Claude Code's. A "*" entry catches anything left over.
+    Config wins outright, then the published list prices. Keyed by model
+    rather than by agent, because a model has one list price wherever it
+    ran - the same claude-sonnet-5 entry prices Copilot's turns and Claude
+    Code's. Longest matching name wins, so claude-opus-4 does not shadow
+    claude-opus-4-8, and a "*" entry catches anything left over.
     """
     name = str(model or "")
-    if name in RATES:
-        return RATES[name]
-    best = None
-    for key, rate in RATES.items():
-        if key != "*" and key in name:
-            if best is None or len(key) > len(best[0]):
-                best = (key, rate)
-    return best[1] if best else RATES.get("*")
+    for table, origin in ((RATES, "config"), (LIST_RATES, "list")):
+        if name in table:
+            return table[name], origin
+        best = None
+        for key, rate in table.items():
+            if key != "*" and key in name:
+                if best is None or len(key) > len(best[0]):
+                    best = (key, rate)
+        if best:
+            return best[1], origin
+        if table.get("*"):
+            return table["*"], origin
+    return None, None
 
 
 def metered_rows(entries, w, note=""):
@@ -1591,25 +1639,34 @@ def metered_rows(entries, w, note=""):
     if not entries:
         return []
     priced, total, missing = [], 0.0, []
+    origins = set()
     for model, tokens in entries:
-        rate = rate_for(model)
+        rate, origin = rate_for(model)
         if not rate:
             missing.append(model)
             continue
         cost = sum((tokens.get(kind) or 0) / 1e6 * float(rate.get(kind) or 0)
                    for kind in RATE_KINDS)
         total += cost
+        origins.add(origin)
         priced.append((model, cost))
     if not priced:
         if not RATES:
             return [seg([(LBL, " ── METERED ── "),
-                         (DIM, "no rates configured")], w - 1)] + no_local(
+                         (DIM, "no published rates for these models")],
+                        w - 1)] + no_local(
                 "Set usage.rates in config.json - US$ per million tokens,"
                 " keyed by model.", "", w) + [""]
         return []
+    # Where the prices came from belongs on screen: a list price is a dated
+    # fact that goes stale in silence, and a configured one is the reader's
+    # own assertion. Neither should be mistaken for the other.
+    where = ("your configured rates" if origins == {"config"}
+             else "list prices · %s" % LIST_RATES_AS_OF if origins == {"list"}
+             else "list prices · %s, some configured" % LIST_RATES_AS_OF)
     rows = [seg([(LBL, " ── METERED ── "),
                  (AGENT, "$%.2f" % total),
-                 (DIM, " at your configured rates"),
+                 (DIM, " at " + where),
                  (DIM, "   %s" % note if note else "")], w - 1)]
     label_w = max(len(m) for m, _ in priced)
     for model, cost in sorted(priced, key=lambda x: -x[1]):

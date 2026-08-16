@@ -83,20 +83,7 @@
     "agents": [],
     "exclude_agents": [],
     "refresh": 30,
-    "_rates_comment": "US$ per million tokens, keyed by model - yours to set, nothing is shipped. Only Cursor publishes what it charges; for every other agent this is the only honest way to answer 'what would this have cost'. Longest matching model name wins; '*' catches the rest.",
-    "rates": {
-      "claude-opus-5": {
-        "input": 15,
-        "output": 75,
-        "cache_read": 1.5,
-        "cache_write": 18.75
-      },
-      "claude-sonnet-5": {
-        "input": 3,
-        "output": 15,
-        "cache_read": 0.3,
-        "cache_write": 3.75
-      }
-    }
+    "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
+    "rates": {}
   }
 }

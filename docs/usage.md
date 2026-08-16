@@ -346,8 +346,8 @@ publishes both numbers. The others were each checked:
 | Codex | token counts | no prices anywhere, and no model attached to the totals |
 | Grok | a credit percentage | no tokens priced at all |
 
-So the other tabs get a metered section built on **rates you supply**, which is
-the only honest way to answer "what would this have cost".
+So the other tabs price their tokens against a **rate card**, and for Claude
+models that card ships in the code.
 
 ```json
 "usage": {
@@ -360,15 +360,50 @@ the only honest way to answer "what would this have cost".
 }
 ```
 
-US$ per million tokens. **Nothing ships in that table on purpose** — a price
-this repo invented would be exactly the fabricated denominator it exists to
-avoid, and list prices change without telling anyone. With it empty the section
-is one line pointing at the setting rather than a section of zeros.
+Anthropic **publishes** its prices, so there is nothing to invent. The table is
+copied from `platform.claude.com/docs/en/docs/about-claude/pricing`, with the
+source and date in the source file and **the date on screen beside the total**.
+A published price is a fact; what makes one dangerous is going stale in
+silence, and a date fixes that. Claude models therefore need no configuration
+at all.
+
+```
+ ── METERED ── $15126.88 at list prices · Aug 2026   all time
+  claude-opus-5              $9882.80
+  claude-opus-4-8            $2544.83
+  claude-fable-5             $2247.90
+  claude-sonnet-5             $450.71
+  claude-haiku-4-5-20251001     $0.64
+```
+
+`cache_write` uses the **5-minute** write rate (1.25× input), which is what
+Claude Code takes by default. A 1-hour write is 2×, and nothing records which
+kind a cached block was, so the cheaper and commoner one is assumed — stated
+here rather than quietly averaged.
+
+Config remains, as an **override** rather than a requirement:
+
+```json
+"usage": {
+  "rates": {
+    "gpt-5.6-sol": {"input": 1.25, "output": 10}
+  }
+}
+```
+
+Use it to correct a stale price, to add a provider that publishes none, or to
+enter your own negotiated rates. Anything set there wins over the shipped
+table, and the header says which was used — `at list prices · Aug 2026`, `at
+your configured rates`, or both when a tab mixes them. A list price is a dated
+fact and a configured one is your own assertion; neither should be mistaken for
+the other.
 
 Rates are keyed by **model, not by agent**, because a model has one list price
-wherever it ran: the same `claude-sonnet-5` entry prices Copilot's turns and
-Claude Code's. The longest matching model name wins, so `claude-opus` covers
-every Opus revision, and a `"*"` entry catches whatever is left.
+wherever it ran. That is not theoretical tidiness: Copilot runs
+`claude-sonnet-5`, so its metered section prices off the same shipped entry as
+Claude Code's, with no configuration and no second table. The longest matching
+name wins, so `claude-opus-4` does not shadow `claude-opus-4-8`, and a `"*"`
+entry catches whatever is left.
 
 ```
  ── METERED ── $37958.95 at your configured rates   all time
