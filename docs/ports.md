@@ -17,9 +17,10 @@ What is listening on this machine, what started it, and who can reach it.
  ↑↓ select  [k]ill  [o]show system  [r]efresh  [q]uit
 ```
 
-Eight of this machine's sixteen listening ports are root's and are hidden;
-`o` shows them. The count in the header is of all of them, so the eight it
-does not draw are never a surprise.
+Seven of this machine's sixteen listening ports are hidden here — five of
+root's, plus `22` and `53` from `system_ports` — and `o` shows them. The count
+in the header is of all sixteen, so the seven it does not draw are never a
+surprise.
 
 ## What identifies a dev server
 

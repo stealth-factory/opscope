@@ -620,7 +620,7 @@ def main():
                 hide_system = not hide_system
             elif key == "r":
                 store.wake.set()
-            elif key in ("k", "K") and shown:
+            elif key in ("k", "K") and shown and watch is None:
                 row = shown[max(0, min(selected, len(shown) - 1))]
                 pid, why = killable(row)
                 if why:
