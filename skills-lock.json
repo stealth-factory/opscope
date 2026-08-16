@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "skills": {
+    "agents-md-setup": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/agents-md-setup/SKILL.md",
+      "computedHash": "912a91e5f0794aa0d726ed85db79d5312ef2f0aafefed3e12dad0f9fdffffccf"
+    },
+    "autofix": {
+      "source": "coderabbitai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/autofix/SKILL.md",
+      "computedHash": "421f9102c20fb1c91d87a10ca9bee2e91c7e632e644dfdd3dc013e53865df6c1"
+    },
+    "autonomous-pr-driver": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/autonomous-pr-driver/SKILL.md",
+      "computedHash": "e3182fc6ecc5d2a7b0d0ad440c7a8620fec28feaa5dd4091713f96a632f0b17b"
+    },
+    "branch-cleanup": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/branch-cleanup/SKILL.md",
+      "computedHash": "193e4544e944ab7131034a62a8fb0a00b5bb4bdda68163f63ac13796eed4a121"
+    },
+    "code-complexity-stats-pr": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-complexity-stats-pr/SKILL.md",
+      "computedHash": "69e0ac4d970547d7577f4e8f56a6b7d105aba76c8cbf7d9c8bd5db1afa97846d"
+    },
+    "code-review": {
+      "source": "coderabbitai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review/SKILL.md",
+      "computedHash": "6d117c3f8797e0c770c6b00a646a07028f3440b5d8042e8f841e88ed1116788f"
+    },
+    "conventional-commits": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/conventional-commits/SKILL.md",
+      "computedHash": "fabae2d2f77314bf05c32892548ba5a802692b621dd12e72db0b224bd5e8d6b3"
+    },
+    "dual-agent-review": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/dual-agent-review/SKILL.md",
+      "computedHash": "4b2ad4b4705f555be177fdacc34fda6c2497f8e56182aef24075d7e0682cd503"
+    },
+    "fable-style-reasoning": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/fable-style-reasoning/SKILL.md",
+      "computedHash": "21c274a51d904aa4be7b1a2b15af16e06c0172ef33269988486901c16a74de17"
+    },
+    "git-trunk-branch-and-pr-automation": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/git-trunk-branch-and-pr-automation/SKILL.md",
+      "computedHash": "ac12b965d3bce5afe438f78980e6d3095ba80fbc9a1d07eb7ec719ccb16136c2"
+    },
+    "meaningful-linear-issues": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/meaningful-linear-issues/SKILL.md",
+      "computedHash": "3e21a89583617d2f09c8eda3f35f609714a195fdbf5dd06c6776247e26e61a56"
+    },
+    "multi-agent-codebase-audit": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/multi-agent-codebase-audit/SKILL.md",
+      "computedHash": "2306f78625a41ac3adf9f3d408779a10ceff35ada6cb468c9034243ef502daeb"
+    },
+    "nextjs-locale-monorepo": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/nextjs-locale-monorepo/SKILL.md",
+      "computedHash": "5a5f32a2e369725151111eddccaf84caed0ec9a5d3cd74198739de35beb96ffc"
+    },
+    "nextjs-locale-standalone": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/nextjs-locale-standalone/SKILL.md",
+      "computedHash": "2835f44893140294c3869bb6c73c22eac8b49c12a72f04367e68ccae4a80287b"
+    },
+    "pooled-release": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/pooled-release/SKILL.md",
+      "computedHash": "6a7f9deafca064512c46f995859ebc4b77c335f9433fdabc23ed86f0a4a55fa2"
+    },
+    "production-release-gating": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/production-release-gating/SKILL.md",
+      "computedHash": "f3e8167fa209de6e3553797d0be25d4e21f026a4947fcaa1859954641bcc0b38"
+    },
+    "resolve-merge-conflicts": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/resolve-merge-conflicts/SKILL.md",
+      "computedHash": "84cd68b75bfdc71676d7284e6d100a2eb81d879d21aeb1f8a80c4d2430d459c1"
+    },
+    "safari26-liquid-glass": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/safari26-liquid-glass/SKILL.md",
+      "computedHash": "8284dd2d2e2afee1c1165accf44c8a776b98b5eeba22d7c37dafba881736b2be"
+    },
+    "semantic-release-automation": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/semantic-release-automation/SKILL.md",
+      "computedHash": "96514db93578dc0741de175cd8993000fad11974764f34e01a314ceec4d63c6e"
+    },
+    "skill-publishing": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/skill-publishing/SKILL.md",
+      "computedHash": "67b989b4fbf690a6f13c85353ba55f62e4cd45d43ab6cad279c033c33467ae73"
+    },
+    "vercel-deployment-password-gate": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/vercel-deployment-password-gate/SKILL.md",
+      "computedHash": "575012241c58f0779f0ae87ac43b20eccaf25d8c8016ffa97e4ecd64330d078a"
+    },
+    "vercel-preview-cleanup": {
+      "source": "stealth-factory/skills",
+      "sourceType": "github",
+      "skillPath": "skills/vercel-preview-cleanup/SKILL.md",
+      "computedHash": "7430dc1a9d4a7a6b1a39560c3c8ffadbea434d50be779e6009cf2f04ccd2e9d5"
+    }
+  }
+}
