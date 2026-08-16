@@ -184,9 +184,9 @@ reasoning tokens, AI credits as `total_nano_aiu`, a `request_multiplier`, and �
 uniquely among these agents — `duration_ms`, `time_to_first_token_ms` and
 `inter_token_latency_ms`. It is the best-shaped usage data of the lot.
 
-It is simply **empty** on this machine — two sessions, zero turns — so that
-half of the tab says so rather than drawing an empty chart. The moment a turn
-is recorded here it has real numbers, and better ones than anywhere else.
+It sat **empty** here for a long time — two sessions, zero turns — and now it
+is not: two turns, 60.8k in, 701 out, 9.211 AI units, and a measured 4,370 ms
+to first token. It really is the best-shaped data of the lot.
 
 **The quota half does not depend on it**, which is the point that took a second
 look. Copilot's remaining allowance is not in the session store at all; it is on
@@ -328,6 +328,32 @@ Claude's section also degrades rather than disappearing. With the endpoint
 unreachable it falls back to `~/.claude/.credentials.json`, which needs no
 network and always carries `subscriptionType` and `rateLimitTier`, and says
 `from credentials` so it is never mistaken for the fuller reading.
+
+## Empty tabs say two things and stop
+
+An agent with no local data gets exactly two lines: what is missing, and the
+command that fixes it.
+
+```
+ ── SPENT ── no local sessions
+
+  Nothing recorded in the local session store yet.
+  run copilot here and this fills in
+```
+
+They used to get a paragraph. Copilot's empty tab toured the schema it would
+have used — the table, the column names, why it would have been the best data
+here — which is interesting exactly once and is then a wall of text sitting
+where the numbers should be. Two lines say as much, and the second answers the
+only question an empty tab actually raises, which is *what do I do about it*.
+
+Every tab uses the same two lines: `claude`, `codex`, `cursor-agent`, `grok`,
+`copilot`. Antigravity gets the first line without the second, because there is
+no command that would make it record tokens — it does not record them at all,
+and saying "run this" would be a promise the tab cannot keep.
+
+The text wraps rather than clipping, so a narrow pane loses no part of the
+sentence.
 
 ## On wrapping rather than clipping
 

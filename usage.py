@@ -139,7 +139,10 @@ def span_ms(ms):
     m = s // 60
     if d:
         return "%dd %dh %dm" % (d, h, m)
-    return "%dh %dm" % (h, m) if h else "%dm" % m
+    if h:
+        return "%dh %dm" % (h, m)
+    # a couple of seconds of generation is not "0m"
+    return "%dm" % m if m else "%.1fs" % ((ms or 0) / 1000.0)
 
 
 def big_num(n):
@@ -801,7 +804,8 @@ def codex_plan_rows(state, w):
 
 def codex_tab(state, w, h):
     if not state.get("ok"):
-        return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
+        return no_local("No session rollouts on this machine.",
+                        RUN_HINT["codex"], w)
     t = state["total"]
     rows = []
     # The one genuine quota figure any of these agents publishes: the server
@@ -1067,7 +1071,8 @@ def grok_plan_rows(q, w):
 
 def grok_tab(state, w, h):
     if not state.get("ok"):
-        return [seg([(BAD, "  %s" % state.get("why"))], w - 1)]
+        return no_local("No Grok sessions on this machine.",
+                        RUN_HINT["grok"], w)
     rows = []
     q = state.get("quota")
     if q and q.get("percent") is not None:
@@ -1257,16 +1262,11 @@ def antigravity_tab(state, w, h):
         rows.append(seg([(DIM, "  " + pad(label, label_w) + "  "),
                          (colour, value)], w - 1))
     rows.append("")
-    for line in ("Antigravity records no tokens and no quota. Each",
-                 "conversation is its own SQLite store of the steps the",
-                 "agent took, and no table in it counts a token.",
-                 "",
-                 "Its quota is real but never lands on disk: the language",
-                 "server refreshes one into memory - the log says so, in",
-                 "quota_manager.go - and the server is not kept between",
-                 "runs. Nothing published answers what is left, so nothing",
-                 "here claims to. The tier below is what can be known."):
-        rows.append(seg([(DIM if line else RST, "  " + line)], w - 1))
+    rows += no_local("No tokens or quota are recorded locally - only the"
+                     " conversations and steps above. Antigravity refreshes"
+                     " its quota into memory, in a server that is not kept"
+                     " between runs, so only the tier below can be known.",
+                     "", w)
     return rows
 
 
@@ -1365,6 +1365,20 @@ COPILOT_FEATURES = (("chat_enabled", "chat"),
                     ("copilotignore_enabled", "copilotignore"))
 
 
+def wrap_text(text, budget):
+    """Plain text flowed to a width. Clipping a sentence loses its end."""
+    lines, line = [], ""
+    for word in str(text).split():
+        if line and len(line) + 1 + len(word) > budget:
+            lines.append(line)
+            line = word
+        else:
+            line = (line + " " + word) if line else word
+    if line:
+        lines.append(line)
+    return lines or [""]
+
+
 def wrap_pair(key, value, label_w, w):
     """A labelled value flowed onto as many lines as it needs.
 
@@ -1390,6 +1404,29 @@ def wrap_pair(key, value, label_w, w):
     if line:
         lines.append(line)
     return [(key if not i else "", part) for i, part in enumerate(lines)]
+
+
+# What to run to make each agent start recording. An empty tab that only
+# says "nothing here" leaves the reader to guess whether it is broken.
+RUN_HINT = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent",
+            "grok": "grok", "copilot": "copilot"}
+
+
+def no_local(what, run, w):
+    """The empty state: what is missing, and the one command that fixes it.
+
+    These tabs used to explain the schema they would have used - the tables,
+    the column names, why it would have been the best data of the lot. That
+    is interesting exactly once, and after that it is a wall of text sitting
+    where the numbers should be. Two lines say as much and answer the only
+    question an empty tab actually raises.
+    """
+    rows = [seg([(DIM, "  " + line)], w - 1)
+            for line in wrap_text(what, max(20, w - 4))]
+    if run:
+        rows.append(seg([(DIM, "  run "), (ACCENT, run),
+                         (DIM, " here and this fills in")], w - 1))
+    return rows
 
 
 def plan_rows(headline, pairs, w, note="", wrapped=None):
@@ -1569,26 +1606,20 @@ def copilot_tab(state, w, h):
                          (DIM, "   between tokens "),
                          (TXT, "%.1f ms" % use["itl"])], w - 1))
         rows.append("")
-        for model, n, out_tok in (state.get("models") or []):
-            rows.append(seg([(TXT, "  " + pad(str(model or "?"), 28)),
-                             (DIM, "%5d turns  " % n),
-                             (AGENT, big_num(out_tok))], w - 1))
+        models = state.get("models") or []
+        if models:
+            rows.append(seg([(LBL, " ── BY MODEL ── "),
+                             (DIM, "output tokens")], w - 1))
+            for model, n, out_tok in models:
+                rows.append(seg([(TXT, "  " + pad(str(model or "?"), 28)),
+                                 (DIM, "%5d turns  " % n),
+                                 (AGENT, big_num(out_tok))], w - 1))
     else:
-        rows.append(seg([(LBL, " ── SPENT ── "), (DIM, "nothing recorded")],
-                        w - 1))
+        rows.append(seg([(LBL, " ── SPENT ── "),
+                         (DIM, "no local sessions")], w - 1))
         rows.append("")
-        for line in (
-                "The session store has the richest schema of any agent here:",
-                "assistant_usage_events records per-turn input, output, cache",
-                "and reasoning tokens, credits as total_nano_aiu, and - alone",
-                "among these agents - duration, time to first token and",
-                "inter-token latency.",
-                "",
-                "It has %d sessions and no turns on this machine, so there is"
-                % state.get("sessions", 0),
-                "nothing to total. The quota above is the account's and is",
-                "real; this half fills in the moment a turn is recorded here."):
-            rows.append(seg([(DIM if line else RST, "  " + line)], w - 1))
+        rows += no_local("Nothing recorded in the local session store yet.",
+                         RUN_HINT["copilot"], w)
     return rows
 
 
@@ -1807,8 +1838,9 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
 def claude_tab(state, w, h):
     rows = claude_quota(state.get("quota"), w)
     if not state.get("ok"):
-        return rows + [seg([(BAD, "  no stats cache: %s"
-                             % state.get("why"))], w - 1)]
+        return rows + no_local("No stats cache yet (%s)."
+                               % state.get("why"),
+                               RUN_HINT["claude"], w)
     d = state["data"]
     mu = d.get("modelUsage") or {}
     daily = d.get("dailyActivity") or []
@@ -1921,11 +1953,6 @@ def claude_tab(state, w, h):
                         + [(DIM, " More")], w - 1))
 
 
-    rows.append("")
-    rows.append(seg([(DIM, "  This file records what was spent. It carries no"
-                           " limit and no reset,")], w - 1))
-    rows.append(seg([(DIM, "  so no percentage of a quota is shown -"
-                           " there is none to read.")], w - 1))
     return rows
 
 
@@ -2002,7 +2029,8 @@ def cursor_tab(state, w, h):
     if not state.get("ok"):
         return (cursor_quota(state.get("live"), w)
                 + cursor_spend_rows(state.get("spend"), w)
-                or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
+                or no_local("No Cursor tracking database on this machine.",
+                            RUN_HINT["cursor"], w))
     rows = cursor_quota(state.get("live"), w)
     rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
