@@ -1128,6 +1128,19 @@ def codex_daily():
     return merged
 
 
+def codex_session_count():
+    """Distinct sessions, not rollout files.
+
+    Thirty rollouts here hold eight sessions: resuming writes a new file for
+    a session that already existed. Counting files and calling them sessions
+    was the same mistake that made the totals wrong, in the label.
+    """
+    ids = set()
+    for path in glob.glob(CODEX_SESSIONS, recursive=True):
+        ids.update(key[0] for key in scan_rollout_models(path))
+    return len(ids)
+
+
 def codex_totals(daily):
     """Totals from the de-duplicated per-turn deltas.
 
@@ -1206,7 +1219,8 @@ def read_codex():
                 rates.append(out / gap)
         prev = ts or prev
     rates.sort()
-    return {"ok": True, "sessions": counted, "files": len(files),
+    return {"ok": True, "sessions": codex_session_count() or counted,
+            "files": len(files),
             "total": total, "rates": rates, "daily": daily,
             "daily_models": daily_models,
             "limits": limits, "limits_at": limits_at, "live": cached("codex", codex_live),
