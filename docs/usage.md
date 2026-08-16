@@ -842,9 +842,19 @@ put where the eye already is.
 
 It **replaces** a cell rather than adding one, so it costs no width, and it is
 a different glyph from the bar rather than only a different colour — it
-survives with colour off. It is tinted green when the fill is behind it and
-amber when past, which is the one place amber appears on a bar that is not
-nearly empty.
+survives with colour off.
+
+**One colour on every bar**, a near-black notch. It was first tinted green when
+the fill was behind it and amber when past, which was wrong twice over: a
+reference line that changes colour looks like the line has a state, when the
+state being reported is where the fill sits relative to it — and one amber mark
+beside five green ones read as *that agent's mark meaning something different*
+rather than that agent being behind. The relationship is already legible from
+the geometry, and the `-20%` column states it.
+
+Near-black rather than a light neutral because the agent hues are themselves
+light: white vanishes inside a full bar at 1.04:1, while this holds **7.6:1**
+there and **2.3:1** on the empty track.
 
 No mark is drawn when the window is unknown, or when a reading is **cached**
 and its window may already have closed: a pace computed from a window that has

@@ -2548,6 +2548,7 @@ def elapsed_of(secs, reset):
 # the darkest agent hue, and 0.34 leaves the empty track at least as visible
 # as the flat GRID it replaces (2.20:1 against 2.16:1).
 BAR_FLOOR = (30, 38, 52)
+PACE_MARK = rgb(10, 12, 18)   # the notch, dark enough to read on either side
 
 
 def blend(hue, t):
@@ -2586,10 +2587,17 @@ def paced_bar(used, elapsed, room, hue=None):
     parts = []
     for i, ch in enumerate(bar):
         if i == at:
-            # The pace mark keeps its own green/amber: it is the one thing
-            # here that reports trouble, and trouble does not take on the
-            # colour of whoever is in trouble.
-            parts.append((OK if used <= (elapsed or 0) else WARN, "┃"))
+            # One colour for the mark on every bar. It is a reference line -
+            # where an even burn would have reached - and a line that changes
+            # colour looks like it has a state of its own, when the state
+            # being reported is the fill's position relative to it. Copilot
+            # in amber beside five in green read as Copilot's mark meaning
+            # something different, rather than Copilot being behind.
+            #
+            # Near-black rather than a light neutral: the agent hues are
+            # themselves light, so white vanishes inside a full bar (1.04:1)
+            # while this holds 8.1:1 there and 2.5:1 on the empty track.
+            parts.append((PACE_MARK, "┃"))
         elif i < filled:
             # Filled cells run dark to full across the fill, so the bar is
             # recognisably its agent's colour and still reads as a quantity
