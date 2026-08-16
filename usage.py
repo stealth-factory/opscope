@@ -2357,7 +2357,6 @@ def cursor_tab(state, w, h):
                 or no_local("No Cursor tracking database on this machine.",
                             RUN_HINT["cursor"], w))
     rows = cursor_quota(state.get("live"), w)
-    rows += cursor_metered_rows(state, w)
     rows += cursor_daily_rows(state.get("events"), w)
     rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
@@ -2516,7 +2515,10 @@ def main():
             if claude.get("profile"):
                 sub = claude_plan_rows(claude["profile"], w)
         elif name == "cursor":
-            body = cursor_tab(cursor, w, h)
+            # METERED sits last-but-one on every tab, so Cursor's - which
+            # is published rather than configured - lands in the same place
+            # as everyone else's rather than floating up beside its quota.
+            body = cursor_tab(cursor, w, h) + cursor_metered_rows(cursor, w)
             sub = cursor_plan_rows(cursor.get("plan"), w)
         elif name == "codex":
             body = codex_tab(codex, w, h) + codex_metered(codex, w)
