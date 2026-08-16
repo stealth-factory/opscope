@@ -276,10 +276,19 @@ publishes. Its `approx_local_messages` and `approx_cloud_messages` read zero
 here for a real reason — they are estimates derived from a credit balance, and
 the balance is zero.
 
-These are held for **an hour**, not the two minutes the quotas get. A plan does
-not change between refreshes, and the Claude usage endpoint answers `429` if
-you ask at quota cadence — which it did, during testing, and the pane correctly
-fell back to its cache and said so.
+A **success** is held for an hour, not the two minutes the quotas get: a plan
+does not change between refreshes, and the Claude usage endpoint answers `429`
+if you ask at quota cadence — which it did, during testing.
+
+A **failure is never held that long**, whatever the caller asked for. That
+distinction had to be learned: one rate-limited profile call was cached for the
+full hour and blanked Claude's subscription section for that hour, which looks
+exactly like an agent that publishes nothing.
+
+Claude's section also degrades rather than disappearing. With the endpoint
+unreachable it falls back to `~/.claude/.credentials.json`, which needs no
+network and always carries `subscriptionType` and `rateLimitTier`, and says
+`from credentials` so it is never mistaken for the fuller reading.
 
 ## On wrapping rather than clipping
 
