@@ -1941,7 +1941,7 @@ def cost_of(tokens, rate):
                for kind in RATE_KINDS)
 
 
-def metered_block(where, windows, w, saves=None, note="", scope="",
+def metered_block(where, windows, w, extras=None, note="", scope="",
                   caveat=""):
     """The metered section: one row per window, each with its models under it.
 
@@ -1966,8 +1966,8 @@ def metered_block(where, windows, w, saves=None, note="", scope="",
                  (DIM, "   %s" % note if note else "")], w - 1)]
     for line in (wrap_text(caveat, max(20, w - 4)) if caveat else []):
         rows.append(seg([(DIM, "  " + line)], w - 1))
-    label_w = max([len(x[0]) for x in windows]
-                  + ([len("the plan saves")] if saves is not None else []))
+    extras = [x for x in (extras or []) if x[1] is not None]
+    label_w = max([len(x[0]) for x in windows] + [len(x[0]) for x in extras])
     for label, cost, tokens, models in windows:
         rows.append(seg([(TXT, "  " + pad(label, label_w) + "  "),
                          (AGENT, pad("$%.2f" % cost, 11)),
@@ -1982,9 +1982,11 @@ def metered_block(where, windows, w, saves=None, note="", scope="",
             rows.append(seg([(DIM, "  " + " " * label_w + "   "),
                              (DIM, "+%d more" % (len(models) - len(top)))],
                             w - 1))
-    if saves is not None:
-        rows.append(seg([(DIM, "  " + pad("the plan saves", label_w) + "  "),
-                         (OK, "$%.2f" % saves)], w - 1))
+    # Summary rows below the windows rather than in the header, which had
+    # grown long enough to clip the moment a scope word joined it.
+    for label, value, colour in extras:
+        rows.append(seg([(DIM, "  " + pad(label, label_w) + "  "),
+                         (colour, "$%.2f" % value)], w - 1))
     rows.append("")
     return rows
 
@@ -2035,8 +2037,9 @@ def metered_rows(windows, w, note="", agent=None, scope="", caveat=""):
     month = next((x[1] for x in built if x[0] == "30 days"), None)
     if paid and month:
         saves = month - float(paid)
-    rows = metered_block(where, built, w, saves=saves, note=note,
-                         scope=scope, caveat=caveat)
+    rows = metered_block(where, built, w, note=note, scope=scope,
+                         caveat=caveat,
+                         extras=[("the plan saves", saves, OK)])
     if missing and rows:
         rows.insert(len(rows) - 1,
                     seg([(WARN, "  %d model%s unpriced: "
@@ -2124,7 +2127,10 @@ def copilot_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
                          ("30 days", window_models(daily, 30))], w,
-                        agent="copilot", scope="this machine")
+                        agent="copilot", scope="this machine",
+                        caveat="Counted from the local session store. Copilot"
+                               " in an editor, on another machine or on"
+                               " github.com is not in here.")
 
 
 def copilot_tab(state, w, h):
@@ -2476,7 +2482,10 @@ def claude_metered(state, w):
     daily = state.get("daily_models") or {}
     return metered_rows([("today", window_models(daily, 1)),
                          ("30 days", window_models(daily, 30))], w,
-                        agent="claude", scope="this machine")
+                        agent="claude", scope="this machine",
+                        caveat="Counted from transcripts, which are written"
+                               " where the agent ran. Claude used on another"
+                               " machine, or on claude.ai, is not in here.")
 
 
 def claude_tab(state, w, h):
@@ -2699,9 +2708,12 @@ def cursor_metered_rows(state, w):
         windows.append((label, cost, tokens, models))
     vendor = float(ev.get("vendor_cents") or 0)
     saves = (vendor - metered) / 100.0 if vendor and metered else None
-    note = ("Cursor meters $%.2f of it" % (metered / 100.0)) if metered else ""
-    return metered_block("vendor rates", windows, w, saves=saves, note=note,
-                        scope="account-wide")
+    return metered_block("vendor rates", windows, w, scope="account-wide",
+                        extras=[("cursor meters", metered / 100.0 if metered
+                                 else None, TXT),
+                                ("the plan saves", saves, OK)],
+                        caveat="From Cursor's own API, so it covers every"
+                               " device on the account, not just this one.")
 
 
 def cursor_daily_rows(events, w):

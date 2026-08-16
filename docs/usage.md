@@ -356,10 +356,22 @@ unpriced instead, and are named.
 
 ### What each figure covers
 
-The METERED header states its **scope** first, because that is the thing most
-easily got wrong: the section sits directly under a `QUOTA` labelled
-*account-wide*, and a local figure beside it reads as the same scope unless it
-says otherwise.
+The METERED header states its **scope** first and then spells it out in a
+remark, because that is the thing most easily got wrong: the section sits
+directly under a `QUOTA` labelled *account-wide*, and a local figure beside it
+reads as the same scope unless it says otherwise.
+
+```
+ ── METERED ── this machine · at list prices · Aug 2026
+  Counted from transcripts, which are written where the
+  agent ran. Claude used on another machine, or on
+  claude.ai, is not in here.
+```
+
+The remark names what is **excluded**, not just what is counted — "this
+machine" alone leaves the reader to work out what that rules out, and the
+answer differs per agent: another laptop for Claude, an editor or github.com
+for Copilot, seven other surfaces for Codex.
 
 | | scope | why |
 |---|---|---|
