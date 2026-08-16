@@ -220,10 +220,36 @@ def read_claude():
 
 
 def iso_epoch(s):
+    """ISO-8601 to epoch seconds.
+
+    fromisoformat rejects a trailing Z before Python 3.11, and these APIs mix
+    Z with +00:00 in the same response. A value carrying no zone at all is
+    read as local time, which is why the callers here pass zoned strings.
+    """
     try:
-        return datetime.datetime.fromisoformat(s).timestamp()
+        return datetime.datetime.fromisoformat(
+            re.sub(r"Z$", "+00:00", s)).timestamp()
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+def quota_window(reset_ts):
+    """The span a monthly quota covers, worked back from its reset.
+
+    Copilot states when the quota resets but never how long the window is.
+    It can be derived, but only safely when the reset lands on midnight UTC
+    on the first of a month - which is what a calendar-month cycle looks
+    like, and what this account shows. Anything else and the window is not
+    known, so nothing is claimed about it.
+    """
+    if not reset_ts:
+        return None
+    end = datetime.datetime.fromtimestamp(reset_ts, datetime.timezone.utc)
+    if (end.day, end.hour, end.minute, end.second) != (1, 0, 0, 0):
+        return None
+    start = (end.replace(year=end.year - 1, month=12) if end.month == 1
+             else end.replace(month=end.month - 1))
+    return "%s → %s" % (start.strftime("%-d %b"), end.strftime("%-d %b"))
 
 
 def left_span(secs):
@@ -1031,14 +1057,22 @@ def copilot_tab(state, w, h):
         plan = live.get("copilot_plan") or ""
         # A monthly quota reset arrives as a bare date; days remaining is the
         # form every other tab here uses, and the one anyone reads.
-        reset, when = live.get("quota_reset_date") or "", ""
-        stamp = iso_epoch(reset + "T00:00:00") if reset else None
+        # quota_reset_date_utc, not quota_reset_date: the bare date carries
+        # no zone, so it parses as local midnight and the countdown drifts by
+        # the machine's UTC offset. Zero on this server, which is exactly why
+        # it would have gone unnoticed here.
+        stamp = iso_epoch(live.get("quota_reset_date_utc") or "")
+        when = ""
         if stamp:
             days = int((stamp - time.time()) // 86400)
             when = "resets in %dd" % days if days > 0 else "resets today"
         rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
                          (DIM, " · account-wide   "), (DIM, plan),
                          (DIM, "  " + when)], w - 1))
+        span = quota_window(stamp)
+        if span:
+            rows.append(seg([(DIM, "  window "), (TXT, span),
+                             (DIM, " · monthly")], w - 1))
         label_w = max(9, max(len(k) for k in snaps))
         for key in sorted(snaps, key=lambda k: (snaps[k].get("unlimited"), k)):
             q = snaps[key] or {}
@@ -1060,6 +1094,14 @@ def copilot_tab(state, w, h):
             rows.append(seg([(DIM, " " + name + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
                              (heat(used), " %3.0f%%" % pct)], w - 1))
+            # A pool can carry its own reset, in which case it is not on the
+            # account-wide cycle in the header and has to say so itself.
+            own = q.get("quota_reset_at") or 0
+            own_when = ""
+            if own and abs(own - (stamp or 0)) > 3600:
+                left_s = own - time.time()
+                own_when = ("   resets in " + left_span(left_s)
+                            if left_s > 0 else "   resetting")
             if ent:
                 rows.append(seg([(DIM, " " + " " * label_w + "  "),
                                  (TXT, "{:,}".format(int(used_n or 0))),
@@ -1069,7 +1111,8 @@ def copilot_tab(state, w, h):
                                                          or 0))),
                                  (DIM, " left"),
                                  (WARN, "   %d over" % q["overage_count"]
-                                  if q.get("overage_count") else "")], w - 1))
+                                  if q.get("overage_count") else ""),
+                                 (DIM, own_when)], w - 1))
         rows.append("")
     elif state.get("live_why"):
         rows.append(seg([(WARN, "  no quota: " + state["live_why"])], w - 1))

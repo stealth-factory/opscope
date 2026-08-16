@@ -208,6 +208,22 @@ ones sort first — an unlimited pool is not news.
 The API reports `percent_remaining`; the pane shows what is *spent*, like every
 other tab, so that red always means the same thing across the wall.
 
+**The window is derived, and only when it is safe to.** Copilot says when the
+quota resets and never how long the window is. `quota_reset_date_utc` lands on
+`2026-09-01T00:00:00.000Z` — midnight UTC on the first of a month — and that
+shape is what a calendar-month cycle looks like, so the span is worked back a
+month and shown as `window 1 Aug → 1 Sep · monthly`. A reset that does *not*
+land on a month boundary gets no window line at all, because then the cadence
+genuinely is not known.
+
+Use `quota_reset_date_utc`, never the bare `quota_reset_date`: a date with no
+zone parses as local midnight, and the countdown then drifts by the machine's
+UTC offset. This server runs UTC, so that bug would have sat here unseen.
+
+Each pool also carries its own `quota_reset_at`. It is `0` on this account —
+every pool is on the account-wide cycle — but when one is set and differs, that
+lane prints its own reset instead of inheriting the header's.
+
 **Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
 carries a running `totalTokens` on each session event alongside an
 `agentTimestampMs`. Differencing consecutive events and bucketing by the
