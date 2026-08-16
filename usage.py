@@ -213,6 +213,23 @@ def claude_profile():
     return d
 
 
+def claude_creds_plan():
+    """What the credentials file alone can say about the plan.
+
+    The profile endpoint is richer, but this needs no network and is always
+    there, so the section degrades to two true lines instead of vanishing.
+    """
+    try:
+        with open(CLAUDE_CREDS) as f:
+            o = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except (OSError, ValueError):
+        return None
+    if not o.get("subscriptionType"):
+        return None
+    return {"_plan": o["subscriptionType"], "_local": True,
+            "organization": {"rate_limit_tier": o.get("rateLimitTier") or ""}}
+
+
 def claude_plan_rows(prof, w):
     org = (prof.get("organization") or {})
     pairs = []
@@ -227,7 +244,8 @@ def claude_plan_rows(prof, w):
     if org.get("billing_type"):
         pairs.append(("billing", org["billing_type"].replace("_", " ")))
     return plan_rows(prof.get("_plan") or org.get("organization_type"),
-                     pairs, w)
+                     pairs, w,
+                     note="from credentials" if prof.get("_local") else "")
 
 
 def claude_stale():
@@ -257,7 +275,8 @@ def read_claude():
     entirely, and account-wide rather than about this machine.
     """
     quota = cached("claude", lambda: claude_live() or claude_stale())
-    profile = cached("claude-plan", claude_profile, ttl=PLAN_TTL)
+    profile = (cached("claude-plan", claude_profile, ttl=PLAN_TTL)
+               or claude_creds_plan())
     try:
         stat = os.stat(CLAUDE_STATS)
         with open(CLAUDE_STATS) as f:
@@ -598,19 +617,22 @@ _LIVE = {}
 
 
 def cached(key, fn, ttl=LIVE_TTL):
-    """Hold a live quota reading for a while.
+    """Hold a reading for a while, but never hold a failure that long.
 
     The pane redraws every 30 seconds; these windows move over hours, and
-    three tabs between them were making five requests a minute to say the
-    same thing. A failure is cached too, so a dead endpoint is retried once
-    a couple of minutes rather than on every frame.
+    three tabs between them were making six requests a minute to say the
+    same thing. A failure is cached too, so a dead endpoint is retried
+    occasionally rather than on every frame - but only ever for the short
+    interval, never the long one. A subscription is held an hour because it
+    does not change; one transient 429 should not blank its section for an
+    hour, which is exactly what happened here.
     """
     now = time.time()
     hit = _LIVE.get(key)
-    if hit and now - hit[0] < ttl:
+    if hit and now - hit[0] < hit[2]:
         return hit[1]
     val = fn()
-    _LIVE[key] = (now, val)
+    _LIVE[key] = (now, val, ttl if val else min(ttl, LIVE_TTL))
     return val
 
 
@@ -1963,11 +1985,17 @@ def main():
         extra = [n for n in ORDER
                  if (installed.get(n) or {}).get("present") and n not in tabs]
         def status(where=""):
-            return seg([(DIM, " local state · live quota · read %s ago"
-                         % ago(fetched)),
-                        (DIM, "   · = detected"),
-                        (DIM, "   %d hidden by config" % len(extra)
-                         if extra else ""),
+            # The scroll position goes last on this line but matters most,
+            # so the legend stands down to make room rather than letting it
+            # be clipped - which is what had been happening at 58 columns,
+            # leaving the footer offering a scroll with nothing saying where
+            # in the tab you were.
+            base = " local state · live quota · read %s ago" % ago(fetched)
+            hidden = "   %d hidden by config" % len(extra) if extra else ""
+            legend = "   · = detected"
+            if len(base) + len(hidden) + len(legend) + len(where) > w - 1:
+                legend = ""
+            return seg([(DIM, base), (DIM, legend), (DIM, hidden),
                         (ACCENT, where)], w - 1)
 
         status_at = len(rows)        # filled in once the scroll is resolved
