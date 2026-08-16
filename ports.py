@@ -20,21 +20,31 @@ On a box running several agents at once, "which port is that project on" and
 "is this reachable from outside" are asked constantly and answered badly.
 `lsof -i` gives a pid and a port and stops there.
 
-Each row is one listening socket: the port, what it is bound to, what kind of
+Each row is one listening service: the port, what it is bound to, what kind of
 server it is, the project directory it was started from - the label that
 actually identifies a dev server - how long it has been up, and whether
-anything outside this machine can reach it.
+anything outside this machine can reach it. A server listening on both IPv4
+and IPv6 is one row, not two.
 
     python3 ports.py [-n SECONDS]
 
 Read from /proc alone: the socket table for the ports, and each process's own
 cmdline and cwd for the rest. Exposure comes from `tailscale serve status`
-where Tailscale is installed. Keys: up/down select, o hides system ports,
-r refreshes, q quits.
+where Tailscale is installed. Another user's sockets cannot be tied to a
+process without root, so those rows name the owner the socket table gives
+and are hidden behind o along with the system ports.
+
+k stops the selected server, after a confirmation and only for a process you
+own: SIGTERM to its process group, which is what Ctrl-C in its own terminal
+would have sent, then the offer of SIGKILL if it is still up three seconds
+later. Keys: up/down select, k kills, o hides system ports, r refreshes,
+q quits.
 """
 import json
 import os
+import pwd
 import re
+import signal
 import socket
 import struct
 import subprocess
@@ -43,8 +53,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, load_config, maybe_help,
-                    pack_hints, pad, rgb, seg, setup, size, title)
+from common import (Keyboard, bg, draw, load_config, maybe_help, pack_hints,
+                    pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("ports", {
     # Ports that are part of the machine rather than something you started.
@@ -135,6 +145,17 @@ def hex_addr(text, family):
         return "?"
 
 
+def bind_class(bind):
+    """Who can reach a socket bound to this address."""
+    if bind in ("0.0.0.0", "::"):
+        return "all"
+    if bind.startswith("127.") or bind == "::1":
+        return "local"
+    if TAILNET_V4.match(bind) or bind.startswith("fd7a:115c:a1e0"):
+        return "tailnet"
+    return bind
+
+
 def listening():
     """Every listening TCP socket, from the kernel's own table."""
     out = []
@@ -150,9 +171,37 @@ def listening():
             if len(cols) < 10 or cols[3] != "0A":
                 continue
             addr, port = cols[1].rsplit(":", 1)
+            # The uid is in the table even where the process behind it is
+            # not reachable, which is the difference between "somebody
+            # else's" and "a mystery".
             out.append({"port": int(port, 16), "bind": hex_addr(addr, family),
-                        "inode": cols[9], "v6": family == socket.AF_INET6})
+                        "inode": cols[9], "uid": int(cols[7])})
     return out
+
+
+def owner_name(uid):
+    """Whose socket it is, by name where the machine has one."""
+    if uid == os.getuid():
+        return ""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return "uid %d" % uid
+
+
+def theirs(row):
+    """Whether a row is part of the machine rather than something you started.
+
+    Two kinds qualify and both belong behind the same key: a well-known
+    system port, and any socket owned by another user - which in practice
+    means root's daemons, the ones that cannot be signalled without root and
+    are never the answer to "which port is my dev server on". A port served
+    by Tailscale with nothing behind it is neither: nobody else configured
+    that.
+    """
+    if row.get("orphan"):
+        return False
+    return row["port"] in SYSTEM_PORTS or bool(row.get("user"))
 
 
 def socket_owners():
@@ -162,6 +211,9 @@ def socket_owners():
     That is stated on screen rather than papered over: a widget claiming to
     know what is behind port 22 when it cannot is worse than one that says
     so.
+
+    The pid is an int, not the string /proc was listed as: it is handed to
+    os.kill when a row is stopped, and that takes no strings.
     """
     owners = {}
     for pid in os.listdir("/proc"):
@@ -177,7 +229,7 @@ def socket_owners():
             except OSError:
                 continue
             if target.startswith("socket:["):
-                owners[target[8:-1]] = pid
+                owners[target[8:-1]] = int(pid)
     return owners
 
 
@@ -278,33 +330,46 @@ def span(seconds):
 
 
 def scan():
-    """One entry per listening socket, plus anything served but not bound."""
+    """One entry per listening service, plus anything served but not bound."""
     owners = socket_owners()
     served = exposure()
-    rows, seen = [], set()
+    rows, seen, services = [], set(), {}
     now = time.time()
     for sock in listening():
         pid = owners.get(sock["inode"])
+        # A server that listens on both address families is two sockets in
+        # the kernel table but one thing to know about: 0.0.0.0 alongside ::,
+        # or a tailnet IPv4 address alongside its IPv6. Same port, same owner
+        # and the same answer to "who can reach it" means one row. Any of the
+        # three differing is a real second row - 127.0.0.1:8080 and
+        # 100.x:8080 are not the same answer even from the same process.
+        key = (sock["port"], pid, bind_class(sock["bind"]))
+        if key in services:
+            services[key]["families"] += 1
+            continue
         cmdline, cwd, started = process_info(pid) if pid else ("", "", None)
         kind, guessed = kind_of(cmdline, sock["port"])
-        rows.append({
-            "port": sock["port"], "bind": sock["bind"], "v6": sock["v6"],
+        row = {
+            "port": sock["port"], "bind": sock["bind"], "families": 1,
             "pid": pid, "cmdline": cmdline, "cwd": cwd,
-            "kind": kind, "guessed": guessed,
+            "kind": kind, "guessed": guessed, "user": owner_name(sock["uid"]),
             "project": project_name(cwd),
             "gone": cwd.endswith("(deleted)") if cwd else False,
             "up": (now - started) if started else None,
             "exposed": served.get(sock["port"], ""),
-        })
+        }
+        services[key] = row
+        rows.append(row)
         seen.add(sock["port"])
     # A port Tailscale forwards to with nothing behind it is worth its own
     # row: the URL exists, answers 502, and nothing in `lsof` explains why.
     for port, how in served.items():
         if port not in seen:
-            rows.append({"port": port, "bind": "", "v6": False, "pid": None,
+            rows.append({"port": port, "bind": "", "families": 0, "pid": None,
                          "cmdline": "", "cwd": "", "kind": "nothing listening",
                          "guessed": False, "project": "", "gone": False,
-                         "up": None, "exposed": how, "orphan": True})
+                         "user": "", "up": None, "exposed": how,
+                         "orphan": True})
     rows.sort(key=lambda r: (r["port"] in SYSTEM_PORTS, r["port"]))
     return rows
 
@@ -341,6 +406,120 @@ class Store(object):
             self.wake.clear()
 
 
+def alive(pid):
+    """Whether a pid is still running. Signal 0 checks without delivering.
+
+    A zombie answers signal 0 and is not running: it is an exit status its
+    parent has not collected yet. Reporting one as alive would leave the
+    widget offering to SIGKILL something already dead, forever, since no
+    signal moves a zombie. /proc knows the difference.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def killable(row):
+    """Whether this row can be signalled, and why not when it cannot.
+
+    Returns (pid, reason). Only one of the two is ever set. The checks are
+    all about not doing damage past what was asked for: a row whose owner
+    /proc would not name is somebody else's process, and a process in this
+    widget's own group cannot be group-killed without taking the widget
+    down with it.
+    """
+    pid = row.get("pid")
+    if not pid:
+        return None, "not yours - no owner for this socket in /proc"
+    if pid <= 1:
+        return None, "refusing to signal pid %d" % pid
+    try:
+        if os.stat("/proc/%d" % pid).st_uid != os.getuid():
+            return None, "pid %d is not yours" % pid
+    except OSError:
+        return None, "pid %d is already gone" % pid
+    return pid, ""
+
+
+def end(pid, sig):
+    """Signal the process group, falling back to the process alone.
+
+    A dev server is rarely one process: `npm run dev` is a shell, a package
+    manager and the server itself, sharing a process group precisely so that
+    Ctrl-C reaches all three. Signalling the group is what Ctrl-C does. The
+    fallback covers a process whose group we cannot read, and the guard
+    covers the case where the group is this widget's own.
+    """
+    try:
+        group = os.getpgid(pid)
+    except OSError:
+        group = None
+    try:
+        if group is not None and group != os.getpgrp():
+            os.killpg(group, sig)
+        else:
+            os.kill(pid, sig)
+    except ProcessLookupError:
+        return "already gone"
+    except PermissionError:
+        return "not permitted"
+    except OSError as exc:
+        return exc.strerror or "failed"
+    return ""
+
+
+def kill_label(row, room=999):
+    """What a kill would take down, in whatever room the pane has.
+
+    Everything here identifies the target, but not equally: the port is the
+    one thing the person is looking at, and the framework name without the
+    project it belongs to is no use on a machine running four of them. The
+    pid is the first to go, then the kind.
+    """
+    what = row["kind"] or "unidentified"
+    where = row["project"]
+    full = "%s%s on :%d (pid %d)" % (what, " in " + where if where else "",
+                                     row["port"], row["pid"])
+    for text in (full,
+                 "%s%s on :%d" % (what, " in " + where if where else "",
+                                  row["port"]),
+                 "%s on :%d" % (where or what, row["port"]),
+                 ":%d" % row["port"]):
+        if len(text) <= room:
+            return text
+    return ":%d" % row["port"]
+
+
+def prompt(ask, key, options, w):
+    """A question and the key that answers it, fitted to the pane.
+
+    On one line where both fit, on two where they do not, because the key is
+    never the half that may be truncated: a prompt with its `[y]` pushed off
+    the right edge is a prompt nobody can act on. The wording after the key
+    has shorter forms for the same reason, longest first.
+    """
+    def answer(room):
+        text = next((o for o in options if len(key[1]) + len(o) <= room), "")
+        return [key, (DIM, text)]
+
+    # The bare last form - "[y] yes", with no word on what anything else
+    # does - is a fallback for a pane too narrow for two lines, not a thing
+    # to choose while a second line is going spare.
+    keep = options[-2] if len(options) > 1 else options[-1]
+    room = (w - 1) - sum(len(t) for _, t in ask) - 2
+    if room >= len(key[1]) + len(keep):
+        return [seg(ask + [(DIM, "  ")] + answer(room), w - 1)]
+    return [seg(ask, w - 1), seg([(DIM, " ")] + answer(w - 2), w - 1)]
+
+
 def bind_note(row):
     """What the bound address means for who can reach it.
 
@@ -351,14 +530,14 @@ def bind_note(row):
     """
     if row.get("orphan"):
         return "--", DIM
-    bind = row["bind"]
-    if bind in ("0.0.0.0", "::"):
+    reach = bind_class(row["bind"])
+    if reach == "all":
         return "all", OPEN
-    if bind.startswith("127.") or bind == "::1":
+    if reach == "local":
         return "local", LOCAL
-    if TAILNET_V4.match(bind) or bind.startswith("fd7a:115c:a1e0"):
+    if reach == "tailnet":
         return "tailnet", ACCENT
-    return bind[:7], TXT
+    return reach[:7], TXT
 
 
 def main():
@@ -374,25 +553,87 @@ def main():
     store = Store()
     threading.Thread(target=store.run, daemon=True).start()
     selected, hide_system, scroll = 0, True, 0
+    confirm = None    # a row awaiting an explicit yes before anything is sent
+    watch = None      # what SIGTERM was sent to, and whether it has died
+    notice = None     # (text, colour, expires) - the result of the last kill
 
     while True:
+        w, h = size()
+        all_rows, fetched, err = store.snapshot()
+        shown = [r for r in all_rows if not (hide_system and theirs(r))]
+        selected = max(0, min(selected, len(shown) - 1)) if shown else 0
+
+        # A process that dies on its own between the prompt and the deadline
+        # is the normal case, and wants no further questions.
+        if watch is not None and not watch["asked"]:
+            if not alive(watch["pid"]):
+                notice = ("stopped " + kill_label(watch["row"], w - 11),
+                          OK, time.time() + 5)
+                watch = None
+                store.wake.set()
+            elif time.time() >= watch["deadline"]:
+                watch["asked"] = True
+
         for key in keyboard.poll():
+            if confirm is not None:
+                # Only an explicit yes kills. Every other key cancels,
+                # deliberately including q: quitting must never double as
+                # consent to signal something.
+                row, confirm = confirm, None
+                if key not in ("y", "Y"):
+                    notice = ("cancelled", DIM, time.time() + 2)
+                    continue
+                pid, why = killable(row)
+                if why:
+                    notice = (why, BAD, time.time() + 5)
+                    continue
+                failed = end(pid, signal.SIGTERM)
+                if failed:
+                    notice = ("%s: %s" % (kill_label(row, w - 4 - len(failed)),
+                                          failed), BAD, time.time() + 5)
+                    store.wake.set()
+                else:
+                    watch = {"pid": pid, "row": row, "asked": False,
+                             "deadline": time.time() + 3.0}
+                continue
+            if watch is not None and watch["asked"]:
+                pid, row, watch = watch["pid"], watch["row"], None
+                if key in ("f", "F"):
+                    failed = end(pid, signal.SIGKILL)
+                    notice = ("%s: %s" % (kill_label(row, w - 4 - len(failed)),
+                                          failed) if failed
+                              else "SIGKILL sent to "
+                                   + kill_label(row, w - 19),
+                              BAD if failed else WARN, time.time() + 5)
+                else:
+                    notice = ("left running: " + kill_label(row, w - 17),
+                              DIM, time.time() + 3)
+                store.wake.set()
+                continue
             if key in ("q", "Q"):
                 raise SystemExit(0)
-            if key in ("up", "k"):
+            if key == "up":
                 selected -= 1
-            elif key in ("down", "j"):
+            elif key == "down":
                 selected += 1
             elif key == "o":
                 hide_system = not hide_system
             elif key == "r":
                 store.wake.set()
+            elif key in ("k", "K") and shown:
+                row = shown[max(0, min(selected, len(shown) - 1))]
+                pid, why = killable(row)
+                if why:
+                    notice = (why, BAD, time.time() + 5)
+                else:
+                    confirm = row
 
-        w, h = size()
-        all_rows, fetched, err = store.snapshot()
-        shown = [r for r in all_rows
-                 if not (hide_system and r["port"] in SYSTEM_PORTS)]
+        # Rebuilt after the keys rather than before them, so that a press of
+        # o is answered in the frame it was made in and not the next one.
+        shown = [r for r in all_rows if not (hide_system and theirs(r))]
         selected = max(0, min(selected, len(shown) - 1)) if shown else 0
+        if notice and time.time() >= notice[2]:
+            notice = None
         mine = sum(1 for r in all_rows if r["pid"])
         out = sum(1 for r in all_rows if r.get("exposed"))
 
@@ -427,15 +668,20 @@ def main():
             here = i == selected
             tint = bg(28, 44, 62) if here else ""
             note, note_colour = bind_note(row)
-            kind = row["kind"] or "(not ours)"
+            # Another user's row names its owner rather than its project,
+            # which it has none of that we can read. That is the whole of
+            # what is knowable about it, and it is more use than the
+            # "(not ours)" this used to say in the column beside it.
+            who = row["project"] or row.get("user") or ("—" if row["pid"]
+                                                        else "")
             line = [(tint + (ACCENT if here else PORT),
                      ("▸" if here else " ") + "%-6d" % row["port"]),
                     (tint + note_colour, "%-8s" % note),
                     (tint + (DIM if row["guessed"] or not row["kind"] else TXT),
-                     pad(kind, 18)),
-                    (tint + (WARN if row["gone"] else TXT),
-                     pad(row["project"] or ("—" if row["pid"] else ""),
-                         name_w))]
+                     pad(row["kind"], 18)),
+                    (tint + (WARN if row["gone"] else
+                             DIM if row.get("user") else TXT),
+                     pad(who, name_w))]
             if wide:
                 line.append((tint + DIM, "%-6s" % span(row["up"])))
                 line.append((tint + (OK if row["exposed"] == "tailnet"
@@ -446,13 +692,36 @@ def main():
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
 
-        while len(rows) < h - 2:
+        # The bottom of the pane is one of four things: a question that must
+        # be answered before anything is signalled, the wait after it, the
+        # outcome, or the ordinary keys.
+        if confirm is not None:
+            foot = prompt([(BAD, " kill "), (TXT, kill_label(confirm, w - 30)),
+                           (DIM, "?")], (WARN, "[y]"),
+                          [" yes  ·  any other key cancels",
+                           " yes  ·  any key cancels", " yes"], w)
+        elif watch is not None and watch["asked"]:
+            foot = prompt([(WARN, " still up: "),
+                           (TXT, kill_label(watch["row"], w - 30))],
+                          (BAD, "[f]"),
+                          [" force kill  ·  any other key leaves it",
+                           " SIGKILL  ·  any key leaves it", " SIGKILL"], w)
+        elif watch is not None:
+            foot = [seg([(DIM, " SIGTERM sent, waiting for "),
+                         (TXT, kill_label(watch["row"], w - 29))], w - 1)]
+        elif notice is not None:
+            foot = [seg([(notice[1], " " + notice[0])], w - 1)]
+        else:
+            hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                     [(DIM, "[k]ill")],
+                     [(DIM, "[o]%s system"
+                       % ("show" if hide_system else "hide"))],
+                     [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
+            foot = [" " + line for line in pack_hints(hints, w - 2)]
+
+        while len(rows) < h - len(foot) - 1:
             rows.append("")
-        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
-                 [(DIM, "[o]%s system" % ("show" if hide_system else "hide"))],
-                 [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
-        for line in pack_hints(hints, w - 2):
-            rows.append(" " + line)
+        rows.extend(foot)
         draw(rows, w, h)
         time.sleep(0.3)
 

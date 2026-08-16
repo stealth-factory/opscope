@@ -4,7 +4,7 @@ What is listening on this machine, what started it, and who can reach it.
 
 ```
 ╺━ DEV SERVERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 19 listening · 8 yours · 1 reachable off-box   every 4s
+ 16 listening · 8 yours · 1 reachable off-box   every 4s
 
   PORT  BIND    WHAT              PROJECT                  UP    EXPOSED
   3000  all     Next.js 16.3.1    fix-dependabot-alerts ✗  22h   -
@@ -13,7 +13,13 @@ What is listening on this machine, what started it, and who can reach it.
   4100  --      nothing listening                          --    tailnet
  25001  local   Next.js           my-project               1h    -
  42043  local   agy               wiiiimm-codes            9h    -
+
+ ↑↓ select  [k]ill  [o]show system  [r]efresh  [q]uit
 ```
+
+Eight of this machine's sixteen listening ports are root's and are hidden;
+`o` shows them. The count in the header is of all of them, so the eight it
+does not draw are never a surprise.
 
 ## What identifies a dev server
 
@@ -75,21 +81,78 @@ for lacking a socket.
 ## What it cannot see
 
 Sockets owned by another user, which on a normal machine means everything root
-runs — `sshd`, the resolver, Tailscale itself. `/proc/<pid>/fd` is unreadable
-for those, so the socket cannot be tied to a process without root.
+runs — `sshd`, the resolver, Tailscale, whatever your cloud provider installed
+to collect metrics. Tying a socket to a process means reading
+`/proc/<pid>/fd`, and that directory is unreadable for anyone else's process,
+so the port is visible and the thing behind it is not.
 
-Those rows say `(not ours)`, or name the service **with a question mark** —
-`SSH?`, `DNS?` — where the port number is a well-known convention. The question
-mark is the point: it is a guess from a port number, not something read from
-the process, and the widget says which it is. They are hidden behind `o` by
-default, since they are never the answer to "which port is my dev server on".
+What *is* readable is the uid, which the kernel puts in the socket table
+beside the inode. So those rows name their owner — `root` — in the column
+where yours name their project, and leave WHAT blank rather than guessing.
+Where the port number is a well-known convention the service is named **with a
+question mark**: `SSH?`, `HTTPS?`. The question mark is the point. It is a
+guess from a number, not something read from the process, and the widget says
+which it is.
+
+`o` hides them, and does so by default, along with the system ports in
+`system_ports`. Both are the machine rather than something you started, both
+are unkillable without root, and neither is ever the answer to "which port is
+my dev server on".
+
+They are hidden rather than dropped because two questions this widget exists
+for still involve them. A root process holding port 3000 is why *your* server
+could not bind it, and a public Tailscale funnel lands on 443, which is root's.
+The header keeps counting them for the same reason: `16 listening · 8 yours`
+on a screen showing eight rows says plainly that eight more exist.
+
+## One service, not one socket
+
+A server that listens on both address families holds two sockets and appears
+twice in the kernel's table — `0.0.0.0:3000` and `[::]:3000`, or a tailnet
+IPv4 address alongside its IPv6. That is one thing to know about, so it is one
+row.
+
+Rows are merged only when the port, the owning pid **and** the reachability
+class all match. Two sockets on the same port that differ on any of the three
+stay two rows, because `127.0.0.1:8080` and `100.64.1.2:8080` are not the same
+answer to "who can reach this" even when one process holds both.
+
+## Stopping a server
+
+`k` stops the selected one. It asks first, on the bottom line, naming what is
+about to go:
+
+```
+ kill Next.js in my-project on :25001 (pid 84120)?  [y] yes  ·  any other key cancels
+```
+
+Only `y` proceeds. Every other key cancels, `q` included — quitting is not
+consent.
+
+What it sends is **SIGTERM to the process group**, which is what Ctrl-C in that
+server's own terminal would have sent. A dev server is rarely one process:
+`npm run dev` is a package manager, a supervisor and the server itself, sharing
+a group for exactly this reason. Signalling the pid alone leaves the supervisor
+to respawn it. Where the group cannot be read, or where it is this widget's
+own, the pid alone is signalled instead.
+
+Then it waits. Most servers are gone within a second and the row disappears. If
+one is still up after three seconds, the offer is `[f]` for SIGKILL, which it
+does not get automatically — a server ignoring SIGTERM is usually mid-write,
+and that is worth a deliberate second keystroke.
+
+It refuses outright on anything that is not yours: a row with no pid is a
+socket `/proc` would not name, which means another user's process, and pid 1 is
+never a dev server. Neither case is offered a prompt.
 
 ## Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a row |
-| `o` | show or hide system ports |
+| `k` | stop the selected server, after confirming |
+| `f` | escalate to SIGKILL, only when offered |
+| `o` | show or hide what is the machine's rather than yours |
 | `r` | rescan now |
 | `q` | quit |
 
