@@ -405,6 +405,11 @@ Claude Code's, with no configuration and no second table. The longest matching
 name wins, so `claude-opus-4` does not shadow `claude-opus-4-8`, and a `"*"`
 entry catches whatever is left.
 
+**Config wins outright**, before the shipped table is consulted at all — which
+means a single `"*"` entry reprices every model, including ones with a published
+rate. That is the intended reading of "your rates override mine", but it is
+worth knowing before setting a catch-all.
+
 ```
  ── METERED ── $37958.95 at your configured rates   all time
   claude-opus-5    $29648.39
