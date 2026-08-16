@@ -266,7 +266,22 @@ What it returns is worth reading carefully: `currentTier` is `free-tier`
 while `paidTier` is `Google AI Ultra`. Those are different questions — which
 Code Assist tier this project sits on, and which Google AI plan the account
 holds — and they disagree here, so **both are shown** rather than one being
-picked as "the" plan.
+picked as "the" plan, with a remark saying why they can differ.
+
+`free-tier` is not a downgrade, and the response says so itself. `allowedTiers`
+offers exactly two: `free-tier`, marked `isDefault`, and `standard-tier`, which
+carries `usesGcpTos: true` and `userDefinedCloudaicompanionProject: true`. The
+paid Code Assist tier is **GCP licensing** — it wants Cloud terms accepted and
+your own Cloud project nominated. This account is a consumer sign-in
+(`auth: consumer`, `gcpManaged: false`) on an auto-provisioned project, so it
+sits on the default, while the limits actually come from the consumer Ultra
+subscription in `paidTier`.
+
+One inconsistency is Google's rather than this pane's, and is left as it
+arrives: `currentTier.upgradeSubscriptionText` still advertises *"Upgrade to
+get 1,500 model requests per day"* with `upgradeSubscriptionType:
+GOOGLE_ONE_HELIUM`, pitching a Google One upgrade to an account whose
+`paidTier` already reads *"You are subscribed to the best Google AI plan."*
 
 **Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
 carries a running `totalTokens` on each session event alongside an

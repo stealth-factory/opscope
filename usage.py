@@ -1707,7 +1707,17 @@ def antigravity_plan_rows(state, w):
             pairs.append(("auth", method))
     except (OSError, ValueError):
         pass
-    return plan_rows(cur.get("name") or paid.get("name"), pairs, w)
+    # Two different product lines, and the names invite the wrong reading:
+    # the Code Assist tier is GCP licensing, the Google AI plan is the
+    # consumer subscription. Being on free-tier with Ultra is normal.
+    caveat = ""
+    if cur.get("id") and paid.get("name"):
+        caveat = ("The Code Assist tier is GCP licensing - standard-tier"
+                  " wants your own Cloud project and Cloud terms - while the"
+                  " Google AI plan is the consumer subscription. Free-tier"
+                  " here is the default, not a downgrade.")
+    return plan_rows(cur.get("name") or paid.get("name"), pairs, w,
+                     caveat=caveat)
 
 
 def antigravity_tab(state, w, h):
@@ -2048,7 +2058,7 @@ def metered_rows(windows, w, note="", agent=None, scope="", caveat=""):
     return rows
 
 
-def plan_rows(headline, pairs, w, note="", wrapped=None):
+def plan_rows(headline, pairs, w, note="", wrapped=None, caveat=""):
     """A subscription block: what the plan is, then the facts about it.
 
     Shared by four tabs so the same question is answered in the same shape
@@ -2057,6 +2067,8 @@ def plan_rows(headline, pairs, w, note="", wrapped=None):
     """
     rows = [seg([(LBL, " ── SUBSCRIPTION ── "), (TXT, headline or "unknown"),
                  (DIM, "   " + note if note else "")], w - 1)]
+    for line in (wrap_text(caveat, max(20, w - 4)) if caveat else []):
+        rows.append(seg([(DIM, "  " + line)], w - 1))
     labels = [k for k, _ in pairs] + ([wrapped[0]] if wrapped else [])
     label_w = max([len(x) for x in labels] or [0])
     for key, value in pairs:
