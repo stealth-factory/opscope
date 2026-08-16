@@ -2082,12 +2082,13 @@ def plan_rows(headline, pairs, w, note="", wrapped=None):
     return rows
 
 
-def last_section(rows, block):
-    """Put a section at the end of a tab with exactly one blank before it.
+def add_section(rows, block):
+    """Append a section with exactly one blank line before it.
 
-    Every tab ends with its subscription block, so the separator is owned in
-    one place rather than by five callers who each end differently - some
-    already finish on a blank line and would otherwise leave two.
+    The separator is owned here rather than by callers who each end
+    differently - some finish on a blank line and would otherwise leave two,
+    and plain concatenation leaves none at all, which is what METERED did
+    when it was bolted on after the tab body.
     """
     if not block:
         return rows
@@ -2941,30 +2942,34 @@ def main():
         name = tabs[active]
         sub = []
         if name == "claude":
-            body = claude_tab(claude, w, h) + claude_metered(claude, w)
+            body = add_section(claude_tab(claude, w, h),
+                               claude_metered(claude, w))
             if claude.get("profile"):
                 sub = claude_plan_rows(claude["profile"], w)
         elif name == "cursor":
             # METERED sits last-but-one on every tab, so Cursor's - which
             # is published rather than configured - lands in the same place
             # as everyone else's rather than floating up beside its quota.
-            body = cursor_tab(cursor, w, h) + cursor_metered_rows(cursor, w)
+            body = add_section(cursor_tab(cursor, w, h),
+                               cursor_metered_rows(cursor, w))
             sub = cursor_plan_rows(cursor.get("plan"), w)
         elif name == "codex":
-            body = codex_tab(codex, w, h) + codex_metered(codex, w)
+            body = add_section(codex_tab(codex, w, h),
+                               codex_metered(codex, w))
             sub = codex_plan_rows(codex, w)
         elif name == "grok":
             body = grok_tab(grok, w, h)
             sub = grok_plan_rows(grok.get("quota"), w)
         elif name == "copilot":
-            body = copilot_tab(copilot, w, h) + copilot_metered(copilot, w)
+            body = add_section(copilot_tab(copilot, w, h),
+                               copilot_metered(copilot, w))
             sub = copilot_plan_rows(copilot.get("live") or {}, w)
         elif name == "antigravity":
             body = antigravity_tab(antigravity, w, h)
             sub = antigravity_plan_rows(antigravity, w)
         else:
             body = elsewhere_tab(name, installed, w, h)
-        body = last_section(body, sub)
+        body = add_section(body, sub)
 
         hints = [[(ACCENT, "←→"), (DIM, " agent")],
                  [(ACCENT, "↑↓"), (DIM, " scroll")],
