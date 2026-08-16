@@ -388,11 +388,34 @@ the CLI leaves nothing on this disk. On one account the dashboard read
 `$3,400.37` where this pane read `$225.33`; both are correct, and they are
 answers to different questions.
 
-**That account-wide breakdown is not fetchable.** `/backend-api/codex/usage`
-exists — it answers 403 rather than 404 — but the 403 is HTML from bot
-protection rather than a JSON auth error, so it is a browser-only dashboard
-route, exactly like the `cursor.com` usage API this widget also could not use.
-The CLI's OAuth token opens `wham/usage` and nothing further.
+**That account-wide breakdown is not fetchable with a token**, and reading
+CodexBar's source settles why rather than leaving it a guess. It gets those
+numbers by **being a browser**: `OpenAIDashboardBrowserCookieImporter` lifts
+session cookies out of WebView storage, `OpenAIDashboardFetcher` loads
+`chatgpt.com/codex/cloud/settings/analytics#usage` in a hidden web view, and
+`OpenAISubscriptionMetadata` injects JavaScript to intercept the page's own
+`fetch('/backend-api/subscriptions')` — falling back to scraping the rendered
+table when the API response is not enough.
+
+A terminal widget cannot follow it there. Reaching into a browser's cookie
+store is a different kind of program from one that reads an agent's own files,
+and this repo is not going to become that quietly.
+
+Probing the same endpoints with the CLI's OAuth token gives three different
+answers, and the differences are the useful part:
+
+| endpoint | with the CLI token |
+|---|---|
+| `wham/usage`, `wham/rate-limit-reset-credits` | **200** — quota, plan, credits |
+| `backend-api/me`, `backend-api/subscriptions` | **403 HTML** — a bot wall, not an auth error |
+| `accounts/<id>/spend-controls/current-user/monthly-usage` | **401 JSON**: *"Must use workspace account for this operation"* |
+
+That last one is the interesting one: a real API answer rather than a wall, so
+the endpoint **is** reachable by token — just not for a personal account. On a
+workspace account it would plausibly return account-wide monthly spend. Nothing
+here calls it, because there is no workspace account on this machine to see the
+response shape, and writing a parser for a payload nobody has seen is how
+plausible-looking wrong numbers get shipped.
 
 ### Where each agent's numbers come from
 
