@@ -238,6 +238,52 @@ Looking only at `sessions/` is what made this tab say "no quota" for a while.
 `grok du` reports **disk** use — the name is a coincidence worth not falling
 for.
 
+## Which subscription, and since when
+
+Every tab that shows a quota now says what the quota is *of*. A percentage
+without its plan is half a fact: an enterprise seat is why two of Copilot's
+three pools come back unlimited, and Cursor's `$400.00` limit means nothing
+until you know that is what Ultra includes for `$200/mo`.
+
+| | where it comes from | what it says |
+|---|---|---|
+| **Claude** | `api/oauth/profile` | plan, member since, subscription status, rate-limit tier, billing type |
+| **Cursor** | `GetPlanInfo` on the same Connect service | plan name, price, included amount, who bills it |
+| **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
+| **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
+| **Grok** | the client log | tier and billing period, which it already showed |
+
+Codex gets three lines rather than a section because three lines is all it
+publishes. Its `approx_local_messages` and `approx_cloud_messages` read zero
+here for a real reason — they are estimates derived from a credit balance, and
+the balance is zero.
+
+These are held for **an hour**, not the two minutes the quotas get. A plan does
+not change between refreshes, and the Claude usage endpoint answers `429` if
+you ask at quota cadence — which it did, during testing, and the pane correctly
+fell back to its cache and said so.
+
+## On wrapping rather than clipping
+
+Long text **wraps**; charts and tables do not, and the difference is not
+laziness.
+
+A labelled value is words — `copilot_enterprise_seat_multi_quota` is one — so
+it flows onto as many lines as it needs, continuation lines sitting under the
+value rather than under the label. A single word wider than the column is split
+rather than allowed to run off.
+
+A bar chart broken across two lines is not a bar chart, and a table row wrapped
+mid-row loses the columns that made it a table. Those **adapt** instead: columns
+drop as the pane narrows, labels shorten, bars take whatever width is left.
+
+Headers do a third thing again — they shed a *clause* before they will clip a
+*number*. `· account-wide, not this machine` becomes `· account-wide` so that
+`resets in 15d` survives, because losing the clause leaves a shorter true
+sentence while losing two characters of the countdown leaves `resets in 1`,
+which is a different and wrong number. That one shipped, and read exactly as
+badly as it sounds.
+
 ## On tokens per second
 
 Two agents can answer it, and they answer different questions.

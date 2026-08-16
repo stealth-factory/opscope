@@ -95,6 +95,9 @@ CLAUDE_STATS = os.path.expanduser("~/.claude/stats-cache.json")
 CLAUDE_CREDS = os.path.expanduser("~/.claude/.credentials.json")
 CLAUDE_CONFIG = os.path.expanduser("~/.claude.json")
 CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_PROFILE_API = "https://api.anthropic.com/api/oauth/profile"
+# a plan does not change between refreshes; the windows do
+PLAN_TTL = 3600
 # The windows are not stated in limits[], but the same response names them in
 # its own top-level keys: five_hour and seven_day.
 CLAUDE_WINDOW = {"session": "5h", "weekly": "7d"}
@@ -152,7 +155,10 @@ def ago(when):
         return "%dm" % int(s // 60)
     if s < 86400:
         return "%dh" % int(s // 3600)
-    return "%dd" % int(s // 86400)
+    if s < 365 * 86400:
+        return "%dd" % int(s // 86400)
+    # a subscription can be years old, and "890d" is not a span anyone reads
+    return "%.1fy" % (s / (365.0 * 86400))
 
 
 def claude_live():
@@ -179,6 +185,49 @@ def claude_live():
                     "plan": o.get("subscriptionType") or ""}
     except (urllib.error.URLError, ValueError, OSError):
         return None
+
+
+def claude_profile():
+    """Which subscription the windows belong to.
+
+    A separate endpoint from the usage one, and near-static, so it is held
+    far longer - a plan does not change between refreshes, and the usage
+    endpoint answers 429 if these are called at usage cadence.
+    """
+    try:
+        with open(CLAUDE_CREDS) as f:
+            o = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except (OSError, ValueError):
+        return None
+    tok = o.get("accessToken")
+    if not tok or (o.get("expiresAt") or 0) / 1000.0 <= time.time():
+        return None
+    req = urllib.request.Request(CLAUDE_PROFILE_API, headers={
+        "Authorization": "Bearer " + tok, "User-Agent": "terminal-toys"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    d["_plan"] = o.get("subscriptionType") or ""
+    return d
+
+
+def claude_plan_rows(prof, w):
+    org = (prof.get("organization") or {})
+    pairs = []
+    since = iso_epoch(org.get("subscription_created_at") or "")
+    day = iso_day(org.get("subscription_created_at") or "")
+    if since and day:
+        pairs.append(("member since", "%s · %s ago" % (day, ago(since))))
+    if org.get("subscription_status"):
+        pairs.append(("status", org["subscription_status"]))
+    if org.get("rate_limit_tier"):
+        pairs.append(("rate limit tier", org["rate_limit_tier"]))
+    if org.get("billing_type"):
+        pairs.append(("billing", org["billing_type"].replace("_", " ")))
+    return plan_rows(prof.get("_plan") or org.get("organization_type"),
+                     pairs, w)
 
 
 def claude_stale():
@@ -208,15 +257,17 @@ def read_claude():
     entirely, and account-wide rather than about this machine.
     """
     quota = cached("claude", lambda: claude_live() or claude_stale())
+    profile = cached("claude-plan", claude_profile, ttl=PLAN_TTL)
     try:
         stat = os.stat(CLAUDE_STATS)
         with open(CLAUDE_STATS) as f:
             d = json.load(f)
     except (OSError, ValueError) as e:
-        return {"ok": False, "why": "%s" % type(e).__name__, "quota": quota}
+        return {"ok": False, "why": "%s" % type(e).__name__,
+                "quota": quota, "profile": profile}
     rates, sampled = claude_rates()
     return {"ok": True, "mtime": stat.st_mtime, "data": d, "quota": quota,
-            "rates": rates, "sampled": sampled}
+            "profile": profile, "rates": rates, "sampled": sampled}
 
 
 def iso_epoch(s):
@@ -450,6 +501,33 @@ def cursor_rpc(method, body, tok=None):
         return None
 
 
+def cursor_plan():
+    """Which Cursor plan the percentages are percentages of.
+
+    GetPlanInfo is where the plan's name and price live - the usage call
+    carries neither, and its $400 limit is meaningless without knowing that
+    is what Ultra includes. Found in the CLI bundle the same way the usage
+    endpoint was.
+    """
+    return cursor_rpc("GetPlanInfo", {})
+
+
+def cursor_plan_rows(info, w):
+    plan = (info or {}).get("planInfo") or {}
+    if not plan:
+        return []
+    pairs = []
+    if plan.get("price"):
+        pairs.append(("price", plan["price"]))
+    inc = plan.get("includedAmountCents")
+    if inc:
+        pairs.append(("included", "$%.2f per cycle" % (int(inc) / 100.0)))
+    owner = (plan.get("planOwner") or "").replace("PLAN_OWNER_", "").lower()
+    if owner:
+        pairs.append(("billing", owner))
+    return plan_rows(plan.get("planName"), pairs, w)
+
+
 def cursor_spend(days=30):
     """Per-model tokens and real cost over a window.
 
@@ -467,6 +545,7 @@ def read_cursor():
     if not os.path.exists(CURSOR_DB):
         return {"ok": False, "why": "no tracking database",
                 "live": cached("cursor", cursor_live),
+                "plan": cached("cursor-plan", cursor_plan, ttl=PLAN_TTL),
                 "spend": cached("cursor-spend", cursor_spend)}
     try:
         con = sqlite3.connect("file:%s?mode=ro" % CURSOR_DB, uri=True)
@@ -485,6 +564,7 @@ def read_cursor():
     except sqlite3.Error as e:
         return {"ok": False, "why": str(e)[:40]}
     return {"ok": True, "live": cached("cursor", cursor_live),
+                "plan": cached("cursor-plan", cursor_plan, ttl=PLAN_TTL),
                 "spend": cached("cursor-spend", cursor_spend),
             "hashes": rows[0], "conversations": rows[1],
             "models": rows[2], "by_model": by_model,
@@ -749,12 +829,22 @@ def codex_tab(state, w, h):
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
                              (heat(used), " %3.0f%%" % (pct or 0)),
                              (DIM, "  " + when)], w - 1))
-        credits = live.get("credits") or (state.get("limits") or {}).get("credits") or {}
-        if credits:
-            rows.append(seg([(DIM, "  credits "),
-                             (TXT, "unlimited" if credits.get("unlimited")
-                              else str(credits.get("balance") or "0"))], w - 1))
         rows.append("")
+        # Everything Codex publishes about the subscription itself: a plan
+        # word and a credit balance, which is why this is three lines and
+        # not the section Copilot and Cursor get. Credits live here rather
+        # than under the bars: they are what the plan grants, not a window.
+        credits = (live.get("credits")
+                   or (state.get("limits") or {}).get("credits") or {})
+        pairs = []
+        if credits:
+            pairs.append(("credits", "unlimited" if credits.get("unlimited")
+                          else str(credits.get("balance") or "0")))
+        if (live.get("spend_control") or {}).get("individual_limit"):
+            pairs.append(("spend limit",
+                          str(live["spend_control"]["individual_limit"])))
+        if plan or pairs:
+            rows.extend(plan_rows(plan, pairs, w))
     rows.append(seg([(LBL, " ── TOTALS ── "),
                      (DIM, "%d sessions · newest %s ago"
                       % (state["sessions"], ago(state["last"])))], w - 1))
@@ -1087,17 +1177,74 @@ COPILOT_FEATURES = (("chat_enabled", "chat"),
                     ("copilotignore_enabled", "copilotignore"))
 
 
+def wrap_pair(key, value, label_w, w):
+    """A labelled value flowed onto as many lines as it needs.
+
+    Only text can be wrapped. A bar chart broken across two lines is not a
+    bar chart, and a table row wrapped mid-row loses the columns that made
+    it a table - which is why those still adapt to the width instead. A
+    value like an enterprise sku is just words, so it wraps, and the
+    continuation lines sit under the value rather than under the label.
+    """
+    budget = max(8, w - label_w - 5)
+    words, lines, line = str(value).split(), [], ""
+    for word in words:
+        if line and len(line) + 1 + len(word) > budget:
+            lines.append(line)
+            line = word
+        else:
+            # A single word longer than the column is split rather than
+            # allowed to run off; a sku is one word and still has to fit.
+            while len(word) > budget:
+                lines.append(word[:budget])
+                word = word[budget:]
+            line = (line + " " + word).strip() if line else word
+    if line:
+        lines.append(line)
+    return [(key if not i else "", part) for i, part in enumerate(lines)]
+
+
+def plan_rows(headline, pairs, w, note="", wrapped=None):
+    """A subscription block: what the plan is, then the facts about it.
+
+    Shared by four tabs so the same question is answered in the same shape
+    wherever you are on the wall - a percentage means little without the
+    subscription it is a percentage of.
+    """
+    rows = [seg([(LBL, " ── SUBSCRIPTION ── "), (TXT, headline or "unknown"),
+                 (DIM, "   " + note if note else "")], w - 1)]
+    labels = [k for k, _ in pairs] + ([wrapped[0]] if wrapped else [])
+    label_w = max([len(x) for x in labels] or [0])
+    for key, value in pairs:
+        for lab, part in wrap_pair(key, value, label_w, w):
+            rows.append(seg([(DIM, "  " + pad(lab, label_w) + "  "),
+                             (TXT, part)], w - 1))
+    if wrapped and wrapped[1]:
+        # Wrapped rather than clipped: a truncated list reads as a shorter
+        # one, and only the first line takes the label.
+        budget = max(10, w - label_w - 6)
+        lines, line = [], []
+        for name in wrapped[1]:
+            if line and len(" · ".join(line + [name])) > budget:
+                lines.append(line)
+                line = []
+            line.append(name)
+        if line:
+            lines.append(line)
+        for i, part in enumerate(lines):
+            rows.append(seg([(DIM, "  " + pad(wrapped[0] if not i else "",
+                                              label_w) + "  "),
+                             (OK, " · ".join(part))], w - 1))
+    rows.append("")
+    return rows
+
+
 def copilot_plan_rows(live, w):
     """Which subscription this quota belongs to, and since when.
 
-    A percentage means little without the seat behind it: an enterprise seat
-    is why two of the three pools come back unlimited, and the assignment
-    date is the only thing here that says how long it has been so.
+    An enterprise seat is why two of the three pools come back unlimited,
+    and assigned_date is the only field saying how long it has been so.
     """
-    rows = [seg([(LBL, " ── SUBSCRIPTION ── "),
-                 (TXT, live.get("copilot_plan") or "unknown"),
-                 (WARN, "   upgradeable" if live.get("can_upgrade_plan")
-                  else "")], w - 1)]
     pairs = []
     since = iso_epoch(live.get("assigned_date") or "")
     day = iso_day(live.get("assigned_date") or "")
@@ -1113,28 +1260,10 @@ def copilot_plan_rows(live, w):
         pairs.append(("sku", live["access_type_sku"]))
     if live.get("token_based_billing"):
         pairs.append(("billing", "token-based"))
-    label_w = max(len(k) for k, _ in pairs) if pairs else 0
-    for key, value in pairs:
-        rows.append(seg([(DIM, "  " + pad(key, label_w) + "  "),
-                         (TXT, value)], w - 1))
-    # Wrapped rather than clipped: a truncated list reads as a shorter one,
-    # and only the first line takes the label so the column stays readable.
     on = [name for flag, name in COPILOT_FEATURES if live.get(flag)]
-    budget = max(10, w - label_w - 6)
-    lines, line = [], []
-    for name in on:
-        if line and len(" · ".join(line + [name])) > budget:
-            lines.append(line)
-            line = []
-        line.append(name)
-    if line:
-        lines.append(line)
-    for i, part in enumerate(lines):
-        rows.append(seg([(DIM, "  " + pad("enabled" if not i else "",
-                                          label_w) + "  "),
-                         (OK, " · ".join(part))], w - 1))
-    rows.append("")
-    return rows
+    return plan_rows(live.get("copilot_plan"), pairs, w,
+                     note="upgradeable" if live.get("can_upgrade_plan") else "",
+                     wrapped=("enabled", on))
 
 
 def copilot_tab(state, w, h):
@@ -1470,6 +1599,8 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
 
 def claude_tab(state, w, h):
     rows = claude_quota(state.get("quota"), w)
+    if state.get("profile"):
+        rows += claude_plan_rows(state["profile"], w)
     if not state.get("ok"):
         return rows + [seg([(BAD, "  no stats cache: %s"
                              % state.get("why"))], w - 1)]
@@ -1665,9 +1796,11 @@ def cursor_spend_rows(spend, w):
 def cursor_tab(state, w, h):
     if not state.get("ok"):
         return (cursor_quota(state.get("live"), w)
+                + cursor_plan_rows(state.get("plan"), w)
                 + cursor_spend_rows(state.get("spend"), w)
                 or [seg([(BAD, "  %s" % state.get("why"))], w - 1)])
     rows = cursor_quota(state.get("live"), w)
+    rows += cursor_plan_rows(state.get("plan"), w)
     rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"
