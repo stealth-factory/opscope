@@ -178,6 +178,15 @@ HEAT_STEPS = ((74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84))
 CODEX_STEPS = ((66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250))
 GROK_STEPS = ((44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250))
 CURSOR_STEPS = ((48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184))
+# One hue per provider, for the summary's group headings. Each is the colour
+# that agent's own tab already uses - Claude the terracotta of its /stats,
+# Codex its white ramp, Grok its blue, Cursor its included-lane green - so the
+# same agent looks the same wherever you meet it. Copilot and Antigravity have
+# no calendar to borrow from and get their own, chosen to sit clear of the
+# amber and red this widget reserves for trouble.
+AGENT_HUE = {"claude": (240, 132, 84), "codex": (206, 214, 228),
+             "cursor": (126, 208, 176), "grok": (120, 196, 250),
+             "copilot": (186, 166, 255), "antigravity": (232, 158, 200)}
 EMPTY_CELL = rgb(58, 66, 80)
 
 
@@ -566,14 +575,13 @@ def claude_quota(q, w):
                     else "resetting" if live else "already reset")
         sev = (l.get("severity") or "normal").lower()
         window = CLAUDE_WINDOW_SECS.get(l.get("group") or "")
-        bar = meter(used, max(8, w - 35 - label_w))
-        filled = bar.count("█")
         # is_active marks the limit currently doing the binding - the one that
         # will stop you first - so it is the one worth reading brightly.
         rows.append(seg([(TXT if l.get("is_active") else DIM,
-                          " " + pad(text, label_w) + " "),
-                         (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                         (heat(used), pct_text(pct)),
+                          " " + pad(text, label_w) + " ")]
+                        + paced_bar(used, elapsed_of(window, ts),
+                                    max(8, w - 35 - label_w))
+                        + [(heat(used), pct_text(pct)),
                          pace_cell(lead(pct, window, ts)),
                          (BAD if sev not in ("normal", "") else DIM,
                           "  " + (when if sev in ("normal", "")
@@ -1357,11 +1365,10 @@ def codex_tab(state, w, h):
             used = (pct or 0) / 100.0
             # heat(used), not heat(1 - used): red belongs at a quota nearly
             # spent, and the inverse painted a 26%-used week amber
-            bar = meter(used, max(8, w - 34 - label_w))
-            filled = bar.count("█")
-            rows.append(seg([(DIM, " " + pad(text, label_w) + " "),
-                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), pct_text(pct)),
+            rows.append(seg([(DIM, " " + pad(text, label_w) + " ")]
+                            + paced_bar(used, elapsed_of(secs, reset),
+                                        max(8, w - 34 - label_w))
+                            + [(heat(used), pct_text(pct)),
                              pace_cell(lead(pct, secs, reset)),
                              (DIM, "  " + when)], w - 1))
         rows.append("")
@@ -1582,11 +1589,12 @@ def grok_tab(state, w, h):
         begin, finish = iso_epoch(q.get("start") or ""), iso_epoch(q.get("end") or "")
         if begin and finish and finish > begin:
             span, reset_ts = finish - begin, finish
-        rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"])),
-                         (heat(used), meter(used, max(10, w - 38))),
-                         (DIM, "  credits used"),
-                         pace_cell(lead(float(q["percent"]), span, reset_ts))],
-                        w - 1))
+        rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"]))]
+                        + paced_bar(used, elapsed_of(span, reset_ts),
+                                    max(10, w - 38))
+                        + [(DIM, "  credits used"),
+                           pace_cell(lead(float(q["percent"]), span,
+                                          reset_ts))], w - 1))
         span = ""
         for key, label in (("start", ""), ("end", " → ")):
             try:
@@ -1859,11 +1867,11 @@ def antigravity_quota_rows(groups, w):
                 # reset stands down rather than being cut in half.
                 when = ""
                 room = w - 20 - label_w
-            bar = meter(used, max(8, room))
-            filled = bar.count("█")
-            rows.append(seg([(DIM, "   " + pad(window, label_w) + " "),
-                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), pct_text(pct)),
+            rows.append(seg([(DIM, "   " + pad(window, label_w) + " ")]
+                            + paced_bar(used, elapsed_of(
+                                ANTIGRAVITY_WINDOWS.get(window), reset),
+                                max(8, room))
+                            + [(heat(used), pct_text(pct)),
                              pace_cell(lead(pct,
                                             ANTIGRAVITY_WINDOWS.get(window),
                                             reset)),
@@ -2346,8 +2354,6 @@ def copilot_tab(state, w, h):
             # shows what is spent, and red belongs at the empty end.
             pct = 100.0 - float(q.get("percent_remaining") or 0)
             used = max(0.0, min(1.0, pct / 100.0))
-            bar = meter(used, max(8, w - 38 - label_w))
-            filled = bar.count("█")
             # The window is a calendar month, so its length is the gap
             # between this reset and the one before it.
             span = None
@@ -2357,10 +2363,11 @@ def copilot_tab(state, w, h):
                 back = (prev.replace(year=prev.year - 1, month=12)
                         if prev.month == 1 else prev.replace(month=prev.month - 1))
                 span = stamp - back.timestamp()
-            rows.append(seg([(DIM, " " + name + " "),
-                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), pct_text(pct)),
-                             pace_cell(lead(pct, span, stamp))], w - 1))
+            rows.append(seg([(DIM, " " + name + " ")]
+                            + paced_bar(used, elapsed_of(span, stamp),
+                                        max(8, w - 38 - label_w))
+                            + [(heat(used), pct_text(pct)),
+                               pace_cell(lead(pct, span, stamp))], w - 1))
             # A pool can carry its own reset, in which case it is not on the
             # account-wide cycle in the header and has to say so itself.
             own = q.get("quota_reset_at") or 0
@@ -2522,6 +2529,43 @@ def detect_agents():
 SUMMARY_TAB = "+"
 
 
+def elapsed_of(secs, reset):
+    """How much of a window has gone, from its length and its reset."""
+    if not secs or not reset:
+        return None
+    left = reset - time.time()
+    if left <= 0 or left > secs:
+        return None
+    return (secs - left) / secs
+
+
+def paced_bar(used, elapsed, room):
+    """A quota bar with a mark where an even burn would have reached by now.
+
+    The percentage alone cannot separate a lane that is 71% spent with three
+    weeks left from one that is 71% spent with three days left, and colour
+    alone cannot either - both are the same red. The mark is the window's
+    own progress, so a fill short of it is spending slower than the clock
+    and a fill past it is not.
+
+    Returned as coloured segments rather than a string because the mark has
+    to be tinted against whichever side of it the fill lands on, and it is a
+    different glyph from the bar so it survives without colour at all.
+    """
+    bar = meter(used, room)
+    filled = bar.count("█")
+    if elapsed is None:
+        return [(heat(used), bar[:filled]), (GRID, bar[filled:])]
+    at = max(0, min(room - 1, int(round(elapsed * room))))
+    ahead = used <= elapsed
+    mark = (OK if ahead else WARN, "┃")
+    if at < filled:
+        return [(heat(used), bar[:at]), mark,
+                (heat(used), bar[at + 1:filled]), (GRID, bar[filled:])]
+    return [(heat(used), bar[:filled]), (GRID, bar[filled:at]), mark,
+            (GRID, bar[at + 1:])]
+
+
 def summary_tab(states, w, h):
     """Every agent's quotas on one screen, worst first.
 
@@ -2562,24 +2606,30 @@ def summary_tab(states, w, h):
     show_reset = (w - 1) - fixed - 8 >= 16
     tail = 16 if show_reset else (8 if any(x[5] for x in lanes) else 0)
     bar_room = max(8, (w - 1) - fixed - tail)
-    for name in order:
-        rows.append(seg([(TXT, "  " + name.upper())], w - 1))
+    for i, name in enumerate(order):
+        if i:
+            rows.append("")
+        rows.append(seg([(rgb(*AGENT_HUE.get(name, (225, 235, 245))),
+                          "  " + name.upper())], w - 1))
         for _, label, pct, secs, reset, stale in sorted(
                 groups[name], key=lambda x: -x[2]):
             used = max(0.0, min(1.0, pct / 100.0))
-            bar = meter(used, bar_room)
-            filled = bar.count("█")
+            gone = None
+            if secs and reset:
+                left = reset - time.time()
+                if 0 < left <= secs:
+                    gone = (secs - left) / secs
             when, tint = "", DIM
             if stale:
                 when, tint = "  cached", WARN
             elif show_reset and reset:
                 left = reset - time.time()
                 when = ("  " + left_span(left)) if left > 0 else "  resetting"
-            rows.append(seg([(DIM, "   " + pad(label, label_w) + " "),
-                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), pct_text(pct)),
-                             pace_cell(lead(pct, secs, reset)),
-                             (tint, when)], w - 1))
+            rows.append(seg([(DIM, "   " + pad(label, label_w) + " ")]
+                            + paced_bar(used, gone, bar_room)
+                            + [(heat(used), pct_text(pct)),
+                               pace_cell(lead(pct, secs, reset)),
+                               (tint, when)], w - 1))
     if quiet:
         rows.append("")
         rows += no_local("No quota published by: " + ", ".join(quiet)

@@ -824,6 +824,37 @@ seconds and these windows move over hours, so the earlier code was making six
 requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
 endpoint is retried occasionally instead of on every frame.
 
+## The pace mark on every quota bar
+
+```
+ premium reqs  █████████┃██░░░░░   71%  -20%
+ 7d            █████░░░░┃░░░░░░░   29%  +23%
+```
+
+The `┃` is where an even burn would have reached by now — the window's own
+progress, drawn on the bar it belongs to. A fill **short** of it is spending
+slower than the clock; a fill **past** it is not, and Copilot's above is.
+
+It exists because a percentage cannot separate a lane 71% spent with three
+weeks left from one 71% spent with three days left, and neither can colour:
+both are the same red. The mark is the same quantity the `+N%` column reports,
+put where the eye already is.
+
+It **replaces** a cell rather than adding one, so it costs no width, and it is
+a different glyph from the bar rather than only a different colour — it
+survives with colour off. It is tinted green when the fill is behind it and
+amber when past, which is the one place amber appears on a bar that is not
+nearly empty.
+
+No mark is drawn when the window is unknown, or when a reading is **cached**
+and its window may already have closed: a pace computed from a window that has
+ended is arithmetic about nothing.
+
+Cursor is the exception. Its three lanes are coloured as *categories* —
+included, auto, api, in the palette `cursor-agent` uses for the same three —
+and a heat-coloured fill would overwrite that distinction to say something its
+own dollar line already says.
+
 ## On colour
 
 Red means something is wrong, and nothing else. It appears on an error, and on
