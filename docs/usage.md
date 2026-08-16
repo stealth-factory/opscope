@@ -355,9 +355,30 @@ they exist. And `cache_creation` splits `ephemeral_5m_input_tokens` from
 `ephemeral_1h_input_tokens` — the two are priced differently, 1.25× input
 against 2× — so both rates are carried and **neither duration is assumed**.
 
-That corpus is 242MB across 38 files here. Each is parsed once and cached on
+Two things about reading that corpus were learned the hard way, both found by
+one question — *why is Haiku missing?*
+
+**The glob has to recurse.** Subagent transcripts live two levels further down,
+in `<project>/<session>/subagents/`, and that is where Haiku and most of Sonnet
+actually run. A one-level glob found 38 files and silently skipped **257 more,
+277MB of them** — so an agent that only ever appears in subagents vanished from
+the costs entirely.
+
+**Records have to be de-duplicated on `uuid`.** The same message appears in
+more than one file: resuming or forking a session replays its history into the
+new transcript, and subagent turns are written twice over. There were 38,612
+duplicated `requestId`s here. Left raw, that inflated Fable by 29% and Opus 5
+by 13%.
+
+Both fixed, the transcript totals reconcile against Claude Code's own
+`modelUsage` — Haiku to the token, Fable and Opus 5 within a point, Sonnet
+within one, Opus 4.8 at 93% where older transcripts have been rotated away and
+the cache still counts them. That agreement is the check that the extraction is
+right; it is worth re-running after any change here.
+
+The corpus is 520MB across 295 files. Each is parsed once and cached on
 `(mtime, size)`, exactly as the Codex rollouts are, because a finished
-transcript never changes. Cold, the whole set streams in about 1.5 seconds.
+transcript never changes. Cold, the whole set streams in about 2.6 seconds.
 
 **Copilot** groups its own `assistant_usage_events` by day and model, which is
 the same shape from a much smaller table.
@@ -685,7 +706,7 @@ them, whichever tab is on screen.
 
 Two slow things block the first poll, so a freshly started widget takes
 roughly fifteen seconds to paint anything on any tab: Cursor's event fetch,
-and the first pass over Claude's 242MB of transcripts (about 1.5 seconds).
+and the first pass over Claude's 520MB of transcripts (about 2.6 seconds).
 Both are cached afterwards — the events half-hourly, the transcripts per file
 on mtime and size — and neither is paid again.
 

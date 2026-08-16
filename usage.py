@@ -172,7 +172,11 @@ PLAN_TTL = 3600
 CLAUDE_WINDOW = {"session": "5h", "weekly": "7d"}
 CLAUDE_WINDOW_SECS = {"session": 5 * 3600, "weekly": 7 * 86400}
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
-CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
+# Recursive on purpose: subagent transcripts live a further two levels down,
+# in <project>/<session>/subagents/, and that is where Haiku and most of
+# Sonnet actually run. Globbing one level deep found 38 files of 520MB and
+# silently missed 257 of them.
+CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/**/*.jsonl")
 RATE_FILES = 3           # newest transcripts to sample for a rate
 MIN_GAP = 1.0            # seconds; below this the timestamps are not a turn
 ANTIGRAVITY_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
@@ -570,11 +574,16 @@ def usage_kinds(u):
 
 
 def scan_transcript(path):
-    """Per-day, per-model token counts from one transcript.
+    """Per-record token counts from one transcript, keyed by record uuid.
 
-    Cached on (mtime, size): the corpus here is 242MB across 38 files and a
-    finished transcript never changes, so each is parsed once. The whole set
-    streams in a couple of seconds; re-reading it every refresh would not.
+    Keyed rather than summed because the same message appears in more than
+    one file: resuming or forking a session replays its history into the new
+    transcript, and subagent turns are written twice over. Left raw that
+    inflated Fable by 29% and Opus 5 by 13% against Claude Code's own totals;
+    de-duplicated on uuid they land within a point.
+
+    Cached on (mtime, size): the corpus here is 520MB across 295 files and a
+    finished transcript never changes, so each is parsed once.
     """
     try:
         st = os.stat(path)
@@ -584,7 +593,7 @@ def scan_transcript(path):
     hit = _TRANSCRIPT_CACHE.get(path)
     if hit and hit[0] == key:
         return hit[1]
-    days = {}
+    records = {}
     try:
         with open(path, errors="replace") as fh:
             for line in fh:
@@ -597,40 +606,41 @@ def scan_transcript(path):
                 msg = r.get("message") or {}
                 u = msg.get("usage")
                 model = msg.get("model")
+                uid = r.get("uuid")
                 stamp = r.get("timestamp")
-                if not u or not model or not stamp:
+                if not u or not model or not stamp or not uid:
                     continue
                 when = iso_epoch(stamp)
                 if not when:
                     continue
-                day = datetime.date.fromtimestamp(when).isoformat()
                 got = usage_kinds(u)
-                bucket = days.setdefault(day, {}).setdefault(
-                    model, dict.fromkeys(RATE_KINDS, 0))
-                for kind in RATE_KINDS:
-                    bucket[kind] += got[kind]
+                if not any(got.values()):
+                    continue
+                records[uid] = (datetime.date.fromtimestamp(when).isoformat(),
+                                model, got)
     except OSError:
         return {}
-    _TRANSCRIPT_CACHE[path] = (key, days)
-    return days
+    _TRANSCRIPT_CACHE[path] = (key, records)
+    return records
 
 
 def claude_daily():
-    """Every transcript's per-day, per-model tokens, merged.
+    """Every transcript's per-day, per-model tokens, de-duplicated.
 
     stats-cache.json has dailyModelTokens, but only one total per model per
     day - and input, output and the two cache kinds differ in price by up to
     fifty times, so a total cannot be costed. The transcripts carry the
     split, which is why the money comes from here and not from the cache.
     """
+    seen = {}
+    for path in glob.glob(CLAUDE_TRANSCRIPTS, recursive=True):
+        seen.update(scan_transcript(path))
     merged = {}
-    for path in glob.glob(CLAUDE_TRANSCRIPTS):
-        for day, models in scan_transcript(path).items():
-            into = merged.setdefault(day, {})
-            for model, tokens in models.items():
-                bucket = into.setdefault(model, dict.fromkeys(RATE_KINDS, 0))
-                for kind in RATE_KINDS:
-                    bucket[kind] += tokens[kind]
+    for day, model, tokens in seen.values():
+        bucket = merged.setdefault(day, {}).setdefault(
+            model, dict.fromkeys(RATE_KINDS, 0))
+        for kind in RATE_KINDS:
+            bucket[kind] += tokens[kind]
     return merged
 
 
@@ -663,8 +673,8 @@ def claude_rates():
     outliers are trimmed, which is the reason to trust it; the maximum moves
     from 15328 to 800 on the same data, which is the reason not to show one.
     """
-    files = sorted(glob.glob(CLAUDE_TRANSCRIPTS), key=os.path.getmtime,
-                   reverse=True)[:RATE_FILES]
+    files = sorted(glob.glob(CLAUDE_TRANSCRIPTS, recursive=True),
+                   key=os.path.getmtime, reverse=True)[:RATE_FILES]
     out, sampled = [], 0
     for path in files:
         prev, prev_type = None, None
