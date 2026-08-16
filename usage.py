@@ -89,8 +89,34 @@ RATE_KINDS = ("input", "output", "cache_read", "cache_write",
 # five-minute write, 2x for an hour - and the transcripts record which was
 # taken, per iteration, so both are carried and neither is assumed.
 LIST_RATES_AS_OF = "Aug 2026"
-LIST_RATES_SOURCE = "platform.claude.com pricing"
+LIST_RATES_SOURCE = "platform.claude.com and developers.openai.com pricing"
+# Models known to have no published price: prefix matching would otherwise
+# hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not on
+# the API (supported_in_api: false in Codex's own model cache). Naming them
+# here makes them report as unpriced rather than as a number nobody published.
+NO_PUBLISHED_PRICE = ("gpt-5.3-codex-spark", "codex-auto-review")
+
+# OpenAI's published list prices, from developers.openai.com/api/docs/pricing
+# on the same date. OpenAI does not charge for cache writes, so there is no
+# cache_write entry and one would be wrong rather than merely absent.
 LIST_RATES = {
+    "gpt-5.6-sol":   {"input": 5, "output": 30, "cache_read": 0.50},
+    "gpt-5.6-terra": {"input": 2, "output": 12, "cache_read": 0.20},
+    "gpt-5.6-luna":  {"input": 0.20, "output": 1.20, "cache_read": 0.02},
+    "gpt-5.5-pro":   {"input": 30, "output": 180},
+    "gpt-5.5":       {"input": 5, "output": 30, "cache_read": 0.50},
+    "gpt-5.4-mini":  {"input": 0.75, "output": 4.50, "cache_read": 0.075},
+    "gpt-5.4-nano":  {"input": 0.20, "output": 1.25, "cache_read": 0.02},
+    "gpt-5.4-pro":   {"input": 30, "output": 180},
+    "gpt-5.4":       {"input": 2.50, "output": 15, "cache_read": 0.25},
+    "gpt-5.3-codex": {"input": 1.75, "output": 14, "cache_read": 0.175},
+    "gpt-5.2-pro":   {"input": 21, "output": 168},
+    "gpt-5.2":       {"input": 1.75, "output": 14, "cache_read": 0.175},
+    "gpt-5.1":       {"input": 1.25, "output": 10, "cache_read": 0.125},
+    "gpt-5-mini":    {"input": 0.25, "output": 2, "cache_read": 0.025},
+    "gpt-5-nano":    {"input": 0.05, "output": 0.40, "cache_read": 0.005},
+    "gpt-5-pro":     {"input": 15, "output": 120},
+    "gpt-5":         {"input": 1.25, "output": 10, "cache_read": 0.125},
     "claude-fable-5":   {"input": 10, "output": 50, "cache_write": 12.50,
                          "cache_read": 1,
                          "cache_write_1h": 20},
@@ -1010,6 +1036,121 @@ def scan_rollout(path):
     return out
 
 
+_ROLLOUT_MODELS = {}
+
+
+def scan_rollout_models(path):
+    """Per-day, per-model token counts from one rollout.
+
+    The model is not on the token counts: it arrives in `turn_context`, one
+    per turn, and applies to the `token_count` events that follow it. So the
+    file is walked in order, carrying the model forward.
+
+    `last_token_usage` is the per-turn delta - the running total is on every
+    event and summing those would count the session once per turn. Within
+    input_tokens, cached_input_tokens is the cheaper subset, and within
+    output_tokens the reasoning tokens are already included, so only the
+    uncached remainder is charged at the input rate.
+
+    Keyed by (session, ordinal) so a rollout replayed into a resumed session
+    is not counted twice - the same fault that inflated Claude's figures.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (st.st_mtime, st.st_size)
+    hit = _ROLLOUT_MODELS.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    # session_id, not the filename: a resumed session replays into a new
+    # file, and two rollouts in different directories can share a basename.
+    # The sequence number is counted here because `ordinal` is absent from
+    # older rollouts - keying on it collapsed every file to one record.
+    # session_id + timestamp, not the filename and not a sequence: a resumed
+    # session replays its earlier events into a new file, so the same turn is
+    # written twice with the same stamp. Sequence numbers restart per file and
+    # would pair unrelated events; `ordinal` is absent from older rollouts.
+    records, model, session = {}, None, os.path.basename(path)
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if ('"model"' not in line and '"token_count"' not in line
+                        and '"session_meta"' not in line):
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                payload = r.get("payload") or {}
+                if r.get("type") == "session_meta":
+                    session = payload.get("session_id") or session
+                    continue
+                if r.get("type") == "turn_context":
+                    model = payload.get("model") or model
+                    continue
+                if payload.get("type") != "token_count":
+                    continue
+                use = (payload.get("info") or {}).get("last_token_usage") or {}
+                if not use or not model:
+                    continue
+                when = iso_epoch(r.get("timestamp") or "")
+                if not when:
+                    continue
+                cached = use.get("cached_input_tokens") or 0
+                got = dict.fromkeys(RATE_KINDS + ("reasoning",), 0)
+                got["input"] = max(0, (use.get("input_tokens") or 0) - cached)
+                got["cache_read"] = cached
+                got["cache_write"] = use.get("cache_write_input_tokens") or 0
+                got["output"] = use.get("output_tokens") or 0
+                got["reasoning"] = use.get("reasoning_output_tokens") or 0
+                if not any(got.values()):
+                    continue
+                records[(session, r.get("timestamp"))] = (
+                    datetime.date.fromtimestamp(when).isoformat(), model, got)
+    except OSError:
+        return {}
+    _ROLLOUT_MODELS[path] = (key, records)
+    return records
+
+
+def codex_daily():
+    """Every rollout's per-day, per-model tokens, de-duplicated."""
+    seen = {}
+    for path in glob.glob(CODEX_SESSIONS, recursive=True):
+        seen.update(scan_rollout_models(path))
+    merged = {}
+    for day, model, tokens in seen.values():
+        bucket = merged.setdefault(day, {}).setdefault(
+            model, dict.fromkeys(RATE_KINDS + ("reasoning",), 0))
+        for kind in tokens:
+            bucket[kind] = bucket.get(kind, 0) + tokens[kind]
+    return merged
+
+
+def codex_totals(daily):
+    """Totals from the de-duplicated per-turn deltas.
+
+    Not from the rollout tails. `total_token_usage` is cumulative for the
+    *session*, and a session spans several files - thirty rollouts here hold
+    only eight sessions - so summing one tail per file counted most sessions
+    two or three times over: 664.5M against a true 370.0M for the primary
+    model. Summing the per-turn deltas instead reproduces Codex's own
+    cumulative figure exactly on four of those eight sessions, and picks up
+    the review model besides, which the session total never included.
+    """
+    out = {"input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0,
+           "cached_input_tokens": 0, "total_tokens": 0}
+    for models in (daily or {}).values():
+        for tokens in models.values():
+            out["input_tokens"] += tokens.get("input", 0) + tokens.get("cache_read", 0)
+            out["cached_input_tokens"] += tokens.get("cache_read", 0)
+            out["output_tokens"] += tokens.get("output", 0)
+            out["reasoning_output_tokens"] += tokens.get("reasoning", 0)
+    out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
+    return out
+
+
 def read_codex():
     """Codex rollouts carry token_count events with running and per-turn use.
 
@@ -1032,12 +1173,14 @@ def read_codex():
             continue
         if got["total"]:
             counted += 1
-            for k in total:
-                total[k] += got["total"].get(k, 0)
         for day, n in got["daily"].items():
             daily[day] = daily.get(day, 0) + n
         if got["limits"] and (got["limits_at"] or "") > limits_at:
             limits, limits_at = got["limits"], got["limits_at"]
+    # Totals come from the de-duplicated per-turn deltas, not from summing
+    # each file's cumulative tail - see codex_totals for why that was wrong.
+    daily_models = codex_daily()
+    total = codex_totals(daily_models)
 
     # per-turn rate, from the newest rollout only
     rates, prev = [], None
@@ -1065,6 +1208,7 @@ def read_codex():
     rates.sort()
     return {"ok": True, "sessions": counted, "files": len(files),
             "total": total, "rates": rates, "daily": daily,
+            "daily_models": daily_models,
             "limits": limits, "limits_at": limits_at, "live": cached("codex", codex_live),
             "last": os.path.getmtime(files[-1])}
 
@@ -1093,16 +1237,10 @@ def codex_plan_rows(state, w):
 
 
 def codex_metered(state, w):
-    """Codex records no model against its token counts, so the whole total
-    is priced by the "*" entry or not at all - said plainly rather than
-    attributed to a model that was guessed."""
-    t = state.get("total") or {}
-    if not RATES.get("*"):
-        return []
-    return metered_rows([("all models", {
-        "input": t.get("input_tokens"), "output": t.get("output_tokens"),
-        "cache_read": t.get("cached_input_tokens")})], w,
-        note="all rollouts · no per-model split")
+    daily = state.get("daily_models") or {}
+    return metered_rows([("today", window_models(daily, 1)),
+                         ("30 days", window_models(daily, 30))], w,
+                        agent="codex")
 
 
 def codex_tab(state, w, h):
@@ -1763,6 +1901,8 @@ def rate_for(model):
     claude-opus-4-8, and a "*" entry catches anything left over.
     """
     name = str(model or "")
+    if name in NO_PUBLISHED_PRICE and name not in RATES:
+        return None, None
     for table, origin in ((RATES, "config"), (LIST_RATES, "list")):
         if name in table:
             return table[name], origin
@@ -1791,8 +1931,10 @@ def metered_block(where, windows, w, saves=None, note=""):
     and today says whether that is still true. A single all-time figure
     answered neither question.
     """
-    windows = [x for x in windows if x[1] or x[2]]
-    if not windows:
+    # Windows are kept even when empty, as long as something is. A zero
+    # today against a busy month is the answer to "have I used this today",
+    # and dropping the row leaves the reader to wonder which it was.
+    if not any(x[1] or x[2] for x in windows):
         return []
     rows = [seg([(LBL, " ── METERED ── "), (DIM, "at " + where),
                  (DIM, "   %s" % note if note else "")], w - 1)]
