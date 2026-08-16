@@ -83,6 +83,7 @@ AGENT = rgb(180, 160, 255)
 HEAT_STEPS = ((74, 52, 46), (140, 78, 58), (196, 100, 66), (240, 132, 84))
 CODEX_STEPS = ((66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250))
 GROK_STEPS = ((44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250))
+CURSOR_STEPS = ((48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184))
 EMPTY_CELL = rgb(58, 66, 80)
 
 
@@ -101,6 +102,7 @@ PLAN_TTL = 3600
 # The windows are not stated in limits[], but the same response names them in
 # its own top-level keys: five_hour and seven_day.
 CLAUDE_WINDOW = {"session": "5h", "weekly": "7d"}
+CLAUDE_WINDOW_SECS = {"session": 5 * 3600, "weekly": 7 * 86400}
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 RATE_FILES = 3           # newest transcripts to sample for a rate
@@ -339,6 +341,44 @@ def scope_phrase(w, used):
     return full if used + len(full) <= w - 1 else " · account-wide   "
 
 
+PACE_FLOOR = 3.0     # below this much of a window, the figure is noise
+
+
+def lead(pct_used, window_secs, reset_ts):
+    """How far ahead of the clock a quota is, as a signed percentage.
+
+    The share of the window already gone minus the share of the allowance
+    already spent. Positive is headroom - CodexBar calls the same quantity
+    "in reserve" - and negative means this runs out before the window does.
+
+    Note the sign is the opposite of CodexBar's separate pace token, where
+    +X% means burning too fast. The cushion reading is the one that matches
+    the phrase, so the column is labelled rather than left to be guessed.
+
+    Nothing is fetched for it: the window length and the reset are already
+    on screen. Below PACE_FLOOR of a window it is not shown at all, because
+    ten minutes into a week every number looks like a catastrophe or a
+    triumph. CodexBar gates it the same way and for the same reason.
+    """
+    if not window_secs or not reset_ts:
+        return None
+    left = reset_ts - time.time()
+    gone = window_secs - left
+    if gone <= 0 or gone > window_secs:
+        return None
+    elapsed = 100.0 * gone / window_secs
+    if elapsed < PACE_FLOOR:
+        return None
+    return elapsed - (pct_used or 0)
+
+
+def pace_cell(value):
+    """The signed cushion, coloured by whether it is one."""
+    if value is None:
+        return (DIM, "")
+    return (OK if value >= 0 else WARN, "  %+.0f%%" % value)
+
+
 def quota_window(reset_ts):
     """The span a monthly quota covers, worked back from its reset.
 
@@ -407,7 +447,8 @@ def claude_quota(q, w):
             when = ("resets in " + left_span(left) if left > 0
                     else "resetting" if live else "already reset")
         sev = (l.get("severity") or "normal").lower()
-        bar = meter(used, max(8, w - 27 - label_w))
+        window = CLAUDE_WINDOW_SECS.get(l.get("group") or "")
+        bar = meter(used, max(8, w - 33 - label_w))
         filled = bar.count("█")
         # is_active marks the limit currently doing the binding - the one that
         # will stop you first - so it is the one worth reading brightly.
@@ -415,6 +456,7 @@ def claude_quota(q, w):
                           " " + pad(text, label_w) + " "),
                          (heat(used), bar[:filled]), (GRID, bar[filled:]),
                          (heat(used), " %3.0f%%" % pct),
+                         pace_cell(lead(pct, window, ts)),
                          (BAD if sev not in ("normal", "") else DIM,
                           "  " + (when if sev in ("normal", "")
                                   else "%s · %s" % (sev, when)))], w - 1))
@@ -569,12 +611,70 @@ def cursor_spend(days=30):
                        "endDate": str(now)})
 
 
+CURSOR_EVENT_PAGE = 1000     # the RPC's own ceiling per request
+CURSOR_EVENT_PAGES = 8       # enough to reach past any sane window
+EVENTS_TTL = 1800
+
+
+def cursor_events(days=30):
+    """Per-day spend, from the raw events cursor.com's own dashboard uses.
+
+    GetAggregatedUsageEvents totals by model and carries no timestamp at all,
+    so no calendar can be built from it. GetFilteredUsageEvents returns the
+    individual events - each with a timestamp, a model and its cents - newest
+    first, a thousand at a time.
+
+    Paging stops as soon as a page reaches past the window, so the cost is
+    proportional to the window rather than to the account's whole history:
+    thirty days is five pages and about eleven seconds here. Held for half an
+    hour, because that is far too slow to repeat on a redraw.
+    """
+    cut = time.time() - days * 86400
+    days_cents, days_tokens = {}, {}
+    vendor_cents = 0.0
+    tokens = 0
+    counted = 0
+    for page in range(1, CURSOR_EVENT_PAGES + 1):
+        got = cursor_rpc("GetFilteredUsageEvents",
+                         {"page": page, "pageSize": CURSOR_EVENT_PAGE})
+        events = (got or {}).get("usageEventsDisplay") or []
+        if not events:
+            break
+        oldest = time.time()
+        for e in events:
+            try:
+                when = int(e["timestamp"]) / 1000.0
+            except (KeyError, ValueError, TypeError):
+                continue
+            oldest = min(oldest, when)
+            if when < cut:
+                continue
+            use = e.get("tokenUsage") or {}
+            cents = float(use.get("totalCents") or 0)
+            n = int(use.get("inputTokens") or 0) + int(use.get("outputTokens") or 0)
+            day = datetime.date.fromtimestamp(when)
+            days_cents[day] = days_cents.get(day, 0.0) + cents
+            days_tokens[day] = days_tokens.get(day, 0) + n
+            vendor_cents += cents
+            tokens += n
+            counted += 1
+        if oldest < cut or len(events) < CURSOR_EVENT_PAGE:
+            break
+    if not counted:
+        return None
+    return {"by_day": days_cents, "tokens_by_day": days_tokens,
+            "vendor_cents": vendor_cents, "tokens": tokens,
+            "events": counted, "days": days}
+
+
 def read_cursor():
     """Cursor's AI code tracking: how much code it wrote, not what it cost."""
     if not os.path.exists(CURSOR_DB):
         return {"ok": False, "why": "no tracking database",
                 "live": cached("cursor", cursor_live),
                 "plan": cached("cursor-plan", cursor_plan, ttl=PLAN_TTL),
+                "events": cached("cursor-events", cursor_events,
+                                 ttl=EVENTS_TTL),
                 "spend": cached("cursor-spend", cursor_spend)}
     try:
         con = sqlite3.connect("file:%s?mode=ro" % CURSOR_DB, uri=True)
@@ -594,6 +694,8 @@ def read_cursor():
         return {"ok": False, "why": str(e)[:40]}
     return {"ok": True, "live": cached("cursor", cursor_live),
                 "plan": cached("cursor-plan", cursor_plan, ttl=PLAN_TTL),
+                "events": cached("cursor-events", cursor_events,
+                                 ttl=EVENTS_TTL),
                 "spend": cached("cursor-spend", cursor_spend),
             "hashes": rows[0], "conversations": rows[1],
             "models": rows[2], "by_model": by_model,
@@ -854,36 +956,37 @@ def codex_tab(state, w, h):
                 when = ("resets in %dd %dh" % (left // 86400,
                                                (left % 86400) // 3600)
                         if left > 0 else "resetting")
-            prepared.append((name, wname, pct, when))
+            prepared.append((name, wname, pct, when, secs, reset))
 
         # Alone, the account-wide lanes are told apart by their window and a
         # bare "7d" is clear enough. Beside a named one it is not, so it says
         # what it covers only when there is something to confuse it with.
-        named = any(name for name, _, _, _ in prepared)
+        named = any(name for name, _, _, _, _, _ in prepared)
 
         def labels(short):
             """Spell a feature out while there is room; below that the last
             segment carries it - GPT-5.3-Codex-Spark is Spark."""
             out = []
-            for name, wname, _, _ in prepared:
+            for name, wname, _, _, _, _ in prepared:
                 n = name.rsplit("-", 1)[-1] if (short and name) else name
                 out.append(("%s %s" % (n or ("overall" if named else ""),
                                        wname)).strip())
             return out
 
         lab = labels(False)
-        if w - 26 - max(len(x) for x in lab) < 20:
+        if w - 32 - max(len(x) for x in lab) < 20:
             lab = labels(True)
         label_w = max(9, max(len(x) for x in lab))
-        for (_, _, pct, when), text in zip(prepared, lab):
+        for (_, _, pct, when, secs, reset), text in zip(prepared, lab):
             used = (pct or 0) / 100.0
             # heat(used), not heat(1 - used): red belongs at a quota nearly
             # spent, and the inverse painted a 26%-used week amber
-            bar = meter(used, max(8, w - 26 - label_w))
+            bar = meter(used, max(8, w - 32 - label_w))
             filled = bar.count("█")
             rows.append(seg([(DIM, " " + pad(text, label_w) + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
                              (heat(used), " %3.0f%%" % (pct or 0)),
+                             pace_cell(lead(pct, secs, reset)),
                              (DIM, "  " + when)], w - 1))
         rows.append("")
         # Everything Codex publishes about the subscription itself: a plan
@@ -1092,9 +1195,15 @@ def grok_tab(state, w, h):
         rows.append(seg([(LBL, " ── %s QUOTA ── " % period.upper()),
                          (DIM, "resets in %.1f days" % left
                           if left is not None and left >= 0 else "")], w - 1))
+        span, reset_ts = None, None
+        begin, finish = iso_epoch(q.get("start") or ""), iso_epoch(q.get("end") or "")
+        if begin and finish and finish > begin:
+            span, reset_ts = finish - begin, finish
         rows.append(seg([(heat(used), " %-5s" % ("%.0f%%" % q["percent"])),
-                         (heat(used), meter(used, max(10, w - 30))),
-                         (DIM, "  credits used")], w - 1))
+                         (heat(used), meter(used, max(10, w - 38))),
+                         (DIM, "  credits used"),
+                         pace_cell(lead(float(q["percent"]), span, reset_ts))],
+                        w - 1))
         span = ""
         for key, label in (("start", ""), ("end", " → ")):
             try:
@@ -1545,11 +1654,21 @@ def copilot_tab(state, w, h):
             # shows what is spent, and red belongs at the empty end.
             pct = 100.0 - float(q.get("percent_remaining") or 0)
             used = max(0.0, min(1.0, pct / 100.0))
-            bar = meter(used, max(8, w - 30 - label_w))
+            bar = meter(used, max(8, w - 36 - label_w))
             filled = bar.count("█")
+            # The window is a calendar month, so its length is the gap
+            # between this reset and the one before it.
+            span = None
+            if stamp:
+                prev = datetime.datetime.fromtimestamp(
+                    stamp, datetime.timezone.utc)
+                back = (prev.replace(year=prev.year - 1, month=12)
+                        if prev.month == 1 else prev.replace(month=prev.month - 1))
+                span = stamp - back.timestamp()
             rows.append(seg([(DIM, " " + name + " "),
                              (heat(used), bar[:filled]), (GRID, bar[filled:]),
-                             (heat(used), " %3.0f%%" % pct)], w - 1))
+                             (heat(used), " %3.0f%%" % pct),
+                             pace_cell(lead(pct, span, stamp))], w - 1))
             # A pool can carry its own reset, in which case it is not on the
             # account-wide cycle in the header and has to say so itself.
             own = q.get("quota_reset_at") or 0
@@ -1761,7 +1880,7 @@ def token_heatmap(daily, w):
              for e in daily if e.get("date")), w)
 
 
-def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
+def day_calendar(totals_by_date, w, steps=HEAT_STEPS, weeks=None):
     """Tokens per day, drawn the way Claude Code's own /stats draws it.
 
     Weekday rows with only Mon, Wed and Fri labelled; one cell per day; months
@@ -1784,7 +1903,11 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS):
     best = max(totals, key=totals.get)
 
     last = max(totals)
-    weeks_fit = max(4, w - 7)
+    # A caller with a bounded window says so, rather than having its month
+    # of data stretched across a year of empty dots. Left unset the grid
+    # fills the pane, which is right for a cache whose emptiness is itself
+    # information.
+    weeks_fit = max(4, min(w - 7, weeks or w - 7))
     end_week = last - datetime.timedelta(days=last.weekday())
     starts = [end_week - datetime.timedelta(days=7 * i)
               for i in range(weeks_fit - 1, -1, -1)]
@@ -1967,9 +2090,20 @@ def cursor_quota(live, w):
     if ends:
         left = int(ends) / 1000.0 - time.time()
         when = ("resets in %dd" % (left // 86400)) if left > 0 else "resetting"
+    start = live.get("billingCycleStart")
+    elapsed, cycle_secs, reset_ts = None, None, None
+    if start and ends and int(ends) > int(start):
+        cycle_secs = (int(ends) - int(start)) / 1000.0
+        reset_ts = int(ends) / 1000.0
+        gone = time.time() * 1000 - int(start)
+        elapsed = max(0.0, min(100.0, 100.0 * gone / (int(ends) - int(start))))
     rows.append(seg([(LBL, " ── QUOTA ── "), (OK, "live"),
                      (DIM, scope_phrase(w, 17 + len(when))),
                      (DIM, when)], w - 1))
+    if elapsed is not None:
+        rows.append(seg([(DIM, "  %.0f%% of the cycle gone" % elapsed),
+                         (DIM, " · the +/- column is your lead on it")],
+                        w - 1))
     values = {"included": plan.get("totalPercentUsed"),
               "auto": plan.get("autoPercentUsed"),
               "api": plan.get("apiPercentUsed")}
@@ -1978,12 +2112,18 @@ def cursor_quota(live, w):
         if pct is None:
             continue
         used = max(0.0, min(1.0, pct / 100.0))
-        bar = meter(used, max(8, w - 30))
+        bar = meter(used, max(8, w - 38))
         filled = bar.count("█")
+        # How far ahead of the clock you are: the share of the billing period
+        # already gone, minus the share of the allowance spent. Positive is a
+        # cushion, negative means this lane runs out before the cycle does.
+        # It is what CodexBar calls "in reserve", and it is pure arithmetic on
+        # the cycle dates - nothing new is fetched for it.
         rows.append(seg([(DIM, " %-9s" % name),
                          (rgb(*colour), bar[:filled]),
                          (GRID, bar[filled:]),
-                         (rgb(*colour), " %3.0f%%" % pct)], w - 1))
+                         (rgb(*colour), " %3.0f%%" % pct),
+                         pace_cell(lead(pct, cycle_secs, reset_ts))], w - 1))
     limit, spend = plan.get("limit"), plan.get("totalSpend")
     if limit:
         # Deliberately dollars rather than a fourth bar. This is spend against
@@ -1996,6 +2136,87 @@ def cursor_quota(live, w):
                          (DIM, " of "), (TXT, "$%.2f" % (limit / 100.0)),
                          (DIM, "   $%.2f left" % (left / 100.0)
                           if left is not None else "")], w - 1))
+    rows.append("")
+    return rows
+
+
+def cursor_metered_rows(state, w):
+    """What Cursor charges you, beside what the same tokens cost at list.
+
+    Two real figures from two different calls, not an estimate either way.
+    GetAggregatedUsageEvents returns what Cursor actually meters against the
+    plan; summing the raw events' own totalCents gives the vendor-rate cost
+    of the same traffic, which is higher because the plan discounts it -
+    every event carries its own discountPercentOff.
+
+    The gap is what the subscription is worth this month, which is the only
+    honest way this widget can answer "what would it have cost without".
+    """
+    ev = state.get("events") or {}
+    spend = state.get("spend") or {}
+    metered = float(spend.get("totalCostCents") or 0)
+    vendor = float(ev.get("vendor_cents") or 0)
+    if not metered and not vendor:
+        return []
+    days = ev.get("days") or 30
+    rows = [seg([(LBL, " ── METERED ── "),
+                 (DIM, "last %dd · %d events" % (days, ev.get("events") or 0))],
+                w - 1)]
+    today = datetime.date.today()
+    today_cents = (ev.get("by_day") or {}).get(today, 0.0)
+    pairs = [("cursor meters", "$%.2f" % (metered / 100.0)),
+             ("at vendor rates", "$%.2f" % (vendor / 100.0))]
+    if vendor and metered:
+        saved = vendor - metered
+        pairs.append(("the plan saves",
+                      "$%.2f · %.0f%%" % (saved / 100.0, 100.0 * saved / vendor)))
+    pairs.append(("today", "$%.2f" % (today_cents / 100.0)))
+    if ev.get("tokens"):
+        pairs.append(("tokens", big_num(ev["tokens"])))
+    label_w = max(len(k) for k, _ in pairs)
+    for key, value in pairs:
+        rows.append(seg([(DIM, "  " + pad(key, label_w) + "  "),
+                         (AGENT if key == "the plan saves" else TXT, value)],
+                        w - 1))
+    rows.append("")
+    return rows
+
+
+def cursor_daily_rows(events, w):
+    """Spend per day, one column per day, the way the usage page shows it.
+
+    A bar chart rather than the calendar the token tabs use: this window is
+    thirty days, and thirty cells of a year-wide grid is six columns of
+    colour in a field of dots. Money over a month reads better as a profile,
+    and it is the shape Cursor's own dashboard draws.
+    """
+    by_day = (events or {}).get("by_day") or {}
+    if not by_day:
+        return []
+    days = events.get("days") or 30
+    today = datetime.date.today()
+    series = [(today - datetime.timedelta(days=n)) for n in range(days - 1, -1, -1)]
+    cents = [by_day.get(d, 0.0) for d in series]
+    peak = max(cents) or 1.0
+    best = series[cents.index(peak)] if peak in cents else None
+    rows = [seg([(LBL, " ── SPEND / DAY ── "),
+                 (DIM, "%dd · peak " % days), (AGENT, "$%.0f" % (peak / 100.0)),
+                 (DIM, " on %s" % (best.strftime("%b %-d") if best else "--")),
+                 (DIM, " · today "), (TXT, "$%.2f"
+                                      % (by_day.get(today, 0.0) / 100.0))],
+                w - 1)]
+    avail = max(10, w - 3)
+    slot = max(1, avail // len(cents))
+    cols = []
+    for c in cents:
+        cols.extend([(c, AGENT)] * slot)
+    for line in vbars(cols, 3, hi=peak):
+        rows.append(seg([(RST, " ")] + line, w - 1))
+    rows.append(seg([(RST, " "), (GRID, "─" * len(cols))], w - 1))
+    left, right = series[0].strftime("%b %-d"), series[-1].strftime("%b %-d")
+    rows.append(seg([(DIM, " " + left),
+                     (DIM, " " * max(1, len(cols) - len(left) - len(right))),
+                     (DIM, right)], w - 1))
     rows.append("")
     return rows
 
@@ -2032,6 +2253,8 @@ def cursor_tab(state, w, h):
                 or no_local("No Cursor tracking database on this machine.",
                             RUN_HINT["cursor"], w))
     rows = cursor_quota(state.get("live"), w)
+    rows += cursor_metered_rows(state, w)
+    rows += cursor_daily_rows(state.get("events"), w)
     rows += cursor_spend_rows(state.get("spend"), w)
     rows.append(seg([(LBL, " ── AI-WRITTEN CODE ── "),
                  (DIM, "last seen %s ago"

@@ -282,6 +282,89 @@ Looking only at `sessions/` is what made this tab say "no quota" for a while.
 `grok du` reports **disk** use — the name is a coincidence worth not falling
 for.
 
+## Pace: how far ahead of the clock you are
+
+Every quota bar carries a signed percentage after it.
+
+```
+ session 5h ██░░░░░░░░░░░░░░░░░░░░░░░░░   9%  +15%  resets in 3h 46m
+ overall 7d ████████████░░░░░░░░░░░░░░░  43%  +53%  resets in 6h 46m
+ premium interactions ██████████░░░░  71%  -22%
+```
+
+It is the share of the window already gone **minus** the share of the
+allowance already spent. Positive is headroom: you are burning slower than the
+clock and will reach the reset with room to spare. Negative means this runs out
+before the window does — the Copilot line above is at −22%, which is the pane
+saying those premium interactions will not last the month at this rate.
+
+This is the quantity CodexBar calls **"in reserve"**, and it was worked out
+from its own numbers before its docs were read: 98% left with 11% in reserve at
+26d 23h remaining implies 13% of a 31-day cycle elapsed against 2% spent, and
+all three Cursor lanes reproduced to the percentage point.
+
+**The sign is deliberately the opposite of CodexBar's separate pace token**,
+where `+X%` means burning *too fast*. The cushion reading is the one that
+matches the phrase "in reserve", so the column is labelled in the header rather
+than left to be guessed at.
+
+Nothing is fetched for it — the window length and the reset are already on
+screen — so it costs nothing on any tab. It is hidden for the first **3%** of a
+window, because ten minutes into a week every number looks like a catastrophe
+or a triumph. CodexBar gates it the same way, for the same reason: Codex's
+Spark lane shows no pace at 0.6% elapsed, and that is correct.
+
+## What Cursor would have cost without the plan
+
+```
+ ── METERED ── last 30d · 4148 events
+  cursor meters    $758.97
+  at vendor rates  $1292.75
+  the plan saves   $533.78 · 41%
+  today            $32.88
+  tokens           94.3M
+```
+
+Two real figures from two different calls, neither an estimate.
+`GetAggregatedUsageEvents` returns `totalCostCents` — what Cursor meters
+against the plan. Summing the raw events' own `totalCents` gives the
+vendor-rate cost of the very same traffic, which is higher because the plan
+discounts it; every event carries its own `discountPercentOff`.
+
+That answers what "Cursor-metered" is, if you have seen the phrase elsewhere
+and wondered: it is the post-discount figure, and the larger number beside it
+is the same tokens at list price. The gap is what the subscription is worth
+this month.
+
+**Only Cursor can show this**, because only Cursor publishes both numbers.
+Claude, Codex and Copilot publish tokens without prices, and turning those into
+money would mean hardcoding a rate card — inventing the denominator, which is
+the one thing this repo does not do.
+
+## Spend per day
+
+```
+ ── SPEND / DAY ── 30d · peak $501 on Aug 5 · today $32.88
+                                     ██
+                                     ██              ▄▄
+         ▁▁▆▆▁▁                ▁▁▂▂▁▁██▅▅▁▁    ▁▁  ▂▂██▅▅▁▁▁▁
+ ────────────────────────────────────────────────────────────
+ Jul 18                                                Aug 16
+```
+
+`GetAggregatedUsageEvents` totals by model and carries **no timestamp at all**,
+so no per-day view can be built from it — which is why this took a second look.
+`GetFilteredUsageEvents` returns the individual events, newest first, each with
+a timestamp, a model and its cents, a thousand at a time. Paging stops as soon
+as a page reaches past the window, so the cost is proportional to the window
+rather than to the whole account: thirty days is five pages and about eleven
+seconds. Held for **half an hour**, because that is far too slow to repeat on
+a redraw.
+
+It is a bar chart rather than the calendar the token tabs use. Thirty days in a
+year-wide grid is six columns of colour in a field of dots; money over a month
+reads better as a profile, and it is the shape Cursor's own dashboard draws.
+
 ## Which subscription, and since when
 
 **Every tab ends with a `SUBSCRIPTION` section**, in the same shape and the
