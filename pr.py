@@ -472,7 +472,17 @@ def ready_to_merge(pr):
 
 
 def stats_view(prs, w):
-    """Shape and age of whatever the list is currently showing."""
+    """Shape and age of every open PR, whatever the list is filtered to.
+
+    Deliberately not the filtered set. Typing in the filter is a search, and
+    a search should not move the backlog it is searching: watching the age
+    median and the state bar lurch on every keystroke made them unreadable
+    and, worse, made them look like statements about the whole board when
+    they described three matching rows.
+
+    The list below says how many of how many it is showing; these say what
+    the board is.
+    """
     rows = [""]
     if not prs:
         return rows
@@ -491,7 +501,7 @@ def stats_view(prs, w):
         ready += 1 if ready_to_merge(pr) else 0
 
     rows.append(seg([(LBL, " ── STATE ── "), (TXT, "%d" % n),
-                     (DIM, " shown · "), (DIM, "%d draft" % drafts),
+                     (DIM, " open · "), (DIM, "%d draft" % drafts),
                      (DIM, " · "),
                      (BAD if conflicts else DIM, "%d conflicting" % conflicts),
                      (DIM, " · "),
@@ -767,7 +777,9 @@ def main():
             # the stats cost eight rows; below thirty they would leave the
             # list too short to be a list, so they stand down without asking
             if show_stats and h >= 30:
-                rows += stats_view(shown, w)
+                # every open PR, not `shown`: the filter is a search of the
+                # board, not a redefinition of it
+                rows += stats_view(sort_prs(prs, sort_field, newest_first), w)
             rows += list_view(shown, selected, sort_field, newest_first,
                               needle, typing, w, h, tick, not fetched,
                               source_filter, top=len(rows))

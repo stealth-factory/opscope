@@ -6,7 +6,7 @@ you open.
 ```
 ╺━ PR WATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  33 of 33 open   updated 1m ago   4567 api
- ── STATE ── 34 shown · 10 draft · 9 conflicting · 1 ready to merge
+ ── STATE ── 34 open · 10 draft · 9 conflicting · 1 ready to merge
  ████████████████████████████████████████████████████████████████████████████████████████████████
  ▇ approved 2   ▇ CHANGES REQ 1   ▇ needs review 27   · checks pass 24   · checks FAIL 6
 
@@ -56,6 +56,16 @@ Open one and it becomes a dashboard:
 Three sections above the list, all computed from data already fetched, so they
 cost nothing. `t` toggles them, and they stand down on their own below thirty
 rows rather than leaving the list too short to be a list.
+
+**They describe every open pull request, not the filtered list.** Typing in the
+filter is a search of the board, not a redefinition of it: watching the age
+median and the state bar lurch on every keystroke made them unreadable, and
+worse, made them look like statements about the whole backlog when they
+described the three rows that happened to match. The same goes for `f` — narrow
+to one source and the stats still describe the lot.
+
+The list header carries the other half of that: `1 of 54 shown` says what the
+filter did, while the sections above say what the board is.
 
 **State** — a bar over the review decisions, with drafts, conflicts, and
 **ready to merge** called out. That last one is approved, green, unconflicted
