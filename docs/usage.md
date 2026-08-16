@@ -336,10 +336,56 @@ and wondered: it is the post-discount figure, and the larger number beside it
 is the same tokens at list price. The gap is what the subscription is worth
 this month.
 
-**Only Cursor can show this**, because only Cursor publishes both numbers.
-Claude, Codex and Copilot publish tokens without prices, and turning those into
-money would mean hardcoding a rate card — inventing the denominator, which is
-the one thing this repo does not do.
+**Only Cursor can show this from published data**, because only Cursor
+publishes both numbers. The others were each checked:
+
+| | what it publishes | why it is not enough |
+|---|---|---|
+| Claude | `modelUsage.costUSD` | the field exists and reads **$0.00** for every model — a subscription is not API billing, so it computes no cost |
+| Copilot | `total_nano_aiu`, `request_multiplier` | AI units are real and already shown, but nothing publishes a price per unit |
+| Codex | token counts | no prices anywhere, and no model attached to the totals |
+| Grok | a credit percentage | no tokens priced at all |
+
+So the other tabs get a metered section built on **rates you supply**, which is
+the only honest way to answer "what would this have cost".
+
+```json
+"usage": {
+  "rates": {
+    "claude-opus-5":   {"input": 15, "output": 75,
+                        "cache_read": 1.5, "cache_write": 18.75},
+    "claude-sonnet-5": {"input": 3, "output": 15,
+                        "cache_read": 0.3, "cache_write": 3.75}
+  }
+}
+```
+
+US$ per million tokens. **Nothing ships in that table on purpose** — a price
+this repo invented would be exactly the fabricated denominator it exists to
+avoid, and list prices change without telling anyone. With it empty the section
+is one line pointing at the setting rather than a section of zeros.
+
+Rates are keyed by **model, not by agent**, because a model has one list price
+wherever it ran: the same `claude-sonnet-5` entry prices Copilot's turns and
+Claude Code's. The longest matching model name wins, so `claude-opus` covers
+every Opus revision, and a `"*"` entry catches whatever is left.
+
+```
+ ── METERED ── $37958.95 at your configured rates   all time
+  claude-opus-5    $29648.39
+  claude-opus-4-8   $7634.50
+  claude-sonnet-5    $676.07
+  2 models unpriced: claude-fable-5, claude-haiku-4-5-20251001
+```
+
+**Unpriced models are named, never silently skipped.** A half-filled rate card
+that quietly reported a total would be the same failure as a truncated list
+presented as a whole one.
+
+Codex is the exception among the exceptions: it records no model against its
+token counts, so its total can only be priced by the `"*"` entry, and the
+section says `no per-model split` rather than attributing the spend to a model
+that was guessed.
 
 ## Spend per day
 

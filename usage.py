@@ -59,10 +59,18 @@ _CFG = load_config("usage", {
     # empty-means-discover idiom as github.accounts and linear.exclude_teams.
     "agents": [],
     "exclude_agents": [],
+    # US$ per million tokens, keyed by model. Empty by design - see RATES.
+    "rates": {},
     "refresh": 30,
 })
 
 REFRESH = float(_CFG["refresh"])
+# US$ per million tokens, keyed by model. Nothing is shipped here on purpose:
+# only Cursor publishes what it charges, so every other agent's "what would
+# this have cost" is arithmetic on a rate card the user supplies. A price this
+# repo invented would be exactly the fabricated denominator it exists to avoid.
+RATES = _CFG["rates"] or {}
+RATE_KINDS = ("input", "output", "cache_read", "cache_write")
 
 OK = rgb(90, 240, 160)
 WARN = rgb(255, 200, 90)
@@ -904,6 +912,19 @@ def codex_plan_rows(state, w):
     return plan_rows(plan, pairs, w)
 
 
+def codex_metered(state, w):
+    """Codex records no model against its token counts, so the whole total
+    is priced by the "*" entry or not at all - said plainly rather than
+    attributed to a model that was guessed."""
+    t = state.get("total") or {}
+    if not RATES.get("*"):
+        return []
+    return metered_rows([("all models", {
+        "input": t.get("input_tokens"), "output": t.get("output_tokens"),
+        "cache_read": t.get("cached_input_tokens")})], w,
+        note="all rollouts · no per-model split")
+
+
 def codex_tab(state, w, h):
     if not state.get("ok"):
         return no_local("No session rollouts on this machine.",
@@ -1453,7 +1474,9 @@ def read_copilot():
                 "itl": row[7] or 0, "ms": row[8] or 0,
             }
             out["models"] = con.execute(
-                "select model, count(*), sum(output_tokens)"
+                "select model, count(*), sum(output_tokens),"
+                " sum(input_tokens), sum(cache_read_tokens),"
+                " sum(cache_write_tokens)"
                 " from assistant_usage_events group by model"
                 " order by 3 desc limit 6").fetchall()
         con.close()
@@ -1538,6 +1561,68 @@ def no_local(what, run, w):
     return rows
 
 
+def rate_for(model):
+    """The configured rate for a model: exact name, then longest prefix.
+
+    Keyed by model rather than by agent, because a model has one list price
+    wherever it ran - the same claude-sonnet-5 rate prices Copilot's turns
+    and Claude Code's. A "*" entry catches anything left over.
+    """
+    name = str(model or "")
+    if name in RATES:
+        return RATES[name]
+    best = None
+    for key, rate in RATES.items():
+        if key != "*" and key in name:
+            if best is None or len(key) > len(best[0]):
+                best = (key, rate)
+    return best[1] if best else RATES.get("*")
+
+
+def metered_rows(entries, w, note=""):
+    """What the tokens on this tab would cost at the configured rates.
+
+    Only models with a rate are counted, and the header says how many were
+    priced out of how many ran, so a half-filled rate card cannot read as a
+    total. With nothing configured the section is one line pointing at the
+    setting rather than a section of zeros.
+    """
+    entries = [(m, t) for m, t in (entries or []) if any(t.values())]
+    if not entries:
+        return []
+    priced, total, missing = [], 0.0, []
+    for model, tokens in entries:
+        rate = rate_for(model)
+        if not rate:
+            missing.append(model)
+            continue
+        cost = sum((tokens.get(kind) or 0) / 1e6 * float(rate.get(kind) or 0)
+                   for kind in RATE_KINDS)
+        total += cost
+        priced.append((model, cost))
+    if not priced:
+        if not RATES:
+            return [seg([(LBL, " ── METERED ── "),
+                         (DIM, "no rates configured")], w - 1)] + no_local(
+                "Set usage.rates in config.json - US$ per million tokens,"
+                " keyed by model.", "", w) + [""]
+        return []
+    rows = [seg([(LBL, " ── METERED ── "),
+                 (AGENT, "$%.2f" % total),
+                 (DIM, " at your configured rates"),
+                 (DIM, "   %s" % note if note else "")], w - 1)]
+    label_w = max(len(m) for m, _ in priced)
+    for model, cost in sorted(priced, key=lambda x: -x[1]):
+        rows.append(seg([(TXT, "  " + pad(model, label_w) + "  "),
+                         (AGENT, "$%.2f" % cost)], w - 1))
+    if missing:
+        rows.append(seg([(WARN, "  %d model%s unpriced: " %
+                          (len(missing), "" if len(missing) == 1 else "s")),
+                         (DIM, ", ".join(sorted(missing)[:3]))], w - 1))
+    rows.append("")
+    return rows
+
+
 def plan_rows(headline, pairs, w, note="", wrapped=None):
     """A subscription block: what the plan is, then the facts about it.
 
@@ -1611,6 +1696,14 @@ def copilot_plan_rows(live, w):
     return plan_rows(live.get("copilot_plan"), pairs, w,
                      note="upgradeable" if live.get("can_upgrade_plan") else "",
                      wrapped=("enabled", on))
+
+
+def copilot_metered(state, w):
+    return metered_rows(
+        [(model, {"input": _in, "output": out_tok,
+                  "cache_read": _cr, "cache_write": _cw})
+         for model, n, out_tok, _in, _cr, _cw in (state.get("models") or [])],
+        w, note="local turns")
 
 
 def copilot_tab(state, w, h):
@@ -1729,7 +1822,7 @@ def copilot_tab(state, w, h):
         if models:
             rows.append(seg([(LBL, " ── BY MODEL ── "),
                              (DIM, "output tokens")], w - 1))
-            for model, n, out_tok in models:
+            for model, n, out_tok, _in, _cr, _cw in models:
                 rows.append(seg([(TXT, "  " + pad(str(model or "?"), 28)),
                                  (DIM, "%5d turns  " % n),
                                  (AGENT, big_num(out_tok))], w - 1))
@@ -1956,6 +2049,16 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS, weeks=None):
     facts = {"active": active, "span": span,
              "longest": best_run, "current": current}
     return rows, peak, best, facts
+
+
+def claude_metered(state, w):
+    mu = ((state.get("data") or {}).get("modelUsage")) or {}
+    return metered_rows(
+        [(model, {"input": v.get("inputTokens"),
+                  "output": v.get("outputTokens"),
+                  "cache_read": v.get("cacheReadInputTokens"),
+                  "cache_write": v.get("cacheCreationInputTokens")})
+         for model, v in mu.items()], w, note="all time")
 
 
 def claude_tab(state, w, h):
@@ -2409,20 +2512,20 @@ def main():
         name = tabs[active]
         sub = []
         if name == "claude":
-            body = claude_tab(claude, w, h)
+            body = claude_tab(claude, w, h) + claude_metered(claude, w)
             if claude.get("profile"):
                 sub = claude_plan_rows(claude["profile"], w)
         elif name == "cursor":
             body = cursor_tab(cursor, w, h)
             sub = cursor_plan_rows(cursor.get("plan"), w)
         elif name == "codex":
-            body = codex_tab(codex, w, h)
+            body = codex_tab(codex, w, h) + codex_metered(codex, w)
             sub = codex_plan_rows(codex, w)
         elif name == "grok":
             body = grok_tab(grok, w, h)
             sub = grok_plan_rows(grok.get("quota"), w)
         elif name == "copilot":
-            body = copilot_tab(copilot, w, h)
+            body = copilot_tab(copilot, w, h) + copilot_metered(copilot, w)
             sub = copilot_plan_rows(copilot.get("live") or {}, w)
         elif name == "antigravity":
             body = antigravity_tab(antigravity, w, h)
