@@ -2101,8 +2101,9 @@ def cursor_quota(live, w):
                      (DIM, scope_phrase(w, 17 + len(when))),
                      (DIM, when)], w - 1))
     if elapsed is not None:
-        rows.append(seg([(DIM, "  %.0f%% of the cycle gone" % elapsed),
-                         (DIM, " · the +/- column is your lead on it")],
+        # Just the fact; the +/- column it explains is on every tab now, so
+        # a per-tab legend was both redundant and the thing that clipped.
+        rows.append(seg([(DIM, "  %.0f%% of the cycle gone" % elapsed)],
                         w - 1))
     values = {"included": plan.get("totalPercentUsed"),
               "auto": plan.get("autoPercentUsed"),
