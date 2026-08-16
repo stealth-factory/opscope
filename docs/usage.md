@@ -336,6 +336,24 @@ Two windows because they answer different questions: a month says what an
 agent costs, today says whether that is still true. A single all-time figure
 answered neither, and quietly flattered a habit that changed last week.
 
+### Where the prices come from
+
+Anthropic and OpenAI both **publish** their rate cards, so there is nothing to
+invent. The tables are copied from
+`platform.claude.com/docs/en/docs/about-claude/pricing` and
+`developers.openai.com/api/docs/pricing`, with the sources and the date in the
+source file and **the date on screen beside the total**. A published price is a
+fact; what makes one dangerous is going stale in silence, and a date fixes
+that.
+
+OpenAI does not charge for cache writes, so those entries carry no
+`cache_write` — inventing one would be worse than leaving it out. Two models
+are listed as having **no published price at all**: `gpt-5.3-codex-spark`,
+which is explicitly not on the API (`supported_in_api: false` in Codex's own
+model cache), and `codex-auto-review`. Without that, prefix matching would hand
+Spark `gpt-5.3-codex`'s rate — a number nobody published. They report as
+unpriced instead, and are named.
+
 ### Where each agent's numbers come from
 
 **Cursor** needs no rate card — it publishes both sides. The raw events carry
@@ -383,9 +401,24 @@ transcript never changes. Cold, the whole set streams in about 2.6 seconds.
 **Copilot** groups its own `assistant_usage_events` by day and model, which is
 the same shape from a much smaller table.
 
-**Codex and Grok** record no model against their token counts, so they can only
-be priced by a `"*"` entry, and say `no per-model split` rather than
-attributing spend to a model that was guessed.
+**Codex** attributes them the hard way. The model is not on the token counts:
+it arrives in a `turn_context` record, one per turn, and applies to the
+`token_count` events that follow it, so the rollout is walked in order
+carrying the model forward. Each event's `last_token_usage` is that turn's
+delta; within it `cached_input_tokens` is the cheaper subset of
+`input_tokens`, and the reasoning tokens are already inside `output_tokens`.
+
+Reading it that way turned up **a counting bug in this widget's own totals**.
+`total_token_usage` is cumulative for the *session*, and a session spans
+several files — thirty rollouts here hold only **eight sessions** — so summing
+one tail per file counted most of them two or three times over: 664.5M against
+a true 370.0M for the primary model. The totals now come from the
+de-duplicated per-turn deltas instead, which reproduce Codex's own cumulative
+figure **exactly** on four of those eight sessions, and pick up the review
+model besides, which the session total never included at all.
+
+**Grok** records no model against its tokens at all, so it can only be priced
+by a `"*"` entry.
 
 ### What the plan saves
 
