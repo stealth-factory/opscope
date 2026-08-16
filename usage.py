@@ -2519,6 +2519,167 @@ def detect_agents():
     return found
 
 
+SUMMARY_TAB = "+"
+
+
+def summary_tab(states, w, h):
+    """Every agent's quotas on one screen, worst first.
+
+    Not a concatenation of the other tabs: those answer "how am I using this
+    agent", and this answers the only question that spans them - what runs
+    out first. So the lanes are ranked by what is spent rather than grouped
+    by agent, and an agent that publishes no quota is named at the bottom
+    instead of being silently missing.
+    """
+    lanes, quiet = [], []
+    for name in ORDER:
+        got = quota_lanes(name, states.get(name) or {})
+        if got:
+            lanes.extend((name,) + tuple(lane) + (False,) * (5 - len(lane))
+                         for lane in got)
+        else:
+            quiet.append(name)
+    if not lanes:
+        return no_local("No agent is publishing a quota right now.", "", w)
+    lanes.sort(key=lambda x: -x[2])
+    agent_w = max(len(x[0]) for x in lanes)
+    label_w = min(14, max(len(x[1]) for x in lanes))
+    head = "%d limits across %d agents" % (len(lanes),
+                                           len(ORDER) - len(quiet))
+    if 14 + len(head) + 20 <= w - 1:
+        head += " · most spent first"
+    rows = [seg([(LBL, " ── QUOTAS ── "), (DIM, head)], w - 1)]
+    # 1 lead + agent + 1 + label + 1 + pct(6) + pace(6). The reset needs 16
+    # more and is the first thing dropped, being the only part a reader can
+    # infer from the bar beside it - but a stale marker is not droppable,
+    # since a number nobody labelled as old reads as current.
+    fixed = 15 + agent_w + label_w
+    show_reset = (w - 1) - fixed - 8 >= 16
+    tail = 16 if show_reset else (8 if any(x[5] for x in lanes) else 0)
+    bar_room = max(8, (w - 1) - fixed - tail)
+    for name, label, pct, secs, reset, stale in lanes:
+        used = max(0.0, min(1.0, pct / 100.0))
+        bar = meter(used, bar_room)
+        filled = bar.count("█")
+        when, tint = "", DIM
+        if stale:
+            when, tint = "  cached", WARN
+        elif show_reset and reset:
+            left = reset - time.time()
+            when = ("  " + left_span(left)) if left > 0 else "  resetting"
+        rows.append(seg([(DIM, " " + pad(name, agent_w) + " "),
+                         (TXT, pad(label, label_w) + " "),
+                         (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                         (heat(used), pct_text(pct)),
+                         pace_cell(lead(pct, secs, reset)),
+                         (tint, when)], w - 1))
+    if quiet:
+        rows.append("")
+        rows += no_local("No quota published by: " + ", ".join(quiet)
+                         + ".", "", w)
+    return rows
+
+
+def quota_lanes(name, state):
+    """Every quota an agent publishes, flattened to (label, pct, window, reset).
+
+    Read here rather than borrowed from each tab's renderer, because those
+    render six different shapes - Cursor's coloured lanes, Antigravity's
+    groups, Codex's per-feature windows - and only the four numbers below are
+    common to all of them. The field names are the same ones the tabs use, so
+    a change to an API shows up in both places at once.
+    """
+    lanes = []
+    if name == "claude":
+        # A cached reading can describe windows that have since closed, so
+        # its lanes are marked rather than counted down to - the agent's own
+        # tab says "cached 18h ago" and this must not quietly disagree.
+        stale = (state.get("quota") or {}).get("source") != "live"
+        q = (state.get("quota") or {}).get("u") or {}
+        for l in q.get("limits") or []:
+            if l.get("percent") is None:
+                continue
+            scope = ((l.get("scope") or {}).get("model") or {}).get(
+                "display_name")
+            group = l.get("group") or ""
+            label = scope or ("session" if l.get("kind") == "session"
+                              else "overall")
+            lanes.append(("%s %s" % (label, CLAUDE_WINDOW.get(group, "")),
+                          float(l["percent"]),
+                          None if stale else CLAUDE_WINDOW_SECS.get(group),
+                          None if stale else iso_epoch(l.get("resets_at")),
+                          stale))
+    elif name == "codex":
+        live = state.get("live") or {}
+        for key in ("primary_window", "secondary_window"):
+            win = (live.get("rate_limit") or {}).get(key)
+            if win and win.get("used_percent") is not None:
+                secs = win.get("limit_window_seconds")
+                lanes.append((window_name(secs), float(win["used_percent"]),
+                              secs, win.get("reset_at")))
+        for extra in live.get("additional_rate_limits") or []:
+            win = (extra.get("rate_limit") or {}).get("primary_window") or {}
+            if win.get("used_percent") is None:
+                continue
+            short = (extra.get("limit_name") or "?").rsplit("-", 1)[-1]
+            secs = win.get("limit_window_seconds")
+            lanes.append(("%s %s" % (short, window_name(secs)),
+                          float(win["used_percent"]), secs,
+                          win.get("reset_at")))
+    elif name == "cursor":
+        live = state.get("live") or {}
+        plan = live.get("planUsage") or {}
+        start, end = live.get("billingCycleStart"), live.get("billingCycleEnd")
+        secs = reset = None
+        if start and end and int(end) > int(start):
+            secs = (int(end) - int(start)) / 1000.0
+            reset = int(end) / 1000.0
+        for label, key in (("included", "totalPercentUsed"),
+                           ("auto", "autoPercentUsed"),
+                           ("api", "apiPercentUsed")):
+            if plan.get(key) is not None:
+                lanes.append((label, float(plan[key]), secs, reset))
+    elif name == "grok":
+        q = state.get("quota") or {}
+        if q.get("percent") is not None:
+            begin, end = iso_epoch(q.get("start") or ""), iso_epoch(q.get("end") or "")
+            secs = (end - begin) if (begin and end and end > begin) else None
+            lanes.append(("credits", float(q["percent"]), secs, end))
+    elif name == "copilot":
+        live = state.get("live") or {}
+        stamp = iso_epoch((live.get("quota_reset_date_utc") or ""))
+        span = None
+        if stamp:
+            end = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc)
+            back = (end.replace(year=end.year - 1, month=12) if end.month == 1
+                    else end.replace(month=end.month - 1))
+            span = stamp - back.timestamp()
+        for key, snap in (live.get("quota_snapshots") or {}).items():
+            if (snap or {}).get("unlimited") or snap.get("percent_remaining") is None:
+                continue
+            lanes.append((key.replace("_", " ").replace("interactions", "reqs"),
+                          100.0 - float(snap["percent_remaining"]), span, stamp))
+    elif name == "antigravity":
+        for group in state.get("quota") or []:
+            short = str(group.get("displayName") or "?").split()[0].lower()
+            for b in group.get("buckets") or []:
+                if b.get("remainingFraction") is None:
+                    continue
+                window = str(b.get("window") or "?")
+                lanes.append(("%s %s" % (short, window),
+                              100.0 * (1.0 - float(b["remainingFraction"])),
+                              ANTIGRAVITY_WINDOWS.get(window),
+                              iso_epoch(b.get("resetTime") or "")))
+    return lanes
+
+
+def window_name(secs):
+    secs = int(secs or 0)
+    if secs >= 86400:
+        return "%dd" % (secs // 86400)
+    return "%dh" % (secs // 3600) if secs else "?"
+
+
 def visible_agents(found):
     """The tabs to draw.
 
@@ -2535,7 +2696,9 @@ def visible_agents(found):
     named = [n for n in (_CFG["agents"] or []) if n in AGENTS]
     chosen = named or [n for n in ORDER if found.get(n, {}).get("present")]
     shown = tuple(n for n in chosen if n not in drop)
-    return shown or ORDER
+    # The summary leads and is never discovered or excluded: it is not an
+    # agent, it is the view across whichever agents there turn out to be.
+    return (SUMMARY_TAB,) + (shown or ORDER)
 
 
 def config_complaints(found):
@@ -2556,6 +2719,9 @@ def tab_bar(active, installed, tabs, w):
         have = (installed.get(name) or {}).get("present", False)
         parts.append((bg(38, 56, 76) + ACCENT if here else DIM,
                       ("[%s]" if here else " %s ") % name.upper()))
+        if name == SUMMARY_TAB:
+            parts.append((GRID, " "))
+            continue
         parts.append((OK if have else GRID, "·" if have else " "))
     return seg(parts, w - 1)
 
@@ -3148,7 +3314,12 @@ def main():
         # appended here rather than by five tabs that each end differently.
         name = tabs[active]
         sub = []
-        if name == "claude":
+        if name == SUMMARY_TAB:
+            body = summary_tab({"claude": claude, "codex": codex,
+                                "cursor": cursor, "grok": grok,
+                                "copilot": copilot,
+                                "antigravity": antigravity}, w, h)
+        elif name == "claude":
             body = add_section(claude_tab(claude, w, h),
                                claude_metered(claude, w))
             if claude.get("profile"):

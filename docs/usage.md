@@ -53,6 +53,39 @@ the four that publish one and a subscription for the five that do.
   billing          stripe subscription
 ```
 
+## The `+` tab
+
+The first tab is not an agent. It is every quota all of them publish, on one
+screen, **ranked by what is spent** rather than grouped by who it belongs to:
+
+```
+ ── QUOTAS ── 14 limits across 6 agents · most spent first
+ copilot     premium reqs  █████████████████░░░░░░░   71%  -20%  15d 4h
+ codex       7d            ████████████░░░░░░░░░░░░   29%  +23%  3d 8h
+ grok        credits       █████████░░░░░░░░░░░░░░░   23%  +44%  2d 6h
+ claude      session 5h    ██░░░░░░░░░░░░░░░░░░░░░░  4.0%  +53%  2h 8m
+ cursor      auto          █░░░░░░░░░░░░░░░░░░░░░░░  2.7%  +12%  26d 11h
+ antigravity gemini weekly ░░░░░░░░░░░░░░░░░░░░░░░░ 0.03%   +8%  6d 11h
+```
+
+It is deliberately not a concatenation of the other tabs. Those answer *how am
+I using this agent*; this answers the only question that spans them — **what
+runs out first** — so the ranking is by spend, and the pace column matters more
+here than anywhere else. The line worth finding is the negative one.
+
+An agent that publishes no quota is **named at the bottom**, not silently
+missing, so an empty row and an absent agent are different things.
+
+A lane whose reading came from a cache rather than a live call says `cached`
+instead of a countdown. Claude's fallback can describe windows that have since
+closed, and a passed reset rendered as `resetting` beside five live ones would
+be the summary quietly disagreeing with the tab it summarises. The marker is
+never dropped for width, unlike the reset itself — a number nobody labelled as
+old reads as current.
+
+The tab carries no `·`: that dot means *installed*, and this one is not an
+agent to install.
+
 ## Why tabs
 
 Because the agents do not agree on what "usage" means. One counts tokens,
