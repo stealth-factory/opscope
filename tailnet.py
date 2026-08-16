@@ -813,11 +813,21 @@ def main():
         if listed:
             sel_peer = listed[min(selected, len(listed) - 1)]
             ip4 = [i for i in (sel_peer.get("TailscaleIPs") or []) if ":" not in i]
+            # Nothing is learned by pinging ourselves, and the round trip
+            # would read as a suspiciously good link.
             prober.watch(peer_name(sel_peer),
-                         ip4[0] if (ip4 and sel_peer.get("Online")) else None)
+                         ip4[0] if (ip4 and sel_peer.get("Online")
+                                    and not sel_peer.get("_self")) else None)
 
         listed = [p for p in sorted(peers, key=order)
                   if not (hide_offline and not p.get("Online"))]
+        # This machine belongs in the list of machines - it was only ever in
+        # the header - but never in the counts above it: "3 direct, 2
+        # relayed" describes connections out of here, and there is no
+        # connection from here to here. It pins to the top rather than
+        # sorting by traffic, because where you are is not a ranking.
+        if me:
+            listed.insert(0, dict(me, _self=True))
         selected = max(0, min(selected, len(listed) - 1)) if listed else 0
         visible = max(1, h - len(rows) - 2)
         if selected < scroll:
@@ -830,18 +840,25 @@ def main():
             p = listed[idx]
             if len(rows) >= h - 2:
                 break
-            up = bool(p.get("Online"))
+            mine = bool(p.get("_self"))
+            up = True if mine else bool(p.get("Online"))
             here = idx == selected
             tint = bg(28, 44, 62) if here else ""
             path_direct = bool(p.get("CurAddr"))
-            path = "DIRECT" if path_direct else (p.get("Relay") or "?")
+            # "this" rather than DIRECT or a relay name: the path column
+            # answers how the traffic gets there, and for this machine it
+            # does not go anywhere.
+            path = "this" if mine else (
+                "DIRECT" if path_direct else (p.get("Relay") or "?"))
             name = peer_name(p)
-            line = [(tint + (ONLINE if up else OFFLINE),
-                     ("▸" if here else " ") + "%s " % ("●" if up else "○")),
+            line = [(tint + (ACCENT if mine else (ONLINE if up else OFFLINE)),
+                     ("▸" if here else " ")
+                     + "%s " % ("◆" if mine else ("●" if up else "○"))),
                     (tint + (TXT if up else OFFLINE),
                      pad(name[:namew - 1], namew)),
                     (tint + DIM, "%-8s" % (p.get("OS") or "?")[:8]),
-                    (tint + (DIRECT if path_direct else RELAY),
+                    (tint + (ACCENT if mine else
+                             (DIRECT if path_direct else RELAY)),
                      "%-7s" % (path if up else "-"))]
             if wide:
                 line.append((tint + DIM, " %5s %5s" % (human(p.get("RxBytes")),

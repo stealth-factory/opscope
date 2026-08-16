@@ -21,6 +21,23 @@ reaching each one.
  ○ old-vm               linux   -          0B    0B  156d
 ```
 
+
+## This machine is in the list
+
+It sits at the top, marked `◆` rather than `●`, with `this` where the other
+rows say `DIRECT` or a relay name — the path column answers how traffic gets
+there, and for this machine it does not go anywhere.
+
+It is **not** in the counts above it. `12 online / 23 peers · 8 direct · 4
+relayed` describes connections out of here, and there is no connection from
+here to here; adding self would have quietly inflated the peer count and, since
+`Self` carries no `CurAddr`, filed this machine under "relayed".
+
+It is also never pinged. `tailscale status --json` reports it under `Self`
+rather than `Peer`, which is why it was missing to begin with, and the latency
+prober skips it — a round trip to ourselves would read as a suspiciously good
+link.
+
 ## The column that matters
 
 **PATH** is either `DIRECT` — NAT traversal succeeded, traffic flows
