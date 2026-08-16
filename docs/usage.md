@@ -59,19 +59,29 @@ The first tab is not an agent. It is every quota all of them publish, on one
 screen, **ranked by what is spent** rather than grouped by who it belongs to:
 
 ```
- ── QUOTAS ── 14 limits across 6 agents · most spent first
- copilot     premium reqs  █████████████████░░░░░░░   71%  -20%  15d 4h
- codex       7d            ████████████░░░░░░░░░░░░   29%  +23%  3d 8h
- grok        credits       █████████░░░░░░░░░░░░░░░   23%  +44%  2d 6h
- claude      session 5h    ██░░░░░░░░░░░░░░░░░░░░░░  4.0%  +53%  2h 8m
- cursor      auto          █░░░░░░░░░░░░░░░░░░░░░░░  2.7%  +12%  26d 11h
- antigravity gemini weekly ░░░░░░░░░░░░░░░░░░░░░░░░ 0.03%   +8%  6d 11h
+ ── QUOTAS ── 14 limits across 6 agents · worst first
+  COPILOT
+   premium reqs  █████████░░░░   71%  -20%  15d 4h
+  CODEX
+   7d            ████░░░░░░░░░   29%  +23%  3d 8h
+   Spark 7d      ░░░░░░░░░░░░░    0%        6d 23h
+  GROK
+   credits       ███░░░░░░░░░░   23%  +44%  2d 6h
+  CLAUDE
+   session 5h    █░░░░░░░░░░░░  5.0%  +57%  1h 54m
+   overall 7d    ░░░░░░░░░░░░░  1.0%   +2%  6d 18h
 ```
 
 It is deliberately not a concatenation of the other tabs. Those answer *how am
 I using this agent*; this answers the only question that spans them — **what
-runs out first** — so the ranking is by spend, and the pace column matters more
-here than anywhere else. The line worth finding is the negative one.
+runs out first** — so the pace column matters more here than anywhere else. The
+line worth finding is the negative one.
+
+Lanes are **grouped by provider**, but the ordering still does the work: groups
+are sorted by their own worst lane, and so are the lanes inside them. Structure
+says who owns what; the ordering keeps answering what to worry about. Dropping
+the agent column that a flat list needed also bought back enough width for the
+resets to survive a 58-column pane.
 
 An agent that publishes no quota is **named at the bottom**, not silently
 missing, so an empty row and an absent agent are different things.
