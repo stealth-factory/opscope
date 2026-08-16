@@ -314,118 +314,76 @@ window, because ten minutes into a week every number looks like a catastrophe
 or a triumph. CodexBar gates it the same way, for the same reason: Codex's
 Spark lane shows no pace at 0.6% elapsed, and that is correct.
 
-## What Cursor would have cost without the plan
+## METERED: today, and the last thirty days
+
+Every tab that can cost its tokens shows the same block — two windows, each
+with its money, its tokens, and the models underneath.
 
 ```
- ── METERED ── last 30d · 4148 events
-  cursor meters    $758.97
-  at vendor rates  $1292.75
-  the plan saves   $533.78 · 41%
-  today            $32.88
-  tokens           94.3M
+ ── METERED ── at list prices · Aug 2026
+  today    $645.26    688.8M tokens
+             claude-opus-5    $635.17
+             claude-opus-4-8   $10.09
+  30 days  $13884.16  15.8B tokens
+             claude-opus-5    $9640.29
+             claude-opus-4-8  $2298.76
+             claude-fable-5   $1931.03
+             claude-sonnet-5    $14.08
+  the plan saves  $13685.12
 ```
 
-Two real figures from two different calls, neither an estimate.
-`GetAggregatedUsageEvents` returns `totalCostCents` — what Cursor meters
-against the plan. Summing the raw events' own `totalCents` gives the
-vendor-rate cost of the very same traffic, which is higher because the plan
-discounts it; every event carries its own `discountPercentOff`.
+Two windows because they answer different questions: a month says what an
+agent costs, today says whether that is still true. A single all-time figure
+answered neither, and quietly flattered a habit that changed last week.
 
-That answers what "Cursor-metered" is, if you have seen the phrase elsewhere
-and wondered: it is the post-discount figure, and the larger number beside it
-is the same tokens at list price. The gap is what the subscription is worth
-this month.
+### Where each agent's numbers come from
 
-**Only Cursor can show this from published data**, because only Cursor
-publishes both numbers. The others were each checked:
+**Cursor** needs no rate card — it publishes both sides. The raw events carry
+their own vendor-rate cents, `GetAggregatedUsageEvents` says what Cursor
+actually metered, and the gap is the discount the plan applied. Its header
+reads `at vendor rates · Cursor meters $762.64 of it`.
 
-| | what it publishes | why it is not enough |
-|---|---|---|
-| Claude | `modelUsage.costUSD` | the field exists and reads **$0.00** for every model — a subscription is not API billing, so it computes no cost |
-| Copilot | `total_nano_aiu`, `request_multiplier` | AI units are real and already shown, but nothing publishes a price per unit |
-| Codex | token counts | no prices anywhere, and no model attached to the totals |
-| Grok | a credit percentage | no tokens priced at all |
+**Claude** is costed from the **transcripts**, not from `stats-cache.json`.
+The cache does have `dailyModelTokens` — per day, per model — but only one
+total per model per day, and input, output, cache reads and cache writes
+differ in price by up to fifty times, so a total cannot be costed at all. The
+transcripts carry the split, per message, with a timestamp and a model.
 
-So the other tabs price their tokens against a **rate card**, and for Claude
-models that card ships in the code.
+They carry more than that. A usage block's top-level counters can all read
+zero while its `iterations` hold the real figures, so the iterations win where
+they exist. And `cache_creation` splits `ephemeral_5m_input_tokens` from
+`ephemeral_1h_input_tokens` — the two are priced differently, 1.25× input
+against 2× — so both rates are carried and **neither duration is assumed**.
+
+That corpus is 242MB across 38 files here. Each is parsed once and cached on
+`(mtime, size)`, exactly as the Codex rollouts are, because a finished
+transcript never changes. Cold, the whole set streams in about 1.5 seconds.
+
+**Copilot** groups its own `assistant_usage_events` by day and model, which is
+the same shape from a much smaller table.
+
+**Codex and Grok** record no model against their token counts, so they can only
+be priced by a `"*"` entry, and say `no per-model split` rather than
+attributing spend to a model that was guessed.
+
+### What the plan saves
+
+Cursor computes it from its own two figures. Everyone else needs one number
+that no machine here knows — what you actually pay — so it is configured:
 
 ```json
 "usage": {
-  "rates": {
-    "claude-opus-5":   {"input": 15, "output": 75,
-                        "cache_read": 1.5, "cache_write": 18.75},
-    "claude-sonnet-5": {"input": 3, "output": 15,
-                        "cache_read": 0.3, "cache_write": 3.75}
-  }
+  "plan_cost": { "claude": 200 }
 }
 ```
 
-Anthropic **publishes** its prices, so there is nothing to invent. The table is
-copied from `platform.claude.com/docs/en/docs/about-claude/pricing`, with the
-source and date in the source file and **the date on screen beside the total**.
-A published price is a fact; what makes one dangerous is going stale in
-silence, and a date fixes that. Claude models therefore need no configuration
-at all.
+US$ per month, keyed by agent. **Nothing ships here either**, and for a
+sharper reason than the rates: Anthropic lists Max as *"from $100"* because it
+varies by tier, so there is no single published figure to embed even if one
+wanted to. Set it and the block gains `the plan saves`, which is the month's
+list cost minus what the month actually cost you. Leave it and the line is
+simply absent.
 
-```
- ── METERED ── $15126.88 at list prices · Aug 2026   all time
-  claude-opus-5              $9882.80
-  claude-opus-4-8            $2544.83
-  claude-fable-5             $2247.90
-  claude-sonnet-5             $450.71
-  claude-haiku-4-5-20251001     $0.64
-```
-
-`cache_write` uses the **5-minute** write rate (1.25× input), which is what
-Claude Code takes by default. A 1-hour write is 2×, and nothing records which
-kind a cached block was, so the cheaper and commoner one is assumed — stated
-here rather than quietly averaged.
-
-Config remains, as an **override** rather than a requirement:
-
-```json
-"usage": {
-  "rates": {
-    "gpt-5.6-sol": {"input": 1.25, "output": 10}
-  }
-}
-```
-
-Use it to correct a stale price, to add a provider that publishes none, or to
-enter your own negotiated rates. Anything set there wins over the shipped
-table, and the header says which was used — `at list prices · Aug 2026`, `at
-your configured rates`, or both when a tab mixes them. A list price is a dated
-fact and a configured one is your own assertion; neither should be mistaken for
-the other.
-
-Rates are keyed by **model, not by agent**, because a model has one list price
-wherever it ran. That is not theoretical tidiness: Copilot runs
-`claude-sonnet-5`, so its metered section prices off the same shipped entry as
-Claude Code's, with no configuration and no second table. The longest matching
-name wins, so `claude-opus-4` does not shadow `claude-opus-4-8`, and a `"*"`
-entry catches whatever is left.
-
-**Config wins outright**, before the shipped table is consulted at all — which
-means a single `"*"` entry reprices every model, including ones with a published
-rate. That is the intended reading of "your rates override mine", but it is
-worth knowing before setting a catch-all.
-
-```
- ── METERED ── $37958.95 at your configured rates   all time
-  claude-opus-5    $29648.39
-  claude-opus-4-8   $7634.50
-  claude-sonnet-5    $676.07
-  2 models unpriced: claude-fable-5, claude-haiku-4-5-20251001
-```
-
-**Unpriced models are named, never silently skipped.** A half-filled rate card
-that quietly reported a total would be the same failure as a truncated list
-presented as a whole one.
-
-Codex is the exception among the exceptions: it records no model against its
-token counts, so its total can only be priced by the `"*"` entry, and the
-section says `no per-model split` rather than attributing the spend to a model
-that was guessed.
 
 ## Spend per day
 
@@ -725,9 +683,11 @@ and Antigravity) held for an hour, and Cursor's five-page event fetch every
 half hour. A pane left open all day makes about 163 requests an hour between
 them, whichever tab is on screen.
 
-That event fetch is the one slow thing here: it blocks the first poll, so a
-freshly started widget takes roughly fifteen seconds to paint anything on any
-tab. After that it is half-hourly and invisible.
+Two slow things block the first poll, so a freshly started widget takes
+roughly fifteen seconds to paint anything on any tab: Cursor's event fetch,
+and the first pass over Claude's 242MB of transcripts (about 1.5 seconds).
+Both are cached afterwards — the events half-hourly, the transcripts per file
+on mtime and size — and neither is paid again.
 
 ## Which agents appear
 

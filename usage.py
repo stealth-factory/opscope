@@ -61,6 +61,11 @@ _CFG = load_config("usage", {
     "exclude_agents": [],
     # US$ per million tokens, keyed by model. Empty by design - see RATES.
     "rates": {},
+    # What each subscription costs per month, keyed by agent. Nothing to
+    # ship: Anthropic lists Max as "from $100" because it varies by tier,
+    # and nobody's invoice is on this machine. Set it and the metered
+    # section can say what the plan saved.
+    "plan_cost": {},
     "refresh": 30,
 })
 
@@ -70,7 +75,9 @@ REFRESH = float(_CFG["refresh"])
 # this have cost" is arithmetic on a rate card the user supplies. A price this
 # repo invented would be exactly the fabricated denominator it exists to avoid.
 RATES = _CFG["rates"] or {}
-RATE_KINDS = ("input", "output", "cache_read", "cache_write")
+PLAN_COST = _CFG["plan_cost"] or {}
+RATE_KINDS = ("input", "output", "cache_read", "cache_write",
+              "cache_write_1h")
 
 # Anthropic's published list prices, US$ per million tokens, copied from
 # platform.claude.com/docs/en/docs/about-claude/pricing on the date below.
@@ -78,39 +85,51 @@ RATE_KINDS = ("input", "output", "cache_read", "cache_write")
 # not a guess - but they go stale silently, so the date is carried onto the
 # screen with them and config overrides any line.
 #
-# cache_write uses the 5-minute write rate (1.25x input), which is what
-# Claude Code takes by default; a 1-hour write is 2x and the cache does not
-# record which kind it was, so the cheaper, commoner one is assumed and
-# said so here rather than quietly averaged.
+# Cache writes come in two durations at different prices - 1.25x input for a
+# five-minute write, 2x for an hour - and the transcripts record which was
+# taken, per iteration, so both are carried and neither is assumed.
 LIST_RATES_AS_OF = "Aug 2026"
 LIST_RATES_SOURCE = "platform.claude.com pricing"
 LIST_RATES = {
     "claude-fable-5":   {"input": 10, "output": 50, "cache_write": 12.50,
-                         "cache_read": 1},
+                         "cache_read": 1,
+                         "cache_write_1h": 20},
     "claude-mythos-5":  {"input": 10, "output": 50, "cache_write": 12.50,
-                         "cache_read": 1},
+                         "cache_read": 1,
+                         "cache_write_1h": 20},
     "claude-opus-5":    {"input": 5, "output": 25, "cache_write": 6.25,
-                         "cache_read": 0.50},
+                         "cache_read": 0.50,
+                         "cache_write_1h": 10},
     "claude-opus-4-8":  {"input": 5, "output": 25, "cache_write": 6.25,
-                         "cache_read": 0.50},
+                         "cache_read": 0.50,
+                         "cache_write_1h": 10},
     "claude-opus-4-7":  {"input": 5, "output": 25, "cache_write": 6.25,
-                         "cache_read": 0.50},
+                         "cache_read": 0.50,
+                         "cache_write_1h": 10},
     "claude-opus-4-6":  {"input": 5, "output": 25, "cache_write": 6.25,
-                         "cache_read": 0.50},
+                         "cache_read": 0.50,
+                         "cache_write_1h": 10},
     "claude-opus-4-5":  {"input": 5, "output": 25, "cache_write": 6.25,
-                         "cache_read": 0.50},
+                         "cache_read": 0.50,
+                         "cache_write_1h": 10},
     "claude-opus-4-1":  {"input": 15, "output": 75, "cache_write": 18.75,
-                         "cache_read": 1.50},
+                         "cache_read": 1.50,
+                         "cache_write_1h": 30},
     "claude-sonnet-5":  {"input": 2, "output": 10, "cache_write": 2.50,
-                         "cache_read": 0.20},
+                         "cache_read": 0.20,
+                         "cache_write_1h": 4},
     "claude-sonnet-4-6": {"input": 3, "output": 15, "cache_write": 3.75,
-                          "cache_read": 0.30},
+                          "cache_read": 0.30,
+                         "cache_write_1h": 6},
     "claude-sonnet-4-5": {"input": 3, "output": 15, "cache_write": 3.75,
-                          "cache_read": 0.30},
+                          "cache_read": 0.30,
+                         "cache_write_1h": 6},
     "claude-haiku-4-5": {"input": 1, "output": 5, "cache_write": 1.25,
-                         "cache_read": 0.10},
+                         "cache_read": 0.10,
+                         "cache_write_1h": 2},
     "claude-haiku-3-5": {"input": 0.80, "output": 4, "cache_write": 1,
-                         "cache_read": 0.08},
+                         "cache_read": 0.08,
+                         "cache_write_1h": 1.6},
 }
 
 OK = rgb(90, 240, 160)
@@ -346,7 +365,8 @@ def read_claude():
                 "quota": quota, "profile": profile}
     rates, sampled = claude_rates()
     return {"ok": True, "mtime": stat.st_mtime, "data": d, "quota": quota,
-            "profile": profile, "rates": rates, "sampled": sampled}
+            "profile": profile, "rates": rates, "sampled": sampled,
+            "daily_models": claude_daily()}
 
 
 def iso_epoch(s):
@@ -524,6 +544,111 @@ def claude_quota(q, w):
     return rows
 
 
+_TRANSCRIPT_CACHE = {}
+
+
+def usage_kinds(u):
+    """Token counts from one transcript usage block, by priced kind.
+
+    A block's top-level numbers can all be zero while its `iterations` carry
+    the real figures, so the iterations win where they exist. Cache writes
+    are split by duration because they are priced differently, and the flat
+    cache_creation_input_tokens is only used when that split is absent.
+    """
+    out = dict.fromkeys(RATE_KINDS, 0)
+    for x in (u.get("iterations") or [u]):
+        out["input"] += x.get("input_tokens") or 0
+        out["output"] += x.get("output_tokens") or 0
+        out["cache_read"] += x.get("cache_read_input_tokens") or 0
+        split = x.get("cache_creation") or {}
+        if split:
+            out["cache_write"] += split.get("ephemeral_5m_input_tokens") or 0
+            out["cache_write_1h"] += split.get("ephemeral_1h_input_tokens") or 0
+        else:
+            out["cache_write"] += x.get("cache_creation_input_tokens") or 0
+    return out
+
+
+def scan_transcript(path):
+    """Per-day, per-model token counts from one transcript.
+
+    Cached on (mtime, size): the corpus here is 242MB across 38 files and a
+    finished transcript never changes, so each is parsed once. The whole set
+    streams in a couple of seconds; re-reading it every refresh would not.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (st.st_mtime, st.st_size)
+    hit = _TRANSCRIPT_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    days = {}
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                msg = r.get("message") or {}
+                u = msg.get("usage")
+                model = msg.get("model")
+                stamp = r.get("timestamp")
+                if not u or not model or not stamp:
+                    continue
+                when = iso_epoch(stamp)
+                if not when:
+                    continue
+                day = datetime.date.fromtimestamp(when).isoformat()
+                got = usage_kinds(u)
+                bucket = days.setdefault(day, {}).setdefault(
+                    model, dict.fromkeys(RATE_KINDS, 0))
+                for kind in RATE_KINDS:
+                    bucket[kind] += got[kind]
+    except OSError:
+        return {}
+    _TRANSCRIPT_CACHE[path] = (key, days)
+    return days
+
+
+def claude_daily():
+    """Every transcript's per-day, per-model tokens, merged.
+
+    stats-cache.json has dailyModelTokens, but only one total per model per
+    day - and input, output and the two cache kinds differ in price by up to
+    fifty times, so a total cannot be costed. The transcripts carry the
+    split, which is why the money comes from here and not from the cache.
+    """
+    merged = {}
+    for path in glob.glob(CLAUDE_TRANSCRIPTS):
+        for day, models in scan_transcript(path).items():
+            into = merged.setdefault(day, {})
+            for model, tokens in models.items():
+                bucket = into.setdefault(model, dict.fromkeys(RATE_KINDS, 0))
+                for kind in RATE_KINDS:
+                    bucket[kind] += tokens[kind]
+    return merged
+
+
+def window_models(daily, days):
+    """Per-model token totals over the last N days (1 = today only)."""
+    today = datetime.date.today()
+    first = (today - datetime.timedelta(days=days - 1)).isoformat()
+    out = {}
+    for day, models in (daily or {}).items():
+        if day < first:
+            continue
+        for model, tokens in models.items():
+            bucket = out.setdefault(model, dict.fromkeys(RATE_KINDS, 0))
+            for kind in RATE_KINDS:
+                bucket[kind] += tokens.get(kind) or 0
+    return sorted(out.items())
+
+
 def claude_rates():
     """Output tokens per second, from the newest transcripts.
 
@@ -679,7 +804,7 @@ def cursor_events(days=30):
     hour, because that is far too slow to repeat on a redraw.
     """
     cut = time.time() - days * 86400
-    days_cents, days_tokens = {}, {}
+    days_cents, days_tokens, by_day_model = {}, {}, {}
     vendor_cents = 0.0
     tokens = 0
     counted = 0
@@ -704,6 +829,10 @@ def cursor_events(days=30):
             day = datetime.date.fromtimestamp(when)
             days_cents[day] = days_cents.get(day, 0.0) + cents
             days_tokens[day] = days_tokens.get(day, 0) + n
+            slot = by_day_model.setdefault(day.isoformat(), {}).setdefault(
+                str(e.get("model") or "?"), {"cents": 0.0, "tokens": 0})
+            slot["cents"] += cents
+            slot["tokens"] += n
             vendor_cents += cents
             tokens += n
             counted += 1
@@ -712,8 +841,8 @@ def cursor_events(days=30):
     if not counted:
         return None
     return {"by_day": days_cents, "tokens_by_day": days_tokens,
-            "vendor_cents": vendor_cents, "tokens": tokens,
-            "events": counted, "days": days}
+            "by_day_model": by_day_model, "vendor_cents": vendor_cents,
+            "tokens": tokens, "events": counted, "days": days}
 
 
 def read_cursor():
@@ -1514,6 +1643,18 @@ def read_copilot():
                 "nano_aiu": row[5] or 0, "ttft": row[6] or 0,
                 "itl": row[7] or 0, "ms": row[8] or 0,
             }
+            for day, model, i_tok, o_tok, cr, cw in con.execute(
+                    "select date(created_at), model, sum(input_tokens),"
+                    " sum(output_tokens), sum(cache_read_tokens),"
+                    " sum(cache_write_tokens) from assistant_usage_events"
+                    " group by 1, 2"):
+                bucket = out.setdefault("daily_models", {}).setdefault(
+                    str(day), {}).setdefault(
+                        model, dict.fromkeys(RATE_KINDS, 0))
+                bucket["input"] += i_tok or 0
+                bucket["output"] += o_tok or 0
+                bucket["cache_read"] += cr or 0
+                bucket["cache_write"] += cw or 0
             out["models"] = con.execute(
                 "select model, count(*), sum(output_tokens),"
                 " sum(input_tokens), sum(cache_read_tokens),"
@@ -1627,30 +1768,72 @@ def rate_for(model):
     return None, None
 
 
-def metered_rows(entries, w, note=""):
-    """What the tokens on this tab would cost at the configured rates.
+def cost_of(tokens, rate):
+    return sum((tokens.get(kind) or 0) / 1e6 * float(rate.get(kind) or 0)
+               for kind in RATE_KINDS)
 
-    Only models with a rate are counted, and the header says how many were
-    priced out of how many ran, so a half-filled rate card cannot read as a
-    total. With nothing configured the section is one line pointing at the
-    setting rather than a section of zeros.
+
+def metered_block(where, windows, w, saves=None, note=""):
+    """The metered section: one row per window, each with its models under it.
+
+    `windows` is [(label, cost, tokens, [(model, cost)])]. Two of them -
+    today and thirty days - because a month's total says what an agent costs
+    and today says whether that is still true. A single all-time figure
+    answered neither question.
     """
-    entries = [(m, t) for m, t in (entries or []) if any(t.values())]
-    if not entries:
+    windows = [x for x in windows if x[1] or x[2]]
+    if not windows:
         return []
-    priced, total, missing = [], 0.0, []
-    origins = set()
-    for model, tokens in entries:
-        rate, origin = rate_for(model)
-        if not rate:
-            missing.append(model)
-            continue
-        cost = sum((tokens.get(kind) or 0) / 1e6 * float(rate.get(kind) or 0)
-                   for kind in RATE_KINDS)
-        total += cost
-        origins.add(origin)
-        priced.append((model, cost))
-    if not priced:
+    rows = [seg([(LBL, " ── METERED ── "), (DIM, "at " + where),
+                 (DIM, "   %s" % note if note else "")], w - 1)]
+    label_w = max([len(x[0]) for x in windows]
+                  + ([len("the plan saves")] if saves is not None else []))
+    for label, cost, tokens, models in windows:
+        rows.append(seg([(TXT, "  " + pad(label, label_w) + "  "),
+                         (AGENT, pad("$%.2f" % cost, 11)),
+                         (DIM, big_num(tokens) + " tokens")], w - 1))
+        top = models[:5]
+        name_w = max([len(m) for m, _ in top] or [0])
+        for model, model_cost in top:
+            rows.append(seg([(DIM, "  " + " " * label_w + "   "),
+                             (DIM, pad(model, name_w) + "  "),
+                             (TXT, "$%.2f" % model_cost)], w - 1))
+        if len(models) > len(top):
+            rows.append(seg([(DIM, "  " + " " * label_w + "   "),
+                             (DIM, "+%d more" % (len(models) - len(top)))],
+                            w - 1))
+    if saves is not None:
+        rows.append(seg([(DIM, "  " + pad("the plan saves", label_w) + "  "),
+                         (OK, "$%.2f" % saves)], w - 1))
+    rows.append("")
+    return rows
+
+
+def metered_rows(windows, w, note="", agent=None):
+    """Cost a set of windows against the rate card.
+
+    Each window is (label, [(model, tokens)]). Only models with a rate are
+    counted and the unpriced ones are named, so a half-filled card cannot
+    read as a total.
+    """
+    origins, missing, built = set(), set(), []
+    for label, entries in windows:
+        cost = tokens = 0.0
+        models = []
+        for model, counts in entries:
+            if not any(counts.values()):
+                continue
+            rate, origin = rate_for(model)
+            tokens += sum(counts.get(k) or 0 for k in RATE_KINDS)
+            if not rate:
+                missing.add(model)
+                continue
+            this = cost_of(counts, rate)
+            cost += this
+            origins.add(origin)
+            models.append((model, this))
+        built.append((label, cost, tokens, sorted(models, key=lambda x: -x[1])))
+    if not any(x[1] for x in built):
         if not RATES:
             return [seg([(LBL, " ── METERED ── "),
                          (DIM, "no published rates for these models")],
@@ -1664,19 +1847,20 @@ def metered_rows(entries, w, note=""):
     where = ("your configured rates" if origins == {"config"}
              else "list prices · %s" % LIST_RATES_AS_OF if origins == {"list"}
              else "list prices · %s, some configured" % LIST_RATES_AS_OF)
-    rows = [seg([(LBL, " ── METERED ── "),
-                 (AGENT, "$%.2f" % total),
-                 (DIM, " at " + where),
-                 (DIM, "   %s" % note if note else "")], w - 1)]
-    label_w = max(len(m) for m, _ in priced)
-    for model, cost in sorted(priced, key=lambda x: -x[1]):
-        rows.append(seg([(TXT, "  " + pad(model, label_w) + "  "),
-                         (AGENT, "$%.2f" % cost)], w - 1))
-    if missing:
-        rows.append(seg([(WARN, "  %d model%s unpriced: " %
-                          (len(missing), "" if len(missing) == 1 else "s")),
+    # A month's list cost against what the month actually cost you. Shown
+    # only when the plan price is configured, because it is the one figure
+    # in this section that no machine here knows.
+    saves = None
+    paid = PLAN_COST.get(agent) if agent else None
+    month = next((x[1] for x in built if x[0] == "30 days"), None)
+    if paid and month:
+        saves = month - float(paid)
+    rows = metered_block(where, built, w, saves=saves, note=note)
+    if missing and rows:
+        rows.insert(len(rows) - 1,
+                    seg([(WARN, "  %d model%s unpriced: "
+                          % (len(missing), "" if len(missing) == 1 else "s")),
                          (DIM, ", ".join(sorted(missing)[:3]))], w - 1))
-    rows.append("")
     return rows
 
 
@@ -1756,11 +1940,10 @@ def copilot_plan_rows(live, w):
 
 
 def copilot_metered(state, w):
-    return metered_rows(
-        [(model, {"input": _in, "output": out_tok,
-                  "cache_read": _cr, "cache_write": _cw})
-         for model, n, out_tok, _in, _cr, _cw in (state.get("models") or [])],
-        w, note="local turns")
+    daily = state.get("daily_models") or {}
+    return metered_rows([("today", window_models(daily, 1)),
+                         ("30 days", window_models(daily, 30))], w,
+                        note="local turns", agent="copilot")
 
 
 def copilot_tab(state, w, h):
@@ -2109,13 +2292,10 @@ def day_calendar(totals_by_date, w, steps=HEAT_STEPS, weeks=None):
 
 
 def claude_metered(state, w):
-    mu = ((state.get("data") or {}).get("modelUsage")) or {}
-    return metered_rows(
-        [(model, {"input": v.get("inputTokens"),
-                  "output": v.get("outputTokens"),
-                  "cache_read": v.get("cacheReadInputTokens"),
-                  "cache_write": v.get("cacheCreationInputTokens")})
-         for model, v in mu.items()], w, note="all time")
+    daily = state.get("daily_models") or {}
+    return metered_rows([("today", window_models(daily, 1)),
+                         ("30 days", window_models(daily, 30))], w,
+                        agent="claude")
 
 
 def claude_tab(state, w, h):
@@ -2302,45 +2482,44 @@ def cursor_quota(live, w):
 
 
 def cursor_metered_rows(state, w):
-    """What Cursor charges you, beside what the same tokens cost at list.
+    """What Cursor charges, beside what the same traffic costs at list.
 
-    Two real figures from two different calls, not an estimate either way.
-    GetAggregatedUsageEvents returns what Cursor actually meters against the
-    plan; summing the raw events' own totalCents gives the vendor-rate cost
-    of the same traffic, which is higher because the plan discounts it -
-    every event carries its own discountPercentOff.
-
-    The gap is what the subscription is worth this month, which is the only
-    honest way this widget can answer "what would it have cost without".
+    Cursor is the one agent that publishes both, so no rate card is needed:
+    GetAggregatedUsageEvents returns what it meters against the plan, and
+    the raw events carry their own vendor-rate cents. The gap is what the
+    subscription is worth, and every event states its own discount.
     """
     ev = state.get("events") or {}
     spend = state.get("spend") or {}
     metered = float(spend.get("totalCostCents") or 0)
-    vendor = float(ev.get("vendor_cents") or 0)
-    if not metered and not vendor:
+    by = ev.get("by_day_model") or {}
+    if not by and not metered:
         return []
-    days = ev.get("days") or 30
-    rows = [seg([(LBL, " ── METERED ── "),
-                 (DIM, "last %dd · %d events" % (days, ev.get("events") or 0))],
-                w - 1)]
-    today = datetime.date.today()
-    today_cents = (ev.get("by_day") or {}).get(today, 0.0)
-    pairs = [("cursor meters", "$%.2f" % (metered / 100.0)),
-             ("at vendor rates", "$%.2f" % (vendor / 100.0))]
-    if vendor and metered:
-        saved = vendor - metered
-        pairs.append(("the plan saves",
-                      "$%.2f · %.0f%%" % (saved / 100.0, 100.0 * saved / vendor)))
-    pairs.append(("today", "$%.2f" % (today_cents / 100.0)))
-    if ev.get("tokens"):
-        pairs.append(("tokens", big_num(ev["tokens"])))
-    label_w = max(len(k) for k, _ in pairs)
-    for key, value in pairs:
-        rows.append(seg([(DIM, "  " + pad(key, label_w) + "  "),
-                         (AGENT if key == "the plan saves" else TXT, value)],
-                        w - 1))
-    rows.append("")
-    return rows
+
+    def window(days):
+        first = (datetime.date.today()
+                 - datetime.timedelta(days=days - 1)).isoformat()
+        cents, tokens, models = 0.0, 0, {}
+        for day, entries in by.items():
+            if day < first:
+                continue
+            for model, got in entries.items():
+                cents += got["cents"]
+                tokens += got["tokens"]
+                models[model] = models.get(model, 0.0) + got["cents"]
+            
+        return (cents / 100.0, tokens,
+                sorted([(m, c / 100.0) for m, c in models.items()],
+                       key=lambda x: -x[1]))
+
+    windows = []
+    for label, days in (("today", 1), ("30 days", ev.get("days") or 30)):
+        cost, tokens, models = window(days)
+        windows.append((label, cost, tokens, models))
+    vendor = float(ev.get("vendor_cents") or 0)
+    saves = (vendor - metered) / 100.0 if vendor and metered else None
+    note = ("Cursor meters $%.2f of it" % (metered / 100.0)) if metered else ""
+    return metered_block("vendor rates", windows, w, saves=saves, note=note)
 
 
 def cursor_daily_rows(events, w):

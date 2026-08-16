@@ -84,6 +84,8 @@
     "exclude_agents": [],
     "refresh": 30,
     "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
-    "rates": {}
+    "rates": {},
+    "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
+    "plan_cost": {}
   }
 }
