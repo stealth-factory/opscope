@@ -680,7 +680,12 @@ def main():
                               % (total_c, CONTRIB_WEEKS, peak))],
                             w - 1))
             for r, line in enumerate(grid):
-                label = ("Mon", "", "Wed", "", "Fri", "", "")[r]
+                # Rows are GitHub's own weekday index, where 0 is Sunday -
+                # grid[d["weekday"]] above - so the labels come off the same
+                # constant rather than a hand-written tuple. Written out
+                # Monday-first, they sat one row early and put today under
+                # yesterday's name.
+                label = WEEKDAYS[r] if r in (1, 3, 5) else ""
                 rows.append(seg([(DIM, " %-4s" % label), (OK, "".join(line))],
                                 w - 1))
             cs = calendar_stats(calendar["weeks"])
