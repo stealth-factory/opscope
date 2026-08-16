@@ -2710,8 +2710,11 @@ def summary_tab(states, w, h):
     label_w = min(16, max(len(x[1]) for x in lanes))
     head = "%d limits across %d agents" % (len(lanes),
                                            len(ORDER) - len(quiet))
-    if 14 + len(head) + 20 <= w - 1:
-        head += " · worst first"
+    # Sized against the suffix actually being added, so changing the wording
+    # cannot quietly start clipping the line.
+    suffix = " · ranked by usage"
+    if 14 + len(head) + len(suffix) <= w - 1:
+        head += suffix
     rows = [seg([(LBL, " ── QUOTAS ── "), (DIM, head)], w - 1)]
     # 2 lead + label + 1 + pct(6) + pace(6). The reset needs 16 more and is
     # the first thing dropped, being the only part a reader can infer from

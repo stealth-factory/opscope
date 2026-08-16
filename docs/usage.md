@@ -59,7 +59,7 @@ The first tab is not an agent. It is every quota all of them publish, on one
 screen, **ranked by what is spent** rather than grouped by who it belongs to:
 
 ```
- ── QUOTAS ── 14 limits across 6 agents · worst first
+ ── QUOTAS ── 14 limits across 6 agents · ranked by usage
   COPILOT
    premium reqs  █████████░░░░   71%  -20%  15d 4h
   CODEX
