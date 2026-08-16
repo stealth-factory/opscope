@@ -1613,6 +1613,79 @@ def grok_tab(state, w, h):
 ELSEWHERE = {}
 
 
+ANTIGRAVITY_RPC = ("/exa.language_server_pb.LanguageServerService"
+                   "/RetrieveUserQuotaSummary")
+
+
+def antigravity_ports():
+    """TCP ports the running Antigravity language server listens on.
+
+    The quota never reaches disk, but the process holding it serves an RPC
+    on localhost, so the port is the way in. Found by matching the process
+    then reading its listening sockets out of /proc - no lsof, no guessing
+    at a range, and nothing touched but our own machine.
+    """
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % entry, "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode("utf8", "replace")
+        except OSError:
+            continue
+        if re.search(r"(^|/)(agy|antigravity)\b|language_server", cmd):
+            pids.append(entry)
+    inodes = set()
+    for pid in pids:
+        for fd in glob.glob("/proc/%s/fd/*" % pid):
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:["):
+                inodes.add(target[8:-1])
+    ports = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as f:
+                rows = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            cols = row.split()
+            if len(cols) > 9 and cols[3] == "0A" and cols[9] in inodes:
+                ports.append(int(cols[1].split(":")[1], 16))
+    return sorted(set(ports))
+
+
+def antigravity_quota():
+    """Weekly and five-hour limits, from the language server on localhost.
+
+    The same figures Antigravity's own TUI prints. It speaks Connect over
+    plain HTTP on a loopback port - its TLS listener answers with a wrong
+    version number, so http is not a downgrade here, it is the protocol -
+    and the call leaves this machine no more than reading a file would.
+
+    Found by reading how CodexBar does it (github.com/steipete/CodexBar),
+    after chasing the Google endpoint in the binary to a 404: the quota was
+    never a remote call to make, it was a local one.
+    """
+    for port in antigravity_ports():
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d%s" % (port, ANTIGRAVITY_RPC), data=b"{}",
+            method="POST", headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                got = json.load(r)
+        except (urllib.error.URLError, ValueError, OSError):
+            continue
+        groups = ((got.get("response") or got).get("groups") or [])
+        if groups:
+            return groups
+    return None
+
+
 def antigravity_live():
     """Which Code Assist tier the account is on.
 
@@ -1661,6 +1734,7 @@ def read_antigravity():
     """
     out = {"ok": True, "live": cached("antigravity", antigravity_live,
                                       ttl=PLAN_TTL),
+           "quota": cached("antigravity-quota", antigravity_quota),
            "sessions": 0, "steps": 0, "prompts": 0, "last": 0}
     files = glob.glob(ANTIGRAVITY_CONVERSATIONS)
     out["sessions"] = len(files)
@@ -1720,8 +1794,55 @@ def antigravity_plan_rows(state, w):
                      caveat=caveat)
 
 
+ANTIGRAVITY_WINDOWS = {"weekly": 7 * 86400, "5h": 5 * 3600}
+
+
+def antigravity_quota_rows(groups, w):
+    """One bar per limit, grouped by the model family it covers.
+
+    Shown as spent rather than the remaining fraction the RPC returns, so
+    red means the same here as on every other tab. Every plan reports every
+    family it covers, so a Gemini-only account still gets a Claude/GPT pair
+    sitting at 0% - they are real limits, not padding, and are left in.
+    """
+    if not groups:
+        return []
+    rows = [seg([(LBL, " ── QUOTA ── "), (OK, "live"),
+                 (DIM, " · account-wide, from the local language server")],
+                w - 1)]
+    for group in groups:
+        buckets = [b for b in (group.get("buckets") or [])
+                   if b.get("remainingFraction") is not None]
+        if not buckets:
+            continue
+        rows.append(seg([(TXT, "  " + str(group.get("displayName") or "?"))],
+                        w - 1))
+        label_w = max(len(str(b.get("window") or "?")) for b in buckets)
+        for b in buckets:
+            pct = 100.0 * (1.0 - float(b["remainingFraction"]))
+            used = max(0.0, min(1.0, pct / 100.0))
+            window = str(b.get("window") or "?")
+            reset = iso_epoch(b.get("resetTime") or "")
+            when = ""
+            if reset:
+                left = reset - time.time()
+                when = ("resets in " + left_span(left) if left > 0
+                        else "resetting")
+            bar = meter(used, max(8, w - 34 - label_w))
+            filled = bar.count("█")
+            rows.append(seg([(DIM, "   " + pad(window, label_w) + " "),
+                             (heat(used), bar[:filled]), (GRID, bar[filled:]),
+                             (heat(used), " %3.0f%%" % pct),
+                             pace_cell(lead(pct,
+                                            ANTIGRAVITY_WINDOWS.get(window),
+                                            reset)),
+                             (DIM, "  " + when)], w - 1))
+    rows.append("")
+    return rows
+
+
 def antigravity_tab(state, w, h):
-    rows = []
+    rows = antigravity_quota_rows(state.get("quota"), w)
     if state.get("live") is None:
         rows.append(seg([(WARN, "  no tier: the CLI's access token has"
                                 " expired or the call failed")], w - 1))
@@ -1738,13 +1859,11 @@ def antigravity_tab(state, w, h):
         rows.append(seg([(DIM, "  " + pad(label, label_w) + "  "),
                          (colour, value)], w - 1))
     rows.append("")
-    rows += no_local("No tokens or quota are recorded locally - only the"
-                     " conversations and steps above. Its own TUI does show"
-                     " weekly and five-hour limits per model group, fetched"
-                     " live via fetchQuotaStatus on"
-                     " businessaicode.googleapis.com; that call is not"
-                     " reachable from here yet, so only the tier below is.",
-                     "", w)
+    rows += no_local("No tokens are recorded locally - only the"
+                     " conversations and steps above. The quota is not on"
+                     " disk either; it comes from the language server while"
+                     " Antigravity is running, so it is absent when nothing"
+                     " is.", "", w)
     return rows
 
 

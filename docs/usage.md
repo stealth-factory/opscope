@@ -238,28 +238,49 @@ conversation is its own SQLite file whose `steps` table records what the agent
 did, so the tab reports conversations, agent steps and prompts — real work
 done, but not cost.
 
-Its quota **is** real and never lands on disk. The log shows a
-`quota_manager.go` refreshing one on a loop, into memory, and records only that
-it happened — never a value or a URL.
-
-The CLI's own TUI displays it: weekly and five-hour limits, per model group
-(Gemini models in one, Claude/GPT in another), each as a percentage with a
-refresh countdown. So it is fetched, not computed, and the endpoint is
-findable. It is in the binary — `~/.local/bin/agy`, 206MB of Go — as
+Its quota never lands on disk, and getting it took a wrong turn worth
+recording. The log shows `quota_manager.go` refreshing one on a loop into
+memory, noting only that it happened. The binary — `~/.local/bin/agy`, 206MB
+of Go — carries a plausible-looking remote method:
 
 ```
 POST https://businessaicode.googleapis.com/v1beta/{parent=projects/*/locations/*}:fetchQuotaStatus
 ```
 
-with `google.cloud.businessaicode.v1beta.FetchQuotaStatusRequest` beside it.
-Calling that path directly with the CLI's own token answers **404 from a Google
-frontend**, so either the method is not routed publicly under that host or it
-wants something the descriptor does not spell out. There is no `agy usage`
-subcommand to shell out to either — the display is a slash command inside the
-interactive TUI.
+That is a dead end. Called with the CLI's own token it answers **404 from a
+Google frontend**, and there is no `agy usage` subcommand to fall back on —
+the TUI's display is a slash command.
 
-So the pane says what it can and names where the rest lives, rather than
-guessing at a URL until one sticks.
+**The quota was never a remote call to make.** The process already holding it
+serves an RPC on loopback, which is how CodexBar reads it:
+
+```
+POST http://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
+```
+
+The port is found by matching the running process — `agy`, the Antigravity
+app, or a `language_server` — and reading its listening sockets straight out of
+`/proc`. No `lsof`, no scanning a range. Note the **`http`**: the server's TLS
+listener answers with a wrong-version error, so plain HTTP is not a downgrade
+here, it is the protocol, and the request never leaves the machine.
+
+```
+ ── QUOTA ── live · account-wide, from the local language server
+  Gemini Models
+   weekly ░░░░░░░░░░░░░░░░░░░░░░░░   0%   +3%  resets in 6d 18h
+   5h     ░░░░░░░░░░░░░░░░░░░░░░░░   0%  +14%  resets in 4h 15m
+  Claude and GPT models
+   weekly ░░░░░░░░░░░░░░░░░░░░░░░░   0%        resets in 6d 23h
+   5h     ░░░░░░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
+```
+
+Shown as **spent**, not the `remainingFraction` the RPC returns, so red means
+the same thing here as on every other tab — and with the same pace column.
+Every plan reports every family it covers, so a Gemini-only account still gets
+a Claude/GPT pair at 0%; those are real limits and are left in.
+
+It is present only while Antigravity is running, which the pane does not
+disguise: no process, no port, no section.
 
 The tier comes from the endpoint the CLI authenticates against:
 
