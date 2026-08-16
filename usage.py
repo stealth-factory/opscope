@@ -1781,17 +1781,10 @@ def antigravity_plan_rows(state, w):
             pairs.append(("auth", method))
     except (OSError, ValueError):
         pass
-    # Two different product lines, and the names invite the wrong reading:
-    # the Code Assist tier is GCP licensing, the Google AI plan is the
-    # consumer subscription. Being on free-tier with Ultra is normal.
-    caveat = ""
-    if cur.get("id") and paid.get("name"):
-        caveat = ("The Code Assist tier is GCP licensing - standard-tier"
-                  " wants your own Cloud project and Cloud terms - while the"
-                  " Google AI plan is the consumer subscription. Free-tier"
-                  " here is the default, not a downgrade.")
-    return plan_rows(cur.get("name") or paid.get("name"), pairs, w,
-                     caveat=caveat)
+    # The two tiers can disagree - free-tier beside Google AI Ultra is
+    # normal, since one is GCP licensing and the other a consumer plan - but
+    # that is a paragraph the docs can carry, not four lines on every frame.
+    return plan_rows(cur.get("name") or paid.get("name"), pairs, w)
 
 
 ANTIGRAVITY_WINDOWS = {"weekly": 7 * 86400, "5h": 5 * 3600}
@@ -1859,11 +1852,18 @@ def antigravity_tab(state, w, h):
         rows.append(seg([(DIM, "  " + pad(label, label_w) + "  "),
                          (colour, value)], w - 1))
     rows.append("")
-    rows += no_local("No tokens are recorded locally - only the"
-                     " conversations and steps above. The quota is not on"
-                     " disk either; it comes from the language server while"
-                     " Antigravity is running, so it is absent when nothing"
-                     " is.", "", w)
+    # The absence is only worth explaining while it is one. With the quota
+    # drawn above, a paragraph about why there is no quota contradicts the
+    # screen.
+    if state.get("quota"):
+        rows += no_local("No per-token usage is recorded locally - the"
+                         " conversations and steps above are what there is.",
+                         "", w)
+    else:
+        rows += no_local("No tokens are recorded locally, and no quota"
+                         " either: it comes from the language server while"
+                         " Antigravity is running, so start it and this fills"
+                         " in.", "", w)
     return rows
 
 

@@ -305,7 +305,9 @@ What it returns is worth reading carefully: `currentTier` is `free-tier`
 while `paidTier` is `Google AI Ultra`. Those are different questions — which
 Code Assist tier this project sits on, and which Google AI plan the account
 holds — and they disagree here, so **both are shown** rather than one being
-picked as "the" plan, with a remark saying why they can differ.
+picked as "the" plan. The explanation lives here rather than on the pane: it
+is a paragraph, and a paragraph that never changes does not earn four lines on
+every frame.
 
 `free-tier` is not a downgrade, and the response says so itself. `allowedTiers`
 offers exactly two: `free-tier`, marked `isDefault`, and `standard-tier`, which
