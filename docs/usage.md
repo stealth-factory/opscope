@@ -459,8 +459,9 @@ refresh makes a tab a row longer.
 Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
 never changes. There are five quota calls — Claude, Codex, Copilot and two for
-Cursor — each held for two minutes, so a pane left open all day makes about 150
-requests an hour between them, whichever tab is on screen.
+Cursor — each held for two minutes, plus two subscription reads (Claude and
+Cursor) held for an hour. A pane left open all day makes about 152 requests an
+hour between them, whichever tab is on screen.
 
 ## Which agents appear
 
