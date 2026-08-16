@@ -634,9 +634,14 @@ refresh makes a tab a row longer.
 Small. Local files are read every 30 seconds; Codex rollouts are parsed once
 each and cached on mtime and size, because one is 29MB and a finished rollout
 never changes. There are five quota calls — Claude, Codex, Copilot and two for
-Cursor — each held for two minutes, plus three subscription reads (Claude,
-Cursor and Antigravity) held for an hour. A pane left open all day makes about
-153 requests an hour between them, whichever tab is on screen.
+Cursor — each held for two minutes, three subscription reads (Claude, Cursor
+and Antigravity) held for an hour, and Cursor's five-page event fetch every
+half hour. A pane left open all day makes about 163 requests an hour between
+them, whichever tab is on screen.
+
+That event fetch is the one slow thing here: it blocks the first poll, so a
+freshly started widget takes roughly fifteen seconds to paint anything on any
+tab. After that it is half-hourly and invisible.
 
 ## Which agents appear
 
