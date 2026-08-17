@@ -769,10 +769,18 @@ def kill_label(row, room=999):
     project it belongs to is no use on a machine running four of them. The
     pid is the first to go, then the kind.
     """
+    # An orphan's kind is the words "nothing listening", which reads badly
+    # in the middle of a sentence about it. The port is the whole subject.
+    if row.get("orphan"):
+        return ":%d" % row["port"]
     what = row["kind"] or "unidentified"
     where = row["project"]
-    full = "%s%s on :%d (pid %d)" % (what, " in " + where if where else "",
-                                     row["port"], row["pid"])
+    # Not every row has a pid. A port Tailscale serves with nothing behind
+    # it has none by definition, and one that exits while its screen is open
+    # loses the one it had - both can still be the subject of a prompt.
+    who = " (pid %d)" % row["pid"] if row.get("pid") else ""
+    full = "%s%s on :%d%s" % (what, " in " + where if where else "",
+                              row["port"], who)
     for text in (full,
                  "%s%s on :%d" % (what, " in " + where if where else "",
                                   row["port"]),
@@ -840,25 +848,23 @@ def do_work(kind, row, done):
     port = row["port"]
     if kind in ("serve", "funnel"):
         failed = serve_port(port, kind == "funnel")
-        done.append(((failed, BAD, time.time() + 8) if failed
-                     else ("%s now serves :%d" % (kind, port), OK,
-                           time.time() + 6),))
+        done.append((failed, BAD, time.time() + 8) if failed
+                    else ("%s now serves :%d" % (kind, port), OK,
+                          time.time() + 6))
     elif kind in ("unserve", "unfunnel"):
         failed = unserve_port(port, kind == "unfunnel")
-        done.append(((failed, BAD, time.time() + 8) if failed
-                     else ("stopped serving :%d" % port, OK,
-                           time.time() + 5),))
+        done.append((failed, BAD, time.time() + 8) if failed
+                    else ("stopped serving :%d" % port, OK, time.time() + 5))
     elif kind == "tunnel":
         url, failed = start_tunnel(port)
-        done.append(((failed, BAD, time.time() + 10) if failed
-                     else (url, OK, time.time() + 20),))
+        done.append((failed, BAD, time.time() + 10) if failed
+                    else (url, OK, time.time() + 20))
     elif kind == "untunnel":
         note = tunnel_state(port)
         if note:
             end(note["pid"], signal.SIGTERM)
             forget_tunnel(port)
-        done.append((("closed the tunnel on :%d" % port, OK,
-                      time.time() + 5),))
+        done.append(("closed the tunnel on :%d" % port, OK, time.time() + 5))
 
 
 def start_work(kind, row):
