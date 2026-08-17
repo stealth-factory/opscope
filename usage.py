@@ -206,6 +206,22 @@ PLAN_TTL = 3600
 # its own top-level keys: five_hour and seven_day.
 CLAUDE_WINDOW = {"session": "5h", "weekly": "7d"}
 CLAUDE_WINDOW_SECS = {"session": 5 * 3600, "weekly": 7 * 86400}
+
+
+def claude_lane_rank(limit):
+    """Where a Claude limit belongs in the list, shortest leash first.
+
+    The server returns them in no order worth keeping. Read top to bottom
+    they should widen: the five-hour session is what stops you this
+    afternoon, the weekly total is what stops you this week, and a
+    model-scoped weekly limit stops only one model.
+    """
+    if limit.get("kind") == "session":
+        return 0
+    scoped = ((limit.get("scope") or {}).get("model") or {}).get("display_name")
+    return 2 if scoped else 1
+
+
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
 # Recursive on purpose: subagent transcripts live a further two levels down,
 # in <project>/<session>/subagents/, and that is where Haiku and most of
@@ -568,7 +584,8 @@ def claude_quota(q, w):
     if not q:
         return []
     u = q.get("u") or {}
-    lanes = [l for l in (u.get("limits") or []) if l.get("percent") is not None]
+    lanes = sorted((l for l in (u.get("limits") or [])
+                    if l.get("percent") is not None), key=claude_lane_rank)
     if not lanes:
         return []
     live = q.get("source") == "live"
@@ -2729,8 +2746,15 @@ def summary_tab(states, w, h):
             rows.append("")
         rows.append(seg([(rgb(*AGENT_HUE.get(name, (225, 235, 245))),
                           "  " + name.upper())], w - 1))
-        for _, label, pct, secs, reset, stale in sorted(
-                groups[name], key=lambda x: -x[2]):
+        # Ranked by usage, except where the lanes nest. Claude's five-hour
+        # window sits inside its weekly one, which contains the model-scoped
+        # limit in turn, and reading them widest-last says more than reading
+        # them by percentage - which also reorders itself as the numbers
+        # move, so the bar under the cursor is not the one that was there a
+        # refresh ago.
+        inner = (groups[name] if name == "claude"
+                 else sorted(groups[name], key=lambda x: -x[2]))
+        for _, label, pct, secs, reset, stale in inner:
             used = max(0.0, min(1.0, pct / 100.0))
             gone = None
             if secs and reset:
@@ -2774,7 +2798,7 @@ def quota_lanes(name, state):
         # tab says "cached 18h ago" and this must not quietly disagree.
         stale = (state.get("quota") or {}).get("source") != "live"
         q = (state.get("quota") or {}).get("u") or {}
-        for l in q.get("limits") or []:
+        for l in sorted(q.get("limits") or [], key=claude_lane_rank):
             if l.get("percent") is None:
                 continue
             scope = ((l.get("scope") or {}).get("model") or {}).get(
