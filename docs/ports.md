@@ -146,11 +146,119 @@ It refuses outright on anything that is not yours: a row with no pid is a
 socket `/proc` would not name, which means another user's process, and pid 1 is
 never a dev server. Neither case is offered a prompt.
 
+## The second screen
+
+`↵` opens the selected port, and only when there is something behind it — a
+process of yours, or a port Tailscale is already serving. Another user's
+socket does not get a screen, because the four columns already carry
+everything `/proc` will say about it, and a press that opens a repeat of the
+row is a press wasted.
+
+```
+╺━ :3001 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ Next.js in piaf-web  ·  up 8h
+
+ ── PROCESS ──
+  command   next-server (v16.2.11)
+  directory ~/projects/piaf-web
+  pid       41220 · group 41198
+
+ ── LISTENING ON ── 0.0.0.0, IPv4 and IPv6
+
+ ── REACHABLE AT ── ↑↓ to pick, c copies
+ ▸ http://127.0.0.1:3001                this machine
+   http://10.0.0.4:3001                 ens4
+   http://100.x.x.x:3001                tailnet
+   http://this-machine.tail____.ts.net:3001   tailnet · name
+
+ ── EXPOSE ──
+  [s] tailscale serve     tailnet only
+  [t] tailscale funnel    not enabled for this node
+  [d] cloudflare tunnel   quick tunnel, random domain
+```
+
+### The addresses are bounded by the bind
+
+This is the part that is easy to get wrong and worth being exact about. A
+server bound to `127.0.0.1` is **not** reachable at this machine's LAN or
+tailnet address, however many addresses the machine has, so those are not
+offered — a URL that cannot work is worse than no URL. Only a socket bound to
+every interface gets the full list; one bound to a single address offers that
+address; a `local` one offers loopback and nothing else.
+
+The exception is a port Tailscale already serves. Tailscale proxies to it over
+loopback, so its `https://` name works even for a loopback-only server, and it
+is listed first.
+
+`c` copies the highlighted one via OSC 52, which asks *your terminal* to do
+the copying — so it reaches the laptop you are sitting at, not the server. Some
+terminals refuse and some multiplexers swallow it, so the address is printed in
+the confirmation either way and can be read off the screen if the copy is
+silently dropped.
+
+### Publishing a port
+
+Three ways, each behind a confirmation that names what it is about to do,
+because two of them put a local server on the public internet.
+
+Both Tailscale actions write to the serve configuration, which is a root
+operation unless this user has been made the operator. The widget checks and
+says `needs: tailscale set --operator` on the line rather than letting you
+find out by pressing it. The one-off fix is:
+
+```
+sudo tailscale set --operator=$USER
+```
+
+- **`s` — `tailscale serve`.** Tailnet only: your own devices, nobody else. It
+  mounts on the port's own number rather than 443, since 443 belongs to
+  whatever was served first and a second mount there would collide. Press it
+  again to take that one mount back down — never `serve reset`, which would
+  clear configuration this widget did not create.
+- **`t` — `tailscale funnel`.** Public, on 443, to anyone with the URL. Funnel
+  only works if the tailnet's policy grants this node the attribute, and the
+  node knows whether it has it, so the line says `not enabled for this node`
+  rather than offering a key that only ever errors. Press it anyway and
+  Tailscale's own message is shown — it names the admin-console setting better
+  than this can.
+- **`d` — a Cloudflare quick tunnel.** Needs `cloudflared`, which the line says
+  plainly when it is missing. On Debian or Ubuntu:
+
+  ```
+  curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+  sudo dpkg -i /tmp/cloudflared.deb
+  ```
+
+  A random `*.trycloudflare.com` name, no
+  account and no DNS needed. A *named* tunnel on a domain of your own needs
+  credentials and a DNS record, which is a setup task rather than a keypress,
+  and is not attempted. `cloudflared` holds no listening socket — it dials out
+  — so nothing in `/proc` ties it to the port it serves; its pid and URL are
+  written under `$XDG_STATE_HOME/terminal-toys/tunnels` so a tunnel survives
+  the widget restarting and can still be found and closed.
+
+All three run on a thread. `tailscaled` and `cloudflared` take seconds to
+answer, which is far too long to hold a frame for.
+
+### What about a public IP?
+
+There usually is not one. A cloud VM holds a private address and reaches the
+internet through NAT, so no interface here has an address the world can route
+to, and the widget will not invent one. On a machine like that the public
+address of a port *is* the funnel URL or the tunnel URL — which is why both
+are on this screen rather than an IP.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` `↓` | select a row |
+| `↑` `↓` | select a row — or an address, on the second screen |
+| `↵` | open the selected port, where there is more to show |
+| `esc` | back to the list |
+| `c` | copy the highlighted address |
+| `s` | `tailscale serve` this port, or stop serving it |
+| `t` | `tailscale funnel` this port publicly, or stop |
+| `d` | open or close a Cloudflare quick tunnel |
 | `k` | stop the selected server, after confirming |
 | `f` | escalate to SIGKILL, only when offered |
 | `o` | show or hide what is the machine's rather than yours |

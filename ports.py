@@ -37,13 +37,24 @@ and are hidden behind o along with the system ports.
 k stops the selected server, after a confirmation and only for a process you
 own: SIGTERM to its process group, which is what Ctrl-C in its own terminal
 would have sent, then the offer of SIGKILL if it is still up three seconds
-later. Keys: up/down select, k kills, o hides system ports, r refreshes,
+later.
+
+Enter opens a second screen for one port, where there is more to show than the
+table holds: the command behind it, every address it can actually be reached
+at - bounded by what the socket is bound to - and c to copy one. From there s
+and t publish it over Tailscale, to the tailnet or to the internet, and d
+opens a Cloudflare quick tunnel. Each asks first.
+
+Keys: up/down select, enter opens, esc goes back, c copies, s serves,
+t funnels, d tunnels, k kills, o hides the machine's own ports, r refreshes,
 q quits.
 """
+import getpass
 import json
 import os
 import pwd
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -53,8 +64,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (Keyboard, bg, draw, load_config, maybe_help, pack_hints,
-                    pad, rgb, seg, setup, size, title)
+from common import (Keyboard, bg, clipboard, draw, load_config, maybe_help,
+                    pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("ports", {
     # Ports that are part of the machine rather than something you started.
@@ -290,6 +301,143 @@ def process_info(pid):
     return cmdline, cwd, started
 
 
+def interfaces():
+    """Every address this machine holds, by interface.
+
+    Link-local is dropped: an fe80:: address needs a zone index to be usable
+    and is never what somebody wants pasted into a browser.
+    """
+    found = []
+    try:
+        data = json.loads(run(["ip", "-j", "addr"]) or "[]")
+    except ValueError:
+        return found
+    for link in data:
+        for addr in link.get("addr_info") or []:
+            ip = addr.get("local") or ""
+            if not ip or ip.startswith("fe80:"):
+                continue
+            found.append((link.get("ifname") or "?", ip,
+                          addr.get("family") == "inet6"))
+    return found
+
+
+def tailnet_self():
+    """This node's tailnet name and addresses, and whether it may Funnel.
+
+    Funnel is off unless the tailnet's policy grants the node the attribute,
+    and the node knows: the capability is in the map the coordination server
+    hands it. Asking here means the widget can say so instead of offering a
+    key that only ever returns an error.
+    """
+    out = {"name": "", "ips": [], "funnel": False, "operator": False}
+    try:
+        data = json.loads(run(["tailscale", "status", "--json"]) or "null")
+    except ValueError:
+        return out
+    self_node = (data or {}).get("Self") or {}
+    out["name"] = (self_node.get("DNSName") or "").rstrip(".")
+    out["ips"] = list(self_node.get("TailscaleIPs") or [])
+    out["funnel"] = any("cap/funnel" in cap
+                        for cap in (self_node.get("CapMap") or {}))
+    # Changing the serve config is a root operation unless this user has been
+    # named the operator. Worth knowing before the key is pressed, since the
+    # fix is a one-off command rather than anything the widget can do.
+    try:
+        prefs = json.loads(run(["tailscale", "debug", "prefs"]) or "null")
+    except ValueError:
+        prefs = None
+    who = (prefs or {}).get("OperatorUser")
+    out["operator"] = os.getuid() == 0 or who == getpass.getuser()
+    return out
+
+
+def host_part(ip, v6):
+    """An address as it goes in a URL - IPv6 needs its brackets."""
+    return "[%s]" % ip if v6 else ip
+
+
+def url_for(host, v6, port):
+    """A URL for a host and port, with the scheme the port implies."""
+    scheme = "https" if port in (443, 8443) else "http"
+    return "%s://%s:%d" % (scheme, host_part(host, v6), port)
+
+
+def addresses(row, net, cfg):
+    """Where this port can actually be reached, most local first.
+
+    Bounded by what the socket is bound to, which is the part that gets got
+    wrong: a server on 127.0.0.1 is not reachable at this machine's LAN
+    address no matter how many addresses the machine has, and offering one
+    to copy would hand somebody a URL that cannot work. Only a socket bound
+    to every interface gets the full list.
+
+    A served port is the exception worth keeping: Tailscale proxies to it
+    over loopback, so its https URL works even for a loopback-only server.
+    """
+    port, reach = row["port"], bind_class(row["bind"])
+    found = []
+    url = served_url(cfg, port)
+    if url:
+        found.append((url, "tailnet · via serve"))
+    # Nothing is listening, so every address below would refuse the
+    # connection. The serve URL above is the only one that exists, and it
+    # answers 502 - which is the whole reason this row is on screen.
+    if row.get("orphan"):
+        return found
+    if reach == "local":
+        found.append((url_for("127.0.0.1", False, port), "this machine only"))
+        return found
+    if reach == "tailnet":
+        for ip in net["ips"]:
+            found.append((url_for(ip, ":" in ip, port), "tailnet"))
+        if net["name"]:
+            found.append((url_for(net["name"], False, port), "tailnet · name"))
+        return found
+    if reach != "all":
+        # Bound to one particular address, so that address is the answer.
+        found.append((url_for(row["bind"], ":" in row["bind"], port),
+                      "this interface"))
+        return found
+    found.append((url_for("127.0.0.1", False, port), "this machine"))
+    tail = set(net["ips"])
+    for name, ip, v6 in interfaces():
+        if ip.startswith("127.") or ip == "::1":
+            continue
+        found.append((url_for(ip, v6, port), "tailnet" if ip in tail else name))
+    if net["name"]:
+        found.append((url_for(net["name"], False, port), "tailnet · name"))
+    return found
+
+
+def serve_config():
+    """Tailscale's own serve configuration, as it reports it.
+
+    The JSON form rather than the text: the detail view needs the URL a
+    served port answers on, and putting a second port behind the same node
+    needs to know which mounts are already taken. Both are structure the
+    text output only implies.
+    """
+    try:
+        return json.loads(run(["tailscale", "serve", "status", "--json"])
+                          or "null") or {}
+    except ValueError:
+        return {}
+
+
+def served_url(cfg, port):
+    """The https URL a served port answers on, where one is configured."""
+    for mount, web in (cfg.get("Web") or {}).items():
+        for path, handler in (web.get("Handlers") or {}).items():
+            proxy = handler.get("Proxy") or ""
+            if re.search(r":%d(/|$)" % port, proxy):
+                host, _, listen = mount.partition(":")
+                return "https://%s%s%s" % (
+                    host, "" if listen in ("", "443") else ":" + listen,
+                    path if path != "/" else "/")
+    return ""
+
+
 def exposure():
     """Ports Tailscale is serving, and whether the world can see them.
 
@@ -298,12 +446,13 @@ def exposure():
     separates them.
     """
     served, public = {}, set()
-    text = run(["tailscale", "serve", "status"])
-    for line in text.splitlines():
-        found = re.search(r"proxy\s+https?://(?:127\.0\.0\.1|localhost):(\d+)",
-                          line)
-        if found:
-            served[int(found.group(1))] = "tailnet"
+    cfg = serve_config()
+    for web in (cfg.get("Web") or {}).values():
+        for handler in (web.get("Handlers") or {}).values():
+            found = re.search(r"https?://(?:127\.0\.0\.1|localhost|\[::1\]"
+                              r"|::1):(\d+)", handler.get("Proxy") or "")
+            if found:
+                served[int(found.group(1))] = "tailnet"
     funnel = run(["tailscale", "funnel", "status"])
     if "tailnet only" not in funnel:
         for line in funnel.splitlines():
@@ -406,6 +555,98 @@ class Store(object):
             self.wake.clear()
 
 
+def tunnel_dir():
+    """Where a launched quick tunnel's pid and URL are remembered.
+
+    cloudflared holds no listening socket - it dials out - so nothing in
+    /proc ties it to the port it serves. Without a note on disk the widget
+    would lose a tunnel the moment it restarted, and leave it running with
+    no way to find or stop it.
+    """
+    base = (os.environ.get("XDG_STATE_HOME")
+            or os.path.expanduser("~/.local/state"))
+    path = os.path.join(base, "terminal-toys", "tunnels")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return ""
+    return path
+
+
+def tunnel_state(port):
+    """The quick tunnel for a port: its pid, its URL, whether it still runs."""
+    path = tunnel_dir()
+    if not path:
+        return None
+    try:
+        with open(os.path.join(path, "%d.json" % port)) as f:
+            note = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not alive(note.get("pid") or 0):
+        forget_tunnel(port)
+        return None
+    return note
+
+
+def forget_tunnel(port):
+    try:
+        os.remove(os.path.join(tunnel_dir(), "%d.json" % port))
+    except OSError:
+        pass
+
+
+def start_tunnel(port, wait=25.0):
+    """Run a cloudflared quick tunnel for a port and return its URL.
+
+    A quick tunnel needs no account and no DNS: cloudflared picks a random
+    trycloudflare.com name and prints it. A named tunnel on a domain of your
+    own needs credentials and a DNS record, which is a setup task rather
+    than a keypress, and is deliberately not attempted here.
+    """
+    path = tunnel_dir()
+    if not path:
+        return "", "no state directory to record the tunnel in"
+    log = os.path.join(path, "%d.log" % port)
+    try:
+        handle = open(log, "w+b")
+    except OSError as exc:
+        return "", exc.strerror or "cannot write the log"
+    try:
+        proc = subprocess.Popen(
+            ["cloudflared", "tunnel", "--no-autoupdate",
+             "--url", "http://127.0.0.1:%d" % port],
+            stdout=handle, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        handle.close()
+        return "", exc.strerror or "cloudflared would not start"
+    deadline = time.time() + wait
+    found = ""
+    while time.time() < deadline and not found:
+        time.sleep(0.4)
+        try:
+            with open(log, "rb") as f:
+                text = f.read().decode("utf8", "replace")
+        except OSError:
+            text = ""
+        match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", text)
+        if match:
+            found = match.group(0)
+        elif not alive(proc.pid):
+            break
+    handle.close()
+    if not found:
+        end(proc.pid, signal.SIGTERM)
+        return "", "no URL after %ds - see %s" % (int(wait), log)
+    try:
+        with open(os.path.join(path, "%d.json" % port), "w") as f:
+            json.dump({"pid": proc.pid, "url": found, "port": port}, f)
+    except OSError:
+        pass
+    return found, ""
+
+
 def alive(pid):
     """Whether a pid is still running. Signal 0 checks without delivering.
 
@@ -476,6 +717,50 @@ def end(pid, sig):
     return ""
 
 
+def have(program):
+    """Whether a command exists, so a key can say so instead of failing."""
+    return bool(shutil.which(program))
+
+
+def serve_port(port, public=False):
+    """Put a local port behind this node's HTTPS name.
+
+    Listening on the port's own number rather than 443, which is already
+    taken by whatever was served first and would otherwise collide. Funnel
+    has no such freedom - Tailscale allows it on 443, 8443 and 10000 only -
+    so a funnel goes to 443 and the CLI's own complaint is passed on when
+    that is occupied.
+    """
+    cmd = ["tailscale", "funnel" if public else "serve", "--bg"]
+    cmd += ["--https=%d" % (443 if public else port), str(port)]
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc) or "tailscale would not run"
+    if done.returncode:
+        text = (done.stderr or done.stdout or "").strip()
+        return " ".join(text.split())[:200] or "tailscale refused"
+    return ""
+
+
+def unserve_port(port, public=False):
+    """Take back one port, leaving every other mount as it was.
+
+    Never `serve reset`: that clears the whole configuration, including
+    whatever was already published before this widget was ever run.
+    """
+    cmd = ["tailscale", "funnel" if public else "serve",
+           "--https=%d" % (443 if public else port), "off"]
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc) or "tailscale would not run"
+    if done.returncode:
+        text = (done.stderr or done.stdout or "").strip()
+        return " ".join(text.split())[:200] or "tailscale refused"
+    return ""
+
+
 def kill_label(row, room=999):
     """What a kill would take down, in whatever room the pane has.
 
@@ -540,6 +825,199 @@ def bind_note(row):
     return reach[:7], TXT
 
 
+ACTIONS = {
+    "serve": ("publish", "tailnet only"),
+    "funnel": ("publish publicly", "anyone with the URL"),
+    "unserve": ("stop serving", ""),
+    "unfunnel": ("stop the funnel", ""),
+    "tunnel": ("open a cloudflare tunnel", "anyone with the URL"),
+    "untunnel": ("close the cloudflare tunnel", ""),
+}
+
+
+def do_work(kind, row, done):
+    """Carry out one exposure change and record how it went."""
+    port = row["port"]
+    if kind in ("serve", "funnel"):
+        failed = serve_port(port, kind == "funnel")
+        done.append(((failed, BAD, time.time() + 8) if failed
+                     else ("%s now serves :%d" % (kind, port), OK,
+                           time.time() + 6),))
+    elif kind in ("unserve", "unfunnel"):
+        failed = unserve_port(port, kind == "unfunnel")
+        done.append(((failed, BAD, time.time() + 8) if failed
+                     else ("stopped serving :%d" % port, OK,
+                           time.time() + 5),))
+    elif kind == "tunnel":
+        url, failed = start_tunnel(port)
+        done.append(((failed, BAD, time.time() + 10) if failed
+                     else (url, OK, time.time() + 20),))
+    elif kind == "untunnel":
+        note = tunnel_state(port)
+        if note:
+            end(note["pid"], signal.SIGTERM)
+            forget_tunnel(port)
+        done.append((("closed the tunnel on :%d" % port, OK,
+                      time.time() + 5),))
+
+
+def start_work(kind, row):
+    """Run an exposure change on a thread, so the frame keeps drawing."""
+    work = {"kind": kind, "row": row, "done": []}
+    threading.Thread(target=do_work, args=(kind, row, work["done"]),
+                     daemon=True).start()
+    return work
+
+
+def footer(confirm, watch, working, notice, w, hints):
+    """The bottom of either screen.
+
+    One of five things, in the order they matter: a question that must be
+    answered before anything happens, the wait after answering it, a slow
+    action still running, the outcome of the last one, or the ordinary keys.
+    """
+    if confirm is not None:
+        verb, cost = ACTIONS.get(confirm["kind"], ("kill", ""))
+        ask = [(BAD, " " + verb + " "),
+               (TXT, kill_label(confirm["row"], w - 34 - len(verb)))]
+        if cost:
+            ask.append((WARN, " - " + cost))
+        return prompt(ask + [(DIM, "?")], (WARN, "[y]"),
+                      [" yes  ·  any other key cancels",
+                       " yes  ·  any key cancels", " yes"], w)
+    if watch is not None and watch["asked"]:
+        return prompt([(WARN, " still up: "),
+                       (TXT, kill_label(watch["row"], w - 30))], (BAD, "[f]"),
+                      [" force kill  ·  any other key leaves it",
+                       " SIGKILL  ·  any key leaves it", " SIGKILL"], w)
+    if watch is not None:
+        return [seg([(DIM, " SIGTERM sent, waiting for "),
+                     (TXT, kill_label(watch["row"], w - 29))], w - 1)]
+    if working is not None:
+        verb = ACTIONS.get(working["kind"], ("working", ""))[0]
+        return [seg([(WARN, " %s :%d - this can take a moment"
+                      % (verb, working["row"]["port"]))], w - 1)]
+    if notice is not None:
+        return [seg([(notice[1], " " + notice[0])], w - 1)]
+    return [" " + line for line in pack_hints(hints, w - 2)]
+
+
+def has_detail(row):
+    """Whether there is anything behind this row worth a second screen.
+
+    A process of ours carries a command line, a directory and an age that
+    the table has no room for, and any row at all can be given an address to
+    copy or an exposure to set up. Another user's socket carries none of
+    that: the four columns already say everything /proc will tell us, and
+    opening a screen to repeat them would be a screen that wastes a press.
+    """
+    return bool(row.get("pid") or row.get("orphan") or row.get("exposed"))
+
+
+def wrap(text, width):
+    """Break a long value across lines at spaces, then anywhere."""
+    lines, rest = [], text
+    while rest and len(lines) < 4:
+        if len(rest) <= width:
+            lines.append(rest)
+            break
+        cut = rest.rfind(" ", 0, width + 1)
+        cut = cut if cut > width // 2 else width
+        lines.append(rest[:cut])
+        rest = rest[cut:].lstrip()
+    return lines or [""]
+
+
+def field(label, value, w, colour=TXT, label_w=10):
+    """One `label   value` line, wrapped under its own label."""
+    rows = []
+    for i, line in enumerate(wrap(value, max(8, (w - 3) - label_w))):
+        rows.append(seg([(DIM, "  " + pad(label if not i else "", label_w)),
+                         (colour, line)], w - 1))
+    return rows
+
+
+def expose_options(row, net, tunnel):
+    """The ways this port could be published, and why one is unavailable.
+
+    Each is a key, a name, and the state that decides whether pressing it
+    does anything. An option that cannot work says so on the line rather
+    than failing after the keypress - except Funnel, which is offered even
+    when the capability is missing, because Tailscale's own error names the
+    setting to change in the admin console better than this can.
+    """
+    how = row.get("exposed")
+    # One blocker outranks the others: without the operator bit every serve
+    # and funnel write is refused, whatever else is true of them.
+    barred = "" if net.get("operator") else "needs: tailscale set --operator"
+    return [
+        ("s", "tailscale serve",
+         "serving · tailnet only" if how == "tailnet"
+         else barred or "tailnet only", how == "tailnet"),
+        ("t", "tailscale funnel",
+         "public · anyone with the URL" if how == "public"
+         else barred or ("public" if net["funnel"]
+                         else "not enabled for this node"),
+         how == "public"),
+        ("d", "cloudflare tunnel",
+         "running · %s" % tunnel["url"] if tunnel
+         else "quick tunnel, random domain" if have("cloudflared")
+         else "cloudflared not installed",
+         bool(tunnel)),
+    ]
+
+
+def detail_rows(row, net, cfg, tunnel, links, sel, w):
+    """The second screen: everything known about one port, and what to do."""
+    rows = [title(":%d" % row["port"], w, PORT)]
+    head = row["kind"] or ("%s's" % row["user"] if row.get("user") else "")
+    if row["project"]:
+        head += " in " + row["project"]
+    rows.append(seg([(TXT, " " + head.strip()),
+                     (DIM, "  ·  up " + span(row["up"]) if row["up"]
+                      else "")], w - 1))
+    rows.append("")
+
+    if row.get("pid"):
+        rows.append(seg([(LBL, " ── PROCESS ── ")], w - 1))
+        rows += field("command", row["cmdline"] or "?", w)
+        rows += field("directory", row["cwd"] or "?", w,
+                      WARN if row["gone"] else TXT)
+        group = ""
+        try:
+            group = " · group %d" % os.getpgid(row["pid"])
+        except OSError:
+            pass
+        rows += field("pid", "%d%s" % (row["pid"], group), w)
+        rows.append("")
+
+    # A lone :: is not an IPv6-only server: Linux maps IPv4 onto it unless
+    # the process asked for IPV6_V6ONLY, and /proc cannot say which it did.
+    # Claiming "IPv6 only" here would be a guess dressed as a fact.
+    note = ("two sockets, IPv4 and IPv6" if row.get("families", 0) > 1
+            else "IPv4 too, unless the server turned that off"
+            if row["bind"] == "::" else "one socket")
+    rows.append(seg([(LBL, " ── LISTENING ON ── "),
+                     (TXT, row["bind"] or "nothing"),
+                     (DIM, "  " + note)], w - 1))
+    rows.append("")
+    rows.append(seg([(LBL, " ── REACHABLE AT ── "),
+                     (DIM, "↑↓ to pick, c copies")], w - 1))
+    if not links:
+        rows.append(seg([(DIM, "   nothing is listening to reach")], w - 1))
+    for i, (url, note) in enumerate(links):
+        here = i == sel
+        rows.append(seg([(ACCENT if here else DIM, " ▸ " if here else "   "),
+                         (TXT if here else DIM, url), (DIM, "  " + note)],
+                        w - 1))
+    rows.append("")
+    rows.append(seg([(LBL, " ── EXPOSE ── ")], w - 1))
+    for key, name, state, on in expose_options(row, net, tunnel):
+        rows.append(seg([(ACCENT, "  [%s] " % key), (TXT, pad(name, 18)),
+                         (OK if on else DIM, state)], w - 1))
+    return rows
+
+
 def main():
     maybe_help(__doc__)
     global REFRESH
@@ -553,9 +1031,12 @@ def main():
     store = Store()
     threading.Thread(target=store.run, daemon=True).start()
     selected, hide_system, scroll = 0, True, 0
-    confirm = None    # a row awaiting an explicit yes before anything is sent
+    confirm = None    # an action awaiting an explicit yes before it happens
     watch = None      # what SIGTERM was sent to, and whether it has died
-    notice = None     # (text, colour, expires) - the result of the last kill
+    notice = None     # (text, colour, expires) - the result of the last one
+    detail = None     # the port whose second screen is open, and its state
+    working = None    # an action too slow to block the frame on
+    net = cfg = None  # tailnet identity and serve config, read on demand
 
     while True:
         w, h = size()
@@ -574,27 +1055,41 @@ def main():
             elif time.time() >= watch["deadline"]:
                 watch["asked"] = True
 
+        # An action that talks to tailscaled or cloudflared takes seconds,
+        # which is far too long to hold a frame for, so it runs on a thread
+        # and its answer is collected here.
+        if working is not None and working["done"]:
+            notice = working["done"][0]
+            working = None
+            net = cfg = None
+            store.wake.set()
+
         for key in keyboard.poll():
             if confirm is not None:
-                # Only an explicit yes kills. Every other key cancels,
+                # Only an explicit yes acts. Every other key cancels,
                 # deliberately including q: quitting must never double as
-                # consent to signal something.
-                row, confirm = confirm, None
+                # consent to signal something or publish it.
+                act, confirm = confirm, None
                 if key not in ("y", "Y"):
                     notice = ("cancelled", DIM, time.time() + 2)
                     continue
-                pid, why = killable(row)
-                if why:
-                    notice = (why, BAD, time.time() + 5)
-                    continue
-                failed = end(pid, signal.SIGTERM)
-                if failed:
-                    notice = ("%s: %s" % (kill_label(row, w - 4 - len(failed)),
-                                          failed), BAD, time.time() + 5)
-                    store.wake.set()
+                row, kind = act["row"], act["kind"]
+                if kind == "kill":
+                    pid, why = killable(row)
+                    if why:
+                        notice = (why, BAD, time.time() + 5)
+                        continue
+                    failed = end(pid, signal.SIGTERM)
+                    if failed:
+                        notice = ("%s: %s"
+                                  % (kill_label(row, w - 4 - len(failed)),
+                                     failed), BAD, time.time() + 5)
+                        store.wake.set()
+                    else:
+                        watch = {"pid": pid, "row": row, "asked": False,
+                                 "deadline": time.time() + 3.0}
                 else:
-                    watch = {"pid": pid, "row": row, "asked": False,
-                             "deadline": time.time() + 3.0}
+                    working = start_work(kind, row)
                 continue
             if watch is not None and watch["asked"]:
                 pid, row, watch = watch["pid"], watch["row"], None
@@ -610,6 +1105,49 @@ def main():
                               DIM, time.time() + 3)
                 store.wake.set()
                 continue
+            if detail is not None:
+                # The second screen keeps its own selection - of addresses
+                # rather than rows - and hands every other key back.
+                if key in ("esc", "left", "q", "Q", "backspace"):
+                    detail = None
+                    continue
+                if key == "up":
+                    detail["at"] -= 1
+                elif key == "down":
+                    detail["at"] += 1
+                elif key in ("c", "C"):
+                    links = detail["links"]
+                    if links:
+                        url = links[max(0, min(detail["at"],
+                                               len(links) - 1))][0]
+                        # The address goes in the notice either way: OSC 52
+                        # is refused by some terminals and swallowed by some
+                        # multiplexers, and a copy that silently did nothing
+                        # would leave nothing on screen to read instead.
+                        ok = clipboard(url)
+                        notice = (("copied  " if ok else "no clipboard  ")
+                                  + url, OK if ok else WARN, time.time() + 8)
+                elif key in ("s", "S", "t", "T", "d", "D"):
+                    kind = {"s": "serve", "t": "funnel",
+                            "d": "tunnel"}[key.lower()]
+                    how = detail["row"].get("exposed")
+                    if kind == "serve" and how == "tailnet":
+                        kind = "unserve"
+                    elif kind == "funnel" and how == "public":
+                        kind = "unfunnel"
+                    elif kind == "tunnel" and detail["tunnel"]:
+                        kind = "untunnel"
+                    elif kind == "tunnel" and not have("cloudflared"):
+                        notice = ("cloudflared is not installed - see "
+                                  "the docs for the one-line install",
+                                  WARN, time.time() + 8)
+                        continue
+                    if working is None:
+                        confirm = {"kind": kind, "row": detail["row"]}
+                elif key == "r":
+                    net = cfg = None
+                    store.wake.set()
+                continue
             if key in ("q", "Q"):
                 raise SystemExit(0)
             if key == "up":
@@ -620,13 +1158,22 @@ def main():
                 hide_system = not hide_system
             elif key == "r":
                 store.wake.set()
+            elif key in ("enter", "right", "i") and shown:
+                row = shown[max(0, min(selected, len(shown) - 1))]
+                if has_detail(row):
+                    detail = {"port": row["port"], "row": row, "at": 0,
+                              "links": [], "tunnel": None}
+                    net = cfg = None
+                else:
+                    notice = ("nothing more to show - /proc will not name "
+                              "another user's process", DIM, time.time() + 5)
             elif key in ("k", "K") and shown and watch is None:
                 row = shown[max(0, min(selected, len(shown) - 1))]
                 pid, why = killable(row)
                 if why:
                     notice = (why, BAD, time.time() + 5)
                 else:
-                    confirm = row
+                    confirm = {"kind": "kill", "row": row}
 
         # Rebuilt after the keys rather than before them, so that a press of
         # o is answered in the frame it was made in and not the next one.
@@ -634,6 +1181,36 @@ def main():
         selected = max(0, min(selected, len(shown) - 1)) if shown else 0
         if notice and time.time() >= notice[2]:
             notice = None
+
+        if detail is not None:
+            # Tailscale is asked once per visit rather than once per frame:
+            # two subprocesses at 3Hz would cost more than the whole rest of
+            # the widget. Any change made here clears them.
+            if net is None:
+                net, cfg = tailnet_self(), serve_config()
+            live = next((r for r in all_rows if r["port"] == detail["port"]),
+                        None)
+            detail["row"] = live or dict(detail["row"], pid=None, gone=True)
+            detail["tunnel"] = tunnel_state(detail["port"])
+            detail["links"] = addresses(detail["row"], net, cfg)
+            if detail["tunnel"]:
+                detail["links"] = detail["links"] + [
+                    (detail["tunnel"]["url"], "public · cloudflare")]
+            detail["at"] = max(0, min(detail["at"],
+                                      len(detail["links"]) - 1))
+            rows = detail_rows(detail["row"], net, cfg, detail["tunnel"],
+                               detail["links"], detail["at"], w)
+            foot = footer(confirm, watch, working, notice, w,
+                          [[(ACCENT, "↑↓"), (DIM, " address")],
+                           [(DIM, "[c]opy")], [(DIM, "[s]erve")],
+                           [(DIM, "[t]unnel")], [(DIM, "[d] cloudflare")],
+                           [(ACCENT, "esc"), (DIM, " back")]])
+            while len(rows) < h - len(foot) - 1:
+                rows.append("")
+            draw(rows[:h - len(foot) - 1] + foot, w, h)
+            time.sleep(0.3)
+            continue
+
         mine = sum(1 for r in all_rows if r["pid"])
         out = sum(1 for r in all_rows if r.get("exposed"))
 
@@ -692,32 +1269,12 @@ def main():
                 line.append((tint, " " * w))
             rows.append(seg(line, w - 1))
 
-        # The bottom of the pane is one of four things: a question that must
-        # be answered before anything is signalled, the wait after it, the
-        # outcome, or the ordinary keys.
-        if confirm is not None:
-            foot = prompt([(BAD, " kill "), (TXT, kill_label(confirm, w - 30)),
-                           (DIM, "?")], (WARN, "[y]"),
-                          [" yes  ·  any other key cancels",
-                           " yes  ·  any key cancels", " yes"], w)
-        elif watch is not None and watch["asked"]:
-            foot = prompt([(WARN, " still up: "),
-                           (TXT, kill_label(watch["row"], w - 30))],
-                          (BAD, "[f]"),
-                          [" force kill  ·  any other key leaves it",
-                           " SIGKILL  ·  any key leaves it", " SIGKILL"], w)
-        elif watch is not None:
-            foot = [seg([(DIM, " SIGTERM sent, waiting for "),
-                         (TXT, kill_label(watch["row"], w - 29))], w - 1)]
-        elif notice is not None:
-            foot = [seg([(notice[1], " " + notice[0])], w - 1)]
-        else:
-            hints = [[(ACCENT, "↑↓"), (DIM, " select")],
-                     [(DIM, "[k]ill")],
-                     [(DIM, "[o]%s system"
-                       % ("show" if hide_system else "hide"))],
-                     [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
-            foot = [" " + line for line in pack_hints(hints, w - 2)]
+        foot = footer(confirm, watch, working, notice, w,
+                      [[(ACCENT, "↑↓"), (DIM, " select")],
+                       [(ACCENT, "↵"), (DIM, " details")], [(DIM, "[k]ill")],
+                       [(DIM, "[o]%s system"
+                         % ("show" if hide_system else "hide"))],
+                       [(DIM, "[r]efresh")], [(DIM, "[q]uit")]])
 
         while len(rows) < h - len(foot) - 1:
             rows.append("")

@@ -41,7 +41,7 @@ nothing at all — it just looks good, and it knows it.
 | **`pr.py`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
 | **`linear.py`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
 | **`usage.py`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
-| **`ports.py`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one. | — | [read →](docs/ports.md) |
+| **`ports.py`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it to copy an address or publish it over Tailscale or Cloudflare. | — | [read →](docs/ports.md) |
 | **`link.py`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
 | **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
