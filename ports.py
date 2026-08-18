@@ -722,17 +722,55 @@ def have(program):
     return bool(shutil.which(program))
 
 
-def serve_port(port, public=False):
+# Tailscale accepts Funnel traffic on these three public ports and no
+# others, so a node can have three funnels at once - not the one that
+# defaulting to 443 every time would suggest.
+FUNNEL_PORTS = (443, 8443, 10000)
+
+
+def taken_ports(cfg):
+    """The tailnet-side ports this node's serve config already occupies."""
+    used = set()
+    for key in (cfg.get("TCP") or {}):
+        try:
+            used.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    for mount in (cfg.get("Web") or {}):
+        _, _, listen = mount.rpartition(":")
+        try:
+            used.add(int(listen))
+        except ValueError:
+            continue
+    return used
+
+
+def free_funnel_port(cfg):
+    """The first public port free to funnel on, or 0 when all three are used."""
+    used = taken_ports(cfg)
+    return next((p for p in FUNNEL_PORTS if p not in used), 0)
+
+
+def serve_port(port, public=False, cfg=None):
     """Put a local port behind this node's HTTPS name.
 
-    Listening on the port's own number rather than 443, which is already
-    taken by whatever was served first and would otherwise collide. Funnel
-    has no such freedom - Tailscale allows it on 443, 8443 and 10000 only -
-    so a funnel goes to 443 and the CLI's own complaint is passed on when
-    that is occupied.
+    Serve listens on the port's own number rather than 443. Nothing forces
+    that, but 443 is where an unflagged `tailscale serve` lands, so leaving
+    it as the default would mean the second port published quietly took the
+    first one's mount.
+
+    Funnel has only the three ports Tailscale accepts from the internet, so
+    it takes the first of them that is free - a node can hold three at once,
+    and defaulting all of them to 443 would allow one.
     """
+    listen = port
+    if public:
+        listen = free_funnel_port(serve_config() if cfg is None else cfg)
+        if not listen:
+            return ("all three funnel ports are in use (%s) - stop one first"
+                    % ", ".join(str(p) for p in FUNNEL_PORTS))
     cmd = ["tailscale", "funnel" if public else "serve", "--bg"]
-    cmd += ["--https=%d" % (443 if public else port), str(port)]
+    cmd += ["--https=%d" % listen, str(port)]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -743,14 +781,34 @@ def serve_port(port, public=False):
     return ""
 
 
-def unserve_port(port, public=False):
+def listen_for(cfg, port):
+    """Which tailnet-side port a local port is currently published on."""
+    for mount, web in (cfg.get("Web") or {}).items():
+        for handler in (web.get("Handlers") or {}).values():
+            if re.search(r":%d(/|$)" % port, handler.get("Proxy") or ""):
+                _, _, listen = mount.rpartition(":")
+                try:
+                    return int(listen)
+                except ValueError:
+                    return 0
+    return 0
+
+
+def unserve_port(port, public=False, cfg=None):
     """Take back one port, leaving every other mount as it was.
+
+    The mount to remove is looked up rather than assumed: it was chosen when
+    the port was published, and on a funnel that is whichever of the three
+    public ports happened to be free at the time.
 
     Never `serve reset`: that clears the whole configuration, including
     whatever was already published before this widget was ever run.
     """
+    listen = listen_for(serve_config() if cfg is None else cfg, port)
+    if not listen:
+        listen = 443 if public else port
     cmd = ["tailscale", "funnel" if public else "serve",
-           "--https=%d" % (443 if public else port), "off"]
+           "--https=%d" % listen, "off"]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:

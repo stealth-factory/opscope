@@ -210,12 +210,21 @@ find out by pressing it. The one-off fix is:
 sudo tailscale set --operator=$USER
 ```
 
-- **`s` — `tailscale serve`.** Tailnet only: your own devices, nobody else. It
-  mounts on the port's own number rather than 443, since 443 belongs to
-  whatever was served first and a second mount there would collide. Press it
-  again to take that one mount back down — never `serve reset`, which would
-  clear configuration this widget did not create.
-- **`t` — `tailscale funnel`.** Public, on 443, to anyone with the URL. Funnel
+Neither is limited to one port per device, though both default to 443, which
+makes it look that way: publish a second port with no flags and it lands on
+the mount the first one already owns.
+
+- **`s` — `tailscale serve`.** Tailnet only: your own devices, nobody else.
+  Mounted on the port's own number rather than 443, precisely to avoid that
+  collision — serve accepts any tailnet-side port, so there is no reason to
+  queue everything on one. Press it again to take that one mount back down;
+  the mount is looked up rather than assumed. Never `serve reset`, which
+  would clear configuration this widget did not create.
+- **`t` — `tailscale funnel`.** Public, to anyone with the URL. Tailscale
+  accepts funnel traffic on **443, 8443 and 10000** and nowhere else, so a
+  node can hold three at once and this takes the first one free — defaulting
+  them all to 443 would have allowed exactly one. When all three are taken it
+  says so instead of colliding. Funnel
   only works if the tailnet's policy grants this node the attribute, and the
   node knows whether it has it, so the line says `not enabled for this node`
   rather than offering a key that only ever errors. Press it anyway and
