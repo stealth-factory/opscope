@@ -333,27 +333,44 @@ def ordered(rows, mode):
                                        -(r["up_rate"] + r["down_rate"])))
 
 
-def table(rows, w, limit, selected_sort):
-    name_w = max(10, min(22, (w - 1) - 8 - 11 - 11 - 11 - 11))
-    out = [seg([(DIM, "  " + pad("PROCESS", name_w)),
-                (DIM, "%-8s" % "PID"),
-                (DIM, "%11s" % "TOTAL"),
-                (DIM, "%11s" % "NOW"),
-                (DIM, "%11s" % "DOWN"),
-                (DIM, "%11s" % "UP")], w - 1)]
+def table(rows, w, limit):
+    """The process table, dropping columns rather than clipping them.
+
+    Total is the one figure that cannot go: it is the whole question. Then
+    the combined rate, then the split into down and up, which is a detail
+    beside knowing something is moving at all. The name keeps a space of its
+    own so it never runs into the pid.
+    """
+    avail = (w - 1) - 2 - 8 - 11
+    wide = avail >= 10 + 11 + 22
+    mid = avail >= 10 + 11
+    name_w = max(8, min(26, avail - (33 if wide else 11 if mid else 0)))
+
+    head = [(DIM, "  " + pad("PROCESS", name_w)), (DIM, "%-8s" % "PID"),
+            (DIM, "%11s" % "TOTAL")]
+    if mid:
+        head.append((DIM, "%11s" % "NOW"))
+    if wide:
+        head.append((DIM, "%11s" % "DOWN"))
+        head.append((DIM, "%11s" % "UP"))
+    out = [seg(head, w - 1)]
+
     for row in rows[:limit]:
         live = row["up_rate"] + row["down_rate"]
         total = row["up"] + row["down"]
         gone = not row["alive"]
-        out.append(seg([
-            (DIM if gone else TXT, "  " + pad(row["name"], name_w)),
-            (DIM, "%-8s" % (row["pid"] or "-")),
-            (TXT if total else DIM, "%11s" % units(total)),
-            (OK if live else DIM, "%11s" % rate(live)),
-            (DOWN if row["down_rate"] else DIM,
-             "%11s" % rate(row["down_rate"])),
-            (UP if row["up_rate"] else DIM, "%11s" % rate(row["up_rate"])),
-        ], w - 1))
+        line = [(DIM if gone else TXT,
+                 "  " + pad(row["name"][:name_w - 1], name_w)),
+                (DIM, "%-8s" % (row["pid"] or "-")),
+                (TXT if total else DIM, "%11s" % units(total))]
+        if mid:
+            line.append((OK if live else DIM, "%11s" % rate(live)))
+        if wide:
+            line.append((DOWN if row["down_rate"] else DIM,
+                         "%11s" % rate(row["down_rate"])))
+            line.append((UP if row["up_rate"] else DIM,
+                         "%11s" % rate(row["up_rate"])))
+        out.append(seg(line, w - 1))
     return out
 
 
@@ -460,7 +477,7 @@ def main():
                                   "zero, so this fills as traffic "
                                   "happens.")], w - 1))
         else:
-            out.extend(table(rows, w, limit, mode))
+            out.extend(table(rows, w, limit))
 
         while len(out) < h - 2:
             out.append("")
