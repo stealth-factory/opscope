@@ -1,0 +1,161 @@
+# `netwatch.py`
+
+Which processes are using the network, how much they have used, and how fast
+they are going right now.
+
+```
+╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 9 processes · 3 moving · 4m 12s · sorted by total   every 1s
+ TCP only · ↓ 2.4 MB/s  ↑ 118 KB/s
+
+  PROCESS            PID          TOTAL         NOW        DOWN          UP
+  next-server        190856     1.4 GB    2.1 MB/s    2.0 MB/s   112 KB/s
+  claude             6953       312 MB     94 KB/s     71 KB/s    23 KB/s
+  (unattributed)     -          44 MB     1.2 KB/s    1.0 KB/s      200 B/s
+  curl               1234875    8.2 MB           -           -           -
+
+ [1] total  [2] live  [r]ezero  [q]uit
+```
+
+## Where the numbers come from
+
+macOS has `nettop`, which reports per-process network use directly. Linux has
+no such thing — but it does have the kernel's own per-socket accounting, which
+gets to the same answer without packet capture, a kernel module, or root.
+
+Two facts combine:
+
+- `ss -tine` reports `bytes_sent` and `bytes_received` for every TCP socket,
+  cumulative over that socket's life, along with its **inode**;
+- that inode appears as a `socket:[N]` symlink in `/proc/<pid>/fd`.
+
+So the inode is what ties bytes to a process. `ss -p` would name processes
+directly, but it needs root to name anyone else's; `/proc/<pid>/fd` needs
+nothing at all to name your own, which is the common case.
+
+## Totals start at zero
+
+The first sample is a baseline, not a reading. Sockets already open when
+netwatch starts are recorded and contribute nothing — otherwise an SSH session
+open for a week would appear as a gigabyte of "current" use the moment you
+looked.
+
+A socket that **opens after** that baseline is different: it started at zero
+when the kernel created it, so every byte on it happened while netwatch was
+watching, and all of it counts. This matters more than it sounds. A `curl`
+that starts and finishes inside one interval is only ever seen once, and
+treating every unfamiliar socket as a baseline would silently drop it — short
+connections would be invisible and the totals would read low forever.
+
+`r` rezeroes. It clears the accumulated totals but **keeps** the per-socket
+baseline, so the next sample differences against counters read before the
+reset and adds only what has happened since. Traffic from before a reset
+cannot reappear after it.
+
+## Processes that go away
+
+A process keeps its total after it exits, dimmed, with its rates blank. "What
+has been eating the connection" is usually asked *after* the thing has
+stopped, and a table that forgets on exit cannot answer it.
+
+Rows are keyed by pid **and** name together, so a recycled pid running
+something else starts its own row rather than inheriting a stranger's bytes.
+
+## Naming
+
+`/proc/<pid>/comm` is the kernel's own answer and is usually what you want.
+When it carries no letters at all the enclosing path is walked back for
+something that means something: a binary at `…/claude/versions/2.1.233`
+reports itself as `2.1.233`, which is true and useless, and is shown as
+`claude`.
+
+## What it cannot see
+
+**UDP is invisible.** `ss` keeps no byte counters for UDP sockets — there is
+nothing to read. That is a larger hole than it first appears:
+
+- **QUIC**, which is HTTP/3, and therefore a growing share of ordinary web
+  traffic;
+- **DNS**, almost all of it;
+- **WireGuard, and so Tailscale** — traffic to a tailnet peer is carried
+  inside `tailscaled`'s UDP socket. It does not appear against the
+  application, and it does not appear at all;
+- **mosh**, and anything else with a UDP transport.
+
+**Another user's sockets cannot be attributed.** `/proc/<pid>/fd` is
+unreadable for them, which on a normal machine means everything root runs.
+Those bytes are still counted, under a single `(unattributed)` row, because
+dropping them would make the totals quietly wrong.
+
+**Traffic in the last fraction of a socket's life is missed.** If a connection
+moves data and closes between two samples, what it moved after the final
+sample went unread. Sampling cannot avoid this; a shorter `-i` narrows it.
+
+**A VPN or proxy re-attributes traffic to itself.** If your connection leaves
+through a local proxy, the bytes belong to the proxy's process, not to the
+application that asked for them — the kernel is being told the truth about who
+opened the socket, and that is the proxy. The same is true of system services
+that fetch on another process's behalf.
+
+## Units
+
+Decimal — `KB` is 1,000 bytes, `MB` is 1,000,000 — which is how link rates and
+data caps are quoted, and therefore what these numbers are usefully compared
+against.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| `1` | sort by total data used |
+| `2` | sort by current rate |
+| `r` | rezero every total |
+| `q` | quit |
+
+## Options
+
+```
+netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
+```
+
+| Option | Meaning |
+|---|---|
+| `-i`, `--interval` | seconds between samples; default 1 |
+| `-n`, `--limit` | how many processes to show; default fills the pane |
+| `--sort` | `total` or `live`, the mode it opens in |
+| `--external` | only connections leaving the building |
+| `--plain` | print a block per interval, no clearing, for a pipe or a log |
+| `-h`, `--help` | this |
+
+`--external` drops anything whose peer is on this machine, on the local
+network (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`), or on the tailnet
+(`100.64/10`, `fd7a:115c:a1e0::/48`) — leaving traffic that genuinely goes out
+to the internet. Loopback is always excluded, with or without the flag.
+
+Note `-i` is the sampling interval here, where the other widgets in this
+repository spell that `-n`. This one follows the interface it was asked for,
+and `-n` is the row limit.
+
+## Cost
+
+One `ss -tine` and one walk of `/proc/*/fd` per interval. No network traffic
+of its own, no root, no capture.
+
+## Configuration
+
+```json
+"netwatch": {
+  "interval": 1.0,
+  "limit": 0,
+  "sort": "total",
+  "external": false
+}
+```
+
+Every one of them is what the matching command-line option sets, and the
+option wins where both are given. `limit` of 0 means fill the pane.
+
+## Needs
+
+`ss`, from iproute2, which is standard on Linux. The widget exits with a
+message rather than drawing an empty frame if it is missing.

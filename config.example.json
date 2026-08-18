@@ -101,6 +101,13 @@
       3600
     ]
   },
+  "netwatch": {
+    "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only - UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
+    "interval": 1.0,
+    "limit": 0,
+    "sort": "total",
+    "external": false
+  },
   "ports": {
     "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` - parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
     "system_ports": [
