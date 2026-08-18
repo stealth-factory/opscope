@@ -33,6 +33,38 @@ So the inode is what ties bytes to a process. `ss -p` would name processes
 directly, but it needs root to name anyone else's; `/proc/<pid>/fd` needs
 nothing at all to name your own, which is the common case.
 
+## What counts as leaving the machine
+
+Only traffic that actually reaches an interface. Two kinds are excluded, and
+the second is the one that is easy to get wrong:
+
+- **Loopback** — `127.0.0.0/8` and `::1`. Obvious, and every tool does it.
+- **This machine's own addresses.** A connection to `10.240.0.46` when that
+  *is* this machine looks external in the socket table and is not: the kernel
+  turns it around and sends it back up the stack without a packet ever
+  reaching a wire. The same goes for connecting to your own tailnet address.
+  These are excluded by matching the peer against every address the machine
+  answers to, re-read every thirty seconds so an interface appearing later —
+  a tailnet address when `tailscaled` starts, a bridge when a container does
+  — is picked up.
+
+Everything else is counted, because everything else genuinely leaves: a peer
+on the same subnet, another node on the tailnet, and anything on the internet
+are all traffic out of the network card.
+
+If you want **internet only**, that is a narrower question and `--external`
+answers it — it additionally drops the local network and the tailnet. On a
+host running containers, note that traffic to a container's address leaves
+this network namespace but not the physical box; `--external` drops it,
+the default does not.
+
+### Payload bytes, not wire bytes
+
+The counters are TCP's own: `bytes_sent` includes retransmissions, but
+neither figure includes TCP, IP or Ethernet headers. Real wire usage is a few
+per cent higher than what is shown, and more than that for a connection made
+of small packets.
+
 ## Totals start at zero
 
 The first sample is a baseline, not a reading. Sockets already open when

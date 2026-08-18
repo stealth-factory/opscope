@@ -25,6 +25,12 @@ capture, no kernel module, no root.
     python3 netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live]
                         [--external] [--plain]
 
+Only traffic that leaves the machine is counted. Loopback is excluded, and so
+is any connection to one of this machine's own addresses - talking to your own
+10.x or tailnet address never reaches a wire, however external it looks in the
+socket table. --external is the narrower question of internet-only, and drops
+the local network and the tailnet too.
+
 Totals start at zero: the first sample is a baseline and only what happens
 after it is counted. A process that exits keeps what it used, marked so, since
 "what has been eating the connection" is usually asked after the thing has
@@ -35,6 +41,7 @@ TCP only, which is the honest limit of this method - see docs/netwatch.md.
 Keys: 1 sorts by total, 2 by current rate, r rezeroes, q quits.
 """
 import collections
+import json
 import os
 import re
 import subprocess
@@ -80,6 +87,14 @@ PRIVATE = re.compile(r"^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|"
 UNATTRIBUTED = "(unattributed)"
 
 
+def run(args):
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout if out.returncode == 0 else ""
+
+
 def units(n):
     """Decimal units, as network equipment and ISPs quote them."""
     n = float(n)
@@ -108,10 +123,49 @@ def host_of(addr):
     return host.strip("[]")
 
 
+_OWN = {"at": 0.0, "addrs": set()}
+
+
+def own_addresses():
+    """Every address this machine answers to, refreshed occasionally.
+
+    A connection to one of our own addresses is turned around inside the
+    kernel and never reaches a wire, so it is not traffic leaving the
+    machine even though the address is not loopback. Interfaces come and go
+    - a tailnet address arrives when tailscaled starts, a bridge when a
+    container does - so this is re-read periodically rather than once.
+    """
+    now = time.time()
+    if _OWN["addrs"] and now - _OWN["at"] < 30:
+        return _OWN["addrs"]
+    found = set()
+    try:
+        data = json.loads(run(["ip", "-j", "addr"]) or "[]")
+    except ValueError:
+        data = []
+    for link in data:
+        for addr in link.get("addr_info") or []:
+            if addr.get("local"):
+                found.add(addr["local"])
+    if found:
+        _OWN["addrs"] = found
+        _OWN["at"] = now
+    return _OWN["addrs"]
+
+
 def local_peer(host):
-    """Loopback, which is this machine talking to itself."""
-    return (host.startswith("127.") or host in ("::1", "*", "")
-            or host.startswith("::ffff:127."))
+    """Whether this traffic never leaves the machine.
+
+    Loopback is the obvious half. The other is a connection to one of this
+    machine's own addresses - 10.x to itself, or its own tailnet address -
+    which looks external in the socket table and is not: the kernel routes
+    it back up the stack without a packet ever reaching an interface.
+    """
+    if (host.startswith("127.") or host in ("::1", "*", "")
+            or host.startswith("::ffff:127.")):
+        return True
+    bare = host[7:] if host.startswith("::ffff:") else host
+    return bare in own_addresses()
 
 
 def off_box(host):
@@ -150,6 +204,12 @@ def sockets(external=False):
             peer = host_of(cols[4]) if len(cols) > 4 else ""
             seen = INO.search(line)
             inode = seen.group(1) if seen else None
+            # ino:0 is a socket with no inode to own it - a TIME-WAIT
+            # remnant, say. It cannot be attributed, and worse, every one of
+            # them shares the key, so they would be merged into a single
+            # entry whose counters jump about and manufacture deltas.
+            if inode == "0":
+                inode = None
             continue
         if inode is None:
             continue
