@@ -70,14 +70,37 @@ above half a percent of loss.
 
 ## The chart
 
-Log scale, one column per sample, newest on the right, one glyph and hue per
-session so the trace reads without colour. Log because the sessions on one
-machine can differ by two orders of magnitude — a laptop across town and a
-phone across an ocean — and a linear axis draws the near one as a flat line
-along the bottom.
+Log scale, newest on the right, one glyph and hue per session so the trace
+reads without colour. Log because the sessions on one machine can differ by
+two orders of magnitude — a laptop across town and a phone across an ocean —
+and a linear axis draws the near one as a flat line along the bottom.
 
 Only the top, middle and bottom rows carry an axis label: a number on every
 row is a table pretending to be an axis.
+
+### How much time is on screen
+
+`w` cycles the span: **1m, 5m, 15m, 1h**, shown in the footer and marked under
+the chart's left corner. The retained history follows the longest of them
+automatically, so the last window on the list is always one the samples can
+actually fill.
+
+Up to a minute or so there is one column per sample, as there always was.
+Beyond that there are more readings than the pane has columns — fifteen
+minutes at a two-second poll is 450 of them — so each column becomes the
+**median** of its slice. The median is the typical round-trip over that
+slice, which is what a line should show; a mean would let one 900ms stall
+drag a whole column, and a max would draw a chart made entirely of worst
+cases.
+
+The consequence is worth stating: **at longer windows a brief spike is
+smoothed away.** The peak is not lost — the table's `worst` column and the
+detail screen both report it — but if you are hunting for a stall, look at it
+on `1m`, where nothing is being averaged.
+
+A window longer than the session has existed for simply draws what there is,
+left-padded, and the corner label says how far back the columns really go
+rather than how far back they could.
 
 ## What it cannot see
 
@@ -98,6 +121,7 @@ are still true about the path, just not about the terminal.
 | `↑` `↓` | select a session |
 | `↵` / `i` | open that connection on its own screen |
 | `esc` | back to the list |
+| `w` | cycle the chart's span: 1m, 5m, 15m, 1h |
 | `o` | hide or show sessions idle over five minutes |
 | `r` | re-read now |
 | `q` | quit |
@@ -130,14 +154,21 @@ existing accounting for sockets that already exist.
 "link": {
   "ports": [],
   "refresh": 2,
-  "history": 120
+  "history": 120,
+  "windows": [60, 300, 900, 3600]
 }
 ```
 
 `ports` empty means every port this machine listens on, which is the useful
 default. Naming ports instead pins the set — worth doing if something else
-here accepts connections you would rather not watch. `history` is how many
-samples the chart remembers.
+here accepts connections you would rather not watch.
+
+`windows` is what `w` cycles through, in seconds, and the first one is what
+opens. `history` is a floor on how many samples are kept: the actual figure is
+whatever covers the longest window, so adding a six-hour entry to `windows`
+does not also need `history` raised to match. At the default two-second poll,
+the hour window means about 1,800 readings per session — a few tens of
+kilobytes.
 
 ## Needs
 

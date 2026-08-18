@@ -28,8 +28,16 @@ so this widget can describe the link without adding a single packet to it.
     python3 link.py [-n SECONDS]
 
 Sessions are every established connection into a port this machine listens on,
-which is SSH and anything else that accepts terminals. Keys: up/down select,
-o toggles idle sessions, r refreshes, q quits.
+which is SSH and anything else that accepts terminals.
+
+w cycles how much time the chart covers - a minute, five, fifteen, an hour.
+Past a minute there are more samples than columns, so each column becomes the
+median of its slice: a spike is still counted in the worst column and on the
+detail screen, but the line itself smooths. Look at a stall on the short
+window.
+
+Keys: up/down select, enter opens one, w changes the span, o toggles idle
+sessions, r refreshes, q quits.
 """
 import collections
 import os
@@ -50,11 +58,17 @@ _CFG = load_config("link", {
     "ports": [],
     "refresh": 2,
     "history": 120,
+    # The spans w cycles through, in seconds. The first is what opens.
+    "windows": [60, 300, 900, 3600],
 })
 
 REFRESH = max(0.5, float(_CFG["refresh"]))
-HISTORY = int(_CFG["history"])
 PORTS = [int(p) for p in (_CFG["ports"] or [])]
+WINDOWS = [int(s) for s in (_CFG["windows"] or []) if int(s) > 0] or [300]
+# Retention has to cover the longest span on offer, or w would cycle to a
+# window the samples could never fill. `history` stays a floor rather than
+# the figure, so a config asking for more than that still gets it.
+HISTORY = max(int(_CFG["history"]), int(max(WINDOWS) / REFRESH) + 2)
 
 OK = rgb(90, 240, 160)
 WARN = rgb(255, 200, 90)
@@ -318,7 +332,55 @@ def colour_for(ratio, loss):
 SERIES = "●▲■◆✚✦"          # one glyph per session, so the plot reads mono
 
 
-def build_graph(rows, history, gw, gh, start=0):
+def window_label(seconds):
+    """A span as a person says it: 90s, 5m, 1h."""
+    if seconds < 60:
+        return "%ds" % seconds
+    if seconds < 3600:
+        return "%gm" % round(seconds / 60.0, 1)
+    return "%gh" % round(seconds / 3600.0, 1)
+
+
+def condense(vals, columns):
+    """Fit a run of samples to the columns available, by median.
+
+    A fifteen-minute window at a two-second poll is 450 readings and a pane
+    is eighty columns wide, so something has to give. The median of each
+    bucket is the typical round-trip over that slice, which is what a line
+    should show; the worst of it is still in the table and the detail view,
+    which report the peak rather than the middle.
+    """
+    if len(vals) <= columns or columns < 1:
+        return vals
+    out = []
+    for i in range(columns):
+        chunk = vals[int(i * len(vals) / columns):
+                     int((i + 1) * len(vals) / columns)]
+        if chunk:
+            ordered = sorted(chunk)
+            out.append(ordered[len(ordered) // 2])
+    return out
+
+
+def in_window(history, peer, window, columns):
+    """One session's samples, cut to the chosen span and to the pane."""
+    vals = list(history.get(peer) or [])
+    if window:
+        vals = vals[-max(1, int(round(window / REFRESH))):]
+    else:
+        vals = vals[-columns:]
+    return condense(vals, columns)
+
+
+def plotted_span(rows, history, window, columns):
+    """How much time the drawn columns actually cover, for the axis label."""
+    longest = max([len(history.get(r["peer"]) or []) for r in rows] or [0])
+    if window:
+        longest = min(longest, int(round(window / REFRESH)))
+    return longest * REFRESH
+
+
+def build_graph(rows, history, gw, gh, start=0, window=0):
     """Log-scale multi-series plot of round-trip time.
 
     Log because the sessions on one machine can differ by two orders of
@@ -331,7 +393,7 @@ def build_graph(rows, history, gw, gh, start=0):
     lo = hi = None
     series = []
     for i, row in enumerate(rows):
-        vals = list(history.get(row["peer"]) or [])[-gw:]
+        vals = in_window(history, row["peer"], window, gw)
         if not vals:
             continue
         # `start` keeps a session's glyph and hue the same on its own screen
@@ -375,10 +437,10 @@ def build_graph(rows, history, gw, gh, start=0):
     return grid, tone, (lo, hi)
 
 
-def graph_rows(rows, history, w, h, start=0):
+def graph_rows(rows, history, w, h, start=0, window=0):
     gw = max(10, w - 9)
     gh = max(4, h)
-    grid, tone, bounds = build_graph(rows, history, gw, gh, start)
+    grid, tone, bounds = build_graph(rows, history, gw, gh, start, window)
     if bounds is None:
         return grid
     import math
@@ -517,7 +579,7 @@ def detail_rows(row, names, w, selected=False, hue=None, glyph="●"):
                  ([(" · idle ", DIM), (span(idle), TXT)], None)])]
 
 
-def detail_view(row, names, history, w, h, idx=0):
+def detail_view(row, names, history, w, h, idx=0, window=0):
     """One connection, in full.
 
     The list answers "is anything wrong"; this answers "with what, and how
@@ -585,10 +647,10 @@ def detail_view(row, names, history, w, h, idx=0):
 
     room = h - len(rows) - 4
     if room >= 5:
-        rows.extend(graph_rows([row], history, w, room, idx))
+        rows.extend(graph_rows([row], history, w, room, idx, window))
         rows.append(seg([(DIM, " " * 7),
                          (GRID, "└" + "─" * max(10, w - 9))], w - 1))
-        oldest = REFRESH * len(history.get(row["peer"]) or [])
+        oldest = plotted_span([row], history, window, max(10, w - 9))
         rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                          (DIM, " " * max(1, w - 26)), (DIM, "now")], w - 1))
     return rows
@@ -612,6 +674,7 @@ def main():
     store = Store()
     threading.Thread(target=store.run, daemon=True).start()
     selected, hide_idle, tick, view = 0, False, 0, None
+    span_at = 0       # which of WINDOWS the chart is currently drawn over
 
     while True:
         tick += 1
@@ -628,6 +691,8 @@ def main():
                 view = None
             elif key == "o":
                 hide_idle = not hide_idle
+            elif key in ("w", "W"):
+                span_at = (span_at + 1) % len(WINDOWS)
             elif key == "r":
                 store.wake.set()
 
@@ -640,13 +705,25 @@ def main():
         # One connection in full, on its own screen. The list is for
         # noticing; this is for looking into, and the two want different
         # amounts of room for the same chart.
+        window = WINDOWS[span_at]
         if view and shown:
             pick = min(selected, len(shown) - 1)
-            draw(detail_view(shown[pick], names, history, w, h, pick)
-                 + [""] * 2
-                 + [" " + line for line in
-                    pack_hints([[(DIM, "[esc] back")], [(DIM, "[r]efresh")],
-                                [(DIM, "[q]uit")]], w - 2)], w, h)
+            # The footer is measured before the body is built, and the body
+            # is told the height it actually has. Appending the hints after
+            # sizing the chart to the whole pane pushed them off the bottom
+            # of it - the keys out of this screen were the rows being lost.
+            foot = [" " + line for line in
+                    pack_hints([[(DIM, "[esc] back")],
+                                [(ACCENT, "[w]"),
+                                 (DIM, " %s" % window_label(window))],
+                                [(DIM, "[r]efresh")],
+                                [(DIM, "[q]uit")]], w - 2)]
+            room = max(1, h - len(foot) - 1)
+            body = detail_view(shown[pick], names, history, w, room, pick,
+                               window)
+            while len(body) < room:
+                body.append("")
+            draw(body[:room] + foot, w, h)
             time.sleep(0.2)
             continue
 
@@ -668,11 +745,11 @@ def main():
             rows.append("")
             room = h - len(rows) - 4
             if room >= 5:
-                rows.extend(graph_rows(shown, history, w, room))
+                rows.extend(graph_rows(shown, history, w, room, 0, window))
                 rows.append(seg([(DIM, " " * 7),
                                  (GRID, "└" + "─" * max(10, w - 9))], w - 1))
-                oldest = REFRESH * max([len(history.get(r["peer"]) or [])
-                                        for r in shown] or [0])
+                oldest = plotted_span(shown, history, window,
+                                      max(10, w - 9))
                 rows.append(seg([(DIM, "        %s ago" % span(oldest * 1000)),
                                  (DIM, " " * max(1, w - 26)),
                                  (DIM, "now")], w - 1))
@@ -681,6 +758,7 @@ def main():
             rows.append("")
         hints = [[(ACCENT, "↑↓"), (DIM, " select")],
                  [(DIM, "[↵] open")],
+                 [(ACCENT, "[w]"), (DIM, " %s" % window_label(window))],
                  [(DIM, "[o]%s idle" % ("show" if hide_idle else "hide"))],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         for line in pack_hints(hints, w - 2):
