@@ -38,12 +38,20 @@ stopped.
 
 TCP only, which is the honest limit of this method - see docs/netwatch.md.
 
-Keys: 1 sorts by total, 2 by current rate, r rezeroes, q quits.
+Enter opens one process: its command, every connection it holds separately,
+and the files it currently has open with how fast each is growing - which is
+the closest thing to "which file is it downloading" that exists outside the
+encrypted stream. The URL and the remote filename are inside TLS and are not
+readable from here by any means.
+
+Keys: up/down select, enter opens one, esc goes back, 1 sorts by total,
+2 by current rate, r rezeroes, q quits.
 """
 import collections
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -153,6 +161,24 @@ def own_addresses():
     return _OWN["addrs"]
 
 
+def port_of(addr):
+    _, _, port = addr.rpartition(":")
+    try:
+        return int(port)
+    except ValueError:
+        return 0
+
+
+def service(port):
+    """What a port number is conventionally for, from /etc/services."""
+    if not port:
+        return ""
+    try:
+        return socket.getservbyport(port)
+    except (OSError, TypeError):
+        return ""
+
+
 def local_peer(host):
     """Whether this traffic never leaves the machine.
 
@@ -192,7 +218,7 @@ def sockets(external=False):
     except (OSError, subprocess.SubprocessError):
         return {}, "ss would not run"
     found = {}
-    inode, peer, header = None, "", True
+    inode, peer, port, header = None, "", 0, True
     for line in out.stdout.splitlines():
         if header:
             header = False
@@ -202,6 +228,7 @@ def sockets(external=False):
         if not line.startswith((" ", "\t")):
             cols = line.split()
             peer = host_of(cols[4]) if len(cols) > 4 else ""
+            port = port_of(cols[4]) if len(cols) > 4 else 0
             seen = INO.search(line)
             inode = seen.group(1) if seen else None
             # ino:0 is a socket with no inode to own it - a TIME-WAIT
@@ -217,8 +244,9 @@ def sockets(external=False):
             inode = None
             continue
         sent, recv = SENT.search(line), RECV.search(line)
-        found[inode] = (int(sent.group(1)) if sent else 0,
-                        int(recv.group(1)) if recv else 0)
+        found[inode] = {"sent": int(sent.group(1)) if sent else 0,
+                        "recv": int(recv.group(1)) if recv else 0,
+                        "peer": peer, "port": port}
         inode = None
     return found, ""
 
@@ -286,6 +314,126 @@ def socket_owners():
     return owners
 
 
+_NAMES = {}
+_WANTED = collections.deque()
+_ASKED = set()
+
+
+def resolver():
+    """Reverse DNS, off the drawing thread.
+
+    A PTR lookup takes half a second when it works and longer when it does
+    not, which is several frames. The address is shown until a name arrives,
+    and an address that has no name is remembered as having none so it is
+    not asked about again every second.
+    """
+    while True:
+        try:
+            ip = _WANTED.popleft()
+        except IndexError:
+            time.sleep(0.3)
+            continue
+        try:
+            _NAMES[ip] = socket.gethostbyaddr(ip)[0]
+        except (OSError, socket.herror, socket.gaierror):
+            _NAMES[ip] = ""
+
+
+def hostname(ip):
+    """A name for an address if one is known, queueing a lookup if not."""
+    if ip in _NAMES:
+        return _NAMES[ip]
+    if ip not in _ASKED:
+        _ASKED.add(ip)
+        _WANTED.append(ip)
+    return ""
+
+
+def running(pid):
+    """Whether the process still exists.
+
+    Distinct from the `alive` flag on a row, which means "had a socket in
+    the last sample". A long-running server sitting idle has neither
+    traffic nor open connections and has certainly not exited, and saying
+    it had would be worse than saying nothing.
+    """
+    return bool(pid) and os.path.isdir("/proc/%d" % pid)
+
+
+def proc_io(pid):
+    """Disk bytes this process has read and written, from /proc/<pid>/io."""
+    out = {}
+    try:
+        with open("/proc/%d/io" % pid) as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                try:
+                    out[key.strip()] = int(value)
+                except ValueError:
+                    continue
+    except OSError:
+        return {}
+    return out
+
+
+def open_files(pid):
+    """Regular files this process has open, largest first.
+
+    A download has to land somewhere, and where it lands is a file getting
+    bigger. This is the closest thing to "which file" that exists outside
+    the encrypted stream - the name of the thing being written, rather than
+    the name of the thing being fetched.
+    """
+    found = []
+    try:
+        fds = os.listdir("/proc/%d/fd" % pid)
+    except OSError:
+        return found
+    for fd in fds:
+        try:
+            path = os.readlink("/proc/%d/fd/%s" % (pid, fd))
+        except OSError:
+            continue
+        if not path.startswith("/") or path.startswith(("/dev/", "/proc/",
+                                                        "/sys/")):
+            continue
+        try:
+            size = os.stat("/proc/%d/fd/%s" % (pid, fd)).st_size
+        except OSError:
+            continue
+        writing = False
+        try:
+            with open("/proc/%d/fdinfo/%s" % (pid, fd)) as f:
+                for line in f:
+                    if line.startswith("flags:"):
+                        writing = int(line.split()[1], 8) & 3 != 0
+        except (OSError, ValueError, IndexError):
+            pass
+        found.append({"path": path, "size": size, "writing": writing})
+    found.sort(key=lambda f: -f["size"])
+    return found
+
+
+def process_facts(pid):
+    """Command, directory and age - what the table has no room for."""
+    facts = {"cmdline": "", "cwd": "", "started": None}
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            facts["cmdline"] = f.read().replace(b"\x00", b" ").decode(
+                "utf8", "replace").strip()
+    except OSError:
+        pass
+    try:
+        facts["cwd"] = os.readlink("/proc/%d/cwd" % pid)
+    except OSError:
+        pass
+    try:
+        facts["started"] = os.stat("/proc/%d" % pid).st_ctime
+    except OSError:
+        pass
+    return facts
+
+
 class Store(object):
     """Per-process byte totals, accumulated from per-socket counters.
 
@@ -299,6 +447,7 @@ class Store(object):
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.totals = collections.OrderedDict()
+        self.conns = collections.OrderedDict()
         self.last = {}
         self.started = time.time()
         self.stamp = 0.0
@@ -310,6 +459,14 @@ class Store(object):
             return ([dict(v, key=k) for k, v in self.totals.items()],
                     self.started, self.err)
 
+    def connections(self, pid, name):
+        """One process's individual connections, busiest first."""
+        with self.lock:
+            found = [dict(c) for c in self.conns.values()
+                     if c["pid"] == pid and c["name"] == name]
+        return sorted(found, key=lambda c: (-(c["up"] + c["down"]),
+                                            c["peer"]))
+
     def reset(self):
         """Make the current counters the new zero.
 
@@ -320,6 +477,7 @@ class Store(object):
         """
         with self.lock:
             self.totals.clear()
+            self.conns.clear()
             self.started = time.time()
 
     def run(self):
@@ -343,9 +501,14 @@ class Store(object):
                 for row in self.totals.values():
                     row["up_rate"] = row["down_rate"] = 0.0
                     row["alive"] = False
+                for conn in self.conns.values():
+                    conn["up_rate"] = conn["down_rate"] = 0.0
+                    conn["alive"] = False
                 first = not self.stamp
-                for inode, (sent, recv) in found.items():
+                for inode, seen in found.items():
+                    sent, recv = seen["sent"], seen["recv"]
                     was = self.last.get(inode)
+                    was = was if was is None else (was["sent"], was["recv"])
                     # A socket opened since the last sample started at zero
                     # when it was created, so all of its counters are traffic
                     # that happened while we were watching. Only the sockets
@@ -379,8 +542,36 @@ class Store(object):
                     if gap:
                         row["up_rate"] += d_sent / gap
                         row["down_rate"] += d_recv / gap
+
+                    # The same arithmetic per connection, so the detail
+                    # screen can say which of a process's dozen sockets is
+                    # the one actually moving.
+                    conn = self.conns.get(inode)
+                    if conn is None:
+                        conn = {"pid": pid, "name": name, "peer": seen["peer"],
+                                "port": seen["port"], "up": 0, "down": 0,
+                                "up_rate": 0.0, "down_rate": 0.0,
+                                "alive": True, "seen": now,
+                                "opened": 0 if first else now}
+                        self.conns[inode] = conn
+                    conn["alive"] = True
+                    conn["seen"] = now
+                    conn["up"] += d_sent
+                    conn["down"] += d_recv
+                    if gap:
+                        conn["up_rate"] += d_sent / gap
+                        conn["down_rate"] += d_recv / gap
                 self.last = dict(found)
                 self.stamp = now
+                # A closed connection is worth keeping - it may be the one
+                # that did the damage - but not forever. The quiet dead ones
+                # go once there are enough of them to matter.
+                if len(self.conns) > 400:
+                    for inode, conn in sorted(
+                            self.conns.items(),
+                            key=lambda kv: kv[1]["seen"])[:100]:
+                        if not conn["alive"]:
+                            self.conns.pop(inode, None)
             self.wake.wait(INTERVAL)
             self.wake.clear()
 
@@ -393,7 +584,7 @@ def ordered(rows, mode):
                                        -(r["up_rate"] + r["down_rate"])))
 
 
-def table(rows, w, limit):
+def table(rows, w, limit, selected=-1):
     """The process table, dropping columns rather than clipping them.
 
     Total is the one figure that cannot go: it is the whole question. Then
@@ -415,22 +606,137 @@ def table(rows, w, limit):
         head.append((DIM, "%11s" % "UP"))
     out = [seg(head, w - 1)]
 
-    for row in rows[:limit]:
+    for i, row in enumerate(rows[:limit]):
         live = row["up_rate"] + row["down_rate"]
         total = row["up"] + row["down"]
         gone = not row["alive"]
-        line = [(DIM if gone else TXT,
-                 "  " + pad(row["name"][:name_w - 1], name_w)),
-                (DIM, "%-8s" % (row["pid"] or "-")),
-                (TXT if total else DIM, "%11s" % units(total))]
+        here = i == selected
+        tint = bg(28, 44, 62) if here else ""
+        line = [(tint + (ACCENT if here else DIM if gone else TXT),
+                 ("▸" if here else " ") + " "
+                 + pad(row["name"][:name_w - 2], name_w - 1)),
+                (tint + DIM, "%-8s" % (row["pid"] or "-")),
+                (tint + (TXT if total else DIM), "%11s" % units(total))]
         if mid:
-            line.append((OK if live else DIM, "%11s" % rate(live)))
+            line.append((tint + (OK if live else DIM), "%11s" % rate(live)))
         if wide:
-            line.append((DOWN if row["down_rate"] else DIM,
+            line.append((tint + (DOWN if row["down_rate"] else DIM),
                          "%11s" % rate(row["down_rate"])))
-            line.append((UP if row["up_rate"] else DIM,
+            line.append((tint + (UP if row["up_rate"] else DIM),
                          "%11s" % rate(row["up_rate"])))
+        if here:
+            line.append((tint, " " * w))
         out.append(seg(line, w - 1))
+    return out
+
+
+def short(path, room):
+    """A path that fits, keeping the end - which is the filename."""
+    home = os.path.expanduser("~")
+    if path.startswith(home):
+        path = "~" + path[len(home):]
+    if len(path) <= room:
+        return path
+    return "…" + path[-(room - 1):]
+
+
+def wrap(text, width):
+    lines, rest = [], text
+    while rest and len(lines) < 3:
+        if len(rest) <= width:
+            lines.append(rest)
+            break
+        cut = rest.rfind(" ", 0, width + 1)
+        cut = cut if cut > width // 2 else width
+        lines.append(rest[:cut])
+        rest = rest[cut:].lstrip()
+    return lines or [""]
+
+
+def field(label, value, w, colour=TXT):
+    out = []
+    for i, line in enumerate(wrap(value, max(8, (w - 3) - 10))):
+        out.append(seg([(DIM, "  " + pad(label if not i else "", 10)),
+                        (colour, line)], w - 1))
+    return out
+
+
+def detail_rows(row, conns, sizes, w, h):
+    """One process in full: who it is talking to, and what it is writing."""
+    facts = process_facts(row["pid"])
+    total = row["up"] + row["down"]
+    out = [title("%s · pid %d" % (row["name"], row["pid"]), w, ACCENT)]
+    out.append(seg([(TXT, " " + units(total)),
+                    (DIM, " since it was first seen  ·  "),
+                    (DOWN, "↓ " + rate(row["down_rate"])), (DIM, "  "),
+                    (UP, "↑ " + rate(row["up_rate"]))], w - 1))
+    here = running(row["pid"])
+    if not here:
+        out.append(seg([(WARN, " this process has exited - its total is kept,"
+                               " and nothing below is live")], w - 1))
+    elif not row["alive"]:
+        out.append(seg([(DIM, " no connection open at the moment - what is "
+                              "below is the last that was seen")], w - 1))
+    out.append("")
+
+    out.append(seg([(LBL, " ── PROCESS ── ")], w - 1))
+    out += field("command", facts["cmdline"] or "?", w)
+    if facts["cwd"]:
+        out += field("directory", short(facts["cwd"], w - 14), w)
+    if facts["started"]:
+        out += field("started", elapsed(time.time() - facts["started"])
+                     + " ago", w, DIM)
+    out.append("")
+
+    out.append(seg([(LBL, " ── TALKING TO ── "),
+                    (DIM, "%d connection%s" % (len(conns),
+                                               "" if len(conns) == 1
+                                               else "s"))], w - 1))
+    if not conns:
+        out.append(seg([(DIM, "   none open now")], w - 1))
+    host_w = max(16, min(38, (w - 1) - 40))
+    for conn in conns[:8]:
+        name = hostname(conn["peer"]) or conn["peer"]
+        note = service(conn["port"])
+        out.append(seg([
+            (TXT if conn["alive"] else DIM, "  " + pad(name[:host_w - 1],
+                                                       host_w)),
+            (DIM, "%-7s" % (note or conn["port"] or "")),
+            (DOWN, "↓%9s" % units(conn["down"])),
+            (UP, " ↑%9s" % units(conn["up"])),
+            (OK if conn["down_rate"] + conn["up_rate"] else DIM,
+             "%11s" % rate(conn["down_rate"] + conn["up_rate"])),
+        ], w - 1))
+    out.append("")
+
+    files = open_files(row["pid"]) if here else []
+    growing = [f for f in files if f["writing"] or f["path"] in sizes]
+    out.append(seg([(LBL, " ── WRITING TO ── "),
+                    (DIM, "where a download would be landing")], w - 1))
+    if not growing:
+        out.append(seg([(DIM, "   no files open for writing")], w - 1))
+    path_w = max(20, (w - 1) - 24)
+    for item in growing[:6]:
+        was = sizes.get(item["path"])
+        grew = item["size"] - was[0] if was else 0
+        span = time.time() - was[1] if was else 0
+        out.append(seg([
+            (TXT, "  " + pad(short(item["path"], path_w), path_w)),
+            (DIM, "%10s" % units(item["size"])),
+            (OK if grew > 0 else DIM,
+             "%12s" % (("+" + rate(grew / span)) if grew > 0 and span
+                       else "")),
+        ], w - 1))
+    out.append("")
+
+    io = proc_io(row["pid"]) if here else {}
+    if io:
+        out.append(seg([(LBL, " ── DISK ── "),
+                        (DIM, "read %s · written %s since it started"
+                         % (units(io.get("read_bytes", 0)),
+                            units(io.get("write_bytes", 0))))], w - 1))
+    out.append(seg([(DIM, " HTTPS hides the URL and the filename. Who it "
+                          "talks to and what it writes are above.")], w - 1))
     return out
 
 
@@ -496,20 +802,66 @@ def main():
 
     setup()
     keyboard = Keyboard()
+    threading.Thread(target=resolver, daemon=True).start()
+    selected, detail, sizes = 0, None, {}
     while True:
+        w, h = size()
+        rows, started, err = store.snapshot()
+        rows = ordered(rows, mode)
+
         for key in keyboard.poll():
+            if detail is not None:
+                if key in ("esc", "left", "q", "Q", "backspace"):
+                    detail, sizes = None, {}
+                elif key in ("r", "R"):
+                    store.reset()
+                    detail, sizes = None, {}
+                continue
             if key in ("q", "Q"):
                 raise SystemExit(0)
             if key == "1":
                 mode = "total"
             elif key == "2":
                 mode = "live"
+            elif key == "up":
+                selected -= 1
+            elif key == "down":
+                selected += 1
+            elif key in ("enter", "right", "i") and rows:
+                pick = rows[max(0, min(selected, len(rows) - 1))]
+                detail, sizes = (pick["pid"], pick["name"]), {}
             elif key in ("r", "R"):
                 store.reset()
+                selected = 0
 
-        w, h = size()
-        rows, started, err = store.snapshot()
-        rows = ordered(rows, mode)
+        selected = max(0, min(selected, len(rows) - 1)) if rows else 0
+
+        # One process in full. Its row is looked up fresh each frame so the
+        # figures keep moving while the screen is open, and it survives the
+        # process exiting - which is often when it is being looked at.
+        if detail is not None:
+            pid, name = detail
+            row = next((r for r in rows
+                        if r["pid"] == pid and r["name"] == name), None)
+            if row is None:
+                detail, sizes = None, {}
+            else:
+                conns = store.connections(pid, name)
+                body = detail_rows(row, conns, sizes, w, h)
+                now = time.time()
+                for item in open_files(pid) if running(pid) else []:
+                    if item["path"] not in sizes:
+                        sizes[item["path"]] = (item["size"], now)
+                foot = [" " + line for line in
+                        pack_hints([[(DIM, "[esc] back")], [(DIM, "[r]ezero")],
+                                    [(DIM, "[q]uit")]], w - 2)]
+                room = max(1, h - len(foot) - 1)
+                while len(body) < room:
+                    body.append("")
+                draw(body[:room] + foot, w, h)
+                time.sleep(min(0.5, INTERVAL))
+                continue
+
         moving = sum(1 for r in rows if r["up_rate"] + r["down_rate"])
         down = sum(r["down_rate"] for r in rows)
         up = sum(r["up_rate"] for r in rows)
@@ -532,16 +884,20 @@ def main():
 
         room = max(1, h - len(out) - 3)
         limit = min(LIMIT or room, room)
+        if selected >= limit:
+            rows = rows[selected - limit + 1:]
         if not rows:
             out.append(seg([(DIM, "  Nothing has moved yet. Totals start at "
                                   "zero, so this fills as traffic "
                                   "happens.")], w - 1))
         else:
-            out.extend(table(rows, w, limit))
+            out.extend(table(rows, w, limit, selected))
 
         while len(out) < h - 2:
             out.append("")
-        hints = [[(ACCENT if mode == "total" else DIM, "[1] total")],
+        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(ACCENT, "↵"), (DIM, " details")],
+                 [(ACCENT if mode == "total" else DIM, "[1] total")],
                  [(ACCENT if mode == "live" else DIM, "[2] live")],
                  [(DIM, "[r]ezero")], [(DIM, "[q]uit")]]
         for line in pack_hints(hints, w - 2):

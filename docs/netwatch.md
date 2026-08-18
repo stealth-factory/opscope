@@ -129,6 +129,74 @@ application that asked for them — the kernel is being told the truth about who
 opened the socket, and that is the proxy. The same is true of system services
 that fetch on another process's behalf.
 
+## Looking into one process
+
+`↑` `↓` select a row and `↵` opens it. The question that sends you here is
+usually "why is *that* using so much data", and the screen answers as much of
+it as a machine honestly can:
+
+```
+╺━ CURL · PID 2754838 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 3.2 MB since it was first seen  ·  ↓ 411.2 KB/s  ↑ -
+
+ ── PROCESS ──
+  command   curl -s -o ~/tmp/big.bin --limit-rate 400k https://…/__down
+  directory ~/projects/terminal-toys
+  started   6s ago
+
+ ── TALKING TO ── 1 connection
+  162.159.140.220               https  ↓   3.2 MB ↑    722 B   411.2 KB/s
+
+ ── WRITING TO ── where a download would be landing
+  ~/tmp/big.bin                                     3.0 MB   +425.8 KB/s
+
+ ── DISK ── read 0 B · written 3.0 MB since it started
+ HTTPS hides the URL and the filename. Who it talks to and what it writes
+ are above.
+```
+
+**TALKING TO** is every connection that process holds, separately, so a
+process with a dozen sockets shows which one is actually moving. Peers are
+resolved to names in the background — the address shows until the answer
+arrives, and a lookup is never made twice.
+
+**WRITING TO** is the useful half of "which file". A download has to land
+somewhere, and where it lands is a file getting bigger: these are the regular
+files the process has open, their size, and how fast that size is growing
+since you opened this screen. That is the name of the thing being *written*,
+which is usually what you wanted when you asked which file was being fetched.
+
+**DISK** is the process's own read and write totals from `/proc/<pid>/io`,
+which is how you tell a download being written to disk from one being
+streamed and discarded.
+
+### What this cannot tell you, and why
+
+**Not the URL, and not the remote filename.** Both are inside the TLS session.
+There is no vantage point on this machine, short of terminating the connection
+yourself with a proxy and its certificate installed, from which an HTTPS
+request line is readable — that is the entire point of HTTPS, and no amount of
+`/proc` gets around it. Packet capture would not help either; it would show
+the same encrypted bytes.
+
+What you get instead, and what usually answers the question:
+
+- **Who** — the peer, by name where DNS has a PTR record. A process pulling
+  from `storage.googleapis.com` is telling you a great deal.
+- **What it landed as** — the growing file.
+- **The command line**, which for anything launched from a shell frequently
+  contains the URL outright, as `curl` does above.
+
+If you truly need the request line, the tool for it is a local proxy you
+trust — `mitmproxy` with its certificate installed — pointed at that one
+process. That is a deliberate act of interception, which is why it is not
+something this widget does quietly.
+
+A row that has exited says so, and keeps its total. A row that is merely idle
+says *that*, rather than claiming it has gone: `alive` in the table means
+"moved bytes in the last sample", which a long-running server sitting quiet
+does not.
+
 ## Units
 
 Decimal — `KB` is 1,000 bytes, `MB` is 1,000,000 — which is how link rates and
