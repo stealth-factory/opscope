@@ -20,34 +20,41 @@ they are going right now.
 ## The chart
 
 Above the process list, and the same shape wherever it appears: **received
-above the zero line, sent below it**, newest on the right, one column per
-sample.
+above the zero line, sent below it**, newest on the right.
 
 ```
- ── TRAFFIC ── ↓ rx above · ↑ tx below  · 1m 16s of history
- 2.0 MB/s│            ──────────────                    ──────────────
-         │      ──────              ─────          ─────              ──────
-         │  ────                         ──────────                         ────
-        0┼──────────────────────────────────────────────────────────────────────
-         │─        ────               ────              ─────              ─────
-         │ │   ──        ─        ──        ─        ──        ─        ──
-90.0 KB/s│ ───              ─────              ────               ────
+ ── TRAFFIC ── ↓ rx above · ↑ tx below  · 2m 30s of history
+  2.0 MB/s ┌──────────────────────────────────────────────────────────┐
+           │   ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⢄⣀⡀               ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⠤⣀⡀  │
+           │⠔⠒⠉⠁                   ⠈⠉⠒⠤⢄⡀     ⣀⡠⠔⠒⠉⠁                ⠈⠉⠒⠢⢄⣀│
+         0 ├──────────────────────────────────────────────────────────┤
+           │  ⡠⠔⠊⠉⠑⠢⡀             ⢀⠤⠊⠉⠉⠒⢄              ⡠⠒⠉⠉⠑⠢⡀        ⢀⠔⠊⠉│
+           │⢀⠎      ⠈⠢⡀          ⡔⠁      ⠑⢄          ⡠⠊      ⠈⠢⡀      ⠔⠁ │
+−90.0 KB/s └──────────────────────────────────────────────────────────┘
 ```
 
-A line rather than a filled area. Two series share the screen, and a filled
-one becomes a solid block the moment its rate is steady — which is precisely
-when the shape of the other one is what you are trying to read.
+Drawn with **braille**, which is what makes it a line rather than a staircase.
+A braille cell addresses eight points — two across, four down — so a character
+row holds four vertical positions and a chart eight rows tall resolves
+thirty-two. Consecutive samples are joined with a Bresenham segment, so a
+steep climb draws as a line instead of a column of dots. Two samples share
+each column.
 
-**The two halves are scaled independently**, and each labels its own peak.
-Sharing a scale is the obvious choice and the wrong one: a download at two
-megabytes a second with acknowledgements going back at ninety kilobytes would
-draw the upload as a flat line along the axis, and whether the upload is flat
-is frequently the question. The labels are what make the halves comparable —
-read the numbers, not the heights.
+**The two halves are scaled independently**, and each labels its own peak;
+the lower one carries a minus sign, since down the page is the negative half
+of the axis. Sharing a scale is the obvious choice and the wrong one: a
+download at two megabytes a second with acknowledgements going back at ninety
+kilobytes would draw the upload as a flat line along the axis, and whether
+the upload is flat is frequently the question. Read the labels, not the
+heights.
+
+An idle stretch draws **nothing** rather than a line pinned to the axis — a
+flat line at zero reads as activity that happens to be zero, where blank
+reads as what it is.
 
 The same chart appears in three places: the whole machine above the process
 list, the selected process at the top of its own screen, and the highlighted
-remote host as a small one under the endpoint list.
+remote host as a compact one under the endpoint list, a single row each way.
 
 ## Where the numbers come from
 

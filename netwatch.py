@@ -698,29 +698,68 @@ def table(rows, w, limit, selected=-1):
     return out
 
 
-def trace(values, height, peak, colour, downward=False):
-    """One series as a line: a mark per column, joined where it steps.
+# A braille cell is two dots wide and four tall, so one character holds
+# eight addressable points. The bit for each is fixed by the encoding: the
+# glyph is U+2800 plus the mask of the dots that are lit.
+BRAILLE = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
 
-    A line rather than a filled area, because two of these share a screen
-    and a filled one reads as a solid block the moment the rate is steady -
-    which is exactly when the shape of the other one matters.
+
+def braille_canvas(values, peak, cols, rows, inverted=False):
+    """Plot a series on a dot canvas eight times finer than the cells.
+
+    Two dots per column and four per row, which is the difference between a
+    line that steps between character rows and one that reads as a curve.
+    Consecutive samples are joined with Bresenham rather than left as
+    points, so a steep climb is a line and not a column of freckles.
     """
-    grid = [[(GRID, " ")] * len(values) for _ in range(height)]
-    span = max(1, height - 1)
-    previous = None
-    for x, value in enumerate(values):
-        frac = min(1.0, max(0.0, value / peak)) if peak else 0.0
-        y = int(round(frac * span)) if downward else int(round((1 - frac)
-                                                               * span))
-        y = max(0, min(height - 1, y))
-        if previous is not None and abs(previous - y) > 1:
-            # Join a step so the series reads as one line rather than as
-            # two unrelated marks a row apart.
-            for fill in range(min(previous, y) + 1, max(previous, y)):
-                grid[fill][x] = (colour, "│")
-        grid[y][x] = (colour, "─")
-        previous = y
+    px_w, px_h = cols * 2, rows * 4
+    grid = [[0] * cols for _ in range(rows)]
+    vals = list(values)[-px_w:]
+    if not vals:
+        return grid
+
+    def point(i):
+        x = (px_w - 1 if len(vals) == 1
+             else int(round(i * (px_w - 1) / float(len(vals) - 1))))
+        scaled = min(1.0, max(0.0, vals[i] / peak)) if peak else 0.0
+        magnitude = int(round(scaled * (px_h - 1)))
+        return x, (magnitude if inverted else px_h - 1 - magnitude)
+
+    def dot(x, y):
+        if 0 <= x < px_w and 0 <= y < px_h:
+            grid[y // 4][x // 2] |= BRAILLE[y % 4][x % 2]
+
+    if len(vals) == 1:
+        if vals[0] > 0:
+            dot(*point(0))
+        return grid
+    for i in range(1, len(vals)):
+        # An idle stretch draws nothing at all rather than a flat line
+        # pinned to the axis, which would read as activity at zero.
+        if vals[i - 1] == 0 and vals[i] == 0:
+            continue
+        x0, y0 = point(i - 1)
+        x1, y1 = point(i)
+        dx, dy = abs(x1 - x0), -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            dot(x0, y0)
+            if x0 == x1 and y0 == y1:
+                break
+            twice = 2 * err
+            if twice >= dy:
+                err += dy
+                x0 += sx
+            if twice <= dx:
+                err += dx
+                y0 += sy
     return grid
+
+
+def braille_row(masks, colour):
+    return [(colour, chr(0x2800 + m) if m else " ") for m in masks]
 
 
 def chart(series, w, h, label="", tint=None):
@@ -730,31 +769,33 @@ def chart(series, w, h, label="", tint=None):
     is. A shared scale is the obvious choice and the wrong one here: a
     download running at ten megabits with acknowledgements going back at
     fifty kilobits would draw the upload as a flat nothing, and whether the
-    upload is flat is often the question.
+    upload is flat is often the question. The lower label carries a minus
+    sign, since down the page is the negative half of the axis.
     """
-    rows = max(2, h - 1)
-    up_h = rows // 2
-    down_h = rows - up_h
-    gw = max(10, w - 11)
-    window = list(series)[-gw:]
-    # Newest on the right, so a short history is padded on the left rather
-    # than drawn from the left edge and left to look like it stopped.
-    pad_n = gw - len(window)
-    rx = [0.0] * pad_n + [v[0] for v in window]
-    tx = [0.0] * pad_n + [v[1] for v in window]
+    lab = 10
+    plot = max(12, w - lab - 4)
+    canvas = max(2, h - 3)
+    up_h = max(1, canvas // 2)
+    down_h = max(1, canvas - up_h)
+    window = list(series)[-plot * 2:]
+    rx = [v[0] for v in window]
+    tx = [v[1] for v in window]
     rx_peak = max(rx or [0]) or 1.0
     tx_peak = max(tx or [0]) or 1.0
     rx_hue, tx_hue = tint or (DOWN, UP)
 
-    out = []
-    for i, line in enumerate(trace(rx, up_h, rx_peak, rx_hue)):
-        mark = ("%9s" % rate(rx_peak)) if i == 0 else " " * 9
-        out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))
-    out.append(seg([(DIM, "%9s" % "0"), (GRID, "┼" + "─" * gw)], w - 1))
-    down = trace(tx, down_h, tx_peak, tx_hue, downward=True)
-    for i, line in enumerate(down):
-        mark = ("%9s" % rate(tx_peak)) if i == len(down) - 1 else " " * 9
-        out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))
+    out = [seg([(DIM, "%*s " % (lab, rate(rx_peak))),
+                (GRID, "┌" + "─" * plot + "┐")], w - 1)]
+    for masks in braille_canvas(rx, rx_peak, plot, up_h):
+        out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
+                       + braille_row(masks, rx_hue) + [(GRID, "│")], w - 1))
+    out.append(seg([(DIM, "%*s " % (lab, "0")),
+                    (GRID, "├" + "─" * plot + "┤")], w - 1))
+    for masks in braille_canvas(tx, tx_peak, plot, down_h, inverted=True):
+        out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
+                       + braille_row(masks, tx_hue) + [(GRID, "│")], w - 1))
+    out.append(seg([(DIM, "%*s " % (lab, "−" + rate(tx_peak))),
+                    (GRID, "└" + "─" * plot + "┘")], w - 1))
     return out
 
 
