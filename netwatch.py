@@ -58,14 +58,15 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (Keyboard, bg, draw, load_config, maybe_help, pack_hints,
-                    pad, rgb, seg, setup, size, title, vbars, vbars_down)
+from common import (Keyboard, bg, clipboard, draw, load_config, maybe_help,
+                    pack_hints, pad, rgb, seg, setup, size, title, vbars,
+                    vbars_down)
 
 _CFG = load_config("netwatch", {
     "interval": 1.0,
     "limit": 0,          # 0 fills the pane
     "sort": "total",
-    "external": False,
+    "external": True,
 })
 
 INTERVAL = max(0.2, float(_CFG["interval"]))
@@ -74,7 +75,12 @@ INTERVAL = max(0.2, float(_CFG["interval"]))
 SERIES = 240
 LIMIT = int(_CFG["limit"])
 SORT = _CFG["sort"] if _CFG["sort"] in ("total", "live") else "total"
+# Strict by default: a connection counts only when the other end is a
+# globally routable address. The LAN, the tailnet and the machine's own
+# addresses are all somewhere other than the internet, and "what is this box
+# sending out" is almost always the question being asked.
 EXTERNAL = bool(_CFG["external"])
+VERSION = "1.0"
 PLAIN = False
 
 OK = rgb(90, 240, 160)
@@ -769,17 +775,99 @@ def field(label, value, w, colour=TXT):
     return out
 
 
-def detail_rows(row, conns, sizes, w, h):
-    """One process in full: who it is talking to, and what it is writing."""
+SECTIONS = ("endpoints", "connections", "files")
+# What `c` would put on the clipboard, set while drawing and read when the
+# key is pressed - the selection is known in one place and used in another.
+pending_copy = [""]
+
+
+def section_head(name, count, note, focused, key, w):
+    """A section header that says whether it is the one taking the keys."""
+    return seg([(ACCENT if focused else LBL,
+                 (" ▏" if focused else " ") + "── %s ── " % name),
+                (DIM, "%d %s" % (count, note)),
+                (ACCENT if focused else GRID, "   [%s]" % key)], w - 1)
+
+
+def endpoint_rows(spots, at, focused, room, w):
+    """Remote hosts, ranked by what they have carried since launch."""
+    out = []
+    host_w = max(14, min(34, (w - 1) - 42))
+    for i, spot in enumerate(spots[:max(1, room)]):
+        here = focused and i == at
+        name = hostname(spot["peer"]) or spot["peer"]
+        ports = "/".join(service(p) or str(p) for p in spot["ports"][:2])
+        tint = bg(28, 44, 62) if here else ""
+        out.append(seg([
+            (tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
+            (tint + (TXT if spot["alive"] else DIM), pad(name[:host_w - 1],
+                                                        host_w)),
+            (tint + DIM, "%-9s" % ports[:9]),
+            (tint + DOWN, "↓%9s" % units(spot["down"])),
+            (tint + UP, " ↑%9s" % units(spot["up"])),
+            (tint + (OK if spot["down_rate"] + spot["up_rate"] else DIM),
+             "%11s" % rate(spot["down_rate"] + spot["up_rate"])),
+            (tint, " " * w if here else ""),
+        ], w - 1))
+    return out
+
+
+def connection_rows(conns, at, focused, room, w):
+    """The sockets open right now, which is a different list from the hosts."""
+    out = []
+    host_w = max(14, min(38, (w - 1) - 34))
+    for i, conn in enumerate(conns[:max(1, room)]):
+        here = focused and i == at
+        tint = bg(28, 44, 62) if here else ""
+        where = "%s:%d" % (conn["peer"], conn["port"])
+        out.append(seg([
+            (tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
+            (tint + (TXT if conn["alive"] else DIM), pad(where[:host_w - 1],
+                                                         host_w)),
+            (tint + (OK if conn["alive"] else DIM),
+             "%-7s" % ("open" if conn["alive"] else "closed")),
+            (tint + DOWN, "↓%9s" % units(conn["down"])),
+            (tint + UP, " ↑%9s" % units(conn["up"])),
+            (tint, " " * w if here else ""),
+        ], w - 1))
+    return out
+
+
+def file_rows(files, sizes, at, focused, room, w):
+    """Open files, with how fast each is growing since this screen opened."""
+    out = []
+    path_w = max(18, (w - 1) - 30)
+    for i, item in enumerate(files[:max(1, room)]):
+        here = focused and i == at
+        tint = bg(28, 44, 62) if here else ""
+        was = sizes.get(item["path"])
+        grew = item["size"] - was[0] if was else 0
+        span = time.time() - was[1] if was else 0
+        out.append(seg([
+            (tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
+            (tint + TXT, pad(short(item["path"], path_w), path_w)),
+            (tint + DIM, "%10s" % units(item["size"])),
+            (tint + (OK if grew > 0 else DIM),
+             "%12s" % (("+" + rate(grew / span)) if grew > 0 and span else "")),
+            (tint, " " * w if here else ""),
+        ], w - 1))
+    return out
+
+
+def detail_rows(row, hist, spots, conns, files, sizes, focus, at, w, h):
+    """One process in full: what it is, who it talks to, what it writes."""
     facts = process_facts(row["pid"])
+    here_now = running(row["pid"])
     total = row["up"] + row["down"]
     out = [title("%s · pid %d" % (row["name"], row["pid"]), w, ACCENT)]
     out.append(seg([(TXT, " " + units(total)),
-                    (DIM, " since it was first seen  ·  "),
+                    (DIM, " since first seen  ·  "),
                     (DOWN, "↓ " + rate(row["down_rate"])), (DIM, "  "),
                     (UP, "↑ " + rate(row["up_rate"]))], w - 1))
-    here = running(row["pid"])
-    if not here:
+    if not row["pid"]:
+        out.append(seg([(DIM, " sockets /proc would not name an owner for - "
+                              "another user's, which means root's")], w - 1))
+    elif not here_now:
         out.append(seg([(WARN, " this process has exited - its total is kept,"
                                " and nothing below is live")], w - 1))
     elif not row["alive"]:
@@ -787,64 +875,65 @@ def detail_rows(row, conns, sizes, w, h):
                               "below is the last that was seen")], w - 1))
     out.append("")
 
-    out.append(seg([(LBL, " ── PROCESS ── ")], w - 1))
-    out += field("command", facts["cmdline"] or "?", w)
-    if facts["cwd"]:
-        out += field("directory", short(facts["cwd"], w - 14), w)
-    if facts["started"]:
-        out += field("started", elapsed(time.time() - facts["started"])
-                     + " ago", w, DIM)
-    out.append("")
+    # This process's own traffic, on the same chart as the machine's.
+    spare = h - len(out)
+    graph_h = 7 if spare >= 30 else 5 if spare >= 24 else 0
+    if graph_h and hist:
+        out.append(chart_head(hist, w, "THIS PROCESS"))
+        out.extend(chart(hist, w, graph_h))
+        out.append("")
 
-    out.append(seg([(LBL, " ── TALKING TO ── "),
-                    (DIM, "%d connection%s" % (len(conns),
-                                               "" if len(conns) == 1
-                                               else "s"))], w - 1))
-    if not conns:
-        out.append(seg([(DIM, "   none open now")], w - 1))
-    host_w = max(16, min(38, (w - 1) - 40))
-    for conn in conns[:8]:
-        name = hostname(conn["peer"]) or conn["peer"]
-        note = service(conn["port"])
-        out.append(seg([
-            (TXT if conn["alive"] else DIM, "  " + pad(name[:host_w - 1],
-                                                       host_w)),
-            (DIM, "%-7s" % (note or conn["port"] or "")),
-            (DOWN, "↓%9s" % units(conn["down"])),
-            (UP, " ↑%9s" % units(conn["up"])),
-            (OK if conn["down_rate"] + conn["up_rate"] else DIM,
-             "%11s" % rate(conn["down_rate"] + conn["up_rate"])),
-        ], w - 1))
-    out.append("")
+    if h - len(out) >= 12:
+        out.append(seg([(LBL, " ── PROCESS ── ")], w - 1))
+        out += field("command", facts["cmdline"] or "?", w)
+        if facts["cwd"]:
+            out += field("directory", short(facts["cwd"], w - 14), w)
+        out.append("")
 
-    files = open_files(row["pid"]) if here else []
-    growing = [f for f in files if f["writing"] or f["path"] in sizes]
-    out.append(seg([(LBL, " ── WRITING TO ── "),
-                    (DIM, "where a download would be landing")], w - 1))
-    if not growing:
-        out.append(seg([(DIM, "   no files open for writing")], w - 1))
-    path_w = max(20, (w - 1) - 24)
-    for item in growing[:6]:
-        was = sizes.get(item["path"])
-        grew = item["size"] - was[0] if was else 0
-        span = time.time() - was[1] if was else 0
-        out.append(seg([
-            (TXT, "  " + pad(short(item["path"], path_w), path_w)),
-            (DIM, "%10s" % units(item["size"])),
-            (OK if grew > 0 else DIM,
-             "%12s" % (("+" + rate(grew / span)) if grew > 0 and span
-                       else "")),
-        ], w - 1))
-    out.append("")
+    # What is left is split between the three lists, with the focused one
+    # given the room: it is the one being read, and the others still say
+    # how much they are holding in their headers.
+    left = max(3, h - len(out) - 4)
+    shares = {name: 1 for name in SECTIONS}
+    shares[focus] = max(1, left - 2 - 3 * 2)
+    counts = {"endpoints": len(spots), "connections": len(conns),
+              "files": len(files)}
 
-    io = proc_io(row["pid"]) if here else {}
-    if io:
+    for name, key, note in (("TALKING TO", "e", "endpoint"),
+                            ("CONNECTIONS", "tab", "socket"),
+                            ("FILES", "f", "file")):
+        which = SECTIONS[("TALKING TO", "CONNECTIONS",
+                          "FILES").index(name)]
+        n = counts[which]
+        focused = focus == which
+        out.append(section_head(name, n, note + ("" if n == 1 else "s"),
+                                focused, key, w))
+        room = min(shares[which], max(1, h - len(out) - 3))
+        if not n:
+            out.append(seg([(DIM, "   none")], w - 1))
+        elif which == "endpoints":
+            out.extend(endpoint_rows(spots, at[which], focused, room, w))
+            # The highlighted host gets its own small chart, which is the
+            # quickest way to see whether it is the one doing the work.
+            pick = spots[min(at[which], len(spots) - 1)] if spots else None
+            if focused and pick and pick["hist"] and h - len(out) >= 7:
+                out.append(seg([(DIM, "     ── "),
+                                (ACCENT, hostname(pick["peer"])
+                                 or pick["peer"]),
+                                (DIM, " alone ──")], w - 1))
+                out.extend(chart(pick["hist"], w, 4))
+        elif which == "connections":
+            out.extend(connection_rows(conns, at[which], focused, room, w))
+        else:
+            out.extend(file_rows(files, sizes, at[which], focused, room, w))
+        out.append("")
+
+    io = proc_io(row["pid"]) if here_now else {}
+    if io and h - len(out) >= 2:
         out.append(seg([(LBL, " ── DISK ── "),
                         (DIM, "read %s · written %s since it started"
                          % (units(io.get("read_bytes", 0)),
                             units(io.get("write_bytes", 0))))], w - 1))
-    out.append(seg([(DIM, " HTTPS hides the URL and the filename. Who it "
-                          "talks to and what it writes are above.")], w - 1))
     return out
 
 
@@ -878,6 +967,11 @@ def parse_args(argv):
             SORT = want
         elif arg == "--external":
             EXTERNAL = True
+        elif arg == "--all-external":
+            EXTERNAL = False
+        elif arg in ("-V", "--version"):
+            print("netwatch.py %s" % VERSION)
+            raise SystemExit(0)
         elif arg == "--plain":
             PLAIN = True
         else:
@@ -912,6 +1006,8 @@ def main():
     keyboard = Keyboard()
     threading.Thread(target=resolver, daemon=True).start()
     selected, detail, sizes = 0, None, {}
+    focus, at = "endpoints", {k: 0 for k in SECTIONS}
+    notice = None
     while True:
         w, h = size()
         rows, started, err = store.snapshot()
@@ -924,6 +1020,27 @@ def main():
                 elif key in ("r", "R"):
                     store.reset()
                     detail, sizes = None, {}
+                elif key in ("up", "k", "K"):
+                    at[focus] -= 1
+                elif key in ("down", "j", "J"):
+                    at[focus] += 1
+                elif key == "tab":
+                    focus = SECTIONS[(SECTIONS.index(focus) + 1)
+                                     % len(SECTIONS)]
+                elif key in ("e", "E"):
+                    focus = "endpoints"
+                elif key in ("f", "F"):
+                    focus = "files"
+                elif key in ("c", "C"):
+                    text = pending_copy[0]
+                    if text:
+                        ok = clipboard(text)
+                        # The value goes in the message either way: OSC 52
+                        # is refused by some terminals and swallowed by some
+                        # multiplexers, and a copy that quietly did nothing
+                        # would leave nothing on screen to read instead.
+                        notice = (("copied  " if ok else "no clipboard  ")
+                                  + text, OK if ok else WARN, time.time() + 8)
                 continue
             if key in ("q", "Q"):
                 raise SystemExit(0)
@@ -931,13 +1048,16 @@ def main():
                 mode = "total"
             elif key == "2":
                 mode = "live"
-            elif key == "up":
+            elif key in ("up", "k", "K"):
                 selected -= 1
-            elif key == "down":
+            elif key in ("down", "j", "J"):
                 selected += 1
+            elif key in ("s", "S", "t", "T"):
+                mode = "live" if mode == "total" else "total"
             elif key in ("enter", "right", "i") and rows:
                 pick = rows[max(0, min(selected, len(rows) - 1))]
                 detail, sizes = (pick["pid"], pick["name"]), {}
+                focus, at = "endpoints", {k: 0 for k in SECTIONS}
             elif key in ("r", "R"):
                 store.reset()
                 selected = 0
@@ -954,16 +1074,45 @@ def main():
             if row is None:
                 detail, sizes = None, {}
             else:
+                spots = store.endpoints(pid, name)
                 conns = store.connections(pid, name)
-                body = detail_rows(row, conns, sizes, w, h)
+                files = open_files(pid) if running(pid) else []
                 now = time.time()
-                for item in open_files(pid) if running(pid) else []:
+                for item in files:
                     if item["path"] not in sizes:
                         sizes[item["path"]] = (item["size"], now)
-                foot = [" " + line for line in
-                        pack_hints([[(DIM, "[esc] back")], [(DIM, "[r]ezero")],
-                                    [(DIM, "[q]uit")]], w - 2)]
+                sizes_of = {"endpoints": len(spots),
+                            "connections": len(conns), "files": len(files)}
+                for which in SECTIONS:
+                    at[which] = max(0, min(at[which],
+                                           sizes_of[which] - 1)) \
+                        if sizes_of[which] else 0
+                # What c would copy, decided where the selection is rather
+                # than at the keypress, so the footer can name it.
+                if focus == "endpoints" and spots:
+                    pick = spots[at["endpoints"]]
+                    pending_copy[0] = hostname(pick["peer"]) or pick["peer"]
+                elif focus == "connections" and conns:
+                    pick = conns[at["connections"]]
+                    pending_copy[0] = "%s:%d" % (pick["peer"], pick["port"])
+                elif focus == "files" and files:
+                    pending_copy[0] = files[at["files"]]["path"]
+                else:
+                    pending_copy[0] = ""
+
+                foot = [" " + line for line in pack_hints(
+                    [[(ACCENT, "↑↓"), (DIM, " in section")],
+                     [(ACCENT, "tab"), (DIM, " section")],
+                     [(DIM, "[e]ndpoints")], [(DIM, "[f]iles")],
+                     [(DIM, "[c]opy")], [(DIM, "[esc] back")],
+                     [(DIM, "[q]uit")]], w - 2)]
+                if notice and time.time() >= notice[2]:
+                    notice = None
+                if notice:
+                    foot = [seg([(notice[1], " " + notice[0])], w - 1)]
                 room = max(1, h - len(foot) - 1)
+                body = detail_rows(row, store.history(pid, name), spots,
+                                   conns, files, sizes, focus, at, w, room)
                 while len(body) < room:
                     body.append("")
                 draw(body[:room] + foot, w, h)
@@ -985,7 +1134,8 @@ def main():
         out.append(seg([(DIM, " TCP only · "),
                         (DOWN, "↓ " + rate(down)), (DIM, "  "),
                         (UP, "↑ " + rate(up)),
-                        (DIM, "  · off-box only" if EXTERNAL else "")], w - 1))
+                        (DIM, "  · internet only" if EXTERNAL
+                         else "  · everything off-box")], w - 1))
         if err:
             out.append(seg([(BAD, " ! " + err)], w - 1))
         out.append("")

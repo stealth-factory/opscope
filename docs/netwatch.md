@@ -129,6 +129,20 @@ application that asked for them — the kernel is being told the truth about who
 opened the socket, and that is the proxy. The same is true of system services
 that fetch on another process's behalf.
 
+## Relation to traffic-ctrl
+
+This is the terminal-toys equivalent of
+[`traffic-ctrl`](https://github.com/stealth-factory/traffic-ctrl), a Swift
+tool that does the same job on macOS with `nettop`. The feature set is
+matched; the interface is this repository's, not that one's, and the data
+comes from `ss` and `/proc` rather than `nettop`.
+
+**One feature is deliberately absent: pausing a process.** `traffic-ctrl` can
+`SIGSTOP` a process for thirty seconds as a diagnostic. That is a reasonable
+thing to do to an application on a laptop and an unreasonable thing to do to a
+process on a server, where stopping the wrong one stops a service. This is a
+watcher. It reads, and it signals nothing.
+
 ## Looking into one process
 
 `↑` `↓` select a row and `↵` opens it. The question that sends you here is
@@ -155,12 +169,25 @@ it as a machine honestly can:
  are above.
 ```
 
-**TALKING TO** is every connection that process holds, separately, so a
-process with a dozen sockets shows which one is actually moving. Peers are
-resolved to names in the background — the address shows until the answer
-arrives, and a lookup is never made twice.
+Three lists, and `tab` moves between them — the focused one is marked `▏` and
+takes the arrow keys, and `c` copies whatever is selected in it.
 
-**WRITING TO** is the useful half of "which file". A download has to land
+**TALKING TO** ranks the remote hosts by what they have carried since launch.
+Hosts, not sockets: a process opening six connections to one CDN is one thing
+being talked to. Peers resolve to names in the background — the address shows
+until the answer arrives, and a lookup is never made twice. The highlighted
+host gets its own small rx/tx chart, which is the quickest way to see whether
+it is the one doing the work.
+
+**CONNECTIONS** is the sockets themselves, open right now, which is a
+different question: one host may hold six of them, and a socket that has
+closed still shows what it carried.
+
+A hostname is a best-effort label rather than the domain that was asked for.
+CDNs, shared addresses, encrypted DNS and connection reuse all mean one
+address can stand for many names, or for none.
+
+**FILES** is the useful half of "which file". A download has to land
 somewhere, and where it lands is a file getting bigger: these are the regular
 files the process has open, their size, and how fast that size is growing
 since you opened this screen. That is the name of the thing being *written*,
@@ -207,6 +234,14 @@ against.
 
 | Key | Action |
 |---|---|
+| `↑` `↓` / `j` `k` | select a process — or an item within the focused section |
+| `↵` / `→` | open the selected process |
+| `esc` / `←` | back to the list |
+| `tab` | cycle the focused section: endpoints → connections → files |
+| `e` | focus the endpoints |
+| `f` | focus the open files |
+| `c` | copy the selected host, socket or path |
+| `s` | switch sort mode (`t` also works) |
 | `1` | sort by total data used |
 | `2` | sort by current rate |
 | `r` | rezero every total |
@@ -223,14 +258,19 @@ netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
 | `-i`, `--interval` | seconds between samples; default 1 |
 | `-n`, `--limit` | how many processes to show; default fills the pane |
 | `--sort` | `total` or `live`, the mode it opens in |
-| `--external` | only connections leaving the building |
+| `--external` | public internet only — **the default**, kept as an alias |
+| `--all-external` | widen it: include the LAN, the tailnet, everything off-box |
 | `--plain` | print a block per interval, no clearing, for a pipe or a log |
 | `-h`, `--help` | this |
+| `-V`, `--version` | print the version |
 
-`--external` drops anything whose peer is on this machine, on the local
-network (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`), or on the tailnet
-(`100.64/10`, `fd7a:115c:a1e0::/48`) — leaving traffic that genuinely goes out
-to the internet. Loopback is always excluded, with or without the flag.
+The strict filter is **on by default**: a connection counts only when the far
+end is a globally routable address. The local network (`10/8`, `172.16/12`,
+`192.168/16`, `169.254/16`), the tailnet (`100.64/10`,
+`fd7a:115c:a1e0::/48`), and this machine's own addresses are all somewhere
+other than the internet, and "what is this box sending out" is nearly always
+the question. `--all-external` widens it to everything that leaves the
+machine. Loopback and self-addressed connections are excluded either way.
 
 Note `-i` is the sampling interval here, where the other widgets in this
 repository spell that `-n`. This one follows the interface it was asked for,
