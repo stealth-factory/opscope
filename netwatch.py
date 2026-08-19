@@ -59,7 +59,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (Keyboard, bg, draw, load_config, maybe_help, pack_hints,
-                    pad, rgb, seg, setup, size, title)
+                    pad, rgb, seg, setup, size, title, vbars, vbars_down)
 
 _CFG = load_config("netwatch", {
     "interval": 1.0,
@@ -69,6 +69,9 @@ _CFG = load_config("netwatch", {
 })
 
 INTERVAL = max(0.2, float(_CFG["interval"]))
+# Samples kept for the chart. Wider than any pane, so the graph is a window
+# on to real history rather than exactly as much as happened to fit.
+SERIES = 240
 LIMIT = int(_CFG["limit"])
 SORT = _CFG["sort"] if _CFG["sort"] in ("total", "live") else "total"
 EXTERNAL = bool(_CFG["external"])
@@ -448,6 +451,8 @@ class Store(object):
         self.wake = threading.Event()
         self.totals = collections.OrderedDict()
         self.conns = collections.OrderedDict()
+        self.series = collections.deque(maxlen=SERIES)
+        self.spots = collections.OrderedDict()
         self.last = {}
         self.started = time.time()
         self.stamp = 0.0
@@ -458,6 +463,27 @@ class Store(object):
         with self.lock:
             return ([dict(v, key=k) for k, v in self.totals.items()],
                     self.started, self.err)
+
+    def rates(self):
+        """The machine's total down and up rate, one pair per sample."""
+        with self.lock:
+            return list(self.series)
+
+    def endpoints(self, pid, name):
+        """One process's remote hosts, aggregated, busiest first."""
+        with self.lock:
+            found = [dict(s, ports=sorted(s["ports"]),
+                          hist=list(s["hist"]))
+                     for s in self.spots.values()
+                     if s["pid"] == pid and s["name"] == name]
+        return sorted(found, key=lambda s: (-(s["up"] + s["down"]),
+                                            s["peer"]))
+
+    def history(self, pid, name):
+        """One process's rate history, for its own chart."""
+        with self.lock:
+            row = self.totals.get((pid, name))
+            return list(row["hist"]) if row else []
 
     def connections(self, pid, name):
         """One process's individual connections, busiest first."""
@@ -478,6 +504,8 @@ class Store(object):
         with self.lock:
             self.totals.clear()
             self.conns.clear()
+            self.spots.clear()
+            self.series.clear()
             self.started = time.time()
 
     def run(self):
@@ -504,6 +532,9 @@ class Store(object):
                 for conn in self.conns.values():
                     conn["up_rate"] = conn["down_rate"] = 0.0
                     conn["alive"] = False
+                for spot in self.spots.values():
+                    spot["up_rate"] = spot["down_rate"] = 0.0
+                    spot["alive"] = False
                 first = not self.stamp
                 for inode, seen in found.items():
                     sent, recv = seen["sent"], seen["recv"]
@@ -533,7 +564,8 @@ class Store(object):
                     if row is None:
                         row = {"pid": pid, "name": name, "up": 0, "down": 0,
                                "up_rate": 0.0, "down_rate": 0.0,
-                               "alive": True, "seen": now}
+                               "alive": True, "seen": now,
+                               "hist": collections.deque(maxlen=SERIES)}
                         self.totals[key] = row
                     row["alive"] = True
                     row["seen"] = now
@@ -561,6 +593,37 @@ class Store(object):
                     if gap:
                         conn["up_rate"] += d_sent / gap
                         conn["down_rate"] += d_recv / gap
+
+                    # Endpoints aggregate the sockets sharing a peer: a
+                    # browser opening six connections to one host is one
+                    # thing being talked to, not six.
+                    spot = self.spots.setdefault(
+                        (pid, name, seen["peer"]),
+                        {"pid": pid, "name": name, "peer": seen["peer"],
+                         "up": 0, "down": 0, "up_rate": 0.0,
+                         "down_rate": 0.0, "alive": True, "seen": now,
+                         "ports": set(),
+                         "hist": collections.deque(maxlen=SERIES)})
+                    spot["alive"] = True
+                    spot["seen"] = now
+                    spot["ports"].add(seen["port"])
+                    spot["up"] += d_sent
+                    spot["down"] += d_recv
+                    if gap:
+                        spot["up_rate"] += d_sent / gap
+                        spot["down_rate"] += d_recv / gap
+                # The whole machine's rate this sample, for the chart.
+                # Summed from the same per-process figures the table shows,
+                # so the two can never disagree.
+                if gap:
+                    self.series.append(
+                        (sum(r["down_rate"] for r in self.totals.values()),
+                         sum(r["up_rate"] for r in self.totals.values())))
+                    for row in self.totals.values():
+                        row["hist"].append((row["down_rate"], row["up_rate"]))
+                    for spot in self.spots.values():
+                        spot["hist"].append((spot["down_rate"],
+                                             spot["up_rate"]))
                 self.last = dict(found)
                 self.stamp = now
                 # A closed connection is worth keeping - it may be the one
@@ -628,6 +691,51 @@ def table(rows, w, limit, selected=-1):
             line.append((tint, " " * w))
         out.append(seg(line, w - 1))
     return out
+
+
+def chart(series, w, h, label="", tint=None):
+    """Received above the line, sent below it, newest on the right.
+
+    The two halves are scaled independently and each says what its own peak
+    is. A shared scale is the obvious choice and the wrong one here: a
+    download running at ten megabits with acknowledgements going back at
+    fifty kilobits would draw the upload as a flat nothing, and whether the
+    upload is flat is often the question.
+    """
+    rows = max(2, h - 1)
+    up_h = rows // 2
+    down_h = rows - up_h
+    gw = max(10, w - 11)
+    window = list(series)[-gw:]
+    # Newest on the right, so a short history is padded on the left rather
+    # than drawn from the left edge and left to look like it stopped.
+    pad_n = gw - len(window)
+    rx = [0.0] * pad_n + [v[0] for v in window]
+    tx = [0.0] * pad_n + [v[1] for v in window]
+    rx_peak = max(rx or [0]) or 1.0
+    tx_peak = max(tx or [0]) or 1.0
+    rx_hue, tx_hue = tint or (DOWN, UP)
+
+    out = []
+    for i, line in enumerate(vbars([(v, rx_hue) for v in rx], up_h,
+                                   hi=rx_peak)):
+        mark = ("%9s" % rate(rx_peak)) if i == 0 else " " * 9
+        out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))
+    out.append(seg([(DIM, "%9s" % "0"), (GRID, "┼" + "─" * gw)], w - 1))
+    down = vbars_down([(v, tx_hue) for v in tx], down_h, hi=tx_peak)
+    for i, line in enumerate(down):
+        mark = ("%9s" % rate(tx_peak)) if i == len(down) - 1 else " " * 9
+        out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))
+    return out
+
+
+def chart_head(series, w, label):
+    """The line above a chart: what it is, and how far back it reaches."""
+    window = list(series)
+    span = elapsed(len(window) * INTERVAL) if window else "nothing yet"
+    return seg([(LBL, " ── %s ── " % label),
+                (DOWN, "↓ rx above"), (DIM, " · "), (UP, "↑ tx below"),
+                (DIM, "  · %s of history" % span)], w - 1)
 
 
 def short(path, room):
@@ -881,6 +989,16 @@ def main():
         if err:
             out.append(seg([(BAD, " ! " + err)], w - 1))
         out.append("")
+
+        # The chart takes a share of the pane and the list takes the rest,
+        # but the list is the point: below a certain height there is no
+        # chart at all rather than two rows of neither.
+        spare = h - len(out) - 4
+        graph_h = 9 if spare >= 20 else 7 if spare >= 15 else 5 if spare >= 11 else 0
+        if graph_h and store.rates():
+            out.append(chart_head(store.rates(), w, "TRAFFIC"))
+            out.extend(chart(store.rates(), w, graph_h))
+            out.append("")
 
         room = max(1, h - len(out) - 3)
         limit = min(LIMIT or room, room)
