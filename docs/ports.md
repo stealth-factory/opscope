@@ -246,6 +246,32 @@ the mount the first one already owns.
   written under `$XDG_STATE_HOME/terminal-toys/tunnels` so a tunnel survives
   the widget restarting and can still be found and closed.
 
+### Why only these two
+
+Tailscale and Cloudflare, and deliberately nothing else.
+
+**Tailscale** is already on this machine carrying the tailnet, so `serve`
+publishes a port to your own devices with no third party involved and no
+account beyond the one you have. It is the right first answer for "let me
+reach this from my laptop", which is most of the question.
+
+**Cloudflare** covers the rest: genuinely public, no account for a quick
+tunnel, and nothing to configure.
+
+**ngrok** is the original of the category and the obvious third candidate,
+and is left out on purpose. It now requires an account and an authtoken —
+anonymous tunnels were withdrawn — so it is no longer the low-friction option
+it is remembered as, and its free tier serves browsers an interstitial
+warning page that quietly breaks webhook and API testing. Everything it does
+here, Cloudflare does without an account. Its genuinely better feature is the
+request inspector on `127.0.0.1:4040`, which is a debugging tool rather than
+an exposure mechanism, and not what this screen is for.
+
+The same reasoning excludes localtunnel, bore, localhost.run and the rest: a
+fourth key that publishes a port a fourth way is not worth the surface. If
+you want one, `ssh -R` to a box you already own needs nothing installed at
+all.
+
 All three run on a thread. `tailscaled` and `cloudflared` take seconds to
 answer, which is far too long to hold a frame for.
 
