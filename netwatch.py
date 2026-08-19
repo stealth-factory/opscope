@@ -59,8 +59,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (Keyboard, bg, clipboard, draw, load_config, maybe_help,
-                    pack_hints, pad, rgb, seg, setup, size, title, vbars,
-                    vbars_down)
+                    pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("netwatch", {
     "interval": 1.0,
@@ -699,6 +698,31 @@ def table(rows, w, limit, selected=-1):
     return out
 
 
+def trace(values, height, peak, colour, downward=False):
+    """One series as a line: a mark per column, joined where it steps.
+
+    A line rather than a filled area, because two of these share a screen
+    and a filled one reads as a solid block the moment the rate is steady -
+    which is exactly when the shape of the other one matters.
+    """
+    grid = [[(GRID, " ")] * len(values) for _ in range(height)]
+    span = max(1, height - 1)
+    previous = None
+    for x, value in enumerate(values):
+        frac = min(1.0, max(0.0, value / peak)) if peak else 0.0
+        y = int(round(frac * span)) if downward else int(round((1 - frac)
+                                                               * span))
+        y = max(0, min(height - 1, y))
+        if previous is not None and abs(previous - y) > 1:
+            # Join a step so the series reads as one line rather than as
+            # two unrelated marks a row apart.
+            for fill in range(min(previous, y) + 1, max(previous, y)):
+                grid[fill][x] = (colour, "│")
+        grid[y][x] = (colour, "─")
+        previous = y
+    return grid
+
+
 def chart(series, w, h, label="", tint=None):
     """Received above the line, sent below it, newest on the right.
 
@@ -723,12 +747,11 @@ def chart(series, w, h, label="", tint=None):
     rx_hue, tx_hue = tint or (DOWN, UP)
 
     out = []
-    for i, line in enumerate(vbars([(v, rx_hue) for v in rx], up_h,
-                                   hi=rx_peak)):
+    for i, line in enumerate(trace(rx, up_h, rx_peak, rx_hue)):
         mark = ("%9s" % rate(rx_peak)) if i == 0 else " " * 9
         out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))
     out.append(seg([(DIM, "%9s" % "0"), (GRID, "┼" + "─" * gw)], w - 1))
-    down = vbars_down([(v, tx_hue) for v in tx], down_h, hi=tx_peak)
+    down = trace(tx, down_h, tx_peak, tx_hue, downward=True)
     for i, line in enumerate(down):
         mark = ("%9s" % rate(tx_peak)) if i == len(down) - 1 else " " * 9
         out.append(seg([(DIM, mark), (GRID, "│")] + line, w - 1))

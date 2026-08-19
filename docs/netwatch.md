@@ -17,6 +17,38 @@ they are going right now.
  [1] total  [2] live  [r]ezero  [q]uit
 ```
 
+## The chart
+
+Above the process list, and the same shape wherever it appears: **received
+above the zero line, sent below it**, newest on the right, one column per
+sample.
+
+```
+ ── TRAFFIC ── ↓ rx above · ↑ tx below  · 1m 16s of history
+ 2.0 MB/s│            ──────────────                    ──────────────
+         │      ──────              ─────          ─────              ──────
+         │  ────                         ──────────                         ────
+        0┼──────────────────────────────────────────────────────────────────────
+         │─        ────               ────              ─────              ─────
+         │ │   ──        ─        ──        ─        ──        ─        ──
+90.0 KB/s│ ───              ─────              ────               ────
+```
+
+A line rather than a filled area. Two series share the screen, and a filled
+one becomes a solid block the moment its rate is steady — which is precisely
+when the shape of the other one is what you are trying to read.
+
+**The two halves are scaled independently**, and each labels its own peak.
+Sharing a scale is the obvious choice and the wrong one: a download at two
+megabytes a second with acknowledgements going back at ninety kilobytes would
+draw the upload as a flat line along the axis, and whether the upload is flat
+is frequently the question. The labels are what make the halves comparable —
+read the numbers, not the heights.
+
+The same chart appears in three places: the whole machine above the process
+list, the selected process at the top of its own screen, and the highlighted
+remote host as a small one under the endpoint list.
+
 ## Where the numbers come from
 
 macOS has `nettop`, which reports per-process network use directly. Linux has
