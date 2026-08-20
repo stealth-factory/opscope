@@ -153,10 +153,27 @@ nothing to read. That is a larger hole than it first appears:
   application, and it does not appear at all;
 - **mosh**, and anything else with a UDP transport.
 
-**Another user's sockets cannot be attributed.** `/proc/<pid>/fd` is
-unreadable for them, which on a normal machine means everything root runs.
-Those bytes are still counted, under a single `(unattributed)` row, because
-dropping them would make the totals quietly wrong.
+**Another user's sockets have no pid here** — `/proc/<pid>/fd` is unreadable
+for them, which on a normal machine means everything root runs. They are
+still counted, and on a systemd machine they are still *named*: `ss` prints
+the control group for every socket regardless of who owns it, and
+`/system.slice/tailscaled.service` is `tailscaled` however closed its `/proc`
+happens to be. So the busiest rows a laptop cannot explain — `tailscaled`,
+`google-guest-agent`, `ssh.socket` — arrive with names and no pid, rather
+than piled into one anonymous heap.
+
+Where there is no cgroup to read, or nothing in it worth a name, the row is
+`(unattributed)`. Those bytes are counted either way: dropping them would
+make the totals quietly wrong.
+
+Two of those names are worth knowing about on a machine like this one.
+`tailscaled` appears because Tailscale falls back to relaying over TCP/443 to
+a DERP server when it cannot get a direct path — the direct path is
+WireGuard over UDP and stays invisible, but the relayed one does not, and it
+is attributed to the daemon rather than to whichever application caused it.
+And a cloud VM's guest and ops agents talk constantly to the metadata service
+and to their telemetry endpoints, which is traffic you did not ask for and
+would otherwise be unexplained.
 
 **Traffic in the last fraction of a socket's life is missed.** If a connection
 moves data and closes between two samples, what it moved after the final

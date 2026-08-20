@@ -94,6 +94,7 @@ DOWN = rgb(120, 200, 255)
 UP = rgb(255, 170, 120)
 
 INO = re.compile(r"\bino:(\d+)")
+CGROUP = re.compile(r"\bcgroup:(\S+)")
 SENT = re.compile(r"\bbytes_sent:(\d+)")
 RECV = re.compile(r"\bbytes_received:(\d+)")
 # 10/8, 172.16/12, 192.168/16, 169.254/16 and Tailscale's 100.64/10 are all
@@ -101,6 +102,32 @@ RECV = re.compile(r"\bbytes_received:(\d+)")
 PRIVATE = re.compile(r"^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|"
                      r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)")
 UNATTRIBUTED = "(unattributed)"
+# Systemd names the slice, not the thing in it.
+SLICES = ("system.slice", "user.slice", "init.scope", "-.slice", "app.slice")
+
+
+def unit_name(cgroup):
+    """Who owns a socket, from the cgroup the kernel already reports.
+
+    Another user's /proc is closed, but `ss` prints the control group for
+    every socket regardless, and on a systemd machine that names the unit:
+    /system.slice/tailscaled.service is tailscaled however unreadable its
+    /proc happens to be. This is the difference between a row saying
+    "(unattributed)" and a row saying which daemon it is.
+    """
+    for part in reversed((cgroup or "").strip("/").split("/")):
+        if not part or part in SLICES:
+            continue
+        for suffix in (".service", ".scope", ".slice"):
+            if part.endswith(suffix):
+                part = part[:-len(suffix)]
+                break
+        # A login session is a person, not a program, and says nothing
+        # useful about what opened the socket.
+        if part.startswith("session-") or part.startswith("user-"):
+            continue
+        return part
+    return ""
 
 
 def run(args):
@@ -226,7 +253,7 @@ def sockets(external=False):
     except (OSError, subprocess.SubprocessError):
         return {}, "ss would not run"
     found = {}
-    inode, peer, port, header = None, "", 0, True
+    inode, peer, port, cgroup, header = None, "", 0, "", True
     for line in out.stdout.splitlines():
         if header:
             header = False
@@ -239,6 +266,8 @@ def sockets(external=False):
             port = port_of(cols[4]) if len(cols) > 4 else 0
             seen = INO.search(line)
             inode = seen.group(1) if seen else None
+            unit = CGROUP.search(line)
+            cgroup = unit.group(1) if unit else ""
             # ino:0 is a socket with no inode to own it - a TIME-WAIT
             # remnant, say. It cannot be attributed, and worse, every one of
             # them shares the key, so they would be merged into a single
@@ -254,7 +283,7 @@ def sockets(external=False):
         sent, recv = SENT.search(line), RECV.search(line)
         found[inode] = {"sent": int(sent.group(1)) if sent else 0,
                         "recv": int(recv.group(1)) if recv else 0,
-                        "peer": peer, "port": port}
+                        "peer": peer, "port": port, "cgroup": cgroup}
         inode = None
     return found, ""
 
@@ -563,7 +592,9 @@ class Store(object):
                         d_sent, d_recv = sent, recv
                     else:
                         d_sent, d_recv = sent - was[0], recv - was[1]
-                    pid, name = owners.get(inode, (0, UNATTRIBUTED))
+                    pid, name = owners.get(inode, (0, ""))
+                    if not name:
+                        name = unit_name(seen.get("cgroup")) or UNATTRIBUTED
                     key = (pid, name)
                     row = self.totals.get(key)
                     if row is None:
@@ -929,8 +960,9 @@ def detail_rows(row, hist, spots, conns, files, sizes, focus, at, w, h):
                     (DOWN, "↓ " + rate(row["down_rate"])), (DIM, "  "),
                     (UP, "↑ " + rate(row["up_rate"]))], w - 1))
     if not row["pid"]:
-        out.append(seg([(DIM, " sockets /proc would not name an owner for - "
-                              "another user's, which means root's")], w - 1))
+        out.append(seg([(DIM, " another user's process - named from its "
+                              "control group, since /proc is closed to us")],
+                       w - 1))
     elif not here_now:
         out.append(seg([(WARN, " this process has exited - its total is kept,"
                                " and nothing below is live")], w - 1))
