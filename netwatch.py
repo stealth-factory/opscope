@@ -45,7 +45,8 @@ encrypted stream. The URL and the remote filename are inside TLS and are not
 readable from here by any means.
 
 Keys: up/down select, enter opens one, esc goes back, 1 sorts by total,
-2 by current rate, r rezeroes, q quits.
+2 by current rate, o shows the daemons you do not own, r rezeroes,
+q quits.
 """
 import collections
 import json
@@ -66,6 +67,10 @@ _CFG = load_config("netwatch", {
     "limit": 0,          # 0 fills the pane
     "sort": "total",
     "external": True,
+    # Only processes you own. Everything else is the machine's own daemons -
+    # tailscaled, a cloud guest agent, sshd - which are traffic you did not
+    # ask for and cannot do anything about.
+    "mine": True,
 })
 
 INTERVAL = max(0.2, float(_CFG["interval"]))
@@ -79,7 +84,8 @@ SORT = _CFG["sort"] if _CFG["sort"] in ("total", "live") else "total"
 # addresses are all somewhere other than the internet, and "what is this box
 # sending out" is almost always the question being asked.
 EXTERNAL = bool(_CFG["external"])
-VERSION = "1.0"
+MINE = bool(_CFG["mine"])
+VERSION = "1.1"
 PLAIN = False
 
 OK = rgb(90, 240, 160)
@@ -498,10 +504,11 @@ class Store(object):
             return ([dict(v, key=k) for k, v in self.totals.items()],
                     self.started, self.err)
 
-    def rates(self):
-        """The machine's total down and up rate, one pair per sample."""
+    def rates(self, mine=True):
+        """Total down and up rate per sample, yours or the whole machine's."""
         with self.lock:
-            return list(self.series)
+            window = list(self.series)
+        return [(s[0], s[1]) if mine else (s[2], s[3]) for s in window]
 
     def endpoints(self, pid, name):
         """One process's remote hosts, aggregated, busiest first."""
@@ -652,9 +659,13 @@ class Store(object):
                 # Summed from the same per-process figures the table shows,
                 # so the two can never disagree.
                 if gap:
-                    self.series.append(
-                        (sum(r["down_rate"] for r in self.totals.values()),
-                         sum(r["up_rate"] for r in self.totals.values())))
+                    self.series.append((
+                        sum(r["down_rate"] for r in self.totals.values()
+                            if r["pid"]),
+                        sum(r["up_rate"] for r in self.totals.values()
+                            if r["pid"]),
+                        sum(r["down_rate"] for r in self.totals.values()),
+                        sum(r["up_rate"] for r in self.totals.values())))
                     for row in self.totals.values():
                         row["hist"].append((row["down_rate"], row["up_rate"]))
                     for spot in self.spots.values():
@@ -1047,7 +1058,7 @@ def plain_line(rows, started, mode, limit):
 
 
 def parse_args(argv):
-    global INTERVAL, LIMIT, SORT, EXTERNAL, PLAIN
+    global INTERVAL, LIMIT, SORT, EXTERNAL, PLAIN, MINE
     rest = list(argv)
     while rest:
         arg = rest.pop(0)
@@ -1065,6 +1076,8 @@ def parse_args(argv):
             EXTERNAL = True
         elif arg == "--all-external":
             EXTERNAL = False
+        elif arg == "--all-users":
+            MINE = False
         elif arg in ("-V", "--version"):
             print("netwatch.py %s" % VERSION)
             raise SystemExit(0)
@@ -1076,6 +1089,7 @@ def parse_args(argv):
 
 
 def main():
+    global MINE
     maybe_help(__doc__)
     parse_args(sys.argv[1:])
     if not any(os.access(os.path.join(p, "ss"), os.X_OK)
@@ -1094,6 +1108,8 @@ def main():
             rows, started, err = store.snapshot()
             if err:
                 sys.stderr.write(err + "\n")
+            if MINE:
+                rows = [r for r in rows if r["pid"]]
             print(plain_line(ordered(rows, mode), started, mode,
                              LIMIT or len(rows)))
             sys.stdout.flush()
@@ -1107,6 +1123,10 @@ def main():
     while True:
         w, h = size()
         rows, started, err = store.snapshot()
+        # A row with no pid is a process we do not own: /proc would not name
+        # it, which is the same test as "not ours".
+        if MINE:
+            rows = [r for r in rows if r["pid"]]
         rows = ordered(rows, mode)
 
         for key in keyboard.poll():
@@ -1150,6 +1170,9 @@ def main():
                 selected += 1
             elif key in ("s", "S", "t", "T"):
                 mode = "live" if mode == "total" else "total"
+            elif key in ("o", "O"):
+                MINE = not MINE
+                selected = 0
             elif key in ("enter", "right", "i") and rows:
                 pick = rows[max(0, min(selected, len(rows) - 1))]
                 detail, sizes = (pick["pid"], pick["name"]), {}
@@ -1227,7 +1250,8 @@ def main():
                         (DIM, " · "), (ACCENT, elapsed(time.time() - started)),
                         (DIM, " · sorted by "), (ACCENT, mode),
                         (DIM, "   every %gs" % INTERVAL)], w - 1))
-        out.append(seg([(DIM, " TCP only · "),
+        out.append(seg([(DIM, " TCP only · " if MINE
+                        else " TCP only · every user · "),
                         (DOWN, "↓ " + rate(down)), (DIM, "  "),
                         (UP, "↑ " + rate(up)),
                         (DIM, "  · internet only" if EXTERNAL
@@ -1241,9 +1265,9 @@ def main():
         # chart at all rather than two rows of neither.
         spare = h - len(out) - 4
         graph_h = 9 if spare >= 20 else 7 if spare >= 15 else 5 if spare >= 11 else 0
-        if graph_h and store.rates():
-            out.append(chart_head(store.rates(), w, "TRAFFIC"))
-            out.extend(chart(store.rates(), w, graph_h))
+        if graph_h and store.rates(MINE):
+            out.append(chart_head(store.rates(MINE), w, "TRAFFIC"))
+            out.extend(chart(store.rates(MINE), w, graph_h))
             out.append("")
 
         room = max(1, h - len(out) - 3)
@@ -1263,6 +1287,7 @@ def main():
                  [(ACCENT, "↵"), (DIM, " details")],
                  [(ACCENT if mode == "total" else DIM, "[1] total")],
                  [(ACCENT if mode == "live" else DIM, "[2] live")],
+                 [(DIM, "[o]%s others" % ("show" if MINE else "hide"))],
                  [(DIM, "[r]ezero")], [(DIM, "[q]uit")]]
         for line in pack_hints(hints, w - 2):
             out.append(" " + line)

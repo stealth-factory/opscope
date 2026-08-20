@@ -153,6 +153,17 @@ nothing to read. That is a larger hole than it first appears:
   application, and it does not appear at all;
 - **mosh**, and anything else with a UDP transport.
 
+**Processes you do not own are excluded by default.** They are the machine's
+own daemons — `tailscaled`, a cloud guest agent, `ssh.socket` — carrying
+traffic you did not ask for and cannot do anything about, and they crowd out
+the rows you can act on. `o` shows them, `--all-users` starts with them
+shown, and `netwatch.mine` in config sets which way round it opens.
+
+Both totals are recorded on every sample, so `o` flips instantly and the
+chart redraws over history it already had rather than starting again. What
+the header and the chart count follows the filter: with it on, the figures
+are your processes, not the network card's.
+
 **Another user's sockets have no pid here** — `/proc/<pid>/fd` is unreadable
 for them, which on a normal machine means everything root runs. They are
 still counted, and on a systemd machine they are still *named*: `ss` prints
@@ -298,6 +309,7 @@ against.
 | `f` | focus the open files |
 | `c` | copy the selected host, socket or path |
 | `s` | switch sort mode (`t` also works) |
+| `o` | show or hide processes you do not own |
 | `1` | sort by total data used |
 | `2` | sort by current rate |
 | `r` | rezero every total |
@@ -316,6 +328,7 @@ netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
 | `--sort` | `total` or `live`, the mode it opens in |
 | `--external` | public internet only — **the default**, kept as an alias |
 | `--all-external` | widen it: include the LAN, the tailnet, everything off-box |
+| `--all-users` | include processes you do not own, off by default |
 | `--plain` | print a block per interval, no clearing, for a pipe or a log |
 | `-h`, `--help` | this |
 | `-V`, `--version` | print the version |
@@ -344,7 +357,8 @@ of its own, no root, no capture.
   "interval": 1.0,
   "limit": 0,
   "sort": "total",
-  "external": false
+  "external": true,
+  "mine": true
 }
 ```
 

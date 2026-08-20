@@ -106,7 +106,8 @@
     "interval": 1.0,
     "limit": 0,
     "sort": "total",
-    "external": false
+    "external": true,
+    "mine": true
   },
   "ports": {
     "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` - parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
