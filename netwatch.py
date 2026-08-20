@@ -328,6 +328,43 @@ def process_name(pid):
     return name or "?"
 
 
+# Interfaces that are not the wire: loopback, and anything that is a tunnel
+# or a bridge rather than a card. A packet forwarded out of one of these
+# leaves through a real interface as well, and counting both would count it
+# twice.
+VIRTUAL = ("lo", "tailscale0", "docker", "veth", "br-", "virbr", "wg",
+           "tun", "tap", "cni", "flannel", "kube")
+
+
+def wire_bytes():
+    """Bytes in and out of this machine's real interfaces.
+
+    The kernel counts these whatever produced them, which is the point: a
+    packet this machine routes rather than terminates never touches a
+    socket, so /proc/net/tcp cannot see it and neither can anything built on
+    it. On an exit node or a subnet router that is most of the traffic.
+    """
+    rx = tx = 0
+    try:
+        lines = open("/proc/net/dev").read().splitlines()[2:]
+    except OSError:
+        return None
+    for line in lines:
+        name, _, rest = line.partition(":")
+        name = name.strip()
+        if not rest or name.startswith(VIRTUAL):
+            continue
+        fields = rest.split()
+        if len(fields) < 9:
+            continue
+        try:
+            rx += int(fields[0])
+            tx += int(fields[8])
+        except ValueError:
+            continue
+    return rx, tx
+
+
 def socket_owners():
     """inode -> (pid, name), for every process this user can read.
 
@@ -496,6 +533,8 @@ class Store(object):
         self.last = {}
         self.started = time.time()
         self.stamp = 0.0
+        self.wire = None          # last (rx, tx) off the interfaces
+        self.wire_rate = (0.0, 0.0)
         self.err = ""
         self.rezero = False
 
@@ -503,6 +542,11 @@ class Store(object):
         with self.lock:
             return ([dict(v, key=k) for k, v in self.totals.items()],
                     self.started, self.err)
+
+    def wire_now(self):
+        """The interfaces' current rate, in and out."""
+        with self.lock:
+            return self.wire_rate
 
     def rates(self, mine=True):
         """Total down and up rate per sample, yours or the whole machine's."""
@@ -562,6 +606,7 @@ class Store(object):
     def poll(self):
         while True:
             now = time.time()
+            counters = wire_bytes()
             found, err = sockets(EXTERNAL)
             owners = socket_owners() if found else {}
             gap = max(1e-6, now - self.stamp) if self.stamp else 0.0
@@ -655,6 +700,16 @@ class Store(object):
                     if gap:
                         spot["up_rate"] += d_sent / gap
                         spot["down_rate"] += d_recv / gap
+                # What the interfaces actually moved, against what the
+                # sockets can explain. On a router the two differ by most of
+                # the traffic, and a widget that only showed the second
+                # would be quietly answering a different question.
+                if counters and self.wire and gap:
+                    self.wire_rate = (max(0, counters[0] - self.wire[0]) / gap,
+                                      max(0, counters[1] - self.wire[1]) / gap)
+                if counters:
+                    self.wire = counters
+
                 # The whole machine's rate this sample, for the chart.
                 # Summed from the same per-process figures the table shows,
                 # so the two can never disagree.
@@ -1256,6 +1311,26 @@ def main():
                         (UP, "↑ " + rate(up)),
                         (DIM, "  · internet only" if EXTERNAL
                          else "  · everything off-box")], w - 1))
+        # What the network card moved, beside what the sockets explain. A
+        # machine that routes - an exit node, a subnet router, a container
+        # host - passes traffic that never touches a socket here, and a
+        # process list presented as the whole picture would be a lie by
+        # omission on exactly the machines where it matters most.
+        wire_rx, wire_tx = store.wire_now()
+        wire = wire_rx + wire_tx
+        if wire > 0:
+            share = min(1.0, (down + up) / wire)
+            said = [(DIM, " wire · "),
+                    (DOWN, "↓ " + rate(wire_rx)), (DIM, "  "),
+                    (UP, "↑ " + rate(wire_tx)), (DIM, "  · "),
+                    (DIM if share >= 0.9 else WARN,
+                     "%.0f%% of it has a socket" % (share * 100))]
+            # The percentage is the signal; the sentence explaining it is a
+            # courtesy, and is dropped rather than truncated mid-word.
+            tail = " · the rest is routed through, not sent by anything here"
+            if share < 0.9 and sum(len(t) for _, t in said) + len(tail) <= w - 1:
+                said.append((DIM, tail))
+            out.append(seg(said, w - 1))
         if err:
             out.append(seg([(BAD, " ! " + err)], w - 1))
         out.append("")

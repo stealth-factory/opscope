@@ -140,6 +140,42 @@ something that means something: a binary at `…/claude/versions/2.1.233`
 reports itself as `2.1.233`, which is true and useless, and is shown as
 `claude`.
 
+## Routed traffic, and the `wire` line
+
+**A machine that routes rather than terminates passes traffic this cannot
+see at all.** An exit node, a subnet router, a container host: a packet
+arrives on one interface and leaves by another, forwarded at the IP layer by
+the kernel. It never terminates in a socket here, so `/proc/net/tcp` has no
+entry for it, `ss` reports nothing, and no amount of filtering will reveal
+it. It is not being hidden — it does not exist in the place this reads.
+
+On a Tailscale exit node that is most of the traffic. Measured on one:
+`ens4` moved 9.6 MB in twenty seconds while the sockets accounted for 2.0 MB
+— **85% forwarded**, and invisible.
+
+So the header carries a second line, read from `/proc/net/dev`, which counts
+bytes per interface whatever produced them:
+
+```
+ TCP only · ↓ 6.5 KB/s  ↑ 95.3 KB/s  · internet only
+ wire · ↓ 25.7 KB/s  ↑ 118.7 KB/s  · 71% of it has a socket · the rest is
+                                      routed through, not sent by anything here
+```
+
+The first line is what the process list adds up to. The second is what the
+network card actually moved. When they agree, the list below is the whole
+picture. When they do not, the difference is traffic passing through, and
+the percentage says how much of the story the table is telling.
+
+Only real interfaces are counted — loopback, `tailscale0`, `docker0`, bridges
+and veth pairs are skipped, because a forwarded packet leaves through a card
+as well and counting both would count it twice.
+
+If you need per-process attribution of *forwarded* traffic, this method
+cannot give it and neither can any other that reads sockets. That needs
+conntrack (`conntrack -L`, which sees the NAT flows) or eBPF at the
+forwarding hook — a different tool.
+
 ## What it cannot see
 
 **UDP is invisible.** `ss` keeps no byte counters for UDP sockets — there is
