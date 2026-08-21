@@ -123,21 +123,25 @@ def readiness(stem, need):
     """
     need = (need or "").strip()
     if not need or need in ("—", "-"):
-        return "ready", OK
+        return "nothing to set up", DIM
     commands = BACKTICKED.findall(need)
     if commands:
         missing = [c for c in commands if not shutil.which(c)]
         if missing:
             return "needs " + ", ".join(missing), WARN
-        return "ready", OK
+        return ", ".join(commands) + " installed", OK
     if re.search(r"token|key|login", need, re.I):
         if stem == "usage":
             # Not one credential but whichever agents happen to be signed in
             # on this machine, which the widget itself is the thing that
             # knows. Claiming either way from out here would be a guess.
             return "reads what is logged in", DIM
-        return ("ready" if token_ready(stem) else "set " + need,
-                OK if token_ready(stem) else WARN)
+        if token_ready(stem):
+            # A token being present is not a token being any good: nothing
+            # here spends one to find out whether it is expired or missing a
+            # scope. Saying it is set says only what was actually checked.
+            return "token is set", OK
+        return "set " + need, WARN
     return need, DIM
 
 
@@ -233,11 +237,13 @@ def main():
 
         w, h = size()
         selected = max(0, min(selected, len(items) - 1)) if items else 0
-        ready = sum(1 for i in items if i["state"][0] == "ready")
+        blocked = sum(1 for i in items if i["state"][1] is WARN)
 
         body = [title("terminal toys", w, ACCENT)]
         body.append(seg([(DIM, " %d widgets · " % len(items)),
-                         (OK, "%d ready here" % ready),
+                         (WARN if blocked else OK,
+                          "%d need something first" % blocked if blocked
+                          else "all of them will run here"),
                          (DIM, "   ↵ launches one, q leaves")], w - 1))
         body.append("")
         if not items:

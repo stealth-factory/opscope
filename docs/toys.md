@@ -5,13 +5,14 @@ machine.
 
 ```
 ╺━ TERMINAL TOYS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 13 widgets · 11 ready here   ↵ launches one, q leaves
+ 13 widgets · 2 need something first   ↵ launches one, q leaves
 
- ▸ netwatch     Which processes are using the network, how much…   ready
-   ports        What is listening on this machine, what started…   ready
+ ▸ netwatch     Which processes are using the network, how much…   ss installed
+   ports        What is listening on this machine, what started…   nothing to set up
    github       GitHub delivery metrics across every org…          set a GitHub token
    latency      Multi-target latency monitor.                      needs ping
-   tailnet      Tailscale network: who is online…                  ready
+   tailnet      Tailscale network: who is online…                  tailscale installed
+   usage        How much the coding agents have been used…         reads what is logged in
    …
 
  ── NETWATCH ── python3 netwatch.py
@@ -45,14 +46,31 @@ to remember to update, which is the only kind of list that stays correct.
 
 ## Whether it will run
 
-The right-hand column is this machine, not the general case.
+The right-hand column is this machine, not the general case, and it says
+**what was actually checked** rather than a verdict. There is no "ready",
+because "ready" would mean three different things:
 
-A widget that needs a **command** either has it or does not, and that is
-worth saying plainly: `needs ping` means exactly that. A widget that needs a
-**token** is softer — it might be somewhere the launcher cannot see — so a
-missing one reads `set a GitHub token`, a thing to do rather than a failure.
+| It says | It checked |
+|---|---|
+| `nothing to set up` | the widget declares no requirement at all |
+| `ss installed` | every command it named is on `PATH` |
+| `needs ping` | one is not, and that is its name |
+| `token is set` | a token is present, in config or the named environment variable |
+| `set a GitHub token` | none was found in either |
+| `reads what is logged in` | nothing — see below |
+
+The distinction matters most for tokens. **`token is set` is not `the token
+works`.** Nothing here spends a credential to find out whether it has expired
+or is missing a scope — a GitHub PAT without `read:org` will pass this check
+and still show you half a board. The line says a token exists, because that
+is the only thing that was established.
+
+Nor is anything executed. A command being on `PATH` is not that command
+working; `tailscale installed` says the binary is there, not that the daemon
+is up or you are logged in.
+
 `pr.py` has no token of its own by design, reusing GitHub's rather than
-asking for a second, so it reports GitHub's readiness.
+asking for a second, so it reports GitHub's.
 
 `usage.py` says `reads what is logged in`, because its requirement is not one
 credential but whichever agents happen to be signed in on this machine — and
