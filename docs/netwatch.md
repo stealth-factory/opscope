@@ -52,9 +52,15 @@ An idle stretch draws **nothing** rather than a line pinned to the axis — a
 flat line at zero reads as activity that happens to be zero, where blank
 reads as what it is.
 
-The same chart appears in three places: the whole machine above the process
-list, the selected process at the top of its own screen, and the highlighted
-remote host as a compact one under the endpoint list, a single row each way.
+The chart is named for what it plots, which is the sum of the rows beneath
+it: **YOUR PROCESSES**, or **EVERY PROCESS** once `o` has shown the ones you
+do not own. It is deliberately not called "traffic" — the machine's traffic
+is the `interfaces` line above, and the two disagreeing is the entire reason
+for having both.
+
+The same chart appears in three places: the process list's total above it,
+the selected process at the top of its own screen, and the highlighted remote
+host as a compact one under the endpoint list, a single row each way.
 
 ## Where the numbers come from
 
@@ -140,7 +146,7 @@ something that means something: a binary at `…/claude/versions/2.1.233`
 reports itself as `2.1.233`, which is true and useless, and is shown as
 `claude`.
 
-## Routed traffic, and the `wire` line
+## Routed traffic, and the `interfaces` line
 
 **A machine that routes rather than terminates passes traffic this cannot
 see at all.** An exit node, a subnet router, a container host: a packet
@@ -157,19 +163,32 @@ So the header carries a second line, read from `/proc/net/dev`, which counts
 bytes per interface whatever produced them:
 
 ```
- TCP only · ↓ 6.5 KB/s  ↑ 95.3 KB/s  · internet only
- wire · ↓ 25.7 KB/s  ↑ 118.7 KB/s  · 71% of it has a socket · the rest is
-                                      routed through, not sent by anything here
+ TCP only · ↓ 6.3 KB/s  ↑ 72.2 KB/s  · internet only
+ interfaces · ↓ 41.1 KB/s  ↑ 135.5 KB/s  · 44% of it has a socket  · ens4
 ```
 
 The first line is what the process list adds up to. The second is what the
-network card actually moved. When they agree, the list below is the whole
+interfaces actually moved. When they agree, the list below is the whole
 picture. When they do not, the difference is traffic passing through, and
 the percentage says how much of the story the table is telling.
 
 Only real interfaces are counted — loopback, `tailscale0`, `docker0`, bridges
 and veth pairs are skipped, because a forwarded packet leaves through a card
-as well and counting both would count it twice.
+as well and counting both would count it twice. Which ones were counted is
+named at the end of the line, where the pane is wide enough to say so; that
+is the first thing dropped when it is not.
+
+Two reasons the two lines never match exactly, even on a machine that routes
+nothing. The interface counters include **every protocol** — UDP, ICMP, ARP,
+QUIC, WireGuard — where the table is TCP only. And they count **framing**:
+Ethernet, IP and TCP headers are on the wire, while `bytes_sent` and
+`bytes_received` are payload. So the share is capped at 100%, and anything
+above about 90% means the table is telling essentially the whole story.
+
+On an exit node specifically, a peer's traffic crosses the same interface
+**twice** — inbound wrapped in WireGuard, then outbound again in the clear to
+wherever it was going. The count is a truthful account of what the card
+moved; it is not the same number as what the peer transferred.
 
 If you need per-process attribution of *forwarded* traffic, this method
 cannot give it and neither can any other that reads sockets. That needs

@@ -344,7 +344,7 @@ def wire_bytes():
     socket, so /proc/net/tcp cannot see it and neither can anything built on
     it. On an exit node or a subnet router that is most of the traffic.
     """
-    rx = tx = 0
+    rx, tx, names = 0, 0, []
     try:
         lines = open("/proc/net/dev").read().splitlines()[2:]
     except OSError:
@@ -362,7 +362,22 @@ def wire_bytes():
             tx += int(fields[8])
         except ValueError:
             continue
-    return rx, tx
+        names.append(name)
+    return rx, tx, names
+
+
+def wire_label(names):
+    """Which interfaces are being counted, for the end of the line.
+
+    The line is called "interfaces" because that is what it is. Naming them
+    as well answers "which?" - a real question here, tailscale0 being
+    deliberately absent - and is dropped first when the pane is narrow.
+    """
+    if not names:
+        return ""
+    if len(names) <= 3:
+        return ", ".join(names)
+    return "%d of them" % len(names)
 
 
 def socket_owners():
@@ -535,6 +550,7 @@ class Store(object):
         self.stamp = 0.0
         self.wire = None          # last (rx, tx) off the interfaces
         self.wire_rate = (0.0, 0.0)
+        self.wire_names = []
         self.err = ""
         self.rezero = False
 
@@ -544,9 +560,9 @@ class Store(object):
                     self.started, self.err)
 
     def wire_now(self):
-        """The interfaces' current rate, in and out."""
+        """The interfaces' current rate, in and out, and what they are."""
         with self.lock:
-            return self.wire_rate
+            return self.wire_rate + (list(self.wire_names),)
 
     def rates(self, mine=True):
         """Total down and up rate per sample, yours or the whole machine's."""
@@ -708,7 +724,8 @@ class Store(object):
                     self.wire_rate = (max(0, counters[0] - self.wire[0]) / gap,
                                       max(0, counters[1] - self.wire[1]) / gap)
                 if counters:
-                    self.wire = counters
+                    self.wire = counters[:2]
+                    self.wire_names = counters[2]
 
                 # The whole machine's rate this sample, for the chart.
                 # Summed from the same per-process figures the table shows,
@@ -1316,11 +1333,11 @@ def main():
         # host - passes traffic that never touches a socket here, and a
         # process list presented as the whole picture would be a lie by
         # omission on exactly the machines where it matters most.
-        wire_rx, wire_tx = store.wire_now()
+        wire_rx, wire_tx, wire_names = store.wire_now()
         wire = wire_rx + wire_tx
         if wire > 0:
             share = min(1.0, (down + up) / wire)
-            said = [(DIM, " wire · "),
+            said = [(LBL, " interfaces"), (DIM, " · "),
                     (DOWN, "↓ " + rate(wire_rx)), (DIM, "  "),
                     (UP, "↑ " + rate(wire_tx)), (DIM, "  · "),
                     (DIM if share >= 0.9 else WARN,
@@ -1330,6 +1347,11 @@ def main():
             tail = " · the rest is routed through, not sent by anything here"
             if share < 0.9 and sum(len(t) for _, t in said) + len(tail) <= w - 1:
                 said.append((DIM, tail))
+            which = wire_label(wire_names)
+            if which:
+                room = (w - 1) - sum(len(t) for _, t in said) - 3
+                if len(which) <= room:
+                    said.append((GRID, "  · " + which))
             out.append(seg(said, w - 1))
         if err:
             out.append(seg([(BAD, " ! " + err)], w - 1))
@@ -1341,7 +1363,13 @@ def main():
         spare = h - len(out) - 4
         graph_h = 9 if spare >= 20 else 7 if spare >= 15 else 5 if spare >= 11 else 0
         if graph_h and store.rates(MINE):
-            out.append(chart_head(store.rates(MINE), w, "TRAFFIC"))
+            # The chart is the sum of the rows below it, so it is named
+            # for them. Calling it "traffic" claimed the whole machine's,
+            # which is the one thing it is not - that is the interfaces
+            # line, and the two disagreeing is the point of having both.
+            out.append(chart_head(store.rates(MINE), w,
+                                  "YOUR PROCESSES" if MINE
+                                  else "EVERY PROCESS"))
             out.extend(chart(store.rates(MINE), w, graph_h))
             out.append("")
 
