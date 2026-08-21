@@ -33,6 +33,7 @@ nothing at all — it just looks good, and it knows it.
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
+| **`toys.py`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/toys.md) |
 | **`latency.py`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
 | **`deployments.py`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
 | **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
