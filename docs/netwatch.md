@@ -19,11 +19,17 @@ they are going right now.
 
 ## The chart
 
-Above the process list, and the same shape wherever it appears: **received
-above the zero line, sent below it**, newest on the right.
+Above the process list, and the same shape wherever it appears: **sent above
+the zero line, received below it**, newest on the right.
+
+That way round because of the labels. `↑` means upload and `↓` means
+download, so upload has to be the half that goes up — a `↓ rx` label sitting
+over a line that climbs asks you to hold two contradictory directions at
+once, and you will believe the arrow. It is the same rule the PR and issue
+flow charts follow with `▲`/`▼`.
 
 ```
- ── TRAFFIC ── ↓ rx above · ↑ tx below  · 2m 30s of history
+ ── PROCESS WATCH ── ↑ tx above · ↓ rx below  · 2m 30s of history
   2.0 MB/s ┌──────────────────────────────────────────────────────────┐
            │   ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⢄⣀⡀               ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⠤⣀⡀  │
            │⠔⠒⠉⠁                   ⠈⠉⠒⠤⢄⡀     ⣀⡠⠔⠒⠉⠁                ⠈⠉⠒⠢⢄⣀│

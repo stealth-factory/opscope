@@ -877,7 +877,12 @@ def braille_row(masks, colour):
 
 
 def chart(series, w, h, label="", tint=None):
-    """Received above the line, sent below it, newest on the right.
+    """Sent above the line, received below it, newest on the right.
+
+    That way round because of the arrows: ↑ means upload and ↓ means
+    download, so upload has to be the half that goes up. Drawing received
+    above an arrow pointing down asks the reader to hold two contradictory
+    directions at once, and they will believe the arrow.
 
     The two halves are scaled independently and each says what its own peak
     is. A shared scale is the obvious choice and the wrong one here: a
@@ -886,29 +891,34 @@ def chart(series, w, h, label="", tint=None):
     upload is flat is often the question. The lower label carries a minus
     sign, since down the page is the negative half of the axis.
     """
-    lab = 10
-    plot = max(12, w - lab - 4)
     canvas = max(2, h - 3)
     up_h = max(1, canvas // 2)
     down_h = max(1, canvas - up_h)
-    window = list(series)[-plot * 2:]
+    # Sized against the widest label this could need, so the slice does not
+    # change when the peak's text does.
+    window = list(series)[-max(12, w - 18) * 2:]
     rx = [v[0] for v in window]
     tx = [v[1] for v in window]
     rx_peak = max(rx or [0]) or 1.0
     tx_peak = max(tx or [0]) or 1.0
     rx_hue, tx_hue = tint or (DOWN, UP)
+    # The label column is sized to the labels it must hold. A fixed width
+    # was fine until a peak wanted eleven characters, at which point the
+    # line grew by one and pushed the frame's closing corner off the edge.
+    lab = min(14, max(9, len(rate(tx_peak)), len("−" + rate(rx_peak))))
+    plot = max(12, w - lab - 4)
 
-    out = [seg([(DIM, "%*s " % (lab, rate(rx_peak))),
+    out = [seg([(DIM, "%*s " % (lab, rate(tx_peak))),
                 (GRID, "┌" + "─" * plot + "┐")], w - 1)]
-    for masks in braille_canvas(rx, rx_peak, plot, up_h):
-        out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
-                       + braille_row(masks, rx_hue) + [(GRID, "│")], w - 1))
-    out.append(seg([(DIM, "%*s " % (lab, "0")),
-                    (GRID, "├" + "─" * plot + "┤")], w - 1))
-    for masks in braille_canvas(tx, tx_peak, plot, down_h, inverted=True):
+    for masks in braille_canvas(tx, tx_peak, plot, up_h):
         out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
                        + braille_row(masks, tx_hue) + [(GRID, "│")], w - 1))
-    out.append(seg([(DIM, "%*s " % (lab, "−" + rate(tx_peak))),
+    out.append(seg([(DIM, "%*s " % (lab, "0")),
+                    (GRID, "├" + "─" * plot + "┤")], w - 1))
+    for masks in braille_canvas(rx, rx_peak, plot, down_h, inverted=True):
+        out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
+                       + braille_row(masks, rx_hue) + [(GRID, "│")], w - 1))
+    out.append(seg([(DIM, "%*s " % (lab, "−" + rate(rx_peak))),
                     (GRID, "└" + "─" * plot + "┘")], w - 1))
     return out
 
@@ -918,7 +928,7 @@ def chart_head(series, w, label):
     window = list(series)
     span = elapsed(len(window) * INTERVAL) if window else "nothing yet"
     return seg([(LBL, " ── %s ── " % label),
-                (DOWN, "↓ rx above"), (DIM, " · "), (UP, "↑ tx below"),
+                (UP, "↑ tx above"), (DIM, " · "), (DOWN, "↓ rx below"),
                 (DIM, "  · %s of history" % span)], w - 1)
 
 

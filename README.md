@@ -109,6 +109,12 @@ before changing one:
   pane grows and drop them as it shrinks, rather than truncating.
 - **Never truncate a key hint.** Footers wrap across as many lines as they need
   and never split a hint, because `[±]25` teaches a key that does not exist.
+- **A directional glyph points the way the thing goes.** `▲`/`▼` mark which
+  half of a diverging chart a series occupies — `▲ opened` above the baseline,
+  `▼ merged` below it. `↑`/`↓` mean upload and download. Where both meanings
+  meet, in `netwatch.py`'s chart, the halves are arranged so they agree: tx
+  above and rx below, because a `↓` label over a line that climbs asks the
+  reader to hold two directions at once, and they will believe the arrow.
 - **Measure contrast, do not eyeball it.** Every colour that draws text clears
   WCAG AA against both the terminal background *and* the selected-row tint,
   with the measured ratios recorded beside the definitions.
