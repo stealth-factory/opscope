@@ -52,11 +52,12 @@ An idle stretch draws **nothing** rather than a line pinned to the axis — a
 flat line at zero reads as activity that happens to be zero, where blank
 reads as what it is.
 
-The chart is named for what it plots, which is the sum of the rows beneath
-it: **YOUR PROCESSES**, or **EVERY PROCESS** once `o` has shown the ones you
-do not own. It is deliberately not called "traffic" — the machine's traffic
-is the `interfaces` line above, and the two disagreeing is the entire reason
-for having both.
+The chart is **PROCESS WATCH**: the sum of the rows beneath it, and nothing
+else. It is deliberately not called "traffic" — the machine's traffic is the
+`interfaces` line above, and the two disagreeing is the entire reason for
+having both. Whether the rows are yours alone or everyone's is on that line
+rather than in the chart's name, so the heading stays put when `o` is
+pressed.
 
 The same chart appears in three places: the process list's total above it,
 the selected process at the top of its own screen, and the highlighted remote

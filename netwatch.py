@@ -1367,9 +1367,9 @@ def main():
             # for them. Calling it "traffic" claimed the whole machine's,
             # which is the one thing it is not - that is the interfaces
             # line, and the two disagreeing is the point of having both.
-            out.append(chart_head(store.rates(MINE), w,
-                                  "YOUR PROCESSES" if MINE
-                                  else "EVERY PROCESS"))
+            # Which processes are counted is on the line above; the chart
+            # keeps one name rather than renaming itself under the cursor.
+            out.append(chart_head(store.rates(MINE), w, "PROCESS WATCH"))
             out.extend(chart(store.rates(MINE), w, graph_h))
             out.append("")
 
