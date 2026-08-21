@@ -888,8 +888,9 @@ def chart(series, w, h, label="", tint=None):
     is. A shared scale is the obvious choice and the wrong one here: a
     download running at ten megabits with acknowledgements going back at
     fifty kilobits would draw the upload as a flat nothing, and whether the
-    upload is flat is often the question. The lower label carries a minus
-    sign, since down the page is the negative half of the axis.
+    upload is flat is often the question. Each label names its own direction
+    and neither is signed: the lower half is drawn downward, which is a fact
+    about the drawing rather than about the number.
     """
     canvas = max(2, h - 3)
     up_h = max(1, canvas // 2)
@@ -905,10 +906,17 @@ def chart(series, w, h, label="", tint=None):
     # The label column is sized to the labels it must hold. A fixed width
     # was fine until a peak wanted eleven characters, at which point the
     # line grew by one and pushed the frame's closing corner off the edge.
-    lab = min(14, max(9, len(rate(tx_peak)), len("−" + rate(rx_peak))))
+    # Each label carries its own direction, so a peak means something on
+    # its own rather than only in relation to the legend. Neither is
+    # negative: rx is not negative traffic, it is simply the half drawn
+    # downward, and a minus sign on it would be a fact about the drawing
+    # dressed up as a fact about the number.
+    up_label = "↑ " + rate(tx_peak)
+    down_label = "↓ " + rate(rx_peak)
+    lab = min(16, max(9, len(up_label), len(down_label)))
     plot = max(12, w - lab - 4)
 
-    out = [seg([(DIM, "%*s " % (lab, rate(tx_peak))),
+    out = [seg([(UP, "%*s " % (lab, up_label)),
                 (GRID, "┌" + "─" * plot + "┐")], w - 1)]
     for masks in braille_canvas(tx, tx_peak, plot, up_h):
         out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
@@ -918,7 +926,7 @@ def chart(series, w, h, label="", tint=None):
     for masks in braille_canvas(rx, rx_peak, plot, down_h, inverted=True):
         out.append(seg([(DIM, " " * (lab + 1)), (GRID, "│")]
                        + braille_row(masks, rx_hue) + [(GRID, "│")], w - 1))
-    out.append(seg([(DIM, "%*s " % (lab, "−" + rate(rx_peak))),
+    out.append(seg([(DOWN, "%*s " % (lab, down_label)),
                     (GRID, "└" + "─" * plot + "┘")], w - 1))
     return out
 

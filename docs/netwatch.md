@@ -30,13 +30,13 @@ flow charts follow with `▲`/`▼`.
 
 ```
  ── PROCESS WATCH ── ↑ tx above · ↓ rx below  · 2m 30s of history
-  2.0 MB/s ┌──────────────────────────────────────────────────────────┐
+ ↑ 90.0 KB/s ┌───────────────────────────────────────────────────────┐
            │   ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⢄⣀⡀               ⢀⣀⠤⠤⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠒⠒⠒⠤⠤⣀⡀  │
            │⠔⠒⠉⠁                   ⠈⠉⠒⠤⢄⡀     ⣀⡠⠔⠒⠉⠁                ⠈⠉⠒⠢⢄⣀│
          0 ├──────────────────────────────────────────────────────────┤
            │  ⡠⠔⠊⠉⠑⠢⡀             ⢀⠤⠊⠉⠉⠒⢄              ⡠⠒⠉⠉⠑⠢⡀        ⢀⠔⠊⠉│
            │⢀⠎      ⠈⠢⡀          ⡔⠁      ⠑⢄          ⡠⠊      ⠈⠢⡀      ⠔⠁ │
-−90.0 KB/s └──────────────────────────────────────────────────────────┘
+  ↓ 2.0 MB/s └───────────────────────────────────────────────────────┘
 ```
 
 Drawn with **braille**, which is what makes it a line rather than a staircase.
@@ -46,9 +46,11 @@ thirty-two. Consecutive samples are joined with a Bresenham segment, so a
 steep climb draws as a line instead of a column of dots. Two samples share
 each column.
 
-**The two halves are scaled independently**, and each labels its own peak;
-the lower one carries a minus sign, since down the page is the negative half
-of the axis. Sharing a scale is the obvious choice and the wrong one: a
+**The two halves are scaled independently**, and each label names its own
+direction and peak — `↑ 90.0 KB/s` at the top, `↓ 2.0 MB/s` at the bottom.
+Neither is signed. Received traffic is not negative traffic; it is simply the
+half drawn downward, and a minus sign on it would dress a fact about the
+drawing up as a fact about the number. Sharing a scale is the obvious choice and the wrong one: a
 download at two megabytes a second with acknowledgements going back at ninety
 kilobytes would draw the upload as a flat line along the axis, and whether
 the upload is flat is frequently the question. Read the labels, not the
