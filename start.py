@@ -242,7 +242,13 @@ class Preview(object):
                 best = lines
         if not best:
             return []
-        return [clip(l, cols) for l in best[:rows]]
+        # A carriage return anywhere in a line is fatal here: the line is
+        # drawn inside somebody else's frame, and a return sends the cursor
+        # to column zero, where the erase-to-end that follows every row
+        # wipes out what was just written. They arrive because the pty
+        # translates the widget's own newlines - it writes \r\n and ONLCR
+        # makes that \r\r\n - so one is left over by the split.
+        return [clip(l.replace("\r", ""), cols) for l in best[:rows]]
 
 
 def rows_for(items, w, selected):
