@@ -33,16 +33,9 @@ place that knows what it actually needs.
 
 Keys: up/down select, enter launches, r rechecks, q quits.
 """
-import atexit
-import codecs
 import ast
-import fcntl
 import glob
 import os
-import pty
-import re
-import signal
-import struct
 import subprocess
 import sys
 import termios
@@ -110,145 +103,35 @@ def widgets():
         about = " ".join(para)
         found.append({"file": name, "stem": name[:-3],
                       "summary": lines[0] if lines else "",
-                      "about": about[:400]})
+                      "about": about[:400], "sample": sample(name[:-3])})
     return found
 
 
-# Cursor moves, clears and mode changes belong to whoever wrote them at a
-# real terminal; inside a box on someone else's screen they would move the
-# real cursor. Colour is kept, because colour is most of what a preview is.
-NOT_COLOUR = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-HJKSTfhilmnsu]")
-SGR = re.compile(r"\x1b\[[0-9;]*m")
+def sample(stem):
+    """The picture from this widget's doc page, if it has one.
 
-
-def keep_colour(text):
-    """Strip every escape except the ones that set a colour."""
-    return NOT_COLOUR.sub(lambda m: m.group(0) if m.group(0).endswith("m")
-                          else "", text)
-
-
-def clip(text, width):
-    """Truncate to `width` printable cells, counting no escape as a cell."""
-    kept, cells, i = [], 0, 0
-    while i < len(text) and cells < width:
-        found = SGR.match(text, i)
-        if found:
-            kept.append(found.group(0))
-            i = found.end()
-            continue
-        kept.append(text[i])
-        cells += 1
-        i += 1
-    return "".join(kept)
-
-
-class Preview(object):
-    """The selected widget, running small, in the space under the list.
-
-    A description says what a thing is for; a picture says what it looks
-    like, and these are worth looking at. So the highlighted one is started
-    for real in a pseudo-terminal the size of the box it will be drawn in,
-    and its own frames are shown.
-
-    It is the widget itself rather than a recording, which means a widget
-    that cannot run previews its own explanation of why - the same screen
-    it would show if you started it. Nothing has to be kept in step.
+    Every doc opens with a rendering of the widget it describes, kept by
+    whoever wrote it and read by whoever is deciding whether to run the
+    thing. Using that means no second copy of anything - and, more to the
+    point, no widget has to be started to be looked at.
     """
-
-    def __init__(self):
-        self.proc = None
-        self.fd = None
-        self.buf = ""
-        self.key = None
-        # A read can land in the middle of a character. Decoding each chunk
-        # on its own turns both halves into replacement marks - and these
-        # widgets are largely box-drawing and braille, three bytes each, so
-        # that is not a rare corner: it eats the line, and a line whose left
-        # rule was eaten stops looking like part of the preview at all. An
-        # incremental decoder holds the tail until the rest arrives.
-        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        atexit.register(self.stop)
-
-    def stop(self):
-        if self.proc is not None:
-            try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                self.proc.wait(timeout=2)
-            except Exception:
-                pass
-        if self.fd is not None:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
-        self.proc, self.fd, self.buf = None, None, ""
-        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
-
-    def show(self, item, cols, rows):
-        """Start, or restart, the preview for this widget at this size."""
-        key = (item["file"], cols, rows)
-        if key == self.key:
-            return
-        self.stop()
-        self.key = key
-        master, slave = pty.openpty()
-        try:
-            fcntl.ioctl(slave, termios.TIOCSWINSZ,
-                        struct.pack("HHHH", rows, cols, 0, 0))
-            self.proc = subprocess.Popen(
-                [sys.executable, os.path.join(HERE, item["file"])],
-                stdin=slave, stdout=slave, stderr=slave,
-                start_new_session=True)
-        except OSError:
-            os.close(master)
-            os.close(slave)
-            self.proc, self.fd = None, None
-            return
-        os.close(slave)
-        os.set_blocking(master, False)
-        self.fd = master
-
-    def drain(self):
-        if self.fd is None:
-            return
-        while True:
-            try:
-                chunk = os.read(self.fd, 65536)
-            except (BlockingIOError, OSError):
+    path = os.path.join(HERE, "docs", "%s.md" % stem)
+    try:
+        text = open(path).read()
+    except OSError:
+        return []
+    block, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            if inside:
                 break
-            if not chunk:
-                break
-            self.buf += self.decoder.decode(chunk)
-        # Only the newest frames are ever drawn, so the rest is dropped
-        # rather than accumulated for the length of the session.
-        if len(self.buf) > 400000:
-            self.buf = self.buf[-200000:]
-
-    def frame(self, cols, rows):
-        """The most recent complete frame, as coloured lines."""
-        self.drain()
-        # Every widget here paints a frame by homing the cursor and writing
-        # rows, so the home sequence is where one frame ends and the next
-        # begins. The last one may still be arriving; the one before it is
-        # whole.
-        chunks = self.buf.split("\x1b[H")
-        best = None
-        for chunk in chunks[-3:]:
-            lines = keep_colour(chunk).split("\r\n")
-            if best is None or len(lines) > len(best):
-                best = lines
-        if not best:
-            return []
-        # A carriage return anywhere in a line is fatal here: the line is
-        # drawn inside somebody else's frame, and a return sends the cursor
-        # to column zero, where the erase-to-end that follows every row
-        # wipes out what was just written. They arrive because the pty
-        # translates the widget's own newlines - it writes \r\n and ONLCR
-        # makes that \r\r\n - so one is left over by the split.
-        return [clip(l.replace("\r", ""), cols) for l in best[:rows]]
+            inside = True
+            continue
+        if inside:
+            block.append(line)
+    # Only a block that is actually a picture of the widget: the docs also
+    # hold shell snippets and JSON, and a config listing is not a preview.
+    return block if block and block[0].startswith("╺━") else []
 
 
 def rows_for(items, w, selected):
@@ -321,24 +204,19 @@ def main():
     maybe_help(__doc__)
     setup()
     keyboard = Keyboard()
-    preview = Preview()
-    selected, moved_at = 0, 0.0
+    selected = 0
     while True:
         for key in keyboard.poll():
             if key in ("q", "Q"):
                 raise SystemExit(0)
             if key in ("up", "k", "K"):
                 selected -= 1
-                moved_at = time.time()
             elif key in ("down", "j", "J"):
                 selected += 1
-                moved_at = time.time()
             elif key in ("r", "R"):
                 items = collect()
             elif key in ("enter", "right", "i") and items:
-                preview.stop()
                 run_widget(keyboard, items[min(selected, len(items) - 1)])
-                preview.key = None
                 items = collect()
 
         w, h = size()
@@ -365,28 +243,24 @@ def main():
             for line in wrap(pick["about"], w - 4)[:1 if tall else 3]:
                 body.append(seg([(DIM, "  " + line)], w - 1))
 
-        # And what it looks like, in whatever is left. Started only once the
-        # selection has settled, so holding an arrow key down walks the list
-        # rather than starting and killing a process for every row it passes.
+        # And what it looks like. A picture from the docs rather than the
+        # widget itself: starting one to look at it would ping hosts, spend
+        # API quota and read the whole agent transcript tree, and browsing a
+        # menu should cost nothing at all.
         # Measured against the footer that will actually be drawn, rather
-        # than a guess at its height. Guessing left rows empty under the
-        # preview while the widget inside it was being squeezed.
+        # than a guess at its height.
         hints = [[(ACCENT, "↑↓"), (DIM, " select")],
                  [(ACCENT, "↵"), (DIM, " launch")],
                  [(DIM, "[r]echeck")], [(DIM, "[q]uit")]]
         foot = [" " + line for line in pack_hints(hints, w - 2)]
         room = h - len(body) - len(foot)
-        if pick and room >= 6 and w >= 44:
-            if time.time() - moved_at >= 0.35:
-                preview.show(pick, w - 4, room - 1)
-                shown = preview.frame(w - 4, room - 1)
-                if shown:
-                    body.append(seg([(GRID, " ┌" + "─" * (w - 4) + "┐")],
-                                    w - 1))
-                    for line in shown[:room - 1]:
-                        body.append(" " + GRID + "│" + RST + line)
-            else:
-                preview.stop()
+        shown = pick["sample"] if pick else []
+        if shown and room >= 6 and w >= 44:
+            rule = "─" * max(1, w - 15)
+            body.append(seg([(GRID, " ┌── "), (DIM, "example"),
+                             (GRID, " " + rule + "┐")], w - 1))
+            for line in shown[:room - 1]:
+                body.append(seg([(GRID, " │"), (DIM, line[:w - 4])], w - 1))
 
         while len(body) < h - len(foot):
             body.append("")

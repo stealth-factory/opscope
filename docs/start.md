@@ -46,44 +46,54 @@ to remember to update, which is the only kind of list that stays correct.
 
 ## The preview
 
-Under the description, in whatever height is left, the highlighted widget
-runs — actually runs, in a pseudo-terminal sized to the box it is drawn in.
-What you see is its own output, a second old.
+Under the description, in whatever height is left, a picture of the
+highlighted widget — its doc page's own opening example, marked as one.
 
 ```
- ── GITHUB ──
-  Open pull requests, how many are actually merging, review backlog and
-  issue counts — for one org, several, or your personal account alongside.
- ┌────────────────────────────────────────────────────────────────────┐
- │╺━ GITHUB OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- │ 2 accounts   updated 0s ago   4991/5000 api
- │ ── OPEN PR STATE ── 617 PRs · 154 issues open   (any age)
- │ ▇ awaiting review 481 (78%)   ▇ ready to merge 121 (20%)   ▇ draft 15
+ ── CLOCKS ──
+  A big clock in the machine's own timezone, countdown bars for the next hour…
+ ┌── example ──────────────────────────────────────────────────────────────┐
+ │╺━ CLOCKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ │ ── SERVER TIME ──
+ │   ███ ███     ███ ███     █ █ ███
+ │   █ █ █ █  █    █ █ █  █  █ █ █ █
+ │ ── COUNTDOWN ──
+ │ Pomodoro · FOCUS       00:23:32   3 done
 ```
 
-A description says what a thing is for; a picture says what it looks like,
-and these are worth looking at.
+Every widget's doc page opens with a rendering of the widget it describes,
+maintained by whoever wrote it, so there is no second copy of anything here
+either — the same arrangement as the descriptions. `matrix.py` has no doc
+page on purpose and so has no picture; it gets the description alone.
 
-Because it is the widget and not a recording, **nothing has to be kept in
-step** — and a widget that cannot run previews its own explanation of why,
-which is the same screen you would get by starting it. There is no second
-copy of anything to go stale.
+It says `example` on the frame because it is one. Static numbers in a live
+layout would otherwise read as this machine's, and they are somebody's from
+the day the page was written.
 
-Three details make it behave:
+### Why not run the real thing
 
-- **It waits for the selection to settle** (about a third of a second) before
-  starting anything. Holding an arrow key walks the list rather than starting
-  and killing a process for every row it passes.
-- **Only colour survives.** The widget's cursor moves, clears and mode
-  changes are stripped, because inside a box on somebody else's screen they
-  would move the real cursor. Colour is kept, since colour is most of what a
-  preview is.
-- **It is cleaned up.** The child runs in its own process group and is killed
-  when the selection changes, when you launch something for real, and when
-  the launcher exits — including on a signal.
+It used to. The launcher started the highlighted widget in a pseudo-terminal
+and showed its actual frames, which was accurate by construction and cost
+nothing to keep in step.
 
-It needs six spare rows and a pane at least 44 columns wide. Below that the
-description alone gets the space.
+It also had side effects, and that is what settled it. Arrowing onto
+`latency` spawns `ping` and puts packets on the wire. Onto `github` or `pr`,
+GraphQL calls against a 5,000-an-hour quota. Onto `deployments` or `linear`,
+their APIs. Onto `usage`, a walk of the entire agent transcript tree, which
+on this machine is 541 MB. **Browsing a menu should cost nothing**, and a
+menu that quietly spends your API budget as you scroll past a row is a menu
+with a trap in it.
+
+The live version also had to solve problems the static one does not have at
+all: decoding partial characters across read boundaries, stripping cursor
+control so a child could not move the real cursor, killing process groups on
+every selection change, and a carriage-return translation that made previews
+erase themselves. That is a hundred lines and three bugs bought with running
+processes nobody asked to run.
+
+What is lost is colour, and the certainty that the picture matches today's
+build. The docs are checked by review rather than by machine, so a page that
+falls behind its widget shows a stale picture here too.
 
 ## It says nothing about whether a widget will work
 
