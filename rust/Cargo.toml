@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["core", "widgets"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+# Thirteen of these run at once, so size is worth more here than the last
+# few percent of speed: optimise for it, strip symbols, and let LTO drop
+# everything nothing reaches.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

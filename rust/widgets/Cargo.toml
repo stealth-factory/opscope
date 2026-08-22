@@ -1,0 +1,13 @@
+[package]
+name = "toys-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+toys-core = { path = "../core" }
+libc = "0.2"
+
+[[bin]]
+name = "ports"
+path = "src/bin/ports.rs"

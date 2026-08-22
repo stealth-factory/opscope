@@ -1,0 +1,10 @@
+[package]
+name = "toys-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The terminal is an ioctl and a termios struct away; both come from libc,
+# and nothing else here needs a crate at all.
+[dependencies]
+libc = "0.2"

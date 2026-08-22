@@ -1,0 +1,21 @@
+What is listening on this machine, what started it, and who can reach it.
+
+On a box running several agents at once, "which port is that project on" and
+"is this reachable from outside" are asked constantly and answered badly.
+`lsof -i` gives a pid and a port and stops there.
+
+Each row is one listening service: the port, what it is bound to, what kind of
+server it is, the project directory it was started from - the label that
+actually identifies a dev server - how long it has been up, and whether
+anything outside this machine can reach it. A server listening on both IPv4
+and IPv6 is one row, not two.
+
+    ports [-n SECONDS]
+
+Read from /proc alone: the socket table for the ports, and each process's own
+cmdline and cwd for the rest. Exposure comes from `tailscale serve status`
+where Tailscale is installed. Another user's sockets cannot be tied to a
+process without root, so those rows name the owner the socket table gives
+and are hidden behind o along with the system ports.
+
+Keys: up/down select, o hides the machine's own ports, r refreshes, q quits.
