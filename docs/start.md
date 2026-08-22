@@ -44,6 +44,47 @@ that table.
 The practical effect is that adding a widget adds it here. There is no list
 to remember to update, which is the only kind of list that stays correct.
 
+## The preview
+
+Under the description, in whatever height is left, the highlighted widget
+runs — actually runs, in a pseudo-terminal sized to the box it is drawn in.
+What you see is its own output, a second old.
+
+```
+ ── GITHUB ──
+  Open pull requests, how many are actually merging, review backlog and
+  issue counts — for one org, several, or your personal account alongside.
+ ┌────────────────────────────────────────────────────────────────────┐
+ │╺━ GITHUB OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ │ 2 accounts   updated 0s ago   4991/5000 api
+ │ ── OPEN PR STATE ── 617 PRs · 154 issues open   (any age)
+ │ ▇ awaiting review 481 (78%)   ▇ ready to merge 121 (20%)   ▇ draft 15
+```
+
+A description says what a thing is for; a picture says what it looks like,
+and these are worth looking at.
+
+Because it is the widget and not a recording, **nothing has to be kept in
+step** — and a widget that cannot run previews its own explanation of why,
+which is the same screen you would get by starting it. There is no second
+copy of anything to go stale.
+
+Three details make it behave:
+
+- **It waits for the selection to settle** (about a third of a second) before
+  starting anything. Holding an arrow key walks the list rather than starting
+  and killing a process for every row it passes.
+- **Only colour survives.** The widget's cursor moves, clears and mode
+  changes are stripped, because inside a box on somebody else's screen they
+  would move the real cursor. Colour is kept, since colour is most of what a
+  preview is.
+- **It is cleaned up.** The child runs in its own process group and is killed
+  when the selection changes, when you launch something for real, and when
+  the launcher exits — including on a signal.
+
+It needs six spare rows and a pane at least 44 columns wide. Below that the
+description alone gets the space.
+
 ## It says nothing about whether a widget will work
 
 It used to. There was a column reporting whether each command was installed

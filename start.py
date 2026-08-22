@@ -33,12 +33,19 @@ place that knows what it actually needs.
 
 Keys: up/down select, enter launches, r rechecks, q quits.
 """
+import atexit
 import ast
+import fcntl
 import glob
 import os
+import pty
+import re
+import signal
+import struct
 import subprocess
 import sys
 import termios
+import time
 import tty
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -104,6 +111,129 @@ def widgets():
                       "summary": lines[0] if lines else "",
                       "about": about[:400]})
     return found
+
+
+# Cursor moves, clears and mode changes belong to whoever wrote them at a
+# real terminal; inside a box on someone else's screen they would move the
+# real cursor. Colour is kept, because colour is most of what a preview is.
+NOT_COLOUR = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-HJKSTfhilmnsu]")
+SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def keep_colour(text):
+    """Strip every escape except the ones that set a colour."""
+    return NOT_COLOUR.sub(lambda m: m.group(0) if m.group(0).endswith("m")
+                          else "", text)
+
+
+def clip(text, width):
+    """Truncate to `width` printable cells, counting no escape as a cell."""
+    kept, cells, i = [], 0, 0
+    while i < len(text) and cells < width:
+        found = SGR.match(text, i)
+        if found:
+            kept.append(found.group(0))
+            i = found.end()
+            continue
+        kept.append(text[i])
+        cells += 1
+        i += 1
+    return "".join(kept)
+
+
+class Preview(object):
+    """The selected widget, running small, in the space under the list.
+
+    A description says what a thing is for; a picture says what it looks
+    like, and these are worth looking at. So the highlighted one is started
+    for real in a pseudo-terminal the size of the box it will be drawn in,
+    and its own frames are shown.
+
+    It is the widget itself rather than a recording, which means a widget
+    that cannot run previews its own explanation of why - the same screen
+    it would show if you started it. Nothing has to be kept in step.
+    """
+
+    def __init__(self):
+        self.proc = None
+        self.fd = None
+        self.buf = ""
+        self.key = None
+        atexit.register(self.stop)
+
+    def stop(self):
+        if self.proc is not None:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                self.proc.wait(timeout=2)
+            except Exception:
+                pass
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.proc, self.fd, self.buf = None, None, ""
+
+    def show(self, item, cols, rows):
+        """Start, or restart, the preview for this widget at this size."""
+        key = (item["file"], cols, rows)
+        if key == self.key:
+            return
+        self.stop()
+        self.key = key
+        master, slave = pty.openpty()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
+            self.proc = subprocess.Popen(
+                [sys.executable, os.path.join(HERE, item["file"])],
+                stdin=slave, stdout=slave, stderr=slave,
+                start_new_session=True)
+        except OSError:
+            os.close(master)
+            os.close(slave)
+            self.proc, self.fd = None, None
+            return
+        os.close(slave)
+        os.set_blocking(master, False)
+        self.fd = master
+
+    def drain(self):
+        if self.fd is None:
+            return
+        while True:
+            try:
+                chunk = os.read(self.fd, 65536)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            self.buf += chunk.decode("utf8", "replace")
+        # Only the newest frames are ever drawn, so the rest is dropped
+        # rather than accumulated for the length of the session.
+        if len(self.buf) > 400000:
+            self.buf = self.buf[-200000:]
+
+    def frame(self, cols, rows):
+        """The most recent complete frame, as coloured lines."""
+        self.drain()
+        # Every widget here paints a frame by homing the cursor and writing
+        # rows, so the home sequence is where one frame ends and the next
+        # begins. The last one may still be arriving; the one before it is
+        # whole.
+        chunks = self.buf.split("\x1b[H")
+        best = None
+        for chunk in chunks[-3:]:
+            lines = keep_colour(chunk).split("\r\n")
+            if best is None or len(lines) > len(best):
+                best = lines
+        if not best:
+            return []
+        return [clip(l, cols) for l in best[:rows]]
 
 
 def rows_for(items, w, selected):
@@ -176,19 +306,24 @@ def main():
     maybe_help(__doc__)
     setup()
     keyboard = Keyboard()
-    selected = 0
+    preview = Preview()
+    selected, moved_at = 0, 0.0
     while True:
         for key in keyboard.poll():
             if key in ("q", "Q"):
                 raise SystemExit(0)
             if key in ("up", "k", "K"):
                 selected -= 1
+                moved_at = time.time()
             elif key in ("down", "j", "J"):
                 selected += 1
+                moved_at = time.time()
             elif key in ("r", "R"):
                 items = collect()
             elif key in ("enter", "right", "i") and items:
+                preview.stop()
                 run_widget(keyboard, items[min(selected, len(items) - 1)])
+                preview.key = None
                 items = collect()
 
         w, h = size()
@@ -211,8 +346,24 @@ def main():
         if pick and h - len(body) >= 3:
             body.append(seg([(LBL, " ── %s ── " % pick["stem"].upper())],
                             w - 1))
-            for line in wrap(pick["about"], w - 4)[:h - len(body) - 2]:
+            for line in wrap(pick["about"], w - 4)[:2]:
                 body.append(seg([(DIM, "  " + line)], w - 1))
+
+        # And what it looks like, in whatever is left. Started only once the
+        # selection has settled, so holding an arrow key down walks the list
+        # rather than starting and killing a process for every row it passes.
+        room = h - len(body) - 3
+        if pick and room >= 6 and w >= 44:
+            if time.time() - moved_at >= 0.35:
+                preview.show(pick, w - 4, room - 1)
+                shown = preview.frame(w - 4, room - 1)
+                if shown:
+                    body.append(seg([(GRID, " ┌" + "─" * (w - 4) + "┐")],
+                                    w - 1))
+                    for line in shown[:room - 1]:
+                        body.append(" " + GRID + "│" + RST + line)
+            else:
+                preview.stop()
 
         while len(body) < h - 2:
             body.append("")
@@ -222,7 +373,6 @@ def main():
         for line in pack_hints(hints, w - 2):
             body.append(" " + line)
         draw(body, w, h)
-        import time
         time.sleep(0.15)
 
 
