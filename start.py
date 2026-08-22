@@ -34,6 +34,7 @@ place that knows what it actually needs.
 Keys: up/down select, enter launches, r rechecks, q quits.
 """
 import atexit
+import codecs
 import ast
 import fcntl
 import glob
@@ -159,6 +160,13 @@ class Preview(object):
         self.fd = None
         self.buf = ""
         self.key = None
+        # A read can land in the middle of a character. Decoding each chunk
+        # on its own turns both halves into replacement marks - and these
+        # widgets are largely box-drawing and braille, three bytes each, so
+        # that is not a rare corner: it eats the line, and a line whose left
+        # rule was eaten stops looking like part of the preview at all. An
+        # incremental decoder holds the tail until the rest arrives.
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         atexit.register(self.stop)
 
     def stop(self):
@@ -177,6 +185,7 @@ class Preview(object):
             except OSError:
                 pass
         self.proc, self.fd, self.buf = None, None, ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def show(self, item, cols, rows):
         """Start, or restart, the preview for this widget at this size."""
@@ -212,7 +221,7 @@ class Preview(object):
                 break
             if not chunk:
                 break
-            self.buf += chunk.decode("utf8", "replace")
+            self.buf += self.decoder.decode(chunk)
         # Only the newest frames are ever drawn, so the rest is dropped
         # rather than accumulated for the length of the session.
         if len(self.buf) > 400000:
@@ -346,13 +355,21 @@ def main():
         if pick and h - len(body) >= 3:
             body.append(seg([(LBL, " ── %s ── " % pick["stem"].upper())],
                             w - 1))
-            for line in wrap(pick["about"], w - 4)[:2]:
+            tall = h - len(body) >= 12
+            for line in wrap(pick["about"], w - 4)[:1 if tall else 3]:
                 body.append(seg([(DIM, "  " + line)], w - 1))
 
         # And what it looks like, in whatever is left. Started only once the
         # selection has settled, so holding an arrow key down walks the list
         # rather than starting and killing a process for every row it passes.
-        room = h - len(body) - 3
+        # Measured against the footer that will actually be drawn, rather
+        # than a guess at its height. Guessing left rows empty under the
+        # preview while the widget inside it was being squeezed.
+        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
+                 [(ACCENT, "↵"), (DIM, " launch")],
+                 [(DIM, "[r]echeck")], [(DIM, "[q]uit")]]
+        foot = [" " + line for line in pack_hints(hints, w - 2)]
+        room = h - len(body) - len(foot)
         if pick and room >= 6 and w >= 44:
             if time.time() - moved_at >= 0.35:
                 preview.show(pick, w - 4, room - 1)
@@ -365,14 +382,10 @@ def main():
             else:
                 preview.stop()
 
-        while len(body) < h - 2:
+        while len(body) < h - len(foot):
             body.append("")
-        hints = [[(ACCENT, "↑↓"), (DIM, " select")],
-                 [(ACCENT, "↵"), (DIM, " launch")],
-                 [(DIM, "[r]echeck")], [(DIM, "[q]uit")]]
-        for line in pack_hints(hints, w - 2):
-            body.append(" " + line)
-        draw(body, w, h)
+        body.extend(foot)
+        draw(body[:h], w, h)
         time.sleep(0.15)
 
 
