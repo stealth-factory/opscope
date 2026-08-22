@@ -142,6 +142,83 @@ fn countdowns(now: chrono::DateTime<Local>, work_start: u32, work_end: u32) -> V
     out
 }
 
+/// Seconds each flash stays lit.
+const FLASH_ON: f64 = 0.35;
+
+/// Is the panel lit right now?
+///
+/// Flashes are derived from one timestamp rather than driven by sleeps, so
+/// the render loop keeps running - the clock stays live and keys stay
+/// responsive while it blinks.
+fn flash_window(started: Option<f64>, count: u32, gap: f64, now: f64) -> bool {
+    let started = match started {
+        Some(s) => s,
+        None => return false,
+    };
+    let since = now - started;
+    (0..count.max(1)).any(|n| {
+        let edge = n as f64 * gap;
+        since >= edge && since < edge + FLASH_ON
+    })
+}
+
+/// The same frame, repainted solid: colours stripped, one loud background.
+fn flash_frame(rows: &[String], w: usize, h: usize, bg: &str, fg: &str) -> Vec<String> {
+    (0..h)
+        .map(|i| {
+            let plain = rows.get(i).map(|r| strip_ansi(r)).unwrap_or_default();
+            format!("{}{}{}", bg, fg, tc::pad(&plain, w))
+        })
+        .collect()
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n == 'm' || n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A readable foreground for whatever the flash colour is.
+///
+/// A near-white flash needs dark text on it and a dark one needs light;
+/// picking by luminance means a configured colour cannot make the panel
+/// unreadable at the moment it is trying to get your attention.
+fn flash_ink(rgb: (u8, u8, u8)) -> String {
+    let lum = (0.299 * rgb.0 as f64 + 0.587 * rgb.1 as f64 + 0.114 * rgb.2 as f64) / 255.0;
+    if lum > 0.5 {
+        tc::rgb(18, 20, 26)
+    } else {
+        tc::rgb(255, 240, 240)
+    }
+}
+
+/// Herdr, when we happen to be inside it, can raise a real toast.
+///
+/// Purely additive: nothing here requires Herdr, and outside it this is a
+/// no-op. The widget usually runs on a server, so anything local to that
+/// machine - notify-send, a sound file - would fire where nobody is.
+fn herdr_toast(title: &str, body: &str) {
+    if std::env::var("HERDR_ENV").unwrap_or_default() != "1" {
+        return;
+    }
+    let _ = std::process::Command::new("herdr")
+        .args(["notification", "show", title, body, "--sound", "done"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// The pomodoro, and the state it keeps between runs.
 ///
 /// Hidden means suspended, not merely invisible. A timer that keeps
@@ -284,22 +361,25 @@ impl Pomodoro {
     ///
     /// It does not advance on its own. A break that starts itself while you
     /// are mid-sentence is a break you ignore, and then the count is a lie.
-    fn tick(&mut self, now: f64) {
+    /// Returns true on the tick an alert fires, so the panel can flash.
+    fn tick(&mut self, now: f64) -> bool {
         if !self.running || !self.shown {
-            return;
+            return false;
         }
         let over = self.overtime(now);
         if over <= 0.0 {
-            return;
+            return false;
         }
         let minute = (over / 60.0) as i64;
-        if minute != self.rang_at {
-            self.rang_at = minute;
-            if self.bell {
-                tc::out("\x07");
-                tc::flush();
-            }
+        if minute == self.rang_at {
+            return false;
         }
+        self.rang_at = minute;
+        if self.bell {
+            tc::out("\x07");
+            tc::flush();
+        }
+        true
     }
 }
 
@@ -317,6 +397,23 @@ fn main() {
 
     let p = palette();
     let mut pomo = Pomodoro::new(&cfg);
+    let flash_rgb = cfg
+        .get("pomodoro_flash_rgb")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            let n = |i: usize| a.get(i).and_then(|v| v.as_u64()).unwrap_or(250) as u8;
+            (n(0), n(1), n(2))
+        })
+        .unwrap_or((246, 248, 252));
+    let flash_bg = tc::bg(flash_rgb.0, flash_rgb.1, flash_rgb.2);
+    let flash_fg = flash_ink(flash_rgb);
+    let flash_count = tc::cfg_usize(&cfg, "pomodoro_flash_count", 2) as u32;
+    let flash_gap = tc::cfg_f64(&cfg, "pomodoro_flash_gap", 1.0);
+    let flash_on = cfg
+        .get("pomodoro_flash")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut flash_started: Option<f64> = None;
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut scroll = 0usize;
@@ -365,7 +462,22 @@ fn main() {
 
         // The pomodoro leads the section, as it does in the Python.
         let stamp = seconds();
-        pomo.tick(stamp);
+        if pomo.tick(stamp) {
+            flash_started = Some(stamp);
+            let over = pomo.overtime(stamp);
+            herdr_toast(
+                "Pomodoro",
+                &format!(
+                    "{} elapsed{}",
+                    pomo.phase.label(),
+                    if over >= 60.0 {
+                        format!(", {} over", hms(over as i64))
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
         if pomo.shown {
             let over = pomo.overtime(stamp);
             let left = pomo.remaining(stamp);
@@ -485,7 +597,18 @@ fn main() {
             rows.push(String::new());
         }
         rows.extend(foot);
-        tc::draw(&rows, w, h);
+        if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
+            tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
+        } else {
+            tc::draw(&rows, w, h);
+        }
+        // Forget a flash once its last blink has passed, so the check stops
+        // costing anything for the rest of the session.
+        if let Some(started) = flash_started {
+            if seconds() - started > flash_count as f64 * flash_gap + FLASH_ON {
+                flash_started = None;
+            }
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
 }
@@ -617,6 +740,41 @@ mod tests {
             .max()
             .unwrap();
         assert!(longest < 21, "a label of {} needs a wider field", longest);
+    }
+
+    #[test]
+    fn the_flash_blinks_and_then_stops() {
+        let started = Some(100.0);
+        // Lit at the start of each window, dark between them.
+        assert!(flash_window(started, 2, 1.0, 100.0));
+        assert!(flash_window(started, 2, 1.0, 100.3));
+        assert!(!flash_window(started, 2, 1.0, 100.5));
+        assert!(flash_window(started, 2, 1.0, 101.1));
+        // And over for good once the last blink has passed.
+        assert!(!flash_window(started, 2, 1.0, 102.0));
+        assert!(!flash_window(None, 2, 1.0, 100.0));
+    }
+
+    #[test]
+    fn a_flashed_frame_is_solid_and_exactly_the_width() {
+        let rows = vec![
+            format!("{}hello{}", tc::rgb(1, 2, 3), tc::RST),
+            "plain".to_string(),
+        ];
+        let lit = flash_frame(&rows, 20, 3, &tc::bg(250, 250, 250), &tc::rgb(0, 0, 0));
+        assert_eq!(lit.len(), 3);
+        for line in &lit {
+            // The original colours are gone; only the flash pair remains.
+            assert!(!line.contains("38;2;1;2;3"));
+            assert_eq!(strip_ansi(line).chars().count(), 20);
+        }
+    }
+
+    #[test]
+    fn the_flash_picks_ink_it_can_be_read_through() {
+        // Near-white wants dark text; a dark colour wants light.
+        assert_eq!(flash_ink((246, 248, 252)), tc::rgb(18, 20, 26));
+        assert_eq!(flash_ink((20, 20, 30)), tc::rgb(255, 240, 240));
     }
 
     #[test]
