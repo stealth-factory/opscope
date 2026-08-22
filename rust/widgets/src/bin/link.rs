@@ -22,7 +22,7 @@
 //! measured for each established socket.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use toys_core as tc;
@@ -42,6 +42,10 @@ struct Session {
     sent: f64,
     recv: f64,
     retrans_bytes: f64,
+    /// Retransmits since the previous poll, as a percentage of what was
+    /// sent in that gap. Filled in by the poller, which is the only place
+    /// that has the previous reading to subtract.
+    recent_loss: Option<f64>,
     delivery: Option<f64>,
     cwnd: Option<f64>,
     mss: Option<f64>,
@@ -162,6 +166,7 @@ fn sessions() -> Vec<Session> {
             sent: num(&m, "bytes_sent").unwrap_or(0.0),
             recv: num(&m, "bytes_received").unwrap_or(0.0),
             retrans_bytes: num(&m, "bytes_retrans").unwrap_or(0.0),
+            recent_loss: None,
             delivery: num(&m, "delivery_rate"),
             cwnd: num(&m, "cwnd"),
             mss: num(&m, "mss"),
@@ -175,25 +180,28 @@ fn sessions() -> Vec<Session> {
 }
 
 /// Who is logged in from where, to put a name against an address.
-fn who() -> HashMap<String, Vec<String>> {
-    let mut seen: HashMap<String, Vec<String>> = HashMap::new();
+///
+/// Login and tty, not just the login: two SSH sessions from one laptop share
+/// an address, and the detail view names the ttys to say so. Repeats are
+/// kept for the same reason - deduplicating by user threw away the second
+/// session, which is the fact that line exists to report.
+fn who() -> HashMap<String, Vec<(String, String)>> {
+    let mut seen: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for line in run(&["who"]).lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if cols.len() < 2 {
             continue;
         }
-        let user = cols[0];
-        // The address is in parentheses at the end, where there is one.
-        if let Some(open) = line.rfind('(') {
-            if let Some(close) = line[open..].find(')') {
-                let host = &line[open + 1..open + close];
-                if !host.is_empty() {
-                    let names = seen.entry(host.to_string()).or_default();
-                    if !names.iter().any(|n| n == user) {
-                        names.push(user.to_string());
-                    }
-                }
-            }
+        // The address is the last field, in parentheses, where there is one.
+        let last = cols[cols.len() - 1];
+        if !last.starts_with('(') {
+            continue;
+        }
+        let host = last.trim_matches(|c| c == '(' || c == ')');
+        if !host.is_empty() {
+            seen.entry(host.to_string())
+                .or_default()
+                .push((cols[0].to_string(), cols[1].to_string()));
         }
     }
     seen
@@ -201,22 +209,32 @@ fn who() -> HashMap<String, Vec<String>> {
 
 fn rate(n: Option<f64>) -> String {
     let v = match n {
-        Some(v) if v > 0.0 => v,
-        _ => return "—".into(),
+        Some(v) => v,
+        None => return "--".into(),
     };
-    for (suffix, scale) in [("Gbps", 1e9), ("Mbps", 1e6), ("Kbps", 1e3)] {
+    for (suffix, scale) in [("Gbps", 1e9), ("Mbps", 1e6), ("kbps", 1e3)] {
         if v >= scale {
             return format!("{:.1}{}", v / scale, suffix);
         }
     }
-    format!("{:.0}bps", v)
+    format!("{}bps", v as i64)
+}
+
+/// A byte count as a person would say it.
+fn size_of(n: f64) -> String {
+    for (unit, step) in [("G", 1e9), ("M", 1e6), ("k", 1e3)] {
+        if n >= step {
+            return format!("{:.1}{}", n / step, unit);
+        }
+    }
+    format!("{}B", n as i64)
 }
 
 /// Milliseconds on link.py's own scale, which drops to microseconds below
 /// one: a loopback socket reads 22us, and 0.02ms hides what that means.
 fn ms(value: Option<f64>) -> String {
     match value {
-        None => "—".into(),
+        None => "--".into(),
         Some(v) if v >= 100.0 => format!("{}ms", v.round() as i64),
         Some(v) if v >= 10.0 => format!("{:.0}ms", v),
         Some(v) if v >= 1.0 => format!("{:.1}ms", v),
@@ -228,16 +246,45 @@ fn ms(value: Option<f64>) -> String {
 fn span(milliseconds: Option<f64>) -> String {
     let s = match milliseconds {
         Some(v) => v / 1000.0,
-        None => return "—".into(),
+        None => return "--".into(),
     };
-    if s < 90.0 {
+    if s < 60.0 {
         format!("{}s", s as i64)
-    } else if s < 5400.0 {
+    } else if s < 3600.0 {
         format!("{}m", (s / 60.0) as i64)
-    } else if s < 172_800.0 {
+    } else if s < 86400.0 {
         format!("{}h", (s / 3600.0) as i64)
     } else {
         format!("{}d", (s / 86400.0) as i64)
+    }
+}
+
+/// How much worse than this path's best the connection is right now.
+///
+/// Compared against the socket's own minrtt rather than a fixed threshold:
+/// forty milliseconds is excellent from Hong Kong and poor from the next
+/// rack, and the kernel already knows which this is.
+fn quality(row: &Session) -> Option<f64> {
+    match (row.rtt, row.floor) {
+        (Some(rtt), Some(floor)) if rtt != 0.0 && floor != 0.0 => Some(rtt / floor),
+        _ => None,
+    }
+}
+
+fn colour_for<'a>(ratio: Option<f64>, loss: Option<f64>, p: &'a Palette) -> &'a str {
+    if loss.is_some_and(|l| l >= 2.0) {
+        return &p.bad;
+    }
+    let ratio = match ratio {
+        Some(r) => r,
+        None => return &p.dim,
+    };
+    if ratio >= 3.0 || loss.unwrap_or(0.0) >= 0.5 {
+        &p.bad
+    } else if ratio >= 1.6 {
+        &p.warn
+    } else {
+        &p.ok
     }
 }
 
@@ -291,7 +338,7 @@ fn window_label(seconds: f64) -> String {
 
 struct State {
     rows: Vec<Session>,
-    names: HashMap<String, Vec<String>>,
+    names: HashMap<String, Vec<(String, String)>>,
     history: HashMap<String, Vec<f64>>,
     err: String,
 }
@@ -330,10 +377,30 @@ fn main() {
         history: HashMap::new(),
         err: String::new(),
     }));
+    // [r] asks for a reading now rather than at the end of the interval, so
+    // the poller sleeps on a condition it can be woken out of.
+    let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
-    std::thread::spawn(move || loop {
-        let found = sessions();
+    let poller_wake = Arc::clone(&wake);
+    std::thread::spawn(move || {
+        let mut last: HashMap<String, (f64, f64)> = HashMap::new();
+        loop {
+        let mut found = sessions();
         let names = who();
+        for row in &mut found {
+            // Retransmits since the last look, rather than since the
+            // connection opened: a session hours old has long since
+            // forgiven whatever went wrong at breakfast.
+            if let Some((sent, retrans)) = last.get(&row.peer) {
+                let moved = row.sent - sent;
+                row.recent_loss = Some(if moved > 0.0 {
+                    100.0 * (row.retrans_bytes - retrans) / moved
+                } else {
+                    0.0
+                });
+            }
+            last.insert(row.peer.clone(), (row.sent, row.retrans_bytes));
+        }
         {
             let mut guard = match poller.lock() {
                 Ok(g) => g,
@@ -352,12 +419,25 @@ fn main() {
             guard.rows = found;
             guard.names = names;
         }
-        std::thread::sleep(Duration::from_secs_f64(refresh));
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
+                Err(_) => return,
+            };
+        }
+        *asked = false;
+        }
     });
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut hide_idle, mut span_at) = (0usize, false, 0usize);
+    let mut detail = false;
 
     loop {
         for key in keyboard.poll() {
@@ -369,8 +449,17 @@ fn main() {
                 }
                 "up" | "k" | "K" => selected = selected.saturating_sub(1),
                 "down" | "j" | "J" => selected += 1,
+                "enter" | "i" | "I" => detail = !detail,
+                "esc" => detail = false,
                 "o" | "O" => hide_idle = !hide_idle,
                 "w" | "W" => span_at = (span_at + 1) % windows.len(),
+                "r" | "R" => {
+                    let (lock, cond) = &*wake;
+                    if let Ok(mut asked) = lock.lock() {
+                        *asked = true;
+                        cond.notify_all();
+                    }
+                }
                 _ => {}
             }
         }
@@ -390,6 +479,42 @@ fn main() {
             selected = shown.len() - 1;
         }
         let window = windows[span_at];
+
+        // One connection in full, on its own screen. The list is for
+        // noticing; this is for looking into, and the two want different
+        // amounts of room for the same chart.
+        if detail && !shown.is_empty() {
+            let pick = selected.min(shown.len() - 1);
+            // The footer is measured before the body is built, and the body
+            // is told the height it actually has. Sizing the chart to the
+            // whole pane and appending the hints afterwards pushed them off
+            // the bottom of it - the keys out of this screen were the rows
+            // being lost.
+            let hints: Vec<Vec<(&str, String)>> = vec![
+                vec![(p.dim.as_str(), "[esc] back".into())],
+                vec![
+                    (p.accent.as_str(), "[w]".into()),
+                    (p.dim.as_str(), format!(" {}", window_label(window))),
+                ],
+                vec![(p.dim.as_str(), "[r]efresh".into())],
+                vec![(p.dim.as_str(), "[q]uit".into())],
+            ];
+            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+                .into_iter()
+                .map(|l| format!(" {}", l))
+                .collect();
+            let room = h.saturating_sub(foot.len() + 1).max(1);
+            let mut body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
+            drop(guard);
+            body.truncate(room);
+            while body.len() < room {
+                body.push(String::new());
+            }
+            body.extend(foot);
+            tc::draw(&body, w, h);
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
 
         let mut rows = vec![tc::title("connections", w, &p.link)];
         rows.push(tc::seg(
@@ -428,7 +553,7 @@ fn main() {
             rows.push(String::new());
             let room = h.saturating_sub(rows.len() + 4);
             if room >= 5 {
-                rows.extend(graph(&shown, &guard.history, w, room, window, refresh, &p));
+                rows.extend(graph(&shown, &guard.history, w, room, 0, window, refresh, &p));
                 rows.push(tc::seg(
                     &[
                         (p.dim.as_str(), " ".repeat(7)),
@@ -439,7 +564,7 @@ fn main() {
                 let covered = plotted_span(&shown, &guard.history, window, refresh, w);
                 rows.push(tc::seg(
                     &[
-                        (p.dim.as_str(), format!("        {} ago", window_label(covered))),
+                        (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
                         (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
                         (p.dim.as_str(), "now".into()),
                     ],
@@ -450,6 +575,7 @@ fn main() {
 
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![(p.dim.as_str(), "[↵] open".into())],
             vec![
                 (p.accent.as_str(), "[w]".into()),
                 (p.dim.as_str(), format!(" {}", window_label(window))),
@@ -458,6 +584,7 @@ fn main() {
                 p.dim.as_str(),
                 format!("[o]{} idle", if hide_idle { "show" } else { "hide" }),
             )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         drop(guard);
@@ -495,7 +622,11 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
     // The Python's header, column for column: the two have to sit side by
     // side in a wall and read as the same widget.
     let wide = w >= 74;
-    let name_w = 20usize;
+    // Two for the glyph and its space, eighteen for the name: together they
+    // land the NOW column under its heading. Three and twenty also add up to
+    // a plausible-looking row, and put every number three cells right of the
+    // word above it.
+    let name_w = 18usize;
     let mut out = vec![tc::seg(
         &[
             (p.dim.as_str(), "  PEER".into()),
@@ -511,36 +642,52 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
         let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
         let hue = &p.hues[i % p.hues.len()];
         let glyph = SERIES[i % SERIES.len()];
+        // One login, and only where there is room for it: the address is
+        // what identifies the session, the name is a courtesy.
         let who = state
             .names
             .get(&row.ip)
-            .map(|names| names.join(","))
+            .and_then(|names| names.first())
+            .map(|(user, _tty)| user.clone())
             .unwrap_or_default();
-        let label = if who.is_empty() {
+        let label = if who.is_empty() || !wide {
             row.ip.clone()
         } else {
             format!("{} {}", row.ip, who)
         };
-        let loss = if row.sent > 0.0 {
-            100.0 * row.retrans_bytes / row.sent
-        } else {
-            0.0
-        };
+        let loss = row.recent_loss;
+        let tone = format!("{}{}", tint, colour_for(quality(row), loss, p));
         let name_c = format!("{}{}", tint, hue);
-        let txt_c = format!("{}{}", tint, p.txt);
+        let label_c = format!("{}{}", tint, if here { &p.txt } else { &p.dim });
         let dim_c = format!("{}{}", tint, p.dim);
-        let loss_c = format!("{}{}", tint, if loss > 0.5 { &p.bad } else { &p.dim });
+        let loss_c = format!(
+            "{}{}",
+            tint,
+            if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.dim }
+        );
         let idle = [row.lastsnd, row.lastrcv]
             .into_iter()
             .flatten()
             .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
+        // A missing reading is a dash of the column's own width, not a
+        // narrower cell - anything else shifts every number to its right.
+        let cell = |value: Option<f64>, width: usize| match value {
+            Some(v) if v != 0.0 => format!("{:>width$}", ms(Some(v)), width = width),
+            _ => format!("{:>width$}", "--", width = width),
+        };
         let mut line = vec![
-            (name_c.as_str(), format!(" {} ", glyph)),
-            (txt_c.as_str(), tc::pad(&label, name_w)),
-            (txt_c.as_str(), format!("{:>7}", ms(row.rtt))),
-            (dim_c.as_str(), format!("{:>8}", ms(row.floor))),
-            (dim_c.as_str(), format!("{:>8}", ms(row.jitter))),
-            (loss_c.as_str(), format!("{:>7.2}%", loss)),
+            (name_c.as_str(), format!("{} ", glyph)),
+            (label_c.as_str(), tc::pad(&label, name_w)),
+            (tone.as_str(), cell(row.rtt, 7)),
+            (dim_c.as_str(), cell(row.floor, 8)),
+            (dim_c.as_str(), cell(row.jitter, 8)),
+            (
+                loss_c.as_str(),
+                format!(
+                    "{:>7}",
+                    loss.map_or("--".to_string(), |v| format!("{:.2}%", v))
+                ),
+            ),
         ];
         if wide {
             line.push((dim_c.as_str(), format!("{:>10}", rate(row.delivery))));
@@ -555,11 +702,231 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
 }
 
 /// Log-scale multi-series plot of round-trip time.
+/// One connection, in full.
+///
+/// The list answers "is anything wrong"; this answers "with what, and how
+/// badly". Everything here is a number the kernel already keeps for this
+/// socket - nothing is derived beyond the two percentages, and both say
+/// what they are measured over.
+#[allow(clippy::too_many_arguments)]
+fn detail_view(
+    row: &Session,
+    state: &State,
+    w: usize,
+    h: usize,
+    idx: usize,
+    window: f64,
+    refresh: f64,
+    p: &Palette,
+) -> Vec<String> {
+    let empty = Vec::new();
+    let users = state.names.get(&row.ip).unwrap_or(&empty);
+    let mut rows = vec![tc::title("connection", w, &p.link)];
+    rows.push(tc::seg(
+        &[
+            (
+                p.hues[idx % p.hues.len()].as_str(),
+                format!(" {} ", SERIES[idx % SERIES.len()]),
+            ),
+            (p.txt.as_str(), row.ip.clone()),
+            (p.dim.as_str(), format!("  · port {}", row.port)),
+            (
+                p.dim.as_str(),
+                users.first().map_or(String::new(), |(u, _)| format!("  {}", u)),
+            ),
+        ],
+        w - 1,
+    ));
+    // `who` maps logins to an address, not to a socket, and two SSH sessions
+    // from one laptop share the address. Naming both against each socket
+    // read as "this connection is pts/0 and pts/35", which it is not - so
+    // the ttys are labelled as what they are: the logins from that address.
+    if !users.is_empty() {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), "  logins from this address: ".into()),
+                (
+                    p.txt.as_str(),
+                    users
+                        .iter()
+                        .map(|(_u, tty)| tty.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ],
+            w - 1,
+        ));
+    }
+    rows.push(String::new());
+
+    // A field with nothing behind it is left out rather than shown empty:
+    // the screen is a list of what the kernel knows, so a missing line says
+    // "not reported for this socket".
+    macro_rules! field {
+        ($label:expr, $value:expr, $colour:expr, $note:expr $(,)?) => {{
+            if let Some(v) = $value {
+                if !v.is_empty() && v != "--" {
+                    let note: &str = $note;
+                    rows.push(tc::seg(
+                        &[
+                            (p.dim.as_str(), format!("  {:<16}", $label)),
+                            ($colour, v),
+                            (
+                                p.dim.as_str(),
+                                if note.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("   {}", note)
+                                },
+                            ),
+                        ],
+                        w - 1,
+                    ));
+                }
+            }
+        }};
+    }
+
+    let ratio = quality(row);
+    let live = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| ms(Some(x)));
+    field!(
+        "round trip",
+        live(row.rtt),
+        colour_for(ratio, row.recent_loss, p),
+        &ratio.map_or(String::new(), |r| format!("{:.1}x this path's best", r)),
+    );
+    field!(
+        "best ever",
+        live(row.floor),
+        &p.dim,
+        "the floor; the gap above it is congestion",
+    );
+    field!("jitter", live(row.jitter), &p.dim, "variation in the round trip");
+    field!(
+        "timeout",
+        num(&row.raw, "rto").map(|v| ms(Some(v))),
+        &p.dim,
+        "how long before a lost packet is resent",
+    );
+    rows.push(String::new());
+
+    // Lifetime loss lives here rather than in the table because it is a fact
+    // about the whole session and changes by the hour, while the table's
+    // loss column is about the last two seconds.
+    let lifetime = if row.sent > 0.0 {
+        100.0 * row.retrans_bytes / row.sent
+    } else {
+        0.0
+    };
+    let loss = row.recent_loss;
+    field!(
+        "loss just now",
+        loss.map(|v| format!("{:.2}%", v)),
+        if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.txt },
+        "resent since the last look",
+    );
+    field!(
+        "loss lifetime",
+        Some(format!("{:.2}%", lifetime)),
+        &p.dim,
+        &format!(
+            "{} resent of {}",
+            size_of(row.retrans_bytes),
+            size_of(row.sent)
+        ),
+    );
+    field!(
+        "reordering",
+        row.raw.get("reord_seen").cloned(),
+        &p.dim,
+        "times packets arrived out of order",
+    );
+    rows.push(String::new());
+
+    field!("sent", Some(size_of(row.sent)), &p.txt, "");
+    field!("received", Some(size_of(row.recv)), &p.txt, "");
+    field!(
+        "achieved",
+        Some(rate(row.delivery)),
+        &p.txt,
+        "what it has delivered, not its capacity",
+    );
+    field!(
+        "pacing at",
+        Some(rate(num(&row.raw, "pacing_rate"))),
+        &p.dim,
+        "the rate the kernel is willing to send at",
+    );
+    field!(
+        "in flight",
+        row.raw.get("cwnd").cloned(),
+        &p.dim,
+        "packets allowed unacknowledged at once",
+    );
+    field!(
+        "packet size",
+        row.mss.map(|v| format!("{} bytes", v as i64)),
+        &p.dim,
+        "",
+    );
+    let idle = [row.lastsnd, row.lastrcv]
+        .into_iter()
+        .flatten()
+        .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
+    field!(
+        "idle",
+        Some(span(idle)),
+        &p.dim,
+        "since anything crossed either way",
+    );
+    rows.push(String::new());
+
+    let one = [row.clone()];
+    let room = h.saturating_sub(rows.len() + 4);
+    if room >= 5 {
+        rows.extend(graph(
+            &one,
+            &state.history,
+            w,
+            room,
+            idx,
+            window,
+            refresh,
+            p,
+        ));
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), " ".repeat(7)),
+                (
+                    p.grid.as_str(),
+                    format!("└{}", "─".repeat(w.saturating_sub(9).max(10))),
+                ),
+            ],
+            w - 1,
+        ));
+        let covered = plotted_span(&one, &state.history, window, refresh, w);
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
+                (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
+                (p.dim.as_str(), "now".into()),
+            ],
+            w - 1,
+        ));
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
 fn graph(
     rows: &[Session],
     history: &HashMap<String, Vec<f64>>,
     w: usize,
     h: usize,
+    // `start` keeps a session's glyph and hue the same on its own screen as
+    // in the list: opening the ▲ row and finding a ● chart reads as a
+    // different connection.
+    start_at: usize,
     window: f64,
     refresh: f64,
     p: &Palette,
@@ -577,7 +944,7 @@ fn graph(
             if vals.is_empty() {
                 None
             } else {
-                Some((i, vals))
+                Some((start_at + i, vals))
             }
         })
         .collect();
@@ -693,6 +1060,8 @@ fn hold(needed: &[String]) {
 }
 
 struct Palette {
+    ok: String,
+    warn: String,
     bad: String,
     dim: String,
     grid: String,
@@ -704,6 +1073,8 @@ struct Palette {
 
 fn palette() -> Palette {
     Palette {
+        ok: tc::rgb(90, 240, 160),
+        warn: tc::rgb(255, 200, 90),
         bad: tc::rgb(255, 100, 110),
         dim: tc::rgb(127, 147, 172),
         grid: tc::rgb(60, 78, 98),
@@ -744,23 +1115,148 @@ mod tests {
         assert_eq!(ms(Some(2.74)), "2.7ms");
         // Below a millisecond it changes unit rather than losing the value.
         assert_eq!(ms(Some(0.022)), "22µs");
-        assert_eq!(ms(None), "—");
+        assert_eq!(ms(None), "--");
     }
 
     #[test]
     fn rates_read_as_a_person_would_say_them() {
         assert_eq!(rate(Some(6_287_464.0)), "6.3Mbps");
-        assert_eq!(rate(Some(1_500.0)), "1.5Kbps");
+        // Lower-case k, as link.py writes it: the two sit side by side on a
+        // wall and a capital there reads as a different widget.
+        assert_eq!(rate(Some(1_500.0)), "1.5kbps");
         assert_eq!(rate(Some(45_000_000_000.0)), "45.0Gbps");
-        assert_eq!(rate(None), "—");
-        assert_eq!(rate(Some(0.0)), "—");
+        assert_eq!(rate(None), "--");
+        // A socket that has delivered nothing has delivered nothing; it is
+        // not an absent reading.
+        assert_eq!(rate(Some(0.0)), "0bps");
+    }
+
+    #[test]
+    fn byte_counts_read_as_a_person_would_say_them() {
+        assert_eq!(size_of(1_669.0), "1.7k");
+        assert_eq!(size_of(15_900_000.0), "15.9M");
+        assert_eq!(size_of(512.0), "512B");
     }
 
     #[test]
     fn spans_come_from_milliseconds() {
         assert_eq!(span(Some(45_000.0)), "45s");
         assert_eq!(span(Some(600_000.0)), "10m");
-        assert_eq!(span(None), "—");
+        // The unit changes at the unit, not half again past it: 90s is a
+        // minute and a half, and reading it as "90s" was a threshold this
+        // port had invented.
+        assert_eq!(span(Some(90_000.0)), "1m");
+        assert_eq!(span(Some(7_200_000.0)), "2h");
+        assert_eq!(span(None), "--");
+    }
+
+    #[test]
+    fn a_connection_is_judged_against_its_own_best() {
+        let near = Session {
+            rtt: Some(1.2),
+            floor: Some(1.0),
+            ..Default::default()
+        };
+        let far = Session {
+            rtt: Some(120.0),
+            floor: Some(100.0),
+            ..Default::default()
+        };
+        // Both are 1.2x their floor, so both are fine - a fixed millisecond
+        // threshold would have called the second one bad.
+        assert_eq!(quality(&near), quality(&far));
+        let p = palette();
+        assert_eq!(colour_for(quality(&near), None, &p), p.ok);
+        assert_eq!(colour_for(quality(&far), None, &p), p.ok);
+        // Three times its own floor is congestion wherever it is.
+        let slow = Session {
+            rtt: Some(300.0),
+            floor: Some(100.0),
+            ..Default::default()
+        };
+        assert_eq!(colour_for(quality(&slow), None, &p), p.bad);
+        // Loss outranks latency: a fast path dropping packets is not fine.
+        assert_eq!(colour_for(quality(&near), Some(2.5), &p), p.bad);
+        // Nothing measured yet is not a verdict.
+        assert_eq!(colour_for(None, None, &p), p.dim);
+    }
+
+    /// Drop the colour, keep the cells - alignment is a question about text.
+    #[cfg(test)]
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out.trim_end().to_string()
+    }
+
+    #[test]
+    fn a_row_matches_the_python_cell_for_cell() {
+        // Captured from link.py in an 85-column pty. The row is built from
+        // eight separate formats and the header is one fixed string, so
+        // nothing inside this file can catch a drift between them - only
+        // the other implementation can. This port had three cells of it,
+        // and every half looked plausible on its own.
+        let want = "● 219.73.78.221 will   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
+        let row = Session {
+            peer: "219.73.78.221:22".into(),
+            ip: "219.73.78.221".into(),
+            port: 22,
+            rtt: Some(37.0),
+            jitter: Some(10.0),
+            floor: Some(20.0),
+            recent_loss: Some(0.0),
+            delivery: Some(11_100_000.0),
+            lastsnd: Some(60_000.0),
+            lastrcv: Some(90_000.0),
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::from([(
+                "219.73.78.221".to_string(),
+                vec![("williamli".to_string(), "pts/0".to_string())],
+            )]),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        // Nothing selected, so no row carries the highlight.
+        let drawn = table(&[row], &state, 86, 9, &palette());
+        assert_eq!(plain(&drawn[1]), want);
+    }
+
+    #[test]
+    fn a_missing_reading_keeps_its_column() {
+        // A socket the kernel has no round trip for still has to leave the
+        // numbers to its right where they were, or the whole table shifts
+        // on one absent value.
+        let row = Session {
+            peer: "203.0.113.9:22".into(),
+            ip: "203.0.113.9".into(),
+            port: 22,
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::new(),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        let drawn = table(&[row], &state, 86, 9, &palette());
+        assert_eq!(
+            plain(&drawn[1]),
+            "● 203.0.113.9            --      --      --     --        --     --"
+        );
     }
 
     #[test]
