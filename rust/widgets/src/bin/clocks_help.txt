@@ -1,0 +1,17 @@
+Clocks: this server's, everyone else's, and the ones counting down.
+
+A big clock in the machine's own timezone, countdown bars for the next hour,
+office hours and the end of day, and a world clock covering the hubs you care
+about.
+
+    clocks
+
+The world clock marks each city with a sun or a moon by its local hour, which
+is the fastest way to read whether it is a reasonable time to message someone
+there, and shows the day offset where the date differs from this machine's.
+
+Timezones come from the IANA database, so the offsets are right across a
+daylight-saving boundary rather than fixed at whatever they were when the
+config was written.
+
+Keys: up/down scroll the cities, q quits.

@@ -7,6 +7,11 @@ license.workspace = true
 [dependencies]
 toys-core = { path = "../core" }
 libc = "0.2"
+serde_json = "1"
+# clocks needs these; nothing else does yet, and an unused dependency costs
+# nothing at run time because LTO drops what no binary reaches.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
 
 [[bin]]
 name = "ports"
@@ -27,3 +32,7 @@ path = "src/bin/matrix.rs"
 [[bin]]
 name = "link"
 path = "src/bin/link.rs"
+
+[[bin]]
+name = "clocks"
+path = "src/bin/clocks.rs"
