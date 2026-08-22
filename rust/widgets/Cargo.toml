@@ -60,3 +60,7 @@ path = "src/bin/pr.rs"
 [[bin]]
 name = "github"
 path = "src/bin/github.rs"
+
+[[bin]]
+name = "tailnet"
+path = "src/bin/tailnet.rs"

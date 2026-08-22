@@ -1,0 +1,40 @@
+Tailscale network: who is online, and how you are reaching them.
+
+RX and TX are traffic between *this* host and that peer, counted by the local
+WireGuard engine — not the peer's own totals. They reset when tailscaled
+restarts, so they cover that window rather than all time.
+
+The column that matters is PATH. A peer is either DIRECT, meaning NAT traversal
+succeeded and traffic goes peer-to-peer, or it is relayed through a named DERP
+region, meaning every packet round-trips through Tailscale's infrastructure.
+Relayed peers can be dramatically slower and the difference is invisible in
+`tailscale status` output unless you look for it.
+
+Peers advertising subnet routes are flagged, since those only reach you if this
+node runs with --accept-routes.
+
+The info view names each peer's home DERP region — the Tailscale POP nearest to
+it — as a location hint. That comes from the local DERP map, so no address is
+ever sent to a geolocation service.
+
+    tailnet [-n SECONDS]
+
+A live throughput section graphs peers currently moving data (toggle with g),
+and the info view carries the same graph for the selected machine plus ICMP
+latency over the tunnel — current, average, median, min, max, jitter, loss and
+a sparkline — measured the same way the latency monitor does. Only the selected
+peer is probed, so this costs one ping process regardless of tailnet size.
+
+n cycles the poll interval while running (1/2/5/10/30s), the same way the
+latency monitor's i key does; the graph resolution follows it. -n sets the
+starting value, and `tailnet.refresh` in config.json sets the default.
+
+Keys: up/down select a peer, Enter or i opens a full machine info view (every address,
+routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
+Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
+offline peers, q quits. Copying uses OSC 52, so it reaches the clipboard of
+the machine you are typing at even over SSH.
+
+Needs the `tailscale` CLI. Peer LAN addresses come from `tailscale debug
+netmap`, which needs root; it is attempted with `sudo -n` and simply omitted
+when that would prompt, so nothing here requires privilege.
