@@ -11,3 +11,7 @@ libc = "0.2"
 [[bin]]
 name = "ports"
 path = "src/bin/ports.rs"
+
+[[bin]]
+name = "netwatch"
+path = "src/bin/netwatch.rs"

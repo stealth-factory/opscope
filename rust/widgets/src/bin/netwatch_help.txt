@@ -1,0 +1,25 @@
+Which processes are using the network, how much, and how fast.
+
+`nettop` answers this on macOS and has no equivalent here. What Linux does
+have is the kernel's own per-socket accounting: `ss -tine` reports bytes_sent
+and bytes_received for every TCP socket along with its inode, and the inode
+appears in /proc/<pid>/fd, which is what ties bytes to a process. No packet
+capture, no kernel module, no root.
+
+    netwatch [-i SECONDS] [-n COUNT] [--sort total|live]
+             [--all-external] [--all-users]
+
+Only traffic that leaves the machine is counted. Loopback is excluded, and so
+is any connection to one of this machine's own addresses - talking to your own
+10.x or tailnet address never reaches a wire.
+
+Totals start at zero: the first sample is a baseline and only what happens
+after it is counted. A process that exits keeps what it used.
+
+TCP only, which is the honest limit of this method: ss keeps no byte counters
+for UDP, so QUIC, DNS and everything Tailscale carries over WireGuard are
+invisible. The interfaces line says how much of the machine's traffic the
+table can actually account for.
+
+Keys: up/down select, 1 sorts by total, 2 by current rate, o shows the
+daemons you do not own, r rezeroes, q quits.
