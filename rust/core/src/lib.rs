@@ -423,6 +423,12 @@ fn decode(text: &str) -> Vec<String> {
         ("\x1b[6~", "pgdn"),
         ("\x1b[H", "home"),
         ("\x1b[F", "end"),
+        // The other encoding of the same two keys. Which one arrives
+        // depends on the terminal and on whether it is in application
+        // cursor mode, so both have to be understood or Home and End work
+        // on some clients and not others.
+        ("\x1b[1~", "home"),
+        ("\x1b[4~", "end"),
     ];
     let mut keys = Vec::new();
     let chars: Vec<char> = text.chars().collect();
@@ -533,6 +539,11 @@ mod tests {
         assert_eq!(decode("\x1b[B\x1b[B"), vec!["down", "down"]);
         assert_eq!(decode("q"), vec!["q"]);
         assert_eq!(decode("\x1b"), vec!["esc"]);
+        // Both encodings of Home and End, since terminals disagree.
+        assert_eq!(decode("\x1b[H"), vec!["home"]);
+        assert_eq!(decode("\x1b[1~"), vec!["home"]);
+        assert_eq!(decode("\x1b[F"), vec!["end"]);
+        assert_eq!(decode("\x1b[4~"), vec!["end"]);
         assert_eq!(decode("\r"), vec!["enter"]);
     }
 
