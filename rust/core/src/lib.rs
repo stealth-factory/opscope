@@ -288,6 +288,42 @@ pub fn cfg_strings(cfg: &serde_json::Value, key: &str, fallback: &[&str]) -> Vec
     }
 }
 
+/// Ask the terminal to put `text` on the system clipboard, via OSC 52.
+///
+/// The terminal emulator performs the copy, so this reaches the machine you
+/// are sitting at even when the program runs on a remote host over SSH.
+/// Multiplexers must be willing to forward it. Returns false when stdout is
+/// not a terminal, so callers can fall back to showing the text instead.
+pub fn clipboard(text: &str) -> bool {
+    if unsafe { libc::isatty(1) } == 0 {
+        return false;
+    }
+    out(&format!("\x1b]52;c;{}\x07", base64(text.as_bytes())));
+    flush();
+    true
+}
+
+/// Standard base64, because OSC 52 carries its payload that way.
+fn base64(data: &[u8]) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let mut block = [0u8; 3];
+        block[..chunk.len()].copy_from_slice(chunk);
+        let packed = u32::from(block[0]) << 16 | u32::from(block[1]) << 8 | u32::from(block[2]);
+        for i in 0..4 {
+            // Each output character is six bits; the ones past the end of a
+            // short chunk are padding rather than zeroes.
+            if i <= chunk.len() {
+                out.push(SET[(packed >> (18 - 6 * i) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
