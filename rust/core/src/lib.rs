@@ -534,6 +534,31 @@ impl Keyboard {
         }
     }
 
+    /// Take the terminal back after handing it to a child.
+    ///
+    /// `restore` gives the saved settings back and forgets them, which is
+    /// right on the way out and wrong in a launcher: the menu has to
+    /// return to cbreak once the widget it started has finished with the
+    /// terminal. Anything typed while the child had the keyboard belongs
+    /// to the child, so what is left of it is dropped rather than
+    /// delivered to the menu a moment later.
+    pub fn reclaim(&mut self) {
+        if self.saved.is_some() || unsafe { libc::isatty(self.fd) } != 1 {
+            return;
+        }
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(self.fd, &mut saved) } != 0 {
+            return;
+        }
+        let mut raw = saved;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 0;
+        unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &raw) };
+        self.saved = Some(saved);
+        self.buf.clear();
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
     pub fn poll(&mut self) -> Vec<String> {
         if self.saved.is_none() {
