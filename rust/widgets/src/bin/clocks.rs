@@ -855,6 +855,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_office_countdown_across_a_whole_week() {
+        let office = Office::from_config(&serde_json::json!({}));
+        // 2026-08-17 is a Monday, so +n days walks the week.
+        let at = |day: u32, hour: u32| {
+            Local.with_ymd_and_hms(2026, 8, day, hour, 0, 0).unwrap()
+        };
+        let read = |when| {
+            let items = countdowns(when, &office);
+            (items[1].label.clone(), items[1].left)
+        };
+
+        // Inside hours on a working day: counting to the close.
+        let (label, left) = read(at(18, 11));      // Tuesday 11:00
+        assert_eq!(label, "End of Office Hour");
+        assert_eq!(left, 7 * 3600, "seven hours until six");
+
+        // Just before opening: counting to it, an hour off.
+        let (label, left) = read(at(18, 8));
+        assert_eq!(label, "Start of Office Hour");
+        assert_eq!(left, 3600);
+
+        // After the close on a weekday: tomorrow morning.
+        let (label, left) = read(at(18, 19));
+        assert_eq!(label, "Start of Office Hour");
+        assert_eq!(left, 14 * 3600);
+
+        // The last minute of the working day is still inside it.
+        let (label, _) = read(at(18, 17));
+        assert_eq!(label, "End of Office Hour");
+
+        // Friday evening, Saturday, Sunday: all pointing at Monday.
+        for (day, hour) in [(21, 19), (22, 11), (23, 11)] {
+            let (label, left) = read(at(day, hour));
+            assert_eq!(label, "Start of Office Hour", "on day {}", day);
+            let opens = office.next_open(&at(day, hour));
+            assert_eq!(opens.weekday(), chrono::Weekday::Mon, "on day {}", day);
+            assert!(left > 0);
+        }
+    }
+
+    #[test]
     fn friday_evening_counts_to_monday_not_saturday() {
         let office = Office::from_config(&serde_json::json!({}));
         // Friday 21 August 2026 at 19:00 - after the close, and the next
