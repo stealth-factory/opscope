@@ -59,8 +59,9 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (Keyboard, bg, clipboard, draw, load_config, maybe_help,
-                    pack_hints, pad, rgb, seg, setup, size, title)
+from common import (Keyboard, bg, cannot_start, clipboard, draw, load_config,
+                    maybe_help, missing, pack_hints, pad, rgb, seg, setup,
+                    size, title)
 
 _CFG = load_config("netwatch", {
     "interval": 1.0,
@@ -1182,11 +1183,18 @@ def main():
     global MINE
     maybe_help(__doc__)
     parse_args(sys.argv[1:])
-    if not any(os.access(os.path.join(p, "ss"), os.X_OK)
-               for p in os.environ.get("PATH", "").split(os.pathsep)):
-        sys.stderr.write("netwatch.py needs `ss` (iproute2); it is not on "
-                         "PATH.\n")
-        raise SystemExit(1)
+    absent = missing("ss")
+    if absent:
+        cannot_start(
+            "netwatch", absent,
+            ["ss reports the per-socket byte counters this is built on:",
+             "how much each TCP connection has carried, and the inode that",
+             "ties it to a process. Without it there is nothing to read.",
+             "",
+             "It ships in iproute2, which is on essentially every Linux",
+             "system - its absence usually means a very small container",
+             "image rather than a missing package."],
+            "apt install iproute2")
 
     store = Store()
     threading.Thread(target=store.run, daemon=True).start()

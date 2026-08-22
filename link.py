@@ -48,8 +48,9 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help,
-                    pack_hints, pad, rgb, seg, setup, size, title, vbars)
+from common import (RST, Keyboard, bg, cannot_start, draw, heat, load_config,
+                    maybe_help, pack_hints, pad, rgb, seg, setup, size,
+                    title, vbars)
 
 _CFG = load_config("link", {
     # Every established connection into a port we listen on. Naming ports
@@ -665,9 +666,16 @@ def main():
         args = args[2:]
 
     if not run(["ss", "-V"]):
-        sys.stderr.write("link.py needs `ss` (iproute2) to read socket "
-                         "metrics; it is not on PATH.\n")
-        raise SystemExit(1)
+        cannot_start(
+            "connections", ["ss"],
+            ["ss reads the kernel's own per-socket metrics, which is where",
+             "every figure here comes from: round-trip time, retransmits,",
+             "delivery rate. Nothing else on the machine reports them.",
+             "",
+             "It ships in iproute2, which is installed on essentially every",
+             "Linux system - its absence usually means a very small container",
+             "image rather than a missing package."],
+            "apt install iproute2")
 
     setup()
     keyboard = Keyboard()

@@ -44,44 +44,43 @@ that table.
 The practical effect is that adding a widget adds it here. There is no list
 to remember to update, which is the only kind of list that stays correct.
 
-## Whether it will run
+## It says nothing about whether a widget will work
 
-The right-hand column is this machine, not the general case, and it says
-**what was actually checked** rather than a verdict. There is no "ready",
-because "ready" would mean three different things:
+It used to. There was a column reporting whether each command was installed
+and each token set, and it was the wrong place for all of it.
 
-| It says | It checked |
-|---|---|
-| `nothing to set up` | the widget declares no requirement at all |
-| `ss installed` | every command it named is on `PATH` |
-| `needs ping` | one is not, and that is its name |
-| `token is set` | a token is present, in config or the named environment variable |
-| `set a GitHub token` | none was found in either |
-| `reads what is logged in` | nothing — see below |
+A widget that cannot run is the thing that knows why — which command, what it
+is for, what to install. Saying it out here meant saying it twice, in less
+detail, to somebody who has not yet asked. Now the launcher describes what
+each widget *is*, and a widget that cannot start says so on its own screen:
 
-The distinction matters most for tokens. **`token is set` is not `the token
-works`.** Nothing here spends a credential to find out whether it has expired
-or is missing a scope — a GitHub PAT without `read:org` will pass this check
-and still show you half a board. The line says a token exists, because that
-is the only thing that was established.
+```
+╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ cannot start · needs ss
 
-Nor is anything executed. A command being on `PATH` is not that command
-working; `tailscale installed` says the binary is there, not that the daemon
-is up or you are logged in.
+ ss reports the per-socket byte counters this is built on: how much each
+ TCP connection has carried, and the inode that ties it to a process.
+ Without it there is nothing to read.
 
-`pr.py` has no token of its own by design, reusing GitHub's rather than
-asking for a second, so it reports GitHub's.
+ It ships in iproute2, which is on essentially every Linux system — its
+ absence usually means a very small container image.
 
-`usage.py` says `reads what is logged in`, because its requirement is not one
-credential but whichever agents happen to be signed in on this machine — and
-the widget itself is the thing that knows. Claiming either way from out here
-would be a guess.
+ try: apt install iproute2
 
-**Nothing is hidden for failing a check.** A widget you cannot run yet is
-still worth knowing exists, and the line says what is missing instead of
-disappearing.
+ [q]uit
+```
 
-## Launching
+It **holds** there rather than exiting. A widget that dies on a missing
+dependency is a pane that vanishes the moment you look at it, taking its
+explanation with it — and in a tiled wall, or started from this menu, a line
+on stderr has nowhere to go. So it draws the reason and waits, answering `q`
+like everything else.
+
+`link.py`, `netwatch.py`, `latency.py` and `herdr-panes.py` all do this, via
+`cannot_start` in `common.py`. The first two used to exit; the second two used
+to run and quietly show nothing, which was worse.
+
+## Launching## Launching
 
 `↵` hands the terminal over: cursor restored, raw mode off, the widget gets a
 normal terminal and this process waits. Quit the widget and the launcher

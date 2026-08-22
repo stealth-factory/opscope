@@ -63,7 +63,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, bg, draw, heat, load_config, maybe_help,
+from common import (cannot_start, missing, RST, Keyboard, bg, draw, heat, load_config, maybe_help,
                     pack_hints, pad, rgb, seg, setup, size, title)
 
 _CFG = load_config("herdr_panes", {"refresh": 4.0})
@@ -297,6 +297,18 @@ def main():
     if args and args[0] in ("-n", "--refresh"):
         REFRESH = max(1.0, float(args[1]))
         args = args[2:]
+
+    absent = missing("herdr")
+    if absent:
+        cannot_start(
+            "herdr panes", absent,
+            ["This reads a running Herdr session through its own CLI: the",
+             "workspaces, the panes in them, and which agent is in which.",
+             "There is no other source for any of it.",
+             "",
+             "If Herdr is installed but not on PATH, this widget will find",
+             "it as soon as the shell can."],
+            "see https://herdr.dev")
 
     setup()
     keyboard = Keyboard()

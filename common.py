@@ -21,6 +21,7 @@ import math
 import os
 import re
 import select
+import shutil
 import signal
 import sys
 import termios
@@ -46,6 +47,47 @@ def config_paths():
     return [p for p in (env,
                         os.path.join(xdg, "terminal-toys", CONFIG_NAME),
                         os.path.join(here, CONFIG_NAME)) if p]
+
+
+def missing(*programs):
+    """Which of these required commands are not on PATH."""
+    return [p for p in programs if not shutil.which(p)]
+
+
+def cannot_start(name, needed, why, install=""):
+    """Draw a widget that cannot run, and wait, rather than exiting.
+
+    A widget that exits on a missing dependency is a pane that vanishes the
+    moment you look at it, taking its explanation with it - and in a tiled
+    wall, or launched from the menu, there is nowhere for a line on stderr
+    to go. So it draws the reason at the size it was given and holds there,
+    answering q like everything else. Nothing is polled and nothing is
+    retried: the answer will not change while it sits there.
+    """
+    BAD = rgb(255, 100, 110)
+    DIM = rgb(127, 147, 172)
+    TXT = rgb(225, 235, 245)
+    setup()
+    keyboard = Keyboard()
+    while True:
+        for key in keyboard.poll():
+            if key in ("q", "Q"):
+                raise SystemExit(0)
+        w, h = size()
+        rows = [title(name, w, BAD), ""]
+        rows.append(seg([(BAD, " cannot start · "),
+                         (TXT, "needs %s" % ", ".join(needed))], w - 1))
+        rows.append("")
+        for line in why:
+            rows.append(seg([(DIM, " " + line)], w - 1))
+        if install:
+            rows.append("")
+            rows.append(seg([(DIM, " try: "), (TXT, install)], w - 1))
+        while len(rows) < h - 2:
+            rows.append("")
+        rows.append(" " + pack_hints([[(DIM, "[q]uit")]], w - 2)[0])
+        draw(rows, w, h)
+        time.sleep(0.2)
 
 
 def config_token_warning():

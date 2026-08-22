@@ -22,22 +22,20 @@ the front door: pick one and it runs, quit it and you are back here.
     python3 start.py [WIDGET] [ARGS...]
 
 Nothing is described twice. The name and the summary are each widget's own
-first docstring line, and what it needs is the Needs column of the README
-table - both already maintained, and both already checked by check.py, so a
-widget cannot appear here saying something its own file does not.
+first docstring line, and the note underneath is the paragraph that follows
+it - both already maintained, and already checked by check.py, so a widget
+cannot appear here saying something its own file does not.
 
-Where a widget needs a command, this looks for it and says whether it is
-there. Where it needs a token, this looks for one in the config and in the
-environment. Nothing is hidden for failing either test: a widget you cannot
-run yet is still worth knowing about, and it says what is missing instead.
+Nothing is said here about whether a widget will work. A widget that cannot
+run says so itself, on its own screen, in its own words - which is where
+somebody who has just tried to start it is already looking, and is the only
+place that knows what it actually needs.
 
 Keys: up/down select, enter launches, r rechecks, q quits.
 """
 import ast
 import glob
 import os
-import re
-import shutil
 import subprocess
 import sys
 import termios
@@ -45,26 +43,20 @@ import tty
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (CLEAR, HIDE, HOME, RST, SHOW, Keyboard, bg, draw, flush,
-                    load_config, maybe_help, out, pack_hints, pad, rgb, seg,
-                    setup, size, title)
+                    maybe_help, out, pack_hints, pad, rgb, seg, setup, size,
+                    title)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Not widgets: the shared library, the checker, and this.
 NOT_A_WIDGET = ("common.py", "check.py", "start.py",
                 "__main__.py")
 
-OK = rgb(90, 240, 160)
-WARN = rgb(255, 200, 90)
 DIM = rgb(127, 147, 172)
 GRID = rgb(60, 78, 98)
 TXT = rgb(225, 235, 245)
 LBL = rgb(130, 165, 200)
 ACCENT = rgb(150, 210, 255)
 
-# pr.py deliberately has no token of its own - it reuses github's rather than
-# asking for a second one - so its readiness is github's readiness.
-TOKEN_SECTION = {"pr": "github"}
-BACKTICKED = re.compile(r"`([^`]+)`")
 
 
 def wrap(text, width):
@@ -114,86 +106,22 @@ def widgets():
     return found
 
 
-def needs_from_readme():
-    """What each widget needs, from the table that already records it.
-
-    Kept in the README rather than restated here: check.py already fails a
-    widget that has no row in that table, so the column cannot quietly rot,
-    and one description of a requirement is better than two that disagree.
-    """
-    wants = {}
-    try:
-        text = open(os.path.join(HERE, "README.md")).read()
-    except OSError:
-        return wants
-    for line in text.splitlines():
-        if not line.startswith("| **`"):
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) < 5:
-            continue
-        name = cells[1].strip("* `")
-        wants[name] = cells[3]
-    return wants
-
-
-def token_ready(stem):
-    """Whether a token-needing widget has one, in config or the environment."""
-    section = TOKEN_SECTION.get(stem, stem.replace("-", "_"))
-    cfg = load_config(section, {"token": "", "token_env": ""})
-    if (cfg.get("token") or "").strip():
-        return True
-    return bool(os.environ.get(cfg.get("token_env") or "", "").strip())
-
-
-def readiness(stem, need):
-    """What still has to be done before this one will work, if anything.
-
-    Empty when there is nothing to do, which is most of the time. A working
-    widget has nothing to say about itself, and a column reading "installed"
-    against twelve of thirteen rows is a column of noise with one useful
-    line hidden in it. What is left is a thing to go and do, in the words
-    somebody would use to do it.
-    """
-    need = (need or "").strip()
-    if not need or need in ("—", "-"):
-        return "", None
-    commands = BACKTICKED.findall(need)
-    if commands:
-        missing = [c for c in commands if not shutil.which(c)]
-        return ("install " + ", ".join(missing), WARN) if missing else ("",
-                                                                        None)
-    if re.search(r"token|key|login", need, re.I):
-        # usage.py wants no credential of its own - it reads whichever
-        # agents are signed in - so there is nothing to ask anyone for.
-        if stem == "usage" or token_ready(stem):
-            return "", None
-        return "add " + re.sub(r"^an? ", "", need), WARN
-    return "", None
-
-
 def rows_for(items, w, selected):
     name_w = max(12, min(18, w - 58))
     # The column exists only if something is in it. With nothing to do on
     # this machine - the common case - it takes no width at all and the
     # descriptions get it instead.
-    todo = max([len(i["state"][0]) for i in items] or [0])
-    note_w = min(26, todo + 2) if todo else 0
     # Every column keeps a space of its own, so a description that fills its
     # width stops short of whatever is beside it rather than running into it.
-    text_w = max(8, (w - 1) - name_w - note_w - 6)
+    text_w = max(8, (w - 1) - name_w - 6)
     out_rows = []
     for i, item in enumerate(items):
         here = i == selected
         tint = bg(28, 44, 62) if here else ""
-        state, hue = item["state"]
         line = [(tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
                 (tint + (TXT if here else LBL),
                  pad(item["stem"][:name_w - 1], name_w)),
                 (tint + DIM, pad(item["summary"][:text_w - 1], text_w))]
-        if note_w:
-            line.append((tint + (hue or DIM),
-                         pad(state[:note_w - 1], note_w)))
         if here:
             line.append((tint, " " * w))
         out_rows.append(seg(line, w - 1))
@@ -223,12 +151,7 @@ def run_widget(keyboard, item, extra=()):
 
 
 def collect():
-    wants = needs_from_readme()
-    items = widgets()
-    for item in items:
-        item["need"] = wants.get(item["file"], "")
-        item["state"] = readiness(item["stem"], item["need"])
-    return items
+    return widgets()
 
 
 def main():
@@ -270,18 +193,13 @@ def main():
 
         w, h = size()
         selected = max(0, min(selected, len(items) - 1)) if items else 0
-        blocked = sum(1 for i in items if i["state"][1] is WARN)
 
         body = [title("terminal toys", w, ACCENT)]
-        # Nothing about the state of the machine unless something is wrong
-        # with it. "All twelve are fine" is a sentence nobody needs.
-        body.append(seg([(DIM, " %d widgets" % len(items)),
-                         (WARN, " · %d need setting up first" % blocked
-                          if blocked else ""),
-                         (DIM, "   ↵ starts one, q leaves")], w - 1))
+        body.append(seg([(DIM, " %d widgets   ↵ starts one, q leaves"
+                          % len(items))], w - 1))
         body.append("")
         if not items:
-            body.append(seg([(WARN, "  No widgets beside this script.")],
+            body.append(seg([(DIM, "  No widgets beside this script.")],
                             w - 1))
         else:
             body.extend(rows_for(items, w, selected))
@@ -295,9 +213,6 @@ def main():
                             w - 1))
             for line in wrap(pick["about"], w - 4)[:h - len(body) - 2]:
                 body.append(seg([(DIM, "  " + line)], w - 1))
-            if pick["state"][0]:
-                body.append(seg([(WARN, "  to use it, " + pick["state"][0])],
-                                w - 1))
 
         while len(body) < h - 2:
             body.append("")

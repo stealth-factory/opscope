@@ -48,7 +48,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (RST, Keyboard, cycle, draw, load_config, maybe_help, pad,
+from common import (cannot_start, missing, RST, Keyboard, cycle, draw, load_config, maybe_help, pad,
                     rgb, seg, setup, size, title)
 
 # Defaults are deliberately generic: personal targets belong in config.json,
@@ -413,6 +413,18 @@ def main():
         args = args[2:]
     hosts = args or DEFAULT_HOSTS
     targets = [Target(h, PALETTE[i % len(PALETTE)]) for i, h in enumerate(hosts)]
+    absent = missing("ping")
+    if absent:
+        cannot_start(
+            "latency", absent,
+            ["Every figure here comes from ping: this widget times replies,",
+             "it does not send packets itself. With no ping there is nothing",
+             "to time and nothing to draw.",
+             "",
+             "It is in iputils-ping on Debian and Ubuntu, and in iputils on",
+             "Fedora and Arch."],
+            "apt install iputils-ping")
+
     setup()
     keyboard = Keyboard()
     for t in targets:
