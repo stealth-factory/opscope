@@ -56,3 +56,7 @@ path = "src/bin/linear.rs"
 [[bin]]
 name = "pr"
 path = "src/bin/pr.rs"
+
+[[bin]]
+name = "github"
+path = "src/bin/github.rs"
