@@ -472,6 +472,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn base64_matches_the_rfc_vectors() {
+        // Hand-rolled, and its output is invisible: the copy notice shows
+        // the URL whatever actually landed on the clipboard, so a wrong
+        // encoder would look like it worked. RFC 4648 section 10.
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // The two characters that separate base64 from base64url, and a
+        // byte above 127, since a URL may carry either.
+        assert_eq!(base64(&[0xfb, 0xff]), "+/8=");
+        assert_eq!(base64("é".as_bytes()), "w6k=");
+    }
+
+
+    #[test]
     fn the_config_search_includes_the_working_directory() {
         // The bug this exists for: a compiled binary looked only beside
         // itself, which is target/release, and silently used defaults

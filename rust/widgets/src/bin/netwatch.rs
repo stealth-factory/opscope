@@ -2033,23 +2033,23 @@ mod tests {
 
     #[test]
     fn traffic_that_never_leaves_is_recognised() {
-        let own = vec!["10.240.0.46".to_string(), "100.89.99.102".to_string()];
+        let own = vec!["10.0.0.46".to_string(), "100.64.0.102".to_string()];
         assert!(local_peer("127.0.0.1", &own));
         assert!(local_peer("::1", &own));
         // The half that is easy to miss: our own non-loopback address.
-        assert!(local_peer("10.240.0.46", &own));
-        assert!(local_peer("::ffff:10.240.0.46", &own));
-        assert!(!local_peer("10.240.0.99", &own));
+        assert!(local_peer("10.0.0.46", &own));
+        assert!(local_peer("::ffff:10.0.0.46", &own));
+        assert!(!local_peer("10.0.0.99", &own));
     }
 
     #[test]
     fn only_globally_routable_peers_are_off_box() {
-        let own = vec!["10.240.0.46".to_string()];
-        assert!(off_box("160.79.104.10", &own));
+        let own = vec!["10.0.0.46".to_string()];
+        assert!(off_box("203.0.113.10", &own));
         assert!(!off_box("10.0.0.5", &own));
         assert!(!off_box("172.16.0.1", &own));
         assert!(!off_box("192.168.1.1", &own));
-        assert!(!off_box("100.89.99.102", &own));
+        assert!(!off_box("100.64.0.102", &own));
         assert!(!off_box("127.0.0.1", &own));
         // 172.32 is outside the private range and really is out there.
         assert!(off_box("172.32.0.1", &own));

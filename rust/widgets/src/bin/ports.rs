@@ -2194,11 +2194,11 @@ mod tests {
         assert_eq!(bind_class("::"), "all");
         assert_eq!(bind_class("127.0.0.1"), "local");
         assert_eq!(bind_class("::1"), "local");
-        assert_eq!(bind_class("100.89.99.102"), "tailnet");
+        assert_eq!(bind_class("100.64.0.102"), "tailnet");
         assert_eq!(bind_class("fd7a:115c:a1e0::1"), "tailnet");
         // A LAN address is its own answer, not one of the three.
         assert_eq!(bind_class("192.168.1.9"), "192.168.1.9");
-        assert_eq!(bind_class("10.240.0.46"), "10.240.0.46");
+        assert_eq!(bind_class("10.0.0.46"), "10.0.0.46");
     }
 
     #[test]

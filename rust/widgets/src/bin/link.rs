@@ -1202,15 +1202,18 @@ mod tests {
 
     #[test]
     fn a_row_matches_the_python_cell_for_cell() {
-        // Captured from link.py in an 85-column pty. The row is built from
+        // Captured from link.py in an 85-column pty, with the address
+        // replaced by one from RFC 5737's documentation range - it is the
+        // same width, so the alignment this exists to check is unchanged,
+        // and this repository is public. The row is built from
         // eight separate formats and the header is one fixed string, so
         // nothing inside this file can catch a drift between them - only
         // the other implementation can. This port had three cells of it,
         // and every half looked plausible on its own.
-        let want = "● 219.73.78.221 will   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
+        let want = "● 203.0.113.221 will   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
         let row = Session {
-            peer: "219.73.78.221:22".into(),
-            ip: "219.73.78.221".into(),
+            peer: "203.0.113.221:22".into(),
+            ip: "203.0.113.221".into(),
             port: 22,
             rtt: Some(37.0),
             jitter: Some(10.0),
@@ -1224,7 +1227,7 @@ mod tests {
         let state = State {
             rows: vec![row.clone()],
             names: HashMap::from([(
-                "219.73.78.221".to_string(),
+                "203.0.113.221".to_string(),
                 vec![("williamli".to_string(), "pts/0".to_string())],
             )]),
             history: HashMap::new(),
