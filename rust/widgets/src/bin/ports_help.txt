@@ -18,4 +18,17 @@ where Tailscale is installed. Another user's sockets cannot be tied to a
 process without root, so those rows name the owner the socket table gives
 and are hidden behind o along with the system ports.
 
-Keys: up/down select, o hides the machine's own ports, r refreshes, q quits.
+k stops the selected server, after a confirmation and only for a process you
+own: SIGTERM to its process group, which is what Ctrl-C in its own terminal
+would have sent, then the offer of SIGKILL if it is still up three seconds
+later.
+
+Enter opens a second screen for one port, where there is more to show than the
+table holds: the command behind it, every address it can actually be reached
+at - bounded by what the socket is bound to - and c to copy one. From there s
+and t publish it over Tailscale, to the tailnet or to the internet, and d
+opens a Cloudflare quick tunnel. Each asks first.
+
+Keys: up/down select, enter opens, esc goes back, c copies, s serves,
+t funnels, d tunnels, k kills, o hides the machine's own ports, r refreshes,
+q quits.
