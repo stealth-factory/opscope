@@ -557,14 +557,24 @@ fn main() {
                 }
                 "up" | "k" | "K" => scroll = scroll.saturating_sub(1),
                 "down" | "j" | "J" => scroll += 1,
+                "pgup" => scroll = scroll.saturating_sub(8),
+                "pgdn" => scroll += 8,
+                "home" => scroll = 0,
+                // Clamped to the last city further down, which is the only
+                // place that knows how many there are.
+                "end" => scroll = usize::MAX / 2,
                 "p" | "P" => pomo.toggle(seconds()),
+                "?" | "h" => tips = !tips,
+                // Everything below moves a timer that is not running, so
+                // it is ignored rather than silently acted on.
+                _ if !pomo.shown => {}
                 " " => pomo.start_stop(seconds()),
-                "b" | "B" => pomo.advance(seconds()),
+                // One action, three mnemonics: skip / break / end.
+                "s" | "S" | "b" | "B" | "e" | "E" => pomo.advance(seconds()),
                 "r" | "R" => pomo.restart(seconds()),
                 "0" | "c" => pomo.reset_count(),
                 "+" | "=" => pomo.adjust(1.0, seconds()),
                 "-" | "_" => pomo.adjust(-1.0, seconds()),
-                "?" | "h" => tips = !tips,
                 _ => {}
             }
         }

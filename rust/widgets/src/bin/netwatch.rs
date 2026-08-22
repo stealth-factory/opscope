@@ -1344,6 +1344,31 @@ fn detail_rows(
     out
 }
 
+/// One block per interval, for a log or a pipe.
+fn plain_line(rows: &[Proc], started: f64, live: bool, limit: usize) -> String {
+    let mut lines = vec![format!(
+        "--- {} elapsed · sorted by {} ---",
+        elapsed(now() - started),
+        if live { "live" } else { "total" }
+    )];
+    for row in rows.iter().take(limit) {
+        lines.push(format!(
+            "{:<22} {:<8} {:>11} {:>11} {:>11} {:>11}",
+            row.name,
+            if row.pid > 0 {
+                row.pid.to_string()
+            } else {
+                "-".to_string()
+            },
+            units((row.up + row.down) as f64),
+            rate(row.up_rate + row.down_rate),
+            rate(row.down_rate),
+            rate(row.up_rate)
+        ));
+    }
+    lines.join("\n")
+}
+
 /// The table's order, which is also the order Enter indexes into.
 fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
     let mut rows: Vec<Proc> = match state.lock() {
@@ -1378,6 +1403,7 @@ fn main() {
     let mut external = true;
     let mut mine = true;
     let mut sort_live = false;
+    let mut plain = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -1394,6 +1420,10 @@ fn main() {
                 sort_live = args[i + 1] == "live";
                 i += 2;
             }
+            "--external" => {
+                external = true;
+                i += 1;
+            }
             "--all-external" => {
                 external = false;
                 i += 1;
@@ -1402,11 +1432,21 @@ fn main() {
                 mine = false;
                 i += 1;
             }
+            "--plain" => {
+                plain = true;
+                i += 1;
+            }
             "-V" | "--version" => {
                 println!("netwatch 1.1");
                 return;
             }
-            _ => i += 1,
+            // Refused rather than ignored: a typo that silently does
+            // nothing is worse than one that says so, and the Python has
+            // always said so.
+            other => {
+                eprintln!("unknown option {:?} - try --help", other);
+                std::process::exit(2);
+            }
         }
     }
 
@@ -1426,6 +1466,29 @@ fn main() {
         }
         std::thread::sleep(Duration::from_secs_f64(interval));
     });
+
+    // One block per interval, for a log or a pipe. Nothing here touches
+    // the screen, so it can be redirected to a file and left running.
+    if plain {
+        loop {
+            std::thread::sleep(Duration::from_secs_f64(interval));
+            let (started, err) = {
+                let guard = match state.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                (guard.started, guard.err.clone())
+            };
+            if !err.is_empty() {
+                eprintln!("{}", err);
+            }
+            let rows = ordered(&state, mine, sort_live);
+            let show = if limit > 0 { limit } else { rows.len() };
+            println!("{}", plain_line(&rows, started, sort_live, show));
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
