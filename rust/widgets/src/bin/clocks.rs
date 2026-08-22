@@ -440,6 +440,39 @@ impl Pomodoro {
         self.rang_at = -1;
     }
 
+    /// What pressing the break key will do, right now.
+    ///
+    /// One key for both directions, and the label says which it is about to
+    /// do rather than a fixed word like "skip" that describes neither. The
+    /// long break is called out because it is the one worth waiting for.
+    fn next_label(&self) -> String {
+        if self.phase != Phase::Focus {
+            return "[b]reak stop".into();
+        }
+        let long_next = self.before_long > 0 && (self.done + 1) % self.before_long == 0;
+        if long_next {
+            "[b]reak start (long)".into()
+        } else {
+            "[b]reak start".into()
+        }
+    }
+
+    /// Zero the tally, once there is something to zero.
+    fn reset_count(&mut self) {
+        self.done = 0;
+    }
+
+    /// Lengthen or shorten the focus block, in minutes.
+    fn adjust(&mut self, delta: f64, now: f64) {
+        self.focus = (self.focus + delta).clamp(1.0, 180.0);
+        if self.phase == Phase::Focus {
+            self.left = self.duration();
+            if self.running {
+                self.deadline = now + self.left;
+            }
+        }
+    }
+
     fn restart(&mut self, now: f64) {
         self.left = self.duration();
         self.deadline = now + self.left;
@@ -502,6 +535,14 @@ fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let mut flash_started: Option<f64> = None;
+    // Hidden by default: four extra hints on the bottom line is a lot of
+    // footer for a timer that is usually just sitting there, and [?] is
+    // always on show to bring them back. clocks.py starts them visible;
+    // show_hints in the config still decides either way.
+    let mut tips = cfg
+        .get("show_hints")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut scroll = 0usize;
@@ -518,8 +559,12 @@ fn main() {
                 "down" | "j" | "J" => scroll += 1,
                 "p" | "P" => pomo.toggle(seconds()),
                 " " => pomo.start_stop(seconds()),
-                "n" | "N" => pomo.advance(seconds()),
+                "b" | "B" => pomo.advance(seconds()),
                 "r" | "R" => pomo.restart(seconds()),
+                "0" | "c" => pomo.reset_count(),
+                "+" | "=" => pomo.adjust(1.0, seconds()),
+                "-" | "_" => pomo.adjust(-1.0, seconds()),
+                "?" | "h" => tips = !tips,
                 _ => {}
             }
         }
@@ -693,14 +738,50 @@ fn main() {
             }
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(
+        // Navigation first, as every other widget in the collection has it,
+        // then the pomodoro's own controls, then the panel keys. Only the
+        // pomodoro controls hide behind ?: hiding the way back would leave
+        // no way back.
+        let mut hints: Vec<Vec<(&str, String)>> = vec![vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " cities".into()),
+        ]];
+        if pomo.shown && tips {
+            hints.push(vec![
+                (p.dim.as_str(), "[space] ".into()),
+                (
+                    p.txt.as_str(),
+                    if pomo.running { "pause".into() } else { "start".into() },
+                ),
+            ]);
+            hints.push(vec![(p.dim.as_str(), pomo.next_label())]);
+            hints.push(vec![(p.dim.as_str(), "[r]estart".into())]);
+            hints.push(vec![(p.dim.as_str(), format!("[±]{}min", pomo.focus as i64))]);
+            if pomo.done > 0 {
+                // Nothing to reset at zero, so it only appears once it counts.
+                hints.push(vec![(
+                    p.dim.as_str(),
+                    format!("[0]reset {} done", pomo.done),
+                )]);
+            }
+        }
+        hints.push(vec![(
+            p.dim.as_str(),
+            if pomo.shown {
+                "[p]omodoro off".into()
+            } else {
+                "[p]omodoro".into()
+            },
+        )]);
+        if pomo.shown {
+            // Shown even when the controls are hidden, so there is always a
+            // way back. Names the action rather than the state.
+            hints.push(vec![(
                 p.dim.as_str(),
-                format!("[p]{}", if pomo.shown { "off" } else { "omodoro" }),
-            )],
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " cities".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+                format!("[?]{} pomodoro tips", if tips { "hide" } else { "show" }),
+            )]);
+        }
+        hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
             .into_iter()
             .map(|l| format!(" {}", l))
@@ -853,6 +934,39 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_advance_key_says_what_it_will_do() {
+        let mut pomo = Pomodoro::new(&serde_json::json!({}));
+        // Three blocks done, so the fourth leads to the long break and the
+        // hint has to say so rather than promising an ordinary one.
+        assert_eq!(pomo.next_label(), "[b]reak start");
+        pomo.done = 3;
+        assert_eq!(pomo.next_label(), "[b]reak start (long)");
+        pomo.phase = Phase::Short;
+        assert_eq!(pomo.next_label(), "[b]reak stop");
+    }
+
+    #[test]
+    fn the_focus_length_can_be_nudged_and_stays_sane() {
+        let mut pomo = Pomodoro::new(&serde_json::json!({}));
+        pomo.adjust(5.0, 0.0);
+        assert_eq!(pomo.focus, 30.0);
+        assert_eq!(pomo.duration(), 30.0 * 60.0);
+        // It cannot be driven to zero or beyond a working day.
+        for _ in 0..100 {
+            pomo.adjust(-10.0, 0.0);
+        }
+        assert!(pomo.focus >= 1.0, "focus fell to {}", pomo.focus);
+    }
+
+    #[test]
+    fn the_tally_resets_only_when_there_is_one() {
+        let mut pomo = Pomodoro::new(&serde_json::json!({}));
+        pomo.done = 4;
+        pomo.reset_count();
+        assert_eq!(pomo.done, 0);
+    }
 
     #[test]
     fn the_office_countdown_across_a_whole_week() {
