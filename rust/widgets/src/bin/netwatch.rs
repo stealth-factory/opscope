@@ -20,7 +20,7 @@
 //! per-socket byte counters and the inode beside them, and /proc/<pid>/fd
 //! for the process that owns the inode.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -362,6 +362,65 @@ fn wire_label(names: &[String]) -> String {
 /// read. The header says which window, so the number is not a mystery.
 const RATE_WINDOW: f64 = 4.0;
 
+/// Fold one sample into a counter and re-average over the window.
+///
+/// A macro rather than a trait because processes, connections and endpoints
+/// carry the same six fields and want exactly the same arithmetic; the one
+/// thing that must not happen is the three drifting apart on what a rate
+/// means.
+macro_rules! fold {
+    ($e:expr, $when:expr, $up:expr, $down:expr) => {{
+        let e = &mut $e;
+        e.up += $up;
+        e.down += $down;
+        e.seen = $when;
+        e.alive = true;
+        e.recent.push(($when, $up, $down));
+        e.recent.retain(|(t, _, _)| $when - t <= RATE_WINDOW);
+        let oldest = e.recent.first().map(|(t, _, _)| *t).unwrap_or($when);
+        // The span the samples actually cover, not the nominal window: for
+        // the first few seconds after launch there is less history than
+        // that, and dividing by the full window would read low.
+        let span = $when - oldest;
+        let (mut u, mut d) = (0u64, 0u64);
+        for (_, up, down) in &e.recent {
+            u += up;
+            d += down;
+        }
+        // A process with fifteen sockets folds fifteen samples at one
+        // timestamp, and the window then spans no time at all. Dividing by
+        // an epsilon turned five megabytes into a rate of a terabyte a
+        // second and pinned the chart's axis there for four minutes. With
+        // no elapsed time there is no rate to compute, so the last one
+        // stands until the next sample gives the window a width.
+        if e.recent.len() > 1 && span > 0.0 {
+            e.up_rate = u as f64 / span;
+            e.down_rate = d as f64 / span;
+        }
+    }};
+}
+
+/// Drop what has fallen out of the window, and say so when nothing is left.
+macro_rules! settle {
+    ($e:expr, $when:expr) => {{
+        let e = &mut $e;
+        e.alive = false;
+        e.recent.retain(|(t, _, _)| $when - t <= RATE_WINDOW);
+        if e.recent.is_empty() {
+            e.up_rate = 0.0;
+            e.down_rate = 0.0;
+        }
+    }};
+}
+
+/// Keep a series bounded without reallocating the whole thing each sample.
+fn trim<T>(series: &mut Vec<T>, most: usize) {
+    if series.len() > most {
+        let drop = series.len() - most;
+        series.drain(..drop);
+    }
+}
+
 #[derive(Clone, Default)]
 struct Proc {
     pid: i32,
@@ -371,37 +430,53 @@ struct Proc {
     up_rate: f64,
     down_rate: f64,
     alive: bool,
+    seen: f64,
     /// (when, up bytes, down bytes) for the last few samples.
+    recent: Vec<(f64, u64, u64)>,
+    /// (down rate, up rate) per sample, for this process's own chart.
+    hist: Vec<(f64, f64)>,
+}
+
+/// One socket, so the detail screen can say which of a process's dozen
+/// connections is the one actually moving.
+#[derive(Clone, Default)]
+struct Conn {
+    pid: i32,
+    name: String,
+    peer: String,
+    port: u16,
+    up: u64,
+    down: u64,
+    up_rate: f64,
+    down_rate: f64,
+    alive: bool,
+    seen: f64,
     recent: Vec<(f64, u64, u64)>,
 }
 
-impl Proc {
-    /// Fold this sample in, and re-average over the window.
-    fn add(&mut self, when: f64, up: u64, down: u64) {
-        self.up += up;
-        self.down += down;
-        self.recent.push((when, up, down));
-        self.recent.retain(|(t, _, _)| when - t <= RATE_WINDOW);
-        let oldest = self.recent.first().map(|(t, _, _)| *t).unwrap_or(when);
-        // The span the samples actually cover, not the nominal window: for
-        // the first few seconds after launch there is less history than
-        // that, and dividing by the full window would read low.
-        let span = (when - oldest).max(1e-6);
-        let (mut u, mut d) = (0u64, 0u64);
-        for (_, up, down) in &self.recent {
-            u += up;
-            d += down;
-        }
-        if self.recent.len() > 1 {
-            self.up_rate = u as f64 / span;
-            self.down_rate = d as f64 / span;
-        }
-    }
+/// The sockets sharing a peer, folded together: a browser opening six
+/// connections to one host is one thing being talked to, not six.
+#[derive(Clone, Default)]
+struct Spot {
+    pid: i32,
+    name: String,
+    peer: String,
+    up: u64,
+    down: u64,
+    up_rate: f64,
+    down_rate: f64,
+    alive: bool,
+    seen: f64,
+    ports: BTreeSet<u16>,
+    recent: Vec<(f64, u64, u64)>,
+    hist: Vec<(f64, f64)>,
 }
 
 #[derive(Default)]
 struct State {
     totals: HashMap<(i32, String), Proc>,
+    conns: HashMap<String, Conn>,
+    spots: HashMap<(i32, String, String), Spot>,
     last: HashMap<String, (u64, u64)>,
     series: Vec<(f64, f64, f64, f64)>,
     stamp: f64,
@@ -429,14 +504,15 @@ fn sample(state: &mut State, external: bool) {
     };
     state.err = err;
 
+    // A row with nothing left in the window really is idle, and says so.
     for row in state.totals.values_mut() {
-        row.alive = false;
-        // A row with nothing in the window really is idle, and says so.
-        row.recent.retain(|(t, _, _)| stamp - t <= RATE_WINDOW);
-        if row.recent.is_empty() {
-            row.up_rate = 0.0;
-            row.down_rate = 0.0;
-        }
+        settle!(*row, stamp);
+    }
+    for conn in state.conns.values_mut() {
+        settle!(*conn, stamp);
+    }
+    for spot in state.spots.values_mut() {
+        settle!(*spot, stamp);
     }
 
     let first = state.stamp == 0.0;
@@ -477,12 +553,42 @@ fn sample(state: &mut State, external: bool) {
             .entry((pid, name.clone()))
             .or_insert_with(|| Proc {
                 pid,
-                name,
+                name: name.clone(),
                 ..Default::default()
             });
         row.alive = true;
+        row.seen = stamp;
         if gap > 0.0 {
-            row.add(stamp, d_sent, d_recv);
+            fold!(*row, stamp, d_sent, d_recv);
+        }
+
+        let conn = state.conns.entry(inode.clone()).or_insert_with(|| Conn {
+            pid,
+            name: name.clone(),
+            peer: seen.peer.clone(),
+            port: seen.port,
+            ..Default::default()
+        });
+        conn.alive = true;
+        conn.seen = stamp;
+        if gap > 0.0 {
+            fold!(*conn, stamp, d_sent, d_recv);
+        }
+
+        let spot = state
+            .spots
+            .entry((pid, name.clone(), seen.peer.clone()))
+            .or_insert_with(|| Spot {
+                pid,
+                name: name.clone(),
+                peer: seen.peer.clone(),
+                ..Default::default()
+            });
+        spot.alive = true;
+        spot.seen = stamp;
+        spot.ports.insert(seen.port);
+        if gap > 0.0 {
+            fold!(*spot, stamp, d_sent, d_recv);
         }
     }
 
@@ -505,9 +611,16 @@ fn sample(state: &mut State, external: bool) {
         let all_down: f64 = state.totals.values().map(|r| r.down_rate).sum();
         let all_up: f64 = state.totals.values().map(|r| r.up_rate).sum();
         state.series.push((mine_down, mine_up, all_down, all_up));
-        if state.series.len() > SERIES {
-            let drop = state.series.len() - SERIES;
-            state.series.drain(..drop);
+        trim(&mut state.series, SERIES);
+        // Every process and every endpoint keeps its own series, so the
+        // second screen can draw one of them alone on the same axes.
+        for row in state.totals.values_mut() {
+            row.hist.push((row.down_rate, row.up_rate));
+            trim(&mut row.hist, SERIES);
+        }
+        for spot in state.spots.values_mut() {
+            spot.hist.push((spot.down_rate, spot.up_rate));
+            trim(&mut spot.hist, SERIES);
         }
     }
 
@@ -526,6 +639,23 @@ fn sample(state: &mut State, external: bool) {
 
     state.last = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
     state.stamp = stamp;
+
+    // A closed connection is worth keeping - it may be the one that did the
+    // damage - but not forever. The quiet dead ones go once there are
+    // enough of them to matter.
+    if state.conns.len() > 400 {
+        let mut order: Vec<(String, f64, bool)> = state
+            .conns
+            .iter()
+            .map(|(k, c)| (k.clone(), c.seen, c.alive))
+            .collect();
+        order.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (inode, _, alive) in order.into_iter().take(100) {
+            if !alive {
+                state.conns.remove(&inode);
+            }
+        }
+    }
 }
 
 /// Plot a series on a dot canvas eight times finer than the cells.
@@ -553,7 +683,7 @@ fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted:
         let magnitude = (scaled * (px_h as f64 - 1.0)).round() as i64;
         (x, if inverted { magnitude } else { px_h as i64 - 1 - magnitude })
     };
-    let mut dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
+    let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
         if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
             grid[y as usize / 4][x as usize / 2] |= BRAILLE[y as usize % 4][x as usize % 2];
         }
@@ -610,6 +740,635 @@ fn braille_row(masks: &[u8], colour: &str) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+// ── the second screen ────────────────────────────────────────────────
+//
+// The table answers "what is using the network"; this answers "with what,
+// and what is it writing". Everything here comes out of /proc for our own
+// processes and out of nothing at all for anybody else's, which is why the
+// screen says so rather than showing empty lists.
+
+const SECTIONS: [&str; 3] = ["endpoints", "connections", "files"];
+
+/// Reverse DNS, off the drawing thread.
+///
+/// A PTR lookup takes half a second when it works and longer when it does
+/// not, which is several frames. The address is shown until a name arrives,
+/// and an address that has no name is remembered as having none so it is
+/// not asked about again every second.
+struct Resolver {
+    known: Arc<Mutex<HashMap<String, String>>>,
+    wanted: Arc<Mutex<Vec<String>>>,
+}
+
+impl Resolver {
+    fn new() -> Resolver {
+        let known: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let wanted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (k, q) = (Arc::clone(&known), Arc::clone(&wanted));
+        std::thread::spawn(move || loop {
+            let next = q.lock().ok().and_then(|mut g| g.pop());
+            let ip = match next {
+                Some(ip) => ip,
+                None => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+            };
+            // getent rather than a resolver library: it is glibc's own
+            // lookup, so it honours /etc/hosts, nsswitch and the search
+            // domains exactly as everything else on the machine does.
+            let answer = run(&["getent", "hosts", &ip]);
+            let name = answer
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            if let Ok(mut guard) = k.lock() {
+                guard.insert(ip, name);
+            }
+        });
+        Resolver { known, wanted }
+    }
+
+    /// A name for an address if one is known, queueing a lookup if not.
+    fn name(&self, ip: &str) -> String {
+        if let Ok(guard) = self.known.lock() {
+            if let Some(found) = guard.get(ip) {
+                return found.clone();
+            }
+        }
+        if let Ok(mut queue) = self.wanted.lock() {
+            if !queue.iter().any(|q| q == ip) && queue.len() < 64 {
+                queue.push(ip.to_string());
+            }
+        }
+        String::new()
+    }
+}
+
+/// What a port number is conventionally for, from /etc/services.
+fn service(port: u16) -> String {
+    if port == 0 {
+        return String::new();
+    }
+    let text = match std::fs::read_to_string("/etc/services") {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    let want = format!("{}/tcp", port);
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let mut cols = line.split_whitespace();
+        let (name, entry) = (cols.next(), cols.next());
+        if entry == Some(want.as_str()) {
+            return name.unwrap_or("").to_string();
+        }
+    }
+    String::new()
+}
+
+/// Whether the process still exists.
+///
+/// Distinct from the `alive` flag on a row, which means "had a socket in
+/// the last sample". A long-running server sitting idle has neither traffic
+/// nor open connections and has certainly not exited, and saying it had
+/// would be worse than saying nothing.
+fn running(pid: i32) -> bool {
+    pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).is_dir()
+}
+
+/// Disk bytes this process has read and written, from /proc/<pid>/io.
+fn proc_io(pid: i32) -> HashMap<String, u64> {
+    let mut out = HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(format!("/proc/{}/io", pid)) {
+        for line in text.lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                if let Ok(n) = value.trim().parse() {
+                    out.insert(key.trim().to_string(), n);
+                }
+            }
+        }
+    }
+    out
+}
+
+struct OpenFile {
+    path: String,
+    size: u64,
+}
+
+/// Regular files this process has open, largest first.
+///
+/// A download has to land somewhere, and where it lands is a file getting
+/// bigger. This is the closest thing to "which file" that exists outside
+/// the encrypted stream - the name of the thing being written, rather than
+/// the name of the thing being fetched.
+fn open_files(pid: i32) -> Vec<OpenFile> {
+    let mut found = Vec::new();
+    let dir = match std::fs::read_dir(format!("/proc/{}/fd", pid)) {
+        Ok(d) => d,
+        Err(_) => return found,
+    };
+    for entry in dir.flatten() {
+        let link = match std::fs::read_link(entry.path()) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let path = link.to_string_lossy().to_string();
+        if !path.starts_with('/')
+            || path.starts_with("/dev/")
+            || path.starts_with("/proc/")
+            || path.starts_with("/sys/")
+        {
+            continue;
+        }
+        // Through the fd rather than the path: the target may have been
+        // unlinked, and a temporary file being written is exactly the case
+        // this screen exists for.
+        let size = match std::fs::metadata(entry.path()) {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        found.push(OpenFile { path, size });
+    }
+    found.sort_by(|a, b| b.size.cmp(&a.size));
+    found
+}
+
+#[derive(Default)]
+struct Facts {
+    cmdline: String,
+    cwd: String,
+}
+
+/// Command and directory - what the table has no room for.
+fn process_facts(pid: i32) -> Facts {
+    let mut facts = Facts::default();
+    if let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+        facts.cmdline = String::from_utf8_lossy(&raw)
+            .replace('\0', " ")
+            .trim()
+            .to_string();
+    }
+    if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
+        facts.cwd = link.to_string_lossy().to_string();
+    }
+    facts
+}
+
+/// A path that fits, keeping the end - which is the filename.
+fn short(path: &str, room: usize) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = if !home.is_empty() && path.starts_with(&home) {
+        format!("~{}", &path[home.len()..])
+    } else {
+        path.to_string()
+    };
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= room || room < 2 {
+        return path;
+    }
+    format!("…{}", chars[chars.len() - (room - 1)..].iter().collect::<String>())
+}
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut rest: Vec<char> = text.chars().collect();
+    while !rest.is_empty() && lines.len() < 3 {
+        if rest.len() <= width {
+            lines.push(rest.iter().collect());
+            break;
+        }
+        let cut = rest[..(width + 1).min(rest.len())]
+            .iter()
+            .rposition(|c| *c == ' ')
+            .filter(|c| *c > width / 2)
+            .unwrap_or(width);
+        lines.push(rest[..cut].iter().collect());
+        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
+    }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn field_rows(label: &str, value: &str, w: usize, colour: &str, p: &Palette) -> Vec<String> {
+    wrap(value, ((w - 3).saturating_sub(10)).max(8))
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            tc::seg(
+                &[
+                    (
+                        p.dim.as_str(),
+                        format!("  {}", tc::pad(if i == 0 { label } else { "" }, 10)),
+                    ),
+                    (colour, line),
+                ],
+                w - 1,
+            )
+        })
+        .collect()
+}
+
+/// A section header that says whether it is the one taking the keys.
+fn section_head(
+    name: &str,
+    count: usize,
+    note: &str,
+    focused: bool,
+    key: &str,
+    w: usize,
+    p: &Palette,
+) -> String {
+    tc::seg(
+        &[
+            (
+                if focused { p.accent.as_str() } else { p.lbl.as_str() },
+                format!("{}── {} ── ", if focused { " ▏" } else { " " }, name),
+            ),
+            (
+                p.dim.as_str(),
+                format!("{} {}{}", count, note, if count == 1 { "" } else { "s" }),
+            ),
+            (
+                if focused { p.accent.as_str() } else { p.grid.as_str() },
+                format!("   [{}]", key),
+            ),
+        ],
+        w - 1,
+    )
+}
+
+/// The line above a chart: what it is, and how far back it reaches.
+fn chart_head(len: usize, w: usize, label: &str, interval: f64, p: &Palette) -> String {
+    let span = if len > 0 {
+        elapsed(len as f64 * interval)
+    } else {
+        "nothing yet".to_string()
+    };
+    tc::seg(
+        &[
+            (p.lbl.as_str(), format!(" ── {} ── ", label)),
+            (p.up.as_str(), "↑ tx above".into()),
+            (p.dim.as_str(), " · ".into()),
+            (p.down.as_str(), "↓ rx below".into()),
+            (p.dim.as_str(), format!("  · {} of history", span)),
+        ],
+        w - 1,
+    )
+}
+
+/// Remote hosts, ranked by what they have carried since launch.
+fn endpoint_rows(
+    spots: &[Spot],
+    at: usize,
+    focused: bool,
+    room: usize,
+    w: usize,
+    names: &Resolver,
+    p: &Palette,
+) -> Vec<String> {
+    let host_w = ((w - 1).saturating_sub(42)).clamp(14, 34);
+    spots
+        .iter()
+        .take(room.max(1))
+        .enumerate()
+        .map(|(i, spot)| {
+            let here = focused && i == at;
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let name = {
+                let found = names.name(&spot.peer);
+                if found.is_empty() { spot.peer.clone() } else { found }
+            };
+            let ports: Vec<String> = spot
+                .ports
+                .iter()
+                .take(2)
+                .map(|port| {
+                    let named = service(*port);
+                    if named.is_empty() { port.to_string() } else { named }
+                })
+                .collect();
+            let moving = spot.down_rate + spot.up_rate;
+            let c = |colour: &str| format!("{}{}", tint, colour);
+            tc::seg(
+                &[
+                    (
+                        &c(if here { &p.accent } else { &p.dim }),
+                        if here { " ▸ ".into() } else { "   ".into() },
+                    ),
+                    (
+                        &c(if spot.alive { &p.txt } else { &p.dim }),
+                        tc::pad(&name.chars().take(host_w - 1).collect::<String>(), host_w),
+                    ),
+                    (
+                        &c(&p.dim),
+                        format!("{:<9}", ports.join("/").chars().take(9).collect::<String>()),
+                    ),
+                    (&c(&p.down), format!("↓{:>9}", units(spot.down as f64))),
+                    (&c(&p.up), format!(" ↑{:>9}", units(spot.up as f64))),
+                    (
+                        &c(if moving > 0.0 { &p.ok } else { &p.dim }),
+                        format!("{:>11}", rate(moving)),
+                    ),
+                    (&tint, if here { " ".repeat(w) } else { String::new() }),
+                ],
+                w - 1,
+            )
+        })
+        .collect()
+}
+
+/// The sockets open right now, which is a different list from the hosts.
+fn connection_rows(
+    conns: &[Conn],
+    at: usize,
+    focused: bool,
+    room: usize,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let host_w = ((w - 1).saturating_sub(34)).clamp(14, 38);
+    conns
+        .iter()
+        .take(room.max(1))
+        .enumerate()
+        .map(|(i, conn)| {
+            let here = focused && i == at;
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let where_ = format!("{}:{}", conn.peer, conn.port);
+            let c = |colour: &str| format!("{}{}", tint, colour);
+            tc::seg(
+                &[
+                    (
+                        &c(if here { &p.accent } else { &p.dim }),
+                        if here { " ▸ ".into() } else { "   ".into() },
+                    ),
+                    (
+                        &c(if conn.alive { &p.txt } else { &p.dim }),
+                        tc::pad(
+                            &where_.chars().take(host_w - 1).collect::<String>(),
+                            host_w,
+                        ),
+                    ),
+                    (
+                        &c(if conn.alive { &p.ok } else { &p.dim }),
+                        format!("{:<7}", if conn.alive { "open" } else { "closed" }),
+                    ),
+                    (&c(&p.down), format!("↓{:>9}", units(conn.down as f64))),
+                    (&c(&p.up), format!(" ↑{:>9}", units(conn.up as f64))),
+                    (&tint, if here { " ".repeat(w) } else { String::new() }),
+                ],
+                w - 1,
+            )
+        })
+        .collect()
+}
+
+/// Open files, with how fast each is growing since this screen opened.
+fn file_rows(
+    files: &[OpenFile],
+    sizes: &HashMap<String, (u64, f64)>,
+    at: usize,
+    focused: bool,
+    room: usize,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let path_w = ((w - 1).saturating_sub(30)).max(18);
+    files
+        .iter()
+        .take(room.max(1))
+        .enumerate()
+        .map(|(i, item)| {
+            let here = focused && i == at;
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let (grew, span) = match sizes.get(&item.path) {
+                Some((was, when)) => (item.size.saturating_sub(*was), now() - when),
+                None => (0, 0.0),
+            };
+            let growth = if grew > 0 && span > 0.0 {
+                format!("+{}", rate(grew as f64 / span))
+            } else {
+                String::new()
+            };
+            let c = |colour: &str| format!("{}{}", tint, colour);
+            tc::seg(
+                &[
+                    (
+                        &c(if here { &p.accent } else { &p.dim }),
+                        if here { " ▸ ".into() } else { "   ".into() },
+                    ),
+                    (&c(&p.txt), tc::pad(&short(&item.path, path_w), path_w)),
+                    (&c(&p.dim), format!("{:>10}", units(item.size as f64))),
+                    (
+                        &c(if grew > 0 { &p.ok } else { &p.dim }),
+                        format!("{:>12}", growth),
+                    ),
+                    (&tint, if here { " ".repeat(w) } else { String::new() }),
+                ],
+                w - 1,
+            )
+        })
+        .collect()
+}
+
+/// One process in full: what it is, who it talks to, what it writes.
+#[allow(clippy::too_many_arguments)]
+fn detail_rows(
+    row: &Proc,
+    spots: &[Spot],
+    conns: &[Conn],
+    files: &[OpenFile],
+    sizes: &HashMap<String, (u64, f64)>,
+    focus: usize,
+    at: &[usize; 3],
+    w: usize,
+    h: usize,
+    interval: f64,
+    names: &Resolver,
+    p: &Palette,
+) -> Vec<String> {
+    let facts = process_facts(row.pid);
+    let here_now = running(row.pid);
+    let total = (row.up + row.down) as f64;
+    let mut out = vec![tc::title(
+        &format!("{} · pid {}", row.name, row.pid),
+        w,
+        &p.accent,
+    )];
+    out.push(tc::seg(
+        &[
+            (p.txt.as_str(), format!(" {}", units(total))),
+            (p.dim.as_str(), " since first seen  ·  ".into()),
+            (p.down.as_str(), format!("↓ {}", rate(row.down_rate))),
+            (p.dim.as_str(), "  ".into()),
+            (p.up.as_str(), format!("↑ {}", rate(row.up_rate))),
+        ],
+        w - 1,
+    ));
+    if row.pid == 0 {
+        out.push(tc::seg(
+            &[(
+                p.dim.as_str(),
+                " another user's process - named from its control group, \
+                 since /proc is closed to us"
+                    .into(),
+            )],
+            w - 1,
+        ));
+    } else if !here_now {
+        out.push(tc::seg(
+            &[(
+                p.warn.as_str(),
+                " this process has exited - its total is kept, and nothing \
+                 below is live"
+                    .into(),
+            )],
+            w - 1,
+        ));
+    } else if !row.alive {
+        out.push(tc::seg(
+            &[(
+                p.dim.as_str(),
+                " no connection open at the moment - what is below is the \
+                 last that was seen"
+                    .into(),
+            )],
+            w - 1,
+        ));
+    }
+    out.push(String::new());
+
+    // This process's own traffic, on the same chart as the machine's.
+    let spare = h.saturating_sub(out.len());
+    let graph_h = if spare >= 30 {
+        7
+    } else if spare >= 24 {
+        5
+    } else {
+        0
+    };
+    if graph_h > 0 && !row.hist.is_empty() {
+        out.push(chart_head(row.hist.len(), w, "THIS PROCESS", interval, p));
+        out.extend(chart(&row.hist, w, graph_h, p));
+        out.push(String::new());
+    }
+
+    if h.saturating_sub(out.len()) >= 12 {
+        out.push(tc::seg(&[(p.lbl.as_str(), " ── PROCESS ── ".into())], w - 1));
+        let cmd = if facts.cmdline.is_empty() { "?" } else { &facts.cmdline };
+        out.extend(field_rows("command", cmd, w, &p.txt, p));
+        if !facts.cwd.is_empty() {
+            let cwd = short(&facts.cwd, w.saturating_sub(14));
+            out.extend(field_rows("directory", &cwd, w, &p.txt, p));
+        }
+        out.push(String::new());
+    }
+
+    // What is left is split between the three lists, with the focused one
+    // given the room: it is the one being read, and the others still say
+    // how much they are holding in their headers.
+    let left = h.saturating_sub(out.len() + 4).max(3);
+    let counts = [spots.len(), conns.len(), files.len()];
+    let mut shares = [1usize; 3];
+    shares[focus] = left.saturating_sub(2 + 3 * 2).max(1);
+
+    for (which, (name, key, note)) in [
+        ("TALKING TO", "e", "endpoint"),
+        ("CONNECTIONS", "tab", "socket"),
+        ("FILES", "f", "file"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let focused = focus == which;
+        out.push(section_head(name, counts[which], note, focused, key, w, p));
+        let room = shares[which].min(h.saturating_sub(out.len() + 3).max(1));
+        if counts[which] == 0 {
+            out.push(tc::seg(&[(p.dim.as_str(), "   none".into())], w - 1));
+        } else if which == 0 {
+            out.extend(endpoint_rows(spots, at[which], focused, room, w, names, p));
+            // The highlighted host gets its own small chart, which is the
+            // quickest way to see whether it is the one doing the work.
+            let pick = &spots[at[which].min(spots.len() - 1)];
+            if focused && !pick.hist.is_empty() && h.saturating_sub(out.len()) >= 7 {
+                let found = names.name(&pick.peer);
+                out.push(tc::seg(
+                    &[
+                        (p.dim.as_str(), "     ── ".into()),
+                        (
+                            p.accent.as_str(),
+                            if found.is_empty() { pick.peer.clone() } else { found },
+                        ),
+                        (p.dim.as_str(), " alone ──".into()),
+                    ],
+                    w - 1,
+                ));
+                out.extend(chart(&pick.hist, w, 4, p));
+            }
+        } else if which == 1 {
+            out.extend(connection_rows(conns, at[which], focused, room, w, p));
+        } else {
+            out.extend(file_rows(files, sizes, at[which], focused, room, w, p));
+        }
+        out.push(String::new());
+    }
+
+    let io = if here_now {
+        proc_io(row.pid)
+    } else {
+        HashMap::new()
+    };
+    if !io.is_empty() && h.saturating_sub(out.len()) >= 2 {
+        out.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── DISK ── ".into()),
+                (
+                    p.dim.as_str(),
+                    format!(
+                        "read {} · written {} since it started",
+                        units(*io.get("read_bytes").unwrap_or(&0) as f64),
+                        units(*io.get("write_bytes").unwrap_or(&0) as f64)
+                    ),
+                ),
+            ],
+            w - 1,
+        ));
+    }
+    out
+}
+
+/// The table's order, which is also the order Enter indexes into.
+fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
+    let mut rows: Vec<Proc> = match state.lock() {
+        Ok(guard) => guard
+            .totals
+            .values()
+            .filter(|r| !mine || r.pid != 0)
+            .cloned()
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    if live {
+        rows.sort_by(|a, b| {
+            (b.up_rate + b.down_rate)
+                .total_cmp(&(a.up_rate + a.down_rate))
+                .then((b.up + b.down).cmp(&(a.up + a.down)))
+        });
+    } else {
+        rows.sort_by(|a, b| {
+            (b.up + b.down)
+                .cmp(&(a.up + a.down))
+                .then((b.up_rate + b.down_rate).total_cmp(&(a.up_rate + a.down_rate)))
+        });
+    }
+    rows
 }
 
 fn main() {
@@ -671,9 +1430,66 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // The second screen: which process, which of its three lists is taking
+    // the keys, and where each list is scrolled to.
+    let mut detail: Option<(i32, String)> = None;
+    let mut focus = 0usize;
+    let mut at = [0usize; 3];
+    // What each open file measured when this screen opened, so the growth
+    // column is over the time you have been looking rather than the life
+    // of the file.
+    let mut sizes: HashMap<String, (u64, f64)> = HashMap::new();
+    let mut notice: Option<(String, String, f64)> = None;
+    // What `c` would copy: known while drawing, wanted when the key is hit.
+    let mut pending_copy = String::new();
+    let names = Resolver::new();
 
     loop {
         for key in keyboard.poll() {
+            if detail.is_some() {
+                match key.as_str() {
+                    "esc" | "left" | "q" | "Q" | "backspace" => {
+                        detail = None;
+                        sizes.clear();
+                    }
+                    "r" | "R" => {
+                        if let Ok(mut guard) = state.lock() {
+                            guard.totals.clear();
+                            guard.conns.clear();
+                            guard.spots.clear();
+                            guard.series.clear();
+                            guard.started = now();
+                        }
+                        detail = None;
+                        sizes.clear();
+                    }
+                    "up" | "k" | "K" => at[focus] = at[focus].saturating_sub(1),
+                    "down" | "j" | "J" => at[focus] += 1,
+                    "tab" => focus = (focus + 1) % SECTIONS.len(),
+                    "e" | "E" => focus = 0,
+                    "f" | "F" => focus = 2,
+                    "c" | "C" => {
+                        if !pending_copy.is_empty() {
+                            // The value goes in the message either way: OSC
+                            // 52 is refused by some terminals and swallowed
+                            // by some multiplexers, and a copy that quietly
+                            // did nothing would leave nothing to read.
+                            let copied = tc::clipboard(&pending_copy);
+                            notice = Some((
+                                format!(
+                                    "{}{}",
+                                    if copied { "copied  " } else { "no clipboard  " },
+                                    pending_copy
+                                ),
+                                if copied { p.ok.clone() } else { p.warn.clone() },
+                                now() + 8.0,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -689,44 +1505,124 @@ fn main() {
                 }
                 "up" | "k" | "K" => selected = selected.saturating_sub(1),
                 "down" | "j" | "J" => selected += 1,
+                "enter" | "right" | "i" | "I" => {
+                    if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
+                        detail = Some((pick.pid, pick.name.clone()));
+                        focus = 0;
+                        at = [0; 3];
+                        sizes.clear();
+                    }
+                }
                 "r" | "R" => {
                     if let Ok(mut guard) = state.lock() {
                         guard.totals.clear();
+                        guard.conns.clear();
+                        guard.spots.clear();
                         guard.series.clear();
                         guard.started = now();
                     }
+                    selected = 0;
                 }
                 _ => {}
             }
         }
 
         let (w, h) = tc::size();
+        if notice.as_ref().is_some_and(|n| now() >= n.2) {
+            notice = None;
+        }
+
+        // One process in full. Its row is looked up fresh each frame so the
+        // figures keep moving while the screen is open, and it survives the
+        // process exiting - which is often when it is being looked at.
+        if let Some((pid, name)) = detail.clone() {
+            let (row, spots, conns) = {
+                let guard = match state.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let row = guard.totals.get(&(pid, name.clone())).cloned();
+                let mut spots: Vec<Spot> = guard
+                    .spots
+                    .values()
+                    .filter(|s| s.pid == pid && s.name == name)
+                    .cloned()
+                    .collect();
+                spots.sort_by(|a, b| {
+                    (b.up + b.down)
+                        .cmp(&(a.up + a.down))
+                        .then(a.peer.cmp(&b.peer))
+                });
+                let mut conns: Vec<Conn> = guard
+                    .conns
+                    .values()
+                    .filter(|c| c.pid == pid && c.name == name)
+                    .cloned()
+                    .collect();
+                conns.sort_by(|a, b| {
+                    (b.up + b.down)
+                        .cmp(&(a.up + a.down))
+                        .then(a.peer.cmp(&b.peer))
+                });
+                (row, spots, conns)
+            };
+            let row = match row {
+                Some(r) => r,
+                None => {
+                    detail = None;
+                    continue;
+                }
+            };
+            let files = if running(pid) { open_files(pid) } else { Vec::new() };
+            for file in &files {
+                sizes.entry(file.path.clone()).or_insert((file.size, now()));
+            }
+            let counts = [spots.len(), conns.len(), files.len()];
+            at[focus] = at[focus].min(counts[focus].saturating_sub(1));
+            // The selection is known here and the key is pressed elsewhere,
+            // so what `c` would copy is recorded while the frame is drawn.
+            pending_copy = match focus {
+                0 => spots.get(at[0]).map(|s| s.peer.clone()).unwrap_or_default(),
+                1 => conns
+                    .get(at[1])
+                    .map(|c| format!("{}:{}", c.peer, c.port))
+                    .unwrap_or_default(),
+                _ => files.get(at[2]).map(|f| f.path.clone()).unwrap_or_default(),
+            };
+            let hints: Vec<Vec<(&str, String)>> = vec![
+                vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
+                vec![(p.accent.as_str(), "tab".into()), (p.dim.as_str(), " section".into())],
+                vec![(p.dim.as_str(), "[c]opy".into())],
+                vec![(p.dim.as_str(), "[r]ezero".into())],
+                vec![(p.accent.as_str(), "esc".into()), (p.dim.as_str(), " back".into())],
+                vec![(p.dim.as_str(), "[q]uit".into())],
+            ];
+            let mut foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+                .into_iter()
+                .map(|l| format!(" {}", l))
+                .collect();
+            if let Some((text, colour, _)) = notice.as_ref() {
+                foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+            }
+            let room = h.saturating_sub(foot.len() + 1).max(1);
+            let mut body = detail_rows(
+                &row, &spots, &conns, &files, &sizes, focus, &at, w, room, interval, &names, &p,
+            );
+            body.truncate(room);
+            while body.len() < room {
+                body.push(String::new());
+            }
+            body.extend(foot);
+            tc::draw(&body, w, h);
+            std::thread::sleep(Duration::from_millis(300));
+            continue;
+        }
+
+        let rows = ordered(&state, mine, sort_live);
         let guard = match state.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        let mut rows: Vec<Proc> = guard
-            .totals
-            .values()
-            .filter(|r| !mine || r.pid != 0)
-            .cloned()
-            .collect();
-        if sort_live {
-            rows.sort_by(|a, b| {
-                (b.up_rate + b.down_rate)
-                    .partial_cmp(&(a.up_rate + a.down_rate))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then((b.up + b.down).cmp(&(a.up + a.down)))
-            });
-        } else {
-            rows.sort_by(|a, b| {
-                (b.up + b.down).cmp(&(a.up + a.down)).then(
-                    (b.up_rate + b.down_rate)
-                        .partial_cmp(&(a.up_rate + a.down_rate))
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
-            });
-        }
         if !rows.is_empty() && selected >= rows.len() {
             selected = rows.len() - 1;
         }
@@ -1076,12 +1972,33 @@ mod tests {
         // A kilobyte at t=0 and nothing for the next three seconds. The
         // instantaneous rate is zero for most of that; the windowed one
         // stays up, which is the whole point.
-        row.add(0.0, 0, 1000);
-        row.add(1.0, 0, 0);
-        row.add(2.0, 0, 0);
-        row.add(3.0, 0, 0);
+        fold!(row, 0.0, 0, 1000);
+        fold!(row, 1.0, 0, 0);
+        fold!(row, 2.0, 0, 0);
+        fold!(row, 3.0, 0, 0);
         assert!(row.down_rate > 0.0, "the rate flickered to nothing");
         assert_eq!(row.down, 1000, "the total is unaffected by smoothing");
+    }
+
+    #[test]
+    fn many_sockets_at_one_instant_are_not_a_rate() {
+        let mut row = Proc::default();
+        // One process, fifteen sockets, all folded at the same timestamp -
+        // which is every sample, since a sample reads them all at once.
+        // The window spans no time, so there is no rate to compute yet.
+        for _ in 0..15 {
+            fold!(row, 0.0, 0, 400_000);
+        }
+        assert_eq!(row.down, 6_000_000);
+        assert_eq!(
+            row.down_rate, 0.0,
+            "six megabytes in no time at all read as {} B/s",
+            row.down_rate
+        );
+        // The next sample gives the window a width, and the rate is the
+        // whole window over the time it covers.
+        fold!(row, 1.0, 0, 0);
+        assert!((row.down_rate - 6_000_000.0).abs() < 1.0, "got {}", row.down_rate);
     }
 
     #[test]
@@ -1089,7 +2006,7 @@ mod tests {
         let mut row = Proc::default();
         // Two kilobytes a second, steadily, for four seconds.
         for i in 0..5 {
-            row.add(i as f64, 0, 2000);
+            fold!(row, i as f64, 0, 2000);
         }
         // Averaged over the span the samples cover, which is 4s for 5
         // samples: 10000 bytes over 4 seconds.
@@ -1099,8 +2016,8 @@ mod tests {
     #[test]
     fn history_older_than_the_window_is_dropped() {
         let mut row = Proc::default();
-        row.add(0.0, 0, 5000);
-        row.add(100.0, 0, 1000);
+        fold!(row, 0.0, 0, 5000);
+        fold!(row, 100.0, 0, 1000);
         // The ancient sample is gone, so it cannot prop the rate up.
         assert_eq!(row.recent.len(), 1);
         assert_eq!(row.down, 6000);
