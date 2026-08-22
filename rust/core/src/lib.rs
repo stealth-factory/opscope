@@ -717,6 +717,27 @@ pub fn cycle<T: PartialEq + Copy>(choices: &[T], current: T) -> T {
     choices[(at + 1) % choices.len()]
 }
 
+/// A placeholder bar with a highlight sweeping across it.
+///
+/// For values that are being refetched: showing the previous number while a
+/// new one is in flight states something false, and blanking the row makes
+/// the layout jump. A shimmering grey bar says "pending" without either.
+pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)> {
+    let period = width + span * 2;
+    let centre = (tick % period) as f64 - span as f64;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for i in 0..width {
+        let near = (1.0 - (i as f64 - centre).abs() / span as f64).max(0.0);
+        let level = (58.0 + near * 118.0) as u8;
+        let colour = rgb(level, level, level.saturating_add(8));
+        match out.last_mut() {
+            Some((had, run)) if *had == colour => run.push('█'),
+            _ => out.push((colour, "█".to_string())),
+        }
+    }
+    out
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
@@ -995,6 +1016,21 @@ mod tests {
         // Deterministic, so a frame can be reproduced.
         assert_eq!(dance(4, 7, 0.0), dance(4, 7, 0.0));
         assert_ne!(dance(4, 7, 0.0), dance(4, 8, 0.0));
+    }
+
+    #[test]
+    fn the_shimmer_covers_its_width_and_moves() {
+        let drawn = |tick: usize| -> String {
+            skeleton(20, tick, 7).iter().map(|(_, t)| t.clone()).collect()
+        };
+        // Always exactly its width, whatever the phase: the row it stands
+        // in for has a fixed size.
+        for tick in 0..40 {
+            assert_eq!(drawn(tick).chars().count(), 20, "at tick {}", tick);
+        }
+        // And the highlight actually travels, or it is just a grey bar.
+        let runs = |tick: usize| skeleton(20, tick, 7).len();
+        assert!((0..40).map(runs).collect::<std::collections::HashSet<_>>().len() > 1);
     }
 
     #[test]

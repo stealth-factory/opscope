@@ -1,0 +1,2083 @@
+// terminal-toys - small dependency-free terminal widgets
+// Copyright (C) 2026 William Li
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Every open pull request you can see, and what is holding each one up.
+//!
+//! A port of pr.py. GitHub's search has no OR, so anything that is a union
+//! of conditions is several searches merged; each source remembers which
+//! PRs it found, so narrowing to one costs no request.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chrono::{NaiveDateTime, Utc};
+use toys_core as tc;
+
+const API: &str = "https://api.github.com/graphql";
+const SORTS: &[&str] = &["updated", "created"];
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Width of the opened-per-day chart.
+const OPENED_DAYS: i64 = 30;
+
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The GitHub token, shared with github.py rather than duplicated.
+fn token(pr_cfg: &serde_json::Value, gh_cfg: &serde_json::Value) -> (String, &'static str) {
+    for cfg in [pr_cfg, gh_cfg] {
+        let value = tc::cfg_str(cfg, "token", "");
+        if !value.is_empty() {
+            return (value, "config");
+        }
+    }
+    let name = tc::cfg_str(pr_cfg, "token_env", "GITHUB_TOKEN");
+    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
+    match std::env::var(&name) {
+        Ok(value) if !value.is_empty() => (value, "env"),
+        _ => (String::new(), "missing"),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Rate {
+    remaining: Option<i64>,
+}
+
+fn graphql(
+    query: &str,
+    tok: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    let (out, _headers) = tc::post_json(
+        API,
+        &[
+            ("Authorization", &format!("Bearer {}", tok)),
+            ("Content-Type", "application/json"),
+            ("User-Agent", "terminal-toys"),
+        ],
+        &body,
+        45,
+    )?;
+    let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
+        return Err(first["message"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(100)
+            .collect());
+    }
+    Ok(data["data"].clone())
+}
+
+const PR_FIELDS: &str = "
+      number title url isDraft createdAt updatedAt
+      additions deletions changedFiles
+      author { login }
+      repository { nameWithOwner }
+      headRefName baseRefName reviewDecision mergeable
+      stackEntry { position stack { number size } }
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+
+/// One request, one aliased search per source.
+///
+/// The ceiling is on result nodes rather than field complexity: three
+/// searches of 100 return HTTP 502 with or without the check rollup, three
+/// of 50 do not. So the page size is per source and deliberately modest.
+fn list_query(queries: &[String], limit: usize) -> String {
+    let mut parts = vec!["rateLimit { remaining }".to_string()];
+    for (i, q) in queries.iter().enumerate() {
+        parts.push(format!(
+            "s{}: search(query: {}, type: ISSUE, first: {}) {{ issueCount nodes {{ ... on PullRequest {{ {} }} }} }}",
+            i,
+            serde_json::Value::String(q.clone()),
+            limit,
+            PR_FIELDS
+        ));
+    }
+    format!("{{ {} }}", parts.join(" "))
+}
+
+const DETAIL_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number title url state isDraft createdAt updatedAt
+      additions deletions changedFiles
+      author { login } headRefName baseRefName
+      mergeable mergeStateStatus reviewDecision
+      commitCount: commits { totalCount }
+      stack { number size baseRefName
+        entries(first: 40) { nodes { position pullRequest {
+          number title isDraft reviewDecision mergeable
+          additions deletions author { login } headRefName } } } }
+      reviewThreads(first: 60) { nodes { isResolved } }
+      reviews(last: 20) { nodes { author { login } state submittedAt } }
+      reviewRequests(first: 12) { nodes { requestedReviewer {
+        ... on User { login } ... on Team { name } } } }
+      commits(last: 1) { nodes { commit { statusCheckRollup {
+        state contexts(first: 25) { nodes {
+          ... on CheckRun { name conclusion status startedAt completedAt }
+          ... on StatusContext { context state } } } } } } }
+    }
+  }
+}"#;
+
+/// Every open PR in one repository, for reconstructing a stack that was not
+/// made with `gh stack` - the API's own stack field is authoritative when
+/// it is there, and null everywhere else.
+const REPO_PRS_QUERY: &str = r#"
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100) {
+      nodes { number title isDraft headRefName baseRefName
+              additions deletions author { login }
+              reviewDecision mergeable }
+    }
+  }
+}"#;
+
+fn text(value: &serde_json::Value, key: &str) -> String {
+    value[key].as_str().unwrap_or("").to_string()
+}
+
+fn number(value: &serde_json::Value, key: &str) -> i64 {
+    value[key].as_i64().unwrap_or(0)
+}
+
+fn parse(ts: &str) -> Option<NaiveDateTime> {
+    if ts.len() < 19 {
+        return None;
+    }
+    NaiveDateTime::parse_from_str(&ts[..19], "%Y-%m-%dT%H:%M:%S").ok()
+}
+
+fn hours_since(ts: &str) -> Option<f64> {
+    let when = parse(ts)?;
+    Some((Utc::now().naive_utc() - when).num_seconds() as f64 / 3600.0)
+}
+
+fn ago(ts: &str) -> String {
+    let Some(hours) = hours_since(ts) else {
+        return "--".into();
+    };
+    let s = hours * 3600.0;
+    if s < 3600.0 {
+        format!("{}m", ((s / 60.0) as i64).max(1))
+    } else if s < 86400.0 {
+        format!("{}h", (s / 3600.0) as i64)
+    } else if s < 86400.0 * 365.0 {
+        format!("{}d", (s / 86400.0) as i64)
+    } else {
+        format!("{:.1}y", s / (86400.0 * 365.0))
+    }
+}
+
+fn span(hours: Option<f64>) -> String {
+    let Some(h) = hours else {
+        return "--".into();
+    };
+    if h < 48.0 {
+        return format!("{}h", h as i64);
+    }
+    let days = h / 24.0;
+    if days < 365.0 {
+        format!("{}d", days as i64)
+    } else {
+        format!("{:.1}y", days / 365.0)
+    }
+}
+
+fn rollup(pr: &serde_json::Value) -> String {
+    pr["commits"]["nodes"]
+        .as_array()
+        .and_then(|a| a.first())
+        .map(|n| text(&n["commit"]["statusCheckRollup"], "state"))
+        .unwrap_or_default()
+}
+
+/// Approved, green, no conflict, not a draft - the actionable count.
+///
+/// Everything else on this board describes work in flight; this is the one
+/// number that says something can be done right now.
+fn ready_to_merge(pr: &serde_json::Value) -> bool {
+    let checks = rollup(pr);
+    text(pr, "reviewDecision") == "APPROVED"
+        && (checks == "SUCCESS" || checks.is_empty())
+        && text(pr, "mergeable") != "CONFLICTING"
+        && !pr["isDraft"].as_bool().unwrap_or(false)
+}
+
+/// The chain this PR belongs to, reconstructed from branch names.
+///
+/// A PR whose base branch is another open PR's head branch is sitting on
+/// top of it. That inference produces a tree rather than a line, so each PR
+/// keeps its list of children.
+type Chain = (Option<i64>, HashMap<i64, i64>, HashMap<i64, Vec<i64>>);
+
+fn stack_of(number: i64, repo_prs: &[serde_json::Value]) -> Chain {
+    let mut by_head: HashMap<String, i64> = HashMap::new();
+    for other in repo_prs {
+        by_head.insert(text(other, "headRefName"), self::number(other, "number"));
+    }
+    let mut parent: HashMap<i64, i64> = HashMap::new();
+    let mut kids: HashMap<i64, Vec<i64>> = HashMap::new();
+    for other in repo_prs {
+        let mine = self::number(other, "number");
+        if let Some(up) = by_head.get(&text(other, "baseRefName")) {
+            if *up != mine {
+                parent.insert(mine, *up);
+                kids.entry(*up).or_default().push(mine);
+            }
+        }
+    }
+    if !parent.contains_key(&number) && !kids.contains_key(&number) {
+        return (None, HashMap::new(), HashMap::new());
+    }
+    let mut root = number;
+    let mut seen: HashSet<i64> = HashSet::new();
+    while let Some(up) = parent.get(&root) {
+        if !seen.insert(root) {
+            break;
+        }
+        root = *up;
+    }
+    (Some(root), parent, kids)
+}
+
+/// A row of the stack map: connector, the PR, whether it is the open one,
+/// and its position when GitHub gave one.
+type StackRow = (String, serde_json::Value, bool, Option<i64>);
+
+/// What the open is actually doing, so the wait can show real work.
+#[derive(Clone)]
+struct Stage {
+    label: String,
+    done: bool,
+    t0: f64,
+    took: f64,
+}
+
+#[derive(Default)]
+struct State {
+    viewer: String,
+    orgs: Vec<String>,
+    prs: Vec<serde_json::Value>,
+    total: usize,
+    query: String,
+    detail: Option<serde_json::Value>,
+    stack_rows: Vec<StackRow>,
+    want: Option<(String, String, i64)>,
+    loading: bool,
+    target: String,
+    stages: Vec<Stage>,
+    err: String,
+    fetched: f64,
+}
+
+impl State {
+    fn stage(&mut self, label: &str, done: bool) -> f64 {
+        if let Some(st) = self.stages.iter_mut().find(|s| s.label == label) {
+            st.done = done;
+            st.took = now() - st.t0;
+            return st.t0;
+        }
+        let t0 = now();
+        self.stages.push(Stage {
+            label: label.to_string(),
+            done,
+            t0,
+            took: 0.0,
+        });
+        t0
+    }
+}
+
+/// Each configured source, with `@mine` expanded and args appended.
+///
+/// Repeated qualifiers of the same kind are OR'd by GitHub, so one search
+/// covers every org and your own account at once; relationships that reach
+/// outside them - authored, assigned - need their own.
+fn searches(
+    sources: &[(String, String)],
+    viewer: &str,
+    orgs: &[String],
+    extra: &[String],
+) -> Vec<(String, String)> {
+    let mut mine: Vec<String> = orgs.iter().map(|o| format!("org:{}", o)).collect();
+    if !viewer.is_empty() {
+        mine.push(format!("user:{}", viewer));
+    }
+    let mine = mine.join(" ");
+    sources
+        .iter()
+        .map(|(name, q)| {
+            let mut parts = vec![q.replace("@mine", &mine)];
+            parts.extend(extra.iter().cloned());
+            (name.clone(), parts.join(" "))
+        })
+        .collect()
+}
+
+fn fetch_detail(
+    tok: &str,
+    want: &(String, String, i64),
+    state: &Arc<Mutex<State>>,
+) -> Result<(), String> {
+    let (owner, name, num) = want;
+    let t0 = state
+        .lock()
+        .map(|mut g| g.stage("pull request, checks, reviews", false))
+        .unwrap_or(0.0);
+    let d = graphql(
+        DETAIL_QUERY,
+        tok,
+        serde_json::json!({ "owner": owner, "name": name, "number": num }),
+    )?;
+    if let Ok(mut g) = state.lock() {
+        g.stage("pull request, checks, reviews", true);
+        let _ = t0;
+    }
+    let pr = d["repository"]["pullRequest"].clone();
+    let mut rows: Vec<StackRow> = Vec::new();
+    if !pr.is_null() {
+        let native = &pr["stack"];
+        if !native.is_null() {
+            if let Ok(mut g) = state.lock() {
+                g.stage("stack, from GitHub", true);
+            }
+            // GitHub hands the order over directly, position 1 nearest the
+            // base. A native stack is a line, not a tree, so it draws flat -
+            // eleven levels of indentation would be unreadable and would
+            // imply a branching that is not there.
+            let mut entries: Vec<serde_json::Value> = native["entries"]["nodes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            entries.sort_by_key(|e| number(e, "position"));
+            let last = entries.len().saturating_sub(1);
+            for (i, e) in entries.iter().enumerate() {
+                let child = e["pullRequest"].clone();
+                let twig = if i == last { "└─ " } else { "├─ " };
+                let is_here = number(&child, "number") == *num;
+                let position = e["position"].as_i64();
+                rows.push((twig.to_string(), child, is_here, position));
+            }
+        } else {
+            if let Ok(mut g) = state.lock() {
+                g.stage("stack, from open branches", false);
+            }
+            let repo = graphql(
+                REPO_PRS_QUERY,
+                tok,
+                serde_json::json!({ "owner": owner, "name": name }),
+            )?;
+            if let Ok(mut g) = state.lock() {
+                g.stage("stack, from open branches", true);
+            }
+            let others: Vec<serde_json::Value> = repo["repository"]["pullRequests"]["nodes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let (root, _parent, kids) = stack_of(*num, &others);
+            if let Some(root) = root {
+                let by_num: HashMap<i64, &serde_json::Value> =
+                    others.iter().map(|o| (number(o, "number"), o)).collect();
+                // An inferred stack really is a tree - one PR can have two
+                // others branched off it - so the connectors are drawn
+                // properly rather than indenting by depth alone.
+                let mut stack = vec![(root, String::new(), true)];
+                while let Some((num_at, prefix, last)) = stack.pop() {
+                    if let Some(node) = by_num.get(&num_at) {
+                        rows.push((
+                            format!("{}{}", prefix, if last { "└─ " } else { "├─ " }),
+                            (*node).clone(),
+                            num_at == *num,
+                            None,
+                        ));
+                    }
+                    let mut children = kids.get(&num_at).cloned().unwrap_or_default();
+                    children.sort_unstable();
+                    let below = format!("{}{}", prefix, if last { "   " } else { "│  " });
+                    for (i, kid) in children.iter().enumerate().rev() {
+                        stack.push((*kid, below.clone(), i + 1 == children.len()));
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut g) = state.lock() {
+        g.detail = if pr.is_null() { None } else { Some(pr) };
+        g.stack_rows = rows;
+        g.loading = false;
+    }
+    Ok(())
+}
+
+fn fetch_list(
+    tok: &str,
+    source: &str,
+    sources: &[(String, String)],
+    extra: &[String],
+    limit: usize,
+    state: &Arc<Mutex<State>>,
+    rate: &Arc<Mutex<Rate>>,
+) -> Result<(), String> {
+    let need_viewer = state.lock().map(|g| g.viewer.is_empty()).unwrap_or(true);
+    if need_viewer {
+        let who = graphql(
+            "{ viewer { login organizations(first:20) { nodes { login } } } }",
+            tok,
+            serde_json::json!({}),
+        )?;
+        if let Ok(mut g) = state.lock() {
+            g.viewer = text(&who["viewer"], "login");
+            g.orgs = who["viewer"]["organizations"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|o| text(o, "login"))
+                .collect();
+        }
+    }
+    let (viewer, orgs) = state
+        .lock()
+        .map(|g| (g.viewer.clone(), g.orgs.clone()))
+        .unwrap_or_default();
+    let pairs = searches(sources, &viewer, &orgs, extra);
+    let queries: Vec<String> = pairs.iter().map(|(_, q)| q.clone()).collect();
+    let d = graphql(&list_query(&queries, limit), tok, serde_json::json!({}))?;
+    if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
+        if let Ok(mut g) = rate.lock() {
+            g.remaining = Some(left);
+        }
+    }
+    // Pool the sources, remembering which found each PR and noting when a
+    // source filled its page, so a truncated union is not read as a total.
+    let mut pool: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (i, (name, _)) in pairs.iter().enumerate() {
+        let block = &d[format!("s{}", i)];
+        let got: Vec<&serde_json::Value> = block["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|n| !n.is_null())
+            .collect();
+        for n in got {
+            let url = text(n, "url");
+            let entry = pool.entry(url.clone()).or_insert_with(|| {
+                order.push(url.clone());
+                let mut copy = n.clone();
+                copy["sources"] = serde_json::Value::Array(Vec::new());
+                copy
+            });
+            if let Some(list) = entry["sources"].as_array_mut() {
+                list.push(serde_json::Value::String(name.clone()));
+            }
+        }
+    }
+    let nodes: Vec<serde_json::Value> = order
+        .into_iter()
+        .filter_map(|url| pool.remove(&url))
+        .collect();
+    if let Ok(mut g) = state.lock() {
+        g.query = pairs
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        g.total = nodes.len();
+        g.prs = nodes;
+        g.fetched = now();
+        g.err = if source == "config" {
+            tc::config_token_warning().unwrap_or_default()
+        } else {
+            String::new()
+        };
+    }
+    Ok(())
+}
+
+struct Palette {
+    ok: String,
+    warn: String,
+    bad: String,
+    dim: String,
+    grid: String,
+    txt: String,
+    lbl: String,
+    accent: String,
+    pr: String,
+}
+
+fn palette() -> Palette {
+    Palette {
+        ok: tc::rgb(90, 240, 160),
+        warn: tc::rgb(255, 200, 90),
+        bad: tc::rgb(255, 100, 110),
+        dim: tc::rgb(127, 147, 172),
+        grid: tc::rgb(60, 78, 98),
+        txt: tc::rgb(225, 235, 245),
+        lbl: tc::rgb(130, 165, 200),
+        accent: tc::rgb(150, 210, 255),
+        pr: tc::rgb(180, 160, 255),
+    }
+}
+
+fn review_label<'a>(decision: &str, p: &'a Palette) -> (&'static str, &'a str) {
+    match decision {
+        "APPROVED" => ("approved", &p.ok),
+        "CHANGES_REQUESTED" => ("changes", &p.bad),
+        "REVIEW_REQUIRED" => ("needs review", &p.warn),
+        _ => ("—", &p.dim),
+    }
+}
+
+fn check_label<'a>(state: &str, p: &'a Palette) -> (&'static str, &'a str) {
+    match state {
+        "SUCCESS" => ("pass", &p.ok),
+        "FAILURE" | "ERROR" => ("FAIL", &p.bad),
+        "PENDING" => ("running", &p.warn),
+        "EXPECTED" => ("waiting", &p.dim),
+        _ => ("—", &p.dim),
+    }
+}
+
+fn merge_label<'a>(state: &str, p: &'a Palette) -> (&'static str, &'a str) {
+    match state {
+        "CLEAN" => ("ready", &p.ok),
+        "DIRTY" => ("CONFLICT", &p.bad),
+        "BLOCKED" => ("blocked", &p.warn),
+        "BEHIND" => ("behind", &p.warn),
+        "UNSTABLE" => ("checks failing", &p.warn),
+        "HAS_HOOKS" | "UNKNOWN" => ("checking", &p.dim),
+        _ => ("—", &p.dim),
+    }
+}
+
+fn matches(pr: &serde_json::Value, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = [
+        number(pr, "number").to_string(),
+        text(pr, "title"),
+        text(&pr["author"], "login"),
+        text(&pr["repository"], "nameWithOwner"),
+        text(pr, "headRefName"),
+        text(pr, "baseRefName"),
+    ]
+    .join(" ")
+    .to_lowercase();
+    hay.contains(&needle.to_lowercase())
+}
+
+fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<serde_json::Value> {
+    let key = if field == "updated" { "updatedAt" } else { "createdAt" };
+    let mut out = prs.to_vec();
+    out.sort_by(|a, b| {
+        let (x, y) = (text(a, key), text(b, key));
+        if newest_first { y.cmp(&x) } else { x.cmp(&y) }
+    });
+    out
+}
+
+fn main() {
+    tc::maybe_help(include_str!("pr_help.txt"));
+    let cfg = tc::load_config("pr");
+    let gh = tc::load_config("github");
+    let mut refresh = tc::cfg_f64(&cfg, "refresh", 60.0);
+    let limit = tc::cfg_usize(&cfg, "limit", 50);
+    // GitHub search has no OR, so anything that is a union of conditions has
+    // to be several searches merged.
+    let sources: Vec<(String, String)> = match cfg.get("sources").and_then(|v| v.as_object()) {
+        Some(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect(),
+        None => vec![
+            ("orgs".into(), "is:open is:pr @mine".into()),
+            ("authored".into(), "is:open is:pr author:@me".into()),
+            ("assigned".into(), "is:open is:pr assignee:@me".into()),
+        ],
+    };
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut extra: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-n" | "--refresh" if i + 1 < args.len() => {
+                refresh = args[i + 1].parse().unwrap_or(60.0);
+                i += 2;
+            }
+            other if !other.starts_with('-') => {
+                extra.push(other.to_string());
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let absent = tc::missing(&["curl"]);
+    if !absent.is_empty() {
+        tc::cannot_start(
+            "pr watch",
+            &absent,
+            &[
+                "Everything here comes from GitHub's GraphQL API, and curl is",
+                "how this reaches it - the same way the other widgets reach",
+                "ss, ping and tailscale.",
+                "",
+                "The token is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+        );
+        return;
+    }
+
+    let p = palette();
+    let state = Arc::new(Mutex::new(State::default()));
+    let rate = Arc::new(Mutex::new(Rate::default()));
+    let wake = Arc::new((Mutex::new(false), Condvar::new()));
+    let (tok, source) = token(&cfg, &gh);
+
+    let poller = Arc::clone(&state);
+    let poller_wake = Arc::clone(&wake);
+    let poller_rate = Arc::clone(&rate);
+    let poll_tok = tok.clone();
+    let poll_sources = sources.clone();
+    let poll_extra = extra.clone();
+    std::thread::spawn(move || loop {
+        if poll_tok.is_empty() {
+            if let Ok(mut g) = poller.lock() {
+                g.err = "no token: set github.token in config.json or $GITHUB_TOKEN".into();
+            }
+        } else {
+            let want = poller.lock().ok().and_then(|g| {
+                let have = g.detail.as_ref().map(|d| number(d, "number"));
+                match &g.want {
+                    Some(w) if Some(w.2) != have => Some(w.clone()),
+                    _ => None,
+                }
+            });
+            let mut failed = None;
+            if let Some(want) = want {
+                if let Err(said) = fetch_detail(&poll_tok, &want, &poller) {
+                    failed = Some(said);
+                }
+            }
+            if failed.is_none() {
+                if let Err(said) = fetch_list(
+                    &poll_tok,
+                    source,
+                    &poll_sources,
+                    &poll_extra,
+                    limit,
+                    &poller,
+                    &poller_rate,
+                ) {
+                    failed = Some(said);
+                }
+            }
+            if let Some(said) = failed {
+                if let Ok(mut g) = poller.lock() {
+                    g.err = said;
+                    g.loading = false;
+                }
+            }
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
+                Err(_) => return,
+            };
+        }
+        *asked = false;
+    });
+
+    tc::setup();
+    let mut keyboard = tc::Keyboard::new();
+    let (mut selected, mut tick, mut stack_sel) = (0usize, 0usize, 0usize);
+    let mut sort_at = 0usize;
+    let mut newest_first = true;
+    let (mut needle, mut typing) = (String::new(), false);
+    let mut show_stats = true;
+    let mut copied: (String, f64) = (String::new(), 0.0);
+    let mut source_filter = "all".to_string();
+    let filter_names: Vec<String> = std::iter::once("all".to_string())
+        .chain(sources.iter().map(|(n, _)| n.clone()))
+        .collect();
+
+    let nudge = |wake: &Arc<(Mutex<bool>, Condvar)>| {
+        let (lock, cond) = &**wake;
+        if let Ok(mut asked) = lock.lock() {
+            *asked = true;
+            cond.notify_all();
+        }
+    };
+
+    loop {
+        tick += 1;
+        let (prs, total, detail, stack_rows, loading, err, fetched, stages, target) =
+            match state.lock() {
+                Ok(g) => (
+                    g.prs.clone(),
+                    g.total,
+                    g.detail.clone(),
+                    g.stack_rows.clone(),
+                    g.loading,
+                    g.err.clone(),
+                    g.fetched,
+                    g.stages.clone(),
+                    g.target.clone(),
+                ),
+                Err(_) => return,
+            };
+        let shown: Vec<serde_json::Value> = sort_prs(&prs, SORTS[sort_at], newest_first)
+            .into_iter()
+            .filter(|pr| matches(pr, &needle))
+            .filter(|pr| {
+                source_filter == "all"
+                    || pr["sources"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|s| s.as_str() == Some(source_filter.as_str()))
+            })
+            .collect();
+
+        for key in keyboard.poll() {
+            if typing {
+                // While filtering, keys are text - only escape and enter are
+                // navigation, or the filter could never contain "q".
+                match key.as_str() {
+                    "esc" => {
+                        needle.clear();
+                        typing = false;
+                    }
+                    "enter" => typing = false,
+                    "backspace" => {
+                        needle.pop();
+                    }
+                    other if other.chars().count() == 1 => needle.push_str(other),
+                    _ => {}
+                }
+                continue;
+            }
+            match key.as_str() {
+                "q" | "Q" => {
+                    keyboard.restore();
+                    tc::restore_screen();
+                    return;
+                }
+                "/" => typing = true,
+                "esc" => {
+                    if detail.is_some() || loading {
+                        if let Ok(mut g) = state.lock() {
+                            g.want = None;
+                            g.detail = None;
+                            g.stack_rows.clear();
+                            g.loading = false;
+                            g.stages.clear();
+                        }
+                        stack_sel = 0;
+                    } else {
+                        needle.clear();
+                    }
+                }
+                "enter" => {
+                    if let Some(open) = &detail {
+                        if !stack_rows.is_empty() {
+                            // Walk the stack from inside it: the row under
+                            // the cursor becomes the PR on screen.
+                            let node = &stack_rows[stack_sel.min(stack_rows.len() - 1)].1;
+                            let url = text(open, "url");
+                            let parts: Vec<&str> = url.split('/').collect();
+                            if parts.len() >= 5 && number(node, "number") != number(open, "number")
+                            {
+                                if let Ok(mut g) = state.lock() {
+                                    g.want = Some((
+                                        parts[3].to_string(),
+                                        parts[4].to_string(),
+                                        number(node, "number"),
+                                    ));
+                                    g.detail = None;
+                                    g.stack_rows.clear();
+                                    g.loading = true;
+                                    g.target =
+                                        format!("{}/{} #{}", parts[3], parts[4], number(node, "number"));
+                                    g.stages.clear();
+                                }
+                                stack_sel = 0;
+                                nudge(&wake);
+                            }
+                        }
+                    } else if !shown.is_empty() && !loading {
+                        let pick = &shown[selected.min(shown.len() - 1)];
+                        let full = text(&pick["repository"], "nameWithOwner");
+                        if let Some((owner, name)) = full.split_once('/') {
+                            if let Ok(mut g) = state.lock() {
+                                g.want =
+                                    Some((owner.into(), name.into(), number(pick, "number")));
+                                g.detail = None;
+                                g.stack_rows.clear();
+                                g.loading = true;
+                                g.target = format!("{} #{}", full, number(pick, "number"));
+                                g.stages.clear();
+                            }
+                            nudge(&wake);
+                        }
+                    }
+                }
+                "c" | "C" => {
+                    // The URL of whatever is on screen: the open PR in the
+                    // dashboard, the highlighted row in the list.
+                    let url = match &detail {
+                        Some(d) => text(d, "url"),
+                        None => shown
+                            .get(selected.min(shown.len().saturating_sub(1)))
+                            .map(|pr| text(pr, "url"))
+                            .unwrap_or_default(),
+                    };
+                    if !url.is_empty() {
+                        copied = (
+                            if tc::clipboard(&url) {
+                                url
+                            } else {
+                                format!("no clipboard: {}", url)
+                            },
+                            now(),
+                        );
+                    }
+                }
+                "r" | "R" => nudge(&wake),
+                "f" | "F" => {
+                    // Every PR remembers which sources found it, so
+                    // narrowing to one is instant and costs no request.
+                    let at = filter_names
+                        .iter()
+                        .position(|n| *n == source_filter)
+                        .unwrap_or(0);
+                    source_filter = filter_names[(at + 1) % filter_names.len()].clone();
+                }
+                "s" | "S" => sort_at = (sort_at + 1) % SORTS.len(),
+                "o" | "O" => newest_first = !newest_first,
+                "t" | "T" => show_stats = !show_stats,
+                "up" => {
+                    if detail.is_some() {
+                        stack_sel = stack_sel.saturating_sub(1);
+                    } else {
+                        selected = selected.saturating_sub(1);
+                    }
+                }
+                "down" => {
+                    if detail.is_some() {
+                        stack_sel += 1;
+                    } else {
+                        selected += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (w, h) = tc::size();
+        let mut rows = vec![tc::title("pr watch", w, &p.pr)];
+        let mut head = vec![
+            (p.dim.as_str(), format!(" {} of {}", shown.len(), total)),
+            (
+                p.dim.as_str(),
+                if !needle.is_empty() || source_filter != "all" {
+                    " shown".to_string()
+                } else {
+                    " open".to_string()
+                },
+            ),
+            (
+                p.dim.as_str(),
+                format!(
+                    "   updated {} ago",
+                    if fetched > 0.0 {
+                        let s = now() - fetched;
+                        if s < 3600.0 {
+                            format!("{}m", ((s / 60.0) as i64).max(1))
+                        } else {
+                            format!("{}h", (s / 3600.0) as i64)
+                        }
+                    } else {
+                        "--".into()
+                    }
+                ),
+            ),
+        ];
+        if let Some(left) = rate.lock().map(|g| g.remaining).unwrap_or(None) {
+            head.push((p.dim.as_str(), format!("   {} api", left)));
+        }
+        if !copied.0.is_empty() && now() - copied.1 < 4.0 {
+            head.push((p.ok.as_str(), "   copied ".into()));
+            head.push((
+                p.dim.as_str(),
+                copied.0.chars().take(w.saturating_sub(46).max(10)).collect(),
+            ));
+        }
+        rows.push(tc::seg(&head, w - 1));
+        if !err.is_empty() {
+            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+        }
+
+        let hints: Vec<Vec<(&str, String)>> = if detail.is_some() || loading {
+            let mut stack_sel_clamped = stack_sel;
+            if !stack_rows.is_empty() {
+                stack_sel_clamped = stack_sel.min(stack_rows.len() - 1);
+                stack_sel = stack_sel_clamped;
+            }
+            let top = rows.len();
+            rows.extend(detail_view(
+                detail.as_ref(),
+                &stack_rows,
+                stack_sel_clamped,
+                loading,
+                w,
+                h,
+                tick,
+                &stages,
+                &target,
+                top,
+                &p,
+            ));
+            let mut hints: Vec<Vec<(&str, String)>> = Vec::new();
+            if !stack_rows.is_empty() {
+                hints.push(vec![
+                    (p.accent.as_str(), "↑↓".into()),
+                    (p.dim.as_str(), " stack".into()),
+                ]);
+                hints.push(vec![(p.dim.as_str(), "[↵] open it".into())]);
+            }
+            hints.push(vec![(p.dim.as_str(), "[c]opy url".into())]);
+            hints.push(vec![(p.dim.as_str(), "[esc] back".into())]);
+            hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
+            hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
+            hints
+        } else {
+            if !shown.is_empty() && selected >= shown.len() {
+                selected = shown.len() - 1;
+            }
+            // The stats cost eight rows; below thirty they would leave the
+            // list too short to be a list, so they stand down without asking.
+            if show_stats && h >= 30 {
+                // Every open PR, not `shown`: the filter is a search of the
+                // board, not a redefinition of it.
+                rows.extend(stats_view(
+                    &sort_prs(&prs, SORTS[sort_at], newest_first),
+                    w,
+                    &p,
+                ));
+            }
+            let top = rows.len();
+            rows.extend(list_view(
+                &shown,
+                selected,
+                SORTS[sort_at],
+                newest_first,
+                &needle,
+                w,
+                h,
+                fetched == 0.0,
+                &source_filter,
+                top,
+                &p,
+            ));
+            vec![
+                vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+                vec![(p.dim.as_str(), "[↵] open".into())],
+                vec![(p.dim.as_str(), "[/]filter".into())],
+                vec![(p.dim.as_str(), format!("[s]ort {}", SORTS[sort_at]))],
+                vec![(
+                    p.dim.as_str(),
+                    format!("[o]rder {}", if newest_first { "newest" } else { "oldest" }),
+                )],
+                vec![(p.dim.as_str(), format!("[f]rom {}", source_filter))],
+                vec![(
+                    p.dim.as_str(),
+                    format!("[t]stats {}", if show_stats { "on" } else { "off" }),
+                )],
+                vec![(p.dim.as_str(), "[c]opy url".into())],
+                vec![(p.dim.as_str(), "[r]efresh".into())],
+                vec![(p.dim.as_str(), "[q]uit".into())],
+            ]
+        };
+        let hints = if typing {
+            vec![
+                vec![(p.accent.as_str(), format!("/{}▌", needle))],
+                vec![(p.dim.as_str(), "[↵] keep".into())],
+                vec![(p.dim.as_str(), "[esc] clear".into())],
+            ]
+        } else {
+            hints
+        };
+        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+            .into_iter()
+            .map(|l| format!(" {}", l))
+            .collect();
+        rows.truncate(h.saturating_sub(footer.len()));
+        while rows.len() < h.saturating_sub(footer.len()) {
+            rows.push(String::new());
+        }
+        rows.extend(footer);
+        tc::draw(&rows, w, h);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// Shape and age of every open PR, whatever the list is filtered to.
+///
+/// Deliberately not the filtered set. Typing in the filter is a search, and
+/// a search should not move the backlog it is searching: watching the age
+/// median and the state bar lurch on every keystroke made them unreadable
+/// and, worse, made them look like statements about the whole board when
+/// they described three matching rows.
+fn stats_view(prs: &[serde_json::Value], w: usize, p: &Palette) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    if prs.is_empty() {
+        return rows;
+    }
+    let n = prs.len();
+    let mut review: HashMap<&str, usize> = HashMap::new();
+    let mut checks: HashMap<&str, usize> = HashMap::new();
+    let (mut drafts, mut conflicts, mut ready) = (0usize, 0usize, 0usize);
+    for pr in prs {
+        let decision = text(pr, "reviewDecision");
+        let slot = match decision.as_str() {
+            "APPROVED" => "APPROVED",
+            "CHANGES_REQUESTED" => "CHANGES_REQUESTED",
+            "REVIEW_REQUIRED" => "REVIEW_REQUIRED",
+            _ => "",
+        };
+        *review.entry(slot).or_insert(0) += 1;
+        let state = rollup(pr);
+        let slot = match state.as_str() {
+            "SUCCESS" => "SUCCESS",
+            "FAILURE" => "FAILURE",
+            "PENDING" => "PENDING",
+            _ => "other",
+        };
+        *checks.entry(slot).or_insert(0) += 1;
+        if pr["isDraft"].as_bool().unwrap_or(false) {
+            drafts += 1;
+        }
+        if text(pr, "mergeable") == "CONFLICTING" {
+            conflicts += 1;
+        }
+        if ready_to_merge(pr) {
+            ready += 1;
+        }
+    }
+
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── STATE ── ".into()),
+            (p.txt.as_str(), format!("{}", n)),
+            (p.dim.as_str(), " open · ".into()),
+            (p.dim.as_str(), format!("{} draft", drafts)),
+            (p.dim.as_str(), " · ".into()),
+            (
+                if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
+                format!("{} conflicting", conflicts),
+            ),
+            (p.dim.as_str(), " · ".into()),
+            (
+                if ready > 0 { p.ok.as_str() } else { p.dim.as_str() },
+                format!("{} ready to merge", ready),
+            ),
+        ],
+        w - 1,
+    ));
+    let order: Vec<(&str, &str)> = vec![
+        ("APPROVED", p.ok.as_str()),
+        ("CHANGES_REQUESTED", p.bad.as_str()),
+        ("REVIEW_REQUIRED", p.warn.as_str()),
+        ("", p.dim.as_str()),
+    ];
+    let parts: Vec<(f64, String)> = order
+        .iter()
+        .filter_map(|(k, c)| {
+            let got = review.get(k).copied().unwrap_or(0);
+            if got == 0 {
+                return None;
+            }
+            Some((got as f64 / n as f64, c.to_string()))
+        })
+        .collect();
+    let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
+    let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+    for (colour, txt) in &bar {
+        line.push((colour.as_str(), txt.clone()));
+    }
+    rows.push(tc::seg(&line, w - 1));
+    let mut key: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+    for (k, colour) in &order {
+        let got = review.get(k).copied().unwrap_or(0);
+        if got == 0 {
+            continue;
+        }
+        key.push((colour, "▇ ".into()));
+        key.push((p.txt.as_str(), review_label(k, p).0.into()));
+        key.push((p.dim.as_str(), format!(" {}   ", got)));
+    }
+    for (k, colour, label) in [
+        ("SUCCESS", p.ok.as_str(), "checks pass"),
+        ("FAILURE", p.bad.as_str(), "checks FAIL"),
+        ("PENDING", p.warn.as_str(), "running"),
+    ] {
+        let got = checks.get(k).copied().unwrap_or(0);
+        if got == 0 {
+            continue;
+        }
+        key.push((colour, "· ".into()));
+        key.push((p.txt.as_str(), label.into()));
+        key.push((p.dim.as_str(), format!(" {}   ", got)));
+    }
+    rows.push(tc::seg(&key, w - 1));
+
+    let mut ages: Vec<(f64, &serde_json::Value)> = prs
+        .iter()
+        .filter_map(|pr| hours_since(&text(pr, "createdAt")).map(|h| (h, pr)))
+        .collect();
+    ages.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let idles: Vec<(f64, &serde_json::Value)> = prs
+        .iter()
+        .filter_map(|pr| hours_since(&text(pr, "updatedAt")).map(|h| (h, pr)))
+        .collect();
+
+    // When the open ones arrived.
+    let today = Utc::now().date_naive();
+    let days: Vec<String> = (0..OPENED_DAYS)
+        .rev()
+        .map(|k| (today - chrono::Duration::days(k)).format("%Y-%m-%d").to_string())
+        .collect();
+    let mut per_day: HashMap<&String, usize> = days.iter().map(|d| (d, 0)).collect();
+    let mut inside = 0usize;
+    for pr in prs {
+        let key: String = text(pr, "createdAt").chars().take(10).collect();
+        if let Some(slot) = days.iter().find(|d| **d == key) {
+            *per_day.get_mut(slot).unwrap() += 1;
+            inside += 1;
+        }
+    }
+    let avail = w.saturating_sub(3).max(10);
+    let slot = (avail / days.len()).max(1);
+    let gap = if slot >= 3 { 1 } else { 0 };
+    let barw = slot - gap;
+    let mut cols: Vec<(f64, String)> = Vec::new();
+    for (i, d) in days.iter().enumerate() {
+        let value = per_day.get(d).copied().unwrap_or(0) as f64;
+        cols.extend(std::iter::repeat_n((value, p.pr.clone()), barw));
+        if gap > 0 && i + 1 < days.len() {
+            cols.extend(std::iter::repeat_n((0.0, p.pr.clone()), gap));
+        }
+    }
+    let peak = per_day.values().copied().max().unwrap_or(0);
+    rows.push(String::new());
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── OPENED / DAY ── ".into()),
+            (p.dim.as_str(), format!("last {}d · ", OPENED_DAYS)),
+            (p.txt.as_str(), format!("{}", inside)),
+            (p.dim.as_str(), format!(" of {} still open · ", n)),
+            (p.dim.as_str(), format!("peak {}/day", peak)),
+        ],
+        w - 1,
+    ));
+    if peak > 0 {
+        for line in tc::vbars(&cols, 3, 0.0) {
+            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            for (colour, ch) in &line {
+                parts.push((colour.as_str(), ch.clone()));
+            }
+            rows.push(tc::seg(&parts, w - 1));
+        }
+        rows.push(tc::seg(
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(cols.len()))],
+            w - 1,
+        ));
+        let left = format!("{}d ago", OPENED_DAYS);
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!(" {}", left)),
+                (
+                    p.dim.as_str(),
+                    " ".repeat(cols.len().saturating_sub(left.len() + 5).max(1)),
+                ),
+                (p.dim.as_str(), "today".into()),
+            ],
+            w - 1,
+        ));
+    } else {
+        rows.push(tc::seg(
+            &[(
+                p.dim.as_str(),
+                format!(
+                    "  none of the open PRs were opened in the last {}d",
+                    OPENED_DAYS
+                ),
+            )],
+            w - 1,
+        ));
+    }
+
+    let at = |pairs: &[(f64, &serde_json::Value)], frac: f64| -> Option<f64> {
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut vals: Vec<f64> = pairs.iter().map(|x| x.0).collect();
+        vals.sort_by(f64::total_cmp);
+        Some(vals[((vals.len() as f64 * frac) as usize).min(vals.len() - 1)])
+    };
+    rows.push(String::new());
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── AGE ── ".into()),
+            (p.dim.as_str(), "median ".into()),
+            (p.txt.as_str(), span(at(&ages, 0.5))),
+            (p.dim.as_str(), "  p95 ".into()),
+            (p.txt.as_str(), span(at(&ages, 0.95))),
+            (p.dim.as_str(), "  max ".into()),
+            (p.warn.as_str(), span(at(&ages, 1.0))),
+            (p.dim.as_str(), "   idle median ".into()),
+            (p.txt.as_str(), span(at(&idles, 0.5))),
+        ],
+        w - 1,
+    ));
+    if !ages.is_empty() {
+        // One bar per open PR, youngest left to oldest right - the x axis is
+        // rank, not time. It fills the pane and carries a baseline and end
+        // labels, because a sparkline that stops in the middle of the screen
+        // gives no way to tell where the chart ends and the blank begins.
+        let room = w.saturating_sub(3).max(10);
+        let drawn: &[(f64, &serde_json::Value)] = if ages.len() > room {
+            &ages[ages.len() - room..]
+        } else {
+            &ages
+        };
+        // Spread the remainder across the leftmost bars so the chart reaches
+        // the right edge exactly: stopping short of it left no way to tell a
+        // finished chart from a truncated one.
+        let (slot, extra) = if drawn.len() >= room {
+            (1, 0)
+        } else {
+            (room / drawn.len(), room % drawn.len())
+        };
+        let hi = drawn.iter().map(|x| x.0).fold(0.0f64, f64::max).max(1.0);
+        let mut bars = String::new();
+        for (i, (hours, _)) in drawn.iter().enumerate() {
+            let wide_bar = slot + usize::from(i < extra);
+            let level = ((hours / hi) * 7.99) as usize;
+            for _ in 0..wide_bar {
+                bars.push(SPARK[level.min(7)]);
+            }
+        }
+        let count = bars.chars().count();
+        rows.push(tc::seg(
+            &[(tc::RST, " ".into()), (&tc::heat(0.4), bars)],
+            w - 1,
+        ));
+        rows.push(tc::seg(
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(count))],
+            w - 1,
+        ));
+        let left = format!("youngest {}", span(Some(drawn[0].0)));
+        let right = format!("oldest {}", span(Some(drawn[drawn.len() - 1].0)));
+        let note = if drawn.len() < ages.len() {
+            format!("{} of {} PRs", drawn.len(), ages.len())
+        } else {
+            format!("{} PRs", drawn.len())
+        };
+        let mid = count
+            .saturating_sub(left.len() + right.len() + note.len() + 2)
+            .max(1);
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!(" {}", left)),
+                (p.dim.as_str(), " ".repeat(mid / 2)),
+                (p.grid.as_str(), note),
+                (p.dim.as_str(), " ".repeat(mid - mid / 2 + 2)),
+                (p.dim.as_str(), right),
+            ],
+            w - 1,
+        ));
+    }
+    if let Some(fattest) = prs.iter().max_by_key(|p| number(p, "additions") + number(p, "deletions"))
+    {
+        let worst = |pairs: &[(f64, &serde_json::Value)]| -> String {
+            match pairs.iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
+                Some((hours, pr)) => {
+                    format!("#{} {}", number(pr, "number"), span(Some(*hours)))
+                }
+                None => "--".into(),
+            }
+        };
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), "  oldest ".into()),
+                (p.warn.as_str(), tc::pad(&worst(&ages), 12)),
+                (p.dim.as_str(), "  untouched longest ".into()),
+                (p.warn.as_str(), tc::pad(&worst(&idles), 12)),
+                (p.dim.as_str(), "  biggest ".into()),
+                (
+                    p.txt.as_str(),
+                    format!(
+                        "#{} +{}/-{}",
+                        number(fattest, "number"),
+                        number(fattest, "additions"),
+                        number(fattest, "deletions")
+                    ),
+                ),
+            ],
+            w - 1,
+        ));
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn list_view(
+    prs: &[serde_json::Value],
+    selected: usize,
+    sort_field: &str,
+    newest_first: bool,
+    needle: &str,
+    w: usize,
+    h: usize,
+    waiting: bool,
+    source_filter: &str,
+    top: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let arrow = if newest_first { "↓" } else { "↑" };
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── OPEN PRs ── ".into()),
+            (p.dim.as_str(), format!("by {} {}", sort_field, arrow)),
+            (
+                p.dim.as_str(),
+                if source_filter != "all" {
+                    format!("   from {}", source_filter)
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                p.accent.as_str(),
+                if needle.is_empty() {
+                    String::new()
+                } else {
+                    format!("   /{}", needle)
+                },
+            ),
+        ],
+        w - 1,
+    ));
+    if prs.is_empty() {
+        // "collecting" is only true before the first fetch: an empty filter
+        // or an empty source is a result, not a wait.
+        let why = if !needle.is_empty() {
+            format!("  nothing matches /{}", needle)
+        } else if source_filter != "all" {
+            format!("  no open PRs from {}", source_filter)
+        } else if waiting {
+            "  collecting…".to_string()
+        } else {
+            "  no open PRs".to_string()
+        };
+        rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
+        return rows;
+    }
+
+    // Columns are budgeted rather than guessed: the fixed ones are summed
+    // and the title takes exactly what is left, so nothing runs off the
+    // right edge or into its neighbour.
+    let wide = w >= 96;
+    let repo_w = if wide { 18 } else { 0 };
+    let size_w = if wide { 12 } else { 0 };
+    let fixed = 8 + repo_w + 13 + 8 + 6 + size_w;
+    let title_w = (w - 1).saturating_sub(fixed).max(16);
+    let mut head = format!(" {:<7}", "PR");
+    if repo_w > 0 {
+        head += &format!("{:<width$}", "REPO", width = repo_w);
+    }
+    // The time column follows the sort, so the number you ordered by is the
+    // number you can see. Labelling both "AGE" had it reporting idle time
+    // while the stats above reported true age, and the two disagreed.
+    let when_label = if sort_field == "created" { "AGE" } else { "IDLE" };
+    head += &format!(
+        "{:<width$}{:>13}{:>8}{:>6}",
+        "TITLE",
+        "REVIEW",
+        "CHECKS",
+        when_label,
+        width = title_w
+    );
+    if size_w > 0 {
+        head += &format!("{:>width$}", "SIZE", width = size_w);
+    }
+    rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
+
+    // `top` is what was drawn above this view. Without it the window is
+    // sized as though the list began at the top of the screen, so it renders
+    // far more rows than are visible, the caller truncates the overflow, and
+    // the selection scrolls off the bottom while `first` is still 0.
+    let room = h.saturating_sub(top + rows.len() + 3).max(1);
+    let first = if prs.len() > room {
+        selected.saturating_sub(room / 2).min(prs.len() - room)
+    } else {
+        0
+    };
+    for (i, pr) in prs.iter().enumerate().skip(first).take(room) {
+        let here = i == selected;
+        let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+        let c = |colour: &str| format!("{}{}", tint, colour);
+        let (rlabel, rcol) = review_label(&text(pr, "reviewDecision"), p);
+        let (clabel, ccol) = check_label(&rollup(pr), p);
+        let stacked = !pr["stackEntry"].is_null();
+        let mut line = vec![(
+            c(if here { &p.accent } else { &p.pr }),
+            format!(
+                "{}{}",
+                if here { "▸" } else { " " },
+                tc::pad(&format!("#{}", number(pr, "number")), 7)
+            ),
+        )];
+        if repo_w > 0 {
+            // Clipped one short of the column so it never touches the title.
+            let full = text(&pr["repository"], "nameWithOwner");
+            let repo = full.rsplit('/').next().unwrap_or("").to_string();
+            line.push((
+                c(&p.dim),
+                tc::pad(
+                    &repo.chars().take(repo_w - 1).collect::<String>(),
+                    repo_w,
+                ),
+            ));
+        }
+        let mut name = format!(
+            "{}{}",
+            if stacked { "⣿ " } else { "" },
+            text(pr, "title")
+        );
+        if pr["isDraft"].as_bool().unwrap_or(false) {
+            name = format!("draft · {}", name);
+        }
+        line.push((
+            c(&p.txt),
+            tc::pad(
+                &name.chars().take(title_w - 1).collect::<String>(),
+                title_w,
+            ),
+        ));
+        line.push((c(rcol), format!("{:>13}", rlabel)));
+        line.push((c(ccol), format!("{:>8}", clabel)));
+        line.push((
+            c(&p.dim),
+            format!(
+                "{:>6}",
+                ago(&text(
+                    pr,
+                    if sort_field == "created" { "createdAt" } else { "updatedAt" }
+                ))
+            ),
+        ));
+        if size_w > 0 {
+            line.push((
+                c(&p.dim),
+                format!(
+                    "{:>width$}",
+                    format!("+{}/-{}", number(pr, "additions"), number(pr, "deletions")),
+                    width = size_w
+                ),
+            ));
+        }
+        if here {
+            line.push((tint.clone(), " ".repeat(w)));
+        }
+        let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        rows.push(tc::seg(&refs, w - 1));
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detail_view(
+    pr: Option<&serde_json::Value>,
+    stack_rows: &[StackRow],
+    stack_sel: usize,
+    loading: bool,
+    w: usize,
+    h: usize,
+    tick: usize,
+    stages: &[Stage],
+    target: &str,
+    top: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let Some(pr) = pr.filter(|_| !loading) else {
+        // A shimmer says "wait" and nothing else. The open really does run
+        // in stages, so show them: a spinner on the one in flight, a tick
+        // and a duration on the ones behind it. Honest, and it reads like a
+        // machine doing something rather than a placeholder.
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── OPENING ── ".into()),
+                (p.accent.as_str(), target.to_string()),
+            ],
+            w - 1,
+        ));
+        rows.push(String::new());
+        let spin = SPINNER[tick % SPINNER.len()];
+        for st in stages {
+            rows.push(tc::seg(
+                &[
+                    (
+                        if st.done { p.ok.as_str() } else { p.accent.as_str() },
+                        format!("   {}  ", if st.done { '✓' } else { spin }),
+                    ),
+                    (
+                        if st.done { p.txt.as_str() } else { p.dim.as_str() },
+                        tc::pad(&st.label, w.saturating_sub(22).max(20)),
+                    ),
+                    (
+                        p.dim.as_str(),
+                        format!(
+                            "{:>6}",
+                            if st.took > 0.0 {
+                                format!("{:.1}s", st.took)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    ),
+                ],
+                w - 1,
+            ));
+        }
+        if stages.is_empty() {
+            rows.push(tc::seg(
+                &[
+                    (p.accent.as_str(), format!("   {}  ", spin)),
+                    (p.dim.as_str(), "connecting".into()),
+                ],
+                w - 1,
+            ));
+        }
+        rows.push(String::new());
+        // One sweeping line rather than four fat bars of shimmer.
+        let shimmer = tc::skeleton(w.saturating_sub(6).max(10), tick * 2, 7);
+        let mut line: Vec<(&str, String)> = vec![(tc::RST, "  ".into())];
+        for (colour, txt) in &shimmer {
+            line.push((colour.as_str(), txt.clone()));
+        }
+        rows.push(tc::seg(&line, w - 1));
+        return rows;
+    };
+
+    let draft = if pr["isDraft"].as_bool().unwrap_or(false) {
+        " · draft"
+    } else {
+        ""
+    };
+    rows.push(tc::seg(
+        &[
+            (p.pr.as_str(), format!(" #{} ", number(pr, "number"))),
+            (
+                p.txt.as_str(),
+                text(pr, "title")
+                    .chars()
+                    .take(w.saturating_sub(24).max(10))
+                    .collect::<String>(),
+            ),
+            (p.dim.as_str(), draft.into()),
+        ],
+        w - 1,
+    ));
+    rows.push(tc::seg(
+        &[
+            (p.dim.as_str(), "  ".into()),
+            (
+                p.dim.as_str(),
+                match text(&pr["author"], "login") {
+                    s if s.is_empty() => "?".into(),
+                    s => s,
+                },
+            ),
+            (p.dim.as_str(), "   ".into()),
+            (p.accent.as_str(), text(pr, "headRefName")),
+            (p.dim.as_str(), " → ".into()),
+            (p.accent.as_str(), text(pr, "baseRefName")),
+        ],
+        w - 1,
+    ));
+
+    let (rlabel, rcol) = review_label(&text(pr, "reviewDecision"), p);
+    let (mlabel, mcol) = merge_label(&text(pr, "mergeStateStatus"), p);
+    let unresolved = pr["reviewThreads"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| !t["isResolved"].as_bool().unwrap_or(false))
+        .count();
+    rows.push(String::new());
+    let cells: Vec<(String, String, &str)> = vec![
+        ("review".into(), rlabel.into(), rcol),
+        ("merge".into(), mlabel.into(), mcol),
+        (
+            "unresolved threads".into(),
+            unresolved.to_string(),
+            if unresolved > 0 { p.bad.as_str() } else { p.ok.as_str() },
+        ),
+        (
+            "size".into(),
+            format!(
+                "+{}/-{} in {} files",
+                number(pr, "additions"),
+                number(pr, "deletions"),
+                number(pr, "changedFiles")
+            ),
+            p.txt.as_str(),
+        ),
+        (
+            "commits".into(),
+            number(&pr["commitCount"], "totalCount").to_string(),
+            p.txt.as_str(),
+        ),
+        (
+            "opened / updated".into(),
+            format!(
+                "{} ago / {} ago",
+                ago(&text(pr, "createdAt")),
+                ago(&text(pr, "updatedAt"))
+            ),
+            p.txt.as_str(),
+        ),
+    ];
+    let label_w = cells.iter().map(|c| c.0.len()).max().unwrap_or(8);
+    let ncols = if (w - 2) / 2 >= label_w + 3 + 18 { 2 } else { 1 };
+    let cw = (w - 2) / ncols;
+    let val_w = cw.saturating_sub(label_w + 3).max(6);
+    for chunk in cells.chunks(ncols) {
+        let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (label, value, colour) in chunk {
+            line.push((p.dim.as_str(), format!(" {} ", tc::pad(label, label_w))));
+            line.push((colour, tc::pad(value, val_w)));
+        }
+        rows.push(tc::seg(&line, w - 1));
+    }
+
+    // Who has looked at it. The last state per person wins: someone who
+    // requested changes and later approved has approved, and showing both
+    // would misreport the gate.
+    let mut latest: HashMap<String, String> = HashMap::new();
+    for r in pr["reviews"]["nodes"].as_array().into_iter().flatten() {
+        let who = text(&r["author"], "login");
+        if !who.is_empty() {
+            latest.insert(who, text(r, "state"));
+        }
+    }
+    let mut pending: Vec<String> = Vec::new();
+    for n in pr["reviewRequests"]["nodes"].as_array().into_iter().flatten() {
+        let who = &n["requestedReviewer"];
+        let name = match text(who, "login") {
+            s if !s.is_empty() => s,
+            _ => text(who, "name"),
+        };
+        if !name.is_empty() && !latest.contains_key(&name) {
+            pending.push(name);
+        }
+    }
+    let pick = |state: &str| -> Vec<String> {
+        let mut out: Vec<String> = latest
+            .iter()
+            .filter(|(_, v)| *v == state)
+            .map(|(k, _)| k.clone())
+            .collect();
+        out.sort();
+        out
+    };
+    let groups: Vec<(&str, &str, Vec<String>)> = vec![
+        ("approved", p.ok.as_str(), pick("APPROVED")),
+        ("changes requested", p.bad.as_str(), pick("CHANGES_REQUESTED")),
+        ("commented", p.dim.as_str(), pick("COMMENTED")),
+        ("awaiting", p.warn.as_str(), {
+            pending.sort();
+            pending.clone()
+        }),
+    ];
+    rows.push(String::new());
+    let live: Vec<&(&str, &str, Vec<String>)> = groups.iter().filter(|g| !g.2.is_empty()).collect();
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── REVIEWERS ── ".into()),
+            (
+                p.dim.as_str(),
+                if live.is_empty() {
+                    "nobody has been asked".to_string()
+                } else {
+                    live.iter()
+                        .map(|g| format!("{} {}", g.2.len(), g.0))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                },
+            ),
+        ],
+        w - 1,
+    ));
+    for (label, colour, who) in &live {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad(label, 18))),
+                (
+                    colour,
+                    who.join(", ")
+                        .chars()
+                        .take(w.saturating_sub(24).max(10))
+                        .collect::<String>(),
+                ),
+            ],
+            w - 1,
+        ));
+    }
+
+    let roll = pr["commits"]["nodes"]
+        .as_array()
+        .and_then(|a| a.first())
+        .map(|n| n["commit"]["statusCheckRollup"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    rows.push(String::new());
+    if roll.is_null() {
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── CHECKS ── ".into()),
+                (p.dim.as_str(), "none on the last commit".into()),
+            ],
+            w - 1,
+        ));
+    } else {
+        let (state, scol) = check_label(&text(&roll, "state"), p);
+        let ctx: Vec<&serde_json::Value> = roll["contexts"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| !c.is_null())
+            .collect();
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── CHECKS ── ".into()),
+                (scol, state.into()),
+                (p.dim.as_str(), format!("   {} total", ctx.len())),
+            ],
+            w - 1,
+        ));
+        let verdict_of = |c: &serde_json::Value| -> String {
+            for key in ["conclusion", "state", "status"] {
+                let v = text(c, key);
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+            String::new()
+        };
+        let is_bad = |c: &serde_json::Value| -> bool {
+            let v = verdict_of(c);
+            !matches!(v.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED" | "")
+        };
+        // Failures first: a green wall of passing checks is not why anyone
+        // opens this view.
+        let ordered: Vec<&&serde_json::Value> = ctx
+            .iter()
+            .filter(|c| is_bad(c))
+            .chain(ctx.iter().filter(|c| !is_bad(c)))
+            .collect();
+        for c in ordered.into_iter().take(8) {
+            let name = match text(c, "name") {
+                s if !s.is_empty() => s,
+                _ => match text(c, "context") {
+                    s if !s.is_empty() => s,
+                    _ => "?".into(),
+                },
+            };
+            let verdict = verdict_of(c);
+            let (lab, col) = check_label(&verdict, p);
+            let lab = if lab == "—" && !verdict.is_empty() {
+                verdict.to_lowercase()
+            } else {
+                lab.to_string()
+            };
+            let took = match (
+                parse(&text(c, "startedAt")),
+                parse(&text(c, "completedAt")),
+            ) {
+                (Some(a), Some(b)) => format!("{}s", (b - a).num_seconds()),
+                _ => String::new(),
+            };
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), "  ".into()),
+                    (p.txt.as_str(), tc::pad(&name, w.saturating_sub(30).max(12))),
+                    (col, format!("{:>10}", lab)),
+                    (p.dim.as_str(), format!("{:>8}", took)),
+                ],
+                w - 1,
+            ));
+        }
+    }
+
+    if !stack_rows.is_empty() {
+        let native = !pr["stack"].is_null();
+        rows.push(String::new());
+        // The stack scrolls: eleven-deep stacks exist, and a pane that has
+        // already spent its height on checks cannot show them all.
+        let room = h.saturating_sub(top + rows.len() + 4).max(3);
+        let first = if stack_rows.len() > room {
+            stack_sel.saturating_sub(room / 2).min(stack_rows.len() - room)
+        } else {
+            0
+        };
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── STACK ── ".into()),
+                (
+                    p.dim.as_str(),
+                    format!(
+                        "{} pull requests · {}",
+                        stack_rows.len(),
+                        if native { "from GitHub" } else { "inferred from branches" }
+                    ),
+                ),
+                (
+                    p.accent.as_str(),
+                    if stack_rows.len() > room {
+                        format!(
+                            "   ↑↓ {}-{} of {}",
+                            first + 1,
+                            (first + room).min(stack_rows.len()),
+                            stack_rows.len()
+                        )
+                    } else {
+                        String::new()
+                    },
+                ),
+            ],
+            w - 1,
+        ));
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), "  merge bottom-up: ".into()),
+                (p.txt.as_str(), "the one nearest the base branch first".into()),
+                (p.dim.as_str(), "   ▸ cursor · ● on screen".into()),
+            ],
+            w - 1,
+        ));
+        let base = if native {
+            text(&pr["stack"], "baseRefName")
+        } else {
+            text(pr, "baseRefName")
+        };
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), "  ".into()),
+                (
+                    p.accent.as_str(),
+                    if base.is_empty() { "trunk".into() } else { base },
+                ),
+            ],
+            w - 1,
+        ));
+        for (idx, (twig, node, is_here, position)) in
+            stack_rows.iter().enumerate().skip(first).take(room)
+        {
+            let (lab, col) = review_label(&text(node, "reviewDecision"), p);
+            let (mlab, mcol) = match text(node, "mergeable").as_str() {
+                "CONFLICTING" => ("CONFLICT", p.bad.as_str()),
+                "MERGEABLE" => ("ok", p.ok.as_str()),
+                _ => ("…", p.dim.as_str()),
+            };
+            let on_cursor = idx == stack_sel;
+            let tint = if on_cursor { tc::bg(38, 56, 76) } else { String::new() };
+            let c = |colour: &str| format!("{}{}", tint, colour);
+            let mut name = text(node, "title");
+            if let Some(pos) = position {
+                name = format!("{}. {}", pos, name);
+            }
+            // Two gutter marks, because they answer different questions: ▸
+            // is where the cursor is, ● is the PR actually on screen. One
+            // symbol plus a colour could not say both.
+            let gutter = format!(
+                "{}{}",
+                if on_cursor { "▸" } else { " " },
+                if *is_here { "●" } else { " " }
+            );
+            let name_w = w
+                .saturating_sub(34 + twig.chars().count())
+                .max(10);
+            let mut line = vec![
+                (c(if on_cursor { &p.accent } else { &p.dim }), gutter),
+                (c(&p.dim), twig.clone()),
+                (
+                    c(if on_cursor { &p.accent } else { &p.pr }),
+                    format!("#{:<5} ", number(node, "number")),
+                ),
+                (
+                    c(if *is_here || on_cursor { &p.txt } else { &p.dim }),
+                    tc::pad(&name.chars().take(name_w).collect::<String>(), name_w),
+                ),
+                (c(col), format!("{:>13}", lab)),
+                (c(mcol), format!("{:>10}", mlab)),
+            ];
+            if on_cursor {
+                line.push((tint.clone(), " ".repeat(w)));
+            }
+            let refs: Vec<(&str, String)> =
+                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            rows.push(tc::seg(&refs, w - 1));
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_means_nothing_is_left_to_do() {
+        let pr = |json: &str| -> serde_json::Value { serde_json::from_str(json).unwrap() };
+        let green = pr(r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}"#);
+        assert!(ready_to_merge(&green));
+        // A repo with no CI at all still counts: no checks is not a failing
+        // check, and holding those back would empty the one actionable
+        // number on the board.
+        let no_ci = pr(r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE"}"#);
+        assert!(ready_to_merge(&no_ci));
+        // Every one of the four gates on its own is enough to hold it.
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "REVIEW_REQUIRED", "mergeable": "MERGEABLE"}"#
+        )));
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "CONFLICTING"}"#
+        )));
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "isDraft": true}"#
+        )));
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}}"#
+        )));
+    }
+
+    #[test]
+    fn a_stack_is_inferred_from_where_the_branches_sit() {
+        // main <- a <- b, and c also on a: a tree rather than a line.
+        let prs: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 1, "headRefName": "a", "baseRefName": "main"},
+                {"number": 2, "headRefName": "b", "baseRefName": "a"},
+                {"number": 3, "headRefName": "c", "baseRefName": "a"}]"#,
+        )
+        .unwrap();
+        let (root, parent, kids) = stack_of(2, &prs);
+        assert_eq!(root, Some(1));
+        assert_eq!(parent.get(&2), Some(&1));
+        let mut branched = kids.get(&1).cloned().unwrap_or_default();
+        branched.sort_unstable();
+        assert_eq!(branched, vec![2, 3]);
+        // A PR that neither sits on another nor carries one has no stack,
+        // rather than a stack of itself.
+        let lone: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 9, "headRefName": "x", "baseRefName": "main"}]"#,
+        )
+        .unwrap();
+        assert_eq!(stack_of(9, &lone).0, None);
+    }
+
+    #[test]
+    fn a_cycle_of_branches_does_not_hang_the_walk() {
+        // Two PRs each based on the other's branch. It should not happen,
+        // and the walk must still finish.
+        let prs: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 1, "headRefName": "a", "baseRefName": "b"},
+                {"number": 2, "headRefName": "b", "baseRefName": "a"}]"#,
+        )
+        .unwrap();
+        let (root, _, _) = stack_of(1, &prs);
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn mine_expands_to_every_org_plus_the_account() {
+        let sources = vec![
+            ("orgs".to_string(), "is:open is:pr @mine".to_string()),
+            ("authored".to_string(), "is:open is:pr author:@me".to_string()),
+        ];
+        let out = searches(&sources, "wiiiimm", &["acme".into(), "beta".into()], &[]);
+        assert_eq!(out[0].1, "is:open is:pr org:acme org:beta user:wiiiimm");
+        // A source that does not mention @mine is left alone.
+        assert_eq!(out[1].1, "is:open is:pr author:@me");
+        // Extra arguments are appended to every source.
+        let with = searches(&sources, "w", &[], &["repo:x/y".into()]);
+        assert!(with[1].1.ends_with("repo:x/y"));
+    }
+
+    #[test]
+    fn the_filter_looks_at_everything_on_the_row() {
+        let pr: serde_json::Value = serde_json::from_str(
+            r#"{"number": 42, "title": "Fix the thing",
+                "author": {"login": "wiiiimm"},
+                "repository": {"nameWithOwner": "acme/widgets"},
+                "headRefName": "fix/thing", "baseRefName": "main"}"#,
+        )
+        .unwrap();
+        for needle in ["42", "thing", "WIIIIMM", "widgets", "fix/", "main"] {
+            assert!(matches(&pr, needle), "{} did not match", needle);
+        }
+        assert!(!matches(&pr, "nonsense"));
+        // No filter matches everything, rather than nothing.
+        assert!(matches(&pr, ""));
+    }
+
+    #[test]
+    fn a_span_rolls_over_before_it_stops_reading() {
+        assert_eq!(span(None), "--");
+        assert_eq!(span(Some(5.0)), "5h");
+        assert_eq!(span(Some(72.0)), "3d");
+        assert_eq!(span(Some(24.0 * 400.0)), "1.1y");
+    }
+}
