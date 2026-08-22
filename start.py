@@ -19,7 +19,7 @@
 Thirteen scripts in a directory is a list you have to already know. This is
 the front door: pick one and it runs, quit it and you are back here.
 
-    python3 toys.py [WIDGET] [ARGS...]
+    python3 start.py [WIDGET] [ARGS...]
 
 Nothing is described twice. The name and the summary are each widget's own
 first docstring line, and what it needs is the Needs column of the README
@@ -50,7 +50,8 @@ from common import (CLEAR, HIDE, HOME, RST, SHOW, Keyboard, bg, draw, flush,
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Not widgets: the shared library, the checker, and this.
-NOT_A_WIDGET = ("common.py", "check.py", "toys.py")
+NOT_A_WIDGET = ("common.py", "check.py", "start.py",
+                "__main__.py")
 
 OK = rgb(90, 240, 160)
 WARN = rgb(255, 200, 90)
@@ -66,6 +67,20 @@ TOKEN_SECTION = {"pr": "github"}
 BACKTICKED = re.compile(r"`([^`]+)`")
 
 
+def wrap(text, width):
+    """Break a paragraph at spaces, for the note under the list."""
+    lines, rest = [], (text or "").strip()
+    while rest and len(lines) < 3:
+        if len(rest) <= width:
+            lines.append(rest)
+            break
+        cut = rest.rfind(" ", 0, width + 1)
+        cut = cut if cut > width // 2 else width
+        lines.append(rest[:cut])
+        rest = rest[cut:].lstrip()
+    return lines
+
+
 def widgets():
     """Every widget beside this script, with its own description of itself."""
     found = []
@@ -77,8 +92,25 @@ def widgets():
             doc = ast.get_docstring(ast.parse(open(path).read())) or ""
         except (OSError, SyntaxError):
             doc = ""
-        summary = doc.splitlines()[0] if doc else ""
-        found.append({"file": name, "stem": name[:-3], "summary": summary})
+        lines = doc.splitlines()
+        # The first line is the row; the first paragraph under it is the
+        # aside, which is where each widget explains why it exists. Only
+        # that paragraph: what follows is the usage synopsis and the key
+        # list, which are for somebody reading --help, not somebody
+        # deciding whether this is the thing they want.
+        para = []
+        for line in lines[2:]:
+            if line.startswith("    "):      # an indented usage block
+                break
+            if not line.strip():
+                if para:
+                    break
+                continue
+            para.append(line.strip())
+        about = " ".join(para)
+        found.append({"file": name, "stem": name[:-3],
+                      "summary": lines[0] if lines else "",
+                      "about": about[:400]})
     return found
 
 
@@ -115,55 +147,56 @@ def token_ready(stem):
 
 
 def readiness(stem, need):
-    """(text, colour) for whether this one will work here, and why not.
+    """What still has to be done before this one will work, if anything.
 
-    A command either exists or does not, which is worth stating plainly. A
-    token is softer: it may be somewhere this cannot see, so a missing one
-    is reported as something to set rather than as a failure.
+    Empty when there is nothing to do, which is most of the time. A working
+    widget has nothing to say about itself, and a column reading "installed"
+    against twelve of thirteen rows is a column of noise with one useful
+    line hidden in it. What is left is a thing to go and do, in the words
+    somebody would use to do it.
     """
     need = (need or "").strip()
     if not need or need in ("—", "-"):
-        return "nothing to set up", DIM
+        return "", None
     commands = BACKTICKED.findall(need)
     if commands:
         missing = [c for c in commands if not shutil.which(c)]
-        if missing:
-            return "needs " + ", ".join(missing), WARN
-        return ", ".join(commands) + " installed", OK
+        return ("install " + ", ".join(missing), WARN) if missing else ("",
+                                                                        None)
     if re.search(r"token|key|login", need, re.I):
-        if stem == "usage":
-            # Not one credential but whichever agents happen to be signed in
-            # on this machine, which the widget itself is the thing that
-            # knows. Claiming either way from out here would be a guess.
-            return "reads what is logged in", DIM
-        if token_ready(stem):
-            # A token being present is not a token being any good: nothing
-            # here spends one to find out whether it is expired or missing a
-            # scope. Saying it is set says only what was actually checked.
-            return "token is set", OK
-        return "set " + need, WARN
-    return need, DIM
+        # usage.py wants no credential of its own - it reads whichever
+        # agents are signed in - so there is nothing to ask anyone for.
+        if stem == "usage" or token_ready(stem):
+            return "", None
+        return "add " + re.sub(r"^an? ", "", need), WARN
+    return "", None
 
 
 def rows_for(items, w, selected):
     name_w = max(12, min(18, w - 58))
-    note_w = max(10, min(26, (w - 1) - name_w - 6 - 34))
+    # The column exists only if something is in it. With nothing to do on
+    # this machine - the common case - it takes no width at all and the
+    # descriptions get it instead.
+    todo = max([len(i["state"][0]) for i in items] or [0])
+    note_w = min(26, todo + 2) if todo else 0
     # Every column keeps a space of its own, so a description that fills its
-    # width stops short of the state beside it rather than running into it.
+    # width stops short of whatever is beside it rather than running into it.
     text_w = max(8, (w - 1) - name_w - note_w - 6)
     out_rows = []
     for i, item in enumerate(items):
         here = i == selected
         tint = bg(28, 44, 62) if here else ""
         state, hue = item["state"]
-        out_rows.append(seg([
-            (tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
-            (tint + (TXT if here else LBL),
-             pad(item["stem"][:name_w - 1], name_w)),
-            (tint + DIM, pad(item["summary"][:text_w - 1], text_w)),
-            (tint + hue, pad(state[:note_w - 1], note_w)),
-            (tint, " " * w if here else ""),
-        ], w - 1))
+        line = [(tint + (ACCENT if here else DIM), " ▸ " if here else "   "),
+                (tint + (TXT if here else LBL),
+                 pad(item["stem"][:name_w - 1], name_w)),
+                (tint + DIM, pad(item["summary"][:text_w - 1], text_w))]
+        if note_w:
+            line.append((tint + (hue or DIM),
+                         pad(state[:note_w - 1], note_w)))
+        if here:
+            line.append((tint, " " * w))
+        out_rows.append(seg(line, w - 1))
     return out_rows
 
 
@@ -202,7 +235,7 @@ def main():
     args = sys.argv[1:]
     items = collect()
     # A widget name is resolved before --help is looked at, so that
-    # `toys.py netwatch --help` is netwatch's help and not this one's. Every
+    # `start.py netwatch --help` is netwatch's help, not this one's. Every
     # argument after the name belongs to the widget, including that one.
     if args and not args[0].startswith("-"):
         # A name, so run it straight away and pass the rest through: the menu
@@ -240,11 +273,12 @@ def main():
         blocked = sum(1 for i in items if i["state"][1] is WARN)
 
         body = [title("terminal toys", w, ACCENT)]
-        body.append(seg([(DIM, " %d widgets · " % len(items)),
-                         (WARN if blocked else OK,
-                          "%d need something first" % blocked if blocked
-                          else "all of them will run here"),
-                         (DIM, "   ↵ launches one, q leaves")], w - 1))
+        # Nothing about the state of the machine unless something is wrong
+        # with it. "All twelve are fine" is a sentence nobody needs.
+        body.append(seg([(DIM, " %d widgets" % len(items)),
+                         (WARN, " · %d need setting up first" % blocked
+                          if blocked else ""),
+                         (DIM, "   ↵ starts one, q leaves")], w - 1))
         body.append("")
         if not items:
             body.append(seg([(WARN, "  No widgets beside this script.")],
@@ -252,12 +286,17 @@ def main():
         else:
             body.extend(rows_for(items, w, selected))
         body.append("")
+        # What the highlighted one is for, in its own words - the rest of
+        # its opening paragraph, which the row has no room for. Not the
+        # command to run it: that is this screen's job, not the reader's.
         pick = items[selected] if items else None
         if pick and h - len(body) >= 3:
-            body.append(seg([(LBL, " ── %s ── " % pick["stem"].upper()),
-                             (DIM, "python3 %s" % pick["file"])], w - 1))
-            if pick["need"] and pick["need"] not in ("—", "-"):
-                body.append(seg([(DIM, "  needs "), (TXT, pick["need"])],
+            body.append(seg([(LBL, " ── %s ── " % pick["stem"].upper())],
+                            w - 1))
+            for line in wrap(pick["about"], w - 4)[:h - len(body) - 2]:
+                body.append(seg([(DIM, "  " + line)], w - 1))
+            if pick["state"][0]:
+                body.append(seg([(WARN, "  to use it, " + pick["state"][0])],
                                 w - 1))
 
         while len(body) < h - 2:

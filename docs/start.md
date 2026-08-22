@@ -1,4 +1,4 @@
-# `toys.py`
+# `start.py`
 
 The front door: every widget, what it does, and whether it will work on this
 machine.
@@ -92,11 +92,17 @@ Naming one skips the menu entirely, and anything after it is passed straight
 through:
 
 ```sh
-./toys.py                    # the menu
-./toys.py netwatch           # straight into one
-./toys.py netwatch -i 2 -n 5 # arguments go to the widget
-./toys.py link --help        # including --help
+python3 terminal-toys         # the directory itself is runnable
+./start.py                    # the menu, from inside it
+./start.py netwatch           # straight into one
+./start.py netwatch -i 2 -n 5 # arguments go to the widget
+./start.py link --help        # including --help
 ```
+
+The first form works because of `__main__.py`, which is Python's own
+convention for an entry point: a directory containing one can be run by
+name. It holds three lines and hands straight over to this script, so the
+collection can be started without knowing which file inside it to name.
 
 That form uses `exec`, so the launcher replaces itself rather than sitting in
 the middle of a pipeline it adds nothing to.

@@ -31,8 +31,11 @@ import re
 import sys
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+# The library, the checker, the launcher and the directory's entry point are
+# not widgets: none of them draws a panel, and none has a doc page of the
+# shape these checks look for.
 WIDGETS = [f for f in sorted(glob.glob("*.py"))
-           if f not in ("common.py", "check.py")]
+           if f not in ("common.py", "check.py", "start.py", "__main__.py")]
 PROBLEMS = []
 
 

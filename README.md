@@ -33,7 +33,7 @@ nothing at all — it just looks good, and it knows it.
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`toys.py`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/toys.md) |
+| **`start.py`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
 | **`latency.py`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
 | **`deployments.py`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
 | **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
@@ -51,6 +51,14 @@ nothing at all — it just looks good, and it knows it.
 Each is a single self-contained script with no dependencies — pure Python 3
 standard library, 24-bit colour, and a full redraw each frame so everything
 reflows when you resize the pane.
+
+```sh
+python3 terminal-toys   # the front door: pick one and it runs
+./start.py              # the same thing from inside the directory
+./start.py latency      # or name one and skip the menu
+```
+
+Each widget is also an ordinary program, if you would rather go direct:
 
 ```sh
 ./latency.py            # each runs standalone
