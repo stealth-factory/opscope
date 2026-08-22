@@ -756,7 +756,15 @@ fn main() {
             ]);
             hints.push(vec![(p.dim.as_str(), pomo.next_label())]);
             hints.push(vec![(p.dim.as_str(), "[r]estart".into())]);
-            hints.push(vec![(p.dim.as_str(), format!("[±]{}min", pomo.focus as i64))]);
+            // Both halves, because each answers a question the other does
+            // not. The step says what the key will do; the value is the
+            // only place the block length appears while the timer runs,
+            // since the countdown shows what is left rather than what it
+            // started from.
+            hints.push(vec![
+                (p.dim.as_str(), "[±]1min ".to_string()),
+                (p.txt.as_str(), format!("(focus {}min)", pomo.focus as i64)),
+            ]);
             if pomo.done > 0 {
                 // Nothing to reset at zero, so it only appears once it counts.
                 hints.push(vec![(
