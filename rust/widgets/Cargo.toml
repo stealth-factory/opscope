@@ -23,3 +23,7 @@ path = "src/bin/latency.rs"
 [[bin]]
 name = "matrix"
 path = "src/bin/matrix.rs"
+
+[[bin]]
+name = "link"
+path = "src/bin/link.rs"
