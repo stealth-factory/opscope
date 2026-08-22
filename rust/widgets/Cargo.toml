@@ -15,3 +15,11 @@ path = "src/bin/ports.rs"
 [[bin]]
 name = "netwatch"
 path = "src/bin/netwatch.rs"
+
+[[bin]]
+name = "latency"
+path = "src/bin/latency.rs"
+
+[[bin]]
+name = "matrix"
+path = "src/bin/matrix.rs"

@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The terminal is an ioctl and a termios struct away; both come from libc,
-# and nothing else here needs a crate at all.
 [dependencies]
+# The terminal is an ioctl and a termios struct away, both of which are in
+# libc. serde_json is here for one reason: every widget reads the same
+# config file, and hand-rolling a parser thirteen times over would be a bug
+# farm for no gain.
 libc = "0.2"
+serde_json = "1"

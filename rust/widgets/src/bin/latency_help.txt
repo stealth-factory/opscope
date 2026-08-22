@@ -1,0 +1,20 @@
+Multi-target latency monitor.
+
+Continuously pings every target, and shows per-target statistics and a
+log-scale graph of every target at once.
+
+    latency [-i SECONDS] [HOST...]
+
+One ping per target, read line by line as it arrives, so the numbers are what
+ping measured rather than anything this timed itself.
+
+Jitter is the median absolute deviation, not the standard deviation: a single
+400ms spike in a thousand samples is worth knowing about, but it is not what
+the link feels like, and a standard deviation would let it dominate. The spike
+is in the worst column instead.
+
+The graph is log-scale, because targets on one screen can differ by two orders
+of magnitude and a linear axis draws the near one as a flat line along the
+bottom.
+
+Keys: q quits.

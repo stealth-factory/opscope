@@ -206,6 +206,96 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
     lines
 }
 
+/// Where settings are looked for, in order of preference.
+///
+/// The same three places the Python looks, so one config file serves both
+/// while the collection is half translated.
+pub fn config_paths() -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    if let Ok(env) = std::env::var("TERMINAL_TOYS_CONFIG") {
+        if !env.is_empty() {
+            found.push(std::path::PathBuf::from(env));
+        }
+    }
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok().filter(|s| !s.is_empty());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let base = xdg.unwrap_or(format!("{}/.config", home));
+    found.push(std::path::PathBuf::from(base).join("terminal-toys/config.json"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            found.push(dir.join("config.json"));
+        }
+    }
+    found
+}
+
+/// One section of the config file, or an empty object.
+///
+/// The first readable file wins, and a malformed one falls back to the
+/// defaults rather than stopping a running panel - a widget on a wall
+/// should not vanish because a comma went missing in a file it shares.
+pub fn load_config(section: &str) -> serde_json::Value {
+    for path in config_paths() {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(found) = parsed.get(section) {
+            return found.clone();
+        }
+        return serde_json::json!({});
+    }
+    serde_json::json!({})
+}
+
+/// A setting, or the default when it is absent or the wrong shape.
+pub fn cfg_f64(cfg: &serde_json::Value, key: &str, fallback: f64) -> f64 {
+    cfg.get(key).and_then(|v| v.as_f64()).unwrap_or(fallback)
+}
+
+pub fn cfg_usize(cfg: &serde_json::Value, key: &str, fallback: usize) -> usize {
+    cfg.get(key)
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(fallback)
+}
+
+pub fn cfg_str(cfg: &serde_json::Value, key: &str, fallback: &str) -> String {
+    cfg.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+pub fn cfg_strings(cfg: &serde_json::Value, key: &str, fallback: &[&str]) -> Vec<String> {
+    match cfg.get(key).and_then(|v| v.as_array()) {
+        Some(items) if !items.is_empty() => items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => fallback.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Which of these required commands are not on PATH.
+pub fn missing(programs: &[&str]) -> Vec<String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    programs
+        .iter()
+        .filter(|p| {
+            !path.split(':').any(|dir| {
+                let candidate = std::path::Path::new(dir).join(p);
+                candidate.is_file()
+            })
+        })
+        .map(|p| p.to_string())
+        .collect()
+}
+
 /// Non-blocking key input, decoding the sequences arrows arrive as.
 ///
 /// Returns names for special keys and the bare character otherwise, and
