@@ -178,6 +178,92 @@ fn watch(host: String, index: usize, interval: f64, window: usize, shared: Arc<M
     }
 }
 
+/// A braille cell is two dots wide and four tall, so one character holds
+/// eight addressable points. The bit for each is fixed by the encoding.
+const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+/// Plot one series on a dot canvas eight times finer than the cells.
+///
+/// Consecutive samples are joined rather than left as marks, which is the
+/// difference between a line that reads as a round trip moving and one that
+/// reads as specks a row apart. The masks come back per cell instead of as
+/// text so that several series can be laid over one another first.
+fn braille_canvas(values: &[f64], llo: f64, lhi: f64, cols: usize, rows: usize) -> Vec<Vec<u8>> {
+    let (px_w, px_h) = (cols * 2, rows * 4);
+    let mut grid = vec![vec![0u8; cols]; rows];
+    if values.is_empty() || px_w == 0 || px_h == 0 {
+        return grid;
+    }
+    let vals: Vec<f64> = values.iter().rev().take(px_w).rev().copied().collect();
+    // Newest against the right edge: a target that has answered five times
+    // shows five samples there, not five stretched across the whole width.
+    let left = px_w - vals.len();
+    let decade = (lhi - llo).max(1e-9);
+    let point = |i: usize| -> (i64, i64) {
+        let frac = ((vals[i].max(1e-3).log10() - llo) / decade).clamp(0.0, 1.0);
+        (
+            (left + i) as i64,
+            ((1.0 - frac) * (px_h as f64 - 1.0)).round() as i64,
+        )
+    };
+    let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
+        if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
+            grid[y as usize / 4][x as usize / 2] |= BRAILLE[y as usize % 4][x as usize % 2];
+        }
+    };
+    // Every value here is a reply that arrived, so unlike netwatch's idle
+    // zero there is no reading that means "nothing happened" and should be
+    // left blank. One sample is a measurement and gets its dot.
+    let (x, y) = point(0);
+    dot(x, y, &mut grid);
+    for i in 1..vals.len() {
+        let (mut x0, mut y0) = point(i - 1);
+        let (x1, y1) = point(i);
+        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            dot(x0, y0, &mut grid);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let twice = 2 * err;
+            if twice >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if twice <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+    grid
+}
+
+/// Lay the canvases over one another, cell by cell.
+///
+/// The dots are merged so that no sample is lost where two targets cross.
+/// A cell can carry only one colour, and it goes to whichever series comes
+/// later in the table above: which trace is hidden is then something the
+/// reader can work out from that list rather than something the data decides
+/// afresh every frame.
+fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
+    let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
+    for (colour, canvas) in layers {
+        for (y, line) in canvas.iter().enumerate().take(rows) {
+            for (x, mask) in line.iter().enumerate().take(cols) {
+                if *mask != 0 {
+                    cells[y][x].0 = colour.clone();
+                    cells[y][x].1 |= mask;
+                }
+            }
+        }
+    }
+    cells
+}
+
 /// Log-scale plot of every target's round trip.
 ///
 /// Log because the targets on one screen can differ by two orders of
@@ -191,7 +277,9 @@ fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
         .enumerate()
         .map(|(i, t)| {
             let all = t.rtts();
-            let start = all.len().saturating_sub(gw);
+            // Two dots to a cell across, so the chart holds twice the pings
+            // it did when each one had a character to itself.
+            let start = all.len().saturating_sub(gw * 2);
             (i, all[start..].to_vec())
         })
         .filter(|(_, v)| !v.is_empty())
@@ -215,34 +303,22 @@ fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
         * 1.25;
     let (llo, lhi) = (lo.log10(), hi.log10());
 
-    let mut grid = vec![vec![(p.grid.clone(), " ".to_string()); gw]; gh];
-    for (idx, values) in &series {
-        let glyph = SERIES[idx % SERIES.len()];
-        let colour = &p.hues[idx % p.hues.len()];
-        let start = gw - values.len();
-        let mut previous: Option<usize> = None;
-        for (x, value) in values.iter().enumerate() {
-            let frac = (value.max(1e-3).log10() - llo) / (lhi - llo);
-            let y = ((1.0 - frac) * (gh as f64 - 1.0)).round().clamp(0.0, gh as f64 - 1.0) as usize;
-            let col = start + x;
-            if let Some(prev) = previous {
-                if prev.abs_diff(y) > 1 {
-                    // Join consecutive samples so a series reads as a trace
-                    // rather than as marks a row apart.
-                    for fill in prev.min(y) + 1..prev.max(y) {
-                        if grid[fill][col].1 == " " {
-                            grid[fill][col] = (colour.clone(), "│".into());
-                        }
-                    }
-                }
-            }
-            grid[y][col] = (colour.clone(), glyph.to_string());
-            previous = Some(y);
-        }
-    }
+    // One canvas per target rather than one shared grid: the glyphs used to
+    // tell the traces apart, and with braille the hue is all that is left to
+    // do it with, so each series has to keep its own until the last moment.
+    let layers: Vec<(String, Vec<Vec<u8>>)> = series
+        .iter()
+        .map(|(idx, values)| {
+            (
+                p.hues[idx % p.hues.len()].clone(),
+                braille_canvas(values, llo, lhi, gw, gh),
+            )
+        })
+        .collect();
+    let cells = overlay(&layers, gw, gh);
 
     let mut out = Vec::new();
-    for (y, line) in grid.iter().enumerate() {
+    for (y, line) in cells.iter().enumerate() {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
         let value = 10f64.powf(llo + frac * (lhi - llo));
         // Label only the top, middle and bottom: a number on every row is a
@@ -254,8 +330,14 @@ fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
         };
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
-        for (colour, ch) in line {
-            parts.push((colour.as_str(), ch.clone()));
+        for (colour, mask) in line {
+            parts.push(match mask {
+                0 => (p.grid.as_str(), " ".into()),
+                m => (
+                    colour.as_str(),
+                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string(),
+                ),
+            });
         }
         out.push(tc::seg(&parts, w - 1));
     }
@@ -555,5 +637,43 @@ mod tests {
         let strip = vec![".example.internal".to_string()];
         assert_eq!(label_for("box.example.internal", &strip), "box");
         assert_eq!(label_for("1.1.1.1", &strip), "1.1.1.1");
+    }
+
+    #[test]
+    fn a_rising_series_climbs_the_canvas() {
+        // Eight samples across four cells - two dots each - from the bottom
+        // of the decade the axis covers to the top of it.
+        let values: Vec<f64> = (0..8).map(|i| 10f64.powf(1.0 + i as f64 / 7.0)).collect();
+        let grid = braille_canvas(&values, 1.0, 2.0, 4, 4);
+        let highest: Vec<usize> = (0..4)
+            .map(|x| {
+                grid.iter()
+                    .position(|row| row[x] != 0)
+                    .expect("every column carries part of the trace")
+            })
+            .collect();
+        // Row zero is the top of the canvas, so climbing counts down.
+        assert_eq!(highest.first(), Some(&3));
+        assert_eq!(highest.last(), Some(&0));
+        assert!(highest.windows(2).all(|p| p[0] >= p[1]), "{:?}", highest);
+    }
+
+    #[test]
+    fn two_traces_in_one_cell_keep_both_their_dots() {
+        let top = braille_canvas(&[10.0, 10.0], 0.0, 1.0, 1, 1);
+        let bottom = braille_canvas(&[1.0, 1.0], 0.0, 1.0, 1, 1);
+        assert!(top[0][0] != 0 && bottom[0][0] != 0);
+        let cells = overlay(
+            &[
+                ("first".to_string(), top.clone()),
+                ("second".to_string(), bottom.clone()),
+            ],
+            1,
+            1,
+        );
+        assert_eq!(cells[0][0].1, top[0][0] | bottom[0][0]);
+        // Only the hue has to be given up, and it goes to the lower row of
+        // the table, which is the rule the reader can apply from outside.
+        assert_eq!(cells[0][0].0, "second");
     }
 }
