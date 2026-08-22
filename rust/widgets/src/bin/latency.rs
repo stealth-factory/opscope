@@ -381,14 +381,13 @@ fn log(events: &Arc<Mutex<Vec<Event>>>, hue: &str, host: &str, kind: &'static st
     }
 }
 
-/// Wall-clock time of day, without pulling in a date library for it.
+/// The time of day, as the machine reckons it.
+///
+/// Local rather than UTC: this sits on a wall beside a clock panel showing
+/// server time, and a header eight hours out from the pane next to it is
+/// read as a broken widget rather than as a different timezone.
 fn clock_time() -> String {
-    let secs = now() as i64;
-    let day = secs.rem_euclid(86_400);
-    // UTC, because this is only ever compared against the other lines in
-    // the same log - and a widget that guessed at the local offset would be
-    // wrong for half the year.
-    format!("{:02}:{:02}:{:02}", day / 3600, (day % 3600) / 60, day % 60)
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 /// Restart every ping so a new interval takes effect at once.
