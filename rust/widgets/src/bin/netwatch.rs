@@ -353,6 +353,15 @@ fn wire_label(names: &[String]) -> String {
     }
 }
 
+/// How long a rate is averaged over.
+///
+/// One sample interval is the honest instantaneous rate and an unreadable
+/// column: nearly all traffic is bursty, so a process that is steadily busy
+/// flickers between a figure and a dash. Averaging over a few seconds is
+/// just as true - it is a rate over a stated window - and can actually be
+/// read. The header says which window, so the number is not a mystery.
+const RATE_WINDOW: f64 = 4.0;
+
 #[derive(Clone, Default)]
 struct Proc {
     pid: i32,
@@ -362,6 +371,32 @@ struct Proc {
     up_rate: f64,
     down_rate: f64,
     alive: bool,
+    /// (when, up bytes, down bytes) for the last few samples.
+    recent: Vec<(f64, u64, u64)>,
+}
+
+impl Proc {
+    /// Fold this sample in, and re-average over the window.
+    fn add(&mut self, when: f64, up: u64, down: u64) {
+        self.up += up;
+        self.down += down;
+        self.recent.push((when, up, down));
+        self.recent.retain(|(t, _, _)| when - t <= RATE_WINDOW);
+        let oldest = self.recent.first().map(|(t, _, _)| *t).unwrap_or(when);
+        // The span the samples actually cover, not the nominal window: for
+        // the first few seconds after launch there is less history than
+        // that, and dividing by the full window would read low.
+        let span = (when - oldest).max(1e-6);
+        let (mut u, mut d) = (0u64, 0u64);
+        for (_, up, down) in &self.recent {
+            u += up;
+            d += down;
+        }
+        if self.recent.len() > 1 {
+            self.up_rate = u as f64 / span;
+            self.down_rate = d as f64 / span;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -395,9 +430,13 @@ fn sample(state: &mut State, external: bool) {
     state.err = err;
 
     for row in state.totals.values_mut() {
-        row.up_rate = 0.0;
-        row.down_rate = 0.0;
         row.alive = false;
+        // A row with nothing in the window really is idle, and says so.
+        row.recent.retain(|(t, _, _)| stamp - t <= RATE_WINDOW);
+        if row.recent.is_empty() {
+            row.up_rate = 0.0;
+            row.down_rate = 0.0;
+        }
     }
 
     let first = state.stamp == 0.0;
@@ -442,11 +481,8 @@ fn sample(state: &mut State, external: bool) {
                 ..Default::default()
             });
         row.alive = true;
-        row.up += d_sent;
-        row.down += d_recv;
         if gap > 0.0 {
-            row.up_rate += d_sent as f64 / gap;
-            row.down_rate += d_recv as f64 / gap;
+            row.add(stamp, d_sent, d_recv);
         }
     }
 
@@ -717,7 +753,10 @@ fn main() {
                     p.accent.as_str(),
                     if sort_live { "live".into() } else { "total".into() },
                 ),
-                (p.dim.as_str(), format!("   every {}s", interval)),
+                (
+                    p.dim.as_str(),
+                    format!("   every {}s · rates over {}s", interval, RATE_WINDOW as i64),
+                ),
             ],
             w - 1,
         ));
@@ -1030,6 +1069,42 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bursty_process_keeps_a_readable_rate() {
+        let mut row = Proc::default();
+        // A kilobyte at t=0 and nothing for the next three seconds. The
+        // instantaneous rate is zero for most of that; the windowed one
+        // stays up, which is the whole point.
+        row.add(0.0, 0, 1000);
+        row.add(1.0, 0, 0);
+        row.add(2.0, 0, 0);
+        row.add(3.0, 0, 0);
+        assert!(row.down_rate > 0.0, "the rate flickered to nothing");
+        assert_eq!(row.down, 1000, "the total is unaffected by smoothing");
+    }
+
+    #[test]
+    fn a_rate_is_the_window_it_claims() {
+        let mut row = Proc::default();
+        // Two kilobytes a second, steadily, for four seconds.
+        for i in 0..5 {
+            row.add(i as f64, 0, 2000);
+        }
+        // Averaged over the span the samples cover, which is 4s for 5
+        // samples: 10000 bytes over 4 seconds.
+        assert!((row.down_rate - 2500.0).abs() < 1.0, "got {}", row.down_rate);
+    }
+
+    #[test]
+    fn history_older_than_the_window_is_dropped() {
+        let mut row = Proc::default();
+        row.add(0.0, 0, 5000);
+        row.add(100.0, 0, 1000);
+        // The ancient sample is gone, so it cannot prop the rate up.
+        assert_eq!(row.recent.len(), 1);
+        assert_eq!(row.down, 6000);
+    }
 
     #[test]
     fn units_are_decimal_as_isps_quote_them() {
