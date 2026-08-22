@@ -95,10 +95,96 @@ struct Countdown {
     label: String,
     left: i64,
     frac: f64,
+    /// Its own colour: the three are different clocks, not three readings
+    /// of one, and a single hue makes them look like a stack of the same
+    /// thing.
+    ink: String,
+}
+
+/// Which days are working days, and between which hours.
+#[derive(Clone)]
+struct Office {
+    /// Monday is 0. Defaults to Monday through Friday.
+    days: Vec<u32>,
+    start: u32,
+    end: u32,
+}
+
+impl Office {
+    fn from_config(cfg: &serde_json::Value) -> Office {
+        let days = cfg
+            .get("work_days")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| day_number(v))
+                    .filter(|d| *d < 7)
+                    .collect::<Vec<u32>>()
+            })
+            .filter(|d: &Vec<u32>| !d.is_empty())
+            .unwrap_or_else(|| vec![0, 1, 2, 3, 4]);
+        Office {
+            days,
+            start: tc::cfg_usize(cfg, "work_start_hour", 9) as u32,
+            end: tc::cfg_usize(cfg, "work_end_hour", 18) as u32,
+        }
+    }
+
+    fn is_working_day(&self, when: &chrono::DateTime<Local>) -> bool {
+        self.days.contains(&when.weekday().num_days_from_monday())
+    }
+
+    fn is_open(&self, when: &chrono::DateTime<Local>) -> bool {
+        self.is_working_day(when) && (self.start..self.end).contains(&when.hour())
+    }
+
+    /// The next opening after `now`, skipping days that are not worked.
+    fn next_open(&self, now: &chrono::DateTime<Local>) -> chrono::DateTime<Local> {
+        let mut day = now.date_naive();
+        for _ in 0..14 {
+            let candidate = day.and_time(NaiveTime::from_hms_opt(self.start, 0, 0).unwrap());
+            let stamp = Local.from_local_datetime(&candidate).single();
+            if let Some(stamp) = stamp {
+                if stamp > *now && self.is_working_day(&stamp) {
+                    return stamp;
+                }
+            }
+            day += chrono::Duration::days(1);
+        }
+        *now
+    }
+
+    /// The last closing before `now`, for measuring how far into the gap
+    /// we are - without it the bar has nothing to fill from.
+    fn prev_close(&self, now: &chrono::DateTime<Local>) -> chrono::DateTime<Local> {
+        let mut day = now.date_naive();
+        for _ in 0..14 {
+            let candidate = day.and_time(NaiveTime::from_hms_opt(self.end, 0, 0).unwrap());
+            if let Some(stamp) = Local.from_local_datetime(&candidate).single() {
+                if stamp <= *now && self.is_working_day(&stamp) {
+                    return stamp;
+                }
+            }
+            day -= chrono::Duration::days(1);
+        }
+        *now
+    }
+}
+
+/// A weekday from a config entry, as a number or a name.
+fn day_number(value: &serde_json::Value) -> Option<u32> {
+    if let Some(n) = value.as_u64() {
+        return Some(n as u32);
+    }
+    let name = value.as_str()?.to_lowercase();
+    ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        .iter()
+        .position(|d| name.starts_with(d))
+        .map(|i| i as u32)
 }
 
 /// The three fixed countdowns: the hour, the working day, and midnight.
-fn countdowns(now: chrono::DateTime<Local>, work_start: u32, work_end: u32) -> Vec<Countdown> {
+fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
     let mut out = Vec::new();
 
     let into_hour = now.minute() as i64 * 60 + now.second() as i64;
@@ -106,31 +192,33 @@ fn countdowns(now: chrono::DateTime<Local>, work_start: u32, work_end: u32) -> V
         label: "Next Hour".into(),
         left: 3600 - into_hour,
         frac: into_hour as f64 / 3600.0,
+        ink: tc::rgb(90, 220, 255),
     });
 
-    // Office hours run to work_end today; past it, to work_start tomorrow.
+    // Inside working hours this counts to the close; outside them, to the
+    // next opening - which on a Friday evening is Monday morning, not
+    // tomorrow. The bar fills from the last close, so the gap has a span.
     let today = now.date_naive();
-    let start = today.and_time(NaiveTime::from_hms_opt(work_start, 0, 0).unwrap());
-    let end = today.and_time(NaiveTime::from_hms_opt(work_end, 0, 0).unwrap());
-    let naive = now.naive_local();
-    let (label, target, from) = if naive < start {
-        ("Start of Office Hour", start, start - chrono::Duration::hours(12))
-    } else if naive < end {
+    let (label, target, from) = if office.is_open(&now) {
+        let start = Local
+            .from_local_datetime(&today.and_time(NaiveTime::from_hms_opt(office.start, 0, 0).unwrap()))
+            .single()
+            .unwrap_or(now);
+        let end = Local
+            .from_local_datetime(&today.and_time(NaiveTime::from_hms_opt(office.end, 0, 0).unwrap()))
+            .single()
+            .unwrap_or(now);
         ("End of Office Hour", end, start)
     } else {
-        let tomorrow = today + chrono::Duration::days(1);
-        (
-            "Start of Office Hour",
-            tomorrow.and_time(NaiveTime::from_hms_opt(work_start, 0, 0).unwrap()),
-            end,
-        )
+        ("Start of Office Hour", office.next_open(&now), office.prev_close(&now))
     };
     let span = (target - from).num_seconds().max(1);
-    let left = (target - naive).num_seconds();
+    let left = (target - now).num_seconds();
     out.push(Countdown {
         label: label.into(),
         left,
         frac: 1.0 - (left as f64 / span as f64),
+        ink: tc::rgb(255, 200, 90),
     });
 
     let into_day = now.num_seconds_from_midnight() as i64;
@@ -138,6 +226,7 @@ fn countdowns(now: chrono::DateTime<Local>, work_start: u32, work_end: u32) -> V
         label: "End of Day".into(),
         left: 86400 - into_day,
         frac: into_day as f64 / 86400.0,
+        ink: tc::rgb(175, 130, 255),
     });
     out
 }
@@ -391,8 +480,7 @@ struct City {
 fn main() {
     tc::maybe_help(include_str!("clocks_help.txt"));
     let cfg = tc::load_config("clocks");
-    let work_start = tc::cfg_usize(&cfg, "work_start_hour", 9) as u32;
-    let work_end = tc::cfg_usize(&cfg, "work_end_hour", 18) as u32;
+    let office = Office::from_config(&cfg);
     let cities = load_cities(&cfg);
 
     let p = palette();
@@ -488,15 +576,23 @@ fn main() {
             let over = pomo.overtime(stamp);
             let left = pomo.remaining(stamp);
             let frac = 1.0 - (left / pomo.duration().max(1.0));
+            // Paused takes its own ink: a stopped timer showing focus red
+            // reads as one that is running.
+            let ink = if !pomo.running {
+                &p.paused
+            } else if pomo.phase == Phase::Focus {
+                &p.focus
+            } else {
+                &p.rest
+            };
             rows.push(tc::seg(
                 &[
-                    (p.txt.as_str(), " Pomodoro · ".into()),
                     (
-                        if pomo.phase == Phase::Focus { &p.focus } else { &p.rest },
-                        format!("{:<12}", pomo.phase.label()),
+                        ink.as_str(),
+                        format!(" {}", tc::pad(&format!("Pomodoro · {}", pomo.phase.label()), 23)),
                     ),
                     (
-                        if over > 0.0 { &p.focus } else { &p.accent },
+                        if over > 0.0 { &p.over } else { &p.txt },
                         if over > 0.0 {
                             format!("+{}", hms(over as i64))
                         } else {
@@ -504,25 +600,38 @@ fn main() {
                         },
                     ),
                     (
-                        p.dim.as_str(),
-                        format!(
-                            "  {}   {} done",
-                            if pomo.running { "running" } else { "paused" },
-                            pomo.done
-                        ),
+                        p.paused.as_str(),
+                        if pomo.running { String::new() } else { "  paused".into() },
                     ),
+                    (
+                        if over > 0.0 { &p.over } else { &p.dim },
+                        if over > 0.0 { "  OVER".into() } else { String::new() },
+                    ),
+                    (p.dim.as_str(), format!("   {} done", pomo.done)),
                 ],
                 w - 1,
             ));
-            rows.push(tc::seg(
-                &[(
-                    if pomo.phase == Phase::Focus { &p.focus } else { &p.rest },
-                    format!(" {}", bar(frac, bar_w)),
-                )],
-                w - 1,
-            ));
+            if over > 0.0 {
+                // The bar rescales to duration plus overtime, so the red
+                // share grows the longer the phase is ignored - the point
+                // being that it keeps getting harder to miss.
+                let total = pomo.duration() + over;
+                let base = ((bar_w as f64 * pomo.duration() / total).round() as usize).max(1);
+                rows.push(tc::seg(
+                    &[
+                        (ink.as_str(), format!(" {}", "█".repeat(base))),
+                        (p.over.as_str(), "█".repeat(bar_w.saturating_sub(base))),
+                    ],
+                    w - 1,
+                ));
+            } else {
+                rows.push(tc::seg(
+                    &[(ink.as_str(), format!(" {}", bar(frac, bar_w)))],
+                    w - 1,
+                ));
+            }
         }
-        for item in countdowns(now, work_start, work_end) {
+        for item in countdowns(now, &office) {
             rows.push(tc::seg(
                 &[
                     (p.txt.as_str(), format!(" {:<21}", item.label)),
@@ -531,7 +640,7 @@ fn main() {
                 w - 1,
             ));
             rows.push(tc::seg(
-                &[(p.bar.as_str(), format!(" {}", bar(item.frac, bar_w)))],
+                &[(item.ink.as_str(), format!(" {}", bar(item.frac, bar_w)))],
                 w - 1,
             ));
         }
@@ -559,14 +668,11 @@ fn main() {
                 let there = now.with_timezone(&city.zone);
                 // Sun or moon by the local hour, which is the fastest way
                 // to read "is it a reasonable time to message them".
-                let awake = (7..19).contains(&there.hour());
+                let (ink, glyph) = phase_of(&there, &p);
                 let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
                 rows.push(tc::seg(
                     &[
-                        (
-                            if awake { &p.sun } else { &p.moon },
-                            format!(" {} ", if awake { "☀" } else { "☾" }),
-                        ),
+                        (ink.as_str(), format!(" {} ", glyph)),
                         (p.txt.as_str(), tc::pad(&city.name, 16)),
                         (p.txt.as_str(), there.format("%H:%M").to_string()),
                         (
@@ -619,6 +725,30 @@ fn main() {
     }
 }
 
+/// Colour and glyph for what people there are plausibly doing.
+///
+/// Four states rather than two: asleep, weekend, working, and the evening
+/// either side of it. The glyph says light or dark and the colour says
+/// whether anyone is likely to be at a desk, which is the actual question
+/// being asked of a world clock.
+fn phase_of(there: &chrono::DateTime<Tz>, p: &Palette) -> (String, &'static str) {
+    let hour = there.hour() as f64 + there.minute() as f64 / 60.0;
+    let weekend = there.weekday().num_days_from_monday() >= 5;
+    if hour < 6.5 || hour >= 22.0 {
+        return (p.night.clone(), "☾");
+    }
+    if weekend {
+        return (p.weekend.clone(), "☀");
+    }
+    if (9.0..18.0).contains(&hour) {
+        return (p.work.clone(), "☀");
+    }
+    if hour >= 18.0 {
+        return (p.eve.clone(), "☾");
+    }
+    (p.eve.clone(), "☀")
+}
+
 /// The configured cities, or the four the Python ships with.
 ///
 /// A zone the database does not know is dropped rather than defaulted to
@@ -636,6 +766,17 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
                 });
             }
         }
+    }
+    if !out.is_empty() {
+        // West to east by current offset, so the row order is a map.
+        let now = Utc::now();
+        out.sort_by_key(|c| {
+            (
+                now.with_timezone(&c.zone).offset().fix().local_minus_utc(),
+                c.name.clone(),
+            )
+        });
+        return out;
     }
     if out.is_empty() {
         for (name, zone) in [
@@ -665,6 +806,12 @@ fn seconds() -> f64 {
 struct Palette {
     focus: String,
     rest: String,
+    paused: String,
+    over: String,
+    work: String,
+    eve: String,
+    night: String,
+    weekend: String,
     dim: String,
     txt: String,
     lbl: String,
@@ -684,6 +831,12 @@ fn palette() -> Palette {
     Palette {
         focus: tc::rgb(255, 130, 120),
         rest: tc::rgb(120, 235, 170),
+        paused: tc::rgb(160, 172, 190),
+        over: tc::rgb(255, 80, 90),
+        work: tc::rgb(130, 255, 180),
+        eve: tc::rgb(255, 200, 90),
+        night: tc::rgb(95, 130, 175),
+        weekend: tc::rgb(150, 150, 170),
         dim: tc::rgb(70, 130, 110),
         txt: tc::rgb(220, 255, 240),
         lbl: tc::rgb(70, 130, 110),
@@ -700,6 +853,75 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friday_evening_counts_to_monday_not_saturday() {
+        let office = Office::from_config(&serde_json::json!({}));
+        // Friday 21 August 2026 at 19:00 - after the close, and the next
+        // working day is three days off.
+        let friday = Local.with_ymd_and_hms(2026, 8, 21, 19, 0, 0).unwrap();
+        assert!(!office.is_open(&friday));
+        let opens = office.next_open(&friday);
+        assert_eq!(opens.weekday(), chrono::Weekday::Mon);
+        assert_eq!(opens.hour(), 9);
+        // Which is nearly three days, not the fourteen hours a naive
+        // "tomorrow at nine" would give.
+        let items = countdowns(friday, &office);
+        assert!(items[1].left > 48 * 3600, "got {}s", items[1].left);
+    }
+
+    #[test]
+    fn a_saturday_is_not_a_working_day() {
+        let office = Office::from_config(&serde_json::json!({}));
+        let saturday = Local.with_ymd_and_hms(2026, 8, 22, 11, 0, 0).unwrap();
+        assert!(!office.is_open(&saturday), "eleven on a Saturday is not office hours");
+        assert_eq!(countdowns(saturday, &office)[1].label, "Start of Office Hour");
+    }
+
+    #[test]
+    fn the_working_week_can_be_configured() {
+        // A Sunday-to-Thursday week, as much of the Gulf works.
+        let office = Office::from_config(&serde_json::json!({
+            "work_days": ["sun", "mon", "tue", "wed", "thu"],
+            "work_start_hour": 8,
+            "work_end_hour": 16
+        }));
+        let sunday = Local.with_ymd_and_hms(2026, 8, 23, 9, 0, 0).unwrap();
+        assert!(office.is_open(&sunday), "Sunday is a working day there");
+        let friday = Local.with_ymd_and_hms(2026, 8, 21, 9, 0, 0).unwrap();
+        assert!(!office.is_open(&friday), "Friday is not");
+        // Numbers work as well as names, Monday being zero.
+        let by_number = Office::from_config(&serde_json::json!({"work_days": [0, 1, 2]}));
+        assert_eq!(by_number.days, vec![0, 1, 2]);
+        // And nonsense falls back rather than emptying the week.
+        let junk = Office::from_config(&serde_json::json!({"work_days": []}));
+        assert_eq!(junk.days, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn each_countdown_gets_its_own_colour() {
+        let now = Local.with_ymd_and_hms(2026, 8, 22, 14, 30, 0).unwrap();
+        let items = countdowns(now, &Office::from_config(&serde_json::json!({})));
+        let inks: std::collections::HashSet<String> =
+            items.iter().map(|c| c.ink.clone()).collect();
+        assert_eq!(inks.len(), 3, "three clocks, three colours");
+    }
+
+    #[test]
+    fn the_world_clock_reads_more_than_light_and_dark() {
+        let p = palette();
+        let tokyo: Tz = "Asia/Tokyo".parse().unwrap();
+        let at = |h: u32, d: u32| {
+            tokyo.with_ymd_and_hms(2026, 8, d, h, 0, 0).unwrap()
+        };
+        // Saturday the 22nd, Monday the 24th.
+        assert_eq!(phase_of(&at(3, 24), &p).1, "☾", "the small hours");
+        assert_eq!(phase_of(&at(11, 24), &p), (p.work.clone(), "☀"));
+        assert_eq!(phase_of(&at(19, 24), &p), (p.eve.clone(), "☾"));
+        assert_eq!(phase_of(&at(8, 24), &p), (p.eve.clone(), "☀"));
+        // A weekday's working hours and a weekend's are different answers.
+        assert_eq!(phase_of(&at(11, 22), &p), (p.weekend.clone(), "☀"));
+    }
 
     #[test]
     fn the_clock_is_two_colours_down_its_height() {
@@ -755,7 +977,7 @@ mod tests {
         // "Start of Office Hour" is exactly twenty characters, and a
         // twenty-wide field ran it straight into the time beside it.
         let now = Local.with_ymd_and_hms(2026, 8, 22, 7, 0, 0).unwrap();
-        let longest = countdowns(now, 9, 18)
+        let longest = countdowns(now, &Office::from_config(&serde_json::json!({})))
             .into_iter()
             .map(|c| c.label.chars().count())
             .max()
@@ -872,7 +1094,7 @@ mod tests {
     #[test]
     fn the_countdowns_stay_inside_their_spans() {
         let now = Local.with_ymd_and_hms(2026, 8, 22, 14, 30, 0).unwrap();
-        let items = countdowns(now, 9, 18);
+        let items = countdowns(now, &Office::from_config(&serde_json::json!({})));
         assert_eq!(items.len(), 3);
         for item in &items {
             assert!(item.left > 0, "{} had {}s left", item.label, item.left);
@@ -883,11 +1105,14 @@ mod tests {
     }
 
     #[test]
-    fn after_hours_counts_to_tomorrow_morning() {
-        let evening = Local.with_ymd_and_hms(2026, 8, 22, 21, 0, 0).unwrap();
-        let items = countdowns(evening, 9, 18);
+    fn a_weekday_evening_counts_to_the_next_morning() {
+        // Thursday 20 August 2026 at nine in the evening: twelve hours to
+        // Friday's opening. This test previously used a Saturday and
+        // expected the same answer, which is how the missing weekend
+        // handling went unnoticed - the assertion encoded the bug.
+        let evening = Local.with_ymd_and_hms(2026, 8, 20, 21, 0, 0).unwrap();
+        let items = countdowns(evening, &Office::from_config(&serde_json::json!({})));
         assert_eq!(items[1].label, "Start of Office Hour");
-        // Twelve hours to nine the next morning.
         assert_eq!(items[1].left, 12 * 3600);
     }
 }
