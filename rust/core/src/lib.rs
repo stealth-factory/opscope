@@ -208,8 +208,12 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
 
 /// Where settings are looked for, in order of preference.
 ///
-/// The same three places the Python looks, so one config file serves both
-/// while the collection is half translated.
+/// The Python's third place is "beside the script", which a compiled
+/// binary does not have: its own directory is target/release, where nobody
+/// would put a config. The working directory stands in for it, since that
+/// is the project directory when a widget is started from a pane, and the
+/// executable's own directory is kept last for a binary shipped with one
+/// beside it.
 pub fn config_paths() -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     if let Ok(env) = std::env::var("TERMINAL_TOYS_CONFIG") {
@@ -221,6 +225,9 @@ pub fn config_paths() -> Vec<std::path::PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let base = xdg.unwrap_or(format!("{}/.config", home));
     found.push(std::path::PathBuf::from(base).join("terminal-toys/config.json"));
+    if let Ok(cwd) = std::env::current_dir() {
+        found.push(cwd.join("config.json"));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             found.push(dir.join("config.json"));
@@ -427,6 +434,20 @@ pub fn maybe_help(doc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_config_search_includes_the_working_directory() {
+        // The bug this exists for: a compiled binary looked only beside
+        // itself, which is target/release, and silently used defaults
+        // while a real config sat in the project directory.
+        let paths = config_paths();
+        let cwd = std::env::current_dir().unwrap().join("config.json");
+        assert!(paths.contains(&cwd), "cwd missing from {:?}", paths);
+        assert!(
+            paths.iter().any(|p| p.to_string_lossy().contains(".config/terminal-toys")),
+            "the xdg location must stay, for an installed binary"
+        );
+    }
 
     #[test]
     fn seg_counts_only_the_text() {

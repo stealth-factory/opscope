@@ -439,10 +439,16 @@ fn main() {
         let (w, h) = tc::size();
         let now = Local::now();
         let mut rows = vec![tc::title("clocks", w, &p.head)];
-        rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ── ".into())], w - 1));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ──".into())], w - 1));
 
-        for line in render_big(&now.format("%H:%M:%S").to_string()) {
-            rows.push(tc::seg(&[(p.big.as_str(), format!("  {}", line))], w - 1));
+        // Two colours down the digits, not one: the top three rows are
+        // bright and the base is darker, which is what gives them weight.
+        for (i, line) in render_big(&now.format("%H:%M:%S").to_string())
+            .into_iter()
+            .enumerate()
+        {
+            let ink = if i < 3 { &p.big_top } else { &p.big_base };
+            rows.push(tc::seg(&[(ink.as_str(), format!(" {}", line))], w - 1));
         }
         rows.push(String::new());
         rows.push(tc::seg(
@@ -457,7 +463,7 @@ fn main() {
         ));
         rows.push(String::new());
 
-        rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ── ".into())], w - 1));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
         let bar_w = w.saturating_sub(3).min(90);
 
         // The pomodoro leads the section, as it does in the Python.
@@ -664,23 +670,28 @@ struct Palette {
     lbl: String,
     accent: String,
     head: String,
-    big: String,
+    big_top: String,
+    big_base: String,
     bar: String,
     sun: String,
     moon: String,
 }
 
 fn palette() -> Palette {
+    // clocks.py's own palette, value for value. Its DIM is a green-grey
+    // rather than the blue-grey the other widgets use, and the difference
+    // is visible the moment the two sit side by side.
     Palette {
         focus: tc::rgb(255, 130, 120),
-        rest: tc::rgb(120, 220, 170),
-        dim: tc::rgb(127, 147, 172),
-        txt: tc::rgb(225, 235, 245),
-        lbl: tc::rgb(130, 165, 200),
-        accent: tc::rgb(150, 210, 255),
+        rest: tc::rgb(120, 235, 170),
+        dim: tc::rgb(70, 130, 110),
+        txt: tc::rgb(220, 255, 240),
+        lbl: tc::rgb(70, 130, 110),
+        accent: tc::rgb(90, 220, 255),
         head: tc::rgb(0, 255, 170),
-        big: tc::rgb(220, 255, 240),
-        bar: tc::rgb(90, 200, 255),
+        big_top: tc::rgb(120, 255, 200),
+        big_base: tc::rgb(40, 150, 120),
+        bar: tc::rgb(90, 220, 255),
         sun: tc::rgb(255, 210, 120),
         moon: tc::rgb(150, 170, 210),
     }
@@ -689,6 +700,16 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clock_is_two_colours_down_its_height() {
+        // The Python paints the top three rows bright and the base dark;
+        // one flat colour loses the weight of the digits entirely.
+        let p = palette();
+        assert_ne!(p.big_top, p.big_base);
+        assert_eq!(p.big_top, tc::rgb(120, 255, 200));
+        assert_eq!(p.big_base, tc::rgb(40, 150, 120));
+    }
 
     #[test]
     fn digits_are_five_rows_of_blocks() {
