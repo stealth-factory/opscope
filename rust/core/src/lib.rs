@@ -324,6 +324,74 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+/// Green through amber to red.
+///
+/// Used wherever a fraction is a temperature - CPU, memory, how close a
+/// number is to a limit - so the same load reads the same colour whichever
+/// widget is showing it.
+pub fn heat(frac: f64) -> String {
+    let frac = frac.clamp(0.0, 1.0);
+    if frac < 0.5 {
+        let t = frac / 0.5;
+        rgb((40.0 + 200.0 * t) as u8, 255, (120.0 - 100.0 * t) as u8)
+    } else {
+        let t = (frac - 0.5) / 0.5;
+        rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
+    }
+}
+
+/// Draw the reason a widget cannot run, and hold until q.
+///
+/// Exiting with a message loses it: a widget lives in a pane that is not
+/// being watched at the moment it starts, and a line printed to a shell
+/// that then sits at a prompt is indistinguishable from the widget never
+/// having been launched. This stays on screen until somebody reads it.
+pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) {
+    let bad = rgb(255, 100, 110);
+    let dim = rgb(127, 147, 172);
+    let txt = rgb(225, 235, 245);
+    setup();
+    let mut keyboard = Keyboard::new();
+    loop {
+        for key in keyboard.poll() {
+            if key == "q" || key == "Q" {
+                keyboard.restore();
+                restore_screen();
+                return;
+            }
+        }
+        let (w, h) = size();
+        let mut rows = vec![title(name, w, &bad), String::new()];
+        rows.push(seg(
+            &[
+                (bad.as_str(), " cannot start · ".into()),
+                (txt.as_str(), format!("needs {}", needed.join(", "))),
+            ],
+            w - 1,
+        ));
+        rows.push(String::new());
+        for line in why {
+            rows.push(seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
+        }
+        if !install.is_empty() {
+            rows.push(String::new());
+            rows.push(seg(
+                &[
+                    (dim.as_str(), " try: ".into()),
+                    (txt.as_str(), install.to_string()),
+                ],
+                w - 1,
+            ));
+        }
+        while rows.len() < h - 1 {
+            rows.push(String::new());
+        }
+        rows.push(seg(&[(dim.as_str(), " [q]uit".into())], w - 1));
+        draw(&rows, w, h);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
@@ -476,6 +544,19 @@ pub fn maybe_help(doc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heat_runs_green_to_red_through_amber() {
+        // The ends and the middle, since every widget reads the same scale
+        // and a drift in it would make one pane disagree with the next.
+        assert_eq!(heat(0.0), rgb(40, 255, 120));
+        assert_eq!(heat(0.5), rgb(255, 240, 20));
+        assert_eq!(heat(1.0), rgb(255, 40, 30));
+        // Out of range is clamped rather than wrapped: a CPU reading over
+        // 100% on a multicore box must not come back green.
+        assert_eq!(heat(2.0), heat(1.0));
+        assert_eq!(heat(-1.0), heat(0.0));
+    }
 
     #[test]
     fn base64_matches_the_rfc_vectors() {
