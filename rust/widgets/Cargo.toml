@@ -48,3 +48,7 @@ path = "src/bin/deployments.rs"
 [[bin]]
 name = "start"
 path = "src/bin/start.rs"
+
+[[bin]]
+name = "linear"
+path = "src/bin/linear.rs"

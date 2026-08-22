@@ -463,19 +463,258 @@ pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, 
     })
 }
 
+/// One HTTPS POST of a JSON body, returning the body and its headers.
+///
+/// The headers come back because a rate limit is only knowable from them,
+/// and a widget that polls an API every two minutes should be able to say
+/// how much of its hour it has left.
+///
+/// Not `--fail`: a GraphQL endpoint answers 200 with an errors array, and
+/// on a 4xx the body is usually the only thing that says what was wrong.
+/// The status is read off the dumped headers instead.
+pub fn post_json(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+) -> Result<(String, Vec<(String, String)>), String> {
+    use std::io::Write;
+    let mut config = format!(
+        "--silent\n--show-error\n--request POST\n--dump-header -\n\
+         --max-time {}\n--url {}\n--data {}\n",
+        seconds,
+        quoted(url),
+        quoted(body)
+    );
+    for (name, value) in headers {
+        config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
+    }
+    let mut child = std::process::Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl would not take its configuration")?
+        .write_all(config.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if said.is_empty() {
+            format!("curl exited {}", out.status.code().unwrap_or(-1))
+        } else {
+            said
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (head, body) = split_response(&text);
+    let status = head
+        .first()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let found: Vec<(String, String)> = head
+        .iter()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+        .collect();
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {}", status));
+    }
+    Ok((body, found))
+}
+
+/// Split curl's `--dump-header -` output into its last header block and
+/// the body under it.
+///
+/// The last block, because a redirect or a `100 Continue` leaves earlier
+/// ones in front of it, and the one that describes the response is the one
+/// nearest the body.
+fn split_response(text: &str) -> (Vec<String>, String) {
+    let mut head: Vec<String> = Vec::new();
+    let mut rest = text;
+    loop {
+        let mut lines = Vec::new();
+        let mut at = 0usize;
+        let mut ended = false;
+        for line in rest.split_inclusive('\n') {
+            at += line.len();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                ended = true;
+                break;
+            }
+            lines.push(trimmed.to_string());
+        }
+        if !ended || lines.is_empty() || !lines[0].starts_with("HTTP/") {
+            break;
+        }
+        head = lines;
+        rest = &rest[at..];
+    }
+    (head, rest.to_string())
+}
+
 /// A value for curl's config format, which takes double quotes and
-/// backslash escapes and would otherwise stop at the first space.
+/// backslash escapes and would otherwise stop at the first space - or, for
+/// a GraphQL query, at the end of its first line.
 fn quoted(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for c in value.chars() {
-        if c == '"' || c == '\\' {
-            out.push('\\');
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
         }
-        out.push(c);
     }
     out.push('"');
     out
+}
+
+/// Proportions as one bar: (fraction, colour) pairs to coloured segments.
+///
+/// A bar beats a pie in a character grid - no aliasing, and the eye compares
+/// lengths far better than angles. The last segment takes whatever rounding
+/// left over, so the bar is always exactly its width.
+pub fn stacked_bar(parts: &[(f64, String)], width: usize) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for (i, (frac, colour)) in parts.iter().enumerate() {
+        let n = if i + 1 == parts.len() {
+            width.saturating_sub(used)
+        } else {
+            ((frac * width as f64).round() as usize).min(width.saturating_sub(used))
+        };
+        if n > 0 {
+            out.push((colour.clone(), "█".repeat(n)));
+            used += n;
+        }
+    }
+    out
+}
+
+/// A filled fraction of a fixed-width track.
+pub fn meter(frac: f64, n: usize) -> String {
+    let filled = ((frac.clamp(0.0, 1.0) * n as f64).round() as usize).min(n);
+    format!("{}{}", "█".repeat(filled), "░".repeat(n - filled))
+}
+
+const EIGHTHS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Vertical bar chart, one column per value.
+///
+/// Each cell resolves an eighth of a row through the partial-block glyphs,
+/// so a five-row chart has forty levels rather than five. `hi` fixes the
+/// full-scale value so two charts can share a scale and stay comparable.
+pub fn vbars(columns: &[(f64, String)], height: usize, hi: f64) -> Vec<Vec<(String, String)>> {
+    let hi = if hi > 0.0 {
+        hi
+    } else {
+        columns.iter().map(|(v, _)| *v).fold(0.0, f64::max).max(1.0)
+    };
+    (0..height)
+        .map(|r| {
+            let top = hi * (height - r) as f64 / height as f64;
+            let bottom = hi * (height - r - 1) as f64 / height as f64;
+            columns
+                .iter()
+                .map(|(value, colour)| {
+                    let ch = if *value >= top {
+                        '█'
+                    } else if *value <= bottom {
+                        ' '
+                    } else {
+                        let step = ((value - bottom) / (top - bottom) * 8.0) as usize;
+                        EIGHTHS[step.clamp(1, 8)]
+                    };
+                    (colour.clone(), ch.to_string())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Bar chart hanging downward from a baseline above it.
+///
+/// Paired with `vbars` and a shared `hi`, this makes a diverging chart: one
+/// series growing up, another down, one column per day.
+///
+/// The partial-block glyphs are all bottom-anchored, so a downward bar
+/// cannot resolve an eighth of a cell the way `vbars` does - only `▀`
+/// exists as a top-anchored partial. Half a cell is ample once peaks are
+/// scaled, and the alternative needs the terminal's background painted,
+/// which these widgets deliberately never do.
+pub fn vbars_down(columns: &[(f64, String)], height: usize, hi: f64) -> Vec<Vec<(String, String)>> {
+    let hi = if hi > 0.0 {
+        hi
+    } else {
+        columns.iter().map(|(v, _)| *v).fold(0.0, f64::max).max(1.0)
+    };
+    (0..height)
+        .map(|r| {
+            let full = hi * (r + 1) as f64 / height as f64;
+            let empty = hi * r as f64 / height as f64;
+            columns
+                .iter()
+                .map(|(value, colour)| {
+                    let ch = if *value >= full {
+                        '█'
+                    } else if *value <= empty {
+                        ' '
+                    } else if (value - empty) / (full - empty) >= 0.5 {
+                        '▀'
+                    } else {
+                        ' '
+                    };
+                    (colour.clone(), ch.to_string())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Column heights in 0..1 bouncing like a level meter, for pending data.
+///
+/// Two sine waves of different periods per column, so neighbours move
+/// together enough to read as one instrument but never march in lockstep.
+/// Deterministic in `tick`, so every frame is reproducible and no random
+/// source is needed.
+pub fn dance(width: usize, tick: usize, phase: f64) -> Vec<f64> {
+    (0..width)
+        .map(|i| {
+            let t = tick as f64;
+            let i = i as f64;
+            let a = (t * 0.55 + i * 0.85 + phase).sin();
+            let b = (t * 0.31 + i * 0.41 + phase * 1.7).sin();
+            (0.5 + 0.33 * a + 0.17 * b).clamp(0.08, 1.0)
+        })
+        .collect()
+}
+
+/// Blend two colours, for fading a placeholder into real data.
+pub fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> String {
+    let t = t.clamp(0.0, 1.0);
+    let step = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    rgb(step(a.0, b.0), step(a.1, b.1), step(a.2, b.2))
+}
+
+/// The next entry after `current`, wrapping; for a key that cycles.
+pub fn cycle<T: PartialEq + Copy>(choices: &[T], current: T) -> T {
+    let at = choices.iter().position(|c| *c == current).unwrap_or(0);
+    choices[(at + 1) % choices.len()]
 }
 
 /// Which of these required commands are not on PATH.
@@ -657,6 +896,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_query_survives_its_own_newlines() {
+        // A GraphQL query is several lines. Unescaped, curl's config parser
+        // would read the second one as another option.
+        assert_eq!(quoted("query {\n  issues\n}"), "\"query {\\n  issues\\n}\"");
+        assert_eq!(quoted("a\tb"), "\"a\\tb\"");
+    }
+
+    #[test]
+    fn the_headers_that_count_are_the_ones_next_to_the_body() {
+        // A redirect leaves its own block in front. The response is the one
+        // nearest the body, and everything before it is history.
+        let text = "HTTP/2 301\r\nlocation: /x\r\n\r\n\
+                    HTTP/2 200\r\nX-RateLimit-Requests-Remaining: 2491\r\n\r\n\
+                    {\"data\": 1}";
+        let (head, body) = split_response(text);
+        assert_eq!(head[0], "HTTP/2 200");
+        assert_eq!(body, "{\"data\": 1}");
+        // A body containing a blank line of its own is not mistaken for a
+        // header block, because a block has to open with HTTP/.
+        let plain = "HTTP/2 200\r\n\r\nline\n\nline";
+        let (head, body) = split_response(plain);
+        assert_eq!(head[0], "HTTP/2 200");
+        assert_eq!(body, "line\n\nline");
+    }
+
+    #[test]
     fn a_curl_config_value_survives_spaces_and_quotes() {
         assert_eq!(quoted("simple"), "\"simple\"");
         // A header is "Name: value" and the space is the whole reason this
@@ -667,6 +932,76 @@ mod tests {
         );
         assert_eq!(quoted("a\"b"), "\"a\\\"b\"");
         assert_eq!(quoted("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[test]
+    fn a_stacked_bar_is_exactly_its_width() {
+        let hue = |n: u8| rgb(n, n, n);
+        // Thirds do not divide ten, and the last segment absorbs the
+        // rounding rather than leaving a gap at the end.
+        let parts = vec![
+            (1.0 / 3.0, hue(1)),
+            (1.0 / 3.0, hue(2)),
+            (1.0 / 3.0, hue(3)),
+        ];
+        let drawn: usize = stacked_bar(&parts, 10)
+            .iter()
+            .map(|(_, t)| t.chars().count())
+            .sum();
+        assert_eq!(drawn, 10);
+        // A part that rounds to nothing takes no segment at all, rather
+        // than an empty one.
+        let tiny = vec![(0.001, hue(1)), (0.999, hue(2))];
+        assert_eq!(stacked_bar(&tiny, 10).len(), 1);
+    }
+
+    #[test]
+    fn a_meter_fills_and_clamps() {
+        assert_eq!(meter(0.0, 4), "░░░░");
+        assert_eq!(meter(0.5, 4), "██░░");
+        assert_eq!(meter(1.0, 4), "████");
+        // Over and under are clamped: a percentage above 100 must not
+        // draw a bar wider than its track.
+        assert_eq!(meter(2.0, 4), "████");
+        assert_eq!(meter(-1.0, 4), "░░░░");
+    }
+
+    #[test]
+    fn bars_resolve_eighths_of_a_row() {
+        let hue = rgb(0, 0, 0);
+        let columns = vec![(1.0, hue.clone()), (0.5, hue.clone()), (0.0, hue.clone())];
+        let rows = vbars(&columns, 1, 1.0);
+        assert_eq!(rows[0][0].1, "█");
+        assert_eq!(rows[0][1].1, "▄");
+        assert_eq!(rows[0][2].1, " ");
+        // Hanging downward there is only one partial glyph, so half a cell
+        // rounds to it and less than half to nothing.
+        let down = vbars_down(&columns, 1, 1.0);
+        assert_eq!(down[0][0].1, "█");
+        assert_eq!(down[0][1].1, "▀");
+        assert_eq!(down[0][2].1, " ");
+    }
+
+    #[test]
+    fn the_placeholder_moves_but_never_leaves_the_track() {
+        // Every column stays inside the range a bar chart can draw, at
+        // every tick - a value outside it would render as an empty cell
+        // and read as data rather than as waiting.
+        for tick in 0..40 {
+            for value in dance(12, tick, 0.0) {
+                assert!((0.08..=1.0).contains(&value), "{} at tick {}", value, tick);
+            }
+        }
+        // Deterministic, so a frame can be reproduced.
+        assert_eq!(dance(4, 7, 0.0), dance(4, 7, 0.0));
+        assert_ne!(dance(4, 7, 0.0), dance(4, 8, 0.0));
+    }
+
+    #[test]
+    fn a_blend_reaches_both_ends() {
+        assert_eq!(mix((0, 0, 0), (10, 20, 30), 0.0), rgb(0, 0, 0));
+        assert_eq!(mix((0, 0, 0), (10, 20, 30), 1.0), rgb(10, 20, 30));
+        assert_eq!(mix((0, 0, 0), (10, 20, 30), 0.5), rgb(5, 10, 15));
     }
 
     #[test]
