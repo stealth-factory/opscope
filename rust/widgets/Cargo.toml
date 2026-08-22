@@ -40,3 +40,7 @@ path = "src/bin/clocks.rs"
 [[bin]]
 name = "herdr-panes"
 path = "src/bin/herdr-panes.rs"
+
+[[bin]]
+name = "deployments"
+path = "src/bin/deployments.rs"

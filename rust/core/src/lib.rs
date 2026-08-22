@@ -392,6 +392,92 @@ pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) 
     }
 }
 
+/// Warn when a config file holding a token is readable by others.
+///
+/// Any widget that takes a token writes it into this file, so the check
+/// belongs beside the loader rather than in whichever widget happened to
+/// need it first.
+pub fn config_token_warning() -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    for path in config_paths() {
+        if !path.exists() {
+            continue;
+        }
+        let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o077;
+        return if mode != 0 {
+            Some("config.json is readable by others; chmod 600 it".into())
+        } else {
+            None
+        };
+    }
+    None
+}
+
+/// One HTTPS GET, returning the body.
+///
+/// Through curl rather than an HTTP crate, for the same reason every other
+/// source here is a subprocess: this collection reads `ss`, `ping`,
+/// `tailscale` and `herdr` the same way, and a TLS stack would be forty
+/// dependencies and a megabyte to do what curl already does on every
+/// machine these run on.
+///
+/// The headers go in on **stdin**, never in the arguments. `/proc/<pid>/
+/// cmdline` is world-readable, so a token on the command line is a token
+/// handed to every user on the box for as long as the request lasts - and
+/// these widgets exist partly to keep one out of the source tree.
+pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, String> {
+    use std::io::Write;
+    let mut config = format!(
+        "--silent\n--show-error\n--fail\n--location\n--max-time {}\n--url {}\n",
+        seconds,
+        quoted(url)
+    );
+    for (name, value) in headers {
+        config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
+    }
+    let mut child = std::process::Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl would not take its configuration")?
+        .write_all(config.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+    }
+    // curl's own message, which names the status code for --fail. Whatever
+    // it says, it must not be allowed to carry the header back out.
+    let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if said.is_empty() {
+        format!("curl exited {}", out.status.code().unwrap_or(-1))
+    } else {
+        said
+    })
+}
+
+/// A value for curl's config format, which takes double quotes and
+/// backslash escapes and would otherwise stop at the first space.
+fn quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
@@ -544,6 +630,19 @@ pub fn maybe_help(doc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_curl_config_value_survives_spaces_and_quotes() {
+        assert_eq!(quoted("simple"), "\"simple\"");
+        // A header is "Name: value" and the space is the whole reason this
+        // exists - unquoted, curl would read the rest as another option.
+        assert_eq!(
+            quoted("Authorization: Bearer abc"),
+            "\"Authorization: Bearer abc\""
+        );
+        assert_eq!(quoted("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quoted("a\\b"), "\"a\\\\b\"");
+    }
 
     #[test]
     fn heat_runs_green_to_red_through_amber() {

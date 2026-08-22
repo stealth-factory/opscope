@@ -1,0 +1,27 @@
+Vercel deployments, live.
+
+Shows deployment activity over time, build-duration trend, and the most recent
+deployments with their state, project, branch, commit and build time.
+
+    deployments [-n SECONDS] [-t TEAM_ID] [project ...]
+
+Polls every 15s by default (-n changes it, minimum 5s). One request per team
+per poll, so the default is 4 polls/min — modest against the API's limits.
+
+Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
+Enter, i or c opens a full detail view for the selected deployment - state and
+failure reason, timings, regions, commit, and everything worth copying on
+number keys - r refreshes
+now, f cycles the filter (all / failed / production), p cycles which project
+is shown, q quits.
+
+Copying uses OSC 52, so the terminal you are sitting at performs it and the
+text reaches your local clipboard even over SSH. If your terminal or
+multiplexer blocks OSC 52, the sheet still shows each URL in full for mouse
+selection.
+
+Credentials: `deployments.token` in config.json, or $VERCEL_TOKEN. Create one
+at Account Settings -> Tokens. The Vercel CLI's own session is deliberately not
+used - it expires within hours and only the CLI can refresh it, so anything
+reading it goes dark overnight. The token is read locally and never printed. `vercel ls --all --format json` is an equivalent data source
+but spawns a Node process per refresh, so this queries the REST API directly.
