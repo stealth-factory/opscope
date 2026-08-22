@@ -15,4 +15,8 @@ run says so itself, on its own screen, in its own words - which is where
 somebody who has just tried to start it is already looking, and is the only
 place that knows what it actually needs.
 
-Keys: up/down select, enter launches, r rechecks, q quits.
+Keys: up/down select, enter launches, q quits.
+
+start.py rescans its directory on r. This one has no directory to
+rescan - the list is compiled in - so there is no recheck key here,
+and none is advertised.

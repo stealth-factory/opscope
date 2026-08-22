@@ -57,6 +57,11 @@ const WIDGETS: &[Widget] = &[
         doc: include_str!("../../../../docs/latency.md"),
     },
     Widget {
+        stem: "linear",
+        help: include_str!("linear_help.txt"),
+        doc: include_str!("../../../../docs/linear.md"),
+    },
+    Widget {
         stem: "link",
         help: include_str!("link_help.txt"),
         doc: include_str!("../../../../docs/link.md"),
@@ -358,7 +363,6 @@ fn main() {
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " launch".into())],
-            vec![(p.dim.as_str(), "[r]echeck".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
@@ -404,6 +408,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_binary_is_on_the_menu() {
+        // start.py globs the directory, so a new widget appears by existing.
+        // Here the list is compiled in, and the failure mode is a widget
+        // that ships without a way to find it - which linear did, for one
+        // commit. The manifest is the thing that knows what was built.
+        let manifest = include_str!("../../Cargo.toml");
+        let mut built: Vec<&str> = Vec::new();
+        let mut in_bin = false;
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_bin = line == "[[bin]]";
+                continue;
+            }
+            if in_bin {
+                if let Some(rest) = line.strip_prefix("name = \"") {
+                    if let Some(name) = rest.strip_suffix('"') {
+                        built.push(name);
+                    }
+                }
+            }
+        }
+        assert!(built.len() > 1, "no binaries found in the manifest");
+        for name in built {
+            // The menu does not list itself.
+            if name == "start" {
+                continue;
+            }
+            assert!(
+                WIDGETS.iter().any(|w| w.stem == name),
+                "{} is built but is not on the menu",
+                name
+            );
+        }
+    }
 
     #[test]
     fn every_widget_describes_itself() {
