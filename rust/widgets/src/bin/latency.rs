@@ -35,11 +35,31 @@ fn now() -> f64 {
 
 #[derive(Clone, Default)]
 struct Target {
-    host: String,
     label: String,
     ip: String,
     samples: Vec<(f64, Option<f64>)>, // (when, rtt or a loss)
     down_since: Option<f64>,
+    /// Whether the last reading was an answer, for the dot beside the name.
+    alive: bool,
+    /// The live ping, so a new interval can be applied without waiting for
+    /// the old one to notice.
+    pid: Option<i32>,
+    /// Set while we are killing our own ping on purpose, so its exit is not
+    /// logged as an outage.
+    restarting: bool,
+}
+
+/// Everything the table says about one target over the retained window.
+#[derive(Default)]
+struct Stats {
+    now: Option<f64>,
+    avg: Option<f64>,
+    med: Option<f64>,
+    min: Option<f64>,
+    max: Option<f64>,
+    jit: Option<f64>,
+    loss: f64,
+    n: usize,
 }
 
 impl Target {
@@ -48,53 +68,142 @@ impl Target {
         self.samples.iter().filter_map(|(_, r)| *r).collect()
     }
 
-    fn median(&self) -> Option<f64> {
-        let mut got = self.rtts();
-        if got.is_empty() {
-            return None;
-        }
-        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        Some(got[got.len() / 2])
-    }
-
-    /// The spread of the middle of the distribution, not the extremes.
-    ///
-    /// A single 400ms spike in a thousand samples is worth knowing about,
-    /// but it is not what the link feels like, and a standard deviation
-    /// would let it dominate the number.
-    fn jitter(&self) -> Option<f64> {
+    fn stats(&self) -> Stats {
         let got = self.rtts();
-        if got.len() < 2 {
-            return None;
+        let total = self.samples.len();
+        let lost = total - got.len();
+        let loss = if total > 0 {
+            100.0 * lost as f64 / total as f64
+        } else {
+            0.0
+        };
+        if got.is_empty() {
+            return Stats {
+                loss: if total > 0 { 100.0 } else { 0.0 },
+                n: total,
+                ..Default::default()
+            };
         }
-        let median = self.median()?;
-        let mut deviations: Vec<f64> = got.iter().map(|r| (r - median).abs()).collect();
-        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        Some(deviations[deviations.len() / 2])
-    }
-
-    fn worst(&self) -> Option<f64> {
-        self.rtts().into_iter().fold(None, |acc: Option<f64>, r| {
-            Some(acc.map_or(r, |a: f64| a.max(r)))
-        })
-    }
-
-    fn loss(&self) -> f64 {
-        if self.samples.is_empty() {
-            return 0.0;
+        let mut ordered = got.clone();
+        ordered.sort_by(f64::total_cmp);
+        // The mean gap between one reply and the next, which is what jitter
+        // means on a link: how much the round trip moves from ping to ping,
+        // not how far it sits from its own average.
+        let jit = if got.len() > 1 {
+            Some(
+                got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>()
+                    / (got.len() - 1) as f64,
+            )
+        } else {
+            Some(0.0)
+        };
+        Stats {
+            now: self.samples.last().and_then(|(_, r)| *r),
+            avg: Some(got.iter().sum::<f64>() / got.len() as f64),
+            med: Some(ordered[ordered.len() / 2]),
+            min: Some(ordered[0]),
+            max: Some(ordered[ordered.len() - 1]),
+            jit,
+            loss,
+            n: total,
         }
-        let lost = self.samples.iter().filter(|(_, r)| r.is_none()).count();
-        100.0 * lost as f64 / self.samples.len() as f64
     }
 }
 
-fn ms(value: Option<f64>) -> String {
+/// A round trip in a fixed seven cells, so the columns cannot shift.
+///
+/// Below a millisecond it changes unit rather than losing the value: a
+/// loopback reply reads 0.21ms as 210µs, and two decimal places of a
+/// millisecond hides what that means.
+fn fmt_ms(value: Option<f64>) -> String {
     match value {
-        None => "—".into(),
-        Some(v) if v >= 100.0 => format!("{:.0}ms", v),
-        Some(v) if v >= 10.0 => format!("{:.1}ms", v),
-        Some(v) => format!("{:.2}ms", v),
+        None => "   --  ".to_string(),
+        Some(v) if v < 1.0 => format!("{:>5.0}µs", v * 1000.0),
+        Some(v) if v < 100.0 => format!("{:>5.2}ms", v),
+        Some(v) => format!("{:>5.1}ms", v),
     }
+}
+
+const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// One target's recent history at one character per ping.
+///
+/// Scaled to its own range rather than the chart's, so a target that never
+/// leaves a two-millisecond band still shows the shape of its variation -
+/// which is the question this line answers and the shared chart does not.
+fn sparkline(samples: &[(f64, Option<f64>)], n: usize, p: &Palette) -> Vec<(String, String)> {
+    let window = &samples[samples.len().saturating_sub(n)..];
+    let got: Vec<f64> = window.iter().filter_map(|(_, r)| *r).collect();
+    if got.is_empty() {
+        return vec![(p.bad.clone(), "×".repeat(window.len().min(n)))];
+    }
+    let lo = got.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = got.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = if hi > lo { hi - lo } else { 1.0 };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (_, r) in window {
+        let (colour, glyph) = match r {
+            None => (p.bad.clone(), '×'),
+            Some(v) => {
+                let frac = (v - lo) / span;
+                let colour = if frac < 0.5 {
+                    &p.ok
+                } else if frac < 0.85 {
+                    &p.warn
+                } else {
+                    &p.bad
+                };
+                (colour.clone(), SPARK[((frac * 7.99) as usize).min(7)])
+            }
+        };
+        match out.last_mut() {
+            Some((was, text)) if *was == colour => text.push(glyph),
+            _ => out.push((colour, glyph.to_string())),
+        }
+    }
+    out
+}
+
+/// A loss, a recovery or a spike, with the time it happened.
+#[derive(Clone)]
+struct Event {
+    at: String,
+    hue: String,
+    host: String,
+    kind: &'static str,
+    detail: String,
+}
+
+/// How samples sharing one graph column combine.
+///
+/// Median by default: latency is right-skewed, so a single spike inside a
+/// bucket would drag a mean well above the latency actually experienced
+/// most of the time.
+fn aggregate(values: &[f64], how: &str) -> f64 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let n = ordered.len();
+    if n == 1 {
+        return ordered[0];
+    }
+    match how {
+        "mean" => ordered.iter().sum::<f64>() / n as f64,
+        "min" => ordered[0],
+        "max" => ordered[n - 1],
+        "p95" => ordered[(n - 1).min((n as f64 * 0.95) as usize)],
+        _ if n % 2 == 1 => ordered[n / 2],
+        _ => (ordered[n / 2 - 1] + ordered[n / 2]) / 2.0,
+    }
+}
+
+const AGGREGATORS: &[&str] = &["median", "mean", "min", "max", "p95"];
+const INTERVAL_CHOICES: &[f64] = &[0.2, 0.5, 1.0, 2.0, 5.0];
+const COLUMN_CHOICES: &[f64] = &[0.0, 2.0, 5.0, 10.0];
+
+/// The next entry after `current`, wrapping. Used by the cycling keys.
+fn cycle<T: PartialEq + Copy>(choices: &[T], current: T) -> T {
+    let at = choices.iter().position(|c| *c == current).unwrap_or(0);
+    choices[(at + 1) % choices.len()]
 }
 
 /// The round trip out of one ping reply line.
@@ -126,9 +235,39 @@ fn ip_of(line: &str) -> Option<String> {
     }
 }
 
+/// What the cycling keys change, shared with the reader threads.
+///
+/// The interval lives here rather than being handed to each thread once,
+/// because pressing i has to reach pings that are already running.
+#[derive(Default)]
+struct Settings {
+    interval: f64,
+    seconds_per_column: f64,
+    aggregate: String,
+    spike_factor: f64,
+}
+
 /// Keep one ping running per target, forever.
-fn watch(host: String, index: usize, interval: f64, window: usize, shared: Arc<Mutex<Vec<Target>>>) {
+///
+/// Wrapped in its own thread per target and never allowed to end: if ping
+/// exits - a name that stopped resolving, a network that went away - the
+/// row would otherwise just stop updating, which reads as a quiet link
+/// rather than as a broken widget.
+fn watch(
+    host: String,
+    index: usize,
+    window: usize,
+    shared: Arc<Mutex<Vec<Target>>>,
+    settings: Arc<Mutex<Settings>>,
+    events: Arc<Mutex<Vec<Event>>>,
+    hue: String,
+    label: String,
+) {
     loop {
+        let (interval, spike_factor) = match settings.lock() {
+            Ok(s) => (s.interval, s.spike_factor),
+            Err(_) => return,
+        };
         let child = std::process::Command::new("ping")
             .args(["-n", "-O", "-i", &interval.to_string(), &host])
             .stdout(std::process::Stdio::piped())
@@ -141,11 +280,15 @@ fn watch(host: String, index: usize, interval: f64, window: usize, shared: Arc<M
                 continue;
             }
         };
+        if let Ok(mut guard) = shared.lock() {
+            guard[index].pid = Some(child.id() as i32);
+        }
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => continue,
         };
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let stamp = now();
             let mut guard = match shared.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -156,15 +299,32 @@ fn watch(host: String, index: usize, interval: f64, window: usize, shared: Arc<M
                     target.ip = ip;
                 }
             }
-            let stamp = now();
             if let Some(rtt) = rtt_of(&line) {
+                // A spike is worth a line in the log because the median in
+                // the table will not move for it, and a link that is fine
+                // except once a minute is a different problem from one that
+                // is slow.
+                let st = target.stats();
+                if let Some(med) = st.med {
+                    if st.n > 10 && rtt > med * spike_factor {
+                        log(&events, &hue, &label, "SPIKE",
+                            format!("{} (median {})", fmt_ms(Some(rtt)).trim(),
+                                    fmt_ms(Some(med)).trim()));
+                    }
+                }
+                if let Some(since) = target.down_since.take() {
+                    log(&events, &hue, &label, "UP",
+                        format!("recovered after {:.0}s", stamp - since));
+                }
+                target.alive = true;
                 target.samples.push((stamp, Some(rtt)));
-                target.down_since = None;
             } else if is_loss(&line) {
-                target.samples.push((stamp, None));
                 if target.down_since.is_none() {
                     target.down_since = Some(stamp);
+                    log(&events, &hue, &label, "LOSS", "no reply".into());
                 }
+                target.alive = false;
+                target.samples.push((stamp, None));
             }
             if target.samples.len() > window {
                 let drop = target.samples.len() - window;
@@ -172,9 +332,80 @@ fn watch(host: String, index: usize, interval: f64, window: usize, shared: Arc<M
             }
         }
         let _ = child.wait();
-        // ping exited - the host may have gone, or the network. Retry
-        // rather than leaving a dead row that never updates again.
+        let ours = match shared.lock() {
+            Ok(mut guard) => {
+                guard[index].pid = None;
+                let deliberate = guard[index].restarting;
+                guard[index].restarting = false;
+                deliberate
+            }
+            Err(_) => return,
+        };
+        // We killed it ourselves to apply a new interval; not an outage, and
+        // it starts again immediately rather than after the retry pause.
+        if ours {
+            continue;
+        }
+        if let Ok(mut guard) = shared.lock() {
+            let target = &mut guard[index];
+            if target.down_since.is_none() {
+                target.down_since = Some(now());
+                drop(guard);
+                log(&events, &hue, &label, "DOWN", "ping exited, retrying".into());
+            } else {
+                drop(guard);
+            }
+        }
+        if let Ok(mut guard) = shared.lock() {
+            guard[index].alive = false;
+            guard[index].samples.push((now(), None));
+        }
         std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn log(events: &Arc<Mutex<Vec<Event>>>, hue: &str, host: &str, kind: &'static str, detail: String) {
+    if let Ok(mut guard) = events.lock() {
+        guard.push(Event {
+            at: clock_time(),
+            hue: hue.to_string(),
+            host: host.to_string(),
+            kind,
+            detail,
+        });
+        let most = 40;
+        if guard.len() > most {
+            let drop = guard.len() - most;
+            guard.drain(..drop);
+        }
+    }
+}
+
+/// Wall-clock time of day, without pulling in a date library for it.
+fn clock_time() -> String {
+    let secs = now() as i64;
+    let day = secs.rem_euclid(86_400);
+    // UTC, because this is only ever compared against the other lines in
+    // the same log - and a widget that guessed at the local offset would be
+    // wrong for half the year.
+    format!("{:02}:{:02}:{:02}", day / 3600, (day % 3600) / 60, day % 60)
+}
+
+/// Restart every ping so a new interval takes effect at once.
+///
+/// SIGTERM rather than waiting for the current one to end: at five seconds
+/// a change would otherwise take five seconds to become visible, which
+/// reads as the key not having worked.
+fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
+    if let Ok(mut guard) = shared.lock() {
+        for target in guard.iter_mut() {
+            if let Some(pid) = target.pid {
+                target.restarting = true;
+                if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+                    target.restarting = false;
+                }
+            }
+        }
     }
 }
 
@@ -188,37 +419,51 @@ const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 
 /// difference between a line that reads as a round trip moving and one that
 /// reads as specks a row apart. The masks come back per cell instead of as
 /// text so that several series can be laid over one another first.
-fn braille_canvas(values: &[f64], llo: f64, lhi: f64, cols: usize, rows: usize) -> Vec<Vec<u8>> {
+fn braille_canvas(
+    values: &[Option<f64>],
+    llo: f64,
+    lhi: f64,
+    cols: usize,
+    rows: usize,
+) -> Vec<Vec<u8>> {
     let (px_w, px_h) = (cols * 2, rows * 4);
     let mut grid = vec![vec![0u8; cols]; rows];
     if values.is_empty() || px_w == 0 || px_h == 0 {
         return grid;
     }
-    let vals: Vec<f64> = values.iter().rev().take(px_w).rev().copied().collect();
+    let vals: Vec<Option<f64>> = values.iter().rev().take(px_w).rev().copied().collect();
     // Newest against the right edge: a target that has answered five times
     // shows five samples there, not five stretched across the whole width.
     let left = px_w - vals.len();
     let decade = (lhi - llo).max(1e-9);
-    let point = |i: usize| -> (i64, i64) {
-        let frac = ((vals[i].max(1e-3).log10() - llo) / decade).clamp(0.0, 1.0);
-        (
+    let point = |i: usize| -> Option<(i64, i64)> {
+        let v = vals[i]?;
+        let frac = ((v.max(1e-3).log10() - llo) / decade).clamp(0.0, 1.0);
+        Some((
             (left + i) as i64,
             ((1.0 - frac) * (px_h as f64 - 1.0)).round() as i64,
-        )
+        ))
     };
     let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
         if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
             grid[y as usize / 4][x as usize / 2] |= BRAILLE[y as usize % 4][x as usize % 2];
         }
     };
-    // Every value here is a reply that arrived, so unlike netwatch's idle
-    // zero there is no reading that means "nothing happened" and should be
-    // left blank. One sample is a measurement and gets its dot.
-    let (x, y) = point(0);
-    dot(x, y, &mut grid);
+    // A single reading is a measurement and gets its dot: unlike netwatch's
+    // idle zero, there is no value here that means "nothing happened".
+    if let Some((x, y)) = point(0) {
+        dot(x, y, &mut grid);
+    }
     for i in 1..vals.len() {
-        let (mut x0, mut y0) = point(i - 1);
-        let (x1, y1) = point(i);
+        // A column with no reply is a gap, and a gap is not drawn through.
+        // Joining across one would draw a line where the link was down,
+        // which is the opposite of what happened.
+        let (Some((mut x0, mut y0)), Some((x1, y1))) = (point(i - 1), point(i)) else {
+            if let Some((x, y)) = point(i) {
+                dot(x, y, &mut grid);
+            }
+            continue;
+        };
         let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
         let sx = if x0 < x1 { 1 } else { -1 };
         let sy = if y0 < y1 { 1 } else { -1 };
@@ -269,38 +514,58 @@ fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<V
 /// Log because the targets on one screen can differ by two orders of
 /// magnitude, and a linear axis renders the near one as a flat line at the
 /// bottom.
-fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
+///
+/// Columns are anchored to a fixed time grid rather than measured backwards
+/// from now, so a sample never migrates between columns: the plot steps left
+/// exactly once per bucket instead of shuffling as the clock slides.
+fn graph(
+    targets: &[Target],
+    w: usize,
+    h: usize,
+    bucket: f64,
+    how: &str,
+    p: &Palette,
+) -> (Vec<String>, f64) {
     let gw = w.saturating_sub(9).max(10);
     let gh = h.max(4);
-    let series: Vec<(usize, Vec<f64>)> = targets
+    // Two dot columns to a cell, so the chart holds twice the buckets it
+    // did when each one had a whole character to itself.
+    let slots = gw * 2;
+    let newest = (now() / bucket).floor();
+    let series: Vec<(usize, Vec<Option<f64>>)> = targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let all = t.rtts();
-            // Two dots to a cell across, so the chart holds twice the pings
-            // it did when each one had a character to itself.
-            let start = all.len().saturating_sub(gw * 2);
-            (i, all[start..].to_vec())
+            let mut columns: Vec<Vec<f64>> = vec![Vec::new(); slots];
+            for (at, rtt) in &t.samples {
+                let Some(rtt) = rtt else { continue };
+                let age = newest - (at / bucket).floor();
+                if age < 0.0 || age >= slots as f64 {
+                    continue;
+                }
+                columns[slots - 1 - age as usize].push(*rtt);
+            }
+            let values = columns
+                .into_iter()
+                .map(|c| if c.is_empty() { None } else { Some(aggregate(&c, how)) })
+                .collect();
+            (i, values)
         })
-        .filter(|(_, v)| !v.is_empty())
         .collect();
-    if series.is_empty() {
-        return vec![tc::seg(&[(p.dim.as_str(), "  collecting…".into())], w - 1)];
+    let span = bucket * slots as f64;
+    let seen: Vec<f64> = series
+        .iter()
+        .flat_map(|(_, v)| v.iter().flatten())
+        .copied()
+        .collect();
+    if seen.is_empty() {
+        return (
+            vec![tc::seg(&[(p.dim.as_str(), "  collecting…".into())], w - 1)],
+            span,
+        );
     }
-    let lo = series
-        .iter()
-        .flat_map(|(_, v)| v.iter())
-        .cloned()
-        .fold(f64::INFINITY, f64::min)
-        .max(0.05)
-        * 0.8;
-    let hi = series
-        .iter()
-        .flat_map(|(_, v)| v.iter())
-        .cloned()
-        .fold(0.0f64, f64::max)
-        .max(lo * 1.6)
-        * 1.25;
+    let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min).max(0.05) * 0.8;
+    let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
     let (llo, lhi) = (lo.log10(), hi.log10());
 
     // One canvas per target rather than one shared grid: the glyphs used to
@@ -324,7 +589,7 @@ fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
         // Label only the top, middle and bottom: a number on every row is a
         // table pretending to be an axis.
         let label = if y == 0 || y == gh / 2 || y == gh - 1 {
-            format!("{:>7}", ms(Some(value)))
+            fmt_ms(Some(value))
         } else {
             " ".repeat(7)
         };
@@ -341,18 +606,21 @@ fn graph(targets: &[Target], w: usize, h: usize, p: &Palette) -> Vec<String> {
         }
         out.push(tc::seg(&parts, w - 1));
     }
-    out
+    (out, span)
 }
-
-const SERIES: &[char] = &['●', '▲', '■', '◆', '✚', '✦'];
 
 fn main() {
     tc::maybe_help(include_str!("latency_help.txt"));
     let cfg = tc::load_config("latency");
     let hosts = tc::cfg_strings(&cfg, "hosts", &["1.1.1.1", "8.8.8.8"]);
-    let mut interval = tc::cfg_f64(&cfg, "interval", 0.5);
     let window = tc::cfg_usize(&cfg, "window", 600);
     let strip: Vec<String> = tc::cfg_strings(&cfg, "strip_suffixes", &[]);
+    let mut live = Settings {
+        interval: tc::cfg_f64(&cfg, "interval", 0.5),
+        seconds_per_column: tc::cfg_f64(&cfg, "seconds_per_column", 0.0),
+        aggregate: tc::cfg_str(&cfg, "aggregate", "median"),
+        spike_factor: tc::cfg_f64(&cfg, "spike_factor", 3.0),
+    };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut named: Vec<String> = Vec::new();
@@ -360,7 +628,19 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-i" | "--interval" if i + 1 < args.len() => {
-                interval = args[i + 1].parse::<f64>().unwrap_or(0.5).max(0.1);
+                live.interval = args[i + 1].parse::<f64>().unwrap_or(0.5).max(0.2);
+                i += 2;
+            }
+            "-c" | "--column-seconds" if i + 1 < args.len() => {
+                live.seconds_per_column = args[i + 1].parse::<f64>().unwrap_or(0.0).max(0.0);
+                i += 2;
+            }
+            "-g" | "--group" if i + 1 < args.len() => {
+                if !AGGREGATORS.contains(&args[i + 1].as_str()) {
+                    eprintln!("-g must be one of: {}", AGGREGATORS.join(", "));
+                    std::process::exit(2);
+                }
+                live.aggregate = args[i + 1].clone();
                 i += 2;
             }
             other if !other.starts_with('-') => {
@@ -382,26 +662,57 @@ fn main() {
     let targets: Vec<Target> = hosts
         .iter()
         .map(|h| Target {
-            host: h.clone(),
             label: label_for(h, &strip),
             ..Default::default()
         })
         .collect();
+    let labels: Vec<String> = targets.iter().map(|t| t.label.clone()).collect();
     let shared = Arc::new(Mutex::new(targets));
+    let settings = Arc::new(Mutex::new(live));
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     for (index, host) in hosts.iter().enumerate() {
         let shared = Arc::clone(&shared);
+        let settings = Arc::clone(&settings);
+        let events = Arc::clone(&events);
         let host = host.clone();
-        std::thread::spawn(move || watch(host, index, interval, window, shared));
+        let hue = p.hues[index % p.hues.len()].clone();
+        let label = labels[index].clone();
+        std::thread::spawn(move || {
+            watch(host, index, window, shared, settings, events, hue, label)
+        });
     }
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     loop {
         for key in keyboard.poll() {
-            if key == "q" || key == "Q" {
-                keyboard.restore();
-                tc::restore_screen();
-                return;
+            match key.as_str() {
+                "q" | "Q" => {
+                    keyboard.restore();
+                    tc::restore_screen();
+                    return;
+                }
+                "i" | "I" => {
+                    if let Ok(mut s) = settings.lock() {
+                        s.interval = cycle(INTERVAL_CHOICES, s.interval);
+                    }
+                    apply_interval(&shared);
+                }
+                "g" | "G" => {
+                    if let Ok(mut s) = settings.lock() {
+                        let at = AGGREGATORS
+                            .iter()
+                            .position(|a| *a == s.aggregate)
+                            .unwrap_or(0);
+                        s.aggregate = AGGREGATORS[(at + 1) % AGGREGATORS.len()].to_string();
+                    }
+                }
+                "c" | "C" => {
+                    if let Ok(mut s) = settings.lock() {
+                        s.seconds_per_column = cycle(COLUMN_CHOICES, s.seconds_per_column);
+                    }
+                }
+                _ => {}
             }
         }
         let (w, h) = tc::size();
@@ -409,74 +720,180 @@ fn main() {
             Ok(g) => g.clone(),
             Err(_) => return,
         };
+        let (interval, per_column, how) = match settings.lock() {
+            Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone()),
+            Err(_) => return,
+        };
+        // Zero means one bucket per ping, which is the finest motion the
+        // grid allows; anything larger trades that for a longer history.
+        let bucket = if per_column > 0.0 { per_column } else { interval };
 
         let mut rows = vec![tc::title("network latency monitor", w, &p.head)];
-        let live = snapshot.iter().filter(|t| t.down_since.is_none()).count();
         rows.push(tc::seg(
             &[
-                (p.dim.as_str(), format!(" {} targets", snapshot.len())),
-                (p.dim.as_str(), " · ".into()),
                 (
-                    if live == snapshot.len() { &p.ok } else { &p.bad },
-                    format!("{} answering", live),
+                    p.dim.as_str(),
+                    format!(" {} targets · {:.1}s interval · ", snapshot.len(), interval),
                 ),
-                (p.dim.as_str(), format!("   every {}s", interval)),
+                (p.txt.as_str(), clock_time()),
+                (
+                    p.dim.as_str(),
+                    if bucket <= interval {
+                        " · 1 ping/column".to_string()
+                    } else {
+                        format!(" · {} of {}s blocks", how, bucket)
+                    },
+                ),
+                (
+                    p.grid.as_str(),
+                    "   [i]nterval [g]roup [c]olumns [q]uit".into(),
+                ),
             ],
             w - 1,
         ));
         rows.push(String::new());
 
-        let name_w = snapshot
-            .iter()
-            .map(|t| t.label.chars().count())
-            .max()
-            .unwrap_or(8)
-            .clamp(8, 24);
+        // The columns are dropped from the right as the pane narrows rather
+        // than clipped, because half a number is worse than none.
+        let wide = w >= 72;
+        let show_med = w >= 80;
+        let name_w = 22usize;
         rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!("  {}", tc::pad("TARGET", name_w))),
-                (p.dim.as_str(), format!("{:>9}", "MEDIAN")),
-                (p.dim.as_str(), format!("{:>9}", "JITTER")),
-                (p.dim.as_str(), format!("{:>9}", "WORST")),
-                (p.dim.as_str(), format!("{:>8}", "LOSS")),
-            ],
+            &[(
+                p.lbl.as_str(),
+                format!(
+                    " {} {:>7} {:>7}{} {:>7} {:>7} {:>7} {:>6}",
+                    tc::pad("HOST", name_w),
+                    "NOW",
+                    "AVG",
+                    if show_med { "  MEDIAN" } else { "" },
+                    "MIN",
+                    "MAX",
+                    "JITTER",
+                    "LOSS"
+                ),
+            )],
             w - 1,
         ));
         for (i, t) in snapshot.iter().enumerate() {
-            let glyph = SERIES[i % SERIES.len()];
+            let st = t.stats();
             let hue = &p.hues[i % p.hues.len()];
-            let loss = t.loss();
+            let loss_c = if st.loss == 0.0 {
+                &p.ok
+            } else if st.loss < 5.0 {
+                &p.warn
+            } else {
+                &p.bad
+            };
             rows.push(tc::seg(
                 &[
-                    (hue.as_str(), format!(" {}", glyph)),
-                    (p.txt.as_str(), tc::pad(&t.label, name_w)),
-                    (p.txt.as_str(), format!("{:>9}", ms(t.median()))),
-                    (p.dim.as_str(), format!("{:>9}", ms(t.jitter()))),
-                    (p.dim.as_str(), format!("{:>9}", ms(t.worst()))),
+                    // The dot rides in the colour rather than the text, so
+                    // it costs no cell - which is how latency.py draws it,
+                    // and the two have to line up column for column when
+                    // they sit side by side.
                     (
-                        if loss > 0.0 { &p.bad } else { &p.dim },
-                        format!("{:>7.1}%", loss),
+                        &format!(
+                            "{}{}",
+                            if t.alive { &p.ok } else { &p.bad },
+                            if t.alive { '●' } else { '○' }
+                        ),
+                        " ".to_string(),
                     ),
+                    (hue.as_str(), tc::pad(&t.label, name_w)),
+                    (p.txt.as_str(), format!(" {}", fmt_ms(st.now))),
+                    (p.txt.as_str(), format!(" {}", fmt_ms(st.avg))),
+                    (
+                        p.ok.as_str(),
+                        if show_med {
+                            format!(" {}", fmt_ms(st.med))
+                        } else {
+                            String::new()
+                        },
+                    ),
+                    (p.dim.as_str(), format!(" {}", fmt_ms(st.min))),
+                    (p.dim.as_str(), format!(" {}", fmt_ms(st.max))),
+                    (p.txt.as_str(), format!(" {}", fmt_ms(st.jit))),
+                    (loss_c.as_str(), format!(" {:>5.1}%", st.loss)),
+                ],
+                w - 1,
+            ));
+            if wide && !t.samples.is_empty() {
+                let mut line: Vec<(&str, String)> = vec![(p.dim.as_str(), "   ".into())];
+                let spark = sparkline(&t.samples, w.saturating_sub(6), &p);
+                for (colour, text) in &spark {
+                    line.push((colour.as_str(), text.clone()));
+                }
+                rows.push(tc::seg(&line, w - 1));
+            }
+        }
+        rows.push(String::new());
+
+        // The log only earns its space on a tall pane: on a short one the
+        // chart is the thing worth keeping.
+        let log_h = if h.saturating_sub(rows.len()) > 20 { 7 } else { 0 };
+        let gh = h.saturating_sub(rows.len() + log_h + 4).max(4);
+        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, &p);
+        let drawn = chart.len();
+        rows.extend(chart);
+        if drawn > 1 {
+            let gw = w.saturating_sub(9).max(10);
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ".repeat(7)),
+                    (p.grid.as_str(), format!("└{}", "─".repeat(gw))),
+                ],
+                w - 1,
+            ));
+            let ago = format!("{}s ago", span as i64);
+            let ago = if ago.chars().count() + 4 > gw {
+                String::new()
+            } else {
+                ago
+            };
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), format!("{:8}{}", "", ago)),
+                    (
+                        p.dim.as_str(),
+                        " ".repeat(gw.saturating_sub(ago.chars().count() + 3)),
+                    ),
+                    (p.dim.as_str(), "now".into()),
                 ],
                 w - 1,
             ));
         }
         rows.push(String::new());
 
-        let room = h.saturating_sub(rows.len() + 3);
-        if room >= 5 {
-            rows.extend(graph(&snapshot, w, room, &p));
+        if log_h > 0 {
+            rows.push(tc::seg(&[(p.dim.as_str(), " ── EVENTS ──".into())], w - 1));
+            let recent: Vec<Event> = match events.lock() {
+                Ok(g) => g.iter().rev().take(log_h - 1).rev().cloned().collect(),
+                Err(_) => Vec::new(),
+            };
+            if recent.is_empty() {
+                rows.push(tc::seg(
+                    &[(p.dim.as_str(), "   (no loss or spikes recorded)".into())],
+                    w - 1,
+                ));
+            }
+            for event in &recent {
+                let kind_c = match event.kind {
+                    "LOSS" | "DOWN" => &p.bad,
+                    "SPIKE" => &p.warn,
+                    _ => &p.ok,
+                };
+                rows.push(tc::seg(
+                    &[
+                        (p.dim.as_str(), format!(" {} ", event.at)),
+                        (kind_c.as_str(), format!("{:<6}", event.kind)),
+                        (event.hue.as_str(), tc::pad(&event.host, 22)),
+                        (p.dim.as_str(), event.detail.clone()),
+                    ],
+                    w - 1,
+                ));
+            }
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![vec![(p.dim.as_str(), "[q]uit".into())]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -545,29 +962,39 @@ fn cannot_start(needed: &[String]) {
 
 struct Palette {
     ok: String,
+    warn: String,
     bad: String,
     dim: String,
     grid: String,
     txt: String,
+    lbl: String,
     head: String,
     hues: Vec<String>,
 }
 
 fn palette() -> Palette {
     Palette {
-        ok: tc::rgb(90, 240, 160),
-        bad: tc::rgb(255, 100, 110),
-        dim: tc::rgb(127, 147, 172),
-        grid: tc::rgb(60, 78, 98),
-        txt: tc::rgb(225, 235, 245),
+        ok: tc::rgb(110, 255, 170),
+        warn: tc::rgb(255, 200, 90),
+        bad: tc::rgb(255, 95, 105),
+        dim: tc::rgb(70, 100, 120),
+        grid: tc::rgb(38, 58, 74),
+        txt: tc::rgb(215, 235, 250),
+        lbl: tc::rgb(120, 170, 200),
         head: tc::rgb(90, 220, 255),
+        // latency.py's own nine, not the six the other widgets share: the
+        // traces are told apart by hue alone now that the glyphs are gone,
+        // so more targets than six needs more than six colours.
         hues: vec![
-            tc::rgb(120, 200, 255),
-            tc::rgb(150, 230, 180),
-            tc::rgb(220, 170, 255),
-            tc::rgb(160, 190, 240),
-            tc::rgb(200, 220, 150),
-            tc::rgb(240, 180, 210),
+            tc::rgb(90, 220, 255),
+            tc::rgb(255, 170, 80),
+            tc::rgb(140, 255, 160),
+            tc::rgb(230, 140, 255),
+            tc::rgb(255, 110, 130),
+            tc::rgb(255, 230, 110),
+            tc::rgb(120, 160, 255),
+            tc::rgb(255, 140, 200),
+            tc::rgb(150, 255, 240),
         ],
     }
 }
@@ -602,16 +1029,36 @@ mod tests {
     }
 
     #[test]
-    fn jitter_is_the_middle_of_the_spread_not_the_extremes() {
+    fn a_spike_belongs_in_max_and_not_in_the_middle() {
         let mut t = Target::default();
-        // Nine steady samples and one wild spike: the spike belongs in
-        // worst, and must not be allowed to define jitter.
+        // Nine steady samples and one wild spike. The median and the
+        // typical round trip are unmoved by it; max is where it shows.
         for v in [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 400.0] {
             t.samples.push((0.0, Some(v)));
         }
-        assert_eq!(t.median(), Some(10.0));
-        assert_eq!(t.jitter(), Some(0.0));
-        assert_eq!(t.worst(), Some(400.0));
+        let st = t.stats();
+        assert_eq!(st.med, Some(10.0));
+        assert_eq!(st.max, Some(400.0));
+        assert_eq!(st.min, Some(10.0));
+        assert_eq!(st.now, Some(400.0));
+    }
+
+    #[test]
+    fn jitter_is_the_gap_between_one_reply_and_the_next() {
+        let mut t = Target::default();
+        // Ten and twenty alternating: every consecutive gap is 10ms, so
+        // that is the jitter - even though every sample sits 5ms from the
+        // mean, which is what a deviation would have reported.
+        for v in [10.0, 20.0, 10.0, 20.0, 10.0] {
+            t.samples.push((0.0, Some(v)));
+        }
+        assert_eq!(t.stats().jit, Some(10.0));
+        // A steady link has none, and one sample cannot have any.
+        let mut steady = Target::default();
+        for _ in 0..4 {
+            steady.samples.push((0.0, Some(30.0)));
+        }
+        assert_eq!(steady.stats().jit, Some(0.0));
     }
 
     #[test]
@@ -621,15 +1068,74 @@ mod tests {
         t.samples.push((0.0, None));
         t.samples.push((0.0, Some(12.0)));
         t.samples.push((0.0, None));
-        assert_eq!(t.loss(), 50.0);
+        assert_eq!(t.stats().loss, 50.0);
+        // Nothing back at all is total loss, not an absent reading.
+        let mut silent = Target::default();
+        silent.samples.push((0.0, None));
+        assert_eq!(silent.stats().loss, 100.0);
+        assert_eq!(silent.stats().med, None);
     }
 
     #[test]
-    fn milliseconds_gain_precision_as_they_shrink() {
-        assert_eq!(ms(Some(123.4)), "123ms");
-        assert_eq!(ms(Some(12.34)), "12.3ms");
-        assert_eq!(ms(Some(1.234)), "1.23ms");
-        assert_eq!(ms(None), "—");
+    fn milliseconds_keep_their_column_width() {
+        // Seven cells whatever the value, or the columns shift under the
+        // headings as a link speeds up.
+        for value in [Some(123.4), Some(12.34), Some(1.234), Some(0.21), None] {
+            assert_eq!(fmt_ms(value).chars().count(), 7, "{:?}", value);
+        }
+        assert_eq!(fmt_ms(Some(123.4)), "123.4ms");
+        assert_eq!(fmt_ms(Some(12.34)), "12.34ms");
+        // Below a millisecond it changes unit rather than losing the value.
+        assert_eq!(fmt_ms(Some(0.21)), "  210µs");
+        assert_eq!(fmt_ms(None), "   --  ");
+    }
+
+    #[test]
+    fn a_bucket_keeps_the_typical_not_the_extreme() {
+        let block = [10.0, 10.0, 10.0, 10.0, 400.0];
+        // Median by default, because latency is right-skewed and one spike
+        // in a bucket would drag a mean well above what the link felt like.
+        assert_eq!(aggregate(&block, "median"), 10.0);
+        assert_eq!(aggregate(&block, "min"), 10.0);
+        assert_eq!(aggregate(&block, "max"), 400.0);
+        assert_eq!(aggregate(&block, "mean"), 88.0);
+        assert_eq!(aggregate(&block, "p95"), 400.0);
+        // An even count takes the middle of the two middles.
+        assert_eq!(aggregate(&[10.0, 20.0], "median"), 15.0);
+        assert_eq!(aggregate(&[7.0], "mean"), 7.0);
+    }
+
+    #[test]
+    fn the_cycling_keys_wrap() {
+        assert_eq!(cycle(INTERVAL_CHOICES, 0.5), 1.0);
+        assert_eq!(cycle(INTERVAL_CHOICES, 5.0), 0.2);
+        // A value that is not one of the choices starts from the first.
+        assert_eq!(cycle(INTERVAL_CHOICES, 3.3), 0.5);
+        assert_eq!(cycle(COLUMN_CHOICES, 10.0), 0.0);
+    }
+
+    #[test]
+    fn a_gap_in_the_data_is_not_drawn_through() {
+        // Two readings with a lost bucket between them. Joining across it
+        // would draw a line where the link was down.
+        let values = [Some(10.0), None, Some(10.0)];
+        let grid = braille_canvas(&values, 1.0, 2.0, 3, 2);
+        let occupied: Vec<bool> = (0..6)
+            .map(|x| grid.iter().any(|row| row[x / 2] & column_mask(x % 2) != 0))
+            .collect();
+        // Six dot columns for three cells, and three values, so they sit in
+        // the last three: a reading, the lost bucket, a reading.
+        assert!(occupied[3] && occupied[5], "the readings are missing");
+        assert!(!occupied[4], "something was drawn across the gap");
+        assert!(
+            !occupied[..3].iter().any(|hit| *hit),
+            "the empty left of the axis was painted"
+        );
+    }
+
+    /// Every dot bit in one column of a braille cell.
+    fn column_mask(x: usize) -> u8 {
+        BRAILLE.iter().fold(0u8, |acc, row| acc | row[x])
     }
 
     #[test]
@@ -643,7 +1149,9 @@ mod tests {
     fn a_rising_series_climbs_the_canvas() {
         // Eight samples across four cells - two dots each - from the bottom
         // of the decade the axis covers to the top of it.
-        let values: Vec<f64> = (0..8).map(|i| 10f64.powf(1.0 + i as f64 / 7.0)).collect();
+        let values: Vec<Option<f64>> = (0..8)
+            .map(|i| Some(10f64.powf(1.0 + i as f64 / 7.0)))
+            .collect();
         let grid = braille_canvas(&values, 1.0, 2.0, 4, 4);
         let highest: Vec<usize> = (0..4)
             .map(|x| {
@@ -660,8 +1168,8 @@ mod tests {
 
     #[test]
     fn two_traces_in_one_cell_keep_both_their_dots() {
-        let top = braille_canvas(&[10.0, 10.0], 0.0, 1.0, 1, 1);
-        let bottom = braille_canvas(&[1.0, 1.0], 0.0, 1.0, 1, 1);
+        let top = braille_canvas(&[Some(10.0), Some(10.0)], 0.0, 1.0, 1, 1);
+        let bottom = braille_canvas(&[Some(1.0), Some(1.0)], 0.0, 1.0, 1, 1);
         assert!(top[0][0] != 0 && bottom[0][0] != 0);
         let cells = overlay(
             &[
