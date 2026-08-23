@@ -262,8 +262,13 @@ fn scan_store(con: &Connection, d: &mut Data) -> rusqlite::Result<()> {
         itl: row.7.unwrap_or(0.0),
         ms: row.8.unwrap_or(0.0),
     });
+    // localtime, because claude, codex, cursor and grok all bucket by the
+    // reader's own midnight and day_calendar draws them on one wall under
+    // the same headings. created_at is stored with a trailing Z, so plain
+    // date() is the UTC day: east of Greenwich, an evening turn filed
+    // under yesterday.
     let mut daily = con.prepare(
-        "select date(created_at), model, sum(input_tokens), \
+        "select date(created_at, 'localtime'), model, sum(input_tokens), \
          sum(output_tokens), sum(cache_read_tokens), \
          sum(cache_write_tokens) from assistant_usage_events \
          group by 1, 2",
@@ -791,6 +796,34 @@ mod tests {
             .unwrap();
         }
         con
+    }
+
+    #[test]
+    fn a_turn_is_filed_under_the_day_it_was_here() {
+        // 20:00 UTC is already tomorrow anywhere east of Greenwich. The
+        // other five readers bucket by the reader's own midnight and
+        // day_calendar draws them all on one wall, so this one must too.
+        // Every other store test uses a mid-morning stamp, which falls on
+        // the same date in both zones and cannot tell them apart.
+        let con = store_with(&[
+            "'2026-08-16T20:00:00Z', 'model-a', 100, 0, 0, 0, 0, 0, 0.0, 0.0, 0",
+        ]);
+        let mut d = Data::default();
+        scan_store(&con, &mut d).expect("a readable store");
+        let days: Vec<&String> = d.daily.keys().collect();
+        assert_eq!(days.len(), 1, "{:?}", days);
+        let want = chrono::Local
+            .timestamp_opt(
+                chrono::DateTime::parse_from_rfc3339("2026-08-16T20:00:00Z")
+                    .expect("a fixed stamp")
+                    .timestamp(),
+                0,
+            )
+            .single()
+            .expect("a local time")
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(days[0], &want, "filed under the wrong day");
     }
 
     #[test]
