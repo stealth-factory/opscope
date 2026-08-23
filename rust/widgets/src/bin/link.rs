@@ -90,6 +90,21 @@ struct Session {
     raw: HashMap<String, String>,
 }
 
+/// A command's output, or why it could not be had.
+///
+/// `run` folds every failure into an empty string, which is right for the
+/// callers that read absence as "nothing to show". It is wrong for the two
+/// that feed the whole widget: from an empty string, `ss` failing and `ss`
+/// reporting no sockets are the same thing, and one of them is a quiet
+/// machine while the other is a broken pane imitating one.
+fn run_or(args: &[&str]) -> Result<String, String> {
+    match std::process::Command::new(args[0]).args(&args[1..]).output() {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(out) => Err(format!("{} exited {}", args[0], out.status)),
+        Err(e) => Err(format!("{} did not run: {}", args[0], e)),
+    }
+}
+
 fn run(args: &[&str]) -> String {
     match std::process::Command::new(args[0]).args(&args[1..]).output() {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
@@ -102,9 +117,9 @@ fn run(args: &[&str]) -> String {
 /// Inbound is defined as "arrived at a port we listen on" rather than by a
 /// list of numbers, so SSH, a terminal server and anything else that
 /// accepts sessions are all found without being named.
-fn listening_ports() -> Vec<u16> {
+fn listening_ports() -> Result<Vec<u16>, String> {
     let mut ports = Vec::new();
-    for line in run(&["ss", "-tlnH"]).lines() {
+    for line in run_or(&["ss", "-tlnH"])?.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if let Some(local) = cols.get(3) {
             if let Some((_, port)) = local.rsplit_once(':') {
@@ -114,7 +129,7 @@ fn listening_ports() -> Vec<u16> {
             }
         }
     }
-    ports
+    Ok(ports)
 }
 
 /// The kernel's own numbers for one socket.
@@ -147,12 +162,12 @@ fn num(map: &HashMap<String, String>, key: &str) -> Option<f64> {
 }
 
 /// One entry per established inbound connection, with its metrics.
-fn sessions() -> Vec<Session> {
-    let ports = listening_ports();
+fn sessions() -> Result<Vec<Session>, String> {
+    let ports = listening_ports()?;
     if ports.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let text = run(&["ss", "-tinH", "state", "established"]);
+    let text = run_or(&["ss", "-tinH", "state", "established"])?;
     let mut found = Vec::new();
     let mut head: Option<Vec<String>> = None;
     for line in text.lines() {
@@ -212,7 +227,7 @@ fn sessions() -> Vec<Session> {
         });
         head = None;
     }
-    found
+    Ok(found)
 }
 
 /// Who is logged in from where, to put a name against an address.
@@ -419,9 +434,36 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     std::thread::spawn(move || {
+        // A thread that ends leaves the last frame on screen for ever, and a
+        // widget frozen on real numbers is harder to catch than one showing
+        // none. Every way out of this loop writes down why first - which is
+        // what link.py's `run` does around `poll`, and what this port had
+        // lost: `State.err` was drawn but never assigned, so the line that
+        // explains a dead poller could not fire.
+        let stopped = |why: &str| {
+            if let Ok(mut guard) = poller.lock() {
+                guard.err = format!("poller stopped: {}", why);
+            }
+        };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
-        let mut found = sessions();
+        let mut found = match sessions() {
+            Ok(rows) => {
+                if let Ok(mut guard) = poller.lock() {
+                    guard.err = String::new();
+                }
+                rows
+            }
+            // Not fatal: ss can fail for a moment. Reported and retried
+            // rather than ending the thread, but never silently - an empty
+            // list and a failed read look identical on screen otherwise.
+            Err(why) => {
+                if let Ok(mut guard) = poller.lock() {
+                    guard.err = why;
+                }
+                Vec::new()
+            }
+        };
         let names = who();
         for row in &mut found {
             // Retransmits since the last look, rather than since the
@@ -458,12 +500,12 @@ fn main() {
         let (lock, cond) = &*poller_wake;
         let mut asked = match lock.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return stopped("the wake lock was poisoned"),
         };
         if !*asked {
             asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
                 Ok((g, _)) => g,
-                Err(_) => return,
+                Err(_) => return stopped("the wake lock was poisoned while waiting"),
             };
         }
         *asked = false;
@@ -1199,27 +1241,37 @@ fn braille_canvas(
 /// it did not own.
 ///
 /// So a cell belongs to exactly one trace and shows only that trace's dots.
-/// Where several want it, ownership advances with the column, which makes a
-/// contested stretch read as interleaved dashed lines - each dot its own
-/// colour - rather than one solid line belonging to nobody. Sessions whose
-/// round trips never meet are unaffected and stay solid.
+/// Where several want it, ownership advances once per contested cell, which
+/// makes a contested stretch read as interleaved dashed lines - each dot its
+/// own colour - rather than one solid line belonging to nobody. Traces that
+/// never meet are unaffected and stay solid.
+///
+/// The turn is counted over contested cells and not taken from the column
+/// number, which is the same bug one level in. Indexing by `x` looks fair
+/// and is not: when the contested cells all share a parity - which happens
+/// as soon as one series has a gap in every other column, and the column
+/// width is free-form config - `x % 2` picks the same claimant every time
+/// and the other trace is absent from the whole stretch. That is the
+/// failure this function exists to prevent, in a narrower form.
 fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
     let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
     for y in 0..rows {
+        // Counts contested cells along this row, so every claimant takes a
+        // turn no matter which columns the contention lands on.
+        let mut turn = 0usize;
         for x in 0..cols {
             let dots = |canvas: &Vec<Vec<u8>>| {
                 canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
             };
             let claims: Vec<&(String, Vec<Vec<u8>>)> =
                 layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
-            if claims.is_empty() {
+            let Some((colour, canvas)) = claims.get(turn % claims.len().max(1)) else {
                 continue;
+            };
+            cells[y][x] = ((*colour).clone(), dots(canvas));
+            if claims.len() > 1 {
+                turn += 1;
             }
-            // Deterministic, and a function of the column rather than of
-            // which sample happened to be drawn last, so the pattern holds
-            // still between frames instead of flickering.
-            let (colour, canvas) = claims[x % claims.len()];
-            cells[y][x] = (colour.clone(), dots(canvas));
         }
     }
     cells
@@ -1684,7 +1736,52 @@ mod tests {
             assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
             assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
         }
+        // The property rather than the phase: the run is shared, so neither
+        // trace is missing from it. Pinning the exact alternation here is
+        // what let the parity starvation through - it asserted the mechanism
+        // and called that the contract.
         let owners: Vec<&str> = (0..4).map(|x| cells[0][x].0.as_str()).collect();
-        assert_eq!(owners, vec!["first", "second", "first", "second"]);
+        assert!(owners.contains(&"first"), "{:?}", owners);
+        assert!(owners.contains(&"second"), "{:?}", owners);
     }
+
+    #[test]
+    fn a_command_that_will_not_run_says_so_rather_than_returning_nothing() {
+        // `run` folds failure into an empty string, and for `ss` that is the
+        // difference between a machine with nobody connected and a widget
+        // that cannot see. The poller puts this text on screen; before it
+        // existed, State.err was drawn but never assigned and a dead read
+        // rendered as "No inbound sessions".
+        let why = run_or(&["definitely-not-a-real-binary-xyz", "--version"])
+            .expect_err("a missing binary must not read as empty output");
+        assert!(why.contains("did not run"), "{}", why);
+        assert!(why.contains("definitely-not-a-real-binary-xyz"), "{}", why);
+        // A command that does run still comes back as Ok.
+        assert!(run_or(&["true"]).is_ok());
+    }
+
+    #[test]
+    fn no_trace_is_starved_by_where_the_contention_falls() {
+        // Two traces that meet only in even-numbered cells, which is what a
+        // series with a gap in every other column produces - and the column
+        // width is free-form config, so it is reachable rather than
+        // theoretical. Ownership used to be `x % claims.len()`, so every
+        // contested cell shared a parity, the modulus picked the same
+        // claimant every time, and the other trace was absent from the whole
+        // stretch. That is the failure this function exists to prevent, one
+        // level in.
+        let a = vec![vec![0b0000_0001u8, 0, 0b0000_0001, 0]];
+        let b = vec![vec![0b0100_0000u8, 0, 0b0100_0000, 0]];
+        let cells = overlay(&[("first".to_string(), a), ("second".to_string(), b)], 4, 1);
+        let owners: Vec<&str> = (0..4)
+            .filter(|x| cells[0][*x].1 != 0)
+            .map(|x| cells[0][x].0.as_str())
+            .collect();
+        assert_eq!(owners.len(), 2, "both contested cells should be drawn");
+        // The property, not the phase. Which of the two takes the first cell
+        // is an implementation detail; that neither vanishes is not.
+        assert!(owners.contains(&"first"), "{:?}", owners);
+        assert!(owners.contains(&"second"), "{:?}", owners);
+    }
+
 }

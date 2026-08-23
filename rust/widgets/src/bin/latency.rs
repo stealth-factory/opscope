@@ -530,27 +530,37 @@ fn braille_canvas(
 /// merging painted the whole of one of them in the other's colour.
 ///
 /// So a cell belongs to exactly one trace and shows only that trace's dots.
-/// Where several want it, ownership advances with the column, which makes a
-/// contested stretch read as two interleaved dashed lines - each dot its own
-/// colour - rather than as one solid line belonging to nobody. Traces that
+/// Where several want it, ownership advances once per contested cell, which
+/// makes a contested stretch read as interleaved dashed lines - each dot its
+/// own colour - rather than one solid line belonging to nobody. Traces that
 /// never meet are unaffected and stay solid.
+///
+/// The turn is counted over contested cells and not taken from the column
+/// number, which is the same bug one level in. Indexing by `x` looks fair
+/// and is not: when the contested cells all share a parity - which happens
+/// as soon as one series has a gap in every other column, and the column
+/// width is free-form config - `x % 2` picks the same claimant every time
+/// and the other trace is absent from the whole stretch. That is the
+/// failure this function exists to prevent, in a narrower form.
 fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
     let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
     for y in 0..rows {
+        // Counts contested cells along this row, so every claimant takes a
+        // turn no matter which columns the contention lands on.
+        let mut turn = 0usize;
         for x in 0..cols {
             let dots = |canvas: &Vec<Vec<u8>>| {
                 canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
             };
             let claims: Vec<&(String, Vec<Vec<u8>>)> =
                 layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
-            if claims.is_empty() {
+            let Some((colour, canvas)) = claims.get(turn % claims.len().max(1)) else {
                 continue;
+            };
+            cells[y][x] = ((*colour).clone(), dots(canvas));
+            if claims.len() > 1 {
+                turn += 1;
             }
-            // Deterministic, and a function of the column rather than of
-            // which sample happened to be drawn last, so the pattern holds
-            // still between frames instead of flickering.
-            let (colour, canvas) = claims[x % claims.len()];
-            cells[y][x] = (colour.clone(), dots(canvas));
         }
     }
     cells
@@ -1402,7 +1412,37 @@ mod tests {
         }
         // Ownership advances with the column, so a contested stretch shows
         // both traces as interleaved dashes rather than hiding one.
+        // The property rather than the phase: the run is shared, so neither
+        // trace is missing from it. Pinning the exact alternation here is
+        // what let the parity starvation through - it asserted the mechanism
+        // and called that the contract.
         let owners: Vec<&str> = (0..4).map(|x| cells[0][x].0.as_str()).collect();
-        assert_eq!(owners, vec!["first", "second", "first", "second"]);
+        assert!(owners.contains(&"first"), "{:?}", owners);
+        assert!(owners.contains(&"second"), "{:?}", owners);
     }
+
+    #[test]
+    fn no_trace_is_starved_by_where_the_contention_falls() {
+        // Two traces that meet only in even-numbered cells, which is what a
+        // series with a gap in every other column produces - and the column
+        // width is free-form config, so it is reachable rather than
+        // theoretical. Ownership used to be `x % claims.len()`, so every
+        // contested cell shared a parity, the modulus picked the same
+        // claimant every time, and the other trace was absent from the whole
+        // stretch. That is the failure this function exists to prevent, one
+        // level in.
+        let a = vec![vec![0b0000_0001u8, 0, 0b0000_0001, 0]];
+        let b = vec![vec![0b0100_0000u8, 0, 0b0100_0000, 0]];
+        let cells = overlay(&[("first".to_string(), a), ("second".to_string(), b)], 4, 1);
+        let owners: Vec<&str> = (0..4)
+            .filter(|x| cells[0][*x].1 != 0)
+            .map(|x| cells[0][x].0.as_str())
+            .collect();
+        assert_eq!(owners.len(), 2, "both contested cells should be drawn");
+        // The property, not the phase. Which of the two takes the first cell
+        // is an implementation detail; that neither vanishes is not.
+        assert!(owners.contains(&"first"), "{:?}", owners);
+        assert!(owners.contains(&"second"), "{:?}", owners);
+    }
+
 }
