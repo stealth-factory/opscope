@@ -784,6 +784,13 @@ pub struct Keyboard {
     fd: i32,
     saved: Option<libc::termios>,
     buf: Vec<u8>,
+    /// What has arrived but not yet decoded. Kept between polls, because a
+    /// sequence can be torn across two reads on a slow link and half an
+    /// arrow key is not an Escape.
+    pending: String,
+    /// A bare ESC is held for one poll before it counts as Escape: it is
+    /// indistinguishable from the start of a sequence still arriving.
+    lone_esc: bool,
 }
 
 impl Keyboard {
@@ -804,6 +811,8 @@ impl Keyboard {
             None
         };
         Keyboard {
+            pending: String::new(),
+            lone_esc: false,
             fd,
             saved,
             buf: Vec::new(),
@@ -857,9 +866,10 @@ impl Keyboard {
                 Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
             }
         }
-        let text = String::from_utf8_lossy(&self.buf).to_string();
+        self.pending
+            .push_str(&String::from_utf8_lossy(&self.buf).to_string());
         self.buf.clear();
-        decode(&text)
+        decode(&mut self.pending, &mut self.lone_esc)
     }
 }
 
@@ -870,7 +880,64 @@ impl Drop for Keyboard {
 }
 
 /// Turn a run of input bytes into key names.
-fn decode(text: &str) -> Vec<String> {
+/// How long the unmapped escape sequence at the front of `s` is, in chars.
+///
+/// The shapes a terminal actually sends: CSI is ESC [ then parameter
+/// digits and semicolons then a final letter or tilde; SS3 is ESC O then
+/// one letter. Anything matching is a key this program does not use -
+/// Delete, a function key, a focus report, a bracketed-paste marker - and
+/// must be swallowed whole. Emitting it a character at a time is how F9
+/// came to reset the pomodoro count, "0" being a real binding in clocks.
+fn escape_len(s: &[char]) -> Option<usize> {
+    if s.first() != Some(&'\x1b') {
+        return None;
+    }
+    match s.get(1) {
+        Some('[') => {
+            let mut i = 2;
+            while matches!(s.get(i), Some(c) if c.is_ascii_digit() || *c == ';') {
+                i += 1;
+            }
+            match s.get(i) {
+                Some(c) if c.is_ascii_alphabetic() || *c == '~' => Some(i + 1),
+                _ => None,
+            }
+        }
+        Some('O') => match s.get(2) {
+            Some(c) if c.is_ascii_alphabetic() => Some(3),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `s` is the start of a sequence that has not finished arriving.
+///
+/// ESC, ESC O, and ESC [ with only parameter characters after it can all
+/// still become a key. Holding them costs nothing - the next read either
+/// completes the sequence or makes it a malformed escape - and it is the
+/// difference between a torn arrow key being an arrow and it being three
+/// characters that other keys are bound to.
+fn still_arriving(s: &[char]) -> bool {
+    match s {
+        [] => false,
+        ['\x1b'] => true,
+        ['\x1b', 'O'] => true,
+        ['\x1b', '[', rest @ ..] => rest
+            .iter()
+            .all(|c| c.is_ascii_digit() || *c == ';'),
+        _ => false,
+    }
+}
+
+/// Turn what the terminal sent into key names, leaving anything incomplete
+/// in `buf` for the next poll.
+///
+/// This mirrors common.py's Keyboard.poll rather than reinventing it: the
+/// order of the checks is what decides whether an unknown key is silently
+/// ignored or arrives as a handful of characters that other keys are bound
+/// to.
+fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
     const SEQUENCES: &[(&str, &str)] = &[
         ("\x1b[A", "up"),
         ("\x1b[B", "down"),
@@ -892,35 +959,57 @@ fn decode(text: &str) -> Vec<String> {
         ("\x1b[4~", "end"),
     ];
     let mut keys = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '\x1b' {
-            let rest: String = chars[i..].iter().collect();
+    let mut chars: Vec<char> = buf.chars().collect();
+    let mut at = 0usize;
+    while at < chars.len() {
+        if chars[at] == '\x1b' {
+            let rest: String = chars[at..].iter().collect();
+            // Longest wins: ESC [ 1 ~ is Home, not ESC [ 1 followed by ~.
             let found = SEQUENCES
                 .iter()
-                .find(|(seq, _)| rest.starts_with(seq))
-                .map(|(seq, name)| (seq.chars().count(), *name));
-            match found {
-                Some((len, name)) => {
-                    keys.push(name.to_string());
-                    i += len;
-                }
-                None => {
-                    keys.push("esc".to_string());
-                    i += 1;
-                }
+                .filter(|(seq, _)| rest.starts_with(seq))
+                .max_by_key(|(seq, _)| seq.chars().count());
+            if let Some((seq, name)) = found {
+                keys.push((*name).to_string());
+                at += seq.chars().count();
+                continue;
             }
+            if let Some(len) = escape_len(&chars[at..]) {
+                at += len; // a sequence this program does not map; drop it
+                continue;
+            }
+            if still_arriving(&chars[at..]) {
+                // Either a bare ESC or a half-arrived sequence. A bare ESC
+                // only counts as Escape once a second poll has found
+                // nothing following it; a longer prefix is simply kept,
+                // since it cannot be Escape at all.
+                if chars.len() - at == 1 {
+                    if *lone_esc {
+                        at += 1;
+                        *lone_esc = false;
+                        keys.push("esc".to_string());
+                    } else {
+                        *lone_esc = true;
+                    }
+                }
+                break;
+            }
+            at += 1; // malformed; discard the ESC and carry on
             continue;
         }
-        let ch = chars[i];
-        i += 1;
+        let ch = chars[at];
+        at += 1;
         match ch {
             '\r' | '\n' => keys.push("enter".to_string()),
             '\t' => keys.push("tab".to_string()),
             '\x7f' | '\x08' => keys.push("backspace".to_string()),
             c => keys.push(c.to_string()),
         }
+    }
+    chars.drain(..at);
+    *buf = chars.into_iter().collect();
+    if buf != "\x1b" {
+        *lone_esc = false;
     }
     keys
 }
@@ -1146,18 +1235,80 @@ mod tests {
         assert!(plain.contains(" CLOCKS "));
     }
 
+    /// One poll's worth of input, decoded from a fresh keyboard.
+    fn keys(text: &str) -> Vec<String> {
+        let mut buf = text.to_string();
+        let mut held = false;
+        decode(&mut buf, &mut held)
+    }
+
     #[test]
     fn arrows_decode_to_names() {
-        assert_eq!(decode("\x1b[A"), vec!["up"]);
-        assert_eq!(decode("\x1b[B\x1b[B"), vec!["down", "down"]);
-        assert_eq!(decode("q"), vec!["q"]);
-        assert_eq!(decode("\x1b"), vec!["esc"]);
+        assert_eq!(keys("\x1b[A"), vec!["up"]);
+        assert_eq!(keys("\x1b[B\x1b[B"), vec!["down", "down"]);
+        assert_eq!(keys("q"), vec!["q"]);
         // Both encodings of Home and End, since terminals disagree.
-        assert_eq!(decode("\x1b[H"), vec!["home"]);
-        assert_eq!(decode("\x1b[1~"), vec!["home"]);
-        assert_eq!(decode("\x1b[F"), vec!["end"]);
-        assert_eq!(decode("\x1b[4~"), vec!["end"]);
-        assert_eq!(decode("\r"), vec!["enter"]);
+        assert_eq!(keys("\x1b[H"), vec!["home"]);
+        assert_eq!(keys("\x1b[1~"), vec!["home"]);
+        assert_eq!(keys("\x1b[F"), vec!["end"]);
+        assert_eq!(keys("\x1b[4~"), vec!["end"]);
+        assert_eq!(keys("\r"), vec!["enter"]);
+    }
+
+    #[test]
+    fn a_key_this_program_does_not_use_is_dropped_whole() {
+        // Each of these used to arrive as "esc" plus its own bytes as
+        // separate keys, and those bytes are live bindings elsewhere: "0"
+        // resets the pomodoro count in clocks, "1" and "2" reorder
+        // netwatch. Pressing F9 must do nothing, not reset a counter.
+        for seq in [
+            "\x1b[3~",    // Delete
+            "\x1b[20~",   // F9
+            "\x1b[15~",   // F5
+            "\x1bOP",     // F1
+            "\x1b[I",     // focus in
+            "\x1b[O",     // focus out
+            "\x1b[200~",  // bracketed paste begins
+            "\x1b[Z",     // shift-tab
+            "\x1b[1;5C",  // ctrl-right
+        ] {
+            assert_eq!(keys(seq), Vec::<String>::new(), "{:?} leaked a key", seq);
+        }
+        // And it does not swallow what follows it.
+        assert_eq!(keys("\x1b[3~q"), vec!["q"]);
+    }
+
+    #[test]
+    fn a_bare_escape_waits_one_poll_before_it_counts() {
+        // ESC alone is indistinguishable from the first byte of a sequence
+        // still arriving, so it is held. Two polls with nothing following
+        // make it Escape; a poll that completes an arrow makes it an arrow.
+        let mut buf = "\x1b".to_string();
+        let mut held = false;
+        assert_eq!(decode(&mut buf, &mut held), Vec::<String>::new());
+        assert!(held);
+        assert_eq!(decode(&mut buf, &mut held), vec!["esc"]);
+        assert!(buf.is_empty());
+
+        // The torn arrow: ESC in one read, "[A" in the next.
+        let mut buf = "\x1b".to_string();
+        let mut held = false;
+        assert_eq!(decode(&mut buf, &mut held), Vec::<String>::new());
+        buf.push_str("[A");
+        assert_eq!(decode(&mut buf, &mut held), vec!["up"]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn an_incomplete_sequence_stays_in_the_buffer() {
+        // Half of Home arrives; nothing is emitted and the half is kept,
+        // rather than being spent as "esc" and a bracket.
+        let mut buf = "\x1b[1".to_string();
+        let mut held = false;
+        assert_eq!(decode(&mut buf, &mut held), Vec::<String>::new());
+        assert_eq!(buf, "\x1b[1");
+        buf.push('~');
+        assert_eq!(decode(&mut buf, &mut held), vec!["home"]);
     }
 
     #[test]
