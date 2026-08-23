@@ -260,7 +260,15 @@ fn iso_epoch(s: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
     }
-    let s = s.trim_end_matches('Z');
+    // Z and +00:00 are the same zone and these APIs mix them inside one
+    // response. Spelling it one way means every zoned stamp is parsed by
+    // the same branch - the two branches did not agree about whether a
+    // fraction of a second survives.
+    let s: String = match s.strip_suffix('Z') {
+        Some(head) => format!("{}+00:00", head),
+        None => s.to_string(),
+    };
+    let s = s.as_str();
     // Trim any sub-second field to microseconds, whatever it arrived as.
     let cleaned = match s.find('.') {
         Some(dot) => {
@@ -278,10 +286,14 @@ fn iso_epoch(s: &str) -> Option<f64> {
         "%Y-%m-%dT%H:%M:%S",
     ] {
         if let Ok(at) = chrono::DateTime::parse_from_str(&cleaned, fmt) {
-            return Some(at.timestamp() as f64 + at.timestamp_subsec_millis() as f64 / 1000.0);
+            return Some(at.timestamp() as f64 + at.timestamp_subsec_micros() as f64 / 1e6);
         }
         if let Ok(at) = chrono::NaiveDateTime::parse_from_str(&cleaned, fmt) {
-            return Some(Utc.from_utc_datetime(&at).timestamp() as f64);
+            // Unzoned, so read as UTC. usage.py reads these as local, but
+            // its own docstring says the callers all pass zoned strings -
+            // and every caller here does.
+            let at = Utc.from_utc_datetime(&at);
+            return Some(at.timestamp() as f64 + at.timestamp_subsec_micros() as f64 / 1e6);
         }
     }
     None
@@ -1732,7 +1744,14 @@ mod tests {
         // nanoseconds where the parser takes six digits.
         let want = iso_epoch("2026-08-23T04:15:00+00:00").expect("offset form");
         assert_eq!(iso_epoch("2026-08-23T04:15:00Z"), Some(want));
-        assert_eq!(iso_epoch("2026-08-23T04:15:00.123456789Z"), Some(want));
+        // The two spellings of the same zone must give the same answer to
+        // the same precision. This asserted that the nanosecond form
+        // equalled the whole second - which is the fraction being thrown
+        // away, and adjacent records then look 0 or 1 second apart when a
+        // rate is computed by dividing tokens by that gap.
+        let fine = iso_epoch("2026-08-23T04:15:00.123456789Z").expect("nanoseconds");
+        assert!((fine - (want + 0.123456)).abs() < 1e-6, "got {}", fine - want);
+        assert_eq!(iso_epoch("2026-08-23T04:15:00.123456+00:00"), Some(fine));
         assert!(iso_epoch("").is_none());
         assert!(iso_epoch("not a date").is_none());
     }
