@@ -41,11 +41,13 @@ fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Seconds before an external command is given up on, from tailnet.py's longest, on `tailscale status`.
+const RUN_TIMEOUT: u64 = 25;
+
 fn run(args: &[&str]) -> String {
-    match std::process::Command::new(args[0]).args(&args[1..]).output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => String::new(),
-    }
+    // Bounded: .output() waits forever, and a wedged child used to freeze
+    // the poll thread with the pane still showing its last frame.
+    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
 }
 
 fn text(value: &serde_json::Value, key: &str) -> String {

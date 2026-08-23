@@ -1014,6 +1014,68 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
     keys
 }
 
+/// Run a command and give up on it after `seconds`.
+///
+/// std's `.output()` waits forever, and every one of these commands talks
+/// to something that can stop answering - a tailnet coordination server,
+/// a Herdr socket, a wedged `ss`. The Pythons all pass a timeout; the port
+/// dropped them, so a hung child froze the poll thread with no error and
+/// the pane kept drawing its last frame as though it were current.
+///
+/// Returns everything the child produced, so a caller that needs the exit
+/// status or stderr - to say why a command refused - still has them.
+pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, String> {
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    let Some((program, rest)) = args.split_first() else {
+        return Err("no command given".into());
+    };
+    let child = Command::new(program)
+        .args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{}: {}", program, e))?;
+    let pid = child.id() as i32;
+    let (tx, rx) = mpsc::channel();
+    // wait_with_output drains the pipe while it waits; doing the wait on
+    // this side and the read afterwards would deadlock on a child that
+    // fills its stdout buffer.
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(seconds)) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(format!("{}: {}", program, e)),
+        Err(_) => {
+            // SIGKILL rather than SIGTERM: this one has already ignored the
+            // time it was given, and the reader thread ends when it dies.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            Err(format!("{} did not answer in {}s", program, seconds))
+        }
+    }
+}
+
+/// The same, reduced to the stdout of a command that succeeded.
+///
+/// A command that ran and failed is an error here, not empty output: the
+/// callers that want the difference use run_full and read the status.
+pub fn run(args: &[&str], seconds: u64) -> Result<String, String> {
+    let out = run_full(args, seconds)?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
+        Err(if why.is_empty() {
+            format!("{} exited {}", args[0], out.status)
+        } else {
+            why.chars().take(200).collect()
+        })
+    }
+}
+
 /// Print the doc comment and leave, when asked for help.
 pub fn maybe_help(doc: &str) {
     let args: Vec<String> = std::env::args().skip(1).collect();

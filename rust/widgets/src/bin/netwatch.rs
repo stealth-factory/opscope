@@ -79,11 +79,13 @@ fn elapsed(seconds: f64) -> String {
     }
 }
 
+/// Seconds before an external command is given up on, from netwatch.py.
+const RUN_TIMEOUT: u64 = 5;
+
 fn run(args: &[&str]) -> String {
-    match std::process::Command::new(args[0]).args(&args[1..]).output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => String::new(),
-    }
+    // Bounded: .output() waits forever, and a wedged child used to freeze
+    // the poll thread with the pane still showing its last frame.
+    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
 }
 
 /// Every address this machine answers to.

@@ -42,19 +42,24 @@ fn rank_of(state: &str) -> usize {
     RANK.iter().position(|s| *s == state).unwrap_or(9)
 }
 
+/// Seconds before a herdr command is given up on, from herdr-panes.py.
+const RUN_TIMEOUT: u64 = 15;
+
 /// Run a herdr command for its effect; true when it succeeded.
+///
+/// Bounded, because the socket on the other end can stop answering and
+/// .output() would wait for it forever with the pane still drawing.
 fn herdr_action(args: &[&str]) -> bool {
-    std::process::Command::new("herdr")
-        .args(args)
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    let mut argv = vec!["herdr"];
+    argv.extend_from_slice(args);
+    tc::run(&argv, RUN_TIMEOUT).is_ok()
 }
 
 /// Run a herdr command and hand back the `result` object it printed.
 fn herdr(args: &[&str]) -> Option<serde_json::Value> {
-    let out = std::process::Command::new("herdr").args(args).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let mut argv = vec!["herdr"];
+    argv.extend_from_slice(args);
+    let text = tc::run(&argv, RUN_TIMEOUT).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
     match parsed.get("result") {
         Some(serde_json::Value::Null) | None => None,

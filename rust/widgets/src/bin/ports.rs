@@ -389,11 +389,13 @@ fn version_in(cmdline: &str) -> Option<String> {
     }
 }
 
+/// Seconds before an external command is given up on, from ports.py's longest, on the serve/funnel commands.
+const RUN_TIMEOUT: u64 = 30;
+
 fn run(args: &[&str]) -> String {
-    match std::process::Command::new(args[0]).args(&args[1..]).output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => String::new(),
-    }
+    // Bounded: .output() waits forever, and a wedged child used to freeze
+    // the poll thread with the pane still showing its last frame.
+    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
 }
 
 /// Ports Tailscale is serving, and whether the world can see them.
@@ -1020,12 +1022,11 @@ fn serve_port(port: u16, public: bool) -> String {
         }
     }
     let verb = if public { "funnel" } else { "serve" };
-    match std::process::Command::new("tailscale")
-        .args([verb, "--bg", &format!("--https={}", listen), &port.to_string()])
-        .output()
-    {
+    let https = format!("--https={}", listen);
+    let port = port.to_string();
+    match tc::run_full(&["tailscale", verb, "--bg", &https, &port], RUN_TIMEOUT) {
         Ok(out) => refusal(out, "tailscale refused"),
-        Err(e) => e.to_string(),
+        Err(e) => e,
     }
 }
 
@@ -1058,12 +1059,10 @@ fn unserve_port(port: u16, public: bool) -> String {
         listen = if public { 443 } else { port };
     }
     let verb = if public { "funnel" } else { "serve" };
-    match std::process::Command::new("tailscale")
-        .args([verb, &format!("--https={}", listen), "off"])
-        .output()
-    {
+    let https = format!("--https={}", listen);
+    match tc::run_full(&["tailscale", verb, &https, "off"], RUN_TIMEOUT) {
         Ok(out) => refusal(out, "tailscale refused"),
-        Err(e) => e.to_string(),
+        Err(e) => e,
     }
 }
 
