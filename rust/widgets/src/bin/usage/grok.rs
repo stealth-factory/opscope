@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use toys_core as tc;
 
 use crate::shared::*;
@@ -116,7 +116,12 @@ fn session_days(body: &str) -> (f64, HashMap<String, f64>) {
         let Some(ms) = int_after(line, "\"agentTimestampMs\":") else {
             continue;
         };
-        let Some(at) = Utc.timestamp_millis_opt(ms as i64).single() else {
+        // Local, not UTC, because Claude, Codex and Cursor all bucket
+        // locally and day_calendar draws the four on one wall under the
+        // same headings. The stamp is epoch milliseconds with no zone of
+        // its own to honour, so there is nothing here arguing for UTC the
+        // way Copilot's reset boundary does.
+        let Some(at) = Local.timestamp_millis_opt(ms as i64).single() else {
             continue;
         };
         *days.entry(at.date_naive().to_string()).or_insert(0.0) += step;
@@ -567,7 +572,7 @@ mod tests {
 
     #[test]
     fn a_running_total_is_counted_as_deltas() {
-        // Two events on one UTC day and one on the next. Summed raw this
+        // Two events on one day and one on the next. Summed raw this
         // would read 1400 rather than 900, and put all of it on one day.
         let body = concat!(
             r#"{"totalTokens":100,"agentTimestampMs":1755302400000}"#,
@@ -679,8 +684,45 @@ mod tests {
         assert_eq!(period_name(""), "current");
     }
 
+    #[test]
+    fn a_turn_is_filed_under_the_day_it_was_that_day_here() {
+        // 1755388200000 is 23:30 UTC. East of Greenwich that is already
+        // tomorrow locally, west of it the same evening - either way the
+        // reader must agree with the wall clock of whoever is reading the
+        // pane, because the three calendars drawn beside this one do.
+        let body = concat!(
+            r#"{"totalTokens":0,"agentTimestampMs":1755388200000}"#,
+            "\n",
+            r#"{"totalTokens":700,"agentTimestampMs":1755388200000}"#,
+            "\n",
+        );
+        let (_, days) = session_days(body);
+        let local = Local
+            .timestamp_millis_opt(1755388200000)
+            .single()
+            .expect("a fixed timestamp")
+            .date_naive()
+            .to_string();
+        assert_eq!(days.get(&local), Some(&700.0));
+        // And nothing was filed under the UTC day, unless this machine is
+        // on UTC and the two are the same date.
+        let utc = chrono::Utc
+            .timestamp_millis_opt(1755388200000)
+            .single()
+            .expect("a fixed timestamp")
+            .date_naive()
+            .to_string();
+        if utc != local {
+            assert_eq!(days.get(&utc), None);
+        }
+    }
+
+    /// The day the reader will file a stamp under - local, matching the
+    /// reader, so this asserts the bucketing rather than the zone this
+    /// machine happens to run in.
     fn day_of(ms: i64) -> String {
-        Utc.timestamp_millis_opt(ms)
+        Local
+            .timestamp_millis_opt(ms)
             .single()
             .expect("a fixed timestamp")
             .date_naive()
