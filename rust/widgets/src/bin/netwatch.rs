@@ -369,21 +369,29 @@ const RATE_WINDOW: f64 = 4.0;
 /// thing that must not happen is the three drifting apart on what a rate
 /// means.
 macro_rules! fold {
-    ($e:expr, $when:expr, $up:expr, $down:expr) => {{
+    ($e:expr, $when:expr, $gap:expr, $up:expr, $down:expr) => {{
         let e = &mut $e;
         e.up += $up;
         e.down += $down;
         e.seen = $when;
         e.alive = true;
-        e.recent.push(($when, $up, $down));
-        e.recent.retain(|(t, _, _)| $when - t <= RATE_WINDOW);
-        let oldest = e.recent.first().map(|(t, _, _)| *t).unwrap_or($when);
-        // The span the samples actually cover, not the nominal window: for
-        // the first few seconds after launch there is less history than
-        // that, and dividing by the full window would read low.
-        let span = $when - oldest;
+        e.recent.push(($when, $gap, $up, $down));
+        e.recent.retain(|(t, _, _, _)| $when - t <= RATE_WINDOW);
+        // Each delta covers the interval ending at its stamp and lasting
+        // its own gap, so the time the window covers is the sum of those
+        // gaps - counting each stamp once, because a process's fifteen
+        // sockets fold at one stamp and share one interval between them.
+        // Dividing instead by the span from oldest stamp to newest counted
+        // n deltas over n-1 intervals, and every process, connection and
+        // endpoint row read a quarter high at a one-second cadence.
+        let mut span = 0.0f64;
+        let mut last = f64::NAN;
         let (mut u, mut d) = (0u64, 0u64);
-        for (_, up, down) in &e.recent {
+        for (t, gap, up, down) in &e.recent {
+            if *t != last {
+                span += gap;
+                last = *t;
+            }
             u += up;
             d += down;
         }
@@ -393,7 +401,7 @@ macro_rules! fold {
         // second and pinned the chart's axis there for four minutes. With
         // no elapsed time there is no rate to compute, so the last one
         // stands until the next sample gives the window a width.
-        if e.recent.len() > 1 && span > 0.0 {
+        if span > 0.0 {
             e.up_rate = u as f64 / span;
             e.down_rate = d as f64 / span;
         }
@@ -405,7 +413,7 @@ macro_rules! settle {
     ($e:expr, $when:expr) => {{
         let e = &mut $e;
         e.alive = false;
-        e.recent.retain(|(t, _, _)| $when - t <= RATE_WINDOW);
+        e.recent.retain(|(t, _, _, _)| $when - t <= RATE_WINDOW);
         if e.recent.is_empty() {
             e.up_rate = 0.0;
             e.down_rate = 0.0;
@@ -432,7 +440,8 @@ struct Proc {
     alive: bool,
     seen: f64,
     /// (when, up bytes, down bytes) for the last few samples.
-    recent: Vec<(f64, u64, u64)>,
+    /// (stamp, the gap it covers, bytes up, bytes down)
+    recent: Vec<(f64, f64, u64, u64)>,
     /// (down rate, up rate) per sample, for this process's own chart.
     hist: Vec<(f64, f64)>,
 }
@@ -451,7 +460,8 @@ struct Conn {
     down_rate: f64,
     alive: bool,
     seen: f64,
-    recent: Vec<(f64, u64, u64)>,
+    /// (stamp, the gap it covers, bytes up, bytes down)
+    recent: Vec<(f64, f64, u64, u64)>,
 }
 
 /// The sockets sharing a peer, folded together: a browser opening six
@@ -468,7 +478,8 @@ struct Spot {
     alive: bool,
     seen: f64,
     ports: BTreeSet<u16>,
-    recent: Vec<(f64, u64, u64)>,
+    /// (stamp, the gap it covers, bytes up, bytes down)
+    recent: Vec<(f64, f64, u64, u64)>,
     hist: Vec<(f64, f64)>,
 }
 
@@ -559,7 +570,7 @@ fn sample(state: &mut State, external: bool) {
         row.alive = true;
         row.seen = stamp;
         if gap > 0.0 {
-            fold!(*row, stamp, d_sent, d_recv);
+            fold!(*row, stamp, gap, d_sent, d_recv);
         }
 
         let conn = state.conns.entry(inode.clone()).or_insert_with(|| Conn {
@@ -572,7 +583,7 @@ fn sample(state: &mut State, external: bool) {
         conn.alive = true;
         conn.seen = stamp;
         if gap > 0.0 {
-            fold!(*conn, stamp, d_sent, d_recv);
+            fold!(*conn, stamp, gap, d_sent, d_recv);
         }
 
         let spot = state
@@ -588,7 +599,7 @@ fn sample(state: &mut State, external: bool) {
         spot.seen = stamp;
         spot.ports.insert(seen.port);
         if gap > 0.0 {
-            fold!(*spot, stamp, d_sent, d_recv);
+            fold!(*spot, stamp, gap, d_sent, d_recv);
         }
     }
 
@@ -2035,11 +2046,13 @@ mod tests {
         // A kilobyte at t=0 and nothing for the next three seconds. The
         // instantaneous rate is zero for most of that; the windowed one
         // stays up, which is the whole point.
-        fold!(row, 0.0, 0, 1000);
-        fold!(row, 1.0, 0, 0);
-        fold!(row, 2.0, 0, 0);
-        fold!(row, 3.0, 0, 0);
+        fold!(row, 0.0, 1.0, 0, 1000);
+        fold!(row, 1.0, 1.0, 0, 0);
+        fold!(row, 2.0, 1.0, 0, 0);
+        fold!(row, 3.0, 1.0, 0, 0);
         assert!(row.down_rate > 0.0, "the rate flickered to nothing");
+        // A kilobyte spread over the four seconds the window covers.
+        assert!((row.down_rate - 250.0).abs() < 1.0, "got {}", row.down_rate);
         assert_eq!(row.down, 1000, "the total is unaffected by smoothing");
     }
 
@@ -2050,7 +2063,7 @@ mod tests {
         // which is every sample, since a sample reads them all at once.
         // The window spans no time, so there is no rate to compute yet.
         for _ in 0..15 {
-            fold!(row, 0.0, 0, 400_000);
+            fold!(row, 0.0, 0.0, 0, 400_000);
         }
         assert_eq!(row.down, 6_000_000);
         assert_eq!(
@@ -2058,10 +2071,17 @@ mod tests {
             "six megabytes in no time at all read as {} B/s",
             row.down_rate
         );
-        // The next sample gives the window a width, and the rate is the
-        // whole window over the time it covers.
-        fold!(row, 1.0, 0, 0);
-        assert!((row.down_rate - 6_000_000.0).abs() < 1.0, "got {}", row.down_rate);
+        // A second poll, a second apart, and the fifteen sockets of the
+        // first one share the single interval they were read in - they are
+        // parallel, not fifteen intervals in a row. Six megabytes over the
+        // one second that poll covered. This asserted six megabytes per
+        // second across a two-second window before.
+        let mut row = Proc::default();
+        for _ in 0..15 {
+            fold!(row, 0.0, 1.0, 0, 400_000);
+        }
+        fold!(row, 1.0, 1.0, 0, 0);
+        assert!((row.down_rate - 3_000_000.0).abs() < 1.0, "got {}", row.down_rate);
     }
 
     #[test]
@@ -2069,18 +2089,21 @@ mod tests {
         let mut row = Proc::default();
         // Two kilobytes a second, steadily, for four seconds.
         for i in 0..5 {
-            fold!(row, i as f64, 0, 2000);
+            fold!(row, i as f64, 1.0, 0, 2000);
         }
-        // Averaged over the span the samples cover, which is 4s for 5
-        // samples: 10000 bytes over 4 seconds.
-        assert!((row.down_rate - 2500.0).abs() < 1.0, "got {}", row.down_rate);
+        // Five polls, each covering a second, carrying 2000 bytes each:
+        // 10000 bytes over the five seconds they cover, so 2000 a second,
+        // which is what was actually sent. This asserted 2500 before - a
+        // quarter too high on every row, with the overcount written into
+        // the comment as though it were the intent.
+        assert!((row.down_rate - 2000.0).abs() < 1.0, "got {}", row.down_rate);
     }
 
     #[test]
     fn history_older_than_the_window_is_dropped() {
         let mut row = Proc::default();
-        fold!(row, 0.0, 0, 5000);
-        fold!(row, 100.0, 0, 1000);
+        fold!(row, 0.0, 1.0, 0, 5000);
+        fold!(row, 100.0, 1.0, 0, 1000);
         // The ancient sample is gone, so it cannot prop the rate up.
         assert_eq!(row.recent.len(), 1);
         assert_eq!(row.down, 6000);
