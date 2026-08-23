@@ -14,5 +14,15 @@ license = "AGPL-3.0-or-later"
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
+# unwind, deliberately, and not for free: it costs about 0.5 MB across the
+# fourteen binaries, 4.5%, measured. It buys the poller guards in usage,
+# herdr-panes and ports, which wrap their poll threads in catch_unwind and
+# record why they stopped. Under panic = "abort" those guards cannot fire
+# at all - the process dies before the Err arm is reached - so the source
+# read as protected while the shipped binary had no protection, and the
+# tests exercised a path that only exists in the test profile. CLAUDE.md
+# asks that every poller record why it stopped; this is what makes that
+# true rather than aspirational. Setting this back to "abort" silently
+# deletes three error paths.
+panic = "unwind"
 strip = true
