@@ -713,8 +713,15 @@ pub fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> String {
 
 /// The next entry after `current`, wrapping; for a key that cycles.
 pub fn cycle<T: PartialEq + Copy>(choices: &[T], current: T) -> T {
-    let at = choices.iter().position(|c| *c == current).unwrap_or(0);
-    choices[(at + 1) % choices.len()]
+    // A value that is not one of the choices starts from the first, as
+    // common.py's ValueError branch does. unwrap_or(0) then +1 started from
+    // the second instead, silently skipping a choice whenever the current
+    // setting came from a config file or an argument rather than from a
+    // previous press of the key.
+    match choices.iter().position(|c| *c == current) {
+        Some(at) => choices[(at + 1) % choices.len()],
+        None => choices[0],
+    }
 }
 
 /// A placeholder bar with a highlight sweeping across it.
@@ -1302,6 +1309,17 @@ mod tests {
         let mut buf = text.to_string();
         let mut held = false;
         decode(&mut buf, &mut held)
+    }
+
+    #[test]
+    fn a_setting_that_is_not_a_choice_starts_from_the_first() {
+        let choices = [0.2f64, 0.5, 1.0, 2.0];
+        assert_eq!(cycle(&choices, 0.2), 0.5);
+        assert_eq!(cycle(&choices, 2.0), 0.2, "the last wraps to the first");
+        // A value from config or an argument that is not on the list. This
+        // returned 0.5 - the second - so the first choice could never be
+        // reached by pressing the key.
+        assert_eq!(cycle(&choices, 3.3), 0.2);
     }
 
     #[test]
