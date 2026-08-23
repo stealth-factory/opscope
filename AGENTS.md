@@ -5,9 +5,11 @@ Linear project: <https://linear.app/stealth-company/project/terminal-toys-e829b4
 
 ## What this repo is
 
-Dependency-free Python 3 terminal widgets that look like sci-fi movie panels
-and show only real data. Each widget is a single executable script sharing
-`common.py`; there is no package, no build step and no third-party dependency.
+Terminal widgets that look like sci-fi movie panels and show only real
+data, in two implementations: Python 3 scripts sharing `common.py`, and a
+Rust port under `rust/` sharing `toys-core`. The Python has no package and
+no build step; the Rust builds fourteen binaries with `cargo build
+--release`.
 
 The founding rule, and the one worth defending: **every number on screen is
 real.** Widgets that could not be wired to a true source were deleted rather
@@ -15,9 +17,16 @@ than faked. `matrix.py` is the sole exception and computes nothing on purpose.
 
 ## Conventions
 
-- **Python 3.9+, standard library only.** No pip installs, ever. If a widget
-  needs an external tool (`ping`, `tailscale`, `herdr`) it degrades gracefully
-  when that tool is absent.
+- **What ships must carry what it needs.** Third-party dependencies are
+  allowed; a dependency that has to be installed separately before a widget
+  runs is not. The Rust has a build step that can absorb one - `rusqlite`
+  is taken with `bundled` so SQLite is compiled in, and `ldd` on a release
+  binary shows only libc, libm and libgcc. The Python has no build step, so
+  in practice it stays on the 3.9+ standard library: there is nowhere for a
+  pip install to be absorbed into. If a widget needs an external *tool*
+  (`ping`, `tailscale`, `herdr`) it degrades gracefully when that tool is
+  absent - that is a different thing from a library and the rule is
+  unchanged.
 - **Config, never hardcoded.** Hostnames, cities, tokens and account lists go
   in `config.json` (git-ignored) via `load_config()`. Add new keys to
   `config.example.json` in the same commit — and **use the section name the
