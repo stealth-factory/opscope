@@ -35,7 +35,22 @@
       ]
     ],
     "work_start_hour": 9,
-    "work_end_hour": 18
+    "work_end_hour": 18,
+    "pomodoro_enabled": false,
+    "pomodoro_focus_minutes": 25,
+    "pomodoro_short_break_minutes": 5,
+    "pomodoro_long_break_minutes": 15,
+    "pomodoro_sessions_before_long_break": 4,
+    "pomodoro_bell": true,
+    "pomodoro_notify": true,
+    "pomodoro_flash": true,
+    "pomodoro_flash_count": 2,
+    "pomodoro_flash_gap": 1.0,
+    "pomodoro_flash_rgb": [
+      246,
+      248,
+      252
+    ]
   },
   "deployments": {
     "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",

@@ -463,14 +463,30 @@ impl Pomodoro {
     }
 
     /// Lengthen or shorten the focus block, in minutes.
+    /// Lengthen or shorten the block you are actually in.
+    ///
+    /// Whichever phase is running: focus during focus, and that break during
+    /// a break. It used to write to `focus` whatever the phase, so pressing
+    /// it during a break moved a number that was not on screen and left the
+    /// countdown alone - and the hint beside it read "focus" while the line
+    /// above it read BREAK. Both breaks keep their own length, so shortening
+    /// a short break does not shorten the long one.
     fn adjust(&mut self, delta: f64, now: f64) {
-        self.focus = (self.focus + delta).clamp(1.0, 180.0);
-        if self.phase == Phase::Focus {
-            self.left = self.duration();
-            if self.running {
-                self.deadline = now + self.left;
-            }
+        let slot = match self.phase {
+            Phase::Focus => &mut self.focus,
+            Phase::Short => &mut self.short,
+            Phase::Long => &mut self.long,
+        };
+        *slot = (*slot + delta).clamp(1.0, 180.0);
+        self.left = self.duration();
+        if self.running {
+            self.deadline = now + self.left;
         }
+    }
+
+    /// The length of the block in progress, in minutes.
+    fn minutes(&self) -> i64 {
+        (self.duration() / 60.0).round() as i64
     }
 
     fn restart(&mut self, now: f64) {
@@ -773,7 +789,10 @@ fn main() {
             // started from.
             hints.push(vec![
                 (p.dim.as_str(), "[±]1min ".to_string()),
-                (p.txt.as_str(), format!("(focus {}min)", pomo.focus as i64)),
+                // "interval" rather than "focus": the key adjusts whichever
+                // block is running, so naming one of the three would be
+                // wrong in two phases out of three.
+                (p.txt.as_str(), format!("(interval {}min)", pomo.minutes())),
             ]);
             if pomo.done > 0 {
                 // Nothing to reset at zero, so it only appears once it counts.
@@ -952,6 +971,52 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_block_keeps_its_own_length() {
+        // The config numbers are starting values, not fixed ones: ± moves
+        // whichever block is running and leaves the other two alone, so a
+        // 25/5/15 day can become 30/5/15 without touching the breaks.
+        let mut pomo = Pomodoro {
+            phase: Phase::Focus,
+            running: false,
+            shown: true,
+            deadline: 0.0,
+            left: 25.0 * 60.0,
+            done: 0,
+            focus: 25.0,
+            short: 5.0,
+            long: 15.0,
+            before_long: 4,
+            bell: false,
+            rang_at: 0,
+        };
+
+        pomo.phase = Phase::Focus;
+        pomo.adjust(5.0, 0.0);
+        assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 5.0, 15.0));
+
+        pomo.phase = Phase::Short;
+        pomo.adjust(-2.0, 0.0);
+        assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 3.0, 15.0));
+
+        pomo.phase = Phase::Long;
+        pomo.adjust(1.0, 0.0);
+        assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 3.0, 16.0));
+
+        // And the hint reports the block in progress, not one named block.
+        assert_eq!(pomo.minutes(), 16);
+        pomo.phase = Phase::Short;
+        assert_eq!(pomo.minutes(), 3);
+
+        // A block cannot be argued below a minute or above three hours.
+        pomo.phase = Phase::Short;
+        for _ in 0..10 {
+            pomo.adjust(-1.0, 0.0);
+        }
+        assert_eq!(pomo.short, 1.0);
+        assert_eq!((pomo.focus, pomo.long), (30.0, 16.0), "the others are untouched");
+    }
 
     #[test]
     fn the_advance_key_says_what_it_will_do() {
