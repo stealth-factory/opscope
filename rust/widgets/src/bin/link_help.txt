@@ -20,9 +20,17 @@ median of its slice: a spike is still counted in the worst column and on the
 detail screen, but the line itself smooths. Look at a stall on the short
 window.
 
-Keys: up/down select, enter opens one, w changes the span, o toggles idle
+Keys: up/down move the selection, and pressing up on the first session or
+down on the last clears it, which puts the chart back to drawing every
+session alike. Right or enter opens the selected one; left or esc comes back.
+On that screen up/down scroll it and n/p step to the next or previous
+session without returning to the list. w changes the span, o toggles idle
 sessions, r refreshes, q quits.
 
 The chart is drawn on a braille dot canvas rather than one character per
-sample, so it reads as a line rather than a column of marks. Sessions are
-told apart by colour, matching the glyph beside each row above.
+sample, so it reads as a line rather than a column of marks. Sessions share
+the one chart, so the selected row is drawn last and at full strength while
+the rest are mixed toward the background: where two traces cross, the colour
+goes to the one being looked at rather than to whichever sits lower in the
+list. The others stay drawn rather than hidden, because a chart that showed
+one session at a time would answer a different question.

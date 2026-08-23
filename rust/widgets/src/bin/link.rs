@@ -28,8 +28,44 @@ use std::time::Duration;
 use toys_core as tc;
 
 const IDLE_AFTER: f64 = 300.0;
+
+/// The fewest rows the detail chart is worth drawing in.
+///
+/// It used to take whatever the fields left over and be dropped silently
+/// when that came to less than five, so a short pane showed the numbers and
+/// no chart and said nothing about why - indistinguishable from a session
+/// with no history. It now takes its rows regardless and the screen scrolls.
+const MIN_CHART: usize = 12;
+
+/// How the detail screen reports where you are in it, at a width that does
+/// not change with the numbers - the footer is measured before the body is
+/// built, so an indicator that grew by a character could change how many
+/// lines the hints wrap onto and leave the body sized for the wrong one.
+fn scroll_label(first: usize, last: usize, total: usize) -> String {
+    format!("rows {:>3}-{:>3} of {:>3}", first, last, total)
+}
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-const SERIES: &[char] = &['●', '▲', '■', '◆', '✚', '✦'];
+/// The hues sessions are drawn in, kept as numbers so a faded set can be
+/// mixed from the same six.
+const HUES: &[(u8, u8, u8)] = &[
+    (120, 200, 255),
+    (150, 230, 180),
+    (220, 170, 255),
+    (160, 190, 240),
+    (200, 220, 150),
+    (240, 180, 210),
+];
+
+/// The dark these widgets are drawn against - not the terminal's real
+/// background, which cannot be asked for, but the one the palette was chosen
+/// for, and what a trace is mixed toward when it is not the one selected.
+const BACKDROP: (u8, u8, u8) = (16, 22, 30);
+
+/// How far an unlooked-at trace is mixed toward the backdrop. Measured
+/// against the two things it sits between: at 0.60 a faded trace stays
+/// visibly ink rather than sinking into the axis furniture, and is far
+/// enough from its own full-strength hue to read as a different weight.
+const FADE: f64 = 0.60;
 
 #[derive(Clone, Default)]
 struct Session {
@@ -436,10 +472,25 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
-    let (mut selected, mut hide_idle, mut span_at) = (0usize, false, 0usize);
+    // Nothing selected until asked for, and no selection is the position
+    // above the first row and below the last, so walking off either end
+    // lands there and walking off it again comes in at the other. The chart
+    // then opens showing every session at equal weight, and focus is
+    // something you leave the way you entered it.
+    let (mut selected, mut hide_idle, mut span_at) =
+        (None::<usize>, false, 0usize);
+    let mut count = 0usize;
     let mut detail = false;
+    // How far down the detail screen we are. Clamped against the body every
+    // frame rather than when the key is pressed, because the body's length
+    // depends on the pane, which can change under us between frames.
+    let mut scroll = 0usize;
 
     loop {
+        // Read before the keys rather than after them, so a page key knows
+        // how big a page is on this pane.
+        let (w, h) = tc::size();
+        let page = h.saturating_sub(4).max(1);
         for key in keyboard.poll() {
             match key.as_str() {
                 "q" | "Q" => {
@@ -447,10 +498,69 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" | "k" | "K" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" => selected += 1,
-                "enter" | "i" | "I" => detail = !detail,
-                "esc" => detail = false,
+                // Up and down mean "move through what is in front of you"
+                // in both views: in the list that is the selection, on the
+                // detail screen it is the screen itself.
+                "up" | "k" | "K" => {
+                    if detail {
+                        scroll = scroll.saturating_sub(1);
+                    } else {
+                        selected = match selected {
+                            None => count.checked_sub(1),
+                            Some(0) => None,
+                            Some(at) => Some(at - 1),
+                        };
+                    }
+                }
+                "down" | "j" | "J" => {
+                    if detail {
+                        scroll = scroll.saturating_add(1);
+                    } else {
+                        selected = match selected {
+                            None if count > 0 => Some(0),
+                            None => None,
+                            Some(at) if at + 1 >= count => None,
+                            Some(at) => Some(at + 1),
+                        };
+                    }
+                }
+                // Right goes in and left comes back out, the way a column
+                // of panes works, so the hand does not have to learn a key
+                // for it. Enter and esc still do the same two things.
+                "right" | "enter" | "i" | "I" if !detail => {
+                    // Opening with nothing selected takes the first row
+                    // rather than doing nothing, which would be a key that
+                    // the footer offers and that does not answer.
+                    if selected.is_none() && count > 0 {
+                        selected = Some(0);
+                    }
+                    detail = selected.is_some();
+                    scroll = 0;
+                }
+                "left" | "esc" | "enter" | "i" | "I" if detail => {
+                    detail = false;
+                    scroll = 0;
+                }
+                // Stepping between connections without going back to the
+                // list. This was on left and right until those were given
+                // their directional meaning; it is worth keeping, because
+                // comparing two sockets is most of what the detail screen
+                // is for.
+                // Stays within the list rather than falling off it: the
+                // detail screen has to be showing something.
+                "n" | "N" if detail => {
+                    selected = selected.map(|at| (at + 1).min(count.saturating_sub(1)));
+                    scroll = 0;
+                }
+                "p" | "P" if detail => {
+                    selected = selected.map(|at| at.saturating_sub(1));
+                    scroll = 0;
+                }
+                "pgup" if detail => scroll = scroll.saturating_sub(page),
+                "pgdn" if detail => scroll = scroll.saturating_add(page),
+                "home" if detail => scroll = 0,
+                // Clamped to the end of the body when the frame is drawn.
+                "end" if detail => scroll = usize::MAX,
                 "o" | "O" => hide_idle = !hide_idle,
                 "w" | "W" => span_at = (span_at + 1) % windows.len(),
                 "r" | "R" => {
@@ -464,7 +574,6 @@ fn main() {
             }
         }
 
-        let (w, h) = tc::size();
         let guard = match state.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -475,43 +584,79 @@ fn main() {
             .filter(|r| !(hide_idle && r.lastrcv.unwrap_or(0.0) > IDLE_AFTER * 1000.0))
             .cloned()
             .collect();
-        if !shown.is_empty() && selected >= shown.len() {
-            selected = shown.len() - 1;
+        count = shown.len();
+        if let Some(at) = selected {
+            selected = if shown.is_empty() {
+                None
+            } else {
+                Some(at.min(shown.len() - 1))
+            };
+        }
+        if selected.is_none() {
+            detail = false;
         }
         let window = windows[span_at];
 
         // One connection in full, on its own screen. The list is for
         // noticing; this is for looking into, and the two want different
         // amounts of room for the same chart.
-        if detail && !shown.is_empty() {
-            let pick = selected.min(shown.len() - 1);
+        if let (true, Some(pick)) = (detail && !shown.is_empty(), selected) {
             // The footer is measured before the body is built, and the body
             // is told the height it actually has. Sizing the chart to the
             // whole pane and appending the hints afterwards pushed them off
             // the bottom of it - the keys out of this screen were the rows
             // being lost.
-            let hints: Vec<Vec<(&str, String)>> = vec![
-                vec![(p.dim.as_str(), "[esc] back".into())],
+            // Built twice: once to learn how many lines the hints wrap
+            // onto, and again with the real position once the body exists.
+            // `scroll_label` is a fixed width, so the second pass cannot
+            // wrap differently from the first and leave the body sized
+            // against a footer that is no longer there.
+            let detail_hints = |place: String| -> Vec<Vec<(&str, String)>> {
                 vec![
-                    (p.accent.as_str(), "[w]".into()),
-                    (p.dim.as_str(), format!(" {}", window_label(window))),
-                ],
-                vec![(p.dim.as_str(), "[r]efresh".into())],
-                vec![(p.dim.as_str(), "[q]uit".into())],
-            ];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|l| format!(" {}", l))
-                .collect();
+                    vec![
+                        (p.accent.as_str(), "←".into()),
+                        (p.dim.as_str(), "/[esc] back".into()),
+                    ],
+                    vec![
+                        (p.accent.as_str(), "↑↓".into()),
+                        (p.dim.as_str(), " scroll".into()),
+                    ],
+                    vec![(p.dim.as_str(), "[n]ext [p]rev".into())],
+                    vec![
+                        (p.accent.as_str(), "[w]".into()),
+                        (p.dim.as_str(), format!(" {}", window_label(window))),
+                    ],
+                    vec![(p.dim.as_str(), "[r]efresh".into())],
+                    vec![(p.dim.as_str(), "[q]uit".into())],
+                    vec![(p.dim.as_str(), place)],
+                ]
+            };
+            let pack = |hints: &[Vec<(&str, String)>]| -> Vec<String> {
+                tc::pack_hints(hints, w - 2, "  ")
+                    .into_iter()
+                    .map(|l| format!(" {}", l))
+                    .collect()
+            };
+            let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
             let room = h.saturating_sub(foot.len() + 1).max(1);
-            let mut body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
+            let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
             drop(guard);
-            body.truncate(room);
-            while body.len() < room {
-                body.push(String::new());
+            // The body is as tall as it needs to be and the pane shows a
+            // window onto it, rather than the body being cut to the pane
+            // and the remainder going unmentioned.
+            let furthest = body.len().saturating_sub(room);
+            scroll = scroll.min(furthest);
+            let last = (scroll + room).min(body.len());
+            let mut shown_body: Vec<String> = body[scroll..last].to_vec();
+            while shown_body.len() < room {
+                shown_body.push(String::new());
             }
-            body.extend(foot);
-            tc::draw(&body, w, h);
+            shown_body.extend(pack(&detail_hints(scroll_label(
+                scroll + 1,
+                last,
+                body.len(),
+            ))));
+            tc::draw(&shown_body, w, h);
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -552,8 +697,31 @@ fn main() {
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
             let room = h.saturating_sub(rows.len() + 4);
-            if room >= 5 {
-                rows.extend(graph(&shown, &guard.history, w, room, 0, window, refresh, &p));
+            if room < 5 {
+                // Say so rather than leaving a gap: a chart that is missing
+                // for want of rows looks exactly like one missing for want
+                // of data, and only one of those is the reader's to fix.
+                if room >= 1 {
+                    rows.push(tc::seg(
+                        &[(
+                            p.dim.as_str(),
+                            format!("  chart needs {} more rows", 5 - room),
+                        )],
+                        w - 1,
+                    ));
+                }
+            } else {
+                rows.extend(graph(
+                    &shown,
+                    &guard.history,
+                    w,
+                    room,
+                    0,
+                    selected,
+                    window,
+                    refresh,
+                    &p,
+                ));
                 rows.push(tc::seg(
                     &[
                         (p.dim.as_str(), " ".repeat(7)),
@@ -575,7 +743,10 @@ fn main() {
 
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![(p.dim.as_str(), "[↵] open".into())],
+            vec![
+                (p.accent.as_str(), "→".into()),
+                (p.dim.as_str(), "/[↵] open".into()),
+            ],
             vec![
                 (p.accent.as_str(), "[w]".into()),
                 (p.dim.as_str(), format!(" {}", window_label(window))),
@@ -618,7 +789,13 @@ fn plotted_span(
     capped as f64 * refresh
 }
 
-fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette) -> Vec<String> {
+fn table(
+    rows: &[Session],
+    state: &State,
+    w: usize,
+    selected: Option<usize>,
+    p: &Palette,
+) -> Vec<String> {
     // The Python's header, column for column: the two have to sit side by
     // side in a wall and read as the same widget.
     let wide = w >= 74;
@@ -626,11 +803,16 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
     // land the NOW column under its heading. Three and twenty also add up to
     // a plausible-looking row, and put every number three cells right of the
     // word above it.
-    let name_w = 18usize;
+    // Wide enough for the peer's own port, because that is the only field
+    // that differs between sockets from one machine to one service: four
+    // browser tabs against the same dev server share an address and a local
+    // port and are told apart by nothing else. 21 fits the longest IPv4
+    // address and port; the wider pane spends five more on the login.
+    let name_w = if wide { 26usize } else { 21usize };
     let mut out = vec![tc::seg(
         &[
             (p.dim.as_str(), "  PEER".into()),
-            (p.dim.as_str(), " ".repeat(14)),
+            (p.dim.as_str(), " ".repeat(name_w - 4)),
             (p.dim.as_str(), "    NOW   FLOOR  JITTER    LOSS".into()),
             (p.dim.as_str(), if wide { "  ACHIEVED".into() } else { String::new() }),
             (p.dim.as_str(), if wide { "   IDLE".into() } else { String::new() }),
@@ -638,10 +820,10 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
         w - 1,
     )];
     for (i, row) in rows.iter().enumerate() {
-        let here = i == selected;
+        let here = selected == Some(i);
         let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
         let hue = &p.hues[i % p.hues.len()];
-        let glyph = SERIES[i % SERIES.len()];
+
         // One login, and only where there is room for it: the address is
         // what identifies the session, the name is a courtesy.
         let who = state
@@ -651,9 +833,9 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
             .map(|(user, _tty)| user.clone())
             .unwrap_or_default();
         let label = if who.is_empty() || !wide {
-            row.ip.clone()
+            row.peer.clone()
         } else {
-            format!("{} {}", row.ip, who)
+            format!("{} {}", row.peer, who)
         };
         let loss = row.recent_loss;
         let tone = format!("{}{}", tint, colour_for(quality(row), loss, p));
@@ -676,7 +858,12 @@ fn table(rows: &[Session], state: &State, w: usize, selected: usize, p: &Palette
             _ => format!("{:>width$}", "--", width = width),
         };
         let mut line = vec![
-            (name_c.as_str(), format!("{} ", glyph)),
+            // A colour chip rather than a shape. Six shapes told six
+            // sessions apart no better than six hues did, and a seventh
+            // session repeated the first one's shape - so the chip carries
+            // the hue and the name carries the selection.
+            (name_c.as_str(), "▐".to_string()),
+            (label_c.as_str(), " ".to_string()),
             (label_c.as_str(), tc::pad(&label, name_w)),
             (tone.as_str(), cell(row.rtt, 7)),
             (dim_c.as_str(), cell(row.floor, 8)),
@@ -724,12 +911,13 @@ fn detail_view(
     let mut rows = vec![tc::title("connection", w, &p.link)];
     rows.push(tc::seg(
         &[
-            (
-                p.hues[idx % p.hues.len()].as_str(),
-                format!(" {} ", SERIES[idx % SERIES.len()]),
-            ),
-            (p.txt.as_str(), row.ip.clone()),
-            (p.dim.as_str(), format!("  · port {}", row.port)),
+            (p.hues[idx % p.hues.len()].as_str(), " ▐ ".to_string()),
+            (p.txt.as_str(), row.peer.clone()),
+            // Their port identifies the socket; ours identifies the service
+            // it reached. Both, because the list is keyed on the first and
+            // the question "what is this connected to" is answered by the
+            // second.
+            (p.dim.as_str(), format!("  · to port {}", row.port)),
             (
                 p.dim.as_str(),
                 users.first().map_or(String::new(), |(u, _)| format!("  {}", u)),
@@ -882,14 +1070,20 @@ fn detail_view(
     rows.push(String::new());
 
     let one = [row.clone()];
-    let room = h.saturating_sub(rows.len() + 4);
-    if room >= 5 {
+    // Not `if room >= 5`: the chart takes MIN_CHART rows even when the
+    // fields have already spent the pane, and the caller scrolls to reach
+    // what will not fit. A chart quietly missing reads as missing data.
+    let room = h.saturating_sub(rows.len() + 4).max(MIN_CHART);
+    {
         rows.extend(graph(
             &one,
             &state.history,
             w,
             room,
             idx,
+            // One session on its own screen: there is nothing to push back,
+            // so it is drawn at full strength like everything else.
+            None,
             window,
             refresh,
             p,
@@ -996,21 +1190,36 @@ fn braille_canvas(
 
 /// Lay the canvases over one another, cell by cell.
 ///
-/// The dots are merged so that no sample is lost where two sessions cross.
-/// A cell can carry only one colour, and it goes to whichever session comes
-/// later in the list above: which trace is hidden is then something the
-/// reader can work out from that list rather than something the data decides
-/// afresh every frame.
+/// A braille cell can hold the dots of two traces but only one colour, and
+/// there is no honest way to show both: whichever colour the cell takes, the
+/// other session's samples are drawn in a hue that is not theirs. This used
+/// to merge the dots and give the cell to whichever session came later in
+/// the list, and on latency's chart - the same code - that hid a whole host
+/// behind another one eleven milliseconds away, drawn end to end in a colour
+/// it did not own.
+///
+/// So a cell belongs to exactly one trace and shows only that trace's dots.
+/// Where several want it, ownership advances with the column, which makes a
+/// contested stretch read as interleaved dashed lines - each dot its own
+/// colour - rather than one solid line belonging to nobody. Sessions whose
+/// round trips never meet are unaffected and stay solid.
 fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
     let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
-    for (colour, canvas) in layers {
-        for (y, line) in canvas.iter().enumerate().take(rows) {
-            for (x, mask) in line.iter().enumerate().take(cols) {
-                if *mask != 0 {
-                    cells[y][x].0 = colour.clone();
-                    cells[y][x].1 |= mask;
-                }
+    for y in 0..rows {
+        for x in 0..cols {
+            let dots = |canvas: &Vec<Vec<u8>>| {
+                canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
+            };
+            let claims: Vec<&(String, Vec<Vec<u8>>)> =
+                layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
+            if claims.is_empty() {
+                continue;
             }
+            // Deterministic, and a function of the column rather than of
+            // which sample happened to be drawn last, so the pattern holds
+            // still between frames instead of flickering.
+            let (colour, canvas) = claims[x % claims.len()];
+            cells[y][x] = (colour.clone(), dots(canvas));
         }
     }
     cells
@@ -1026,6 +1235,7 @@ fn graph(
     // in the list: opening the ▲ row and finding a ● chart reads as a
     // different connection.
     start_at: usize,
+    focus: Option<usize>,
     window: f64,
     refresh: f64,
     p: &Palette,
@@ -1072,19 +1282,37 @@ fn graph(
     // the same number plotted_span turns into the "N ago" beneath the chart:
     // one quantity, so the label and the left edge state the same thing.
     let slots = series.iter().map(|(_, v)| v.len()).max().unwrap_or(1);
-    // One canvas per session rather than one shared grid: the glyphs used to
-    // tell the traces apart, and with braille the hue is all that is left to
-    // do it with, so each series has to keep its own until the last moment.
-    let layers: Vec<(String, Vec<Vec<u8>>)> = series
-        .iter()
-        .map(|(idx, values)| {
-            (
-                p.hues[idx % p.hues.len()].clone(),
-                braille_canvas(values, llo, lhi, gw, gh, slots),
-            )
-        })
-        .collect();
-    let cells = overlay(&layers, gw, gh);
+    // One canvas per session rather than one shared grid: a braille cell can
+    // carry the dots of two traces but only one hue, so each series has to
+    // keep its own until the moment they are laid over one another.
+    // The selected session is laid down last and at full strength while the
+    // rest are mixed toward the backdrop, so the trace being looked at wins
+    // any cell it shares. With nothing selected every trace is equal, which
+    // is the chart this widget has always drawn.
+    let mut layers: Vec<(String, Vec<Vec<u8>>)> = Vec::with_capacity(series.len());
+    let mut front: Option<(String, Vec<Vec<u8>>)> = None;
+    for (idx, values) in &series {
+        let canvas = braille_canvas(values, llo, lhi, gw, gh, slots);
+        let hue = p.hues[idx % p.hues.len()].clone();
+        match focus {
+            None => layers.push((hue, canvas)),
+            Some(at) if at == *idx => front = Some((hue, canvas)),
+            Some(_) => layers.push((p.faded[idx % p.faded.len()].clone(), canvas)),
+        }
+    }
+    let mut cells = overlay(&layers, gw, gh);
+    // The focused trace takes its cells outright rather than being merged
+    // into them: a sample drawn in a colour that is not its own is a number
+    // on screen that is not real.
+    if let Some((hue, canvas)) = front {
+        for (y, line) in canvas.iter().enumerate().take(gh) {
+            for (x, mask) in line.iter().enumerate().take(gw) {
+                if *mask != 0 {
+                    cells[y][x] = (hue.clone(), *mask);
+                }
+            }
+        }
+    }
 
     let mut out = Vec::new();
     for (y, line) in cells.iter().enumerate() {
@@ -1170,6 +1398,9 @@ struct Palette {
     accent: String,
     link: String,
     hues: Vec<String>,
+    /// The same six, mixed toward the backdrop, for traces that are not the
+    /// one selected.
+    faded: Vec<String>,
 }
 
 fn palette() -> Palette {
@@ -1182,14 +1413,8 @@ fn palette() -> Palette {
         txt: tc::rgb(225, 235, 245),
         accent: tc::rgb(150, 210, 255),
         link: tc::rgb(140, 200, 255),
-        hues: vec![
-            tc::rgb(120, 200, 255),
-            tc::rgb(150, 230, 180),
-            tc::rgb(220, 170, 255),
-            tc::rgb(160, 190, 240),
-            tc::rgb(200, 220, 150),
-            tc::rgb(240, 180, 210),
-        ],
+        hues: HUES.iter().map(|c| tc::rgb(c.0, c.1, c.2)).collect(),
+        faded: HUES.iter().map(|c| tc::mix(*c, BACKDROP, FADE)).collect(),
     }
 }
 
@@ -1302,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_matches_the_python_cell_for_cell() {
+    fn a_row_is_laid_out_cell_for_cell() {
         // Captured from link.py in an 85-column pty, with the address
         // replaced by one from RFC 5737's documentation range - it is the
         // same width, so the alignment this exists to check is unchanged,
@@ -1311,7 +1536,8 @@ mod tests {
         // nothing inside this file can catch a drift between them - only
         // the other implementation can. This port had three cells of it,
         // and every half looked plausible on its own.
-        let want = "● 203.0.113.221 will   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
+        let want =
+            "▐ 203.0.113.221:22 williamli   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
         let row = Session {
             peer: "203.0.113.221:22".into(),
             ip: "203.0.113.221".into(),
@@ -1335,7 +1561,7 @@ mod tests {
             err: String::new(),
         };
         // Nothing selected, so no row carries the highlight.
-        let drawn = table(&[row], &state, 86, 9, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette());
         assert_eq!(plain(&drawn[1]), want);
     }
 
@@ -1356,10 +1582,10 @@ mod tests {
             history: HashMap::new(),
             err: String::new(),
         };
-        let drawn = table(&[row], &state, 86, 9, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette());
         assert_eq!(
             plain(&drawn[1]),
-            "● 203.0.113.9            --      --      --     --        --     --"
+            "▐ 203.0.113.9:22                 --      --      --     --        --     --"
         );
     }
 
@@ -1423,21 +1649,42 @@ mod tests {
     }
 
     #[test]
-    fn two_traces_in_one_cell_keep_both_their_dots() {
-        let top = braille_canvas(&[10.0, 10.0], 0.0, 1.0, 1, 1, 2);
-        let bottom = braille_canvas(&[1.0, 1.0], 0.0, 1.0, 1, 1, 2);
-        assert!(top[0][0] != 0 && bottom[0][0] != 0);
+    fn the_scroll_label_keeps_its_width() {
+        // The detail footer is measured before the body is built, so this
+        // string has to be one width whatever the numbers are. A wider one
+        // could wrap the hints onto an extra line and leave the body sized
+        // against a footer that is no longer the footer being drawn.
+        let widths: Vec<usize> = [(1, 28, 35), (9, 36, 350), (100, 128, 999)]
+            .into_iter()
+            .map(|(a, b, c)| scroll_label(a, b, c).chars().count())
+            .collect();
+        assert!(widths.windows(2).all(|p| p[0] == p[1]), "{:?}", widths);
+    }
+
+    #[test]
+    fn a_contested_cell_belongs_to_one_trace_and_shares_the_run() {
+        // Two flat traces contesting all four cells. This used to assert the
+        // union of their dots in the later session's colour; that is the bug
+        // the latency chart surfaced, where two hosts a few percent apart
+        // contest every cell and one was drawn wholly in the other's hue.
+        let top = braille_canvas(&[10.0; 8], 0.0, 1.0, 4, 1, 8);
+        let bottom = braille_canvas(&[1.0; 8], 0.0, 1.0, 4, 1, 8);
+        assert!(top[0][0] != 0 && bottom[0][0] != 0, "both must contest");
         let cells = overlay(
             &[
                 ("first".to_string(), top.clone()),
                 ("second".to_string(), bottom.clone()),
             ],
-            1,
+            4,
             1,
         );
-        assert_eq!(cells[0][0].1, top[0][0] | bottom[0][0]);
-        // Only the hue has to be given up, and it goes to the lower row of
-        // the list, which is the rule the reader can apply from outside.
-        assert_eq!(cells[0][0].0, "second");
+        for x in 0..4 {
+            let (whose, mask) = &cells[0][x];
+            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
+            assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
+            assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
+        }
+        let owners: Vec<&str> = (0..4).map(|x| cells[0][x].0.as_str()).collect();
+        assert_eq!(owners, vec!["first", "second", "first", "second"]);
     }
 }

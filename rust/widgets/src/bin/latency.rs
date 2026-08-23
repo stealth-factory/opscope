@@ -20,6 +20,38 @@
 //! arrives, so the numbers are what ping measured rather than anything this
 //! timed itself.
 
+/// The hues targets are drawn in, kept as numbers rather than escapes so
+/// that a faded set can be mixed from the same nine.
+const HUES: &[(u8, u8, u8)] = &[
+    (90, 220, 255),
+    (255, 170, 80),
+    (140, 255, 160),
+    (230, 140, 255),
+    (255, 110, 130),
+    (255, 230, 110),
+    (120, 160, 255),
+    (255, 140, 200),
+    (150, 255, 240),
+];
+
+/// The dark these widgets are drawn against.
+///
+/// Not the terminal's real background - that cannot be asked for - but the
+/// one the palette was chosen for, and what a trace is mixed toward when it
+/// is not the one being looked at.
+const BACKDROP: (u8, u8, u8) = (16, 22, 30);
+
+/// How far an unlooked-at trace is mixed toward the backdrop.
+///
+/// Measured rather than chosen by eye, against the two things it sits
+/// between. At 0.60 a faded trace reads 2.04 against the backdrop where the
+/// axis furniture reads 1.55, so it stays visibly ink rather than sinking
+/// into the chrome; and it is 3.29 from its own full-strength hue, clearing
+/// the 3.0 that separates two graphical tones. Fading further wins
+/// separation and loses the trace into the grid - by 0.65 it is dimmer than
+/// the axis it is drawn over.
+const FADE: f64 = 0.60;
+
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -488,21 +520,37 @@ fn braille_canvas(
 
 /// Lay the canvases over one another, cell by cell.
 ///
-/// The dots are merged so that no sample is lost where two targets cross.
-/// A cell can carry only one colour, and it goes to whichever series comes
-/// later in the table above: which trace is hidden is then something the
-/// reader can work out from that list rather than something the data decides
-/// afresh every frame.
+/// A braille cell can hold the dots of two traces but only one colour, and
+/// there is no honest way to show both: whichever colour the cell takes, the
+/// other trace's samples are drawn in a hue that is not theirs. That is a
+/// number on screen that is not real, which is the one thing this collection
+/// does not do - and it is not hypothetical, it hid a target completely. Two
+/// hosts eleven milliseconds apart at 130ms sit 0.036 of a decade apart where
+/// a dot row is 0.065, so they contest nearly every cell they occupy, and
+/// merging painted the whole of one of them in the other's colour.
+///
+/// So a cell belongs to exactly one trace and shows only that trace's dots.
+/// Where several want it, ownership advances with the column, which makes a
+/// contested stretch read as two interleaved dashed lines - each dot its own
+/// colour - rather than as one solid line belonging to nobody. Traces that
+/// never meet are unaffected and stay solid.
 fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
     let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
-    for (colour, canvas) in layers {
-        for (y, line) in canvas.iter().enumerate().take(rows) {
-            for (x, mask) in line.iter().enumerate().take(cols) {
-                if *mask != 0 {
-                    cells[y][x].0 = colour.clone();
-                    cells[y][x].1 |= mask;
-                }
+    for y in 0..rows {
+        for x in 0..cols {
+            let dots = |canvas: &Vec<Vec<u8>>| {
+                canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
+            };
+            let claims: Vec<&(String, Vec<Vec<u8>>)> =
+                layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
+            if claims.is_empty() {
+                continue;
             }
+            // Deterministic, and a function of the column rather than of
+            // which sample happened to be drawn last, so the pattern holds
+            // still between frames instead of flickering.
+            let (colour, canvas) = claims[x % claims.len()];
+            cells[y][x] = (colour.clone(), dots(canvas));
         }
     }
     cells
@@ -523,6 +571,7 @@ fn graph(
     h: usize,
     bucket: f64,
     how: &str,
+    focus: Option<usize>,
     p: &Palette,
 ) -> (Vec<String>, f64) {
     let gw = w.saturating_sub(9).max(10);
@@ -567,19 +616,54 @@ fn graph(
     let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
     let (llo, lhi) = (lo.log10(), hi.log10());
 
-    // One canvas per target rather than one shared grid: the glyphs used to
-    // tell the traces apart, and with braille the hue is all that is left to
-    // do it with, so each series has to keep its own until the last moment.
-    let layers: Vec<(String, Vec<Vec<u8>>)> = series
-        .iter()
-        .map(|(idx, values)| {
-            (
-                p.hues[idx % p.hues.len()].clone(),
-                braille_canvas(values, llo, lhi, gw, gh),
-            )
-        })
-        .collect();
-    let cells = overlay(&layers, gw, gh);
+    // One canvas per target rather than one shared grid: a braille cell can
+    // carry the dots of two traces but only one hue, so each series has to
+    // keep its own until the moment they are laid over one another.
+    //
+    // The selected target is laid down last, so where two traces share a
+    // cell the colour goes to the one being looked at rather than to
+    // whichever happens to sit lower in the table. The others are mixed
+    // most of the way to the backdrop - still drawn, because a chart that
+    // dropped every other target the moment you selected one would be
+    // answering a different question, but no longer competing.
+    let mut layers: Vec<(String, Vec<Vec<u8>>)> = Vec::with_capacity(series.len());
+    let mut front: Option<(String, Vec<Vec<u8>>)> = None;
+    for (idx, values) in &series {
+        let canvas = braille_canvas(values, llo, lhi, gw, gh);
+        let hue = p.hues[idx % p.hues.len()].clone();
+        match focus {
+            // Nothing selected: every trace at full strength, in table
+            // order, which is the chart this widget has always drawn.
+            None => layers.push((hue, canvas)),
+            Some(at) if at == *idx => front = Some((hue, canvas)),
+            Some(_) => layers.push((p.faded[idx % p.faded.len()].clone(), canvas)),
+        }
+    }
+    let mut cells = overlay(&layers, gw, gh);
+    // The focused trace takes its cells outright rather than being merged
+    // into them.
+    //
+    // `overlay` unions the dots and gives the cell to the last writer, which
+    // is right when every trace is equal: no sample is lost and the colour
+    // follows the table's order. Under focus it is a lie. Two targets a few
+    // percent apart share a cell constantly - 138ms and 127ms sit 0.036 of a
+    // decade apart where a dot row is 0.065 - and merging drew the other
+    // one's dots in the focused colour, so a flat trace came out two rows
+    // thick and the second row belonged to a different host.
+    //
+    // Replacing the cell hides the faded trace where the two meet. That is
+    // the right way round: the faded one is the one being pushed back, and
+    // it stays legible either side, whereas a sample drawn in a colour that
+    // is not its own is a number on screen that is not real.
+    if let Some((hue, canvas)) = front {
+        for (y, line) in canvas.iter().enumerate().take(gh) {
+            for (x, mask) in line.iter().enumerate().take(gw) {
+                if *mask != 0 {
+                    cells[y][x] = (hue.clone(), *mask);
+                }
+            }
+        }
+    }
 
     let mut out = Vec::new();
     for (y, line) in cells.iter().enumerate() {
@@ -666,6 +750,10 @@ fn main() {
         })
         .collect();
     let labels: Vec<String> = targets.iter().map(|t| t.label.clone()).collect();
+    // Fixed for the life of the run: one poll thread per host, and the
+    // list never grows or shrinks, so the cursor can be reasoned about
+    // without holding the lock to count rows.
+    let count = hosts.len();
     let shared = Arc::new(Mutex::new(targets));
     let settings = Arc::new(Mutex::new(live));
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -683,6 +771,13 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
+    // Which target the chart brings to the front, if any. Starts at none,
+    // so the chart opens saying what it has always said - every target at
+    // equal weight - and focus is something you ask for rather than a state
+    // you have to escape from. Clamped against the list when the frame is
+    // drawn rather than when the key is pressed, because targets are only
+    // known to the poll threads.
+    let mut selected: Option<usize> = None;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -691,6 +786,28 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
+                // No selection is the position above the first row and
+                // below the last one, so walking off either end lands there
+                // and walking off it again comes in at the other. Focus is
+                // then something you can leave the way you entered it,
+                // rather than a state with only one door.
+                "up" | "k" | "K" => {
+                    selected = match selected {
+                        None => count.checked_sub(1),
+                        Some(0) => None,
+                        Some(at) => Some(at - 1),
+                    }
+                }
+                "down" | "j" | "J" => {
+                    selected = match selected {
+                        None if count > 0 => Some(0),
+                        None => None,
+                        Some(at) if at + 1 >= count => None,
+                        Some(at) => Some(at + 1),
+                    }
+                }
+                // Back to every target drawn alike.
+                "esc" => selected = None,
                 "i" | "I" => {
                     if let Ok(mut s) = settings.lock() {
                         s.interval = cycle(INTERVAL_CHOICES, s.interval);
@@ -719,6 +836,13 @@ fn main() {
             Ok(g) => g.clone(),
             Err(_) => return,
         };
+        if let Some(at) = selected {
+            selected = if snapshot.is_empty() {
+                None
+            } else {
+                Some(at.min(snapshot.len() - 1))
+            };
+        }
         let (interval, per_column, how) = match settings.lock() {
             Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone()),
             Err(_) => return,
@@ -743,10 +867,6 @@ fn main() {
                         format!(" · {} of {}s blocks", how, bucket)
                     },
                 ),
-                (
-                    p.grid.as_str(),
-                    "   [i]nterval [g]roup [c]olumns [q]uit".into(),
-                ),
             ],
             w - 1,
         ));
@@ -761,7 +881,7 @@ fn main() {
             &[(
                 p.lbl.as_str(),
                 format!(
-                    " {} {:>7} {:>7}{} {:>7} {:>7} {:>7} {:>6}",
+                    "  {} {:>7} {:>7}{} {:>7} {:>7} {:>7} {:>6}",
                     tc::pad("HOST", name_w),
                     "NOW",
                     "AVG",
@@ -776,7 +896,12 @@ fn main() {
         ));
         for (i, t) in snapshot.iter().enumerate() {
             let st = t.stats();
-            let hue = &p.hues[i % p.hues.len()];
+            let here = selected == Some(i);
+            // The selected row is tinted rather than marked, so the thing
+            // that says "this one" in the table is the same thing that says
+            // it in the chart: one target at full strength, the rest behind.
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let raw_hue = p.hues[i % p.hues.len()].clone();
             let loss_c = if st.loss == 0.0 {
                 &p.ok
             } else if st.loss < 5.0 {
@@ -784,38 +909,86 @@ fn main() {
             } else {
                 &p.bad
             };
-            rows.push(tc::seg(
-                &[
-                    // The dot rides in the colour rather than the text, so
-                    // it costs no cell - which is how latency.py draws it,
-                    // and the two have to line up column for column when
-                    // they sit side by side.
-                    (
-                        &format!(
-                            "{}{}",
-                            if t.alive { &p.ok } else { &p.bad },
-                            if t.alive { '●' } else { '○' }
-                        ),
-                        " ".to_string(),
-                    ),
-                    (hue.as_str(), tc::pad(&t.label, name_w)),
-                    (p.txt.as_str(), format!(" {}", fmt_ms(st.now))),
-                    (p.txt.as_str(), format!(" {}", fmt_ms(st.avg))),
-                    (
-                        p.ok.as_str(),
-                        if show_med {
-                            format!(" {}", fmt_ms(st.med))
-                        } else {
-                            String::new()
-                        },
-                    ),
-                    (p.dim.as_str(), format!(" {}", fmt_ms(st.min))),
-                    (p.dim.as_str(), format!(" {}", fmt_ms(st.max))),
-                    (p.txt.as_str(), format!(" {}", fmt_ms(st.jit))),
-                    (loss_c.as_str(), format!(" {:>5.1}%", st.loss)),
-                ],
-                w - 1,
-            ));
+            // A tint is a background escape and has to come before every
+            // foreground on the row, or the colour that follows it resets
+            // the background and the highlight stops halfway across.
+            let tinted = |colour: &str| format!("{}{}", tint, colour);
+            // MIN and MAX are drawn in `dim`, which does not clear AA on the
+            // tint. On the selected row they get the lighter one.
+            let dim = if here { &p.dim_lit } else { &p.dim };
+            // Owned colours rather than borrowed: the row is assembled
+            // before it is measured, so a `&format!(...)` temporary would not
+            // outlive the vector it was put in.
+            let mut cells: Vec<(String, String)> = vec![
+                // No status dot. latency.py draws ● or ○ here, but it says
+                // exactly what NOW says one column to the right and at the
+                // same instant - a target that is not answering has no round
+                // trip to print - so it was six glyphs of permanent green
+                // reporting something already on screen. Losing it also lets
+                // the columns sit under their own headings, which the dot's
+                // uncounted cell prevented.
+                //
+                // The cell the header spends on a leading space is the marker
+                // column. A tint alone says "this row is not like the others"
+                // without saying which way, and it is gone entirely on a
+                // terminal that will not paint one - so the mark is a solid
+                // bar rather than a glyph, because the tint cannot be made
+                // louder: (28,44,62) is already as bright as it goes before
+                // `bad` red drops under AA on it, measured at 4.80 against a
+                // floor of 4.5.
+                //
+                // ▐ is East Asian Neutral, so it is one cell wherever it
+                // renders. ▌ and █ read better but are Ambiguous, and this
+                // row is otherwise all ASCII - one Ambiguous cell would shift
+                // the selected row and nothing else.
+                (tinted(&raw_hue), "▐".to_string()),
+                // The chip is a colour, not a letter, and reads as part of
+                // the name when it touches it. The header spends the same
+                // cell so the columns still sit under their own headings.
+                (tint.clone(), " ".to_string()),
+                // Grey until this is the row being looked at, then white -
+                // which is how link tells its selected session apart, and
+                // the reason its list reads at a glance. The hue cannot do
+                // that job: fading a hue far enough to be a contrast takes
+                // it under AA long before it is a difference the eye
+                // catches, measured at 3.86 by a fade of 0.30 and only 1.73
+                // away from the full colour. So the hue moves to the chip,
+                // which is what link puts its glyph in, and the name is free
+                // to swing between two colours that are both readable.
+                (
+                    tinted(if here { &p.txt } else { &p.dim_lit }),
+                    tc::pad(&t.label, name_w),
+                ),
+                // Red when there is no round trip to report, which is the
+                // whole of what the status dot used to say.
+                (
+                    tinted(if st.now.is_some() { &p.txt } else { &p.bad }),
+                    format!(" {}", fmt_ms(st.now)),
+                ),
+                (tinted(&p.txt), format!(" {}", fmt_ms(st.avg))),
+                (
+                    tinted(&p.ok),
+                    if show_med {
+                        format!(" {}", fmt_ms(st.med))
+                    } else {
+                        String::new()
+                    },
+                ),
+                (tinted(dim), format!(" {}", fmt_ms(st.min))),
+                (tinted(dim), format!(" {}", fmt_ms(st.max))),
+                (tinted(&p.txt), format!(" {}", fmt_ms(st.jit))),
+                (tinted(loss_c), format!(" {:>5.1}%", st.loss)),
+            ];
+            // Carry the tint to the edge. Left ragged it stops wherever the
+            // last number happens to end, and a highlight that stops short
+            // reads as a smudge rather than as a bar across the row.
+            if here {
+                let used: usize = cells.iter().map(|(_, t)| t.chars().count()).sum();
+                cells.push((tint.clone(), " ".repeat((w - 1).saturating_sub(used))));
+            }
+            let parts: Vec<(&str, String)> =
+                cells.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            rows.push(tc::seg(&parts, w - 1));
             if wide && !t.samples.is_empty() {
                 let mut line: Vec<(&str, String)> = vec![(p.dim.as_str(), "   ".into())];
                 let spark = sparkline(&t.samples, w.saturating_sub(6), &p);
@@ -827,11 +1000,39 @@ fn main() {
         }
         rows.push(String::new());
 
+        // The keys live along the bottom, so they are measured before the
+        // chart and the log are sized and the rows they occupy are taken out
+        // of what is left. Sizing the body to the whole pane and appending
+        // them afterwards is how a footer ends up pushed off the bottom of
+        // the screen it documents. `pack_hints` wraps without splitting one,
+        // because half a hint teaches a key that does not exist.
+        let mut hints: Vec<Vec<(&str, String)>> = vec![vec![
+            (p.head.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " focus".into()),
+        ]];
+        // Offered only once there is a selection to clear. An empty hint
+        // would still cost `pack_hints` a separator and leave a gap in the
+        // footer where a key used to be.
+        if selected.is_some() {
+            hints.push(vec![(p.dim.as_str(), "[esc] clear focus".into())]);
+        }
+        hints.extend([
+            vec![(p.dim.as_str(), "[i]nterval".into())],
+            vec![(p.dim.as_str(), "[g]roup".into())],
+            vec![(p.dim.as_str(), "[c]olumns".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ]);
+        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+            .into_iter()
+            .map(|l| format!(" {}", l))
+            .collect();
+        let body_h = h.saturating_sub(foot.len());
+
         // The log only earns its space on a tall pane: on a short one the
         // chart is the thing worth keeping.
-        let log_h = if h.saturating_sub(rows.len()) > 20 { 7 } else { 0 };
-        let gh = h.saturating_sub(rows.len() + log_h + 4).max(4);
-        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, &p);
+        let log_h = if body_h.saturating_sub(rows.len()) > 20 { 7 } else { 0 };
+        let gh = body_h.saturating_sub(rows.len() + log_h + 4).max(4);
+        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p);
         let drawn = chart.len();
         rows.extend(chart);
         if drawn > 1 {
@@ -893,6 +1094,11 @@ fn main() {
             }
         }
 
+        while rows.len() < body_h {
+            rows.push(String::new());
+        }
+        rows.truncate(body_h);
+        rows.extend(foot);
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -967,8 +1173,16 @@ struct Palette {
     grid: String,
     txt: String,
     lbl: String,
+    /// The readable dim, used wherever `dim` would fail: on the selected
+    /// row's tint, where (70,100,120) measures 2.27 against AA's 4.5, and
+    /// for every host name, which is grey until its row is the one selected.
+    /// This clears AA on the tint at 4.83 and on the backdrop at 6.18.
+    dim_lit: String,
     head: String,
     hues: Vec<String>,
+    /// The same nine, mixed toward the backdrop, for traces that are not
+    /// the one selected.
+    faded: Vec<String>,
 }
 
 fn palette() -> Palette {
@@ -980,21 +1194,13 @@ fn palette() -> Palette {
         grid: tc::rgb(38, 58, 74),
         txt: tc::rgb(215, 235, 250),
         lbl: tc::rgb(120, 170, 200),
+        dim_lit: tc::rgb(120, 155, 180),
         head: tc::rgb(90, 220, 255),
         // latency.py's own nine, not the six the other widgets share: the
         // traces are told apart by hue alone now that the glyphs are gone,
         // so more targets than six needs more than six colours.
-        hues: vec![
-            tc::rgb(90, 220, 255),
-            tc::rgb(255, 170, 80),
-            tc::rgb(140, 255, 160),
-            tc::rgb(230, 140, 255),
-            tc::rgb(255, 110, 130),
-            tc::rgb(255, 230, 110),
-            tc::rgb(120, 160, 255),
-            tc::rgb(255, 140, 200),
-            tc::rgb(150, 255, 240),
-        ],
+        hues: HUES.iter().map(|c| tc::rgb(c.0, c.1, c.2)).collect(),
+        faded: HUES.iter().map(|c| tc::mix(*c, BACKDROP, FADE)).collect(),
     }
 }
 
@@ -1166,21 +1372,37 @@ mod tests {
     }
 
     #[test]
-    fn two_traces_in_one_cell_keep_both_their_dots() {
-        let top = braille_canvas(&[Some(10.0), Some(10.0)], 0.0, 1.0, 1, 1);
-        let bottom = braille_canvas(&[Some(1.0), Some(1.0)], 0.0, 1.0, 1, 1);
-        assert!(top[0][0] != 0 && bottom[0][0] != 0);
+    fn a_contested_cell_belongs_to_one_trace_and_shares_the_run() {
+        // Two flat traces, one at the top of the decade and one at the
+        // bottom, both drawn across all four cells. This used to assert the
+        // union of their dots in the later trace's colour, and that was the
+        // bug: on a real chart two hosts a few percent apart contest every
+        // cell, so one of them was drawn entirely in the other's hue and
+        // vanished from the chart as a distinct line.
+        let high = [Some(10.0); 8];
+        let low = [Some(1.0); 8];
+        let top = braille_canvas(&high, 0.0, 1.0, 4, 1);
+        let bottom = braille_canvas(&low, 0.0, 1.0, 4, 1);
+        assert!(top[0][0] != 0 && bottom[0][0] != 0, "both must contest");
         let cells = overlay(
             &[
                 ("first".to_string(), top.clone()),
                 ("second".to_string(), bottom.clone()),
             ],
-            1,
+            4,
             1,
         );
-        assert_eq!(cells[0][0].1, top[0][0] | bottom[0][0]);
-        // Only the hue has to be given up, and it goes to the lower row of
-        // the table, which is the rule the reader can apply from outside.
-        assert_eq!(cells[0][0].0, "second");
+        for x in 0..4 {
+            let (whose, mask) = &cells[0][x];
+            // Never the union: a cell shows one trace's samples, so no dot
+            // is ever painted in a colour that is not its own.
+            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
+            assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
+            assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
+        }
+        // Ownership advances with the column, so a contested stretch shows
+        // both traces as interleaved dashes rather than hiding one.
+        let owners: Vec<&str> = (0..4).map(|x| cells[0][x].0.as_str()).collect();
+        assert_eq!(owners, vec!["first", "second", "first", "second"]);
     }
 }
