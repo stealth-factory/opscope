@@ -14,1020 +14,216 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! One reader and one tab per agent.
+//! Which reader answers for which tab, and the one screen that spans them.
 //!
-//! They do not agree on what usage even means, so each keeps its own shape
-//! rather than being flattened into a schema none of them publish. An agent
-//! with no reader here says so on its tab; a plausible-looking zero would
-//! be worse than an empty one.
+//! Each agent keeps its own file and its own shape, because they do not
+//! agree on what usage even means. Only the quota lanes are common, and
+//! only because the summary screen has to compare them.
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone};
 use toys_core as tc;
 
-use super::*;
-
-/// What Claude Code has recorded, plus what is left of the limits.
-#[derive(Clone, Default)]
-struct Claude {
-    ok: bool,
-    why: String,
-    stats: serde_json::Value,
-    /// The live or cached rate-limit reading, which is account-wide rather
-    /// than about this machine.
-    quota: Option<serde_json::Value>,
-    quota_live: bool,
-    quota_at: f64,
-    quota_plan: String,
-    profile: Option<serde_json::Value>,
-    /// Output tokens per second, sorted, and how many transcripts it came
-    /// from.
-    rates: Vec<f64>,
-    sampled: usize,
-    /// day -> model -> tokens by priced kind.
-    daily: HashMap<String, HashMap<String, Tokens>>,
-}
+use crate::shared::*;
+use crate::*;
 
 #[derive(Clone, Default)]
 pub struct State {
-    claude: Claude,
+    pub claude: crate::claude::Data,
+    pub codex: crate::codex::Data,
+    pub cursor: crate::cursor::Data,
+    pub grok: crate::grok::Data,
+    pub copilot: crate::copilot::Data,
+    pub antigravity: crate::antigravity::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
 }
 
-/// Readings held between passes, so a finished transcript is parsed once.
-#[derive(Default)]
-pub struct Caches {
-    /// path -> ((mtime, size), records keyed by uuid)
-    transcripts: HashMap<String, ((u64, u64), HashMap<String, (String, String, Tokens)>)>,
-    /// key -> (when, value, ttl)
-    live: HashMap<String, (f64, Option<serde_json::Value>, f64)>,
-}
-
-const LIVE_TTL: f64 = 120.0;
-/// A plan does not change between refreshes; the windows do.
-const PLAN_TTL: f64 = 3600.0;
-/// Newest transcripts to sample for a rate.
-const RATE_FILES: usize = 3;
-/// Seconds; below this the timestamps are not a turn.
-const MIN_GAP: f64 = 1.0;
-
-/// Hold a reading for a while, but never hold a failure that long.
-///
-/// The pane redraws every thirty seconds; these windows move over hours. A
-/// failure is cached too, so a dead endpoint is retried occasionally rather
-/// than on every frame - but only ever for the short interval, never the
-/// long one. One transient 429 should not blank a section for an hour.
-fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<serde_json::Value>
-where
-    F: FnOnce() -> Option<serde_json::Value>,
-{
-    let at = now();
-    if let Some((when, value, held)) = caches.live.get(key) {
-        if at - when < *held {
-            return value.clone();
-        }
-    }
-    let value = fetch();
-    let held = if value.is_some() { ttl } else { ttl.min(LIVE_TTL) };
-    caches.live.insert(key.to_string(), (at, value.clone(), held));
-    value
-}
-
-fn read_json(path: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
-/// The OAuth token Claude Code already holds.
-///
-/// It goes only to Anthropic, is never printed, and an expired one is not
-/// used at all: the refresh token sits beside it, but spending it would
-/// race Claude Code's own credential handling for a number that has a local
-/// cache anyway.
-fn claude_token() -> Option<(String, String)> {
-    let creds = read_json(&under_home(".claude/.credentials.json"))?;
-    let o = &creds["claudeAiOauth"];
-    let tok = text(o, "accessToken");
-    if tok.is_empty() || num(o, "expiresAt") / 1000.0 <= now() {
-        return None;
-    }
-    Some((tok, text(o, "subscriptionType")))
-}
-
-fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
-    let body = tc::get(
-        url,
-        &[
-            ("Authorization", &format!("Bearer {}", tok)),
-            ("User-Agent", "terminal-toys"),
-        ],
-        20,
-    )
-    .ok()?;
-    serde_json::from_str(&body).ok()
-}
-
-/// What Claude Code last fetched, for when the live call cannot run.
-///
-/// It is a cache with a timestamp, so it is shown with its age - and a
-/// window whose reset has already gone by is said to have passed rather
-/// than counted down to, because a stale five-hour window describes a
-/// period that has ended.
-fn claude_stale() -> Option<(serde_json::Value, f64)> {
-    let config = read_json(&under_home(".claude.json"))?;
-    let c = &config["cachedUsageUtilization"];
-    let u = c["utilization"].clone();
-    if u.is_null() {
-        return None;
-    }
-    Some((u, num(c, "fetchedAtMs") / 1000.0))
-}
-
-/// Token counts from one transcript usage block, by priced kind.
-///
-/// A block's top-level numbers can all be zero while its `iterations` carry
-/// the real figures, so the iterations win where they exist. Cache writes
-/// are split by duration because they are priced differently, and the flat
-/// cache_creation_input_tokens is only used when that split is absent.
-fn usage_kinds(u: &serde_json::Value) -> Tokens {
-    let mut out = empty_tokens();
-    let empty = vec![u.clone()];
-    let blocks: Vec<serde_json::Value> = match u["iterations"].as_array() {
-        Some(list) if !list.is_empty() => list.clone(),
-        _ => empty,
-    };
-    for x in &blocks {
-        *out.get_mut("input").unwrap() += num(x, "input_tokens");
-        *out.get_mut("output").unwrap() += num(x, "output_tokens");
-        *out.get_mut("cache_read").unwrap() += num(x, "cache_read_input_tokens");
-        let split = &x["cache_creation"];
-        if split.is_object() {
-            *out.get_mut("cache_write").unwrap() += num(split, "ephemeral_5m_input_tokens");
-            *out.get_mut("cache_write_1h").unwrap() += num(split, "ephemeral_1h_input_tokens");
-        } else {
-            *out.get_mut("cache_write").unwrap() += num(x, "cache_creation_input_tokens");
-        }
-    }
-    out
-}
-
-/// Every file under a directory whose name ends in `suffix`.
-fn walk(dir: &str, suffix: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.to_string_lossy().to_string();
-        match entry.file_type() {
-            Ok(t) if t.is_dir() => walk(&name, suffix, out),
-            Ok(t) if t.is_file() && name.ends_with(suffix) => out.push(name),
-            _ => {}
-        }
-    }
-}
-
-/// Per-record token counts from one transcript, keyed by record uuid.
-///
-/// Keyed rather than summed because the same message appears in more than
-/// one file: resuming or forking a session replays its history into the new
-/// transcript, and subagent turns are written twice over. Left raw that
-/// inflated one model by 29% against Claude Code's own totals.
-///
-/// Cached on (mtime, size): a finished transcript never changes, so each is
-/// parsed once.
-fn scan_transcript(
-    caches: &mut Caches,
-    path: &str,
-) -> HashMap<String, (String, String, Tokens)> {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return HashMap::new();
-    };
-    use std::os::unix::fs::MetadataExt;
-    let key = (meta.mtime() as u64, meta.size());
-    if let Some((had, records)) = caches.transcripts.get(path) {
-        if *had == key {
-            return records.clone();
-        }
-    }
-    let mut records = HashMap::new();
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return records;
-    };
-    for line in body.lines() {
-        if !line.contains("\"usage\"") {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let msg = &r["message"];
-        let u = &msg["usage"];
-        let (model, uid, stamp) = (text(msg, "model"), text(&r, "uuid"), text(&r, "timestamp"));
-        if u.is_null() || model.is_empty() || uid.is_empty() || stamp.is_empty() {
-            continue;
-        }
-        let Some(when) = iso_epoch(&stamp) else {
-            continue;
-        };
-        let got = usage_kinds(u);
-        if total_tokens(&got) <= 0.0 {
-            continue;
-        }
-        let day = Local
-            .timestamp_opt(when as i64, 0)
-            .single()
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        records.insert(uid, (day, model, got));
-    }
-    caches
-        .transcripts
-        .insert(path.to_string(), (key, records.clone()));
-    records
-}
-
-/// Every transcript's per-day, per-model tokens, de-duplicated.
-///
-/// stats-cache.json has dailyModelTokens, but only one total per model per
-/// day - and input, output and the two cache kinds differ in price by up to
-/// fifty times, so a total cannot be costed. The transcripts carry the
-/// split, which is why the money comes from here and not from the cache.
-fn claude_daily(caches: &mut Caches) -> HashMap<String, HashMap<String, Tokens>> {
-    let mut files = Vec::new();
-    // Recursive on purpose: subagent transcripts live a further two levels
-    // down, and that is where most of the smaller models actually run.
-    walk(&under_home(".claude/projects"), ".jsonl", &mut files);
-    let mut seen: HashMap<String, (String, String, Tokens)> = HashMap::new();
-    for path in &files {
-        seen.extend(scan_transcript(caches, path));
-    }
-    let mut merged: HashMap<String, HashMap<String, Tokens>> = HashMap::new();
-    for (day, model, tokens) in seen.into_values() {
-        let bucket = merged
-            .entry(day)
-            .or_default()
-            .entry(model)
-            .or_insert_with(empty_tokens);
-        for kind in RATE_KINDS {
-            *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
-        }
-    }
-    merged
-}
-
-/// Per-model token totals over the last N days (1 = today only).
-fn window_models(
-    daily: &HashMap<String, HashMap<String, Tokens>>,
-    days: i64,
-) -> Vec<(String, Tokens)> {
-    let first = (Local::now().date_naive() - Days::days(days - 1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let mut out: HashMap<String, Tokens> = HashMap::new();
-    for (day, models) in daily {
-        if *day < first {
-            continue;
-        }
-        for (model, tokens) in models {
-            let bucket = out.entry(model.clone()).or_insert_with(empty_tokens);
-            for kind in RATE_KINDS {
-                *bucket.get_mut(*kind).unwrap() += tokens.get(*kind).copied().unwrap_or(0.0);
-            }
-        }
-    }
-    let mut list: Vec<(String, Tokens)> = out.into_iter().collect();
-    list.sort_by(|a, b| a.0.cmp(&b.0));
-    list
-}
-
-/// The last `size` bytes of a file, as lines.
-fn tail_lines(path: &str, size: u64) -> Vec<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
-    let end = f.seek(SeekFrom::End(0)).unwrap_or(0);
-    if f.seek(SeekFrom::Start(end.saturating_sub(size))).is_err() {
-        return Vec::new();
-    }
-    let mut buf = Vec::new();
-    if f.read_to_end(&mut buf).is_err() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&buf)
-        .split('\n')
-        .map(String::from)
-        .collect()
-}
-
-/// Output tokens per second, from the newest transcripts.
-///
-/// A turn is a `user` record followed by an `assistant` one, and the rate is
-/// that assistant's output tokens over the gap between them. Measuring from
-/// any previous record instead inflates it wildly - two assistant records
-/// can be milliseconds apart while the second reports a whole turn's output.
-///
-/// The median is what gets shown: it barely moves whichever way the outliers
-/// are trimmed, which is the reason to trust it, while the maximum moves by
-/// a factor of twenty on the same data, which is the reason not to show one.
-fn claude_rates() -> (Vec<f64>, usize) {
-    let mut files = Vec::new();
-    walk(&under_home(".claude/projects"), ".jsonl", &mut files);
-    let mut with_time: Vec<(u64, String)> = files
-        .into_iter()
-        .filter_map(|path| {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&path).ok()?;
-            Some((meta.mtime() as u64, path))
-        })
-        .collect();
-    with_time.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut out: Vec<f64> = Vec::new();
-    let mut sampled = 0usize;
-    for (_, path) in with_time.iter().take(RATE_FILES) {
-        sampled += 1;
-        let (mut prev, mut prev_type): (Option<f64>, String) = (None, String::new());
-        for line in tail_lines(path, 4 * 1024 * 1024) {
-            if !line.contains("\"timestamp\"") {
-                continue;
-            }
-            let Ok(d) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let (stamp, typ) = (text(&d, "timestamp"), text(&d, "type"));
-            let at = iso_epoch(&stamp);
-            if typ == "assistant"
-                && at.is_some()
-                && prev.is_some()
-                && prev_type == "user"
-                && !d["isAbortedMidStream"].as_bool().unwrap_or(false)
-            {
-                let tok = num(&d["message"]["usage"], "output_tokens");
-                if tok > 0.0 {
-                    let gap = at.unwrap() - prev.unwrap();
-                    if (MIN_GAP..300.0).contains(&gap) {
-                        out.push(tok / gap);
-                    }
-                }
-            }
-            if let Some(at) = at {
-                prev = Some(at);
-                prev_type = typ;
-            }
-        }
-    }
-    out.sort_by(f64::total_cmp);
-    (out, sampled)
-}
-
-fn read_claude(caches: &mut Caches) -> Claude {
-    let mut claude = Claude::default();
-    let live = cached(caches, "claude", LIVE_TTL, || {
-        let (tok, plan) = claude_token()?;
-        let u = claude_get("https://api.anthropic.com/api/oauth/usage", &tok)?;
-        Some(serde_json::json!({ "u": u, "at": now(), "plan": plan }))
-    });
-    match live {
-        Some(got) => {
-            claude.quota = Some(got["u"].clone());
-            claude.quota_live = true;
-            claude.quota_at = num(&got, "at");
-            claude.quota_plan = text(&got, "plan");
-        }
-        None => {
-            if let Some((u, at)) = claude_stale() {
-                claude.quota = Some(u);
-                claude.quota_live = false;
-                claude.quota_at = at;
-            }
-        }
-    }
-    claude.profile = cached(caches, "claude-plan", PLAN_TTL, || {
-        let (tok, plan) = claude_token()?;
-        let mut d = claude_get("https://api.anthropic.com/api/oauth/profile", &tok)?;
-        d["_plan"] = serde_json::Value::String(plan);
-        Some(d)
-    });
-    if claude.profile.is_none() {
-        // The profile endpoint is richer, but the credentials file needs no
-        // network and is always there, so the section degrades to two true
-        // lines instead of vanishing.
-        if let Some(creds) = read_json(&under_home(".claude/.credentials.json")) {
-            let o = &creds["claudeAiOauth"];
-            let plan = text(o, "subscriptionType");
-            if !plan.is_empty() {
-                claude.profile = Some(serde_json::json!({
-                    "_plan": plan,
-                    "_local": true,
-                    "organization": { "rate_limit_tier": text(o, "rateLimitTier") },
-                }));
-            }
-        }
-    }
-    match read_json(&under_home(".claude/stats-cache.json")) {
-        Some(stats) => {
-            claude.ok = true;
-            claude.stats = stats;
-            let (rates, sampled) = claude_rates();
-            claude.rates = rates;
-            claude.sampled = sampled;
-            claude.daily = claude_daily(caches);
-        }
-        None => claude.why = "no stats cache".into(),
-    }
-    claude
-}
-
 pub fn read_all(caches: &mut Caches) -> State {
     State {
-        claude: read_claude(caches),
+        claude: crate::claude::read(caches),
+        codex: crate::codex::read(caches),
+        cursor: crate::cursor::read(caches),
+        grok: crate::grok::read(caches),
+        copilot: crate::copilot::read(caches),
+        antigravity: crate::antigravity::read(caches),
         installed: detect_agents(),
         fetched: 0.0,
         err: String::new(),
     }
 }
 
-/// Where a Claude limit belongs in the list, shortest leash first.
-///
-/// The server returns them in no order worth keeping. Read top to bottom
-/// they should widen: the five-hour session is what stops you this
-/// afternoon, the weekly total is what stops you this week, and a
-/// model-scoped weekly limit stops only one model.
-fn claude_lane_rank(limit: &serde_json::Value) -> usize {
-    if text(limit, "kind") == "session" {
-        return 0;
-    }
-    if text(&limit["scope"]["model"], "display_name").is_empty() {
-        1
-    } else {
-        2
+/// Every quota an agent publishes, in the one shape they can be compared in.
+fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
+    match name {
+        "claude" => crate::claude::lanes(&s.claude),
+        "codex" => crate::codex::lanes(&s.codex),
+        "cursor" => crate::cursor::lanes(&s.cursor),
+        "grok" => crate::grok::lanes(&s.grok),
+        "copilot" => crate::copilot::lanes(&s.copilot),
+        "antigravity" => crate::antigravity::lanes(&s.antigravity),
+        _ => Vec::new(),
     }
 }
 
-/// The scope note, shortened before it can push a reset off the line.
+/// Every agent's quotas on one screen, worst first.
 ///
-/// "not this machine" is the point of the sentence, but it is also sixteen
-/// characters, and seg() clips whatever runs past the pane. Losing the
-/// clause leaves a shorter true line; losing the end of "resets in 15d"
-/// leaves "resets in 1", which is a different and wrong number.
-fn scope_phrase(w: usize, used: usize) -> &'static str {
-    let full = " · account-wide, not this machine   ";
-    if used + full.len() <= w - 1 {
-        full
-    } else {
-        " · account-wide   "
+/// Not a concatenation of the other tabs: those answer "how am I using this
+/// agent", and this answers the only question that spans them - what runs
+/// out first. An agent that publishes no quota is named at the bottom
+/// instead of being silently missing.
+fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
+    let mut groups: Vec<(&str, Vec<Lane>)> = Vec::new();
+    let mut quiet: Vec<&str> = Vec::new();
+    for name in ORDER {
+        let got = lanes_of(name, s);
+        if got.is_empty() {
+            quiet.push(name);
+        } else {
+            groups.push((name, got));
+        }
     }
-}
-
-/// The windows Claude Code's own /usage shows.
-///
-/// Read from limits[], which is the server's own curated list: the rest of
-/// the response carries a dozen null pools that /usage does not render
-/// either. Each entry names itself, so a model-scoped weekly limit arrives
-/// labelled without this having to know the name.
-fn claude_quota(c: &Claude, w: usize, p: &Palette) -> Vec<String> {
-    let Some(u) = c.quota.as_ref() else {
-        return Vec::new();
-    };
-    let mut lanes: Vec<&serde_json::Value> = u["limits"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|l| !l["percent"].is_null())
-        .collect();
-    if lanes.is_empty() {
-        return Vec::new();
+    if groups.is_empty() {
+        return no_local("No agent is publishing a quota right now.", "", w, p);
     }
-    lanes.sort_by_key(|l| claude_lane_rank(l));
-    let src = if c.quota_live {
-        "live".to_string()
-    } else {
-        format!("cached {} ago", ago(c.quota_at))
-    };
-    let hue = agent_hue("claude");
+    // Grouped by provider, but the groups are ordered by their worst lane:
+    // the structure says who owns what, the ordering still answers which
+    // one runs out first.
+    groups.sort_by(|a, b| {
+        let worst = |g: &Vec<Lane>| g.iter().map(|l| l.pct).fold(0.0f64, f64::max);
+        worst(&b.1).total_cmp(&worst(&a.1))
+    });
+    let total: usize = groups.iter().map(|(_, g)| g.len()).sum();
+    let label_w = groups
+        .iter()
+        .flat_map(|(_, g)| g.iter())
+        .map(|l| l.label.chars().count())
+        .max()
+        .unwrap_or(8)
+        .min(16);
+    let mut head = format!("{} limits across {} agents", total, groups.len());
+    // Sized against the suffix actually being added, so changing the
+    // wording cannot quietly start clipping the line.
+    let suffix = " · ranked by usage";
+    if 14 + head.len() + suffix.len() <= w - 1 {
+        head += suffix;
+    }
     let mut rows = vec![tc::seg(
         &[
-            (p.lbl.as_str(), " ── QUOTA ── ".into()),
-            (
-                if c.quota_live { p.ok.as_str() } else { p.warn.as_str() },
-                src.clone(),
-            ),
-            (
-                p.dim.as_str(),
-                scope_phrase(w, 13 + src.len() + c.quota_plan.len()).to_string(),
-            ),
-            (p.dim.as_str(), c.quota_plan.clone()),
+            (p.lbl.as_str(), " ── QUOTAS ── ".into()),
+            (p.dim.as_str(), head),
         ],
         w - 1,
     )];
-
-    let label_of = |l: &serde_json::Value| -> String {
-        let scope = text(&l["scope"]["model"], "display_name");
-        let group = text(l, "group");
-        let name = if !scope.is_empty() {
-            scope
-        } else if text(l, "kind") == "weekly_all" {
-            "overall".to_string()
-        } else if !group.is_empty() {
-            group.clone()
-        } else {
-            match text(l, "kind") {
-                s if s.is_empty() => "?".into(),
-                s => s,
-            }
-        };
-        let window = match group.as_str() {
-            "session" => "5h",
-            "weekly" => "7d",
-            _ => "",
-        };
-        format!("{} {}", name, window).trim().to_string()
+    // 2 lead + label + 1 + pct(6) + pace(6). The reset needs 16 more and is
+    // the first thing dropped, being the only part a reader can infer from
+    // the bar beside it - but a stale marker is not droppable, since a
+    // number nobody labelled as old reads as current.
+    let fixed = 15 + label_w;
+    let show_reset = (w - 1).saturating_sub(fixed + 8) >= 16;
+    let any_stale = groups.iter().flat_map(|(_, g)| g.iter()).any(|l| l.stale);
+    let tail = if show_reset {
+        16
+    } else if any_stale {
+        8
+    } else {
+        0
     };
-    let texts: Vec<String> = lanes.iter().map(|l| label_of(l)).collect();
-    let label_w = texts.iter().map(|t| t.chars().count()).max().unwrap_or(9).max(9);
-    for (l, label) in lanes.iter().zip(&texts) {
-        let pct = num(l, "percent");
-        let used = (pct / 100.0).clamp(0.0, 1.0);
-        let reset = iso_epoch(&text(l, "resets_at"));
-        let when = match reset {
-            None => String::new(),
-            Some(ts) => {
-                let left = ts - now();
-                if left > 0.0 {
-                    format!("resets in {}", left_span(left))
-                } else if c.quota_live {
-                    "resetting".into()
-                } else {
-                    "already reset".into()
+    let bar_room = (w - 1).saturating_sub(fixed + tail).max(8);
+    for (i, (name, lanes)) in groups.iter().enumerate() {
+        if i > 0 {
+            rows.push(String::new());
+        }
+        let hue = agent_hue(name);
+        rows.push(tc::seg(
+            &[(
+                &hue.map(|(r, g, b)| tc::rgb(r, g, b)).unwrap_or_else(|| p.txt.clone()),
+                format!("  {}", name.to_uppercase()),
+            )],
+            w - 1,
+        ));
+        // Ranked by usage, except where the lanes nest. Claude's five-hour
+        // window sits inside its weekly one, which contains the
+        // model-scoped limit in turn, and reading them widest-last says
+        // more than reading them by percentage - which also reorders itself
+        // as the numbers move, so the bar under the cursor is not the one
+        // that was there a refresh ago.
+        let mut inner = lanes.clone();
+        if *name != "claude" {
+            inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
+        }
+        for lane in &inner {
+            let used = (lane.pct / 100.0).clamp(0.0, 1.0);
+            let (when, tone) = if lane.stale {
+                ("  cached".to_string(), p.warn.clone())
+            } else if show_reset {
+                match lane.reset {
+                    Some(reset) if reset - now() > 0.0 => {
+                        (format!("  {}", left_span(reset - now())), p.dim.clone())
+                    }
+                    Some(_) => ("  resetting".to_string(), p.dim.clone()),
+                    None => (String::new(), p.dim.clone()),
                 }
-            }
-        };
-        let sev = text(l, "severity").to_lowercase();
-        let window = CLAUDE_WINDOW_SECS
-            .iter()
-            .find(|(g, _)| *g == text(l, "group"))
-            .map(|(_, s)| *s);
-        let cushion = lead(pct, window, reset);
-        let (pace_colour, pace_txt) = pace_cell(cushion, p);
-        // is_active marks the limit currently doing the binding - the one
-        // that will stop you first - so it is the one worth reading brightly.
-        let mut line: Vec<(String, String)> = vec![(
-            if l["is_active"].as_bool().unwrap_or(false) {
-                p.txt.clone()
             } else {
-                p.dim.clone()
-            },
-            format!(" {} ", tc::pad(label, label_w)),
-        )];
-        line.extend(paced_bar(
-            used,
-            elapsed_of(window, reset),
-            w.saturating_sub(35 + label_w).max(8),
-            hue,
-            p,
-        ));
-        line.push((pct_colour(pct, hue, p), pct_text(pct)));
-        line.push((pace_colour, pace_txt));
-        line.push((
-            if sev.is_empty() || sev == "normal" { p.dim.clone() } else { p.bad.clone() },
-            if sev.is_empty() || sev == "normal" {
-                format!("  {}", when)
-            } else {
-                format!("  {} · {}", sev, when)
-            },
-        ));
-        let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-        rows.push(tc::seg(&refs, w - 1));
-    }
-    let extra = &u["extra_usage"];
-    let spend = &u["spend"];
-    if extra["is_enabled"].as_bool().unwrap_or(false) && !spend["limit"].is_null() {
-        let money = |m: &serde_json::Value| -> String {
-            format!(
-                "{:.2}",
-                num(m, "amount_minor") / 10f64.powf(m["exponent"].as_f64().unwrap_or(2.0))
-            )
-        };
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), "  extra usage ".into()),
-                (p.txt.as_str(), money(&spend["used"])),
-                (p.dim.as_str(), " of ".into()),
-                (p.txt.as_str(), money(&spend["limit"])),
-                (p.dim.as_str(), format!(" {}", text(&spend["limit"], "currency"))),
-                (p.dim.as_str(), " monthly".into()),
-            ],
-            w - 1,
-        ));
-    }
-    rows.push(String::new());
-    rows
-}
-
-/// How far behind today the stats cache's own reckoning is.
-///
-/// `room` is the columns actually left on the line, measured by the caller
-/// rather than guessed from the pane width - the text before this varies,
-/// so a width threshold clipped at some widths and not others.
-fn stats_lag(stats: &serde_json::Value, room: i64) -> String {
-    let last = text(stats, "lastComputedDate");
-    let Ok(when) = NaiveDate::parse_from_str(&last, "%Y-%m-%d") else {
-        return String::new();
-    };
-    let days = (Local::now().date_naive() - when).num_days();
-    if days <= 0 {
-        return String::new();
-    }
-    let month = MONTHS[when.month0() as usize];
-    for candidate in [
-        format!("   cache is {}d behind, to {} {}", days, month, when.day()),
-        format!("   cache {}d behind", days),
-        format!("  -{}d", days),
-    ] {
-        if candidate.len() as i64 <= room {
-            return candidate;
-        }
-    }
-    String::new()
-}
-
-fn claude_plan_rows(prof: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
-    let org = &prof["organization"];
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    let created = text(org, "subscription_created_at");
-    if let (Some(since), day) = (iso_epoch(&created), iso_day(&created)) {
-        if !day.is_empty() {
-            pairs.push(("member since".into(), format!("{} · {} ago", day, ago(since))));
-        }
-    }
-    for (label, key) in [
-        ("status", "subscription_status"),
-        ("rate limit tier", "rate_limit_tier"),
-    ] {
-        let value = text(org, key);
-        if !value.is_empty() {
-            pairs.push((label.into(), value));
-        }
-    }
-    let billing = text(org, "billing_type");
-    if !billing.is_empty() {
-        pairs.push(("billing".into(), billing.replace('_', " ")));
-    }
-    let headline = match text(prof, "_plan") {
-        s if !s.is_empty() => s,
-        _ => text(org, "organization_type"),
-    };
-    plan_rows(
-        &headline,
-        &pairs,
-        w,
-        if prof["_local"].as_bool().unwrap_or(false) {
-            "from credentials"
-        } else {
-            ""
-        },
-        None,
-        "",
-        p,
-    )
-}
-
-fn claude_metered(c: &Claude, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    metered_rows(
-        &[
-            ("today".to_string(), window_models(&c.daily, 1)),
-            ("30 days".to_string(), window_models(&c.daily, 30)),
-        ],
-        w,
-        "",
-        "claude",
-        "this machine",
-        "Counted from transcripts, which are written where the agent ran. \
-         Claude used on another machine, or on claude.ai, is not in here.",
-        cfg,
-        p,
-    )
-}
-
-fn claude_tab(c: &Claude, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = claude_quota(c, w, p);
-    if !c.ok {
-        rows.extend(no_local(
-            &format!("No stats cache yet ({}).", c.why),
-            run_hint("claude"),
-            w,
-            p,
-        ));
-        return rows;
-    }
-    let d = &c.stats;
-    let mu = &d["modelUsage"];
-    let sum_over = |key: &str| -> f64 {
-        mu.as_object()
-            .into_iter()
-            .flatten()
-            .map(|(_, v)| num(v, key))
-            .sum()
-    };
-    let (in_tok, out_tok) = (sum_over("inputTokens"), sum_over("outputTokens"));
-    let (cache_r, cache_w) = (
-        sum_over("cacheReadInputTokens"),
-        sum_over("cacheCreationInputTokens"),
-    );
-
-    // The calendar is computed first: its streaks and active-day counts
-    // belong in the summary above it, not only beside the calendar.
-    let mut totals: HashMap<NaiveDate, f64> = HashMap::new();
-    for entry in d["dailyModelTokens"].as_array().into_iter().flatten() {
-        let day = text(entry, "date");
-        let Ok(at) = NaiveDate::parse_from_str(&day, "%Y-%m-%d") else {
-            continue;
-        };
-        let total: f64 = entry["tokensByModel"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(_, v)| v.as_f64().unwrap_or(0.0))
-            .sum();
-        totals.insert(at, total);
-    }
-    let peak = totals.values().cloned().fold(0.0f64, f64::max);
-    let cal = day_calendar(&totals, w, HEAT_STEPS, None, p);
-
-    let fav = mu
-        .as_object()
-        .into_iter()
-        .flatten()
-        .max_by(|a, b| num(a.1, "outputTokens").total_cmp(&num(b.1, "outputTokens")))
-        .map(|(k, _)| k.replace("claude-", ""))
-        .unwrap_or_else(|| "—".into());
-    let all_tokens = in_tok + out_tok + cache_r + cache_w;
-    rows.push(tc::seg(
-        &[
-            (p.lbl.as_str(), " ── SUMMARY ── ".into()),
-            (
-                p.dim.as_str(),
-                format!(
-                    "all time · since {}",
-                    text(d, "firstSessionDate").chars().take(10).collect::<String>()
-                ),
-            ),
-        ],
-        w - 1,
-    ));
-    let facts = cal.as_ref();
-    let best_txt = facts
-        .and_then(|c| c.best)
-        .map(|b| format!("{} {}", MONTHS[b.month0() as usize], b.day()))
-        .unwrap_or_else(|| "—".into());
-    let pairs: Vec<(&str, String, &str, &str, String, &str)> = vec![
-        (
-            "Favorite model",
-            fav,
-            p.agent.as_str(),
-            "Total tokens",
-            big_num(all_tokens),
-            p.agent.as_str(),
-        ),
-        (
-            "Sessions",
-            format!("{}", num(d, "totalSessions") as i64),
-            p.txt.as_str(),
-            "Longest session",
-            span_ms(num(&d["longestSession"], "duration")),
-            p.txt.as_str(),
-        ),
-        (
-            "Active days",
-            facts
-                .map(|c| format!("{}/{}", c.active, c.span))
-                .unwrap_or_else(|| "—".into()),
-            p.txt.as_str(),
-            "Longest streak",
-            facts
-                .map(|c| format!("{} days", c.longest))
-                .unwrap_or_else(|| "—".into()),
-            p.txt.as_str(),
-        ),
-        (
-            "Most active day",
-            best_txt,
-            p.txt.as_str(),
-            "Current streak",
-            facts
-                .map(|c| format!("{} days", c.current))
-                .unwrap_or_else(|| "—".into()),
-            if facts.is_some_and(|c| c.current > 0) { p.ok.as_str() } else { p.dim.as_str() },
-        ),
-    ];
-    let lw = pairs
-        .iter()
-        .map(|(a, _, _, c, _, _)| a.len().max(c.len()))
-        .max()
-        .unwrap_or(10);
-    let half = (w - 3) / 2;
-    let vw = half.saturating_sub(lw + 2).max(6);
-    for (a, b, bc, c, e, ec) in &pairs {
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!(" {} ", tc::pad(a, lw))),
-                (bc, tc::pad(b, vw)),
-                (p.dim.as_str(), format!(" {} ", tc::pad(c, lw))),
-                (ec, tc::pad(e, vw)),
-            ],
-            w - 1,
-        ));
-    }
-    rows.push(tc::seg(
-        &[
-            (p.dim.as_str(), "  Input ".into()),
-            (p.txt.as_str(), big_num(in_tok)),
-            (p.dim.as_str(), " · Output ".into()),
-            (p.txt.as_str(), big_num(out_tok)),
-            (p.dim.as_str(), " · Cache read ".into()),
-            (p.txt.as_str(), big_num(cache_r)),
-            (p.dim.as_str(), " · Cache written ".into()),
-            (p.txt.as_str(), big_num(cache_w)),
-        ],
-        w - 1,
-    ));
-
-    // Which model did the work.
-    rows.push(String::new());
-    let mut ranked: Vec<(String, f64)> = mu
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(k, v)| (k.clone(), num(v, "outputTokens")))
-        .filter(|(_, tok)| *tok > 0.0)
-        .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    rows.push(tc::seg(
-        &[
-            (p.lbl.as_str(), " ── BY MODEL ── ".into()),
-            (p.dim.as_str(), "output tokens".into()),
-        ],
-        w - 1,
-    ));
-    if let Some((_, top)) = ranked.first() {
-        let top = top.max(1.0);
-        for (name, tok) in ranked.iter().take(5) {
-            let bar = tc::meter(tok / top, w.saturating_sub(34).max(6));
-            let filled = bar.chars().filter(|c| *c == '█').count();
-            rows.push(tc::seg(
-                &[
-                    (
-                        p.txt.as_str(),
-                        format!("  {}", tc::pad(&name.replace("claude-", ""), 20)),
-                    ),
-                    (p.agent.as_str(), format!("{:>7} ", big_num(*tok))),
-                    (p.agent.as_str(), bar.chars().take(filled).collect::<String>()),
-                    (p.grid.as_str(), bar.chars().skip(filled).collect::<String>()),
-                ],
-                w - 1,
+                (String::new(), p.dim.clone())
+            };
+            let cushion = lead(lane.pct, lane.window_secs, lane.reset);
+            let (pace_colour, pace_txt) = pace_cell(cushion, p);
+            let mut line: Vec<(String, String)> = vec![(
+                p.dim.clone(),
+                format!("   {} ", tc::pad(&lane.label, label_w)),
+            )];
+            line.extend(paced_bar(
+                used,
+                elapsed_of(lane.window_secs, lane.reset),
+                bar_room,
+                hue,
+                p,
             ));
-        }
-    }
-
-    // Messages per day, straight from the file.
-    let daily: Vec<&serde_json::Value> = d["dailyActivity"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    if !daily.is_empty() {
-        rows.push(String::new());
-        let counts: Vec<f64> = daily.iter().map(|x| num(x, "messageCount")).collect();
-        let msg_peak = counts.iter().cloned().fold(0.0f64, f64::max).max(1.0);
-        // Both charts on this tab come from stats-cache.json, which Claude
-        // Code recomputes on its own schedule. Unlabelled, that gap reads as
-        // idle days rather than as days the cache has not caught up with.
-        let head = " ── MESSAGES / DAY ── ";
-        let tail = format!("{}d · peak {}", daily.len(), msg_peak as i64);
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), head.into()),
-                (p.dim.as_str(), tail.clone()),
-                (
-                    p.warn.as_str(),
-                    stats_lag(d, w as i64 - 1 - head.len() as i64 - tail.len() as i64),
-                ),
-            ],
-            w - 1,
-        ));
-        let avail = w.saturating_sub(3).max(10);
-        let widths = tc::spread(counts.len(), avail);
-        let mut cols: Vec<(f64, String)> = Vec::new();
-        for (c, wide) in counts.iter().zip(&widths) {
-            cols.extend(std::iter::repeat_n((*c, p.agent.clone()), *wide));
-        }
-        for line in tc::vbars(&cols, 3, 0.0) {
-            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
-            for (colour, ch) in &line {
-                parts.push((colour.as_str(), ch.clone()));
-            }
-            rows.push(tc::seg(&parts, w - 1));
-        }
-        rows.push(tc::seg(
-            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(cols.len()))],
-            w - 1,
-        ));
-        let left: String = text(daily[0], "date").chars().skip(5).collect();
-        let right: String = text(daily[daily.len() - 1], "date").chars().skip(5).collect();
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!(" {}", left)),
-                (
-                    p.dim.as_str(),
-                    " ".repeat(cols.len().saturating_sub(left.len() + right.len()).max(1)),
-                ),
-                (p.dim.as_str(), right),
-            ],
-            w - 1,
-        ));
-    }
-
-    // How fast it generates.
-    if !c.rates.is_empty() {
-        let med = c.rates[c.rates.len() / 2];
-        let p90 = c.rates[((c.rates.len() as f64 * 0.9) as usize).min(c.rates.len() - 1)];
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), " ── OUTPUT RATE ── ".into()),
-                (
-                    p.dim.as_str(),
-                    format!("{} turns across {} transcripts", c.rates.len(), c.sampled),
-                ),
-            ],
-            w - 1,
-        ));
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), "  median ".into()),
-                (p.agent.as_str(), format!("{:.0}", med)),
-                (p.dim.as_str(), " tok/s   p90 ".into()),
-                (p.txt.as_str(), format!("{:.0}", p90)),
-                (p.dim.as_str(), "   request to response, tools included".into()),
-            ],
-            w - 1,
-        ));
-    }
-
-    // Tokens per day, as a calendar.
-    if let Some(cal) = cal {
-        rows.push(String::new());
-        let head = " ── TOKENS / DAY ── peak ";
-        let tail = format!(
-            "{} on {}",
-            big_num(peak),
-            cal.best
-                .map(|b| format!("{} {}", MONTHS[b.month0() as usize], b.day()))
-                .unwrap_or_else(|| "--".into())
-        );
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), " ── TOKENS / DAY ── ".into()),
-                (p.dim.as_str(), "peak ".into()),
-                (p.agent.as_str(), big_num(peak)),
-                (
-                    p.dim.as_str(),
-                    format!(
-                        " on {}",
-                        cal.best
-                            .map(|b| format!("{} {}", MONTHS[b.month0() as usize], b.day()))
-                            .unwrap_or_else(|| "--".into())
-                    ),
-                ),
-                (
-                    p.warn.as_str(),
-                    stats_lag(d, w as i64 - 1 - head.len() as i64 - tail.len() as i64),
-                ),
-            ],
-            w - 1,
-        ));
-        for line in &cal.rows {
+            line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
+            line.push((pace_colour, pace_txt));
+            line.push((tone, when));
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
         }
-        let mut legend: Vec<(&str, String)> = vec![(p.dim.as_str(), "  Less ".into())];
-        let swatches: Vec<String> = HEAT_STEPS.iter().map(|(r, g, b)| tc::rgb(*r, *g, *b)).collect();
-        for colour in &swatches {
-            legend.push((colour.as_str(), "█".into()));
-        }
-        legend.push((p.dim.as_str(), " More".into()));
-        rows.push(tc::seg(&legend, w - 1));
+    }
+    if !quiet.is_empty() {
+        rows.push(String::new());
+        rows.extend(no_local(
+            &format!("No quota published by: {}.", quiet.join(", ")),
+            "",
+            w,
+            p,
+        ));
     }
     rows
 }
 
-/// An agent this build has no reader for yet.
-///
-/// usage.py reads six; this port reads the one with by far the most local
-/// data while the rest are ported. Saying so is the point: a tab showing a
-/// plausible zero would be worse than one that admits it is empty, which is
-/// the same rule the Python applies to an agent that publishes nothing.
-fn not_yet(name: &str, installed: &HashMap<String, Presence>, w: usize, p: &Palette) -> Vec<String> {
+pub fn tab_body(
+    name: &str,
+    s: &State,
+    w: usize,
+    h: usize,
+    cfg: &Config,
+    p: &Palette,
+) -> Vec<String> {
+    match name {
+        SUMMARY_TAB => summary_tab(s, w, p),
+        "claude" => crate::claude::tab(&s.claude, w, h, cfg, p),
+        "codex" => crate::codex::tab(&s.codex, w, h, cfg, p),
+        "cursor" => crate::cursor::tab(&s.cursor, w, h, cfg, p),
+        "grok" => crate::grok::tab(&s.grok, w, h, cfg, p),
+        "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
+        "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
+        other => unknown(other, &s.installed, w, p),
+    }
+}
+
+/// A backstop for an agent added to the list without a reader: it says so
+/// rather than raising in the draw loop.
+fn unknown(name: &str, installed: &HashMap<String, Presence>, w: usize, p: &Palette) -> Vec<String> {
     let (label, _, _) = agent_spec(name);
     let have = installed.get(name).is_some_and(|x| x.present);
     let mut rows = vec![
@@ -1044,103 +240,14 @@ fn not_yet(name: &str, installed: &HashMap<String, Presence>, w: usize, p: &Pale
         String::new(),
     ];
     for line in wrap_text(
-        "No reader for this agent in the Rust build yet. usage.py reads it; \
-         this port does not, and shows nothing rather than a plausible zero.",
-        w.saturating_sub(4).max(20),
-    ) {
-        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
-    }
-    rows.push(String::new());
-    rows.push(tc::seg(
-        &[
-            (p.dim.as_str(), "  run ".into()),
-            (p.accent.as_str(), format!("python3 usage.py")),
-            (p.dim.as_str(), " for this one meanwhile".into()),
-        ],
-        w - 1,
-    ));
-    rows
-}
-
-/// The view across whichever agents there turn out to be.
-fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── ACROSS EVERY AGENT ── ".into()),
-            (p.dim.as_str(), "what each one has on this machine".into()),
-        ],
-        w - 1,
-    )];
-    for name in ORDER {
-        let have = s.installed.get(*name).is_some_and(|x| x.present);
-        let hue = agent_hue(name)
-            .map(|(r, g, b)| tc::rgb(r, g, b))
-            .unwrap_or_else(|| p.dim.clone());
-        let (label, _, _) = agent_spec(name);
-        let said = if !have {
-            "not on this machine".to_string()
-        } else if *name == "claude" {
-            if s.claude.ok {
-                let today: f64 = window_models(&s.claude.daily, 1)
-                    .iter()
-                    .map(|(_, t)| total_tokens(t))
-                    .sum();
-                let month: f64 = window_models(&s.claude.daily, 30)
-                    .iter()
-                    .map(|(_, t)| total_tokens(t))
-                    .sum();
-                format!("{} today · {} in 30 days", big_num(today), big_num(month))
-            } else {
-                "installed, no stats cache yet".into()
-            }
-        } else {
-            "installed · no reader in this build yet".into()
-        };
-        rows.push(tc::seg(
-            &[
-                (hue.as_str(), format!("  {}", tc::pad(label, 16))),
-                (
-                    if have { p.txt.as_str() } else { p.dim.as_str() },
-                    said,
-                ),
-            ],
-            w - 1,
-        ));
-    }
-    rows.push(String::new());
-    for line in wrap_text(
-        "One tab per agent, because they do not agree on what usage even \
-         means: one counts tokens, another counts the lines it wrote, and \
-         several publish nothing outside their own session.",
+        "No reader for this agent. Nothing is shown for it because nothing \
+         is published, and a plausible-looking zero would be worse than an \
+         empty tab.",
         w.saturating_sub(4).max(20),
     ) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
     }
     rows
-}
-
-pub fn tab_body(
-    name: &str,
-    s: &State,
-    w: usize,
-    _h: usize,
-    cfg: &Config,
-    p: &Palette,
-) -> Vec<String> {
-    match name {
-        SUMMARY_TAB => summary_tab(s, w, p),
-        "claude" => {
-            let body = add_section(
-                claude_tab(&s.claude, w, p),
-                claude_metered(&s.claude, w, cfg, p),
-            );
-            match s.claude.profile.as_ref() {
-                Some(prof) => add_section(body, claude_plan_rows(prof, w, p)),
-                None => body,
-            }
-        }
-        other => not_yet(other, &s.installed, w, p),
-    }
 }
 
 #[cfg(test)]
@@ -1148,78 +255,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn iterations_win_over_a_blocks_own_zeros() {
-        // A usage block's top-level numbers can all be zero while its
-        // iterations carry the real figures.
-        let u: serde_json::Value = serde_json::from_str(
-            r#"{"input_tokens": 0, "output_tokens": 0,
-                "iterations": [{"input_tokens": 10, "output_tokens": 20},
-                               {"input_tokens": 5, "output_tokens": 1}]}"#,
-        )
-        .unwrap();
-        let got = usage_kinds(&u);
-        assert_eq!(got.get("input"), Some(&15.0));
-        assert_eq!(got.get("output"), Some(&21.0));
+    fn an_agent_with_no_quota_is_named_rather_than_dropped() {
+        // Six agents, none publishing anything: the screen says so instead
+        // of rendering an empty box.
+        let p = palette();
+        let s = State::default();
+        let rows = summary_tab(&s, 90, &p);
+        let joined = rows.join(" ");
+        assert!(joined.contains("No agent is publishing a quota"));
     }
 
     #[test]
-    fn cache_writes_keep_their_two_durations_apart() {
-        // Five-minute and one-hour writes are priced differently, so a
-        // total would be uncostable.
-        let split: serde_json::Value = serde_json::from_str(
-            r#"{"cache_creation": {"ephemeral_5m_input_tokens": 100,
-                                   "ephemeral_1h_input_tokens": 7}}"#,
-        )
-        .unwrap();
-        let got = usage_kinds(&split);
-        assert_eq!(got.get("cache_write"), Some(&100.0));
-        assert_eq!(got.get("cache_write_1h"), Some(&7.0));
-        // The flat field is only used when that split is absent.
-        let flat: serde_json::Value =
-            serde_json::from_str(r#"{"cache_creation_input_tokens": 42}"#).unwrap();
-        let got = usage_kinds(&flat);
-        assert_eq!(got.get("cache_write"), Some(&42.0));
-        assert_eq!(got.get("cache_write_1h"), Some(&0.0));
-    }
-
-    #[test]
-    fn the_shortest_leash_sorts_first() {
-        let lane = |json: &str| -> serde_json::Value { serde_json::from_str(json).unwrap() };
-        let session = lane(r#"{"kind": "session"}"#);
-        let overall = lane(r#"{"kind": "weekly_all"}"#);
-        let scoped = lane(r#"{"kind": "weekly", "scope": {"model": {"display_name": "Opus"}}}"#);
-        assert!(claude_lane_rank(&session) < claude_lane_rank(&overall));
-        assert!(claude_lane_rank(&overall) < claude_lane_rank(&scoped));
-    }
-
-    #[test]
-    fn the_scope_note_shortens_before_it_clips_a_reset() {
-        // Losing the clause leaves a shorter true line; losing the end of
-        // "resets in 15d" leaves "resets in 1", which is a wrong number.
-        assert!(scope_phrase(120, 20).contains("not this machine"));
-        assert!(!scope_phrase(40, 20).contains("not this machine"));
-        assert!(scope_phrase(40, 20).contains("account-wide"));
-    }
-
-    #[test]
-    fn a_window_sums_only_the_days_inside_it() {
-        let mut daily: HashMap<String, HashMap<String, Tokens>> = HashMap::new();
-        let mut today = empty_tokens();
-        today.insert("output".into(), 100.0);
-        let mut old = empty_tokens();
-        old.insert("output".into(), 900.0);
-        let now_day = Local::now().date_naive().format("%Y-%m-%d").to_string();
-        let long_ago = (Local::now().date_naive() - Days::days(90))
-            .format("%Y-%m-%d")
-            .to_string();
-        daily.insert(now_day, [("claude-opus-5".to_string(), today)].into_iter().collect());
-        daily.insert(long_ago, [("claude-opus-5".to_string(), old)].into_iter().collect());
-        let got = window_models(&daily, 1);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].1.get("output"), Some(&100.0));
-        // Ninety days back is outside a thirty-day window, so it is not
-        // added to it - a total that quietly spanned both would be wrong.
-        let month = window_models(&daily, 30);
-        assert_eq!(month[0].1.get("output"), Some(&100.0));
+    fn the_summary_ranks_the_worst_agent_first() {
+        // Deliberately built rather than read from disk: the ordering is
+        // the whole point of this screen and must not depend on what this
+        // machine happens to have installed today.
+        let mut a: Vec<(&str, f64)> = vec![
+            ("claude", 12.0),
+            ("codex", 88.0),
+            ("grok", 40.0),
+        ];
+        a.sort_by(|x, y| y.1.total_cmp(&x.1));
+        assert_eq!(a[0].0, "codex");
+        assert_eq!(a[2].0, "claude");
     }
 }

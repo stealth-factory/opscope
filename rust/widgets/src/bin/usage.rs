@@ -1378,7 +1378,7 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     std::thread::spawn(move || {
-        let mut caches = vendors::Caches::default();
+        let mut caches = shared::Caches::default();
         loop {
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
@@ -1579,7 +1579,24 @@ fn main() {
 }
 
 // Kept in a directory of its own rather than beside this file: anything
-// dropped straight into src/bin/ risks being taken for another binary.
+// dropped straight into src/bin/ risks being taken for another binary. One
+// module per agent, because they share only the shape the summary screen
+// compares them in - and because five readers being written at once should
+// not be five edits to the same file.
+#[path = "usage/shared.rs"]
+mod shared;
+#[path = "usage/antigravity.rs"]
+mod antigravity;
+#[path = "usage/claude.rs"]
+mod claude;
+#[path = "usage/codex.rs"]
+mod codex;
+#[path = "usage/copilot.rs"]
+mod copilot;
+#[path = "usage/cursor.rs"]
+mod cursor;
+#[path = "usage/grok.rs"]
+mod grok;
 #[path = "usage/vendors.rs"]
 mod vendors;
 
