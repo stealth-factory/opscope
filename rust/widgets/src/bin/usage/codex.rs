@@ -765,7 +765,23 @@ fn codex_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// put the wrong agent at the top.
 pub fn lanes(d: &Data) -> Vec<Lane> {
     let Some(live) = d.live.as_ref() else {
-        return Vec::new();
+        // The tab falls back to the rollout snapshot here and says "from
+        // the last session"; the summary used to show nothing at all, so
+        // Codex silently left a screen that names every other agent. The
+        // snapshot keeps the shape it has on disk - window_minutes, not
+        // seconds - and is marked stale, which is what that flag is for.
+        let win = d.limits.as_ref().map(|l| &l["primary"]);
+        let Some(win) = win.filter(|x| !x["used_percent"].is_null()) else {
+            return Vec::new();
+        };
+        let minutes = num(win, "window_minutes");
+        return vec![Lane {
+            label: window_name(Some(minutes * 60.0)),
+            pct: num(win, "used_percent"),
+            window_secs: (minutes > 0.0).then_some(minutes * 60.0),
+            reset: win["resets_at"].as_f64(),
+            stale: true,
+        }];
     };
     let mut out: Vec<Lane> = Vec::new();
     for key in ["primary_window", "secondary_window"] {
@@ -1015,9 +1031,36 @@ mod tests {
         let rows = codex_quota(&d, 90, &p).join(" ");
         assert!(rows.contains("from the last session"), "{}", rows);
         assert!(rows.contains("71%"), "{}", rows);
-        // But it never reaches the summary screen, which ranks agents against
-        // each other and would sort a day-old figure beside live ones.
-        assert!(lanes(&d).is_empty());
+        // And it reaches the summary too, marked stale. The alternative was
+        // Codex disappearing from a screen that names every other agent
+        // while its own tab showed a quota - and the summary draws a stale
+        // lane as "cached" rather than as a reset time, so it is not passed
+        // off as a live figure beside live ones.
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1, "{:?}", got);
+        assert!(got[0].stale);
+        assert_eq!(got[0].pct, 71.0);
+        assert_eq!(got[0].window_secs, Some(10080.0 * 60.0));
+        assert_eq!(got[0].label, "7d");
+    }
+
+    #[test]
+    fn a_snapshot_with_no_window_length_still_reaches_the_summary() {
+        // window_minutes absent reads as 0, which is not a window. The lane
+        // must still appear - the percentage is the part that matters - but
+        // without a length nothing can pace it, so window_secs stays None
+        // and the summary draws no pace mark rather than an invented one.
+        let d = Data {
+            limits: Some(
+                serde_json::from_str(r#"{"primary":{"used_percent":40.0}}"#)
+                    .expect("a snapshot"),
+            ),
+            ..Data::default()
+        };
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].window_secs, None);
+        assert!(got[0].stale);
     }
 
     #[test]

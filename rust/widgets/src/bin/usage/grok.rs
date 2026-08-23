@@ -195,10 +195,17 @@ pub fn read(caches: &mut Caches) -> Data {
     let mut files = Vec::new();
     walk(&under_home(SESSIONS), "updates.jsonl", &mut files);
     if files.is_empty() {
-        // The log is not read either. The tab this feeds leads with its
-        // transcripts and stops when there are none, so a credit window
-        // read here would have nowhere to be drawn.
-        return Data::default();
+        // The log is still read. The credit window is account-wide and true
+        // whatever this disk holds, and hiding it because the local half is
+        // missing is the failure this repo keeps paying for. ok stays false,
+        // so the tab says there are no sessions - under the quota, not
+        // instead of it.
+        return Data {
+            quota: newest_quota(
+                tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str),
+            ),
+            ..Data::default()
+        };
     }
     let (mut total, mut sessions, mut newest) = (0.0f64, 0usize, 0.0f64);
     let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
@@ -311,9 +318,6 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
 }
 
 fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    if !d.ok {
-        return no_local("No Grok sessions on this machine.", run_hint("grok"), w, p);
-    }
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
     let quota = d.quota.as_ref().filter(|q| q.pct.is_some());
@@ -393,6 +397,19 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             w - 1,
         ));
         rows.push(String::new());
+    }
+
+    // Everything below counts what this machine recorded, so it stops here
+    // when there is nothing recorded - but the quota above has already been
+    // drawn, because it is a fact about the account rather than the disk.
+    if !d.ok {
+        rows.extend(no_local(
+            "No Grok sessions on this machine.",
+            run_hint("grok"),
+            w,
+            p,
+        ));
+        return rows;
     }
 
     rows.push(tc::seg(
@@ -675,6 +692,28 @@ mod tests {
             assert!(rows.iter().any(|r| r.contains("WEEKLY QUOTA")), "width {}", w);
             assert!(rows.iter().any(|r| r.contains("SUBSCRIPTION")), "width {}", w);
         }
+    }
+
+    #[test]
+    fn a_machine_with_no_sessions_still_shows_the_credit_window() {
+        // The account has a quota and this disk has no transcripts. Both
+        // facts are true and the tab states both: the window is drawn, and
+        // the sections that count local work say there is none. Before this
+        // the log was never read, so the tab said only "No Grok sessions"
+        // and the summary screen listed Grok as publishing no quota at all.
+        let p = palette();
+        let d = Data {
+            ok: false,
+            quota: newest_quota([LOG_LINE].into_iter()),
+            ..Data::default()
+        };
+        let rows = grok_tab(&d, 90, &p).join(" ");
+        assert!(rows.contains("QUOTA"), "{}", rows);
+        assert!(rows.contains("42%") || rows.contains("43%"), "{}", rows);
+        assert!(rows.contains("No Grok sessions"), "{}", rows);
+        // And it publishes a lane, so the summary does not disagree with
+        // the tab about whether Grok has a quota.
+        assert_eq!(lanes(&d).len(), 1);
     }
 
     #[test]

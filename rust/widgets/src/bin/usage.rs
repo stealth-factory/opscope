@@ -1334,6 +1334,18 @@ fn tab_bar(
     tc::seg(&refs, w - 1)
 }
 
+/// Where a tab cursor lands after moving `by` tabs among `count`.
+///
+/// rem_euclid rather than %, because the left key drives this negative
+/// and Rust's % keeps the sign where Python's does not. Named rather than
+/// inlined so a test can reach the arithmetic the loop actually runs.
+fn step_tab(at: i64, by: i64, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (at + by).rem_euclid(count as i64) as usize
+}
+
 /// What to show before the first poll lands.
 ///
 /// Every tab's empty state is a statement of fact - no stats cache, no
@@ -1465,8 +1477,9 @@ fn main() {
         };
         let mut rows = vec![tc::title("agent usage", w, &p.agent)];
         let tabs = visible_agents(&snapshot.installed, &cfg);
-        active = active.rem_euclid(tabs.len() as i64);
-        let name = tabs[active as usize].clone();
+        let at = step_tab(active, 0, tabs.len());
+        active = at as i64;
+        let name = tabs[at].clone();
         let hidden = ORDER
             .iter()
             .filter(|n| {
@@ -1731,14 +1744,17 @@ mod tests {
         // fault this replaced was right for powers of two and wrong for
         // everything else - a test at one width would have been a coin
         // toss.
-        for tabs in 2i64..10 {
-            let step = |at: i64, by: i64| (at + by).rem_euclid(tabs);
-            assert_eq!(step(0, -1), tabs - 1, "left from the first of {}", tabs);
-            assert_eq!(step(tabs - 1, 1), 0, "right from the last of {}", tabs);
-            for at in 0..tabs {
-                assert_eq!(step(step(at, -1), 1), at, "there and back from {}", at);
+        for count in 2usize..10 {
+            let n = count as i64;
+            assert_eq!(step_tab(0, -1, count), count - 1, "left from the first of {}", count);
+            assert_eq!(step_tab(n - 1, 1, count), 0, "right from the last of {}", count);
+            for at in 0..n {
+                let back = step_tab(at, -1, count) as i64;
+                assert_eq!(step_tab(back, 1, count) as i64, at, "there and back from {}", at);
             }
         }
+        // An empty tab list must not index anything.
+        assert_eq!(step_tab(0, -1, 0), 0);
     }
 
     #[test]
