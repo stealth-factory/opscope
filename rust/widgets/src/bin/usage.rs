@@ -1416,7 +1416,10 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
-    let (mut active, mut tick) = (0usize, 0usize);
+    // Signed, because the left key has to be able to go below zero and
+    // wrap; rem_euclid then brings it back into range the way Python's
+    // % does for a negative index.
+    let (mut active, mut tick) = (0i64, 0usize);
     // One offset per tab. Switching away and back keeps your place, which
     // matters when a tab is forty rows and you were reading the bottom of it.
     let mut offsets: HashMap<String, usize> = HashMap::new();
@@ -1437,7 +1440,7 @@ fn main() {
                     return;
                 }
                 "right" | "tab" | "l" => active += 1,
-                "left" | "h" => active = active.saturating_sub(1).max(active.wrapping_sub(1)),
+                "left" | "h" => active -= 1,
                 "up" | "k" => moves.push(-1),
                 "down" | "j" => moves.push(1),
                 "pgup" => pages.push(-1),
@@ -1462,8 +1465,8 @@ fn main() {
         };
         let mut rows = vec![tc::title("agent usage", w, &p.agent)];
         let tabs = visible_agents(&snapshot.installed, &cfg);
-        active %= tabs.len();
-        let name = tabs[active].clone();
+        active = active.rem_euclid(tabs.len() as i64);
+        let name = tabs[active as usize].clone();
         let hidden = ORDER
             .iter()
             .filter(|n| {
@@ -1719,6 +1722,23 @@ mod tests {
         assert_eq!(iso_epoch("2026-08-23T04:15:00.123456789Z"), Some(want));
         assert!(iso_epoch("").is_none());
         assert!(iso_epoch("not a date").is_none());
+    }
+
+    #[test]
+    fn the_left_key_wraps_to_the_last_tab_at_every_tab_count() {
+        // How the loop moves between tabs: a signed cursor brought back
+        // into range with rem_euclid. Checked across counts because the
+        // fault this replaced was right for powers of two and wrong for
+        // everything else - a test at one width would have been a coin
+        // toss.
+        for tabs in 2i64..10 {
+            let step = |at: i64, by: i64| (at + by).rem_euclid(tabs);
+            assert_eq!(step(0, -1), tabs - 1, "left from the first of {}", tabs);
+            assert_eq!(step(tabs - 1, 1), 0, "right from the last of {}", tabs);
+            for at in 0..tabs {
+                assert_eq!(step(step(at, -1), 1), at, "there and back from {}", at);
+            }
+        }
     }
 
     #[test]
