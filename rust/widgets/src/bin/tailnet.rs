@@ -1512,9 +1512,9 @@ mod tests {
         // Two iPads both call themselves "localhost"; the MagicDNS label is
         // unique across the tailnet and matches the admin console.
         let peer: serde_json::Value =
-            serde_json::from_str(r#"{"DNSName": "pi-2-bne.tail1234.ts.net.", "HostName": "localhost"}"#)
+            serde_json::from_str(r#"{"DNSName": "garden-sensor.example.ts.net.", "HostName": "localhost"}"#)
                 .unwrap();
-        assert_eq!(peer_name(&peer), "pi-2-bne");
+        assert_eq!(peer_name(&peer), "garden-sensor");
         // Only when there is no DNS name does the device get to say.
         let bare: serde_json::Value = serde_json::from_str(r#"{"HostName": "kitchen-pi"}"#).unwrap();
         assert_eq!(peer_name(&bare), "kitchen-pi");
