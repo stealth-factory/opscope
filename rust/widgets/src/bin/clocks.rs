@@ -302,7 +302,12 @@ fn herdr_toast(title: &str, body: &str) {
         return;
     }
     let _ = std::process::Command::new("herdr")
-        .args(["notification", "show", title, body, "--sound", "done"])
+        // --body, not a second positional: `herdr notification show` takes
+        // one <TITLE> and the body is an option. Passing it positionally
+        // fails with "unknown option" - silently, since stderr is nulled -
+        // so this toast had never once been shown.
+        .args(["notification", "show", title, "--body", body, "--sound", "done"])
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -329,6 +334,35 @@ struct Pomodoro {
     before_long: u32,
     bell: bool,
     rang_at: i64,
+    /// The day the tally belongs to, as %Y-%m-%d. Kept so a panel left
+    /// running over midnight zeroes rather than adding to yesterday.
+    day: String,
+    /// pomodoro_enabled: whether it starts running. clocks.py reads this
+    /// and the port did not, so setting it did nothing here.
+    enabled: bool,
+    /// pomodoro_notify: ring the terminal bell on a phase change. Read for
+    /// the same reason.
+    notify: bool,
+}
+
+/// Where the pomodoro's state lives, shared with clocks.py.
+///
+/// The same path and the same keys, so a session started under one
+/// implementation is picked up by the other rather than each keeping a
+/// private tally of the same afternoon.
+fn state_file() -> String {
+    let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}/.local/state",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
+    format!("{}/terminal-toys/pomodoro.json", base)
+}
+
+/// Today, in the form the state file stores.
+fn today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -370,9 +404,108 @@ impl Pomodoro {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
             rang_at: -1,
+            day: today(),
+            enabled: cfg
+                .get("pomodoro_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            notify: cfg
+                .get("pomodoro_notify")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         };
         it.left = it.duration();
+        it.running = it.enabled;
+        it.load();
         it
+    }
+
+    /// Read the state file, if there is one.
+    ///
+    /// Preferences outlive the day; only the tally and the block in
+    /// progress belong to it, so a file from yesterday contributes the
+    /// focus length and nothing else.
+    fn load(&mut self) {
+        let Ok(text) = std::fs::read_to_string(state_file()) else {
+            return;
+        };
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        if let Some(v) = d.get("focus").and_then(|v| v.as_f64()) {
+            self.focus = v;
+        }
+        if let Some(v) = d.get("enabled").and_then(|v| v.as_bool()) {
+            self.enabled = v;
+        }
+        if let Some(v) = d.get("hints").and_then(|v| v.as_bool()) {
+            self.shown = v;
+        }
+        if d.get("day").and_then(|v| v.as_str()) != Some(self.day.as_str()) {
+            return; // a new day starts a fresh count
+        }
+        if let Some(v) = d.get("phase").and_then(|v| v.as_str()) {
+            self.phase = match v {
+                "short" => Phase::Short,
+                "long" => Phase::Long,
+                _ => Phase::Focus,
+            };
+        }
+        self.done = d.get("completed").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if let Some(v) = d.get("left").and_then(|v| v.as_f64()) {
+            self.left = v;
+        }
+        // Resume mid-phase. If it elapsed while the panel was away the
+        // timer simply shows how far over it has run, which is what the
+        // Python does rather than pretending it ended on time.
+        let deadline = d.get("deadline").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if d.get("running").and_then(|v| v.as_bool()).unwrap_or(false) && deadline > 0.0 {
+            self.deadline = deadline;
+            self.running = true;
+        }
+    }
+
+    /// Write the state file, failing quietly.
+    ///
+    /// A panel that cannot save its tally should still show the clock.
+    fn save(&self) {
+        let path = state_file();
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body = serde_json::json!({
+            "day": self.day,
+            "phase": match self.phase {
+                Phase::Focus => "focus",
+                Phase::Short => "short",
+                Phase::Long => "long",
+            },
+            "completed": self.done,
+            "focus": self.focus,
+            "enabled": self.enabled,
+            "running": self.running,
+            "was_running": self.running,
+            "hints": self.shown,
+            "left": self.left,
+            "deadline": self.deadline,
+        });
+        let _ = std::fs::write(&path, body.to_string());
+    }
+
+    /// Zero the tally when the date changes, even if nothing restarted.
+    ///
+    /// clocks.py's own docstring names this: the count previously reset
+    /// only on load, so a panel left running over midnight kept adding to
+    /// yesterday's total. The port had reintroduced exactly that.
+    fn roll_day(&mut self) -> bool {
+        let now = today();
+        if now != self.day {
+            self.day = now;
+            self.done = 0;
+            self.save();
+            return true;
+        }
+        false
     }
 
     fn duration(&self) -> f64 {
@@ -411,6 +544,7 @@ impl Pomodoro {
                 self.deadline = now + self.left;
             }
         }
+        self.save();
     }
 
     fn start_stop(&mut self, now: f64) {
@@ -421,6 +555,7 @@ impl Pomodoro {
             self.running = true;
             self.deadline = now + self.left;
         }
+        self.save();
     }
 
     /// Move to whatever comes next, counting a finished focus block.
@@ -438,6 +573,7 @@ impl Pomodoro {
         self.left = self.duration();
         self.deadline = now + self.left;
         self.rang_at = -1;
+        self.save();
     }
 
     /// What pressing the break key will do, right now.
@@ -460,6 +596,7 @@ impl Pomodoro {
     /// Zero the tally, once there is something to zero.
     fn reset_count(&mut self) {
         self.done = 0;
+        self.save();
     }
 
     /// Lengthen or shorten the focus block, in minutes.
@@ -482,6 +619,7 @@ impl Pomodoro {
         if self.running {
             self.deadline = now + self.left;
         }
+        self.save();
     }
 
     /// The length of the block in progress, in minutes.
@@ -493,6 +631,7 @@ impl Pomodoro {
         self.left = self.duration();
         self.deadline = now + self.left;
         self.rang_at = -1;
+        self.save();
     }
 
     /// One tick: ring on elapse, and once a minute while overrunning.
@@ -513,13 +652,32 @@ impl Pomodoro {
             return false;
         }
         self.rang_at = minute;
-        if self.bell {
-            tc::out("\x07");
-            tc::flush();
-        }
+        self.alert(&format!("{} over", self.phase.label()));
         true
     }
+
+    /// Nudge whoever is in front of the terminal, over SSH if need be.
+    ///
+    /// BEL is universal. OSC 9 covers iTerm2, WezTerm, Windows Terminal
+    /// and Ghostty; OSC 777 covers urxvt and several others. Terminals
+    /// ignore the sequences they do not implement, so sending both costs
+    /// nothing, and a multiplexer in between decides whether to forward
+    /// them.
+    fn alert(&self, text: &str) {
+        if self.bell {
+            tc::out("\x07");
+        }
+        if self.notify {
+            tc::out(&format!("\x1b]9;{}\x07", text));
+            tc::out(&format!("\x1b]777;notify;Pomodoro;{}\x07", text));
+        }
+        tc::flush();
+        if self.notify {
+            herdr_toast("Pomodoro", text);
+        }
+    }
 }
+
 
 struct City {
     name: String,
@@ -627,6 +785,9 @@ fn main() {
 
         // The pomodoro leads the section, as it does in the Python.
         let stamp = seconds();
+        // Before anything reads the tally: a panel left running over
+        // midnight must zero rather than keep adding to yesterday.
+        pomo.roll_day();
         if pomo.tick(stamp) {
             flash_started = Some(stamp);
             let over = pomo.overtime(stamp);
@@ -972,11 +1133,93 @@ fn palette() -> Palette {
 mod tests {
     use super::*;
 
+    /// One lock for every test that touches the state file.
+    ///
+    /// XDG_STATE_HOME is process-global and cargo runs tests in parallel
+    /// threads, so without this one test's sandbox becomes another's - and
+    /// since Pomodoro::new loads, a test wanting a fresh 25-minute focus
+    /// would read whatever a concurrent test had just written.
+    static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the lock and point the state file at an empty directory.
+    ///
+    /// The real file holds a running pomodoro that clocks.py shares, so a
+    /// careless test zeroes an actual afternoon.
+    fn sandbox(name: &str) -> std::sync::MutexGuard<'static, ()> {
+        let held = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = format!("/tmp/toys-clocks-test-{}-{}", std::process::id(), name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("XDG_STATE_HOME", &dir);
+        held
+    }
+
+    #[test]
+    fn a_panel_left_running_over_midnight_starts_a_fresh_count() {
+        // clocks.py's roll_day docstring names this as a bug it already
+        // fixed: the count used to reset only on load, so a panel running
+        // overnight kept adding to yesterday's total. The port had
+        // reintroduced it - there was no roll at all.
+        let _held = sandbox("roll");
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        p.done = 5;
+        p.day = "2020-01-01".into();
+        assert!(p.roll_day(), "a changed date should roll");
+        assert_eq!(p.done, 0, "yesterday's tally carried into today");
+        assert_eq!(p.day, today());
+        // And the same day twice does nothing.
+        p.done = 2;
+        assert!(!p.roll_day());
+        assert_eq!(p.done, 2, "the tally was zeroed on an unchanged day");
+    }
+
+    #[test]
+    fn the_tally_survives_a_restart_and_the_file_is_the_pythons() {
+        // The help text promises the pomodoro persists across restarts,
+        // and the port wrote nothing at all. The file is clocks.py's, key
+        // for key, so a session started under one is picked up by the
+        // other rather than each keeping a private tally.
+        let _held = sandbox("save");
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        p.done = 3;
+        p.phase = Phase::Short;
+        p.save();
+
+        let text = std::fs::read_to_string(state_file()).expect("a state file");
+        let d: serde_json::Value = serde_json::from_str(&text).expect("json");
+        for key in [
+            "day", "phase", "completed", "focus", "enabled", "running",
+            "was_running", "hints", "left", "deadline",
+        ] {
+            assert!(d.get(key).is_some(), "clocks.py reads {} and we omit it", key);
+        }
+        assert_eq!(d["completed"], 3);
+        assert_eq!(d["phase"], "short");
+
+        let back = Pomodoro::new(&serde_json::json!({}));
+        assert_eq!(back.done, 3, "the tally did not survive");
+        assert_eq!(back.phase, Phase::Short);
+    }
+
+    #[test]
+    fn a_tally_from_another_day_is_not_carried_forward() {
+        // Preferences outlive the day; the count does not.
+        let _held = sandbox("stale");
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        p.done = 9;
+        p.day = "2020-01-01".into();
+        p.save();
+        let back = Pomodoro::new(&serde_json::json!({}));
+        assert_eq!(back.done, 0, "yesterday's count was loaded as today's");
+    }
+
     #[test]
     fn each_block_keeps_its_own_length() {
         // The config numbers are starting values, not fixed ones: ± moves
         // whichever block is running and leaves the other two alone, so a
         // 25/5/15 day can become 30/5/15 without touching the breaks.
+        // adjust() saves, and the real state file is a running pomodoro
+        // that clocks.py shares - send the writes somewhere disposable.
+        let _held = sandbox("adjust");
         let mut pomo = Pomodoro {
             phase: Phase::Focus,
             running: false,
@@ -990,6 +1233,9 @@ mod tests {
             before_long: 4,
             bell: false,
             rang_at: 0,
+            day: today(),
+            enabled: false,
+            notify: false,
         };
 
         pomo.phase = Phase::Focus;
@@ -1020,6 +1266,7 @@ mod tests {
 
     #[test]
     fn the_advance_key_says_what_it_will_do() {
+        let _held = sandbox("the_advance_key_says_what_it_will_do");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         // Three blocks done, so the fourth leads to the long break and the
         // hint has to say so rather than promising an ordinary one.
@@ -1032,6 +1279,8 @@ mod tests {
 
     #[test]
     fn the_focus_length_can_be_nudged_and_stays_sane() {
+        // new() loads and adjust() saves, so this needs its own state.
+        let _held = sandbox("nudge");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         pomo.adjust(5.0, 0.0);
         assert_eq!(pomo.focus, 30.0);
@@ -1045,6 +1294,7 @@ mod tests {
 
     #[test]
     fn the_tally_resets_only_when_there_is_one() {
+        let _held = sandbox("the_tally_resets_only_when_there_is_one");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         pomo.done = 4;
         pomo.reset_count();
@@ -1260,6 +1510,7 @@ mod tests {
 
     #[test]
     fn a_focus_block_leads_to_a_break_and_back() {
+        let _held = sandbox("a_focus_block_leads_to_a_break_and_back");
         let cfg = serde_json::json!({});
         let mut pomo = Pomodoro::new(&cfg);
         let now = 1000.0;
@@ -1273,6 +1524,7 @@ mod tests {
 
     #[test]
     fn every_fourth_break_is_a_long_one() {
+        let _held = sandbox("every_fourth_break_is_a_long_one");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         let now = 0.0;
         for _ in 0..3 {
@@ -1286,6 +1538,7 @@ mod tests {
 
     #[test]
     fn hiding_freezes_it_rather_than_letting_it_run_away() {
+        let _held = sandbox("hiding_freezes_it_rather_than_letting_it_run_away");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         pomo.shown = true;
         pomo.start_stop(0.0);
@@ -1302,6 +1555,7 @@ mod tests {
 
     #[test]
     fn overrunning_counts_up_rather_than_stopping() {
+        let _held = sandbox("overrunning_counts_up_rather_than_stopping");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
         pomo.shown = true;
         pomo.start_stop(0.0);
