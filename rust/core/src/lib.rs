@@ -738,6 +738,28 @@ pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)>
     out
 }
 
+/// Cell widths for `count` bars that fill `room` columns exactly.
+///
+/// The remainder goes to the leftmost bars rather than being dropped on the
+/// floor by integer division: stopping short of the right edge leaves no way
+/// to tell a finished chart from a truncated one. Twenty-eight days across
+/// fifty-nine columns is two cells each and three columns wasted, which
+/// reads as a chart that gave up.
+pub fn spread(count: usize, room: usize) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count >= room {
+        // One cell each and the caller decides what to drop: silently
+        // returning fewer widths than bars would lose data without saying so.
+        return vec![1; count];
+    }
+    let (slot, extra) = (room / count, room % count);
+    (0..count)
+        .map(|i| slot + usize::from(i < extra))
+        .collect()
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
@@ -1031,6 +1053,21 @@ mod tests {
         // And the highlight actually travels, or it is just a grey bar.
         let runs = |tick: usize| skeleton(20, tick, 7).len();
         assert!((0..40).map(runs).collect::<std::collections::HashSet<_>>().len() > 1);
+    }
+
+    #[test]
+    fn spread_fills_its_room_exactly() {
+        // Twenty-eight days across fifty-nine columns: the three left over
+        // go to the leftmost bars rather than leaving the chart short.
+        let widths = spread(28, 59);
+        assert_eq!(widths.len(), 28);
+        assert_eq!(widths.iter().sum::<usize>(), 59);
+        assert_eq!(widths[0], 3);
+        assert_eq!(widths[27], 2);
+        // More bars than columns is one cell each, and the caller decides
+        // what to drop - returning fewer widths would lose data silently.
+        assert_eq!(spread(10, 4), vec![1; 10]);
+        assert!(spread(0, 10).is_empty());
     }
 
     #[test]

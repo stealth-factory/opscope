@@ -98,6 +98,11 @@ const WIDGETS: &[Widget] = &[
         help: include_str!("tailnet_help.txt"),
         doc: include_str!("../../../../docs/tailnet.md"),
     },
+    Widget {
+        stem: "usage",
+        help: include_str!("usage_help.txt"),
+        doc: include_str!("../../../../docs/usage.md"),
+    },
 ];
 
 impl Widget {
