@@ -362,7 +362,7 @@ fn wire_label(names: &[String]) -> String {
 /// flickers between a figure and a dash. Averaging over a few seconds is
 /// just as true - it is a rate over a stated window - and can actually be
 /// read. The header says which window, so the number is not a mystery.
-const RATE_WINDOW: f64 = 4.0;
+const RATE_WINDOW: f64 = 10.0;
 
 /// Fold one sample into a counter and re-average over the window.
 ///
@@ -446,6 +446,16 @@ struct Proc {
     recent: Vec<(f64, f64, u64, u64)>,
     /// (down rate, up rate) per sample, for this process's own chart.
     hist: Vec<(f64, f64)>,
+    /// (read rate, write rate) per sample, from /proc/<pid>/io.
+    ///
+    /// Disk was a line of two lifetime totals, which answers "has it ever
+    /// touched the disk" and not "is it touching it now" - the question the
+    /// network half of this screen exists to answer. Same series, same
+    /// chart, so the two can be read against each other.
+    disk: Vec<(f64, f64)>,
+    /// (when, read bytes, write bytes) at the previous sample. The kernel
+    /// reports lifetime counters, so a rate needs the one before.
+    io_was: Option<(f64, u64, u64)>,
 }
 
 /// One socket, so the detail screen can say which of a process's dozen
@@ -630,6 +640,27 @@ fn sample(state: &mut State, external: bool) {
         for row in state.totals.values_mut() {
             row.hist.push((row.down_rate, row.up_rate));
             trim(&mut row.hist, SERIES);
+            // /proc/<pid>/io is one small read beside the /proc/<pid>/fd
+            // directory scan this widget already does per process, and it
+            // is unreadable for anyone else's, which the empty map covers.
+            let (mut read_rate, mut write_rate) = (0.0, 0.0);
+            if row.pid != 0 && row.alive {
+                let io = proc_io(row.pid);
+                let now_read = *io.get("read_bytes").unwrap_or(&0);
+                let now_write = *io.get("write_bytes").unwrap_or(&0);
+                if !io.is_empty() {
+                    if let Some((was_at, was_read, was_write)) = row.io_was {
+                        let span = stamp - was_at;
+                        if span > 0.0 {
+                            read_rate = now_read.saturating_sub(was_read) as f64 / span;
+                            write_rate = now_write.saturating_sub(was_write) as f64 / span;
+                        }
+                    }
+                    row.io_was = Some((stamp, now_read, now_write));
+                }
+            }
+            row.disk.push((read_rate, write_rate));
+            trim(&mut row.disk, SERIES);
         }
         for spot in state.spots.values_mut() {
             spot.hist.push((spot.down_rate, spot.up_rate));
@@ -1284,13 +1315,14 @@ fn detail_rows(
         out.push(String::new());
     }
 
-    // What is left is split between the three lists, with the focused one
-    // given the room: it is the one being read, and the others still say
-    // how much they are holding in their headers.
-    let left = h.saturating_sub(out.len() + 4).max(3);
+    // Every list is drawn in full. The three used to share what was left,
+    // with the focused one taking the room and the other two collapsing to
+    // a single line - so a process with six sockets showed one of them and
+    // said "6 sockets" above it, and the only way to see the rest was to
+    // remember which key focused that section. The screen is now as tall as
+    // it needs to be and the caller scrolls it.
     let counts = [spots.len(), conns.len(), files.len()];
-    let mut shares = [1usize; 3];
-    shares[focus] = left.saturating_sub(2 + 3 * 2).max(1);
+    let shares = [counts[0].max(1), counts[1].max(1), counts[2].max(1)];
 
     for (which, (name, key, note)) in [
         ("TALKING TO", "e", "endpoint"),
@@ -1302,7 +1334,7 @@ fn detail_rows(
     {
         let focused = focus == which;
         out.push(section_head(name, counts[which], note, focused, key, w, p));
-        let room = shares[which].min(h.saturating_sub(out.len() + 3).max(1));
+        let room = shares[which];
         if counts[which] == 0 {
             out.push(tc::seg(&[(p.dim.as_str(), "   none".into())], w - 1));
         } else if which == 0 {
@@ -1353,6 +1385,20 @@ fn detail_rows(
             ],
             w - 1,
         ));
+        // The same chart the network half uses, on the same axes rule:
+        // written above the line, read below. Two lifetime totals say
+        // whether it has ever touched the disk; this says whether it is
+        // touching it now, which is the question the rest of this screen
+        // is answering about the network.
+        let room = h.saturating_sub(out.len() + 1);
+        let disk_h = if room >= 7 { room.min(9) } else { 0 };
+        // Drawn whether or not it is moving, like the network chart above:
+        // a flat line at zero says "not touching the disk", which is an
+        // answer. Hiding it would leave the reader unsure whether the
+        // process is quiet or the chart is broken.
+        if disk_h > 0 && !row.disk.is_empty() {
+            out.extend(chart(&row.disk, w, disk_h, p));
+        }
     }
     out
 }
@@ -1518,6 +1564,10 @@ fn main() {
     let mut detail: Option<(i32, String)> = None;
     let mut focus = 0usize;
     let mut at = [0usize; 3];
+    // How far down the detail screen we are. Clamped against the body when
+    // the frame is drawn, because the body's height depends on how many
+    // sockets and files the process has right now.
+    let mut dscroll = 0usize;
     // What each open file measured when this screen opened, so the growth
     // column is over the time you have been looking rather than the life
     // of the file.
@@ -1554,8 +1604,28 @@ fn main() {
                         detail = None;
                         sizes.clear();
                     }
-                    "up" | "k" | "K" => at[focus] = at[focus].saturating_sub(1),
-                    "down" | "j" | "J" => at[focus] += 1,
+                    // Up and down move the screen, as they do in every
+                    // other widget. The cursor inside a section - which
+                    // picks the endpoint that gets its own chart - moves on
+                    // n and p, the same pair link uses to step between
+                    // connections without leaving the screen.
+                    "up" | "k" | "K" => dscroll = dscroll.saturating_sub(1),
+                    "down" | "j" | "J" => dscroll = dscroll.saturating_add(1),
+                    // The pane height is read here rather than carried,
+                    // because a page is only meaningful against the pane as
+                    // it is now and it may have been resized since.
+                    "pgup" => {
+                        let page = tc::size().1.saturating_sub(4).max(1);
+                        dscroll = dscroll.saturating_sub(page);
+                    }
+                    "pgdn" => {
+                        let page = tc::size().1.saturating_sub(4).max(1);
+                        dscroll = dscroll.saturating_add(page);
+                    }
+                    "home" => dscroll = 0,
+                    "end" => dscroll = usize::MAX,
+                    "n" | "N" => at[focus] += 1,
+                    "p" | "P" => at[focus] = at[focus].saturating_sub(1),
                     "tab" => focus = (focus + 1) % SECTIONS.len(),
                     "e" | "E" => focus = 0,
                     "f" | "F" => focus = 2,
@@ -1601,6 +1671,7 @@ fn main() {
                         detail = Some((pick.pid, pick.name.clone()));
                         focus = 0;
                         at = [0; 3];
+                        dscroll = 0;
                         sizes.clear();
                     }
                 }
@@ -1683,6 +1754,11 @@ fn main() {
             let hints: Vec<Vec<(&str, String)>> = vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
                 vec![(p.accent.as_str(), "tab".into()), (p.dim.as_str(), " section".into())],
+                // n and p move the cursor inside the focused section, which
+                // is what up and down did before they were given the screen.
+                // A key that works and is not named is the same fault as a
+                // name with no key behind it, read from the other side.
+                vec![(p.dim.as_str(), "[n]/[p] in section".into())],
                 vec![(p.dim.as_str(), "[c]opy".into())],
                 vec![(p.dim.as_str(), "[r]ezero".into())],
                 vec![
@@ -1699,15 +1775,33 @@ fn main() {
                 foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
             }
             let room = h.saturating_sub(foot.len() + 1).max(1);
-            let mut body = detail_rows(
-                &row, &spots, &conns, &files, &sizes, focus, &at, w, room, interval, &names, &p,
+            // Built at the height it wants rather than the height it has:
+            // the lists are drawn in full and the charts get their rows, and
+            // what does not fit is scrolled to rather than dropped.
+            let natural = room + spots.len() + conns.len() + files.len() + 24;
+            let body = detail_rows(
+                &row, &spots, &conns, &files, &sizes, focus, &at, w, natural, interval, &names, &p,
             );
-            body.truncate(room);
-            while body.len() < room {
-                body.push(String::new());
+            let furthest = body.len().saturating_sub(room);
+            dscroll = dscroll.min(furthest);
+            let last = (dscroll + room).min(body.len());
+            let mut shown: Vec<String> = body[dscroll..last].to_vec();
+            while shown.len() < room {
+                shown.push(String::new());
             }
-            body.extend(foot);
-            tc::draw(&body, w, h);
+            if furthest > 0 {
+                if let Some(line) = foot.last_mut() {
+                    line.push_str(&tc::seg(
+                        &[(
+                            p.dim.as_str(),
+                            format!("  rows {}-{} of {}", dscroll + 1, last, body.len()),
+                        )],
+                        w - 1,
+                    ));
+                }
+            }
+            shown.extend(foot);
+            tc::draw(&shown, w, h);
             std::thread::sleep(Duration::from_millis(300));
             continue;
         }

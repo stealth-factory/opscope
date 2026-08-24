@@ -365,7 +365,9 @@ against.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k` | select a process — or an item within the focused section |
+| `↑` `↓` / `j` `k` | select a process in the list — or scroll the detail screen |
+| `PgUp` `PgDn` `Home` `End` | move the detail screen by a page, or to either end |
+| `n` / `p` | move the cursor inside the focused section, which picks the endpoint that gets its own chart |
 | `↵` / `→` | open the selected process |
 | `esc` / `←` | back to the list |
 | `tab` | cycle the focused section: endpoints → connections → files |
