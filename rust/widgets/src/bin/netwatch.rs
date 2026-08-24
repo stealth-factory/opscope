@@ -1329,7 +1329,12 @@ fn detail_rows(
     interval: f64,
     names: &Resolver,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, Option<(usize, usize)>) {
+    // Where the cursor ended up in the body, and how many rows it owns - its
+    // own row plus the chart drawn under it. The caller cannot work this out:
+    // the body is built at whatever height it needs and the selected row's
+    // position depends on how many rows every section above it drew.
+    let mut cursor: Option<(usize, usize)> = None;
     let facts = process_facts(row.pid);
     let here_now = running(row.pid);
     let total = (row.up + row.down) as f64;
@@ -1439,11 +1444,14 @@ fn detail_rows(
             let pick_at = at[which].min(spots.len() - 1);
             if focused {
                 let pick = &spots[pick_at];
+                let mut tall = 1;
                 if !pick.hist.is_empty() && pick_at < rows.len() {
                     let mut under = chart(&pick.hist, w, 4, p);
                     under.push(String::new());
+                    tall += under.len();
                     rows.splice(pick_at + 1..pick_at + 1, under);
                 }
+                cursor = Some((out.len() + pick_at, tall));
             }
             out.extend(rows);
         } else if which == 1 {
@@ -1451,17 +1459,23 @@ fn detail_rows(
             let mut rows = connection_rows(conns, at[which], focused, room, w, p);
             let pick_at = at[which].min(conns.len().saturating_sub(1));
             if focused {
+                let mut tall = 1;
                 if let Some(pick) = conns.get(pick_at) {
                     if !pick.hist.is_empty() && pick_at < rows.len() {
                         let mut under = chart(&pick.hist, w, 4, p);
                         under.push(String::new());
+                        tall += under.len();
                         rows.splice(pick_at + 1..pick_at + 1, under);
                     }
                 }
+                cursor = Some((out.len() + pick_at, tall));
             }
             out.extend(rows);
         } else {
             out.push(file_head(w, p));
+            if focused {
+                cursor = Some((out.len() + at[which].min(files.len() - 1), 1));
+            }
             out.extend(file_rows(files, sizes, at[which], focused, room, w, p));
         }
         out.push(String::new());
@@ -1502,7 +1516,7 @@ fn detail_rows(
             out.extend(chart(&row.disk, w, disk_h, p));
         }
     }
-    out
+    (out, cursor)
 }
 
 /// One block per interval, for a log or a pipe.
@@ -1924,10 +1938,27 @@ fn main() {
             // the lists are drawn in full and the charts get their rows, and
             // what does not fit is scrolled to rather than dropped.
             let natural = room + spots.len() + conns.len() + files.len() + 24;
-            let body = detail_rows(
+            let (body, cursor) = detail_rows(
                 &row, &spots, &conns, &files, &sizes, focus, &at, w, natural, interval, &names, &p,
             );
             let furthest = body.len().saturating_sub(room);
+            // The screen follows the cursor into a section. It did not
+            // before: the body is built at whatever height it needs and
+            // scrolled to, but nothing tied the scroll to the selection, so
+            // moving the cursor down a long list walked it off the bottom of
+            // the pane - with its chart, which is the thing you moved the
+            // cursor to see. On a short pane one press was enough.
+            //
+            // The chart is why this reveals a span rather than a row: pulling
+            // the selected line just into view would leave the four rows it
+            // was drawn for still below the edge.
+            if let Some((at_row, tall)) = cursor {
+                if at_row < dscroll {
+                    dscroll = at_row;
+                } else if at_row + tall > dscroll + room {
+                    dscroll = (at_row + tall).saturating_sub(room);
+                }
+            }
             dscroll = dscroll.min(furthest);
             let last = (dscroll + room).min(body.len());
             let mut shown: Vec<String> = body[dscroll..last].to_vec();
