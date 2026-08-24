@@ -150,6 +150,10 @@ struct Seen {
     recv: u64,
     peer: String,
     port: u16,
+    /// Our end of it. Five sockets to one CDN all read "1.2.3.4:443", and
+    /// this is the only field that tells them apart - the peer port is 443
+    /// on every one of them.
+    mine: u16,
     cgroup: String,
 }
 
@@ -165,6 +169,7 @@ fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
     }
     let mut found = HashMap::new();
     let (mut inode, mut peer, mut port, mut cgroup) = (None, String::new(), 0u16, String::new());
+    let mut mine = 0u16;
     for (i, line) in text.lines().enumerate() {
         if i == 0 {
             continue;
@@ -180,6 +185,12 @@ fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
                 .unwrap_or_default();
             port = cols
                 .get(4)
+                .and_then(|a| a.rsplit_once(':'))
+                .and_then(|(_, p)| p.parse().ok())
+                .unwrap_or(0);
+            // Column 3 is our address, column 4 is theirs.
+            mine = cols
+                .get(3)
                 .and_then(|a| a.rsplit_once(':'))
                 .and_then(|(_, p)| p.parse().ok())
                 .unwrap_or(0);
@@ -205,6 +216,7 @@ fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
                     .unwrap_or(0),
                 peer: peer.clone(),
                 port,
+                mine,
                 cgroup: cgroup.clone(),
             },
         );
@@ -477,6 +489,8 @@ struct Conn {
     name: String,
     peer: String,
     port: u16,
+    /// Our port. See `Seen::mine`.
+    mine: u16,
     up: u64,
     down: u64,
     up_rate: f64,
@@ -604,6 +618,7 @@ fn sample(state: &mut State, external: bool) {
             name: name.clone(),
             peer: seen.peer.clone(),
             port: seen.port,
+            mine: seen.mine,
             ..Default::default()
         });
         conn.alive = true;
@@ -1100,7 +1115,10 @@ fn endpoint_host_w(w: usize) -> usize {
 }
 
 fn connection_host_w(w: usize) -> usize {
-    ((w - 1).saturating_sub(34)).clamp(14, 38)
+    // 37 is the fixed tail exactly: 3 for the mark, 6 for our port, 7 for the
+    // state, 10 for rx and 11 for tx. Counted, not estimated - the endpoint
+    // list had this written as 42 when it was 44 and quietly clipped the rate.
+    ((w - 1).saturating_sub(37)).clamp(14, 38)
 }
 
 fn file_path_w(w: usize) -> usize {
@@ -1115,11 +1133,11 @@ fn endpoint_head(w: usize, p: &Palette) -> String {
             p.dim.as_str(),
             format!(
                 "   {}{:<9}{:>10}{:>11}{:>11}",
-                tc::pad("host", endpoint_host_w(w)),
-                "ports",
-                "rx",
-                "tx",
-                "rate"
+                tc::pad("HOST", endpoint_host_w(w)),
+                "PORTS",
+                "RX",
+                "TX",
+                "RATE"
             ),
         )],
         w - 1,
@@ -1132,11 +1150,12 @@ fn connection_head(w: usize, p: &Palette) -> String {
         &[(
             p.dim.as_str(),
             format!(
-                "   {}{:<7}{:>10}{:>11}",
-                tc::pad("socket", connection_host_w(w)),
-                "state",
-                "rx",
-                "tx"
+                "   {}{:<6}{:<7}{:>10}{:>11}",
+                tc::pad("SOCKET", connection_host_w(w)),
+                "OURS",
+                "STATE",
+                "RX",
+                "TX"
             ),
         )],
         w - 1,
@@ -1150,9 +1169,9 @@ fn file_head(w: usize, p: &Palette) -> String {
             p.dim.as_str(),
             format!(
                 "   {}{:>10}{:>12}",
-                tc::pad("path", file_path_w(w)),
-                "size",
-                "growth"
+                tc::pad("PATH", file_path_w(w)),
+                "SIZE",
+                "GROWTH"
             ),
         )],
         w - 1,
@@ -1250,6 +1269,16 @@ fn connection_rows(
                         tc::pad(
                             &where_.chars().take(host_w - 1).collect::<String>(),
                             host_w,
+                        ),
+                    ),
+                    // Our end of the socket. Without it five rows to one CDN
+                    // are five identical lines, and the question "why are
+                    // there so many of these" has no answer on screen.
+                    (
+                        &c(&p.dim),
+                        format!(
+                            "{:<6}",
+                            if conn.mine > 0 { conn.mine.to_string() } else { "-".into() }
                         ),
                     ),
                     (
@@ -2496,11 +2525,11 @@ mod tests {
             let row = bare(&endpoint_rows(&[spot.clone()], 0, false, 1, w, &names, &p)[0]);
             let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
             assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
-            assert_eq!(col(&head, "host"), 3, "host column at w={}", w);
-            assert_eq!(col(&head, "ports"), down - 9, "ports column at w={}", w);
-            assert_eq!(col(&head, "rx") + 2, down + 10, "rx column at w={}", w);
-            assert_eq!(col(&head, "tx") + 2, up + 10, "tx column at w={}", w);
-            assert_eq!(col(&head, "rate") + 4, wide, "rate column at w={}", w);
+            assert_eq!(col(&head, "HOST"), 3, "host column at w={}", w);
+            assert_eq!(col(&head, "PORTS"), down - 9, "ports column at w={}", w);
+            assert_eq!(col(&head, "RX") + 2, down + 10, "rx column at w={}", w);
+            assert_eq!(col(&head, "TX") + 2, up + 10, "tx column at w={}", w);
+            assert_eq!(col(&head, "RATE") + 4, wide, "rate column at w={}", w);
         }
     }
 
@@ -2510,20 +2539,25 @@ mod tests {
         let conn = Conn {
             peer: "192.0.2.7".into(),
             port: 443,
+            mine: 44672,
             up: 4096,
             down: 8192,
             alive: true,
             ..Default::default()
         };
-        for w in [60usize, 84, 120, 200] {
+        for w in [66usize, 84, 120, 200] {
             let head = bare(&connection_head(w, &p));
             let row = bare(&connection_rows(&[conn.clone()], 0, false, 1, w, &p)[0]);
             let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
             assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
-            assert_eq!(col(&head, "socket"), 3, "socket column at w={}", w);
-            assert_eq!(col(&head, "state"), down - 7, "state column at w={}", w);
-            assert_eq!(col(&head, "rx") + 2, down + 10, "rx column at w={}", w);
-            assert_eq!(col(&head, "tx") + 2, up + 10, "tx column at w={}", w);
+            assert_eq!(col(&head, "SOCKET"), 3, "socket column at w={}", w);
+            assert_eq!(col(&head, "STATE"), down - 7, "state column at w={}", w);
+            // our port sits between the address and the state, and the row
+            // is searched for the port itself rather than for a width
+            assert_eq!(col(&head, "OURS"), down - 13, "ours column at w={}", w);
+            assert_eq!(col(&row, "44672"), down - 13, "our port at w={}", w);
+            assert_eq!(col(&head, "RX") + 2, down + 10, "rx column at w={}", w);
+            assert_eq!(col(&head, "TX") + 2, up + 10, "tx column at w={}", w);
             assert_eq!(up + 10, wide, "the tx column is the last at w={}", w);
         }
     }
@@ -2542,14 +2576,14 @@ mod tests {
             let row = bare(&file_rows(&files, &sizes, 0, false, 1, w, &p)[0]);
             let wide = row.chars().count();
             assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
-            assert_eq!(col(&head, "path"), 3, "path column at w={}", w);
+            assert_eq!(col(&head, "PATH"), 3, "path column at w={}", w);
             assert_eq!(
-                col(&head, "size") + 4,
+                col(&head, "SIZE") + 4,
                 col(&row, &shown) + shown.chars().count(),
                 "size column at w={}",
                 w
             );
-            assert_eq!(col(&head, "growth") + 6, wide, "growth column at w={}", w);
+            assert_eq!(col(&head, "GROWTH") + 6, wide, "growth column at w={}", w);
         }
     }
 
