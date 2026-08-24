@@ -162,7 +162,7 @@ the middle of a pipeline it adds nothing to.
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | select a widget |
-| `↵` | launch it, and come back here when it quits |
+| `↵` / `→` | launch it, and come back here when it quits |
 | `r` | recheck what is installed and configured |
 | `q` | quit |
 

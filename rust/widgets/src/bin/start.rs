@@ -209,7 +209,25 @@ fn palette() -> Palette {
     }
 }
 
-fn rows_for(w: usize, selected: usize, p: &Palette) -> Vec<String> {
+/// The rows to draw, and where the window sits.
+///
+/// Returns the first index shown, so the caller can say what it is
+/// showing rather than presenting a slice as the whole list.
+fn window_for(count: usize, selected: usize, room: usize) -> (usize, usize) {
+    if count <= room || room == 0 {
+        return (0, count);
+    }
+    // Keep the cursor inside the window, scrolling only as far as it must:
+    // a list that jumps to centre the selection loses the reader's place.
+    let first = if selected < room {
+        0
+    } else {
+        (selected + 1).saturating_sub(room)
+    };
+    (first, room)
+}
+
+fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -> Vec<String> {
     let name_w = (w.saturating_sub(58)).clamp(12, 18);
     // Every column keeps a space of its own, so a summary that fills its
     // width stops short of whatever is beside it rather than running in.
@@ -217,6 +235,8 @@ fn rows_for(w: usize, selected: usize, p: &Palette) -> Vec<String> {
     WIDGETS
         .iter()
         .enumerate()
+        .skip(first)
+        .take(room)
         .map(|(i, item)| {
             let here = i == selected;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
@@ -348,12 +368,33 @@ fn main() {
         body.push(tc::seg(
             &[(
                 p.dim.as_str(),
-                format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len()),
+                {
+                    let room = h.saturating_sub(6).max(1);
+                    let (first, shown) = window_for(WIDGETS.len(), selected, room);
+                    if shown < WIDGETS.len() {
+                        // A partial list says so, rather than reading as
+                        // the whole set with some widgets missing.
+                        format!(
+                            " {} widgets · showing {}-{}   ↵ or → starts one, q leaves",
+                            WIDGETS.len(),
+                            first + 1,
+                            first + shown
+                        )
+                    } else {
+                        format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len())
+                    }
+                },
             )],
             w - 1,
         ));
         body.push(String::new());
-        body.extend(rows_for(w, selected, &p));
+        // What is left for the list once the title, the two blanks, the
+        // description heading and the footer have had theirs. Drawing all
+        // thirteen and letting the frame cut the tail is what put the
+        // cursor off the bottom of a short pane.
+        let room = h.saturating_sub(body.len() + 5).max(1);
+        let (first, shown) = window_for(WIDGETS.len(), selected, room);
+        body.extend(rows_for(w, selected, first, shown, &p));
         body.push(String::new());
 
         // What the highlighted one is for, in its own words - the rest of
@@ -428,6 +469,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_always_contains_the_cursor() {
+        // The bug this replaces: all thirteen rows were drawn and the
+        // frame cut the tail, so on a short pane the cursor moved onto a
+        // row that was not there - nothing highlighted, and Enter still
+        // starting whatever it was invisibly on.
+        for room in 1usize..14 {
+            for selected in 0..13 {
+                let (first, shown) = window_for(13, selected, room);
+                assert!(
+                    selected >= first && selected < first + shown,
+                    "room {} cursor {} fell outside {}..{}",
+                    room,
+                    selected,
+                    first,
+                    first + shown
+                );
+                assert!(first + shown <= 13, "window ran past the list");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_that_fits_is_not_windowed() {
+        // No note, no scrolling, nothing changed for the pane sizes these
+        // actually run at.
+        assert_eq!(window_for(13, 0, 13), (0, 13));
+        assert_eq!(window_for(13, 12, 20), (0, 13));
+        assert_eq!(window_for(0, 0, 5), (0, 0));
+    }
+
+    #[test]
+    fn the_window_moves_only_as_far_as_it_must() {
+        // Scrolling by one when the cursor steps off the edge, rather than
+        // recentring: a list that jumps loses the reader's place.
+        assert_eq!(window_for(13, 5, 6), (0, 6));
+        assert_eq!(window_for(13, 6, 6), (1, 6));
+        assert_eq!(window_for(13, 12, 6), (7, 6));
+    }
+
 
     #[test]
     fn every_binary_is_on_the_menu() {
