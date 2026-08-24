@@ -120,6 +120,7 @@ are still true about the path, just not about the terminal.
 |---|---|
 | `↑` `↓` | select a session |
 | `↵` / `i` | open that connection on its own screen |
+| `n` / `p` | on the detail screen, step to the next or previous connection |
 | `esc` | back to the list |
 | `w` | cycle the chart's span: 1m, 5m, 15m, 1h |
 | `o` | hide or show sessions idle over five minutes |

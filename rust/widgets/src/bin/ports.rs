@@ -32,7 +32,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use toys_core as tc;
 
+/// The machine's own ports, hidden behind `o` by default: they are never
+/// the answer to "which port is my dev server on".
 const SYSTEM_PORTS: &[u16] = &[22, 53, 123, 323, 631, 5353];
+
+/// What config said, if it said anything. Set once in main.
+///
+/// A static rather than a threaded parameter because two predicates deep
+/// in the sort and filter want it and neither is worth rewriting to carry
+/// a list that changes only at startup.
+static CONFIGURED_PORTS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// Whether a port belongs to the machine rather than to something started.
+fn is_system_port(port: u16) -> bool {
+    match CONFIGURED_PORTS.get() {
+        Some(list) => list.contains(&port),
+        None => SYSTEM_PORTS.contains(&port),
+    }
+}
 
 /// Process titles worth recognising, first match winning, so the specific
 /// ones come before `node` and `python`.
@@ -488,7 +505,7 @@ fn scan() -> Vec<Row> {
             });
         }
     }
-    rows.sort_by_key(|r| (SYSTEM_PORTS.contains(&r.port), r.port));
+    rows.sort_by_key(|r| (is_system_port(r.port), r.port));
     rows
 }
 
@@ -513,7 +530,7 @@ fn theirs(row: &Row) -> bool {
     if row.orphan {
         return false;
     }
-    SYSTEM_PORTS.contains(&row.port) || !row.user.is_empty()
+    is_system_port(row.port) || !row.user.is_empty()
 }
 
 /// Every address this machine holds, by interface.
@@ -1611,7 +1628,18 @@ impl Store {
 
 fn main() {
     tc::maybe_help(include_str!("ports_help.txt"));
-    let mut refresh = 4.0f64;
+    // Both of ports' config keys were documented and read by nobody.
+    // Config is the default; argv still overrides.
+    let cfg = tc::load_config("ports");
+    let listed: Vec<u16> = cfg
+        .get("system_ports")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|n| n as u16).collect())
+        .unwrap_or_default();
+    if !listed.is_empty() {
+        let _ = CONFIGURED_PORTS.set(listed);
+    }
+    let mut refresh = tc::cfg_f64(&cfg, "refresh", 4.0).max(1.0);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {

@@ -62,6 +62,8 @@
     "projects": []
   },
   "tailnet": {
+    "_comment_history": "rate samples kept per peer; the chart is a window on to this",
+    "history": 180,
     "refresh": 5
   },
   "herdr_panes": {

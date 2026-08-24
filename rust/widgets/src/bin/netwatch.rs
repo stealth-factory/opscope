@@ -1411,11 +1411,18 @@ fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
 
 fn main() {
     tc::maybe_help(include_str!("netwatch_help.txt"));
-    let mut interval = 1.0f64;
-    let mut limit = 0usize;
-    let mut external = true;
-    let mut mine = true;
-    let mut sort_live = false;
+    // Config first, argv second: `--interval 2` beats a config saying 1,
+    // which is the precedence netwatch.py uses. These five were documented
+    // in config.example.json and read by nobody.
+    let cfg = tc::load_config("netwatch");
+    let mut interval = tc::cfg_f64(&cfg, "interval", 1.0).max(0.2);
+    let mut limit = tc::cfg_usize(&cfg, "limit", 0);
+    let mut external = cfg
+        .get("external")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut mine = cfg.get("mine").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut sort_live = tc::cfg_str(&cfg, "sort", "total") == "live";
     let mut plain = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
