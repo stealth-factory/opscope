@@ -1938,8 +1938,14 @@ fn main() {
             // Appending this to an already-packed line overflowed the width
             // and the terminal wrapped it, so the footer's last row was the
             // tail of a number. It is a hint like the others now, packed with
-            // them, and `scroll_label` is a fixed width so the second pack
-            // cannot wrap differently from the first.
+            // them.
+            //
+            // `room` above reserved one line for it, and one is enough:
+            // pack_hints is greedy, so the hints before this one pack the
+            // same way whether it is there or not, and it either joins the
+            // last line or starts one more. Never two more - which matters,
+            // because `last` was measured against `room` and a second extra
+            // line would cost a body row the label had already counted.
             if furthest > 0 {
                 let mut with_pos = hints.clone();
                 with_pos.push(vec![(
@@ -1952,9 +1958,6 @@ fn main() {
                     .collect();
                 if let Some((text, colour, _)) = notice.as_ref() {
                     foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
-                }
-                while shown.len() + foot.len() > h && shown.len() > 1 {
-                    shown.pop();
                 }
                 while shown.len() + foot.len() < h {
                     shown.push(String::new());

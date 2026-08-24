@@ -1104,6 +1104,50 @@ pub fn maybe_help(doc: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    /// One more hint costs at most one more line.
+    ///
+    /// netwatch's detail screen leans on this: it sizes the body against the
+    /// footer, then adds the scroll position as a seventh hint and re-packs.
+    /// It reserves exactly one line for that. If a hint could ever push the
+    /// footer two lines further, the body would lose a row the position had
+    /// already counted and the label would name a row nobody can see.
+    ///
+    /// It holds because the packing is greedy and in order: whatever comes
+    /// before a hint packs the same way whether that hint follows or not, so
+    /// the new one either joins the last line or starts a single new one.
+    #[test]
+    fn appending_a_hint_adds_at_most_one_line() {
+        let hint = |t: &str| vec![("", t.to_string())];
+        let base = vec![
+            hint("↑↓ select"),
+            hint("tab next section"),
+            hint("[c]opy"),
+            hint("[r]ezero"),
+            hint("←/esc back"),
+            hint("[q]uit"),
+        ];
+        for width in 8..=120usize {
+            let before = pack_hints(&base, width, "  ").len();
+            let mut after_hints = base.clone();
+            after_hints.push(hint("rows   1- 43 of  45"));
+            let after = pack_hints(&after_hints, width, "  ").len();
+            assert!(
+                after == before || after == before + 1,
+                "width {}: {} lines became {}",
+                width,
+                before,
+                after
+            );
+            // And the hints that were already there are untouched.
+            assert_eq!(
+                pack_hints(&base, width, "  ")[..before.saturating_sub(1)],
+                pack_hints(&after_hints, width, "  ")[..before.saturating_sub(1)],
+                "width {}: an earlier line was repacked",
+                width
+            );
+        }
+    }
     use super::*;
 
     #[test]
