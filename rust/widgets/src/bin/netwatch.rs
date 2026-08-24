@@ -355,6 +355,17 @@ fn wire_label(names: &[String]) -> String {
     }
 }
 
+/// How the detail screen reports where you are in it, at a width that does
+/// not change with the numbers - the footer is packed before the body is
+/// measured, so a label that grew by a character could wrap the hints onto
+/// another line and leave the body sized for a footer that is not there.
+///
+/// link.rs carries the same function; TOY-7 tracks folding the pair into
+/// toys-core rather than fixing anything here twice.
+fn scroll_label(first: usize, last: usize, total: usize) -> String {
+    format!("rows {:>3}-{:>3} of {:>3}", first, last, total)
+}
+
 /// How long a rate is averaged over.
 ///
 /// One sample interval is the honest instantaneous rate and an unreadable
@@ -474,6 +485,9 @@ struct Conn {
     seen: f64,
     /// (stamp, the gap it covers, bytes up, bytes down)
     recent: Vec<(f64, f64, u64, u64)>,
+    /// (down rate, up rate) per sample, so a selected socket can be charted
+    /// the way a selected endpoint is.
+    hist: Vec<(f64, f64)>,
 }
 
 /// The sockets sharing a peer, folded together: a browser opening six
@@ -661,6 +675,10 @@ fn sample(state: &mut State, external: bool) {
             }
             row.disk.push((read_rate, write_rate));
             trim(&mut row.disk, SERIES);
+        }
+        for conn in state.conns.values_mut() {
+            conn.hist.push((conn.down_rate, conn.up_rate));
+            trim(&mut conn.hist, SERIES);
         }
         for spot in state.spots.values_mut() {
             spot.hist.push((spot.down_rate, spot.up_rate));
@@ -1025,7 +1043,6 @@ fn section_head(
     count: usize,
     note: &str,
     focused: bool,
-    key: &str,
     w: usize,
     p: &Palette,
 ) -> String {
@@ -1039,10 +1056,12 @@ fn section_head(
                 p.dim.as_str(),
                 format!("{} {}{}", count, note, if count == 1 { "" } else { "s" }),
             ),
-            (
-                if focused { p.accent.as_str() } else { p.grid.as_str() },
-                format!("   [{}]", key),
-            ),
+            // No key named here. There is one way between sections and the
+            // footer says what it is; a letter per heading meant [e] and [f]
+            // pointing at keys that no longer exist and the middle section
+            // pointing at tab, which is the only one that was ever true.
+            // The ▏ at the head of the line is the focus mark; a second one
+            // out here was just the hole the key left.
         ],
         w - 1,
     )
@@ -1067,6 +1086,79 @@ fn chart_head(len: usize, w: usize, label: &str, interval: f64, p: &Palette) -> 
     )
 }
 
+/// The three lists each own a flexible first column and a fixed tail. The
+/// width lives in a function so the heading and the rows read it from the
+/// same place: a heading that has slipped a column is worse than no heading,
+/// because it labels the wrong number with confidence.
+fn endpoint_host_w(w: usize) -> usize {
+    // 44, not 42: the fixed tail is 9 for ports, 10 for rx, 11 for tx and 11
+    // for the rate, plus 3 for the selection mark. It was written as 42, so
+    // between 59 and 77 columns the host name took two cells the rate needed
+    // and seg() clipped "12.4 KB/s" down to "12.4 KB". A rate short of its
+    // unit is not a smaller rate, it is a wrong one.
+    ((w - 1).saturating_sub(44)).clamp(14, 34)
+}
+
+fn connection_host_w(w: usize) -> usize {
+    ((w - 1).saturating_sub(34)).clamp(14, 38)
+}
+
+fn file_path_w(w: usize) -> usize {
+    ((w - 1).saturating_sub(30)).max(18)
+}
+
+/// The column names above `endpoint_rows`. The leading three cells are the
+/// selection mark's column, left blank here.
+fn endpoint_head(w: usize, p: &Palette) -> String {
+    tc::seg(
+        &[(
+            p.dim.as_str(),
+            format!(
+                "   {}{:<9}{:>10}{:>11}{:>11}",
+                tc::pad("host", endpoint_host_w(w)),
+                "ports",
+                "rx",
+                "tx",
+                "rate"
+            ),
+        )],
+        w - 1,
+    )
+}
+
+/// The column names above `connection_rows`.
+fn connection_head(w: usize, p: &Palette) -> String {
+    tc::seg(
+        &[(
+            p.dim.as_str(),
+            format!(
+                "   {}{:<7}{:>10}{:>11}",
+                tc::pad("socket", connection_host_w(w)),
+                "state",
+                "rx",
+                "tx"
+            ),
+        )],
+        w - 1,
+    )
+}
+
+/// The column names above `file_rows`.
+fn file_head(w: usize, p: &Palette) -> String {
+    tc::seg(
+        &[(
+            p.dim.as_str(),
+            format!(
+                "   {}{:>10}{:>12}",
+                tc::pad("path", file_path_w(w)),
+                "size",
+                "growth"
+            ),
+        )],
+        w - 1,
+    )
+}
+
 /// Remote hosts, ranked by what they have carried since launch.
 fn endpoint_rows(
     spots: &[Spot],
@@ -1077,7 +1169,7 @@ fn endpoint_rows(
     names: &Resolver,
     p: &Palette,
 ) -> Vec<String> {
-    let host_w = ((w - 1).saturating_sub(42)).clamp(14, 34);
+    let host_w = endpoint_host_w(w);
     spots
         .iter()
         .take(room.max(1))
@@ -1137,7 +1229,7 @@ fn connection_rows(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    let host_w = ((w - 1).saturating_sub(34)).clamp(14, 38);
+    let host_w = connection_host_w(w);
     conns
         .iter()
         .take(room.max(1))
@@ -1184,7 +1276,7 @@ fn file_rows(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    let path_w = ((w - 1).saturating_sub(30)).max(18);
+    let path_w = file_path_w(w);
     files
         .iter()
         .take(room.max(1))
@@ -1230,7 +1322,7 @@ fn detail_rows(
     conns: &[Conn],
     files: &[OpenFile],
     sizes: &HashMap<String, (u64, f64)>,
-    focus: usize,
+    focus: Option<usize>,
     at: &[usize; 3],
     w: usize,
     h: usize,
@@ -1324,42 +1416,52 @@ fn detail_rows(
     let counts = [spots.len(), conns.len(), files.len()];
     let shares = [counts[0].max(1), counts[1].max(1), counts[2].max(1)];
 
-    for (which, (name, key, note)) in [
-        ("TALKING TO", "e", "endpoint"),
-        ("CONNECTIONS", "tab", "socket"),
-        ("FILES", "f", "file"),
+    for (which, (name, note)) in [
+        ("TALKING TO", "endpoint"),
+        ("CONNECTIONS", "socket"),
+        ("FILES", "file"),
     ]
     .into_iter()
     .enumerate()
     {
-        let focused = focus == which;
-        out.push(section_head(name, counts[which], note, focused, key, w, p));
+        let focused = focus == Some(which);
+        out.push(section_head(name, counts[which], note, focused, w, p));
         let room = shares[which];
         if counts[which] == 0 {
             out.push(tc::seg(&[(p.dim.as_str(), "   none".into())], w - 1));
         } else if which == 0 {
-            out.extend(endpoint_rows(spots, at[which], focused, room, w, names, p));
-            // The highlighted host gets its own small chart, which is the
-            // quickest way to see whether it is the one doing the work.
-            let pick = &spots[at[which].min(spots.len() - 1)];
-            if focused && !pick.hist.is_empty() && h.saturating_sub(out.len()) >= 7 {
-                let found = names.name(&pick.peer);
-                out.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), "     ── ".into()),
-                        (
-                            p.accent.as_str(),
-                            if found.is_empty() { pick.peer.clone() } else { found },
-                        ),
-                        (p.dim.as_str(), " alone ──".into()),
-                    ],
-                    w - 1,
-                ));
-                out.extend(chart(&pick.hist, w, 4, p));
+            out.push(endpoint_head(w, p));
+            let mut rows = endpoint_rows(spots, at[which], focused, room, w, names, p);
+            // The chart belongs under the line it describes, not after the
+            // list: with it at the bottom you had to hold which host was
+            // highlighted in your head while your eye travelled. Here the
+            // answer is where the question is.
+            let pick_at = at[which].min(spots.len() - 1);
+            if focused {
+                let pick = &spots[pick_at];
+                if !pick.hist.is_empty() && pick_at < rows.len() {
+                    let mut under = chart(&pick.hist, w, 4, p);
+                    under.push(String::new());
+                    rows.splice(pick_at + 1..pick_at + 1, under);
+                }
             }
+            out.extend(rows);
         } else if which == 1 {
-            out.extend(connection_rows(conns, at[which], focused, room, w, p));
+            out.push(connection_head(w, p));
+            let mut rows = connection_rows(conns, at[which], focused, room, w, p);
+            let pick_at = at[which].min(conns.len().saturating_sub(1));
+            if focused {
+                if let Some(pick) = conns.get(pick_at) {
+                    if !pick.hist.is_empty() && pick_at < rows.len() {
+                        let mut under = chart(&pick.hist, w, 4, p);
+                        under.push(String::new());
+                        rows.splice(pick_at + 1..pick_at + 1, under);
+                    }
+                }
+            }
+            out.extend(rows);
         } else {
+            out.push(file_head(w, p));
             out.extend(file_rows(files, sizes, at[which], focused, room, w, p));
         }
         out.push(String::new());
@@ -1562,12 +1664,20 @@ fn main() {
     // The second screen: which process, which of its three lists is taking
     // the keys, and where each list is scrolled to.
     let mut detail: Option<(i32, String)> = None;
-    let mut focus = 0usize;
+    // Which section has the cursor, if any. Opens with none: the screen is
+    // a thing to read before it is a thing to work, and a cursor sitting
+    // somewhere you did not put it is a question rather than an answer.
+    let mut focus: Option<usize> = None;
     let mut at = [0usize; 3];
     // How far down the detail screen we are. Clamped against the body when
     // the frame is drawn, because the body's height depends on how many
     // sockets and files the process has right now.
     let mut dscroll = 0usize;
+    // How long each section was when it was last drawn. The keys are read
+    // before the frame is built, so walking off the end of a list has to be
+    // judged against the length it had a moment ago - which is the same
+    // length the reader is looking at.
+    let mut section_len = [0usize; 3];
     // What each open file measured when this screen opened, so the growth
     // column is over the time you have been looking rather than the life
     // of the file.
@@ -1604,13 +1714,25 @@ fn main() {
                         detail = None;
                         sizes.clear();
                     }
-                    // Up and down move the screen, as they do in every
-                    // other widget. The cursor inside a section - which
-                    // picks the endpoint that gets its own chart - moves on
-                    // n and p, the same pair link uses to step between
-                    // connections without leaving the screen.
-                    "up" | "k" | "K" => dscroll = dscroll.saturating_sub(1),
-                    "down" | "j" | "J" => dscroll = dscroll.saturating_add(1),
+                    // Focused into a section, up and down move between its
+                    // rows; otherwise they move the screen. Whichever is in
+                    // front of you is what they act on, which is the same
+                    // rule the list screen follows.
+                    // Walking off either end of a section leaves it, the
+                    // same ring the target list uses: focus is left the way
+                    // it was entered rather than needing a key of its own.
+                    "up" | "k" | "K" => match focus {
+                        Some(at_focus) if at[at_focus] == 0 => focus = None,
+                        Some(at_focus) => at[at_focus] -= 1,
+                        None => dscroll = dscroll.saturating_sub(1),
+                    },
+                    "down" | "j" | "J" => match focus {
+                        Some(at_focus) if at[at_focus] + 1 >= section_len[at_focus] => {
+                            focus = None
+                        }
+                        Some(at_focus) => at[at_focus] += 1,
+                        None => dscroll = dscroll.saturating_add(1),
+                    },
                     // The pane height is read here rather than carried,
                     // because a page is only meaningful against the pane as
                     // it is now and it may have been resized since.
@@ -1624,11 +1746,21 @@ fn main() {
                     }
                     "home" => dscroll = 0,
                     "end" => dscroll = usize::MAX,
-                    "n" | "N" => at[focus] += 1,
-                    "p" | "P" => at[focus] = at[focus].saturating_sub(1),
-                    "tab" => focus = (focus + 1) % SECTIONS.len(),
-                    "e" | "E" => focus = 0,
-                    "f" | "F" => focus = 2,
+                    // tab is the only way between sections. e and f jumped
+                    // straight to two of the three, which meant three keys
+                    // for one job and a section heading advertising a letter
+                    // of its own - and no key at all for the middle one.
+                    // Round the lists and then off the end, back to nothing
+                    // focused.
+                    //
+                    // Empty ones are stepped over. A section with no rows is
+                    // not a place you can be: tab onto "0 files" and the
+                    // footer offers "↑↓ select" over nothing, the next arrow
+                    // silently leaves again, and the key reads as broken.
+                    "tab" => {
+                        let from = focus.map_or(0, |at| at + 1);
+                        focus = (from..SECTIONS.len()).find(|&at| section_len[at] > 0);
+                    }
                     "c" | "C" => {
                         if !pending_copy.is_empty() {
                             // The value goes in the message either way: OSC
@@ -1669,7 +1801,7 @@ fn main() {
                 "enter" | "right" => {
                     if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
                         detail = Some((pick.pid, pick.name.clone()));
-                        focus = 0;
+                        focus = None;
                         at = [0; 3];
                         dscroll = 0;
                         sizes.clear();
@@ -1740,25 +1872,39 @@ fn main() {
                 sizes.entry(file.path.clone()).or_insert((file.size, now()));
             }
             let counts = [spots.len(), conns.len(), files.len()];
-            at[focus] = at[focus].min(counts[focus].saturating_sub(1));
+            section_len = counts;
+            if let Some(at_focus) = focus {
+                at[at_focus] = at[at_focus].min(counts[at_focus].saturating_sub(1));
+            }
             // The selection is known here and the key is pressed elsewhere,
             // so what `c` would copy is recorded while the frame is drawn.
+            // Nothing focused means nothing selected, so c has nothing to
+            // take. It says so rather than copying whatever happened to be
+            // first.
             pending_copy = match focus {
-                0 => spots.get(at[0]).map(|s| s.peer.clone()).unwrap_or_default(),
-                1 => conns
+                Some(0) => spots.get(at[0]).map(|s| s.peer.clone()).unwrap_or_default(),
+                Some(1) => conns
                     .get(at[1])
                     .map(|c| format!("{}:{}", c.peer, c.port))
                     .unwrap_or_default(),
-                _ => files.get(at[2]).map(|f| f.path.clone()).unwrap_or_default(),
+                Some(_) => files.get(at[2]).map(|f| f.path.clone()).unwrap_or_default(),
+                None => String::new(),
             };
             let hints: Vec<Vec<(&str, String)>> = vec![
-                vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
-                vec![(p.accent.as_str(), "tab".into()), (p.dim.as_str(), " section".into())],
-                // n and p move the cursor inside the focused section, which
-                // is what up and down did before they were given the screen.
-                // A key that works and is not named is the same fault as a
-                // name with no key behind it, read from the other side.
-                vec![(p.dim.as_str(), "[n]/[p] in section".into())],
+                vec![
+                    (p.accent.as_str(), "↑↓".into()),
+                    (
+                        p.dim.as_str(),
+                        if focus.is_some() { " select" } else { " scroll" }.to_string(),
+                    ),
+                ],
+                vec![
+                    (p.accent.as_str(), "tab".into()),
+                    (
+                        p.dim.as_str(),
+                        if focus.is_some() { " next section" } else { " into a section" }.to_string(),
+                    ),
+                ],
                 vec![(p.dim.as_str(), "[c]opy".into())],
                 vec![(p.dim.as_str(), "[r]ezero".into())],
                 vec![
@@ -1789,15 +1935,29 @@ fn main() {
             while shown.len() < room {
                 shown.push(String::new());
             }
+            // Appending this to an already-packed line overflowed the width
+            // and the terminal wrapped it, so the footer's last row was the
+            // tail of a number. It is a hint like the others now, packed with
+            // them, and `scroll_label` is a fixed width so the second pack
+            // cannot wrap differently from the first.
             if furthest > 0 {
-                if let Some(line) = foot.last_mut() {
-                    line.push_str(&tc::seg(
-                        &[(
-                            p.dim.as_str(),
-                            format!("  rows {}-{} of {}", dscroll + 1, last, body.len()),
-                        )],
-                        w - 1,
-                    ));
+                let mut with_pos = hints.clone();
+                with_pos.push(vec![(
+                    p.dim.as_str(),
+                    scroll_label(dscroll + 1, last, body.len()),
+                )]);
+                foot = tc::pack_hints(&with_pos, w - 2, "  ")
+                    .into_iter()
+                    .map(|l| format!(" {}", l))
+                    .collect();
+                if let Some((text, colour, _)) = notice.as_ref() {
+                    foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+                }
+                while shown.len() + foot.len() > h && shown.len() > 1 {
+                    shown.pop();
+                }
+                while shown.len() + foot.len() < h {
+                    shown.push(String::new());
                 }
             }
             shown.extend(foot);
@@ -2156,6 +2316,119 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Colour is not width: `len()` counts escape bytes, so every column
+    /// check below measures the text alone.
+    fn bare(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Which cell `token` starts in, counting characters rather than bytes -
+    /// the arrows are three bytes each and byte offsets would lie.
+    fn col(line: &str, token: &str) -> usize {
+        let at = line
+            .find(token)
+            .unwrap_or_else(|| panic!("{:?} is not in {:?}", token, line));
+        line[..at].chars().count()
+    }
+
+    fn a_resolver() -> Resolver {
+        Resolver {
+            known: Arc::new(Mutex::new(HashMap::new())),
+            wanted: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    // The headings are found by looking at where the rendered row put its
+    // columns, not by repeating the arithmetic the row used. A test that
+    // recomputes the widths would agree with a heading that had slipped.
+
+    #[test]
+    fn the_endpoint_heading_sits_over_its_columns() {
+        let p = palette();
+        let names = a_resolver();
+        let mut spot = Spot {
+            peer: "192.0.2.7".into(),
+            up: 4096,
+            down: 8192,
+            alive: true,
+            ..Default::default()
+        };
+        spot.ports.insert(9999);
+        for w in [60usize, 84, 120, 200] {
+            let head = bare(&endpoint_head(w, &p));
+            let row = bare(&endpoint_rows(&[spot.clone()], 0, false, 1, w, &names, &p)[0]);
+            let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
+            assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
+            assert_eq!(col(&head, "host"), 3, "host column at w={}", w);
+            assert_eq!(col(&head, "ports"), down - 9, "ports column at w={}", w);
+            assert_eq!(col(&head, "rx") + 2, down + 10, "rx column at w={}", w);
+            assert_eq!(col(&head, "tx") + 2, up + 10, "tx column at w={}", w);
+            assert_eq!(col(&head, "rate") + 4, wide, "rate column at w={}", w);
+        }
+    }
+
+    #[test]
+    fn the_connection_heading_sits_over_its_columns() {
+        let p = palette();
+        let conn = Conn {
+            peer: "192.0.2.7".into(),
+            port: 443,
+            up: 4096,
+            down: 8192,
+            alive: true,
+            ..Default::default()
+        };
+        for w in [60usize, 84, 120, 200] {
+            let head = bare(&connection_head(w, &p));
+            let row = bare(&connection_rows(&[conn.clone()], 0, false, 1, w, &p)[0]);
+            let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
+            assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
+            assert_eq!(col(&head, "socket"), 3, "socket column at w={}", w);
+            assert_eq!(col(&head, "state"), down - 7, "state column at w={}", w);
+            assert_eq!(col(&head, "rx") + 2, down + 10, "rx column at w={}", w);
+            assert_eq!(col(&head, "tx") + 2, up + 10, "tx column at w={}", w);
+            assert_eq!(up + 10, wide, "the tx column is the last at w={}", w);
+        }
+    }
+
+    #[test]
+    fn the_file_heading_sits_over_its_columns() {
+        let p = palette();
+        let files = vec![OpenFile {
+            path: "/var/log/marker.log".into(),
+            size: 8192,
+        }];
+        let sizes = HashMap::new();
+        let shown = units(8192.0);
+        for w in [60usize, 84, 120, 200] {
+            let head = bare(&file_head(w, &p));
+            let row = bare(&file_rows(&files, &sizes, 0, false, 1, w, &p)[0]);
+            let wide = row.chars().count();
+            assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
+            assert_eq!(col(&head, "path"), 3, "path column at w={}", w);
+            assert_eq!(
+                col(&head, "size") + 4,
+                col(&row, &shown) + shown.chars().count(),
+                "size column at w={}",
+                w
+            );
+            assert_eq!(col(&head, "growth") + 6, wide, "growth column at w={}", w);
+        }
+    }
 
     #[test]
     fn a_bursty_process_keeps_a_readable_rate() {

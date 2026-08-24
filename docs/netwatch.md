@@ -287,32 +287,46 @@ it as a machine honestly can:
  ── PROCESS ──
   command   curl -s -o ~/tmp/big.bin --limit-rate 400k https://…/__down
   directory ~/projects/terminal-toys
-  started   6s ago
 
- ── TALKING TO ── 1 connection
-  162.159.140.220               https  ↓   3.2 MB ↑    722 B   411.2 KB/s
+ ── TALKING TO ── 1 endpoint
+   host                              ports            rx         tx       rate
+   162.159.140.220                   https    ↓   3.2 MB ↑    722 B 411.2 KB/s
 
- ── WRITING TO ── where a download would be landing
-  ~/tmp/big.bin                                     3.0 MB   +425.8 KB/s
+ ── CONNECTIONS ── 1 socket
+   socket                                state          rx         tx
+   162.159.140.220:443                   open   ↓   3.2 MB ↑    722 B
+
+ ── FILES ── 1 file
+   path                                                  size      growth
+   ~/tmp/big.bin                                       3.0 MB +425.7 KB/s
 
  ── DISK ── read 0 B · written 3.0 MB since it started
  HTTPS hides the URL and the filename. Who it talks to and what it writes
  are above.
 ```
 
-Three lists, and `tab` moves between them — the focused one is marked `▏` and
-takes the arrow keys, and `c` copies whatever is selected in it.
+Every list is drawn in full, always, and `↑` `↓` scroll the screen. `tab`
+focuses a list instead: the focused one is marked `▏`, `↑` `↓` then move a
+cursor `▸` inside it, and `c` copies whatever that cursor is on.
+
+You leave a list by walking off either end of it — `↑` on the first row or
+`↓` on the last — or by pressing `tab` again, which moves to the next list
+and, from the last one, back to scrolling the screen. Lists with nothing in
+them are stepped over rather than focused, since there would be nothing to
+put the cursor on. **This is the same rule in every widget here that has
+focusable sections.**
 
 **TALKING TO** ranks the remote hosts by what they have carried since launch.
 Hosts, not sockets: a process opening six connections to one CDN is one thing
 being talked to. Peers resolve to names in the background — the address shows
-until the answer arrives, and a lookup is never made twice. The highlighted
-host gets its own small rx/tx chart, which is the quickest way to see whether
-it is the one doing the work.
+until the answer arrives, and a lookup is never made twice. The row the cursor
+is on gets its own small rx/tx chart, drawn directly beneath it, which is the
+quickest way to see whether that host is the one doing the work.
 
 **CONNECTIONS** is the sockets themselves, open right now, which is a
 different question: one host may hold six of them, and a socket that has
-closed still shows what it carried.
+closed still shows what it carried. It charts the same way TALKING TO does —
+the cursor's socket gets an rx/tx chart under its row.
 
 A hostname is a best-effort label rather than the domain that was asked for.
 CDNs, shared addresses, encrypted DNS and connection reuse all mean one
@@ -361,19 +375,25 @@ Decimal — `KB` is 1,000 bytes, `MB` is 1,000,000 — which is how link rates a
 data caps are quoted, and therefore what these numbers are usefully compared
 against.
 
+Every **rate** — `NOW`, `DOWN`, `UP`, the per-endpoint and per-socket figures,
+and a file's growth — is an average over the last **ten seconds**, not over
+the one-second sample. Almost all traffic is bursty, so an instantaneous rate
+is honest and unreadable: a process that is steadily busy flickers between a
+figure and a dash. An average over a stated window is just as true and can
+actually be read. The header says the window (`every 1s · rates over 10s`) so
+the number is never a mystery, and the **totals** are untouched by it.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k` | select a process in the list — or scroll the detail screen |
+| `↑` `↓` / `j` `k` | select a process in the list — on the detail screen, scroll it, or move the cursor inside a focused section |
 | `PgUp` `PgDn` `Home` `End` | move the detail screen by a page, or to either end |
-| `n` / `p` | move the cursor inside the focused section, which picks the endpoint that gets its own chart |
 | `↵` / `→` | open the selected process |
 | `esc` / `←` | back to the list |
-| `tab` | cycle the focused section: endpoints → connections → files |
-| `e` | focus the endpoints |
-| `f` | focus the open files |
+| `tab` | focus the next section, and from the last one back to scrolling |
 | `c` | copy the selected host, socket or path |
+| `e` `f` | jump straight to the endpoints or the files — **`netwatch.py` only**; the Rust build reaches every section with `tab` alone |
 | `s` | switch sort mode (`t` also works) |
 | `o` | show or hide processes you do not own |
 | `1` | sort by total data used |
