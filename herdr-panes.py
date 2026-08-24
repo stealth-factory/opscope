@@ -50,7 +50,8 @@ is only a lower bound.
     python3 herdr-panes.py [-n SECONDS]
 
 Keys: up/down select, Enter (or f) focuses that agent's pane so you jump
-straight to whatever needs you, w toggles workspace labels vs pane ids,
+straight to whatever needs you, l toggles workspace labels vs pane ids,
+o shows or hides the idle section,
 r refreshes now, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.
 """
@@ -333,7 +334,7 @@ def main():
                 raise SystemExit(0)
             if key == "r":
                 store.wake.set()
-            elif key == "w":
+            elif key == "l":
                 show_labels = not show_labels
             elif key == "o":
                 show_idle = not show_idle
@@ -500,7 +501,7 @@ def main():
         # that drifted, and the footer ended up written past the bottom row.
         hints = [[(ACCENT, "↑↓"), (DIM, " select")],
                  [(ACCENT, "↵"), (DIM, " switch to this pane")],
-                 [(DIM, "[o]idle")], [(DIM, "[w]labels")],
+                 [(DIM, "[o]idle")], [(DIM, "[l]abels")],
                  [(DIM, "[r]efresh")], [(DIM, "[q]uit")]]
         footer = [" " + line for line in pack_hints(hints, w - 2)]
         reserve = len(footer) + 1                     # +1 for the note line

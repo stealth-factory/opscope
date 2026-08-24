@@ -26,7 +26,7 @@ and one keypress to get to any of it.
  ▫ work/site                  site
  ▫ …/another-monorepo         monorepo
 
- ↑↓ select   ↵ switch to this pane   [o]idle [w]labels [r]efresh [q]uit
+ ↑↓ select   ↵ switch to this pane   [i]dle [l]abels [r]efresh [q]uit
 ```
 
 ## Why it is ordered this way
@@ -80,8 +80,8 @@ does not timestamp state changes, so transitions are tracked here.
 |---|---|
 | `↑` `↓` `Home` `End` | select, across all three sections |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
-| `o` | show/hide the idle section |
-| `w` | workspace labels vs pane ids |
+| `i` | show/hide the idle section — `o` in the Python, which is being retired |
+| `l` | workspace labels vs pane ids |
 | `r` | refresh now |
 | `q` | quit |
 

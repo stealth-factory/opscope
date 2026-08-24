@@ -528,8 +528,8 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                "w" | "W" => show_labels = !show_labels,
-                "o" | "O" => {
+                "l" | "L" => show_labels = !show_labels,
+                "i" | "I" => {
                     show_idle = !show_idle;
                     selected = 0;
                 }
@@ -861,8 +861,8 @@ fn main() {
                 (p.accent.as_str(), "↵".into()),
                 (p.dim.as_str(), " switch to this pane".into()),
             ],
-            vec![(p.dim.as_str(), "[o]idle".into())],
-            vec![(p.dim.as_str(), "[w]labels".into())],
+            vec![(p.dim.as_str(), "[i]dle".into())],
+            vec![(p.dim.as_str(), "[l]abels".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];

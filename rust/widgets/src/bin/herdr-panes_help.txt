@@ -34,6 +34,7 @@ is only a lower bound.
     herdr-panes [-n SECONDS]
 
 Keys: up/down select, Enter (or f) focuses that agent's pane so you jump
-straight to whatever needs you, w toggles workspace labels vs pane ids,
+straight to whatever needs you, l toggles workspace labels vs pane ids,
+i shows or hides the idle section,
 r refreshes now, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.
