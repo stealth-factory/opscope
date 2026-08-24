@@ -350,6 +350,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             window_secs: span,
             reset: stamp,
             stale: false,
+            projected: false,
         });
     }
     out

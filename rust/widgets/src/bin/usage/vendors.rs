@@ -170,16 +170,35 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
                 ("  cached".to_string(), p.warn.clone())
             } else if show_reset {
                 match lane.reset {
-                    Some(reset) if reset - now() > 0.0 => {
-                        (format!("  {}", left_span(reset - now())), p.dim.clone())
-                    }
+                    Some(reset) if reset - now() > 0.0 => (
+                        format!(
+                            "  {}{}",
+                            if lane.projected { "~" } else { "" },
+                            left_span(reset - now())
+                        ),
+                        p.dim.clone(),
+                    ),
                     Some(_) => ("  resetting".to_string(), p.dim.clone()),
                     None => (String::new(), p.dim.clone()),
                 }
             } else {
                 (String::new(), p.dim.clone())
             };
-            let cushion = lead(lane.pct, lane.window_secs, lane.reset);
+            // A projected window is one we rolled forward because the
+            // agent's own reading had expired - so the percentage beside it
+            // was measured in a window that has since closed and reset.
+            //
+            // The countdown survives that: the grid the window sits on is
+            // still the grid. The pace does not. Pace is usage against time
+            // elapsed, and how much of *this* window has been used is
+            // exactly what nobody knows - computing it from the last
+            // window's figure produces a confident number about a quantity
+            // that was never measured.
+            let cushion = if lane.projected {
+                None
+            } else {
+                lead(lane.pct, lane.window_secs, lane.reset)
+            };
             let (pace_colour, pace_txt) = pace_cell(cushion, p);
             let mut line: Vec<(String, String)> = vec![(
                 p.dim.clone(),
@@ -287,6 +306,7 @@ mod tests {
             window_secs: None,
             reset: None,
             stale: false,
+            projected: false,
         };
         // grok has more lanes and a higher total, and still ranks below the
         // provider with the single worst one - which a flat sort by

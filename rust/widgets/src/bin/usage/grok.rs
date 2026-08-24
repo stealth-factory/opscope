@@ -265,6 +265,34 @@ pub fn read(caches: &mut Caches) -> Data {
 /// window length is offered only when both ends parse and run forwards,
 /// but the reset is offered whenever the end does - a countdown is
 /// readable without knowing how long the window was.
+/// The window we are in now, rolled forward from the one the log recorded.
+///
+/// Grok publishes no live quota: the reading is whatever its own CLI last
+/// wrote to its log, and that can be weeks old. Once the recorded window has
+/// ended, its end date is not a reset to count down to - it is a date that
+/// has been and gone, which is why this row read "resetting" for ever
+/// instead of counting down to anything.
+///
+/// The window rolls forward on its own measured length rather than on an
+/// assumed seven days: the server states the period, and a window that
+/// turns out to be fortnightly should not be guessed weekly. That makes the
+/// answer a calculation rather than an observation, so it is flagged and
+/// the screen prints it with a `~`.
+///
+/// Returns the recorded end unchanged when there is nothing to roll: no
+/// length to roll by, or a window that has not ended yet.
+fn window_now(begin: Option<f64>, end: Option<f64>, at: f64) -> (Option<f64>, bool) {
+    let (Some(b), Some(e)) = (begin, end) else {
+        return (end, false);
+    };
+    let len = e - b;
+    if len <= 0.0 || e > at {
+        return (end, false);
+    }
+    let skipped = ((at - e) / len).floor() + 1.0;
+    (Some(e + skipped * len), true)
+}
+
 pub fn lanes(d: &Data) -> Vec<Lane> {
     let Some(q) = d.quota.as_ref() else {
         return Vec::new();
@@ -273,6 +301,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         return Vec::new();
     };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
+    let (reset, projected) = window_now(begin, end, now());
     vec![Lane {
         label: "credits".into(),
         pct,
@@ -280,8 +309,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             (Some(b), Some(e)) if e > b => Some(e - b),
             _ => None,
         },
-        reset: end,
+        reset,
         stale: false,
+        projected,
     }]
 }
 
@@ -648,10 +678,51 @@ mod tests {
         assert_eq!(got[0].label, "credits");
         assert_eq!(got[0].pct, 42.5);
         assert_eq!(got[0].window_secs, Some(7.0 * 86400.0));
-        assert_eq!(got[0].reset, iso_epoch("2026-08-17T00:00:00.000000+00:00"));
+        // The fixture's window closed on 2026-08-17, so by the time anyone
+        // runs this it has long since rolled. The reset is therefore a
+        // moving target and cannot be pinned to a literal - what can be
+        // pinned is that it is in the future, sits on the fixture's own
+        // seven-day grid, and is flagged as worked out rather than read.
+        let end = iso_epoch("2026-08-17T00:00:00.000000+00:00").unwrap();
+        let reset = got[0].reset.unwrap();
+        assert!(reset > now(), "the reset is behind us again");
+        assert!(reset - now() <= 7.0 * 86400.0, "rolled further than one window");
+        let steps = (reset - end) / (7.0 * 86400.0);
+        assert!(
+            (steps - steps.round()).abs() < 1e-6,
+            "the rolled window left the grid the recorded one set: {} windows",
+            steps
+        );
+        assert!(got[0].projected, "a calculated date must say so");
         // Never cached: this was read from a file on this machine a moment
         // ago, so counting it down is honest.
         assert!(!got[0].stale);
+    }
+
+    /// The roll itself, on a fixed clock - `lanes` has to ask the real one.
+    #[test]
+    fn a_window_that_has_ended_rolls_forward_to_the_one_we_are_in() {
+        let day = 86400.0;
+        let (begin, end) = (Some(0.0), Some(7.0 * day));
+        // Mid-window: nothing to roll, and nothing claimed.
+        assert_eq!(window_now(begin, end, 3.0 * day), (Some(7.0 * day), false));
+        // One day after it closed: the window we are in ends a week later.
+        assert_eq!(window_now(begin, end, 8.0 * day), (Some(14.0 * day), true));
+        // Five weeks late still lands on the grid, not five weeks ago.
+        assert_eq!(window_now(begin, end, 36.0 * day), (Some(42.0 * day), true));
+        // Exactly on a boundary belongs to the window starting there.
+        assert_eq!(window_now(begin, end, 14.0 * day), (Some(21.0 * day), true));
+    }
+
+    #[test]
+    fn a_window_with_no_length_is_left_alone() {
+        // Half a reading is not a grid to roll along, and inventing one
+        // would put a countdown on screen that nothing supports.
+        assert_eq!(window_now(None, Some(100.0), 999.0), (Some(100.0), false));
+        assert_eq!(window_now(Some(50.0), None, 999.0), (None, false));
+        // A window that does not run forwards is not a window.
+        assert_eq!(window_now(Some(100.0), Some(50.0), 999.0), (Some(50.0), false));
+        assert_eq!(window_now(Some(50.0), Some(50.0), 999.0), (Some(50.0), false));
     }
 
     #[test]

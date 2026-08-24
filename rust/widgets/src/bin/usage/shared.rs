@@ -143,6 +143,11 @@ pub struct Lane {
     /// True when this came from a cache rather than from the agent just
     /// now. A number nobody labelled as old reads as current.
     pub stale: bool,
+    /// True when `reset` was worked out rather than read - a window rolled
+    /// forward from an older one on the length the agent stated. It is
+    /// shown with a `~`, because a date this widget calculated and a date
+    /// the server sent are not the same kind of fact.
+    pub projected: bool,
 }
 
 /// An HTTPS GET carrying a bearer token, returning parsed JSON.

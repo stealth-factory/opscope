@@ -981,6 +981,7 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                     .map(|(_, s)| *s),
                 reset: iso_epoch(&text(l, "resets_at")),
                 stale: !c.quota_live,
+                projected: false,
             }
         })
         .collect()
