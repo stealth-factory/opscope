@@ -79,6 +79,16 @@ exactly like "there is no data":
 - **GitHub search returns at most 100 nodes per page.** Anything counting
   records must paginate or, better, ask for `issueCount` aggregates — which
   cost one rate-limit point per *request*, not per alias.
+- **A secret scan of the diff cannot see commit messages.** Scanning every
+  added line before a push is right and still misses half the rule, because
+  the rule covers code, docs *and* messages, and a message is not a diff
+  line. Scan `git log origin/main..HEAD` separately.
+- **The commit that removes a secret is the likeliest place to restate it.**
+  "The fixture used `<the actual name>`, which is a device on this tailnet"
+  is the most natural sentence to write when documenting the fix, and it
+  says more than the fixture did — it confirms the string is real and
+  explains what it identifies. Describe the shape, never the value: *a
+  fixture named a real device* is enough.
 
 ## Layout of the code
 
