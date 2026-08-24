@@ -5,7 +5,7 @@ Herdr reports, ordered so the ones wanting a human come first. PROCESSES lists
 every other pane that is actually running something — dev servers, monitors,
 builds — with what it is running and what it costs. IDLE lists the panes
 sitting at a shell prompt, by directory, so they can still be jumped to;
-toggle that section with o.
+toggle that section with i.
 
 Enter jumps to whatever is selected: the agent's pane, or the tab holding that
 process.
