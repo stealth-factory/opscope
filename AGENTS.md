@@ -50,15 +50,35 @@ than faked. `matrix.py` is the sole exception and computes nothing on purpose.
 
 ## Before you commit
 
-Run `python3 check.py`. It checks the things `compile()` cannot, and every
-check in it exists because something shipped broken and looked, on screen,
-exactly like "there is no data":
+Run `cargo test` from `rust/`. Alongside each widget's own tests it runs
+`widgets/tests/check.rs`, which checks the things the compiler cannot, and
+every check in it exists because something shipped broken and looked, on
+screen, exactly like "there is no data":
 
-- **unbound names** — a missing import only raises when the line runs, and in a
-  poll thread that means silence;
-- **unguarded pollers** — a daemon thread that raises simply stops;
-- **dead config keys** — a key in the example no widget reads;
-- **missing docs / README rows**, and **footer keys absent from the doc**.
+- **a poller that dies without recording why** — a thread that stops is
+  invisible, and the pane it feeds is indistinguishable from a quiet source;
+- **a footer hint naming a key no match arm answers** — a hint bound to
+  nothing says the feature is there;
+- **a footer hint missing from the widget's doc**;
+- **a config key a widget reads that is not in `config.example.json`** — an
+  undiscoverable setting is not a setting;
+- **a section in the example no widget reads**.
+
+The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
+`[::1]`, `[[bin]]` and `args[0]` out; the glyphs `↵ → ← ↑ ↓`; the names
+`esc tab enter backspace pgup pgdn home end`; and, inside a footer, a bare
+single letter — which is what catches `or i to close`. On the other side it
+reads match arms and `key ==` / `key !=` comparisons alike.
+
+What it still cannot see: a key named in prose in a string that is not a
+footer, and a key answered anywhere other than those two forms. Both halves
+have been wrong before — three versions of this check cried wolf in one day,
+and a checker that cries wolf gets turned off — so when it fires, read the
+flag before believing it, and when it is quiet, that is not proof.
+
+The Python keeps `python3 check.py` while it exists; it covers the same
+ground for `*.py`, plus unbound names, which the Rust compiler makes
+impossible.
 
 ## Gotchas paid for already
 

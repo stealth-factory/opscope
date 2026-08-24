@@ -161,6 +161,13 @@ was learned building these against Herdr: resize semantics, focus, detecting
 what a pane is running, notification gating, and the layout mistakes worth
 skipping.
 
+Both implementations are checked the same way. `cargo test` from `rust/` runs
+each widget's tests plus `widgets/tests/check.rs`, which reads the sources and
+fails on a poller that dies without saying why, a footer hint naming a key
+nothing answers, a hint missing from the widget's doc, and a config key read
+but never documented in `config.example.json`. `python3 check.py` covers the
+same ground for the Python.
+
 `common.py` holds the shared pieces — terminal sizing, a full-frame `draw()`,
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, non-blocking
