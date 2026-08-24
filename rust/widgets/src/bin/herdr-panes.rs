@@ -151,6 +151,40 @@ struct Agent {
     rss: Option<u64>,
 }
 
+/// What the idle section gets, once the lists above it have been drawn.
+///
+/// The three sections used to budget against the same bound, so the
+/// running list could spend the whole pane and the idle heading was pushed
+/// past the bottom and truncated - leaving the footer offering a key with
+/// nothing behind it.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum IdleFit {
+    /// Heading, blank line and at least one pane.
+    Full,
+    /// No room to list them, but room to say how many there are. Dropping
+    /// the section silently is what made the key look broken.
+    CountOnly,
+    /// Not even one line: the pane is shorter than the lists above it.
+    Nothing,
+}
+
+/// How many rows the full section needs: a blank, a heading, and a pane.
+const IDLE_ROWS: usize = 3;
+
+fn idle_fit(h: usize, used: usize, show: bool, resting: usize) -> IdleFit {
+    if !show || resting == 0 {
+        return IdleFit::Nothing;
+    }
+    let body = h.saturating_sub(2);
+    if used + IDLE_ROWS <= body {
+        IdleFit::Full
+    } else if used < body {
+        IdleFit::CountOnly
+    } else {
+        IdleFit::Nothing
+    }
+}
+
 /// A pane with no agent in it: either running something, or at a prompt.
 #[derive(Clone, Default)]
 struct Panel {
@@ -783,7 +817,7 @@ fn main() {
         // idle loop then checked, so on a busy machine the heading was
         // pushed past the bottom and truncated - while the header counted
         // the panes and the footer offered the key to reveal them.
-        let idle_room = if show_idle && !resting.is_empty() { 3 } else { 0 };
+        let idle_room = if show_idle && !resting.is_empty() { IDLE_ROWS } else { 0 };
         let running_budget = h.saturating_sub(2 + idle_room);
         for (j, n) in running.iter().enumerate() {
             if rows.len() >= running_budget {
@@ -833,11 +867,7 @@ fn main() {
         // line saying how many are there and that the pane is too short to
         // list them, rather than nothing at all under a footer still
         // offering the key.
-        if show_idle
-            && !resting.is_empty()
-            && rows.len() + 3 > h.saturating_sub(2)
-            && rows.len() < h.saturating_sub(2)
-        {
+        if idle_fit(h, rows.len(), show_idle, resting.len()) == IdleFit::CountOnly {
             rows.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── IDLE ── ".into()),
@@ -853,7 +883,7 @@ fn main() {
                 w - 1,
             ));
         }
-        if show_idle && !resting.is_empty() && rows.len() + 3 <= h.saturating_sub(2) {
+        if idle_fit(h, rows.len(), show_idle, resting.len()) == IdleFit::Full {
             rows.push(String::new());
             rows.push(tc::seg(
                 &[
@@ -943,6 +973,49 @@ fn plural(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_idle_section_is_never_silently_absent() {
+        // The bug this replaces: the running list budgeted the whole pane
+        // and the idle heading was then pushed past the bottom, so the
+        // section vanished while the footer still offered its key. At
+        // every height, with idle panes to show, the answer must be
+        // something the reader can see - the full section, or the count
+        // saying why the rest is missing.
+        for h in 6usize..80 {
+            let body = h.saturating_sub(2);
+            for used in 0..body {
+                let got = idle_fit(h, used, true, 9);
+                assert_ne!(
+                    got,
+                    IdleFit::Nothing,
+                    "h={} with {} rows used and 9 panes idle says nothing at all",
+                    h,
+                    used
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_full_section_needs_a_heading_a_blank_and_a_pane() {
+        // Exactly at the boundary, and one row either side of it.
+        let h = 40;
+        let body = h - 2;
+        assert_eq!(idle_fit(h, body - IDLE_ROWS, true, 9), IdleFit::Full);
+        assert_eq!(idle_fit(h, body - IDLE_ROWS + 1, true, 9), IdleFit::CountOnly);
+        assert_eq!(idle_fit(h, body - 1, true, 9), IdleFit::CountOnly);
+        assert_eq!(idle_fit(h, body, true, 9), IdleFit::Nothing);
+    }
+
+    #[test]
+    fn nothing_is_drawn_when_there_is_nothing_to_say() {
+        // Hidden by the key, or no idle panes at all: silence is correct
+        // here, and is the only case where it is.
+        assert_eq!(idle_fit(60, 0, false, 9), IdleFit::Nothing);
+        assert_eq!(idle_fit(60, 0, true, 0), IdleFit::Nothing);
+    }
+
 
     #[test]
     fn a_runner_gives_way_to_the_script_it_was_handed() {
