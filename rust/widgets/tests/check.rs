@@ -78,58 +78,145 @@ fn widgets() -> BTreeMap<String, String> {
 /// Deliberately crude: it is looking for `[w]indow`, and a hint never
 /// spans a line. Parsing Rust properly to find a footer would be a much
 /// larger thing that failed in more interesting ways.
-fn string_literals(src: &str) -> String {
-    let mut out = String::new();
+fn string_lines(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
     for line in src.lines() {
+        let mut found = String::new();
         let mut rest = line;
         while let Some(open) = rest.find('"') {
             let after = &rest[open + 1..];
             match after.find('"') {
                 Some(close) => {
-                    out.push_str(&after[..close]);
-                    out.push(' ');
+                    found.push_str(&after[..close]);
+                    found.push(' ');
                     rest = &after[close + 1..];
                 }
                 None => break,
             }
         }
+        if !found.trim().is_empty() {
+            out.push(found);
+        }
     }
     out
 }
 
-/// The keys a footer hint teaches: `[w]indow`, `[r]efresh`.
+/// The glyphs a hint uses instead of a name, and what they answer to.
 ///
-/// The bracket must be followed immediately by a letter, which is what
-/// separates a hint from an index like `rows[0]` or a closure parameter.
-fn hinted_keys(src: &str) -> BTreeSet<char> {
-    let text = string_literals(src);
-    let bytes: Vec<char> = text.chars().collect();
+/// The control standard leans on these four, so a hint that names a key
+/// only as an arrow or a return symbol is still a hint teaching a key.
+const GLYPHS: &[(char, &str)] = &[
+    ('\u{21b5}', "enter"), // ↵
+    ('\u{2192}', "right"), // →
+    ('\u{2190}', "left"),  // ←
+    ('\u{2191}', "up"),    // ↑
+    ('\u{2193}', "down"),  // ↓
+];
+
+/// Named keys that appear in prose: "esc, ↵ or i to close".
+const NAMED: &[&str] = &["esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end"];
+
+/// The keys a hint teaches, in any of the forms this tree writes them.
+///
+/// `[w]indow` and `[d] cloudflare` and `[±]1min` and `↵ starts one` and
+/// `esc, ↵ or i to close` are all hints; `"[{}]"`, `"[::1]:"`, `"[[bin]]"`
+/// and `"args[0]"` are all strings that merely contain brackets. The
+/// separation is four rules, each of which exists for one of those:
+///
+/// - exactly one character between the brackets - kills `[::1]` and `[[bin]]`
+/// - that character is not `{` - kills the format placeholder `[{}]`
+/// - the character before `[` is not alphanumeric - kills `args[0]`
+/// - the character after `]` is not `.` or `(` - kills `][0].as_str()`
+///
+/// An earlier version required a letter immediately after `]`, which threw
+/// away every hint with a space in it.
+fn hinted_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for i in 0..bytes.len().saturating_sub(3) {
-        if bytes[i] == '['
-            && (bytes[i + 1].is_ascii_lowercase() || bytes[i + 1].is_ascii_digit())
-            && bytes[i + 2] == ']'
-            && bytes[i + 3].is_ascii_alphabetic()
-        {
-            found.insert(bytes[i + 1]);
+    for text in string_lines(src) {
+        let chars: Vec<char> = text.chars().collect();
+        // A footer separates its hints with `·` AND names at least one key
+        // unmistakably - in brackets, as a glyph, or by name. The
+        // separator alone is not enough: status lines use it too, and
+        // " {} targets · {:.1}s interval · " would otherwise offer `s` as
+        // a key, and "last {}d · " would offer `d`.
+        let names_a_key = text.contains('[')
+            || GLYPHS.iter().any(|(g, _)| text.contains(*g))
+            || NAMED.iter().any(|n| {
+                text.to_lowercase()
+                    .split(|c: char| !c.is_ascii_alphabetic())
+                    .any(|w| w == *n)
+            });
+        let is_footer = text.contains('\u{b7}') && names_a_key;
+        for i in 0..chars.len() {
+            if chars[i] == '[' && i + 2 < chars.len() && chars[i + 2] == ']' {
+                let key = chars[i + 1];
+                let before_ok = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+                let after_ok = chars
+                    .get(i + 3)
+                    .is_none_or(|c| *c != '.' && *c != '(' && *c != '[');
+                if key != '{' && before_ok && after_ok {
+                    match GLYPHS.iter().find(|(g, _)| *g == key) {
+                        // [↵] means the same as a bare ↵.
+                        Some((_, name)) => {
+                            found.insert((*name).to_string());
+                        }
+                        // [±] is one glyph standing for a pair of arms,
+                        // "+" | "=" and "-" | "_". clocks writes it that
+                        // way because the footer has room for one hint and
+                        // the widget has two keys.
+                        None if key == '\u{b1}' => {
+                            found.insert("+".into());
+                            found.insert("-".into());
+                        }
+                        None => {
+                            found.insert(key.to_lowercase().to_string());
+                        }
+                    }
+                }
+            }
+            if is_footer {
+                if let Some((_, name)) = GLYPHS.iter().find(|(g, _)| *g == chars[i]) {
+                    found.insert((*name).to_string());
+                }
+            }
+        }
+        // A key named in prose - "esc, ↵ or i to close" - counts only in a
+        // footer. This is the form that matters most: it is where the
+        // control standard puts its hints, and a key removed while its
+        // prose hint stayed is exactly what this check is for.
+        if is_footer {
+            let lowered = text.to_lowercase();
+            for word in lowered.split(|c: char| !c.is_ascii_alphanumeric()) {
+                if NAMED.contains(&word) || word.chars().count() == 1 {
+                    found.insert(word.to_string());
+                }
+            }
         }
     }
+    found.remove("");
     found
 }
 
-/// The keys a match arm answers to.
+/// The keys a match arm answers to, single characters and named alike.
 ///
 /// Case-insensitive on purpose: arms read `"q" | "Q"`, and a pattern that
 /// only matched lowercase would fail the whole alternation on the
-/// uppercase half - which is exactly the bug that made the first draft of
-/// this check report 48 failures against widgets that were all correct.
-fn handled_keys(src: &str) -> BTreeSet<char> {
+/// uppercase half - which is exactly the bug that made an earlier hand-run
+/// of this rule report 48 failures against widgets that were all correct.
+fn handled_keys(src: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for line in src.lines() {
-        let Some(arrow) = line.find("=>") else {
+        if line.trim_start().starts_with("//") {
             continue;
+        }
+        // A match arm, up to its =>; or a comparison anywhere on the line.
+        // ports answers `f` with `if key == "f"` and `y` with
+        // `if key != "y"`, and neither is an arm.
+        let head = match line.find("=>") {
+            Some(at) => &line[..at],
+            None if line.contains("key ==") || line.contains("key !=") => line,
+            None => continue,
         };
-        let head = &line[..arrow];
         if !head.contains('"') {
             continue;
         }
@@ -138,11 +225,20 @@ fn handled_keys(src: &str) -> BTreeSet<char> {
             let after = &rest[open + 1..];
             let Some(close) = after.find('"') else { break };
             let word = &after[..close];
-            let mut chars = word.chars();
-            if let (Some(c), None) = (chars.next(), chars.next()) {
-                found.insert(c.to_ascii_lowercase());
+            // Any single character counts, punctuation included: "?" and
+            // "/" are real keys. Longer words count when they name one.
+            let single = word.chars().count() == 1;
+            if single || word.chars().all(|c| c.is_ascii_alphabetic()) {
+                found.insert(word.to_lowercase());
             }
             rest = &after[close + 1..];
+        }
+    }
+    // A guard rather than a literal: `digit if digit.chars().all(is_ascii_digit)`
+    // answers every digit and leaves no "1" to find.
+    if src.contains("is_ascii_digit()") && src.contains(" if ") {
+        for d in '0'..='9' {
+            found.insert(d.to_string());
         }
     }
     found
@@ -234,7 +330,16 @@ fn every_footer_hint_is_in_the_widgets_doc() {
             continue; // matrix is decorative and deliberately undocumented
         };
         for key in hinted_keys(&src) {
-            if !text.contains(&format!("`{}`", key)) {
+            // The docs write these as the glyph, the footers as the name:
+            // a table row reads `↵` where the code answers to "enter".
+            // Either spelling documents the key.
+            let glyph = GLYPHS
+                .iter()
+                .find(|(_, n)| *n == key)
+                .map(|(g, _)| format!("`{}`", g));
+            let documented = text.contains(&format!("`{}`", key))
+                || glyph.is_some_and(|g| text.contains(&g));
+            if !documented {
                 wrong.push(format!("{}: [{}] in the footer, not in docs/{}.md", name, key, name));
             }
         }
