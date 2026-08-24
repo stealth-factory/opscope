@@ -1714,28 +1714,28 @@ fn main() {
                         detail = None;
                         sizes.clear();
                     }
-                    // Focused into a section, up and down move between its
-                    // rows; otherwise they move the screen. Whichever is in
-                    // front of you is what they act on, which is the same
-                    // rule the list screen follows. Walking off either end
-                    // leaves the section - `step_in_section` returning None
-                    // is what "walked off" looks like.
+                    // Focused, up and down walk the three lists as though
+                    // they were one: off the bottom of a section is the top
+                    // of the next, off the top is the bottom of the one
+                    // above. Only the two far ends let go. Unfocused, they
+                    // move the screen. Whichever is in front of you is what
+                    // they act on, which is the rule the list screen follows.
                     "up" | "k" | "K" => match focus {
                         Some(here) => {
-                            focus = tc::step_in_section(at[here], section_len[here], false)
-                                .map(|row| {
-                                    at[here] = row;
-                                    here
+                            focus = tc::step_across_sections(here, at[here], &section_len, false)
+                                .map(|(sect, row)| {
+                                    at[sect] = row;
+                                    sect
                                 });
                         }
                         None => dscroll = dscroll.saturating_sub(1),
                     },
                     "down" | "j" | "J" => match focus {
                         Some(here) => {
-                            focus = tc::step_in_section(at[here], section_len[here], true)
-                                .map(|row| {
-                                    at[here] = row;
-                                    here
+                            focus = tc::step_across_sections(here, at[here], &section_len, true)
+                                .map(|(sect, row)| {
+                                    at[sect] = row;
+                                    sect
                                 });
                         }
                         None => dscroll = dscroll.saturating_add(1),

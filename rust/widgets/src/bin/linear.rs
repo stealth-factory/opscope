@@ -708,10 +708,10 @@ fn main() {
                 "up" | "down" => {
                     let down = key == "down";
                     focus = match focus {
-                        Some(here) => tc::step_in_section(sel[here], pane_len[here], down)
-                            .map(|row| {
-                                sel[here] = row;
-                                here
+                        Some(here) => tc::step_across_sections(here, sel[here], &pane_len, down)
+                            .map(|(pane, row)| {
+                                sel[pane] = row;
+                                pane
                             }),
                         // Nothing focused, and no screen scroll to hand the
                         // arrows to - both panes window themselves. They

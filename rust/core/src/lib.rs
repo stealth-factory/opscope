@@ -743,23 +743,42 @@ pub fn next_section(focus: Option<usize>, lens: &[usize]) -> Option<usize> {
     (from..lens.len()).find(|&at| lens[at] > 0)
 }
 
-/// One step of the cursor inside a focused section.
+/// One step of the cursor when a section has the focus.
 ///
-/// `Some(row)` is where it lands; `None` means it walked off the end and the
-/// section is left. Together with `next_section` this is the whole rule:
-/// leave a section by walking off either end of it, or by pressing tab
-/// again.
+/// Returns the section and row it lands on, or `None` when it leaves the
+/// sections entirely - which happens at exactly two places: up from the first
+/// row of the first section, and down from the last row of the last one.
 ///
-/// A section that empties under the cursor leaves in either direction, and
-/// so does a cursor left beyond the end of one, rather than wandering up a
-/// list that is no longer there.
-pub fn step_in_section(at: usize, len: usize, down: bool) -> Option<usize> {
+/// Everywhere else the sections read as one continuous list. Walking off the
+/// bottom of a section steps into the top of the next, and walking off the
+/// top steps into the *bottom* of the one above - the row you were about to
+/// reach if the two had been a single list. Stepping out to nothing in the
+/// middle of a screen made the arrows stop for a reason the screen could not
+/// show, and left `tab` as the only way to reach a section you were sitting
+/// right next to.
+///
+/// Empty sections are stepped over in both directions, for the reason
+/// `next_section` steps over them. A section that empties under the cursor
+/// escapes rather than trapping it.
+pub fn step_across_sections(
+    focus: usize,
+    at: usize,
+    lens: &[usize],
+    down: bool,
+) -> Option<(usize, usize)> {
+    let len = lens.get(focus).copied().unwrap_or(0);
     if down {
-        if at + 1 >= len { None } else { Some(at + 1) }
-    } else if at == 0 || at >= len {
-        None
+        if at + 1 < len {
+            return Some((focus, at + 1));
+        }
+        let next = (focus + 1..lens.len()).find(|&i| lens[i] > 0)?;
+        Some((next, 0))
     } else {
-        Some(at - 1)
+        if at > 0 && at < len {
+            return Some((focus, at - 1));
+        }
+        let above = (0..focus.min(lens.len())).rev().find(|&i| lens[i] > 0)?;
+        Some((above, lens[above] - 1))
     }
 }
 
@@ -1171,26 +1190,86 @@ mod tests {
     }
 
     #[test]
-    fn walking_off_either_end_of_a_section_leaves_it() {
-        assert_eq!(step_in_section(1, 3, false), Some(0));
-        assert_eq!(step_in_section(0, 3, false), None, "up on the first row leaves");
-        assert_eq!(step_in_section(1, 3, true), Some(2));
-        assert_eq!(step_in_section(2, 3, true), None, "down on the last row leaves");
+    fn walking_off_a_section_steps_into_the_next_one() {
+        let lens = [3usize, 2, 4];
+        // down, out of the first section and into the top of the second
+        assert_eq!(step_across_sections(0, 1, &lens, true), Some((0, 2)));
+        assert_eq!(step_across_sections(0, 2, &lens, true), Some((1, 0)));
+        // up, out of the second and into the *bottom* of the first - the row
+        // you were about to reach if the two had been one list
+        assert_eq!(step_across_sections(1, 1, &lens, false), Some((1, 0)));
+        assert_eq!(step_across_sections(1, 0, &lens, false), Some((0, 2)));
     }
 
     #[test]
-    fn a_section_of_one_leaves_in_both_directions() {
-        assert_eq!(step_in_section(0, 1, false), None);
-        assert_eq!(step_in_section(0, 1, true), None);
+    fn only_the_two_far_ends_leave_the_sections() {
+        let lens = [3usize, 2, 4];
+        assert_eq!(
+            step_across_sections(0, 0, &lens, false),
+            None,
+            "up from the first row of the first section"
+        );
+        assert_eq!(
+            step_across_sections(2, 3, &lens, true),
+            None,
+            "down from the last row of the last section"
+        );
+        // and nowhere in between
+        for (focus, at) in [(0usize, 2usize), (1, 0), (1, 1), (2, 0)] {
+            assert!(
+                step_across_sections(focus, at, &lens, true).is_some()
+                    || step_across_sections(focus, at, &lens, false).is_some(),
+                "section {} row {} had nowhere to go",
+                focus,
+                at
+            );
+        }
     }
 
     #[test]
-    fn a_cursor_left_beyond_a_shrunken_section_leaves() {
-        // Sections are rebuilt every frame and can shrink under the cursor.
-        assert_eq!(step_in_section(0, 0, true), None);
-        assert_eq!(step_in_section(0, 0, false), None);
-        assert_eq!(step_in_section(7, 3, false), None, "not a walk up a list that is gone");
-        assert_eq!(step_in_section(7, 3, true), None);
+    fn a_whole_section_can_be_crossed_in_either_direction() {
+        // Every row of every section, in order, walking down and back up.
+        let lens = [2usize, 1, 3];
+        let mut seen = vec![(0usize, 0usize)];
+        let (mut f, mut a) = (0usize, 0usize);
+        while let Some((nf, na)) = step_across_sections(f, a, &lens, true) {
+            seen.push((nf, na));
+            f = nf;
+            a = na;
+        }
+        assert_eq!(
+            seen,
+            vec![(0, 0), (0, 1), (1, 0), (2, 0), (2, 1), (2, 2)],
+            "walking down did not visit every row once, in order"
+        );
+        let mut back = vec![(f, a)];
+        while let Some((nf, na)) = step_across_sections(f, a, &lens, false) {
+            back.push((nf, na));
+            f = nf;
+            a = na;
+        }
+        back.reverse();
+        assert_eq!(back, seen, "walking back up did not retrace the same path");
+    }
+
+    #[test]
+    fn empty_sections_are_stepped_over_in_both_directions() {
+        assert_eq!(step_across_sections(0, 2, &[3, 0, 4], true), Some((2, 0)));
+        assert_eq!(step_across_sections(2, 0, &[3, 0, 4], false), Some((0, 2)));
+        assert_eq!(
+            step_across_sections(0, 2, &[3, 0, 0], true),
+            None,
+            "nothing below but empties"
+        );
+    }
+
+    #[test]
+    fn a_section_that_empties_under_the_cursor_escapes() {
+        // Sections are rebuilt every frame and can shrink or vanish.
+        assert_eq!(step_across_sections(1, 0, &[3, 0, 4], true), Some((2, 0)));
+        assert_eq!(step_across_sections(1, 0, &[3, 0, 4], false), Some((0, 2)));
+        assert_eq!(step_across_sections(0, 7, &[3, 2, 0], false), None);
+        assert_eq!(step_across_sections(0, 7, &[3, 2, 0], true), Some((1, 0)));
     }
 
     /// One more hint costs at most one more line.

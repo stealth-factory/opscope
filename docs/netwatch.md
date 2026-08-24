@@ -318,12 +318,18 @@ Every list is drawn in full, always, and `↑` `↓` scroll the screen. `tab`
 focuses a list instead: the focused one is marked `▏`, `↑` `↓` then move a
 cursor `▸` inside it, and `c` copies whatever that cursor is on.
 
-You leave a list by walking off either end of it — `↑` on the first row or
-`↓` on the last — or by pressing `tab` again, which moves to the next list
-and, from the last one, back to scrolling the screen. Lists with nothing in
-them are stepped over rather than focused, since there would be nothing to
-put the cursor on. **This is the same rule in every widget here that has
-focusable sections.**
+Under the arrows the three lists read as **one continuous list**: `↓` off the
+bottom of a list steps into the top of the next, and `↑` off the top steps
+into the *bottom* of the one above — the row you were about to reach if they
+had never been separate. `tab` is the shortcut across a whole list rather
+than the only way between them.
+
+You let go of the lists at exactly two places: `↑` from the very first row,
+and `↓` from the very last. Both put you back to scrolling the screen, as
+does `tab` from the last list. Lists with nothing in them are stepped over in
+every direction, since there would be nothing to put the cursor on.
+
+**This is the same rule in every widget here that has focusable sections.**
 
 **TALKING TO** ranks the remote hosts by what they have carried since launch.
 Hosts, not sockets: a process opening six connections to one CDN is one thing

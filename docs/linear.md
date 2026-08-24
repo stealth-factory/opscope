@@ -137,16 +137,21 @@ thing to work. `tab` focuses a pane, and the focused heading says so by
 carrying the `↑↓` marker and its visible range; `↑` `↓` then move a cursor
 through that pane, which windows itself around it.
 
-You leave a pane by walking off either end of it — `↑` on its first row or `↓`
-on its last — or by pressing `tab` again, which moves to the other pane and,
-from the last one, back to no focus. Panes with nothing in them are stepped
-over rather than focused. **This is the same rule in every widget here that
-has focusable sections.**
+Under the arrows the two panes read as **one continuous list**: `↓` off the
+bottom of the cycles steps into the top of the teams, and `↑` off the top of
+the teams steps into the *bottom* of the cycles. `tab` is the shortcut across
+a whole pane rather than the only way between them.
+
+You let go at exactly two places: `↑` from the first cycle, and `↓` from the
+last team. `tab` from the last pane does the same. Panes with nothing in them
+are stepped over in every direction.
+
+**This is the same rule in every widget here that has focusable sections.**
 
 | Key | Action |
 |---|---|
 | `tab` | focus the next pane, and from the last one back to no focus |
-| `↑` `↓` | move the cursor in the focused pane, or step into one when none is focused |
+| `↑` `↓` | move the cursor, crossing between panes at their ends — or step into one when none is focused |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |
