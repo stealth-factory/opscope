@@ -108,6 +108,15 @@ impossible.
   added line before a push is right and still misses half the rule, because
   the rule covers code, docs *and* messages, and a message is not a diff
   line. Scan `git log origin/main..HEAD` separately.
+- **A grep that finds nothing is as often a wrong pattern as an absent
+  thing.** This was the most repeated mistake of the Rust port, on both
+  sides: `[a-z0-9]+` could not match the uppercase half of `"q" | "Q"` and
+  reported 48 widgets broken; a config audit read line by line and silently
+  skipped every multi-line `cfg\n.get(...)` chain, which is most of them;
+  another assumed the config variable was named `cfg` and declared six keys
+  unread that are reached through `&gh` and `&raw`; a claim that netwatch
+  ignored two keys came from grepping only for `tc::cfg_*`. Before believing
+  a zero, run the pattern against a case you know it should match.
 - **A new check is green against your working tree, not against the repo.**
   A check written beside an uncommitted fix is measured against the fix. One
   shipped passing here and failed on a clean checkout of its own commit,
