@@ -302,7 +302,7 @@ it as a machine honestly can:
    162.159.140.220                   https    ↓   3.2 MB ↑    722 B 411.2 KB/s
 
  ── CONNECTIONS ── 2 sockets
-   SOCKET                                OURS  STATE          RX         TX
+   SOCKET                                LOCAL STATE          RX         TX
    162.159.140.220:443                   50206 open   ↓   3.2 MB ↑    722 B
    162.159.140.220:443                   43738 open   ↓   1.1 MB ↑    310 B
 
@@ -344,12 +344,13 @@ different question: one host may hold six of them, and a socket that has
 closed still shows what it carried. It charts the same way TALKING TO does —
 the cursor's socket gets an rx/tx chart under its row.
 
-**OURS** is the local port, and it is the only column that tells those six
-apart. Five sockets to one CDN all read `1.2.3.4:443`, because the address
-and port shown are the *peer's* and the peer's port is 443 on every one of
-them; what differs is the port at this end. Without it the list is five
-identical lines and "why are there so many of these" has no answer on
-screen. A socket seen before this widget could read the port shows `-`.
+**LOCAL** is the port at this end, and it is the only column that tells those
+six apart. Five sockets to one CDN all read `1.2.3.4:443`, because the
+address and port shown are the *peer's* and the peer's port is 443 on every
+one of them; what differs is the port here. Without it the list is five
+identical lines and "why are there so many of these" has no answer on screen.
+The name is `ss`'s and `netstat`'s own — both label that column *Local
+Address:Port*. A socket seen before the port could be read shows `-`.
 
 A hostname is a best-effort label rather than the domain that was asked for.
 CDNs, shared addresses, encrypted DNS and connection reuse all mean one

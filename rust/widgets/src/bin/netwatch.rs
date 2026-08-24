@@ -150,9 +150,9 @@ struct Seen {
     recv: u64,
     peer: String,
     port: u16,
-    /// Our end of it. Five sockets to one CDN all read "1.2.3.4:443", and
-    /// this is the only field that tells them apart - the peer port is 443
-    /// on every one of them.
+    /// The local port - `ss` column 3, where column 4 is the peer's. Five
+    /// sockets to one CDN all read "1.2.3.4:443", and this is the only field
+    /// that tells them apart: the peer's port is 443 on every one of them.
     mine: u16,
     cgroup: String,
 }
@@ -489,7 +489,7 @@ struct Conn {
     name: String,
     peer: String,
     port: u16,
-    /// Our port. See `Seen::mine`.
+    /// The local port. See `Seen::mine`.
     mine: u16,
     up: u64,
     down: u64,
@@ -1152,7 +1152,7 @@ fn connection_head(w: usize, p: &Palette) -> String {
             format!(
                 "   {}{:<6}{:<7}{:>10}{:>11}",
                 tc::pad("SOCKET", connection_host_w(w)),
-                "OURS",
+                "LOCAL",
                 "STATE",
                 "RX",
                 "TX"
@@ -1271,9 +1271,10 @@ fn connection_rows(
                             host_w,
                         ),
                     ),
-                    // Our end of the socket. Without it five rows to one CDN
-                    // are five identical lines, and the question "why are
-                    // there so many of these" has no answer on screen.
+                    // The local port, which ss and netstat both call Local.
+                    // Without it five rows to one CDN are five identical
+                    // lines, and "why are there so many of these" has no
+                    // answer on screen.
                     (
                         &c(&p.dim),
                         format!(
@@ -2554,7 +2555,7 @@ mod tests {
             assert_eq!(col(&head, "STATE"), down - 7, "state column at w={}", w);
             // our port sits between the address and the state, and the row
             // is searched for the port itself rather than for a width
-            assert_eq!(col(&head, "OURS"), down - 13, "ours column at w={}", w);
+            assert_eq!(col(&head, "LOCAL"), down - 13, "local column at w={}", w);
             assert_eq!(col(&row, "44672"), down - 13, "our port at w={}", w);
             assert_eq!(col(&head, "RX") + 2, down + 10, "rx column at w={}", w);
             assert_eq!(col(&head, "TX") + 2, up + 10, "tx column at w={}", w);
