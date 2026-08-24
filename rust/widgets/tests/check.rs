@@ -445,6 +445,35 @@ fn every_config_read_falls_back_to_a_code_default() {
 }
 
 #[test]
+fn every_key_in_the_example_is_read_by_the_widget_it_belongs_to() {
+    // check.py's rule, per key rather than per section: a key in the
+    // example that no widget reads is a lie in a sample file. Checking
+    // only that the section is loaded misses the case where a widget
+    // reads three of its four keys and ignores the fourth.
+    let example = example();
+    let widgets = widgets();
+    let mut wrong = Vec::new();
+    for (section, keys) in &example {
+        let stem = section.replace('_', "-");
+        let Some(src) = widgets.get(section).or_else(|| widgets.get(&stem)) else {
+            continue; // a section for something that is not a Rust widget
+        };
+        for key in keys {
+            // Any mention of the key as a string literal counts. The point
+            // is whether the widget knows the name at all, not which
+            // helper it reaches for.
+            if !src.contains(&format!("\"{}\"", key)) {
+                wrong.push(format!(
+                    "config.example.json documents {}.{} and {}.rs never reads it",
+                    section, key, stem
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
 fn a_poller_that_dies_records_why() {
     // CLAUDE.md's central gotcha: a thread that stops takes its
     // explanation with it, and an empty pane is indistinguishable from a

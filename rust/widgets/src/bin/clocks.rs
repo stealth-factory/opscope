@@ -409,10 +409,13 @@ impl Pomodoro {
                 .get("pomodoro_enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            // True, as clocks.py has it: a break ending is worth saying
+            // out loud, and a machine with no config should behave the
+            // same under either implementation.
             notify: cfg
                 .get("pomodoro_notify")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+                .unwrap_or(true),
         };
         it.left = it.duration();
         it.running = it.enabled;
@@ -709,14 +712,14 @@ fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let mut flash_started: Option<f64> = None;
-    // Hidden by default: four extra hints on the bottom line is a lot of
-    // footer for a timer that is usually just sitting there, and [?] is
-    // always on show to bring them back. clocks.py starts them visible;
+    // Visible by default, as clocks.py has it: the hints are how the keys
+    // are found in the first place, and starting hidden means a reader has
+    // to already know the key that reveals them. [?] toggles, and
     // show_hints in the config still decides either way.
     let mut tips = cfg
         .get("show_hints")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(true);
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut scroll = 0usize;

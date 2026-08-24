@@ -117,8 +117,15 @@ fn run(args: &[&str]) -> String {
 /// Inbound is defined as "arrived at a port we listen on" rather than by a
 /// list of numbers, so SSH, a terminal server and anything else that
 /// accepts sessions are all found without being named.
+/// Ports named in config, to be treated as inbound whether or not `ss`
+/// reports them listening right now. Set once at startup.
+static CONFIGURED_PORTS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
 fn listening_ports() -> Result<Vec<u16>, String> {
-    let mut ports = Vec::new();
+    // Seeded from config, as link.py does, then whatever is actually
+    // listening. The key exists for the ports that are not visibly
+    // listening at the moment you look.
+    let mut ports: Vec<u16> = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
     for line in run_or(&["ss", "-tlnH"])?.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if let Some(local) = cols.get(3) {
@@ -397,6 +404,14 @@ struct State {
 fn main() {
     tc::maybe_help(include_str!("link_help.txt"));
     let cfg = tc::load_config("link");
+    let named: Vec<u16> = cfg
+        .get("ports")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|n| n as u16).collect())
+        .unwrap_or_default();
+    if !named.is_empty() {
+        let _ = CONFIGURED_PORTS.set(named);
+    }
     let refresh = tc::cfg_f64(&cfg, "refresh", 2.0).max(0.5);
     let windows: Vec<f64> = {
         let got = cfg
