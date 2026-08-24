@@ -778,8 +778,15 @@ fn main() {
                 w - 1,
             ));
         }
+        // The idle section is claimed before the running list spends the
+        // pane, not after. It used to be filled up to the same h-2 the
+        // idle loop then checked, so on a busy machine the heading was
+        // pushed past the bottom and truncated - while the header counted
+        // the panes and the footer offered the key to reveal them.
+        let idle_room = if show_idle && !resting.is_empty() { 3 } else { 0 };
+        let running_budget = h.saturating_sub(2 + idle_room);
         for (j, n) in running.iter().enumerate() {
-            if rows.len() >= h.saturating_sub(2) {
+            if rows.len() >= running_budget {
                 break;
             }
             let here = agents.len() + j == selected;
@@ -821,7 +828,32 @@ fn main() {
             ));
         }
 
-        if show_idle && !resting.is_empty() {
+        // Two lines for the blank and the heading, one for a pane. Below
+        // that the section cannot be drawn, but the count still can: one
+        // line saying how many are there and that the pane is too short to
+        // list them, rather than nothing at all under a footer still
+        // offering the key.
+        if show_idle
+            && !resting.is_empty()
+            && rows.len() + 3 > h.saturating_sub(2)
+            && rows.len() < h.saturating_sub(2)
+        {
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── IDLE ── ".into()),
+                    (
+                        p.dim.as_str(),
+                        format!(
+                            "{} pane{} at a prompt, too short to list",
+                            resting.len(),
+                            plural(resting.len())
+                        ),
+                    ),
+                ],
+                w - 1,
+            ));
+        }
+        if show_idle && !resting.is_empty() && rows.len() + 3 <= h.saturating_sub(2) {
             rows.push(String::new());
             rows.push(tc::seg(
                 &[
