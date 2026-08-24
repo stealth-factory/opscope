@@ -110,8 +110,8 @@ down, one bar per day, both directions on a shared scale. Read together they
 say whether the queue is filling faster than it drains. In the board above, 297
 created against 88 completed.
 
-**By team** — ranked by open volume, scrolling when focused and there are more
-teams than rows. `DONE14D` follows the window.
+**By team** — ranked by open volume, windowing around the cursor when focused
+and there are more teams than rows. `DONE14D` follows the window.
 
 ## Cost
 
@@ -132,14 +132,21 @@ reporting a smaller number.
 
 ## Keys
 
-Two sections scroll — the cycles and the team table — so the arrows need to
-know which one they are in. `tab` moves the focus, and the focused heading says
-so by carrying the `↑↓` marker and its visible range.
+The board opens with no cursor anywhere — it is a thing to read before it is a
+thing to work. `tab` focuses a pane, and the focused heading says so by
+carrying the `↑↓` marker and its visible range; `↑` `↓` then move a cursor
+through that pane, which windows itself around it.
+
+You leave a pane by walking off either end of it — `↑` on its first row or `↓`
+on its last — or by pressing `tab` again, which moves to the other pane and,
+from the last one, back to no focus. Panes with nothing in them are stepped
+over rather than focused. **This is the same rule in every widget here that
+has focusable sections.**
 
 | Key | Action |
 |---|---|
-| `tab` | move focus between the cycles and the team table |
-| `↑` `↓` | scroll the focused section |
+| `tab` | focus the next pane, and from the last one back to no focus |
+| `↑` `↓` | move the cursor in the focused pane, or step into one when none is focused |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |

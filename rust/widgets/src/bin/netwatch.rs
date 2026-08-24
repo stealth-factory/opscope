@@ -1717,20 +1717,27 @@ fn main() {
                     // Focused into a section, up and down move between its
                     // rows; otherwise they move the screen. Whichever is in
                     // front of you is what they act on, which is the same
-                    // rule the list screen follows.
-                    // Walking off either end of a section leaves it, the
-                    // same ring the target list uses: focus is left the way
-                    // it was entered rather than needing a key of its own.
+                    // rule the list screen follows. Walking off either end
+                    // leaves the section - `step_in_section` returning None
+                    // is what "walked off" looks like.
                     "up" | "k" | "K" => match focus {
-                        Some(at_focus) if at[at_focus] == 0 => focus = None,
-                        Some(at_focus) => at[at_focus] -= 1,
+                        Some(here) => {
+                            focus = tc::step_in_section(at[here], section_len[here], false)
+                                .map(|row| {
+                                    at[here] = row;
+                                    here
+                                });
+                        }
                         None => dscroll = dscroll.saturating_sub(1),
                     },
                     "down" | "j" | "J" => match focus {
-                        Some(at_focus) if at[at_focus] + 1 >= section_len[at_focus] => {
-                            focus = None
+                        Some(here) => {
+                            focus = tc::step_in_section(at[here], section_len[here], true)
+                                .map(|row| {
+                                    at[here] = row;
+                                    here
+                                });
                         }
-                        Some(at_focus) => at[at_focus] += 1,
                         None => dscroll = dscroll.saturating_add(1),
                     },
                     // The pane height is read here rather than carried,
@@ -1750,17 +1757,9 @@ fn main() {
                     // straight to two of the three, which meant three keys
                     // for one job and a section heading advertising a letter
                     // of its own - and no key at all for the middle one.
-                    // Round the lists and then off the end, back to nothing
-                    // focused.
-                    //
-                    // Empty ones are stepped over. A section with no rows is
-                    // not a place you can be: tab onto "0 files" and the
-                    // footer offers "↑↓ select" over nothing, the next arrow
-                    // silently leaves again, and the key reads as broken.
-                    "tab" => {
-                        let from = focus.map_or(0, |at| at + 1);
-                        focus = (from..SECTIONS.len()).find(|&at| section_len[at] > 0);
-                    }
+                    // Where it goes, and which sections it steps over, is
+                    // toys-core's rule rather than this widget's.
+                    "tab" => focus = tc::next_section(focus, &section_len),
                     "c" | "C" => {
                         if !pending_copy.is_empty() {
                             // The value goes in the message either way: OSC

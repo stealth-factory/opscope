@@ -645,11 +645,23 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
-    // Two sections scroll, so the arrows need to know which one they are
-    // in. Tab moves the focus; the focused heading says so.
+    // Two sections take the arrows, so they need to know which one they
+    // are in. Tab moves the focus; the focused heading says so.
+    //
+    // None is a real state, not a missing value: the board opens with no
+    // cursor anywhere, because it is a thing to read before it is a thing
+    // to work, and a cursor sitting somewhere you did not put it is a
+    // question rather than an answer. It also used to open on the cycles
+    // pane while the footer said the arrows scrolled, which was wrong
+    // twice over.
     let (cycles_pane, teams_pane) = (0usize, 1usize);
-    let mut focus = cycles_pane;
+    let mut focus: Option<usize> = None;
     let mut sel = [0usize, 0usize];
+    // How long each pane was when it was last drawn. The keys are read
+    // before the frame is built, so walking off the end of a pane has to be
+    // judged against the length it had a moment ago - which is the length
+    // the reader is looking at.
+    let mut pane_len = [0usize, 0usize];
     let mut tick = 0usize;
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
@@ -680,9 +692,37 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                "tab" => focus = if focus == cycles_pane { teams_pane } else { cycles_pane },
-                "up" => sel[focus] = sel[focus].saturating_sub(1),
-                "down" => sel[focus] += 1,
+                // The rule every widget here with focusable sections
+                // follows. tab moves to the next pane and, from the last
+                // one, back to no focus at all - it used to toggle between
+                // the two for ever, so there was no way to put the cursor
+                // away. Empty panes are stepped over: focusing one leaves
+                // the arrows moving an index nothing is drawn from, which
+                // is a key that does nothing and says nothing.
+                "tab" => focus = tc::next_section(focus, &pane_len),
+                // Walking off either end of a pane leaves it. There is no
+                // screen scroll here to hand the arrows to - both panes
+                // window themselves to fit - so from nothing focused they
+                // step back in at the near end, the same ring latency and
+                // link use.
+                "up" | "down" => {
+                    let down = key == "down";
+                    focus = match focus {
+                        Some(here) => tc::step_in_section(sel[here], pane_len[here], down)
+                            .map(|row| {
+                                sel[here] = row;
+                                here
+                            }),
+                        // Nothing focused, and no screen scroll to hand the
+                        // arrows to - both panes window themselves. They
+                        // step into the near end of the first pane that has
+                        // rows, so the ring closes the way latency's does.
+                        None => tc::next_section(None, &pane_len).map(|here| {
+                            sel[here] = if down { 0 } else { pane_len[here] - 1 };
+                            here
+                        }),
+                    }
+                }
                 _ => {}
             }
         }
@@ -851,6 +891,7 @@ fn main() {
             let (bm, bl) = churn(b);
             am.total_cmp(&bm).then(al.cmp(&bl))
         });
+        pane_len[cycles_pane] = ranked_cycles.len();
         if !ranked_cycles.is_empty() {
             sel[cycles_pane] = sel[cycles_pane].min(ranked_cycles.len() - 1);
         }
@@ -862,7 +903,7 @@ fn main() {
         } else {
             0
         };
-        let here_now = focus == cycles_pane;
+        let here_now = focus == Some(cycles_pane);
         rows.push(tc::seg(
             &[
                 (
@@ -911,7 +952,7 @@ fn main() {
                     n => n,
                 }
             );
-            let on = focus == cycles_pane && ci == sel[cycles_pane];
+            let on = focus == Some(cycles_pane) && ci == sel[cycles_pane];
             let tint = if on { tc::bg(38, 56, 76) } else { String::new() };
             let c_of = |colour: &str| format!("{}{}", tint, colour);
             let hot = tc::heat(frac);
@@ -1118,6 +1159,7 @@ fn main() {
             };
             open(&b.0).cmp(&open(&a.0)).then(a.0.cmp(&b.0))
         });
+        pane_len[teams_pane] = ranked.len();
         if !ranked.is_empty() {
             sel[teams_pane] = sel[teams_pane].min(ranked.len() - 1);
         }
@@ -1127,7 +1169,7 @@ fn main() {
         } else {
             0
         };
-        let on_teams = focus == teams_pane;
+        let on_teams = focus == Some(teams_pane);
         rows.push(tc::seg(
             &[
                 (
@@ -1208,8 +1250,17 @@ fn main() {
         drop(s);
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
-            vec![(p.dim.as_str(), "[tab] section".into())],
+            // Not "scroll": nothing on this board scrolls. The arrows move
+            // a cursor through whichever pane has the focus, and both panes
+            // window themselves around it.
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "tab".into()),
+                (
+                    p.dim.as_str(),
+                    if focus.is_some() { " next pane" } else { " into a pane" }.to_string(),
+                ),
+            ],
             vec![(p.dim.as_str(), "[w]indow".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],

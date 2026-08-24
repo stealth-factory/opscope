@@ -725,6 +725,44 @@ pub fn cycle<T: PartialEq + Copy>(choices: &[T], current: T) -> T {
     }
 }
 
+/// Where `tab` goes next, on the rule every widget with focusable sections
+/// follows.
+///
+/// `lens` is how long each section is right now. Focus moves to the next
+/// section after the current one and, from the last, off the end to `None` -
+/// so there is a way to put the cursor away, which a ring that only cycles
+/// between the sections does not give you.
+///
+/// Empty sections are stepped over. A section with no rows is not a place
+/// you can be: focusing one leaves the arrows moving an index nothing is
+/// drawn from and a footer offering "select" over nothing, which reads as a
+/// key that has stopped working. From `None`, this is also how you find the
+/// first section worth entering.
+pub fn next_section(focus: Option<usize>, lens: &[usize]) -> Option<usize> {
+    let from = focus.map_or(0, |at| at + 1);
+    (from..lens.len()).find(|&at| lens[at] > 0)
+}
+
+/// One step of the cursor inside a focused section.
+///
+/// `Some(row)` is where it lands; `None` means it walked off the end and the
+/// section is left. Together with `next_section` this is the whole rule:
+/// leave a section by walking off either end of it, or by pressing tab
+/// again.
+///
+/// A section that empties under the cursor leaves in either direction, and
+/// so does a cursor left beyond the end of one, rather than wandering up a
+/// list that is no longer there.
+pub fn step_in_section(at: usize, len: usize, down: bool) -> Option<usize> {
+    if down {
+        if at + 1 >= len { None } else { Some(at + 1) }
+    } else if at == 0 || at >= len {
+        None
+    } else {
+        Some(at - 1)
+    }
+}
+
 /// A placeholder bar with a highlight sweeping across it.
 ///
 /// For values that are being refetched: showing the previous number while a
@@ -1104,6 +1142,56 @@ pub fn maybe_help(doc: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    // The rule every widget with focusable sections follows. It is tested
+    // here rather than in each widget because "the same rule everywhere" is
+    // a claim two hand-written copies cannot keep.
+
+    #[test]
+    fn tab_walks_the_sections_and_then_off_the_end() {
+        let lens = [3usize, 2, 4];
+        assert_eq!(next_section(None, &lens), Some(0), "opens into the first");
+        assert_eq!(next_section(Some(0), &lens), Some(1));
+        assert_eq!(next_section(Some(1), &lens), Some(2));
+        assert_eq!(
+            next_section(Some(2), &lens),
+            None,
+            "the last section leads out, not back to the first"
+        );
+    }
+
+    #[test]
+    fn tab_steps_over_sections_with_nothing_in_them() {
+        // The middle one is empty: focusing it would offer "select" over
+        // nothing and the next arrow would silently leave again.
+        assert_eq!(next_section(Some(0), &[3, 0, 4]), Some(2));
+        assert_eq!(next_section(None, &[0, 0, 4]), Some(2), "skips a run of them");
+        assert_eq!(next_section(Some(0), &[3, 0, 0]), None, "nothing left to enter");
+        assert_eq!(next_section(None, &[0, 0, 0]), None, "an empty screen has nowhere to go");
+    }
+
+    #[test]
+    fn walking_off_either_end_of_a_section_leaves_it() {
+        assert_eq!(step_in_section(1, 3, false), Some(0));
+        assert_eq!(step_in_section(0, 3, false), None, "up on the first row leaves");
+        assert_eq!(step_in_section(1, 3, true), Some(2));
+        assert_eq!(step_in_section(2, 3, true), None, "down on the last row leaves");
+    }
+
+    #[test]
+    fn a_section_of_one_leaves_in_both_directions() {
+        assert_eq!(step_in_section(0, 1, false), None);
+        assert_eq!(step_in_section(0, 1, true), None);
+    }
+
+    #[test]
+    fn a_cursor_left_beyond_a_shrunken_section_leaves() {
+        // Sections are rebuilt every frame and can shrink under the cursor.
+        assert_eq!(step_in_section(0, 0, true), None);
+        assert_eq!(step_in_section(0, 0, false), None);
+        assert_eq!(step_in_section(7, 3, false), None, "not a walk up a list that is gone");
+        assert_eq!(step_in_section(7, 3, true), None);
+    }
 
     /// One more hint costs at most one more line.
     ///

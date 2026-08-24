@@ -16,5 +16,6 @@ Credentials: `linear.token` in config.json, or $LINEAR_API_KEY. A personal API
 key from Settings - Security & access - Personal API keys. The API is called
 directly, so no CLI is required.
 
-Keys: up/down select a team, r refreshes now, w cycles the window
-(7/14/30/60/90 days), q quits.
+Keys: tab focuses a pane — the cycles, then the teams, then no focus at all —
+and up/down move the cursor in whichever is focused, leaving it if you walk off
+either end. r refreshes now, w cycles the window (7/14/30/60/90 days), q quits.
