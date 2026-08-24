@@ -203,10 +203,15 @@ fn day(ts: &str) -> String {
 }
 
 fn parse(ts: &str) -> Option<NaiveDateTime> {
-    if ts.len() < 19 {
+    // By characters, not bytes. len() and [..19] are both byte operations,
+    // so a timestamp with any multibyte character in its first nineteen
+    // bytes used to panic on a character boundary rather than decline to
+    // parse - in a poll thread, on data from a server.
+    let head: String = ts.chars().take(19).collect();
+    if head.chars().count() < 19 {
         return None;
     }
-    NaiveDateTime::parse_from_str(&ts[..19], "%Y-%m-%dT%H:%M:%S").ok()
+    NaiveDateTime::parse_from_str(&head, "%Y-%m-%dT%H:%M:%S").ok()
 }
 
 fn hours_since(from: Option<NaiveDateTime>, to: Option<NaiveDateTime>) -> Option<f64> {
@@ -1218,6 +1223,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timestamp_that_is_not_ascii_is_declined_rather_than_fatal() {
+        // A full-width digit puts a character boundary inside byte 19.
+        // This used to panic in the poll thread, which under the release
+        // profile takes the whole widget with it.
+        // Byte 19 falls inside this character; an earlier fixture put the
+        // wide digit where byte 19 was still a boundary and so passed
+        // against the bug. Verified by reverting the fix.
+        assert_eq!(parse("2026-08-24T10:00:0\u{ff14} x"), None);
+        assert_eq!(parse("\u{4e00}\u{4e00}\u{4e00}\u{4e00}\u{4e00}"), None);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("2026-08-24"), None);
+        // And a real one still reads.
+        assert!(parse("2026-08-24T10:00:00.000Z").is_some());
+    }
+
 
     #[test]
     fn a_span_changes_unit_before_it_stops_meaning_anything() {
