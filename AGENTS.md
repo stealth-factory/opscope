@@ -108,6 +108,12 @@ impossible.
   added line before a push is right and still misses half the rule, because
   the rule covers code, docs *and* messages, and a message is not a diff
   line. Scan `git log origin/main..HEAD` separately.
+- **A new check is green against your working tree, not against the repo.**
+  A check written beside an uncommitted fix is measured against the fix. One
+  shipped passing here and failed on a clean checkout of its own commit,
+  because the stale line it was written to catch had already been corrected
+  in another session's dirty tree. Run a new check against `HEAD` — stash,
+  or `git show HEAD:<path>` the files it reads — before believing it.
 - **The commit that removes a secret is the likeliest place to restate it.**
   "The fixture used `<the actual name>`, which is a device on this tailnet"
   is the most natural sentence to write when documenting the fix, and it
