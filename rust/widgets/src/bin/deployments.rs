@@ -326,7 +326,12 @@ fn palette() -> Palette {
 fn state_colour<'a>(state: &str, p: &'a Palette) -> &'a str {
     match state {
         "READY" => &p.ready,
-        "BUILDING" | "INITIALIZING" => &p.build,
+        "BUILDING" => &p.build,
+        // Initializing is before the build starts, which is why
+        // deployments.py groups it with the queue rather than the build.
+        // Grouping it with BUILDING put the two panes on different colours
+        // for the same state.
+        "INITIALIZING" => &p.queue,
         "ERROR" => &p.error,
         "QUEUED" => &p.queue,
         "CANCELED" => &p.cancel,

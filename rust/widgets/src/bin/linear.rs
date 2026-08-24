@@ -294,6 +294,20 @@ struct State {
     fetched: f64,
 }
 
+/// Whether a team key counts toward the board.
+///
+/// Named teams win outright; otherwise everything not excluded is in. This
+/// lived inside `one_pass` as a closure, where the only way to reach it was
+/// a live token and a network round trip - so its test asserted a copy
+/// written in the test body, and would have passed with this wrong.
+fn team_wanted(keep: &[String], exclude: &[String], key: &str) -> bool {
+    if !keep.is_empty() {
+        keep.iter().any(|k| k == key)
+    } else {
+        !exclude.iter().any(|k| k == key)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
@@ -304,13 +318,7 @@ fn one_pass(
     state: &Arc<Mutex<State>>,
     quota: &Arc<Mutex<Quota>>,
 ) -> Result<(), String> {
-    let wanted = |key: &str| -> bool {
-        if !keep.is_empty() {
-            keep.iter().any(|k| k == key)
-        } else {
-            !exclude.iter().any(|k| k == key)
-        }
-    };
+    let wanted = |key: &str| team_wanted(keep, exclude, key);
     let since = (Utc::now() - chrono::Duration::days(days - 1))
         .format("%Y-%m-%dT00:00:00.000Z")
         .to_string();
@@ -1305,16 +1313,13 @@ mod tests {
     fn a_key_decides_which_teams_are_counted() {
         // Named teams win outright; otherwise the excluded ones are dropped
         // and everything else is in.
-        let wanted = |keep: &[&str], exclude: &[&str], key: &str| -> bool {
-            if !keep.is_empty() {
-                keep.contains(&key)
-            } else {
-                !exclude.contains(&key)
-            }
-        };
-        assert!(wanted(&["TOY"], &["OPS"], "TOY"));
-        assert!(!wanted(&["TOY"], &[], "OPS"));
-        assert!(wanted(&[], &["OPS"], "TOY"));
-        assert!(!wanted(&[], &["OPS"], "OPS"));
+        let of = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        assert!(team_wanted(&of(&["TOY"]), &of(&["OPS"]), "TOY"));
+        assert!(!team_wanted(&of(&["TOY"]), &of(&[]), "OPS"));
+        assert!(team_wanted(&of(&[]), &of(&["OPS"]), "TOY"));
+        assert!(!team_wanted(&of(&[]), &of(&["OPS"]), "OPS"));
+        // A named team wins even when it is also excluded, which is the
+        // branch the test-local copy could never have got wrong.
+        assert!(team_wanted(&of(&["OPS"]), &of(&["OPS"]), "OPS"));
     }
 }

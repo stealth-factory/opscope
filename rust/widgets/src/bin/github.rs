@@ -416,10 +416,20 @@ fn one_pass(
 ) -> Result<(), String> {
     if viewer.is_empty() {
         let who = graphql("{ viewer { login } }", tok, scopes)?;
-        *viewer = who["data"]["viewer"]["login"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        // An errors envelope has no data.viewer, and `unwrap_or("")` turned
+        // that into an empty login the pass then carried on with - every
+        // query after it silently scoped to nobody. Unreadable rendered as
+        // empty is the one failure this collection exists to avoid, so the
+        // pass stops and says why, which is what github.py does.
+        *viewer = match who["data"]["viewer"]["login"].as_str() {
+            Some(login) if !login.is_empty() => login.to_string(),
+            _ => {
+                let why = who["errors"][0]["message"]
+                    .as_str()
+                    .unwrap_or("no viewer login in the response");
+                return Err(format!("who am I: {}", &why[..why.len().min(50)]));
+            }
+        };
     }
     let mut accounts = state.lock().map(|g| g.accounts.clone()).unwrap_or_default();
     if accounts.is_empty() {

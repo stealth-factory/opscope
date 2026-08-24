@@ -22,6 +22,7 @@
 //! Python behaviour rather than the more idiomatic Rust one.
 
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::fd::AsRawFd;
 
 pub const HIDE: &str = "\x1b[?25l";
@@ -775,7 +776,16 @@ pub fn missing(programs: &[&str]) -> Vec<String> {
         .filter(|p| {
             !path.split(':').any(|dir| {
                 let candidate = std::path::Path::new(dir).join(p);
+                // `is_file` is not enough: shutil.which, which the Python
+                // uses, also requires the executable bit. A readable but
+                // non-executable file of the right name on PATH would
+                // otherwise count as the tool being present, and the widget
+                // would start and then fail on every call instead of saying
+                // up front what it needs.
                 candidate.is_file()
+                    && std::fs::metadata(&candidate)
+                        .map(|m| m.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false)
             })
         })
         .map(|p| p.to_string())
@@ -1095,6 +1105,34 @@ pub fn maybe_help(doc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_without_the_executable_bit_is_still_missing() {
+        // shutil.which, which the Python uses, requires the bit. Checking
+        // only is_file() would let a readable non-executable of the right
+        // name count as the tool, so the widget would start and then fail
+        // on every call rather than saying up front what it needs.
+        let dir = std::env::temp_dir().join(format!("toys-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("definitely-not-a-real-tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+
+        let held = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", dir.to_string_lossy().to_string());
+
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let not_executable = missing(&["definitely-not-a-real-tool"]);
+
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = missing(&["definitely-not-a-real-tool"]);
+
+        std::env::set_var("PATH", held);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(not_executable, vec!["definitely-not-a-real-tool"], "0644 counted as present");
+        assert!(executable.is_empty(), "0755 was not found: {:?}", executable);
+    }
+
 
     #[test]
     fn a_query_survives_its_own_newlines() {

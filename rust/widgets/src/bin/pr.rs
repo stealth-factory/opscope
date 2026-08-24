@@ -571,7 +571,15 @@ fn merge_label<'a>(state: &str, p: &'a Palette) -> (&'static str, &'a str) {
         "BLOCKED" => ("blocked", &p.warn),
         "BEHIND" => ("behind", &p.warn),
         "UNSTABLE" => ("checks failing", &p.warn),
-        "HAS_HOOKS" | "UNKNOWN" => ("checking", &p.dim),
+        // HAS_HOOKS means a merge queue or a required hook stands between
+        // this and the button - the PR itself is mergeable. pr.py has always
+        // called it ready; the port called it "checking", which reads as
+        // "not finished yet" and is the opposite of what it means.
+        "HAS_HOOKS" => ("ready", &p.ok),
+        // Drafts had no case and fell to the em-dash, so a draft was
+        // indistinguishable from a PR whose state GitHub had not sent.
+        "DRAFT" => ("draft", &p.dim),
+        "UNKNOWN" => ("checking", &p.dim),
         _ => ("—", &p.dim),
     }
 }

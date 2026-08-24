@@ -73,6 +73,20 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
 /// agent", and this answers the only question that spans them - what runs
 /// out first. An agent that publishes no quota is named at the bottom
 /// instead of being silently missing.
+/// Order provider groups by the lane closest to running out.
+///
+/// A provider with one lane at 88% outranks one whose lanes all sit at 40%,
+/// however many of them there are: the structure says who owns what, the
+/// ordering answers which one stops working first.
+///
+/// Lifted out of `summary_tab` because its test sorted a vector built in the
+/// test body with a comparator written in the test body, so this ordering -
+/// the whole point of that screen - was never run by it.
+fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
+    let worst = |g: &Vec<Lane>| g.iter().map(|l| l.pct).fold(0.0f64, f64::max);
+    groups.sort_by(|a, b| worst(&b.1).total_cmp(&worst(&a.1)));
+}
+
 fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     let mut groups: Vec<(&str, Vec<Lane>)> = Vec::new();
     let mut quiet: Vec<&str> = Vec::new();
@@ -90,10 +104,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     // Grouped by provider, but the groups are ordered by their worst lane:
     // the structure says who owns what, the ordering still answers which
     // one runs out first.
-    groups.sort_by(|a, b| {
-        let worst = |g: &Vec<Lane>| g.iter().map(|l| l.pct).fold(0.0f64, f64::max);
-        worst(&b.1).total_cmp(&worst(&a.1))
-    });
+    rank_by_worst_lane(&mut groups);
     let total: usize = groups.iter().map(|(_, g)| g.len()).sum();
     let label_w = groups
         .iter()
@@ -270,13 +281,24 @@ mod tests {
         // Deliberately built rather than read from disk: the ordering is
         // the whole point of this screen and must not depend on what this
         // machine happens to have installed today.
-        let mut a: Vec<(&str, f64)> = vec![
-            ("claude", 12.0),
-            ("codex", 88.0),
-            ("grok", 40.0),
+        let lane = |pct: f64| Lane {
+            label: String::new(),
+            pct,
+            window_secs: None,
+            reset: None,
+            stale: false,
+        };
+        // grok has more lanes and a higher total, and still ranks below the
+        // provider with the single worst one - which a flat sort by
+        // percentage would get wrong, and which the old test-local
+        // comparator could not have exercised at all.
+        let mut groups = vec![
+            ("claude", vec![lane(12.0)]),
+            ("grok", vec![lane(40.0), lane(39.0), lane(38.0)]),
+            ("codex", vec![lane(88.0)]),
         ];
-        a.sort_by(|x, y| y.1.total_cmp(&x.1));
-        assert_eq!(a[0].0, "codex");
-        assert_eq!(a[2].0, "claude");
+        rank_by_worst_lane(&mut groups);
+        let order: Vec<&str> = groups.iter().map(|(n, _)| *n).collect();
+        assert_eq!(order, vec!["codex", "grok", "claude"]);
     }
 }

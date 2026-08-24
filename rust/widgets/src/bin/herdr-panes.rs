@@ -103,17 +103,26 @@ fn command_label(argv: &[String], name: &str) -> String {
     head
 }
 
-/// (cpu ticks used, resident bytes) for a pid.
-fn proc_stats(pid: i32) -> Option<(u64, u64)> {
-    let text = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    // The command is in brackets and may itself contain spaces, so the split
-    // starts after the last one rather than at the second field.
+/// (cpu ticks used, resident bytes) out of one /proc/<pid>/stat line.
+///
+/// Split from the read so it can be tested on a line rather than on a live
+/// process. Its test used to re-implement this parse in the test body and
+/// assert on the copy, which meant the shipped one was never run.
+fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
+    // The command is in brackets and may itself contain spaces and brackets,
+    // so the split starts after the last one rather than at the second field.
     let rest = text.rsplit_once(')')?.1;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     let utime: u64 = fields.get(11)?.parse().ok()?;
     let stime: u64 = fields.get(12)?.parse().ok()?;
     let rss: u64 = fields.get(21)?.parse().ok()?;
     Some((utime + stime, rss * 4096))
+}
+
+/// (cpu ticks used, resident bytes) for a pid.
+fn proc_stats(pid: i32) -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    parse_proc_stat(&text)
 }
 
 fn clock_ticks() -> f64 {
@@ -977,10 +986,10 @@ mod tests {
             "42 (my (odd) proc) S 1 42 42 0 -1 4194304 100 0 0 0 {} {} 0 0 20 0 8 0 900 0 {} 0",
             310, 90, 4096
         );
-        let rest = line.rsplit_once(')').unwrap().1;
-        let fields: Vec<&str> = rest.split_whitespace().collect();
-        assert_eq!(fields[11], "310");
-        assert_eq!(fields[12], "90");
-        assert_eq!(fields[21], "4096");
+        let (ticks, rss) = parse_proc_stat(&line).expect("a well-formed line should parse");
+        assert_eq!(ticks, 400, "utime and stime are summed");
+        assert_eq!(rss, 4096 * 4096, "rss is in pages, reported in bytes");
+        // A truncated line has no fields to find and must not be guessed at.
+        assert_eq!(parse_proc_stat("42 (short) S 1 2 3"), None);
     }
 }
