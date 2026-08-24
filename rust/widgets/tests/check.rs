@@ -399,6 +399,52 @@ fn every_section_in_the_example_is_read_by_the_widget_it_names() {
 }
 
 #[test]
+fn every_config_read_falls_back_to_a_code_default() {
+    // A key deleted from config.json must land on the widget's own
+    // default, not on zero and not on a panic. cfg_f64 and its siblings
+    // take a fallback by signature; a bare cfg.get() does not, so those
+    // are the ones that can go wrong.
+    //
+    // Checked live as well as here: clocks with no config file, with no
+    // clocks section, with an empty section, and with only the focus key
+    // set, all show the code's own durations.
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        let mut from = 0;
+        while let Some(at) = src[from..].find(".get(\"") {
+            let start = from + at;
+            from = start + 5;
+            // Only reads of the config value itself; every other .get() in
+            // these files is a JSON lookup on something else.
+            let before = &src[start.saturating_sub(40)..start];
+            if !before.trim_end().ends_with("cfg") && !before.trim_end().ends_with("&cfg") {
+                continue;
+            }
+            let key: String = src[from..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
+            // The statement this read belongs to, not a fixed window: an
+            // earlier hand-audit used 260 characters and wrongly flagged
+            // work_days, whose fallback is simply further along.
+            let rest = &src[start..];
+            let stop = rest.find(';').unwrap_or(rest.len());
+            let statement = &rest[..stop];
+            let guarded = statement.contains("unwrap_or")
+                || statement.contains("unwrap_or_else")
+                || statement.contains("unwrap_or_default");
+            if !guarded {
+                wrong.push(format!(
+                    "{}: reads {:?} from config with no fallback in the statement",
+                    name, key
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
 fn a_poller_that_dies_records_why() {
     // CLAUDE.md's central gotcha: a thread that stops takes its
     // explanation with it, and an empty pane is indistinguishable from a
