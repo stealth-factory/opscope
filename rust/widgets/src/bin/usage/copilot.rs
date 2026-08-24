@@ -183,7 +183,7 @@ fn copilot_live() -> Option<serde_json::Value> {
     }
 }
 
-pub fn read(caches: &mut Caches) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
     if let Some(got) = cached(caches, "copilot", LIVE_TTL, copilot_live) {
         if got["data"].is_object() {

@@ -273,7 +273,7 @@ fn conversation_steps(path: &str) -> Option<f64> {
 /// Each conversation is its own SQLite file with a `steps` table - one row
 /// per step the agent took - so the counts are real work done. No table
 /// anywhere carries a token count.
-pub fn read(caches: &mut Caches) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
     let mut d = Data {
         live: cached(caches, "antigravity", PLAN_TTL, antigravity_live),

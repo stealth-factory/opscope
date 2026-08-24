@@ -339,7 +339,7 @@ fn newest_limits(files: &[String]) -> Option<serde_json::Value> {
     None
 }
 
-pub fn read(caches: &mut Caches) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut codex = Data {
         live: cached(caches, "codex", LIVE_TTL, codex_live),
         ..Data::default()

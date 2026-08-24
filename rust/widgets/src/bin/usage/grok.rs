@@ -35,6 +35,26 @@ const SESSIONS: &str = ".grok/sessions";
 /// The quota is not in the session transcripts: it arrives on the client
 /// log, which the CLI writes as it talks to the server.
 const LOG: &str = ".grok/logs/unified.jsonl";
+/// Where the CLI leaves the token it authenticates with.
+const AUTH: &str = ".grok/auth.json";
+/// Seconds to wait on the billing call before falling back to the log.
+const QUOTA_TIMEOUT: u64 = 6;
+/// The CLI, whose only job here is to refresh the token it owns.
+const CLI: &str = ".grok/bin/grok";
+/// Cache key for the billing reading.
+const PING_KEY: &str = "grok:billing";
+/// Cache key for the last session-end refresh, so one ending refreshes once.
+const SEEN_KEY: &str = "grok:session-seen";
+/// How long a session must be quiet before it counts as over. Long enough
+/// that a pause for thought is not an ending.
+const SESSION_QUIET: f64 = 120.0;
+/// And how long before it is old news. Launching the widget days after the
+/// last session should not start the CLI to refresh a window nobody is
+/// watching.
+const SESSION_STALE: f64 = 6.0 * 3600.0;
+/// The CLI's own billing endpoint. Same reading its `/usage` shows, and the
+/// only account-wide source Grok has that is not a file on this disk.
+const BILLING: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 /// The credit reading is one line among the client log's chatter and is
 /// only rewritten when the server sends a new one, so the tail has to be
 /// long enough to still contain one after a busy session.
@@ -75,6 +95,16 @@ pub struct Data {
     /// Newest transcript mtime, as epoch seconds.
     last: f64,
     quota: Option<Quota>,
+    /// True when the quota came from the server just now rather than from
+    /// the log. A number nobody labelled as old reads as current, and this
+    /// one was out by more than double the last time it went unlabelled.
+    quota_live: bool,
+    /// When the server was last asked, as epoch seconds. Zero when it never
+    /// has been - the asking is off unless it is turned on.
+    quota_at: f64,
+    /// Seconds between asks, so the tab can say what the interval is rather
+    /// than leaving the reader to find it in a config file.
+    quota_every: f64,
 }
 
 /// The integer following `key` on a line.
@@ -190,7 +220,60 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
 
 /// What every transcript here spent, and what the server last said about
 /// the account's credits.
-pub fn read(caches: &mut Caches) -> Data {
+/// The server if it is allowed and will answer, the log if not.
+///
+/// Held between asks rather than asked on every frame: the pane redraws
+/// every thirty seconds and this window moves over days, so the interval is
+/// the configured one and the reading in between is the one already had.
+fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64) {
+    let from_log = || {
+        newest_quota(tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str))
+    };
+    if !cfg.grok_ping {
+        return (from_log(), false, 0.0);
+    }
+    let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
+    let got = cached(caches, PING_KEY, ttl, || live_quota(QUOTA_TIMEOUT));
+    // When the ask was actually made, which is not this frame most of the
+    // time. The tab reports it, so it has to be the fetch and not the read.
+    let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
+    match got.as_ref().and_then(quota_from) {
+        Some(q) => (Some(q), true, at),
+        None => (from_log(), false, at),
+    }
+}
+
+/// Run the Grok CLI once, for its side effect: it refreshes the token in
+/// `auth.json` on startup, and that token is what the billing request needs.
+///
+/// Without this the asking works until the token lapses and then quietly
+/// stops working, which is the failure it was meant to fix. With it the
+/// refresh happens when a session has just ended - the moment the numbers
+/// have changed and nobody is at the keyboard waiting.
+///
+/// It starts somebody else's program, so it is off unless asked for. The
+/// handshake is the smallest one the agent answers: initialize, then close.
+fn refresh_token() {
+    use std::io::Write;
+    let Ok(mut child) = std::process::Command::new(under_home(CLI))
+        .args(["agent", "stdio"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut pipe) = child.stdin.take() {
+        let _ = pipe.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\
+              \"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}\n",
+        );
+    }
+    let _ = child.wait();
+}
+
+pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
     let mut files = Vec::new();
     walk(&under_home(SESSIONS), "updates.jsonl", &mut files);
@@ -200,10 +283,12 @@ pub fn read(caches: &mut Caches) -> Data {
         // missing is the failure this repo keeps paying for. ok stays false,
         // so the tab says there are no sessions - under the quota, not
         // instead of it.
+        let (quota, quota_live, quota_at) = quota_now(caches, cfg);
         return Data {
-            quota: newest_quota(
-                tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str),
-            ),
+            quota,
+            quota_live,
+            quota_at,
+            quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
             ..Data::default()
         };
     }
@@ -248,6 +333,30 @@ pub fn read(caches: &mut Caches) -> Data {
     caches
         .live
         .retain(|key, _| !key.starts_with(CACHE) || seen.contains(key));
+    // A session that has just ended is the moment the numbers have changed
+    // and nobody is waiting on the pane. Refreshing the token then keeps the
+    // asking working; refreshing while a session is still running would mean
+    // starting the CLI under somebody who is using it.
+    if cfg.grok_ping && cfg.grok_ping_after_session && newest > 0.0 {
+        let quiet = now() - newest;
+        let handled = caches
+            .live
+            .get(SEEN_KEY)
+            .and_then(|(_, v, _)| v.as_ref())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        if (SESSION_QUIET..SESSION_STALE).contains(&quiet) && newest > handled {
+            refresh_token();
+            caches.live.insert(
+                SEEN_KEY.to_string(),
+                (now(), Some(serde_json::json!(newest)), f64::MAX),
+            );
+            // The token is new, so the reading held from before it is not
+            // the best one available any more.
+            caches.live.remove(PING_KEY);
+        }
+    }
+    let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
         sessions,
@@ -255,7 +364,10 @@ pub fn read(caches: &mut Caches) -> Data {
         total,
         daily,
         last: newest,
-        quota: newest_quota(tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str)),
+        quota: quota_read.0,
+        quota_live: quota_read.1,
+        quota_at: quota_read.2,
+        quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
     }
 }
 
@@ -265,6 +377,59 @@ pub fn read(caches: &mut Caches) -> Data {
 /// window length is offered only when both ends parse and run forwards,
 /// but the reset is offered whenever the end does - a countdown is
 /// readable without knowing how long the window was.
+/// The credit window as the server has it right now.
+///
+/// Grok was the only agent here reading its quota off the disk, and the
+/// number that produced was whatever its CLI last wrote - 23% from a window
+/// that had closed, where the account had since spent 57% of the one we are
+/// actually in. More than double, and nothing on screen said so.
+///
+/// The CLI leaves a bearer token in `auth.json` and this is the endpoint it
+/// calls with it. An expired token is not sent: it would come back 401 after
+/// a round trip, and the log is a better answer than a failed request. The
+/// CLI refreshes the token whenever it runs, so this works for as long as
+/// Grok is in use and stops when it is not, which is the honest shape.
+fn live_quota(seconds: u64) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(under_home(AUTH)).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // Keyed by issuer and account, so the entry is found by shape rather
+    // than by a name that is different on every machine.
+    let entry = parsed
+        .as_object()?
+        .values()
+        .find(|v| v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty()))?;
+    let key = entry["key"].as_str()?;
+    if let Some(expiry) = iso_epoch(&text(entry, "expires_at")) {
+        if expiry <= now() {
+            return None;
+        }
+    }
+    get_json(
+        BILLING,
+        &[("Authorization", &format!("Bearer {}", key))],
+        seconds,
+    )
+}
+
+/// The billing body in the same shape the log parser produces, so the rest
+/// of the tab cannot tell which of the two it is looking at.
+fn quota_from(d: &serde_json::Value) -> Option<Quota> {
+    let cfg = &d["config"];
+    let period = &cfg["currentPeriod"];
+    let pct = val_of(&cfg["creditUsagePercent"]);
+    pct?;
+    Some(Quota {
+        pct,
+        kind: text(period, "type"),
+        start: text(period, "start"),
+        end: text(period, "end"),
+        tier: String::new(),
+        on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
+        on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
+        prepaid: val_of(&cfg["prepaidBalance"]["val"]),
+    })
+}
+
 /// The window we are in now, rolled forward from the one the log recorded.
 ///
 /// Grok publishes no live quota: the reading is whatever its own CLI last
@@ -301,7 +466,13 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         return Vec::new();
     };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
-    let (reset, projected) = window_now(begin, end, now());
+    // A live reading is of the window we are in, so there is nothing to roll
+    // forward and nothing to qualify. Only the log needs either.
+    let (reset, projected) = if d.quota_live {
+        (end, false)
+    } else {
+        window_now(begin, end, now())
+    };
     vec![Lane {
         label: "credits".into(),
         pct,
@@ -310,9 +481,96 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             _ => None,
         },
         reset,
-        stale: false,
+        // Not live means the percentage was measured in some earlier window
+        // and this one's spend is unknown. The row says so rather than
+        // letting a stale figure read as current.
+        stale: !d.quota_live,
         projected,
     }]
+}
+
+/// True when nothing is asking the server on the reader's behalf, so the
+/// figures move only when they use Grok on this machine. The summary says so
+/// under the row; once asking is on, the tab reports the interval instead.
+pub fn asks_nobody(d: &Data) -> bool {
+    d.quota_every <= 0.0
+}
+
+/// Where the figure came from, in the two states it can be in.
+///
+/// Grok is the only agent here that can be reading a file rather than a
+/// server, and the file goes stale in silence: the last time it did it
+/// showed 23% of a window that had closed, while the account had spent 57%
+/// of the one it was in. A percentage nobody dated reads as current.
+///
+/// Written for someone who will go and look: it names the file, its age and
+/// the settings, rather than explaining what a stale reading is.
+/// An interval as a reader would say it: "1h", not left_span's "1h 0m",
+/// which is a duration formatter answering a question nobody asked.
+fn every(seconds: f64) -> String {
+    let mins = (seconds.max(60.0) / 60.0).round() as u64;
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("{}m", m),
+        (h, 0) => format!("{}h", h),
+        (h, m) => format!("{}h {}m", h, m),
+    }
+}
+
+fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    let mut out = Vec::new();
+    if d.quota_every > 0.0 {
+        let ago = now() - d.quota_at;
+        let last = if d.quota_at <= 0.0 {
+            "not yet".to_string()
+        } else if ago < 90.0 {
+            "just now".to_string()
+        } else {
+            format!("{} ago", left_span(ago))
+        };
+        out.push(tc::seg(
+            &[
+                (
+                    if d.quota_live { p.ok.as_str() } else { p.warn.as_str() },
+                    if d.quota_live { "  live" } else { "  not live" }.to_string(),
+                ),
+                (
+                    p.dim.as_str(),
+                    format!(" · polled x.ai {}, every {}", last, every(d.quota_every)),
+                ),
+            ],
+            w - 1,
+        ));
+        out.push(String::new());
+        return out;
+    }
+    // The reading's age, not the file's. The CLI touches that log whenever
+    // it starts, so a file written minutes ago can still hold a credit
+    // figure from a fortnight back - and "written 17m ago" beside a
+    // percentage reads as a fresh percentage.
+    let closed = d
+        .quota
+        .as_ref()
+        .and_then(|q| iso_epoch(&q.end))
+        .filter(|e| *e <= now())
+        .map(|e| format!(" · window closed {} ago", left_span(now() - e)))
+        .unwrap_or_default();
+    out.push(tc::seg(
+        &[
+            (p.warn.as_str(), "  not live".into()),
+            (p.dim.as_str(), format!(" · ~/{}{}", LOG, closed)),
+        ],
+        w - 1,
+    ));
+    out.push(tc::seg(
+        &[(
+            p.dim.as_str(),
+            "  Only your own Grok sessions update it. usage.grok_ping polls x.ai instead."
+                .into(),
+        )],
+        w - 1,
+    ));
+    out.push(String::new());
+    out
 }
 
 /// What the server calls this window, in words a reader has met before.
@@ -357,7 +615,15 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         // else here counts what was spent. It leads the tab for that
         // reason.
         let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
-        let left = end.map(|e| (e - now()) / 86400.0).filter(|days| *days >= 0.0);
+        // The window we are in, not the one the reading came from - the
+        // heading used the raw end, so a rolled window lost its countdown
+        // here while the summary still had one. Two screens, one answer.
+        let (current, rolled) = if d.quota_live {
+            (end, false)
+        } else {
+            window_now(begin, end, now())
+        };
+        let left = current.map(|e| (e - now()) / 86400.0).filter(|days| *days >= 0.0);
         rows.push(tc::seg(
             &[
                 (
@@ -366,12 +632,15 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 ),
                 (
                     p.dim.as_str(),
-                    left.map(|days| format!("resets in {:.1} days", days))
-                        .unwrap_or_default(),
+                    left.map(|days| {
+                        format!("resets in {}{:.1} days", if rolled { "~" } else { "" }, days)
+                    })
+                    .unwrap_or_default(),
                 ),
             ],
             w - 1,
         ));
+        rows.extend(freshness(d, w, p));
         // A window is only a window if it runs forwards; without both ends
         // there is no pace to report, and a mark placed anyway would be a
         // claim about a clock nobody read.
@@ -694,9 +963,43 @@ mod tests {
             steps
         );
         assert!(got[0].projected, "a calculated date must say so");
-        // Never cached: this was read from a file on this machine a moment
-        // ago, so counting it down is honest.
-        assert!(!got[0].stale);
+        // From the log, so the percentage belongs to a window that has since
+        // closed and the row has to say so. This is the case that was wrong
+        // in the wild: 23% shown as current where the account had spent 57%.
+        assert!(got[0].stale, "a reading off the disk must not read as live");
+    }
+
+    #[test]
+    fn an_interval_reads_the_way_someone_would_say_it() {
+        assert_eq!(every(3600.0), "1h");
+        assert_eq!(every(1800.0), "30m");
+        assert_eq!(every(5400.0), "1h 30m");
+        assert_eq!(every(7200.0), "2h");
+        // Never zero: a config of 0 would otherwise advertise "every 0m",
+        // and the poll interval is floored at a minute anyway.
+        assert_eq!(every(0.0), "1m");
+    }
+
+    #[test]
+    fn a_live_reading_is_neither_stale_nor_projected() {
+        // The same fixture, marked as having come from the server. Its
+        // window is then the window we are in: nothing to roll forward, and
+        // nothing to qualify.
+        let d = Data {
+            ok: true,
+            quota: newest_quota([LOG_LINE].into_iter()),
+            quota_live: true,
+            ..Default::default()
+        };
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].stale, "a live reading is current by definition");
+        assert!(!got[0].projected, "a live window was read, not worked out");
+        assert_eq!(
+            got[0].reset,
+            iso_epoch("2026-08-17T00:00:00.000000+00:00"),
+            "a live window is reported as the server gave it, not rolled"
+        );
     }
 
     /// The roll itself, on a fixed clock - `lanes` has to ask the real one.
@@ -757,6 +1060,9 @@ mod tests {
             daily: HashMap::from([(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap(), 900.0)]),
             last: now(),
             quota: newest_quota([LOG_LINE].into_iter()),
+            quota_live: false,
+            quota_at: 0.0,
+            quota_every: 0.0,
         };
         for w in [40usize, 80, 200] {
             let rows = tab(&d, w, 24, &Config::default(), &p);

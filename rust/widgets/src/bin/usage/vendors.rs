@@ -40,14 +40,14 @@ pub struct State {
     pub err: String,
 }
 
-pub fn read_all(caches: &mut Caches) -> State {
+pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
     State {
-        claude: crate::claude::read(caches),
-        codex: crate::codex::read(caches),
-        cursor: crate::cursor::read(caches),
-        grok: crate::grok::read(caches),
-        copilot: crate::copilot::read(caches),
-        antigravity: crate::antigravity::read(caches),
+        claude: crate::claude::read(caches, cfg),
+        codex: crate::codex::read(caches, cfg),
+        cursor: crate::cursor::read(caches, cfg),
+        grok: crate::grok::read(caches, cfg),
+        copilot: crate::copilot::read(caches, cfg),
+        antigravity: crate::antigravity::read(caches, cfg),
         installed: detect_agents(),
         fetched: 0.0,
         err: String::new(),
@@ -217,6 +217,35 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+        }
+        // Grok alone can be reading a file rather than a server, and a
+        // reader who does not know that has no way to tell this row from
+        // the five above it. Said here only while nothing is asking on
+        // their behalf - once it is, the tab reports the interval and this
+        // line would be repeating a setting back at them.
+        if *name == "grok" && crate::grok::asks_nobody(&s.grok) {
+            // Written to fit rather than clipped: a hint cut in half is the
+            // fault this repo keeps paying for, and "usage.grok_pin" names
+            // a setting that does not exist.
+            let long = " · only your own Grok sessions update this · usage.grok_ping";
+            let short = " · usage.grok_ping";
+            let room = (w - 1).saturating_sub("     not live".len());
+            rows.push(tc::seg(
+                &[
+                    (p.warn.as_str(), "     not live".into()),
+                    (
+                        p.dim.as_str(),
+                        if long.chars().count() <= room {
+                            long.to_string()
+                        } else if short.chars().count() <= room {
+                            short.to_string()
+                        } else {
+                            String::new()
+                        },
+                    ),
+                ],
+                w - 1,
+            ));
         }
     }
     if !quiet.is_empty() {

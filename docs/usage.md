@@ -824,6 +824,65 @@ seconds and these windows move over hours, so the earlier code was making six
 requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
 endpoint is retried occasionally instead of on every frame.
 
+### Grok is the fourth, and it is off by default
+
+Grok publishes no quota this widget can read without asking for it. The other
+five agents each answer a host — `api.anthropic.com`, `chatgpt.com`,
+`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. Grok makes
+no call at all: its figures come from `~/.grok/logs/unified.jsonl`, the log its
+own CLI writes, so they move **only when you use Grok on this machine**.
+
+That failed quietly. A log left alone for nine days had the widget showing 23%
+of a credit window that had closed on the 19th, while the account had spent 57%
+of the window it was actually in. More than double, with nothing on screen to
+say the figure was old.
+
+Three settings, all off or hourly by default:
+
+| key | default | what it does |
+|---|---|---|
+| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing`, with the bearer token the Grok CLI leaves in `~/.grok/auth.json` |
+| `grok_ping_minutes` | `60` | how often. The window moves over days; an hour is current without being traffic |
+| `grok_ping_after_session` | `false` | run `grok agent stdio` once after a session goes quiet, purely to refresh that token |
+
+**Off by default for two different reasons.** `grok_ping` talks to a vendor,
+and a widget that reads should not start doing that because it was launched.
+`grok_ping_after_session` is the stronger case: it starts somebody else's
+program. It exists because the token expires — mine had lapsed 8.6 days before
+I looked, on the same day the CLI last ran — and without a refresh the asking
+works for a while and then silently stops, which is the failure it was added to
+fix.
+
+The screen says which state it is in, in both places it appears:
+
+```
+── WEEKLY QUOTA ── resets in ~1.1 days
+ not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
+ Only your own Grok sessions update it. usage.grok_ping polls x.ai instead.
+```
+
+```
+── WEEKLY QUOTA ── resets in 1.1 days
+ live · polled x.ai just now, every 1h
+```
+
+The age quoted is the **reading's**, not the file's. The CLI touches that log
+whenever it starts, so a file written minutes ago can still hold a credit
+figure from a fortnight back, and "written 17m ago" beside a percentage reads
+as a fresh percentage.
+
+When the recorded window has closed, its end date is rolled forward on the
+window's own measured length until it covers now — the length is measured
+rather than assumed to be seven days, because the server states the period type
+and a fortnightly window should not be guessed weekly. That is a calculation
+rather than a reading, so the countdown carries a `~`, and the **pace figure is
+suppressed**: pace is usage against time elapsed, and how much of the current
+window has been spent is exactly what nobody knows.
+
+CodexBar reaches the same endpoint and hits the same wall — it reads the cached
+credential and does not refresh it either, so an expired token drops it back to
+local session files, as this does to the log.
+
 ## The pace mark on every quota bar
 
 ```

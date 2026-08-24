@@ -1148,13 +1148,27 @@ fn day_calendar(
 }
 
 /// Settings, read once, so no widget-wide mutable globals are needed.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Config {
     agents: Vec<String>,
     exclude_agents: Vec<String>,
     rates: HashMap<String, Rate>,
     plan_cost: HashMap<String, f64>,
     refresh: f64,
+    /// Grok is the only agent with no live quota unless it is asked for one.
+    /// Off by default: asking means a request to x.ai carrying the token its
+    /// CLI left on disk, and a widget that reads should not start talking to
+    /// a vendor because it was launched.
+    grok_ping: bool,
+    /// Minutes between those requests. The window it reports moves over
+    /// days, so an hour is frequent enough to be current and rare enough
+    /// not to be traffic.
+    grok_ping_minutes: f64,
+    /// Whether to run the Grok CLI once a session goes quiet. That is what
+    /// refreshes the token the request needs - without it the token expires
+    /// and the quota silently goes back to being read off the disk. Off by
+    /// default for the stronger reason: it starts somebody else's program.
+    grok_ping_after_session: bool,
 }
 
 fn read_config() -> Config {
@@ -1186,6 +1200,15 @@ fn read_config() -> Config {
             .filter_map(|(k, v)| v.as_f64().map(|v| (k.clone(), v)))
             .collect(),
         refresh: tc::cfg_f64(&raw, "refresh", 30.0),
+        grok_ping: raw
+            .get("grok_ping")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 60.0),
+        grok_ping_after_session: raw
+            .get("grok_ping_after_session")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -1401,13 +1424,14 @@ fn main() {
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
+    let poller_cfg = cfg.clone();
     std::thread::spawn(move || {
         let mut caches = shared::Caches::default();
         loop {
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                vendors::read_all(&mut caches)
+                vendors::read_all(&mut caches, &poller_cfg)
             }));
             match read {
                 Ok(found) => {

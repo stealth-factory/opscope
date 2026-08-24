@@ -303,7 +303,7 @@ pub fn claude_rates() -> (Vec<f64>, usize) {
     (out, sampled)
 }
 
-pub fn read(caches: &mut Caches) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut claude = Data::default();
     let live = cached(caches, "claude", LIVE_TTL, || {
         let (tok, plan) = claude_token()?;

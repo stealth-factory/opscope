@@ -349,7 +349,7 @@ fn read_tracking(con: &Connection) -> rusqlite::Result<Tracking> {
     })
 }
 
-pub fn read(caches: &mut Caches) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -

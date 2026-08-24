@@ -117,9 +117,28 @@ def check_config_keys():
                              open(f).read(), re.S):
             known.setdefault(m.group(1), set())
             known[m.group(1)] |= set(re.findall(r'"(\w+)":', m.group(2)))
+    # The port reads the same file, and has keys of its own. A setting the
+    # Rust reads is not dead because the Python has not caught up - it would
+    # only be dead if nothing at all read it, and this script can only see
+    # half the tree. Read as text: a key counts as read if the widget
+    # mentions it, which is the same rule the Rust check settled on after
+    # two attempts that guessed at the variable name and got it wrong.
+    ported = {}
+    for section in known:
+        found = set()
+        for path in glob.glob("rust/widgets/src/bin/%s.rs" % section) + glob.glob(
+            "rust/widgets/src/bin/%s/*.rs" % section
+        ):
+            try:
+                found.add(open(path).read())
+            except OSError:
+                pass
+        ported[section] = "\n".join(found)
     for section, keys in known.items():
         shipped = {k for k in example.get(section, {}) if not k.startswith("_")}
         for dead in sorted(shipped - keys):
+            if '"%s"' % dead in ported.get(section, ""):
+                continue
             fail("dead config key", section, dead)
 
 
