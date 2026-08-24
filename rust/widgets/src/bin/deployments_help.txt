@@ -9,7 +9,7 @@ Polls every 15s by default (-n changes it, minimum 5s). One request per team
 per poll, so the default is 4 polls/min — modest against the API's limits.
 
 Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
-Enter, i or c opens a full detail view for the selected deployment - state and
+→ or Enter opens a full detail view for the selected deployment - state and
 failure reason, timings, regions, commit, and everything worth copying on
 number keys - r refreshes
 now, f cycles the filter (all / failed / production), p cycles which project

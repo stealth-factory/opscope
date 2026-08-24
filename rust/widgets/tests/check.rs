@@ -474,6 +474,61 @@ fn every_key_in_the_example_is_read_by_the_widget_it_belongs_to() {
 }
 
 #[test]
+fn every_key_the_help_text_names_is_answered() {
+    // --help is where someone looks when the footer is not enough, so a
+    // key named there and not implemented is the same lie as a footer
+    // hint bound to nothing. Nothing was reading these files.
+    //
+    // The help is prose, so there are no brackets to key off. Only two
+    // shapes count, both hard to write by accident: a letter right after
+    // "press", and a letter right before a verb - "c opens a detail
+    // view". Reading every single letter instead took "a" from "with a
+    // longer" and reported a key called a.
+    //
+    // Known limitation, stated rather than hidden: in "Enter, i or c
+    // opens", only `c` touches the verb, so a stale `i` beside it is
+    // missed. Catching one of the two still lands the reader in the right
+    // sentence.
+    const VERBS: &[&str] = &[
+        "opens", "cycles", "toggles", "quits", "refreshes", "closes", "copies",
+    ];
+    let dir = root().join("rust/widgets/src/bin");
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        let help = dir.join(format!("{}_help.txt", name));
+        let Ok(text) = std::fs::read_to_string(&help) else {
+            continue;
+        };
+        let handled = handled_keys(&src);
+        for line in text.lines() {
+            let lower = line.to_lowercase();
+            let words: Vec<&str> = lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            for (i, word) in words.iter().enumerate() {
+                if word.chars().count() != 1 {
+                    continue;
+                }
+                let after_press = i > 0 && words[i - 1] == "press";
+                let before_verb = words
+                    .get(i + 1)
+                    .is_some_and(|next| VERBS.contains(next));
+                if (after_press || before_verb) && !handled.contains(*word) {
+                    wrong.push(format!(
+                        "{}_help.txt names {:?} and {}.rs does not answer it",
+                        name, word, name
+                    ));
+                }
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
 fn a_poller_that_dies_records_why() {
     // CLAUDE.md's central gotcha: a thread that stops takes its
     // explanation with it, and an empty pane is indistinguishable from a
