@@ -1,7 +1,12 @@
 # Working on terminal-toys
 
 Linear team: <https://linear.app/stealth-company/team/TOY/overview>
-Linear project: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/overview>
+Linear project: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/issues>
+
+**Everything is tracked there** — planned widgets, the per-widget port
+reviews, and the decisions waiting on William. Before starting anything,
+look for the issue; before proposing something, check it is not already
+filed and already decided against.
 
 ## What this repo is
 

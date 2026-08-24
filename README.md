@@ -147,6 +147,13 @@ for it — copy it to `~/.claude/skills/herdr/` to install. It is Herdr's own
 file, not covered by this repository's licence, and `herdr --skill` regenerates
 it after an upgrade.
 
+## What is being worked on
+
+Planned widgets, open questions and the state of the Rust port are tracked
+in Linear: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/issues>. The link needs access to the workspace; the issues are the
+canonical list either way, so a feature that looks missing may already be
+filed there with a reason.
+
 ## Building your own
 
 [`docs/building-herdr-panels.md`](docs/building-herdr-panels.md) collects what
