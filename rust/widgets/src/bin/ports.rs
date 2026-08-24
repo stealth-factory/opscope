@@ -1807,8 +1807,16 @@ fn main() {
             // rather than rows - and hands every other key back.
             if let Some(view) = detail.as_mut() {
                 match key.as_str() {
-                    "esc" | "left" | "q" | "Q" | "backspace" => {
+                    // Left and esc come out; q quits, which is what the
+                    // footer beside it says and what q does everywhere
+                    // else. backspace is gone: an alias no hint named.
+                    "esc" | "left" => {
                         detail = None;
+                    }
+                    "q" | "Q" => {
+                        keyboard.restore();
+                        tc::restore_screen();
+                        return;
                     }
                     "up" => view.at = view.at.saturating_sub(1),
                     "down" => view.at += 1,
@@ -1877,7 +1885,7 @@ fn main() {
                 "down" => selected += 1,
                 "o" | "O" => hide_system = !hide_system,
                 "r" | "R" => store.wake(),
-                "enter" | "right" | "i" | "I" => {
+                "enter" | "right" => {
                     let all: Vec<Row> = store.rows.lock().map(|g| g.clone()).unwrap_or_default();
                     let shown: Vec<Row> = all
                         .into_iter()
@@ -1980,7 +1988,10 @@ fn main() {
                     vec![(ok.dim.clone(), "[s]erve".into())],
                     vec![(ok.dim.clone(), "[t]unnel".into())],
                     vec![(ok.dim.clone(), "[d] cloudflare".into())],
-                    vec![(ok.accent.clone(), "esc".into()), (ok.dim.clone(), " back".into())],
+                    vec![
+                        (ok.accent.clone(), "←".into()),
+                        (ok.dim.clone(), "/esc back".into()),
+                    ],
                 ],
                 &ok,
             );
@@ -2122,7 +2133,10 @@ fn main() {
             w,
             &[
                 vec![(ok.accent.clone(), "↑↓".into()), (ok.dim.clone(), " select".into())],
-                vec![(ok.accent.clone(), "↵".into()), (ok.dim.clone(), " details".into())],
+                vec![
+                    (ok.accent.clone(), "→/↵".into()),
+                    (ok.dim.clone(), " details".into()),
+                ],
                 vec![(ok.dim.clone(), "[k]ill".into())],
                 vec![(
                     ok.dim.clone(),

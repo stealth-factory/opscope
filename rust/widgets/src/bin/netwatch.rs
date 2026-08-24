@@ -1531,9 +1531,17 @@ fn main() {
         for key in keyboard.poll() {
             if detail.is_some() {
                 match key.as_str() {
-                    "esc" | "left" | "q" | "Q" | "backspace" => {
+                    // Left and esc come out; q quits, which is what the
+                    // footer beside it says and what q does everywhere
+                    // else. backspace is gone: an alias no hint named.
+                    "esc" | "left" => {
                         detail = None;
                         sizes.clear();
+                    }
+                    "q" | "Q" => {
+                        keyboard.restore();
+                        tc::restore_screen();
+                        return;
                     }
                     "r" | "R" => {
                         if let Ok(mut guard) = state.lock() {
@@ -1588,7 +1596,7 @@ fn main() {
                 }
                 "up" | "k" | "K" => selected = selected.saturating_sub(1),
                 "down" | "j" | "J" => selected += 1,
-                "enter" | "right" | "i" | "I" => {
+                "enter" | "right" => {
                     if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
                         detail = Some((pick.pid, pick.name.clone()));
                         focus = 0;
@@ -1677,7 +1685,10 @@ fn main() {
                 vec![(p.accent.as_str(), "tab".into()), (p.dim.as_str(), " section".into())],
                 vec![(p.dim.as_str(), "[c]opy".into())],
                 vec![(p.dim.as_str(), "[r]ezero".into())],
-                vec![(p.accent.as_str(), "esc".into()), (p.dim.as_str(), " back".into())],
+                vec![
+                    (p.accent.as_str(), "←".into()),
+                    (p.dim.as_str(), "/esc back".into()),
+                ],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
             let mut foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
@@ -1846,7 +1857,10 @@ fn main() {
 
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " details".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " details".into()),
+            ],
             vec![(
                 if sort_live { &p.dim } else { &p.accent },
                 "[1] total".into(),

@@ -532,7 +532,7 @@ fn info_overlay(
     rows.push(tc::seg(
         &[(
             p.hint.as_str(),
-            format!(" press 1-{} to copy · esc or i to close", pairs.len()),
+            format!(" press 1-{} to copy · ← or esc to close", pairs.len()),
         )],
         w - 1,
     ));
@@ -711,7 +711,16 @@ fn main() {
         for key in keyboard.poll() {
             if overlay {
                 match key.as_str() {
-                    "esc" | "c" | "i" | "q" | "Q" | "enter" => overlay = false,
+                    // Left and esc come out. q quits outright, which is
+                    // what the footer has always promised and what it
+                    // does from the list - it used to close the overlay
+                    // instead, so the key disagreed with its own hint.
+                    "left" | "esc" => overlay = false,
+                    "q" | "Q" => {
+                        keyboard.restore();
+                        tc::restore_screen();
+                        return;
+                    }
                     digit if digit.len() == 1 && digit.chars().all(|c| c.is_ascii_digit()) => {
                         if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1)))
                         {
@@ -759,7 +768,7 @@ fn main() {
                 "pgdn" => selected += visible,
                 "home" => selected = 0,
                 "end" => selected = shown.len().saturating_sub(1),
-                "c" | "i" | "I" | "enter" => {
+                "right" | "enter" => {
                     if !shown.is_empty() {
                         overlay = true;
                         note = (String::new(), 0.0);
@@ -1068,7 +1077,7 @@ fn main() {
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
-                (p.accent.as_str(), "↵/[i]".into()),
+                (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
             ],
             vec![(p.dim.as_str(), "[f]ilter".into())],

@@ -80,9 +80,9 @@ OSC 52 is blocked.
 | Key | Action |
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | move the selection |
-| `Enter` / `i` / `c` | full detail view for the selected deployment |
+| `→` / `Enter` | full detail view for the selected deployment |
 | `1`–`7` | inside the view, copy that item |
-| `esc` | close the detail view |
+| `←` / `esc` | close the detail view |
 | `f` | filter — all / failed / production |
 | `p` | cycle which project is shown |
 | `r` | refresh now |

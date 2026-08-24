@@ -800,6 +800,20 @@ fn main() {
                     return;
                 }
                 "/" => typing = true,
+                // Left comes out of the detail the way it does everywhere
+                // else. esc keeps its second job of clearing the search when
+                // there is no detail open; left has no business doing that,
+                // so it only acts when there is something to come out of.
+                "left" if detail.is_some() || loading => {
+                    if let Ok(mut g) = state.lock() {
+                        g.want = None;
+                        g.detail = None;
+                        g.stack_rows.clear();
+                        g.loading = false;
+                        g.stages.clear();
+                    }
+                    stack_sel = 0;
+                }
                 "esc" => {
                     if detail.is_some() || loading {
                         if let Ok(mut g) = state.lock() {
@@ -814,7 +828,9 @@ fn main() {
                         needle.clear();
                     }
                 }
-                "enter" => {
+                // Right and enter both go in - and from inside the stack,
+                // in again, onto the PR under the cursor.
+                "right" | "enter" => {
                     if let Some(open) = &detail {
                         if !stack_rows.is_empty() {
                             // Walk the stack from inside it: the row under
@@ -983,7 +999,10 @@ fn main() {
                 hints.push(vec![(p.dim.as_str(), "[↵] open it".into())]);
             }
             hints.push(vec![(p.dim.as_str(), "[c]opy url".into())]);
-            hints.push(vec![(p.dim.as_str(), "[esc] back".into())]);
+            hints.push(vec![
+                (p.accent.as_str(), "←".into()),
+                (p.dim.as_str(), "/[esc] back".into()),
+            ]);
             hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
             hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
             hints

@@ -93,7 +93,8 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a peer |
-| `Enter` / `i` | machine info view |
+| `→` / `Enter` | machine info view — `i` in the Python, which is being retired |
+| `←` / `esc` | back out of the info or copy view |
 | `c` | copy addresses |
 | `g` | show/hide the live throughput graphs |
 | `o` | hide offline peers |

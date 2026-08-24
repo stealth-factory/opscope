@@ -29,7 +29,8 @@ n cycles the poll interval while running (1/2/5/10/30s), the same way the
 latency monitor's i key does; the graph resolution follows it. -n sets the
 starting value, and `tailnet.refresh` in config.json sets the default.
 
-Keys: up/down select a peer, Enter or i opens a full machine info view (every address,
+Keys: up/down select a peer, right or Enter opens a full machine info view and left
+comes back out (every address,
 routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
 offline peers, q quits. Copying uses OSC 52, so it reaches the clipboard of

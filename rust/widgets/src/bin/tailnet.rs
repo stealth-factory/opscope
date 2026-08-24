@@ -709,9 +709,19 @@ fn main() {
         for key in keyboard.poll() {
             if view.is_some() {
                 match key.as_str() {
-                    "esc" | "q" | "Q" => view = None,
-                    "i" | "I" | "enter" => {
-                        view = if view != Some("info") { Some("info") } else { None }
+                    // Left comes back out, the way it does everywhere
+                    // else: right and enter go in, left and esc come
+                    // out, and no widget needs a letter of its own for
+                    // it. `i` used to open this and no longer does.
+                    "left" | "esc" => view = None,
+                    // q quits from here too. It used to close the view
+                    // instead, which is its own kind of trap: the key
+                    // appears to do nothing to a widget you are trying
+                    // to leave, and every other widget quits on it.
+                    "q" | "Q" => {
+                        keyboard.restore();
+                        tc::restore_screen();
+                        return;
                     }
                     "c" | "C" => view = if view != Some("copy") { Some("copy") } else { None },
                     digit
@@ -769,7 +779,7 @@ fn main() {
                         note = (String::new(), 0.0);
                     }
                 }
-                "i" | "I" | "enter" => {
+                "right" | "enter" => {
                     if !listed.is_empty() {
                         view = Some("info");
                     }
@@ -1096,7 +1106,10 @@ fn main() {
         }
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![(p.dim.as_str(), "↵/[i]nfo".into())],
+            vec![
+                (p.accent.as_str(), "→".into()),
+                (p.dim.as_str(), "/↵ info".into()),
+            ],
             vec![(p.dim.as_str(), "[c]opy".into())],
             vec![(p.dim.as_str(), "[g]raph".into())],
             vec![(p.dim.as_str(), "[o]ffline".into())],
@@ -1441,7 +1454,7 @@ fn info_overlay(
         rows.push(String::new());
     }
     rows.push(tc::seg(
-        &[(p.dim.as_str(), " [c]opy addresses · esc, ↵ or i to close".into())],
+        &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close".into())],
         w - 1,
     ));
     rows
@@ -1491,7 +1504,7 @@ fn copy_overlay(
         &[(
             p.dim.as_str(),
             format!(
-                " press 1-{} to copy · esc or c to close",
+                " press 1-{} to copy · ← or esc to close",
                 pairs.len().max(1)
             ),
         )],

@@ -332,7 +332,7 @@ fn main() {
                 }
                 "up" | "k" | "K" => selected = selected.saturating_sub(1),
                 "down" | "j" | "J" => selected += 1,
-                "enter" | "right" | "i" | "I" => {
+                "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }
                 _ => {}
@@ -348,7 +348,7 @@ fn main() {
         body.push(tc::seg(
             &[(
                 p.dim.as_str(),
-                format!(" {} widgets   ↵ starts one, q leaves", WIDGETS.len()),
+                format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len()),
             )],
             w - 1,
         ));

@@ -569,7 +569,7 @@ fn main() {
                 // Right goes in and left comes back out, the way a column
                 // of panes works, so the hand does not have to learn a key
                 // for it. Enter and esc still do the same two things.
-                "right" | "enter" | "i" | "I" if !detail => {
+                "right" | "enter" if !detail => {
                     // Opening with nothing selected takes the first row
                     // rather than doing nothing, which would be a key that
                     // the footer offers and that does not answer.
@@ -579,7 +579,7 @@ fn main() {
                     detail = selected.is_some();
                     scroll = 0;
                 }
-                "left" | "esc" | "enter" | "i" | "I" if detail => {
+                "left" | "esc" if detail => {
                     detail = false;
                     scroll = 0;
                 }
