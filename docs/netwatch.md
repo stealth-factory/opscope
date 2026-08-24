@@ -181,6 +181,15 @@ interfaces actually moved. When they agree, the list below is the whole
 picture. When they do not, the difference is traffic passing through, and
 the percentage says how much of the story the table is telling.
 
+There is a second way the table can be showing less than everything, and it
+says so too. When there are more processes than rows, the header adds
+**`showing 1-14`** beside the count, and the table follows the cursor rather
+than staying at the top of the list — so `↑` `↓` scroll it, and the selected
+row is always on screen. Without the window the cursor walked off the bottom
+of a short pane and disappeared, while `→` still opened whatever it was
+invisibly sitting on. The label is absent when every process fits, because
+then there is nothing to say.
+
 Only real interfaces are counted — loopback, `tailscale0`, `docker0`, bridges
 and veth pairs are skipped, because a forwarded packet leaves through a card
 as well and counting both would count it twice. Which ones were counted is

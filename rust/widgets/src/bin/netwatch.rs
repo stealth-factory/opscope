@@ -1981,17 +1981,15 @@ fn main() {
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
         let mut out = vec![tc::title("netwatch", w, &p.accent)];
+        // Held open. What this line has to say depends on how many rows fit,
+        // which is not known until the chart above the table has been built -
+        // but the line is one row tall whatever it ends up saying, so nothing
+        // below it moves.
+        let count_at = out.len();
+        out.push(String::new());
         out.push(tc::seg(
             &[
-                (
-                    p.dim.as_str(),
-                    format!(
-                        " {} process{}",
-                        rows.len(),
-                        if rows.len() == 1 { "" } else { "es" }
-                    ),
-                ),
-                (p.dim.as_str(), format!(" · {} moving", moving)),
+                (p.dim.as_str(), format!(" {} moving", moving)),
                 (p.dim.as_str(), " · ".into()),
                 (p.accent.as_str(), elapsed(now() - guard.started)),
                 (p.dim.as_str(), " · sorted by ".into()),
@@ -2099,6 +2097,42 @@ fn main() {
 
         let room = h.saturating_sub(out.len() + 3).max(1);
         let show = if limit > 0 { limit.min(room) } else { room };
+        // The window follows the cursor, as it does in the detail screen and
+        // in github's account list. It did not before: the table always drew
+        // rows 0..show while the cursor was free to walk to the end of the
+        // list, so on any pane too short for every process the cursor left
+        // the screen and there was nothing to say where it had gone - and
+        // enter still opened whatever it was sitting on, unseen.
+        let first = if rows.len() > show {
+            selected.saturating_sub(show / 2).min(rows.len() - show)
+        } else {
+            0
+        };
+        // And the count says so. "27 processes" above a table of 15 is a
+        // partial result presented as a total, which is the one thing a
+        // number here must never be.
+        let last = (first + show).min(rows.len());
+        out[count_at] = tc::seg(
+            &[
+                (
+                    p.dim.as_str(),
+                    format!(
+                        " {} process{}",
+                        rows.len(),
+                        if rows.len() == 1 { "" } else { "es" }
+                    ),
+                ),
+                (
+                    if rows.len() > show { p.accent.as_str() } else { p.dim.as_str() },
+                    if rows.len() > show {
+                        format!(" · showing {}-{}", first + 1, last)
+                    } else {
+                        String::new()
+                    },
+                ),
+            ],
+            w - 1,
+        );
         if rows.is_empty() {
             out.push(tc::seg(
                 &[(
@@ -2108,7 +2142,7 @@ fn main() {
                 w - 1,
             ));
         } else {
-            out.extend(table(&rows, w, show, selected, &p));
+            out.extend(table(&rows, w, first, show, selected, &p));
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -2217,7 +2251,14 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
 }
 
 /// The process table, dropping columns rather than clipping them.
-fn table(rows: &[Proc], w: usize, limit: usize, selected: usize, p: &Palette) -> Vec<String> {
+fn table(
+    rows: &[Proc],
+    w: usize,
+    first: usize,
+    limit: usize,
+    selected: usize,
+    p: &Palette,
+) -> Vec<String> {
     let avail = (w - 1).saturating_sub(2 + 8 + 11);
     let wide = avail >= 10 + 11 + 22;
     let mid = avail >= 10 + 11;
@@ -2239,10 +2280,10 @@ fn table(rows: &[Proc], w: usize, limit: usize, selected: usize, p: &Palette) ->
     }
     let mut out = vec![tc::seg(&head, w - 1)];
 
-    for (i, row) in rows.iter().take(limit).enumerate() {
+    for (i, row) in rows.iter().skip(first).take(limit).enumerate() {
         let live = row.up_rate + row.down_rate;
         let total = (row.up + row.down) as f64;
-        let here = i == selected;
+        let here = first + i == selected;
         let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
         let name_c = format!(
             "{}{}",
@@ -2357,6 +2398,55 @@ mod tests {
     // The headings are found by looking at where the rendered row put its
     // columns, not by repeating the arithmetic the row used. A test that
     // recomputes the widths would agree with a heading that had slipped.
+
+    /// The window the main list draws, extracted so the test and the widget
+    /// cannot disagree about it.
+    fn window_at(selected: usize, show: usize, total: usize) -> usize {
+        if total > show { selected.saturating_sub(show / 2).min(total - show) } else { 0 }
+    }
+
+    #[test]
+    fn the_process_cursor_is_always_on_the_screen() {
+        // It was not. The table drew rows 0..show whatever the cursor was
+        // doing, so on any pane too short for the whole list the cursor
+        // walked off the bottom and vanished - and enter still opened the
+        // row it was invisibly sitting on.
+        let p = palette();
+        for total in [1usize, 5, 15, 26, 200] {
+            let rows: Vec<Proc> = (0..total)
+                .map(|i| Proc {
+                    pid: 1000 + i as i32,
+                    name: format!("proc-{}", i),
+                    down: 4096,
+                    alive: true,
+                    ..Default::default()
+                })
+                .collect();
+            for show in [1usize, 3, 7, 15, 40] {
+                for selected in 0..total {
+                    let first = window_at(selected, show, total);
+                    let drawn = table(&rows, 120, first, show, selected, &p);
+                    let marked = drawn.iter().filter(|l| bare(l).starts_with('▸')).count();
+                    assert_eq!(
+                        marked, 1,
+                        "total={} show={} selected={}: {} rows carried the cursor",
+                        total, show, selected, marked
+                    );
+                    // and it is the row it claims to be
+                    let on = drawn
+                        .iter()
+                        .find(|l| bare(l).starts_with('▸'))
+                        .map(|l| bare(l))
+                        .unwrap_or_default();
+                    assert!(
+                        on.contains(&format!("proc-{} ", selected)),
+                        "total={} show={} selected={}: cursor sat on {:?}",
+                        total, show, selected, on.trim()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_endpoint_heading_sits_over_its_columns() {
