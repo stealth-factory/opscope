@@ -131,16 +131,15 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     // the first thing dropped, being the only part a reader can infer from
     // the bar beside it - but a stale marker is not droppable, since a
     // number nobody labelled as old reads as current.
-    let fixed = 15 + label_w;
-    let show_reset = (w - 1).saturating_sub(fixed + 8) >= 16;
+    //
+    // Staleness is a mark beside the bar rather than words in this cell:
+    // spelling it out cost the countdown, and a cached reading of a window
+    // still open has a real countdown worth keeping. One cell for the star,
+    // one line at the foot saying what it means.
     let any_stale = groups.iter().flat_map(|(_, g)| g.iter()).any(|l| l.stale);
-    let tail = if show_reset {
-        16
-    } else if any_stale {
-        8
-    } else {
-        0
-    };
+    let fixed = 15 + label_w + usize::from(any_stale) * 2;
+    let show_reset = (w - 1).saturating_sub(fixed + 8) >= 16;
+    let tail = if show_reset { 16 } else { 0 };
     let bar_room = (w - 1).saturating_sub(fixed + tail).max(8);
     for (i, (name, lanes)) in groups.iter().enumerate() {
         if i > 0 {
@@ -166,23 +165,33 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
         }
         for lane in &inner {
             let used = (lane.pct / 100.0).clamp(0.0, 1.0);
-            let (when, tone) = if lane.stale {
-                ("  cached".to_string(), p.warn.clone())
-            } else if show_reset {
-                match lane.reset {
-                    Some(reset) if reset - now() > 0.0 => (
+            // "cached" used to replace the countdown outright, which threw
+            // away a fact to report an adjective. A reading a few minutes old
+            // still describes the window we are in: its percentage is real,
+            // its reset is real, and the burn between them is worth having.
+            // Cached is a note on the end of that, not a substitute for it.
+            //
+            // A cached reading whose window has *closed* is the other case,
+            // and it is the one Claude was in - a figure fetched nine days
+            // ago, for a window that ended on the sixteenth. There is no
+            // countdown there to keep, and no burn either: what has been
+            // spent in the current window is exactly what nobody knows.
+            let ahead = lane.reset.map(|r| r - now());
+            let (when, tone) = if !show_reset {
+                (String::new(), p.dim.clone())
+            } else {
+                match ahead {
+                    Some(left) if left > 0.0 => (
                         format!(
                             "  {}{}",
                             if lane.projected { "~" } else { "" },
-                            left_span(reset - now())
+                            left_span(left)
                         ),
-                        p.dim.clone(),
+                        if lane.stale { p.warn.clone() } else { p.dim.clone() },
                     ),
                     Some(_) => ("  resetting".to_string(), p.dim.clone()),
                     None => (String::new(), p.dim.clone()),
                 }
-            } else {
-                (String::new(), p.dim.clone())
             };
             // A projected window is one we rolled forward because the
             // agent's own reading had expired - so the percentage beside it
@@ -194,7 +203,12 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             // exactly what nobody knows - computing it from the last
             // window's figure produces a confident number about a quantity
             // that was never measured.
-            let cushion = if lane.projected {
+            // Suppressed for a window that is not the one we are in - rolled
+            // forward, or cached from one that has closed. Pace is spend
+            // against time elapsed, and the spend in the current window is
+            // the unmeasured half.
+            let closed = ahead.is_some_and(|left| left <= 0.0);
+            let cushion = if lane.projected || closed {
                 None
             } else {
                 lead(lane.pct, lane.window_secs, lane.reset)
@@ -206,11 +220,27 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             )];
             line.extend(paced_bar(
                 used,
-                elapsed_of(lane.window_secs, lane.reset),
+                // Dropped with the pace figure and for the same reason: the
+                // mark says how far through the window we are, and putting
+                // it beside a percentage from a different window is the
+                // "well under pace" reading nobody measured.
+                if cushion.is_none() && (lane.projected || closed) {
+                    None
+                } else {
+                    elapsed_of(lane.window_secs, lane.reset)
+                },
                 bar_room,
                 hue,
                 p,
             ));
+            if any_stale {
+                // Held for every lane, so the percentages stay in one
+                // column whether the row beside them is cached or not.
+                line.push((
+                    p.warn.clone(),
+                    if lane.stale { " *".into() } else { "  ".to_string() },
+                ));
+            }
             line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
             line.push((pace_colour, pace_txt));
             line.push((tone, when));
@@ -247,6 +277,27 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
                 w - 1,
             ));
         }
+    }
+    if any_stale {
+        rows.push(String::new());
+        rows.extend(
+            wrap_text(
+                "cached - the agent's own last reading rather than one fetched just \
+                 now. Its own tab says when it was taken, and why.",
+                w.saturating_sub(6).max(20),
+            )
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                tc::seg(
+                    &[
+                        (p.warn.as_str(), if i == 0 { "  * " } else { "    " }.into()),
+                        (p.dim.as_str(), line),
+                    ],
+                    w - 1,
+                )
+            }),
+        );
     }
     if !quiet.is_empty() {
         rows.push(String::new());

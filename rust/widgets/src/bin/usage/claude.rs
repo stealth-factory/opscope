@@ -972,6 +972,26 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                 "weekly" => "7d",
                 _ => "",
             };
+            // A cached reading can be old enough that the window it names has
+            // closed - this machine's was nine days back, naming windows that
+            // ended on the sixteenth. Claude's windows are fixed lengths, so
+            // the one we are in now is that one rolled forward, and a
+            // countdown to it is worth more than the blank a past date left.
+            //
+            // The percentage is not rolled with it. That belonged to the
+            // closed window and the current one's spend is unmeasured, which
+            // is why `projected` also suppresses the pace.
+            let secs = CLAUDE_WINDOW_SECS
+                .iter()
+                .find(|(g, _)| *g == group)
+                .map(|(_, s)| *s);
+            let rolled = match (iso_epoch(&text(l, "resets_at")), secs) {
+                (Some(at), Some(len)) if at <= now() && len > 0.0 => {
+                    let skipped = ((now() - at) / len).floor() + 1.0;
+                    (Some(at + skipped * len), true)
+                }
+                (at, _) => (at, false),
+            };
             Lane {
                 label: format!("{} {}", name, window).trim().to_string(),
                 pct: num(l, "percent"),
@@ -979,9 +999,9 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                     .iter()
                     .find(|(g, _)| *g == group)
                     .map(|(_, s)| *s),
-                reset: iso_epoch(&text(l, "resets_at")),
+                reset: rolled.0,
                 stale: !c.quota_live,
-                projected: false,
+                projected: rolled.1,
             }
         })
         .collect()
