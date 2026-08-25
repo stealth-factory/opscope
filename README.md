@@ -74,8 +74,8 @@ multiplexer — each is an ordinary terminal program. Tile them however you like
 
 ## Building the wall
 
-Ten widgets tile into whatever space you have. A layout that works on a wide
-screen:
+Fourteen widgets tile into whatever space you have. A layout that works on a
+wide screen:
 
 ```
 ┌────────────────────┬──────────────────┬────────────┐
