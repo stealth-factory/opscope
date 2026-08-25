@@ -79,6 +79,12 @@ struct Target {
     /// Set while we are killing our own ping on purpose, so its exit is not
     /// logged as an outage.
     restarting: bool,
+    /// Why this target has no reading, when the reason is this widget's own
+    /// rather than the network's. A host that does not answer is a result;
+    /// a `ping` that will not start is a failure, and the two used to look
+    /// identical - an empty row either way, retried every two seconds for
+    /// as long as the widget was up, saying nothing.
+    err: String,
 }
 
 /// Everything the table says about one target over the retained window.
@@ -307,11 +313,20 @@ fn watch(
             .spawn();
         let mut child = match child {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
+                let why = format!("ping will not start: {}", e);
+                if let Ok(mut guard) = shared.lock() {
+                    guard[index].err = why;
+                    guard[index].alive = false;
+                }
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
+        // It started, so whatever stopped it last time is over.
+        if let Ok(mut guard) = shared.lock() {
+            guard[index].err.clear();
+        }
         if let Ok(mut guard) = shared.lock() {
             guard[index].pid = Some(child.id() as i32);
         }
@@ -966,7 +981,11 @@ fn main() {
                 // which is what link puts its glyph in, and the name is free
                 // to swing between two colours that are both readable.
                 (
-                    tinted(if here { &p.txt } else { &p.dim_lit }),
+                    tinted(if t.err.is_empty() {
+                        if here { &p.txt } else { &p.dim_lit }
+                    } else {
+                        &p.bad
+                    }),
                     tc::pad(&t.label, name_w),
                 ),
                 // Red when there is no round trip to report, which is the
@@ -988,6 +1007,18 @@ fn main() {
                 (tinted(dim), format!(" {}", fmt_ms(st.max))),
                 (tinted(&p.txt), format!(" {}", fmt_ms(st.jit))),
                 (tinted(loss_c), format!(" {:>5.1}%", st.loss)),
+                // The reason, when there is one. It sits after the figures
+                // rather than replacing them: the numbers from before it
+                // broke are still true, and still the last thing this
+                // target was known to be doing.
+                (
+                    tinted(&p.bad),
+                    if t.err.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ! {}", t.err)
+                    },
+                ),
             ];
             // Carry the tint to the edge. Left ragged it stops wherever the
             // last number happens to end, and a highlight that stops short

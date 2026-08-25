@@ -167,6 +167,17 @@ last and leave first. A port nothing is calling shows nothing in the rates
 column rather than `0 B/s` — a column of zeroes down the table reads as a
 measurement that has failed.
 
+## When the scan itself breaks
+
+If the poller stops, the header carries `! poller stopped - see the pane it
+was started from` and the table holds whatever it last knew. It used to catch
+the failure and return an empty list, so the pane read `0 listening` — a
+machine with nothing running on it, which is a thing this widget is supposed
+to be able to say truthfully.
+
+The traffic sampler is separate: if it stops, the columns it feeds go quiet
+and the line says so, while the table below carries on being found.
+
 ## What it cannot see
 
 Sockets owned by another user, which on a normal machine means everything root

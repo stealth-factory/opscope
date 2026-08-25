@@ -539,13 +539,68 @@ fn a_poller_that_dies_records_why() {
         if !src.contains("thread::spawn") {
             continue;
         }
-        let records = src.contains("err =")
-            || src.contains(".err =")
-            || src.contains("why =")
-            || src.contains("catch_unwind");
+        // Two accidents used to satisfy this, and both were found by reading
+        // the widgets rather than by the check failing.
+        //
+        // `catch_unwind` on its own counted as recording a reason. It is
+        // not: ports caught its panic and threw the reason away with
+        // `unwrap_or_default()`, drawing an empty table - the exact thing
+        // this rule exists to prevent, under a comment saying so.
+        //
+        // And a bare `err =` matched `let mut err = dx + dy`, the Bresenham
+        // variable in latency's line drawing. That one accident was the
+        // whole reason latency passed.
+        //
+        // So a reason has to look like a reason - assigned something with
+        // words in it - and it has to reach a row. Recording one nobody
+        // draws is the same silence with more code behind it.
+        let reason = |line: &str| {
+            // A field called `err` holds a reason whatever it is assigned
+            // from - netwatch's `state.err = err` hands over a String built
+            // further up. A bare local is where the Bresenham variables
+            // live, so that one has to be assigned something with words in
+            // it.
+            if line.contains(".err =") || line.contains(".why =") {
+                return true;
+            }
+            let Some(at) = line.find("err =").or_else(|| line.find("why =")) else {
+                return false;
+            };
+            let rhs = &line[at..];
+            rhs.contains('"') || rhs.contains("format!") || rhs.contains("to_string")
+        };
+        let records = src
+            .lines()
+            .any(|l| !l.trim_start().starts_with("//") && reason(l));
+        // On screen, not on stderr: netwatch writes one to stderr *and*
+        // draws it, and only the drawn one is any use behind a full-screen
+        // redraw.
+        let drawn = src.contains("err.is_empty()")
+            || src.contains("&err")
+            || src.contains("why.is_empty()");
+        // One shape is always wrong, whatever else the widget records: a
+        // caught panic whose reason goes straight to `unwrap_or_default()`.
+        // That returns an empty list and the pane draws as if the source had
+        // nothing in it. Checked on its own, because "the widget records a
+        // reason somewhere" is true of a widget with one good guard and one
+        // bad one - which is exactly what ports was.
+        for (n, line) in src.lines().enumerate() {
+            if line.contains("catch_unwind") && line.contains("unwrap_or_default") {
+                wrong.push(format!(
+                    "{}:{}: catches a panic and throws the reason away",
+                    name,
+                    n + 1
+                ));
+            }
+        }
         if !records {
             wrong.push(format!(
                 "{}: spawns a poll thread with nowhere to record why it stopped",
+                name
+            ));
+        } else if !drawn {
+            wrong.push(format!(
+                "{}: records why its poller stopped and never puts it on screen",
                 name
             ));
         }

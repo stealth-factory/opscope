@@ -2084,6 +2084,11 @@ fn footer(
 
 struct Store {
     rows: Mutex<Vec<Row>>,
+    /// Why the poller stopped, if it did. A caught panic used to be thrown
+    /// away here: the scan returned an empty list and the table drew as if
+    /// nothing were listening, which is the one thing this widget must
+    /// never say by accident.
+    err: Mutex<String>,
     /// What has moved on each listening port, sampled by the same poll that
     /// finds the ports. One `ss` call per scan rather than a second thread:
     /// a thread that dies is invisible, and this needs no finer resolution
@@ -2131,20 +2136,43 @@ fn main() {
     let ok = rgb_ok();
     let store = Arc::new(Store {
         rows: Mutex::new(Vec::new()),
+        err: Mutex::new(String::new()),
         traffic: Mutex::new(Traffic::default()),
         wake: (Mutex::new(false), Condvar::new()),
     });
     let poller = Arc::clone(&store);
     std::thread::spawn(move || loop {
         // A thread that dies takes its explanation with it, so the scan is
-        // caught rather than left to unwind: an empty table would look
-        // exactly like a machine with nothing listening.
-        let found = std::panic::catch_unwind(scan).unwrap_or_default();
+        // caught - but catching it is only half of the rule. It used to end
+        // in `unwrap_or_default()`, which handed the table an empty list and
+        // drew a machine with nothing listening. The reason goes on screen
+        // and the thread stops, the way usage and herdr-panes do it.
+        let found = match std::panic::catch_unwind(scan) {
+            Ok(found) => found,
+            Err(_) => {
+                let why = "poller stopped - see the pane it was started from";
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why.into();
+                }
+                return;
+            }
+        };
         // The ports to tally against, taken from the scan that just ran, so
         // a port that has just appeared is measured from its next sample
         // rather than never.
         let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-        let counters = std::panic::catch_unwind(|| run(&["ss", "-tine"])).unwrap_or_default();
+        let counters = match std::panic::catch_unwind(|| run(&["ss", "-tine"])) {
+            Ok(text) => text,
+            Err(_) => {
+                let why = "traffic poller stopped - the table below is still current";
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why.into();
+                }
+                // Traffic is one column of many; the ports themselves are
+                // still being found, so this one says so and carries on.
+                String::new()
+            }
+        };
         if let Ok(mut guard) = poller.rows.lock() {
             *guard = found;
         }
@@ -2517,6 +2545,13 @@ fn main() {
             ],
             w - 1,
         ));
+        // A dead poller says so, right under the counts it has stopped
+        // updating. Same line, same shape and same words as herdr-panes and
+        // usage, so it reads the same wherever you meet it.
+        let err = store.err.lock().map(|g| g.clone()).unwrap_or_default();
+        if !err.is_empty() {
+            rows.push(tc::seg(&[(ok.bad.as_str(), format!(" ! {}", err))], w - 1));
+        }
         rows.push(String::new());
 
         let wide = w >= 78;

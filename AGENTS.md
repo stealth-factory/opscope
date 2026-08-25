@@ -57,7 +57,12 @@ every check in it exists because something shipped broken and looked, on
 screen, exactly like "there is no data":
 
 - **a poller that dies without recording why** — a thread that stops is
-  invisible, and the pane it feeds is indistinguishable from a quiet source;
+  invisible, and the pane it feeds is indistinguishable from a quiet source.
+  Recording it is not enough: the reason has to reach a row, and a caught
+  panic ending in `unwrap_or_default()` is flagged on its own line, because
+  that shape hands the pane an empty list and draws a source with nothing in
+  it. Two widgets passed this check on accidents - one on the presence of
+  `catch_unwind` alone, one on a Bresenham variable called `err`;
 - **a footer hint naming a key no match arm answers** — a hint bound to
   nothing says the feature is there;
 - **a footer hint missing from the widget's doc**;

@@ -23,6 +23,17 @@ explain a bad connection.
          300s ago                                     now
 ```
 
+## A host that will not answer, and a ping that will not run
+
+They are not the same thing and no longer look the same. A host that does not
+reply is a result — it shows as loss, which is what the widget is for. A
+`ping` this widget could not start is a failure of its own, and the row now
+carries the reason and turns its name red, rather than sitting empty and
+being retried every two seconds in silence for as long as the widget is up.
+
+The figures beside it stay. They were true when they were taken, and they are
+the last thing that target was known to be doing.
+
 ## Why the shape of it
 
 **The graph is log-scale**, because a useful target list spans three orders of
