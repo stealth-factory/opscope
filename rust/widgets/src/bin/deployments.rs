@@ -28,6 +28,9 @@ use chrono::{Local, TimeZone};
 use toys_core as tc;
 
 const API: &str = "https://api.vercel.com";
+/// How many build-log lines to ask for. Enough that the tail of a failing
+/// build is in there whole, few enough not to wait on a novel.
+const EVENT_LIMIT: usize = 200;
 const FILTERS: &[&str] = &["all", "failed", "production"];
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -90,6 +93,30 @@ fn fetch_detail(uid: &str, team: &str, tok: &str) -> serde_json::Value {
     let mut path = format!("/v13/deployments/{}", uid);
     if !team.is_empty() {
         path += &format!("?teamId={}", team);
+    }
+    let mut got = match api(&path, tok) {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "_error": e }),
+    };
+    // The build log, on the same trip. errorMessage says a build failed and
+    // names a code; the log says which line of somebody's config did it,
+    // which is the thing you would otherwise open a browser for.
+    if let Some(map) = got.as_object_mut() {
+        map.insert("_events".into(), fetch_events(uid, team, tok));
+    }
+    got
+}
+
+/// The build log for one deployment, newest last.
+///
+/// Capped on the way in: a long build runs to thousands of lines and the
+/// pane shows a few dozen, so asking for all of them would spend the wait
+/// on text nobody sees. The tail is the useful end - a build says why it
+/// failed on its way out, not on its way in.
+fn fetch_events(uid: &str, team: &str, tok: &str) -> serde_json::Value {
+    let mut path = format!("/v3/deployments/{}/events?limit={}", uid, EVENT_LIMIT);
+    if !team.is_empty() {
+        path += &format!("&teamId={}", team);
     }
     match api(&path, tok) {
         Ok(value) => value,
@@ -349,6 +376,60 @@ fn titled(state: &str) -> String {
 }
 
 /// One deployment in full: state, timings, why it failed, and what to copy.
+
+/// The build log, newest last, with what the build wrote to stderr picked
+/// out of what it wrote to stdout.
+///
+/// Vercel returns the lines oldest-first and a build explains itself on the
+/// way out, so the tail is what matters - the last error before it gave up.
+/// Long lines wrap rather than clip: a stack trace cut at the pane edge is
+/// the half without the path in it.
+fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
+    let events = &detail["_events"];
+    if let Some(err) = events.get("_error").and_then(|e| e.as_str()) {
+        return vec![
+            String::new(),
+            tc::seg(&[(p.lbl.as_str(), " ── BUILD LOG ──".into())], w - 1),
+            tc::seg(&[(p.dim.as_str(), format!("  {}", err))], w - 1),
+        ];
+    }
+    let Some(lines) = events.as_array() else {
+        return Vec::new();
+    };
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = vec![
+        String::new(),
+        tc::seg(
+            &[
+                (p.lbl.as_str(), " ── BUILD LOG ──".into()),
+                (
+                    p.dim.as_str(),
+                    format!(" {} line{}", lines.len(), if lines.len() == 1 { "" } else { "s" }),
+                ),
+            ],
+            w - 1,
+        ),
+    ];
+    for event in lines {
+        let said = text(event, "text");
+        let said = said.trim_end();
+        if said.is_empty() {
+            continue;
+        }
+        let colour = if text(event, "type") == "stderr" {
+            p.error.as_str()
+        } else {
+            p.dim.as_str()
+        };
+        for line in wrap(said, w.saturating_sub(4).max(10)) {
+            rows.push(tc::seg(&[(colour, format!("  {}", line))], w - 1));
+        }
+    }
+    rows
+}
+
 fn info_overlay(
     dep: &serde_json::Value,
     detail: Option<&serde_json::Value>,
@@ -504,6 +585,13 @@ fn info_overlay(
         if !who.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  by {}", who))], w - 1));
         }
+    }
+
+    // The build log, last. It is the longest thing on the screen and the
+    // one most often scrolled to, so everything that fits in a line of its
+    // own goes above it.
+    if let Some(detail) = detail {
+        rows.extend(build_log(detail, w, &p));
     }
 
     let pairs = copy_items(dep, detail);
@@ -1107,6 +1195,61 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The line that says why a build failed is the one worth finding, and
+    /// it arrives on stderr among dozens of stdout lines that all look the
+    /// same. Vercel marks them; this checks we keep the mark.
+    #[test]
+    fn the_build_log_picks_stderr_out_of_stdout() {
+        let p = palette();
+        let detail = serde_json::json!({
+            "_events": [
+                {"type": "stdout", "text": "Running build in Washington, D.C."},
+                {"type": "stdout", "text": "Build machine configuration: 4 cores"},
+                {"type": "stderr", "text": "Error: No Next.js version detected."},
+                {"type": "stdout", "text": ""},
+            ]
+        });
+        let rows = build_log(&detail, 90, &p);
+        let joined = rows.join("\n");
+        assert!(joined.contains("BUILD LOG"), "no heading");
+        assert!(joined.contains("Error: No Next.js version"), "the failing line is missing");
+        assert!(joined.contains("Running build in"), "the ordinary lines are missing");
+
+        let of = |needle: &str| {
+            rows.iter()
+                .find(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("{:?} not drawn", needle))
+        };
+        assert!(
+            of("Error: No Next.js").starts_with(p.error.as_str()),
+            "stderr was not marked"
+        );
+        assert!(
+            of("Running build in").starts_with(p.dim.as_str()),
+            "stdout was marked as an error"
+        );
+        // A blank line from the build is not a row on the screen.
+        assert_eq!(joined.matches("  \n").count(), 0);
+        // The count in the heading is the lines the build produced, blank
+        // ones included - it is what the API returned, not what we drew.
+        assert!(of("BUILD LOG").contains("4 lines"), "{}", of("BUILD LOG"));
+    }
+
+    #[test]
+    fn a_log_that_would_not_load_says_so_rather_than_vanishing() {
+        let p = palette();
+        let detail = serde_json::json!({ "_events": { "_error": "curl exited 22" } });
+        let rows = build_log(&detail, 90, &p);
+        let joined = rows.join("\n");
+        assert!(joined.contains("BUILD LOG"), "the section disappeared");
+        assert!(joined.contains("curl exited 22"), "the reason disappeared");
+        // And a deployment with no events at all draws nothing, rather than
+        // an empty heading promising a log that is not coming.
+        assert!(build_log(&serde_json::json!({}), 90, &p).is_empty());
+        assert!(build_log(&serde_json::json!({"_events": []}), 90, &p).is_empty());
+    }
+
 
     #[test]
     fn a_token_prefers_the_config_then_the_environment() {

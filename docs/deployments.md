@@ -75,6 +75,24 @@ omitted, and the sheet says how many are missing rather than silently dropping
 them. Every URL is shown wrapped in full, so mouse selection still works where
 OSC 52 is blocked.
 
+## The build log
+
+The detail view ends with the deployment's own build output, fetched from
+`/v3/deployments/{id}/events` on the same trip as the rest of the detail.
+`errorMessage` above it says a build failed and names a code; the log says
+which line of somebody's config did it, which is the thing you would
+otherwise open a browser for.
+
+What the build wrote to **stderr** is drawn in the error colour among the
+stdout lines, because on a failed build that is the one line worth finding
+and it arrives among dozens that look alike. Long lines wrap rather than
+clip — a stack trace cut at the pane edge is the half without the path in it.
+
+The last 200 lines are requested. A long build runs to thousands and the
+pane shows a few dozen, so asking for all of them would spend the wait on
+text nobody reads; the tail is the useful end, since a build explains itself
+on the way out rather than on the way in.
+
 ## Keys
 
 | Key | Action |
