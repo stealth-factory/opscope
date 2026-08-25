@@ -389,21 +389,6 @@ fn project_columns(w: usize, base: usize, label_w: usize, aside: usize) -> (usiz
     (label_cost, bar, room)
 }
 
-/// Where a window of `room` rows has to start to keep `row` in view.
-///
-/// Every screen here is now drawn whole and shown through a window, and all
-/// three of them - the board, a team, a project - move it the same way. It
-/// is one function so that a test can break it, which a copy inlined three
-/// times could not have.
-fn follow(at: usize, row: usize, room: usize) -> usize {
-    if row < at {
-        row
-    } else if row + 1 > at + room {
-        row + 1 - room
-    } else {
-        at
-    }
-}
 
 /// Break text to a width without breaking a word, and without dropping one.
 fn wrap(t: &str, width: usize) -> Vec<String> {
@@ -2814,7 +2799,7 @@ fn main() {
                 // The page follows the cursor into the project list, the
                 // way netwatch's detail follows one into a section.
                 if let Some(row) = cursor {
-                    *at = follow(*at, row, room);
+                    *at = tc::follow(*at, row, room);
                 }
                 *at = (*at).min(body.len().saturating_sub(room));
                 let from = *at;
@@ -2881,7 +2866,7 @@ fn main() {
         // arrows move the window itself.
         let room = h.saturating_sub(footer.len()).max(1);
         if let Some(at) = cursor {
-            board = follow(board, at, room);
+            board = tc::follow(board, at, room);
         }
         board = board.min(rows.len().saturating_sub(room));
         board_len = rows.len();
@@ -3360,29 +3345,6 @@ mod tests {
         assert!(label_cost > 0 && bar == 30 && room >= aside);
     }
 
-    #[test]
-    fn the_window_chases_a_cursor_it_cannot_see() {
-        // Stated as what the reader sees rather than as the arithmetic:
-        // wherever the cursor is, the window has to contain it, and it has
-        // to move as little as it can to do that.
-        let holds = |at: usize, row: usize, room: usize| row >= at && row < at + room;
-        for room in [1usize, 3, 20] {
-            for start in [0usize, 5, 30] {
-                for row in [0usize, 4, 7, 12, 40] {
-                    let moved = follow(start, row, room);
-                    assert!(holds(moved, row, room), "row {} not in {}..+{}", row, moved, room);
-                    // Not moved at all when it did not need to be.
-                    if holds(start, row, room) {
-                        assert_eq!(moved, start, "moved without needing to");
-                    }
-                }
-            }
-        }
-        // Reaching down puts the cursor on the last row, not past it.
-        assert_eq!(follow(0, 40, 20) + 20, 41);
-        // Reaching up puts it on the first.
-        assert_eq!(follow(30, 4, 20), 4);
-    }
 
     #[test]
     fn a_team_with_no_projects_says_so_rather_than_showing_an_empty_heading() {

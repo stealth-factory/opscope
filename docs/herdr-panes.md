@@ -74,11 +74,38 @@ differs from its own shell pid. Command names come from `argv`, so a pane shows
 widget started — we did not see it begin, so it is only a lower bound. Herdr
 does not timestamp state changes, so transitions are tracked here.
 
+## When it does not all fit
+
+The three lists read as one under the arrows, and the pane is a window onto
+that one list. The header above them is pinned — the counts and the
+`▸ N agents waiting for you` line are the reason to have the widget open, and
+they never scroll away.
+
+The window follows the cursor: it holds still while the cursor moves inside
+it, and moves by as little as it takes when the cursor would leave. It is
+measured in **rows**, not entries, because an agent takes two rows — its
+second carries the directory and the pane title — while a process takes one.
+Counted in entries it admits more rows than the pane has, they are cut off the
+bottom, and the cursor goes with them: it kept moving past the last drawn row
+and disappeared, while `Enter` still switched to whatever it was invisibly
+sitting on.
+
+A heading whose section is not all on screen says so — `── IDLE ── 15 panes at
+a prompt · showing 4-15` — and one the window has scrolled clean past says
+`none on screen` rather than standing over nothing, which reads as a section
+that has failed to load. A section entirely on screen says nothing: a range on
+a list you can see all of is noise.
+
+The idle heading is drawn whenever there are idle panes, at every height. It
+used to be rationed — granted a heading only if the lists above had left room
+— and dropping it silently left the footer offering `[i]dle` with nothing
+behind it.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `Home` `End` | select, across all three sections |
+| `↑` `↓` `Home` `End` | select, across all three sections; the window follows |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
 | `i` | show/hide the idle section — `o` in the Python, which is being retired |
 | `l` | workspace labels vs pane ids |

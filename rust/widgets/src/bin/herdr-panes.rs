@@ -151,37 +151,70 @@ struct Agent {
     rss: Option<u64>,
 }
 
-/// What the idle section gets, once the lists above it have been drawn.
+/// The slice of a variable-height list that fits `room` rows and holds the
+/// cursor.
 ///
-/// The three sections used to budget against the same bound, so the
-/// running list could spend the whole pane and the idle heading was pushed
-/// past the bottom and truncated - leaving the footer offering a key with
-/// nothing behind it.
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-enum IdleFit {
-    /// Heading, blank line and at least one pane.
-    Full,
-    /// No room to list them, but room to say how many there are. Dropping
-    /// the section silently is what made the key look broken.
-    CountOnly,
-    /// Not even one line: the pane is shorter than the lists above it.
-    Nothing,
+/// The three lists here do not have one height between them: an agent takes
+/// two rows, its second carrying the directory and the pane title, while a
+/// process takes one. A window counted in *entries* therefore admits more
+/// rows than the pane has, they are cut off the bottom, and the cursor goes
+/// with them - which is the bug this is here to fix, arrived at the second
+/// time rather than the first.
+///
+/// `from` is where the window sat last frame. It is honoured when it can be,
+/// so the view holds still while the cursor moves inside it, and moves by as
+/// little as it takes when the cursor would leave.
+fn window_over(
+    heights: &[usize],
+    at: usize,
+    room: usize,
+    from: usize,
+) -> std::ops::Range<usize> {
+    let n = heights.len();
+    if n == 0 || room == 0 {
+        return 0..0;
+    }
+    let at = at.min(n - 1);
+    // Never start below the cursor: reaching up moves the window to it.
+    let mut first = from.min(at);
+    loop {
+        let (mut used, mut end) = (0usize, first);
+        while end < n && used + heights[end] <= room {
+            used += heights[end];
+            end += 1;
+        }
+        // A row taller than the whole pane still gets drawn, or the list
+        // would be empty and the cursor nowhere.
+        if end == first {
+            end = first + 1;
+        }
+        if at < end || first + 1 >= n {
+            return first..end;
+        }
+        first += 1;
+    }
 }
 
-/// How many rows the full section needs: a blank, a heading, and a pane.
-const IDLE_ROWS: usize = 3;
-
-fn idle_fit(h: usize, used: usize, show: bool, resting: usize) -> IdleFit {
-    if !show || resting == 0 {
-        return IdleFit::Nothing;
+/// What a section heading adds when the window does not hold all of it.
+///
+/// `first` is where the section starts in the flat list the three of them
+/// make together, and `len` is how many rows it has. Nothing when the whole
+/// section is on screen - a range on a section you can see all of is noise.
+fn showing(window: &std::ops::Range<usize>, first: usize, len: usize) -> String {
+    if len == 0 {
+        return String::new();
     }
-    let body = h.saturating_sub(2);
-    if used + IDLE_ROWS <= body {
-        IdleFit::Full
-    } else if used < body {
-        IdleFit::CountOnly
+    let from = window.start.max(first);
+    let to = window.end.min(first + len);
+    if from <= first && to >= first + len {
+        String::new()
+    } else if to <= from {
+        // Scrolled clean past it. Said out loud, because a heading with a
+        // count and no rows under it otherwise reads as a section that has
+        // failed to load rather than one you have scrolled away from.
+        "  · none on screen".to_string()
     } else {
-        IdleFit::Nothing
+        format!("  · showing {}-{}", from - first + 1, to - first)
     }
 }
 
@@ -348,6 +381,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
     }
     // Busy first, and the busiest of those first: the point of the section
     // is what is costing something.
+    // Idle last, and that ordering is load-bearing twice over. The screen
+    // draws `running` then `resting`, and both the cursor and the window are
+    // indices into `agents ++ panels` - so the two agree only because
+    // `panels` is already running-then-resting. Reorder this and the cursor
+    // silently marks one pane while enter switches to another.
     panels.sort_by(|a, b| {
         a.idle
             .cmp(&b.idle)
@@ -552,6 +590,10 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let (mut selected, mut tick) = (0usize, 0usize);
+    // How far down the three lists, read as one, the window has scrolled.
+    // Kept across frames so the view holds still while the cursor moves
+    // inside it, and only moves when the cursor would leave it.
+    let mut scroll = 0usize;
     let mut note: Option<(String, bool, f64)> = None;
     let mut rows_now: Vec<Row> = Vec::new();
 
@@ -691,10 +733,68 @@ fn main() {
         rows.push(String::new());
 
         let wide = w >= 66;
+
+        // The footer must always be the last visible line, so it is built
+        // before the body rather than after it: it wraps, so how many rows
+        // it takes depends on the width, and the body cannot know its own
+        // budget until that is settled. Each section budgeting for itself is
+        // what drifted before, and left the footer written past the bottom.
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " switch to this pane".into()),
+            ],
+            vec![(p.dim.as_str(), "[i]dle".into())],
+            vec![(p.dim.as_str(), "[l]abels".into())],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+            .into_iter()
+            .map(|l| format!(" {}", l))
+            .collect();
+
+        // One window over the three lists read as one, which is the order
+        // `rows_now` is in and the order the keys walk. The cursor used to
+        // be clamped against the whole list while each section stopped at a
+        // row budget of its own, so on any pane too short for everything the
+        // cursor walked past the last drawn row and vanished - and enter
+        // still acted on whatever it was invisibly sitting on.
+        let idle_listed = show_idle && !resting.is_empty();
+        // Every heading is drawn, always: AGENTS and its column head, a
+        // blank and PROCESSES, and the same again for IDLE when there is an
+        // idle section at all. TOY-34's rule survives that way rather than
+        // by rationing - the heading and its count are never what gets cut.
+        // Everything that is not an entry row: the pinned header already
+        // pushed, each section's heading and column head, the note line and
+        // the footer. Counted rather than estimated, because one row short
+        // is one entry admitted that the truncate below then cuts - and the
+        // row it cuts is the last one, which is where the cursor is when you
+        // have just pressed end.
+        let chrome = rows.len()
+            + 2                                       // AGENTS, and its column head
+            + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
+            + usize::from(agents.is_empty())          // the line that stands in for a list
+            + usize::from(running.is_empty())
+            + if idle_listed { 2 } else { 0 }         // blank, IDLE
+            + footer.len()
+            + 1;                                      // the note line
+        let room = h.saturating_sub(chrome).max(1);
+        // An agent takes two rows and a pane takes one, in the order the
+        // keys walk them.
+        let heights: Vec<usize> = std::iter::repeat(2)
+            .take(agents.len())
+            .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
+            .collect();
+        let window = window_over(&heights, selected, room, scroll);
+        scroll = window.start;
+
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── AGENTS ── ".into()),
                 (p.dim.as_str(), format!("{}", agents.len())),
+                (p.dim.as_str(), showing(&window, 0, agents.len())),
             ],
             w - 1,
         ));
@@ -705,8 +805,8 @@ fn main() {
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
 
         for (i, a) in agents.iter().enumerate() {
-            if rows.len() >= h.saturating_sub(6) {
-                break;
+            if !window.contains(&i) {
+                continue;
             }
             let here = i == selected;
             let colour = colour_of(&a.state, &p);
@@ -797,6 +897,7 @@ fn main() {
                         plural(running.len())
                     ),
                 ),
+                (p.dim.as_str(), showing(&window, agents.len(), running.len())),
             ],
             w - 1,
         ));
@@ -812,16 +913,9 @@ fn main() {
                 w - 1,
             ));
         }
-        // The idle section is claimed before the running list spends the
-        // pane, not after. It used to be filled up to the same h-2 the
-        // idle loop then checked, so on a busy machine the heading was
-        // pushed past the bottom and truncated - while the header counted
-        // the panes and the footer offered the key to reveal them.
-        let idle_room = if show_idle && !resting.is_empty() { IDLE_ROWS } else { 0 };
-        let running_budget = h.saturating_sub(2 + idle_room);
         for (j, n) in running.iter().enumerate() {
-            if rows.len() >= running_budget {
-                break;
+            if !window.contains(&(agents.len() + j)) {
+                continue;
             }
             let here = agents.len() + j == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
@@ -862,28 +956,13 @@ fn main() {
             ));
         }
 
-        // Two lines for the blank and the heading, one for a pane. Below
-        // that the section cannot be drawn, but the count still can: one
-        // line saying how many are there and that the pane is too short to
-        // list them, rather than nothing at all under a footer still
-        // offering the key.
-        if idle_fit(h, rows.len(), show_idle, resting.len()) == IdleFit::CountOnly {
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── IDLE ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!(
-                            "{} pane{} at a prompt, too short to list",
-                            resting.len(),
-                            plural(resting.len())
-                        ),
-                    ),
-                ],
-                w - 1,
-            ));
-        }
-        if idle_fit(h, rows.len(), show_idle, resting.len()) == IdleFit::Full {
+        // The idle section's heading is drawn whenever there is an idle
+        // section at all, and it is never what gets cut - that was TOY-34:
+        // dropping it silently left the footer offering [i]dle with nothing
+        // behind it. Rationing rows for it is no longer how that is kept.
+        // The window bounds the entries above, so the heading always fits,
+        // and it says how many are on screen when not all of them are.
+        if idle_listed {
             rows.push(String::new());
             rows.push(tc::seg(
                 &[
@@ -892,12 +971,16 @@ fn main() {
                         p.dim.as_str(),
                         format!("{} pane{} at a prompt", resting.len(), plural(resting.len())),
                     ),
+                    (
+                        p.dim.as_str(),
+                        showing(&window, agents.len() + running.len(), resting.len()),
+                    ),
                 ],
                 w - 1,
             ));
             for (j, n) in resting.iter().enumerate() {
-                if rows.len() >= h.saturating_sub(2) {
-                    break;
+                if !window.contains(&(agents.len() + running.len() + j)) {
+                    continue;
                 }
                 let here = agents.len() + running.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
@@ -922,25 +1005,6 @@ fn main() {
             }
         }
 
-        // The footer must always be the last visible line, so the body is
-        // clamped to the space left for it rather than each section
-        // budgeting for itself - that drifted, and the footer ended up
-        // written past the bottom row.
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " switch to this pane".into()),
-            ],
-            vec![(p.dim.as_str(), "[i]dle".into())],
-            vec![(p.dim.as_str(), "[l]abels".into())],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
         let reserve = footer.len() + 1; // +1 for the note line
         rows.truncate(h.saturating_sub(reserve));
         while rows.len() < h.saturating_sub(reserve) {
@@ -975,45 +1039,101 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_idle_section_is_never_silently_absent() {
-        // The bug this replaces: the running list budgeted the whole pane
-        // and the idle heading was then pushed past the bottom, so the
-        // section vanished while the footer still offered its key. At
-        // every height, with idle panes to show, the answer must be
-        // something the reader can see - the full section, or the count
-        // saying why the rest is missing.
-        for h in 6usize..80 {
-            let body = h.saturating_sub(2);
-            for used in 0..body {
-                let got = idle_fit(h, used, true, 9);
-                assert_ne!(
-                    got,
-                    IdleFit::Nothing,
-                    "h={} with {} rows used and 9 panes idle says nothing at all",
-                    h,
-                    used
-                );
+    fn the_window_holds_the_cursor_whatever_the_rows_cost() {
+        // Fifteen agents at two rows each, then twenty-eight panes at one:
+        // the shape that broke it. A window counted in entries admits more
+        // rows than the pane has, they are cut off the bottom, and the
+        // cursor goes with them.
+        let heights: Vec<usize> = std::iter::repeat(2)
+            .take(15)
+            .chain(std::iter::repeat(1).take(28))
+            .collect();
+        for room in [1usize, 4, 12, 30, 200] {
+            for at in 0..heights.len() {
+                for from in [0usize, 5, 14, 30, 42] {
+                    let w = window_over(&heights, at, room, from);
+                    assert!(w.contains(&at), "room={} at={} from={} gave {:?}", room, at, from, w);
+                    // And it fits, unless one entry alone is taller than the
+                    // pane - in which case it is drawn anyway, because the
+                    // alternative is drawing nothing.
+                    let used: usize = heights[w.clone()].iter().sum();
+                    assert!(
+                        used <= room || w.len() == 1,
+                        "room={} at={} from={} drew {} rows in {:?}",
+                        room, at, from, used, w
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn the_full_section_needs_a_heading_a_blank_and_a_pane() {
-        // Exactly at the boundary, and one row either side of it.
-        let h = 40;
-        let body = h - 2;
-        assert_eq!(idle_fit(h, body - IDLE_ROWS, true, 9), IdleFit::Full);
-        assert_eq!(idle_fit(h, body - IDLE_ROWS + 1, true, 9), IdleFit::CountOnly);
-        assert_eq!(idle_fit(h, body - 1, true, 9), IdleFit::CountOnly);
-        assert_eq!(idle_fit(h, body, true, 9), IdleFit::Nothing);
+    fn the_window_holds_still_while_the_cursor_moves_inside_it() {
+        let heights = vec![1usize; 40];
+        // Already on screen: the view does not jump under the reader.
+        assert_eq!(window_over(&heights, 12, 10, 8), 8..18);
+        assert_eq!(window_over(&heights, 8, 10, 8), 8..18);
+        assert_eq!(window_over(&heights, 17, 10, 8), 8..18);
+        // Off the bottom: it moves by exactly enough.
+        assert_eq!(window_over(&heights, 18, 10, 8), 9..19);
+        // Off the top: it moves to the cursor rather than past it.
+        assert_eq!(window_over(&heights, 3, 10, 8), 3..13);
+        // An empty list has no window at all.
+        assert_eq!(window_over(&[], 0, 10, 0), 0..0);
     }
 
     #[test]
-    fn nothing_is_drawn_when_there_is_nothing_to_say() {
-        // Hidden by the key, or no idle panes at all: silence is correct
-        // here, and is the only case where it is.
-        assert_eq!(idle_fit(60, 0, false, 9), IdleFit::Nothing);
-        assert_eq!(idle_fit(60, 0, true, 0), IdleFit::Nothing);
+    fn a_heading_says_its_range_only_when_the_section_is_cut() {
+        // Thirteen agents, then fifteen running panes, then fifteen idle.
+        let (agents, running, resting) = (13usize, 15usize, 15usize);
+        let (a, r, i) = (0, agents, agents + running);
+
+        // A window holding everything says nothing about ranges.
+        let all = 0..43;
+        assert_eq!(showing(&all, a, agents), "");
+        assert_eq!(showing(&all, r, running), "");
+        assert_eq!(showing(&all, i, resting), "");
+
+        // A window over the middle: agents cut short, running cut at both
+        // ends, idle not reached.
+        let mid = 6..20;
+        assert_eq!(showing(&mid, a, agents), "  · showing 7-13");
+        assert_eq!(showing(&mid, r, running), "  · showing 1-7");
+        assert_eq!(showing(&mid, i, resting), "  · none on screen");
+
+        // And past the end: the sections above say so rather than showing a
+        // count with no rows under it.
+        let low = 30..43;
+        assert_eq!(showing(&low, a, agents), "  · none on screen");
+        assert_eq!(showing(&low, i, resting), "  · showing 3-15");
+
+        // An empty section has no range to give.
+        assert_eq!(showing(&mid, r, 0), "");
+    }
+
+    #[test]
+    fn the_idle_section_is_never_silently_absent() {
+        // TOY-34's rule, which this rewrite had to keep: dropping the idle
+        // section silently left the footer offering [i]dle with nothing
+        // behind it.
+        //
+        // It used to be kept by rationing rows - the section was granted a
+        // heading only if the lists above had left room. It is now kept by
+        // construction: the window bounds how many entry rows the lists
+        // above can take, so the heading always fits, and when the window
+        // has scrolled past the idle panes the heading says that rather
+        // than nothing.
+        for start in 0..40usize {
+            for room in 1..12usize {
+                let window = start..start + room;
+                let said = showing(&window, 28, 15);
+                assert!(
+                    !said.is_empty() || (window.start <= 28 && window.end >= 43),
+                    "window {:?} says nothing about a section it does not hold",
+                    window
+                );
+            }
+        }
     }
 
 

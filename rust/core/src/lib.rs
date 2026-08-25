@@ -614,6 +614,22 @@ pub fn meter(frac: f64, n: usize) -> String {
 }
 
 const EIGHTHS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Where a window of `room` rows has to start to keep `row` in view.
+///
+/// Every list here that is longer than its pane is drawn whole and shown
+/// through a window, and they all move it the same way: linear's board and
+/// its detail screens, herdr-panes' three sections. It is one function so
+/// that a test can break it, which a copy inlined in each could not have.
+pub fn follow(at: usize, row: usize, room: usize) -> usize {
+    if row < at {
+        row
+    } else if row + 1 > at + room {
+        row + 1 - room
+    } else {
+        at
+    }
+}
+
 
 /// Vertical bar chart, one column per value.
 ///
@@ -1161,6 +1177,30 @@ pub fn maybe_help(doc: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_window_chases_a_cursor_it_cannot_see() {
+        // Stated as what the reader sees rather than as the arithmetic:
+        // wherever the cursor is, the window has to contain it, and it has
+        // to move as little as it can to do that.
+        let holds = |at: usize, row: usize, room: usize| row >= at && row < at + room;
+        for room in [1usize, 3, 20] {
+            for start in [0usize, 5, 30] {
+                for row in [0usize, 4, 7, 12, 40] {
+                    let moved = follow(start, row, room);
+                    assert!(holds(moved, row, room), "row {} not in {}..+{}", row, moved, room);
+                    // Not moved at all when it did not need to be.
+                    if holds(start, row, room) {
+                        assert_eq!(moved, start, "moved without needing to");
+                    }
+                }
+            }
+        }
+        // Reaching down puts the cursor on the last row, not past it.
+        assert_eq!(follow(0, 40, 20) + 20, 41);
+        // Reaching up puts it on the first.
+        assert_eq!(follow(30, 4, 20), 4);
+    }
+
 
     // The rule every widget with focusable sections follows. It is tested
     // here rather than in each widget because "the same rule everywhere" is
