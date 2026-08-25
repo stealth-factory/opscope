@@ -44,7 +44,7 @@ fn age_since(iso: &str) -> String {
     }
 }
 
-const OLDEST_WANTED: usize = 5;
+const OLDEST_WANTED: usize = 10;
 
 const API: &str = "https://api.github.com/graphql";
 const WINDOWS: &[i64] = &[7, 14, 30, 60, 90];
@@ -107,6 +107,7 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
       ... on PullRequest {{
         number
         title
+        url
         createdAt
         isDraft
         repository {{ name }}
@@ -138,10 +139,15 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 fn account_detail(
     a: &Account,
     oldest: Option<&serde_json::Value>,
+    pick: usize,
     w: usize,
     h: usize,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, Option<usize>) {
+    // Where the cursor over the oldest list ended up, so the caller can
+    // scroll to it. The caller cannot work it out: how far down the page
+    // that list starts depends on how many fields this account had.
+    let mut cursor: Option<usize> = None;
     let mut rows = vec![tc::title(&a.account, w, &p.accent)];
     let label_w = 16usize;
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
@@ -331,7 +337,11 @@ fn account_detail(
                     ],
                     w - 1,
                 ));
-                for node in nodes.iter() {
+                for (i, node) in nodes.iter().enumerate() {
+                    let here = i == pick.min(nodes.len().saturating_sub(1));
+                    if here {
+                        cursor = Some(rows.len());
+                    }
                     let age = age_since(node["createdAt"].as_str().unwrap_or(""));
                     let repo = node["repository"]["name"].as_str().unwrap_or("").to_string();
                     let num = node["number"].as_i64().unwrap_or(0);
@@ -344,11 +354,21 @@ fn account_detail(
                     } else {
                         title
                     };
+                    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                    let c = |colour: &str| format!("{}{}", tint, colour);
                     rows.push(tc::seg(
                         &[
-                            (if draft { p.dim.as_str() } else { p.warn.as_str() }, head),
-                            (p.dim.as_str(), format!("{}  ", repo)),
-                            (p.txt.as_str(), title),
+                            (
+                                &c(if here { p.accent.as_str() } else { p.dim.as_str() }),
+                                if here { " ▸".into() } else { "  ".to_string() },
+                            ),
+                            (
+                                &c(if draft { p.dim.as_str() } else { p.warn.as_str() }),
+                                head.trim_start().to_string(),
+                            ),
+                            (&c(p.dim.as_str()), format!("  {}  ", repo)),
+                            (&c(p.txt.as_str()), title),
+                            (&tint, if here { " ".repeat(w) } else { String::new() }),
                         ],
                         w - 1,
                     ));
@@ -447,7 +467,7 @@ fn account_detail(
             w - 1,
         ));
     }
-    rows
+    (rows, cursor)
 }
 
 /// What the token is allowed to see, read off the response headers.
@@ -1110,6 +1130,9 @@ fn main() {
     let (mut selected, mut tick) = (0usize, 0usize);
     // One account on its own screen, and how far down it is scrolled.
     let (mut detail, mut dscroll) = (false, 0usize);
+    // Which of the oldest PRs the cursor is on, and what [c] last said.
+    let mut osel = 0usize;
+    let (mut note, mut note_at) = (String::new(), 0.0f64);
     // The longest-open PRs per account, fetched when that account's screen
     // is opened and kept after.
     let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -1152,8 +1175,38 @@ fn main() {
                     dscroll = 0;
                 }
                 "left" | "esc" if detail => detail = false,
-                "up" if detail => dscroll = dscroll.saturating_sub(1),
-                "down" if detail => dscroll = dscroll.saturating_add(1),
+                "up" if detail => osel = osel.saturating_sub(1),
+                "down" if detail => osel = osel.saturating_add(1),
+                "c" | "C" if detail => {
+                    // The account under the cursor, read from the shared
+                    // state rather than the render's copy - the keys are
+                    // handled before the frame is built.
+                    let key = state
+                        .lock()
+                        .ok()
+                        .and_then(|g| {
+                            g.stats
+                                .get(selected.min(g.stats.len().saturating_sub(1)))
+                                .map(|a| a.key.clone())
+                        })
+                        .unwrap_or_default();
+                    let url = oldest
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(&key).cloned())
+                        .and_then(|v| v.as_array().cloned())
+                        .and_then(|n| n.get(osel).cloned())
+                        .map(|n| n["url"].as_str().unwrap_or("").to_string())
+                        .unwrap_or_default();
+                    if !url.is_empty() {
+                        note = if tc::clipboard(&url) {
+                            format!("✓ copied {}", url)
+                        } else {
+                            format!("no clipboard: {}", url)
+                        };
+                        note_at = now();
+                    }
+                }
                 "pgup" if detail => {
                     let page = tc::size().1.saturating_sub(3).max(1);
                     dscroll = dscroll.saturating_sub(page);
@@ -1752,9 +1805,19 @@ fn main() {
                         });
                     }
                 }
-                let body = account_detail(a, held.as_ref(), w, h, &p);
+                let nodes = held
+                    .as_ref()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                osel = osel.min(nodes.len().saturating_sub(1));
+                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, h, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
-                    vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
+                    vec![
+                        (p.accent.as_str(), "↑↓".into()),
+                        (p.dim.as_str(), if nodes.is_empty() { " scroll" } else { " oldest" }.into()),
+                    ],
+                    vec![(p.dim.as_str(), "[c]opy url".into())],
+                    vec![(p.dim.as_str(), "pgup/pgdn page".into())],
                     vec![
                         (p.accent.as_str(), "←".into()),
                         (p.dim.as_str(), "/esc back".into()),
@@ -1766,11 +1829,26 @@ fn main() {
                     .map(|l| format!(" {}", l))
                     .collect();
                 let room = h.saturating_sub(foot.len()).max(1);
+                // The page follows the cursor into the oldest list, the way
+                // netwatch's detail follows one into a section. Without it
+                // the row being selected is often off the bottom.
+                if let Some(at) = cursor {
+                    if at < dscroll {
+                        dscroll = at;
+                    } else if at >= dscroll + room {
+                        dscroll = at + 1 - room;
+                    }
+                }
                 dscroll = dscroll.min(body.len().saturating_sub(room));
                 let last = (dscroll + room).min(body.len());
                 let mut out: Vec<String> = body[dscroll..last].to_vec();
                 while out.len() < room {
                     out.push(String::new());
+                }
+                if !note.is_empty() && now() - note_at < 6.0 {
+                    if let Some(row) = out.last_mut() {
+                        *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
+                    }
                 }
                 out.extend(foot);
                 tc::draw(&out, w, h);

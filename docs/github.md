@@ -196,10 +196,44 @@ into a single request returned HTTP 502 on the complexity limit.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` | select an account |
+| `↑` `↓` | select an account — on an account's own screen, move through its oldest open PRs |
+| `→` `↵` | open the selected account |
+| `←` `esc` | back to the board |
+| `c` | copy the selected PR's URL |
+| `PgUp` `PgDn` `Home` `End` | scroll an account's screen by the page, or to either end |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now, ignoring the day cache |
-| `q` | quit |
+| `q` | quit, from either screen |
+
+## One account on its own screen
+
+`→` or `↵` opens the highlighted account. Most of what is there the row
+already carried and had no room to spell out — open split into what waits on
+a reviewer and what is still a draft, merged split into what landed and what
+was closed unmerged — plus a few figures worth deriving:
+
+- **net** — opened minus merged over the window. A queue of six hundred is a
+  different thing depending on whether it grew by forty this week or held
+  level.
+- **merged/day**, with the open queue restated as time at that rate. *"110d
+  of open PRs"* is the number people estimate and get wrong.
+- **busiest day** and **days with none** — the shape of the window.
+
+The **OPEN PR STATE** bar and the **PR FLOW** chart are the two the board
+draws for every account added together, drawn here for one. That is the
+reason to open the screen: a queue growing in a single account is invisible
+in a total six others are also feeding.
+
+**OLDEST OPEN** lists the ten longest-waiting PRs, newest information the
+board cannot hold. Everything else on this widget is built from `issueCount`
+aggregates — exact at any volume, one rate-limit point per request rather
+than per alias, and unable to name anything at all. So this one asks for
+nodes, once per account when its screen is first opened, and keeps the
+answer.
+
+`↑` `↓` move through that list and `c` copies the URL of the row under the
+cursor, the same key `pr` uses for the same job. The page scrolls to follow
+the cursor; `PgUp` `PgDn` move it freely for the sections above and below.
 
 ## Credentials
 
