@@ -1992,6 +1992,7 @@ fn main() {
                         (ok.accent.clone(), "←".into()),
                         (ok.dim.clone(), "/esc back".into()),
                     ],
+                    vec![(ok.dim.clone(), "[q]uit".into())],
                 ],
                 &ok,
             );

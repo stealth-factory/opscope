@@ -1476,7 +1476,7 @@ fn info_overlay(
         rows.push(String::new());
     }
     rows.push(tc::seg(
-        &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close".into())],
+        &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close · [q]uit".into())],
         w - 1,
     ));
     rows
@@ -1526,7 +1526,7 @@ fn copy_overlay(
         &[(
             p.dim.as_str(),
             format!(
-                " press 1-{} to copy · ← or esc to close",
+                " press 1-{} to copy · ← or esc to close · [q]uit",
                 pairs.len().max(1)
             ),
         )],

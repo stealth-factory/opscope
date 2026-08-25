@@ -174,6 +174,21 @@ fn main() {
                 .collect();
             rows[y] = tc::seg(&parts, w);
         }
+        // The one piece of text on the screen. This widget is rain and
+        // nothing else, so a full footer would be the loudest thing in it -
+        // but a screen that answers a key and never says which is a screen
+        // you have to guess your way out of. One dim word in the corner,
+        // over the rain rather than instead of it.
+        if h > 0 {
+            let last = h - 1;
+            rows[last] = tc::seg(
+                &[
+                    (tc::rgb(70, 100, 80).as_str(), " [q]uit".to_string()),
+                    (String::new().as_str(), " ".repeat(w.saturating_sub(7))),
+                ],
+                w,
+            );
+        }
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(55));
     }

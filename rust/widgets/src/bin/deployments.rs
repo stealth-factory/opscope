@@ -675,9 +675,9 @@ fn copy_overlay(
         &[(
             p.hint.as_str(),
             if pairs.is_empty() {
-                " ← or esc to close".to_string()
+                " ← or esc to close · [q]uit".to_string()
             } else {
-                format!(" press 1-{} to copy · ← or esc to close", pairs.len())
+                format!(" press 1-{} to copy · ← or esc to close · [q]uit", pairs.len())
             },
         )],
         w - 1,
@@ -1070,13 +1070,13 @@ fn main() {
                         p.hint.as_str(),
                         if furthest > 0 {
                             format!(
-                                " ↑↓ scroll {}-{} of {} · [c]opy · [r]efresh · ← or esc to close",
+                                " ↑↓ scroll {}-{} of {} · [c]opy · [r]efresh · ← esc · [q]uit",
                                 oscroll + 1,
                                 last,
                                 body.len()
                             )
                         } else {
-                            " [c]opy · [r]efresh · ← or esc to close".to_string()
+                            " [c]opy · [r]efresh · ← or esc to close · [q]uit".to_string()
                         },
                     )],
                     w - 1,
