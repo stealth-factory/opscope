@@ -322,6 +322,9 @@ struct Proj {
     progress: f64,
     target: String,
     lead: String,
+    /// Every team that owns it. A project can be shared, and the board's own
+    /// list is not filed under any one of them.
+    teams: Vec<String>,
 }
 
 /// One project's own record, fetched when its screen opens.
@@ -334,6 +337,55 @@ fn fetch_project(id: &str, tok: &str, quota: &Arc<Mutex<Quota>>) -> serde_json::
     match graphql(PROJECT_QUERY, tok, vars, quota) {
         Ok(v) => v["project"].clone(),
         Err(said) => serde_json::json!({ "_error": said }),
+    }
+}
+
+/// How much of a project row each optional column gets.
+///
+/// `base` is what never goes - the marker, the team key, the name and the
+/// percentage. Returns what the status column costs, how wide the bar may
+/// be (zero for none), and how many columns are left for the open count.
+///
+/// The order things go in as the pane narrows: the bar first, because the
+/// percentage beside it says the same thing in five columns; then the
+/// status, which the colour and the ordering carry anyway; and last the
+/// open count, which is the one number on the row the percentage does not
+/// say. Nothing is ever cut through the middle.
+///
+/// This is a function because the arithmetic was wrong twice inline: once
+/// overflowing the pane and letting `seg` cut the percentage off, and once
+/// reserving the bar's gap but not the open count's - which made a row lose
+/// its open count as the pane got *wider*.
+fn project_columns(w: usize, base: usize, label_w: usize, aside: usize) -> (usize, usize, usize) {
+    let budget = w.saturating_sub(1);
+    // Each column is shown only when it and everything above it in the
+    // order fits, and the ones above it are reserved whether or not they
+    // are shown. Anything less than that and widening the pane by one
+    // column can trade one fact for another - at seventy-seven columns the
+    // status arrived and the open count left, which is a pane that gets
+    // wider and says less.
+    let need_aside = if aside > 0 { 2 + aside } else { 0 };
+    let need_label = 2 + label_w;
+    let room = if base + need_aside <= budget { aside } else { 0 };
+    let label_cost = if base + need_aside + need_label <= budget { need_label } else { 0 };
+    let bar = budget.saturating_sub(base + need_aside + need_label + 2);
+    let bar = if bar >= 6 { bar.min(30) } else { 0 };
+    (label_cost, bar, room)
+}
+
+/// Where a window of `room` rows has to start to keep `row` in view.
+///
+/// Every screen here is now drawn whole and shown through a window, and all
+/// three of them - the board, a team, a project - move it the same way. It
+/// is one function so that a test can break it, which a copy inlined three
+/// times could not have.
+fn follow(at: usize, row: usize, room: usize) -> usize {
+    if row < at {
+        row
+    } else if row + 1 > at + room {
+        row + 1 - room
+    } else {
+        at
     }
 }
 
@@ -402,6 +454,8 @@ struct State {
     by_team: HashMap<String, HashMap<String, usize>>,
     /// Team key to that team's projects, ordered as the screen shows them.
     projects: HashMap<String, Vec<Proj>>,
+    /// Every project once, in the same order, for the board's own section.
+    all_projects: Vec<Proj>,
     /// Team key to project id to how many of that team's open issues sit in
     /// it. The empty id is the bucket for issues in no project at all, which
     /// is why the per-project figures do not sum to the team's open count.
@@ -551,7 +605,18 @@ fn one_pass(
         quota,
     )?;
     let mut projects: HashMap<String, Vec<Proj>> = HashMap::new();
+    let mut all_projects: Vec<Proj> = Vec::new();
     for pr in &proj_rows {
+        let owners: Vec<String> = pr["teams"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| text(t, "key"))
+            .filter(|k| keys.contains(k))
+            .collect();
+        if owners.is_empty() {
+            continue;
+        }
         let made = Proj {
             id: text(pr, "id"),
             name: text(pr, "name"),
@@ -560,22 +625,23 @@ fn one_pass(
             progress: pr["progress"].as_f64().unwrap_or(0.0),
             target: text(pr, "targetDate"),
             lead: text(&pr["lead"], "name"),
+            teams: owners.clone(),
         };
-        for t in pr["teams"]["nodes"].as_array().into_iter().flatten() {
-            let key = text(t, "key");
-            if keys.contains(&key) {
-                projects.entry(key).or_default().push(made.clone());
-            }
+        for key in owners {
+            projects.entry(key).or_default().push(made.clone());
         }
+        all_projects.push(made);
     }
+    let order = |a: &Proj, b: &Proj| {
+        rank(&a.kind)
+            .cmp(&rank(&b.kind))
+            .then(b.progress.total_cmp(&a.progress))
+            .then(a.name.cmp(&b.name))
+    };
     for list in projects.values_mut() {
-        list.sort_by(|a, b| {
-            rank(&a.kind)
-                .cmp(&rank(&b.kind))
-                .then(b.progress.total_cmp(&a.progress))
-                .then(a.name.cmp(&b.name))
-        });
+        list.sort_by(&order);
     }
+    all_projects.sort_by(&order);
 
     // Arrivals and departures over the window.
     let vars = serde_json::json!({ "since": since });
@@ -622,6 +688,7 @@ fn one_pass(
         guard.states = states;
         guard.by_team = by_team;
         guard.projects = projects;
+        guard.all_projects = all_projects;
         guard.proj_open = proj_open;
         guard.proj_state = proj_state;
         guard.proj_oldest = proj_oldest;
@@ -1506,14 +1573,15 @@ fn main() {
     // question rather than an answer. It also used to open on the cycles
     // pane while the footer said the arrows scrolled, which was wrong
     // twice over.
-    let (cycles_pane, teams_pane) = (0usize, 1usize);
+    // In the order they are drawn, which is the order the arrows walk them.
+    let (cycles_pane, teams_pane, projects_pane) = (0usize, 1usize, 2usize);
     let mut focus: Option<usize> = None;
-    let mut sel = [0usize, 0usize];
+    let mut sel = [0usize; 3];
     // How long each pane was when it was last drawn. The keys are read
     // before the frame is built, so walking off the end of a pane has to be
     // judged against the length it had a moment ago - which is the length
     // the reader is looking at.
-    let mut pane_len = [0usize, 0usize];
+    let mut pane_len = [0usize; 3];
     // Which pane's selection is open on a screen of its own, and how far
     // down it is scrolled.
     let (mut detail, mut dscroll): (Option<usize>, usize) = (None, 0);
@@ -1537,6 +1605,12 @@ fn main() {
     // frame that answers them is built.
     let mut projects_len = 0usize;
     let mut open_project: Option<String> = None;
+    // How far down the board itself is scrolled, and how tall it was when
+    // it was last drawn - the keys run before the frame that answers them.
+    let mut board = 0usize;
+    let mut board_len = 0usize;
+    // Which project the board's own list has under its cursor.
+    let mut board_project: Option<String> = None;
     let mut tick = 0usize;
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
@@ -1577,7 +1651,13 @@ fn main() {
                 // away. Empty panes are stepped over: focusing one leaves
                 // the arrows moving an index nothing is drawn from, which
                 // is a key that does nothing and says nothing.
-                "tab" => focus = tc::next_section(focus, &pane_len),
+                "tab" => {
+                    focus = tc::next_section(focus, &pane_len);
+                    // Back to no focus means back to reading the board,
+                    // and the window stays where the cursor left it rather
+                    // than jumping to the top.
+                    pick = 0;
+                }
                 // Enter opens whichever pane has the cursor. Without a
                 // focused pane there is nothing selected to open, which is
                 // the same rule the board's own cursor follows.
@@ -1597,11 +1677,27 @@ fn main() {
                         detail = focus;
                         dscroll = 0;
                         pick = 0;
+                        // The board's project list has no screen of its
+                        // own between the board and a project.
+                        if focus == Some(projects_pane) {
+                            deep = board_project.clone();
+                            pscroll = 0;
+                            if deep.is_none() {
+                                detail = None;
+                            }
+                        }
                     }
                 }
                 // Back one level at a time: out of a project to the team
                 // that owns it, and only then to the board.
-                "left" | "esc" if deep.is_some() => deep = None,
+                "left" | "esc" if deep.is_some() => {
+                    deep = None;
+                    // A project opened from the board's own list has no
+                    // team screen behind it to come back to.
+                    if detail == Some(projects_pane) {
+                        detail = None;
+                    }
+                }
                 "left" | "esc" if detail.is_some() => detail = None,
                 // A team's screen hands the arrows to its project list and
                 // scrolls itself to follow; every other screen has nothing
@@ -1646,20 +1742,44 @@ fn main() {
                 "up" | "down" => {
                     let down = key == "down";
                     pick = 0;
-                    focus = match focus {
-                        Some(here) => tc::step_across_sections(here, sel[here], &pane_len, down)
-                            .map(|(pane, row)| {
-                                sel[pane] = row;
-                                pane
-                            }),
-                        // Nothing focused, and no screen scroll to hand the
-                        // arrows to - both panes window themselves. They
-                        // step into the near end of the first pane that has
-                        // rows, so the ring closes the way latency's does.
-                        None => tc::next_section(None, &pane_len).map(|here| {
-                            sel[here] = if down { 0 } else { pane_len[here] - 1 };
-                            here
-                        }),
+                    match focus {
+                        Some(here) => {
+                            focus = tc::step_across_sections(here, sel[here], &pane_len, down)
+                                .map(|(pane, row)| {
+                                    sel[pane] = row;
+                                    pane
+                                });
+                        }
+                        // Nothing focused: the arrows move the board. The
+                        // board is taller than the pane and every section
+                        // is drawn whole, so this is the only way to reach
+                        // the bottom of it without picking a section first.
+                        None => {
+                            board = if down {
+                                board.saturating_add(1)
+                            } else {
+                                board.saturating_sub(1)
+                            };
+                        }
+                    }
+                }
+                "pgup" | "pgdn" => {
+                    let page = tc::size().1.saturating_sub(3).max(1);
+                    if focus.is_none() {
+                        board = if key == "pgdn" {
+                            board.saturating_add(page).min(board_len.saturating_sub(1))
+                        } else {
+                            board.saturating_sub(page)
+                        };
+                    } else if let Some(here) = focus {
+                        // A page through a focused section, clamped to it -
+                        // crossing out of a section is what the single
+                        // arrows are for.
+                        sel[here] = if key == "pgdn" {
+                            sel[here].saturating_add(page).min(pane_len[here].saturating_sub(1))
+                        } else {
+                            sel[here].saturating_sub(page)
+                        };
                     }
                 }
                 _ => {}
@@ -1678,6 +1798,9 @@ fn main() {
         let left = quota.lock().map(|g| g.requests).unwrap_or(None);
 
         let mut rows = vec![tc::title("linear ops", w, &p.new)];
+        // Where the focused section's cursor landed, so the board can be
+        // scrolled to keep it on screen.
+        let mut cursor: Option<usize> = None;
         let mut head = vec![
             (
                 p.dim.as_str(),
@@ -1834,14 +1957,6 @@ fn main() {
         if !ranked_cycles.is_empty() {
             sel[cycles_pane] = sel[cycles_pane].min(ranked_cycles.len() - 1);
         }
-        let shown = ((h.saturating_sub(rows.len())) / 4).clamp(2, 6);
-        let cfirst = if ranked_cycles.len() > shown {
-            sel[cycles_pane]
-                .saturating_sub(shown / 2)
-                .min(ranked_cycles.len() - shown)
-        } else {
-            0
-        };
         let here_now = focus == Some(cycles_pane);
         rows.push(tc::seg(
             &[
@@ -1852,17 +1967,7 @@ fn main() {
                 (p.dim.as_str(), format!("{} running", s.cycles.len())),
                 (
                     if here_now { p.accent.as_str() } else { p.dim.as_str() },
-                    if ranked_cycles.len() > shown {
-                        format!(
-                            "   {}{}-{} of {}",
-                            if here_now { "↑↓ " } else { "" },
-                            cfirst + 1,
-                            (cfirst + shown).min(ranked_cycles.len()),
-                            ranked_cycles.len()
-                        )
-                    } else {
-                        String::new()
-                    },
+                    if here_now { "   ↑↓".to_string() } else { String::new() },
                 ),
             ],
             w - 1,
@@ -1873,7 +1978,10 @@ fn main() {
                 w - 1,
             ));
         }
-        for (ci, c) in ranked_cycles.iter().enumerate().skip(cfirst).take(shown) {
+        for (ci, c) in ranked_cycles.iter().enumerate() {
+            if here_now && ci == sel[cycles_pane] {
+                cursor = Some(rows.len());
+            }
             let scope = last_of(c, "scopeHistory");
             let done = last_of(c, "completedScopeHistory");
             let opened_at = first_of(c, "scopeHistory");
@@ -2102,12 +2210,6 @@ fn main() {
         if !ranked.is_empty() {
             sel[teams_pane] = sel[teams_pane].min(ranked.len() - 1);
         }
-        let room = h.saturating_sub(5 + rows.len()).max(1);
-        let first = if ranked.len() > room {
-            sel[teams_pane].saturating_sub(room / 2).min(ranked.len() - room)
-        } else {
-            0
-        };
         let on_teams = focus == Some(teams_pane);
         rows.push(tc::seg(
             &[
@@ -2117,17 +2219,7 @@ fn main() {
                 ),
                 (
                     if on_teams { p.accent.as_str() } else { p.dim.as_str() },
-                    if ranked.len() > room {
-                        format!(
-                            "   {}{}-{} of {}",
-                            if on_teams { "↑↓ " } else { "" },
-                            first + 1,
-                            (first + room).min(ranked.len()),
-                            ranked.len()
-                        )
-                    } else {
-                        String::new()
-                    },
+                    if on_teams { "   ↑↓".to_string() } else { String::new() },
                 ),
             ],
             w - 1,
@@ -2149,7 +2241,10 @@ fn main() {
             )],
             w - 1,
         ));
-        for (i, (key, name)) in ranked.iter().enumerate().skip(first).take(room) {
+        for (i, (key, name)) in ranked.iter().enumerate() {
+            if on_teams && i == sel[teams_pane] {
+                cursor = Some(rows.len());
+            }
             let empty = HashMap::new();
             let c = s.by_team.get(key).unwrap_or(&empty);
             let count = |k: &str| c.get(k).copied().unwrap_or(0);
@@ -2186,6 +2281,130 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
         }
+        // Every project that is still going, whichever team owns it. The
+        // board reaches them without going through a team first, the way
+        // it reaches cycles without going through one.
+        rows.push(String::new());
+        let live: Vec<Proj> = s
+            .all_projects
+            .iter()
+            .filter(|q| q.kind != "completed" && q.kind != "canceled")
+            .cloned()
+            .collect();
+        let finished = s.all_projects.len() - live.len();
+        pane_len[projects_pane] = live.len();
+        if !live.is_empty() {
+            sel[projects_pane] = sel[projects_pane].min(live.len() - 1);
+        }
+        board_project = live.get(sel[projects_pane]).map(|q| q.id.clone());
+        let on_projects = focus == Some(projects_pane);
+        rows.push(tc::seg(
+            &[
+                (
+                    if on_projects { p.accent.as_str() } else { p.lbl.as_str() },
+                    " ── PROJECTS ── ".into(),
+                ),
+                // What is not in the list, because a count of the running
+                // ones alone reads as a count of all of them.
+                (
+                    p.dim.as_str(),
+                    if finished > 0 {
+                        format!("{} running · {} finished, not listed", live.len(), finished)
+                    } else {
+                        format!("{} running", live.len())
+                    },
+                ),
+                (
+                    if on_projects { p.accent.as_str() } else { p.dim.as_str() },
+                    if on_projects { "   ↑↓".to_string() } else { String::new() },
+                ),
+            ],
+            w - 1,
+        ));
+        if live.is_empty() {
+            rows.push(tc::seg(
+                &[(p.dim.as_str(), "  no project is running in any team".into())],
+                w - 1,
+            ));
+        }
+        {
+            // Sized the way the team screen sizes its own list: no column
+            // capped, the bar taking what is left, and the aside shedding
+            // whole facts rather than being cut through the middle.
+            let asides: Vec<String> = live
+                .iter()
+                .map(|q| {
+                    let open: usize =
+                        s.proj_state.get(&q.id).map(|m| m.values().sum()).unwrap_or(0);
+                    if open > 0 {
+                        format!("{} open", open)
+                    } else {
+                        String::new()
+                    }
+                })
+                .collect();
+            let widest = |xs: &mut dyn Iterator<Item = usize>| xs.max().unwrap_or(0);
+            let team_w = widest(&mut live.iter().map(|q| q.teams.join("/").chars().count())).max(4);
+            let name_w = widest(&mut live.iter().map(|q| q.name.chars().count())).max(8);
+            let label_w = widest(&mut live.iter().map(|q| q.label.chars().count())).max(4);
+            let full = widest(&mut asides.iter().map(|a| a.chars().count()));
+            // Something has to go at narrow widths: the longest project
+            // name in this workspace is 47 characters, and at eighty
+            // columns the name, the team and the status alone do not fit.
+            let base = 2 + team_w + 2 + name_w + 5;
+            let (label_cost, bar_w, room) = project_columns(w, base, label_w, full);
+            for (i, (q, aside)) in live.iter().zip(&asides).enumerate() {
+                let here = on_projects && i == sel[projects_pane];
+                if here {
+                    cursor = Some(rows.len());
+                }
+                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let c_of = |colour: &str| format!("{}{}", tint, colour);
+                let colour = match q.kind.as_str() {
+                    "started" => p.warn.as_str(),
+                    _ => p.txt.as_str(),
+                };
+                let aside = if aside.chars().count() <= room { aside.as_str() } else { "" };
+                let aside =
+                    if aside.is_empty() { String::new() } else { format!("  {}", aside) };
+                let line: Vec<(String, String)> = vec![
+                    (
+                        c_of(if here { &p.accent } else { &p.dim }),
+                        format!(
+                            "{} {}",
+                            if here { "▸" } else { " " },
+                            tc::pad(&q.teams.join("/"), team_w)
+                        ),
+                    ),
+                    (
+                        c_of(if here { &p.accent } else { &p.txt }),
+                        format!("  {}", tc::pad(&q.name, name_w)),
+                    ),
+                    (
+                        c_of(colour),
+                        if label_cost > 0 {
+                            format!("  {}", tc::pad(&q.label, label_w))
+                        } else {
+                            String::new()
+                        },
+                    ),
+                    (
+                        c_of(colour),
+                        if bar_w > 0 {
+                            format!("  {}", tc::meter(q.progress, bar_w))
+                        } else {
+                            String::new()
+                        },
+                    ),
+                    (c_of(&p.txt), format!(" {:>3.0}%", 100.0 * q.progress)),
+                    (c_of(&p.dim), aside),
+                ];
+                let refs: Vec<(&str, String)> =
+                    line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                rows.push(tc::seg(&refs, w - 1));
+            }
+        }
+
         // One cycle, one team, or one of that team's projects, each on a
         // screen of its own.
         if let Some(which) = detail {
@@ -2206,9 +2425,12 @@ fn main() {
             // The project being read is found by its id, so a poll that
             // re-sorts the list underneath cannot swap it for its
             // neighbour.
+            // Looked up across the whole workspace, because the project
+            // may have been opened from the board's list rather than from
+            // the team whose screen is behind it.
             let reading = deep
                 .as_ref()
-                .and_then(|id| projects.iter().find(|q| &q.id == id).cloned());
+                .and_then(|id| s.all_projects.iter().find(|q| &q.id == id).cloned());
             let (body, cursor) = if let Some(q) = reading.as_ref() {
                 let empty = HashMap::new();
                 let states = s.proj_state.get(&q.id).unwrap_or(&empty);
@@ -2217,7 +2439,7 @@ fn main() {
                 (
                     project_detail(
                         q,
-                        team.as_ref().map(|(k, _)| k.as_str()).unwrap_or(""),
+                        &q.teams.join(" · "),
                         record.as_ref(),
                         states,
                         oldest.as_ref(),
@@ -2302,7 +2524,15 @@ fn main() {
                     (p.accent.as_str(), "←".into()),
                     (
                         p.dim.as_str(),
-                        if reading.is_some() { "/esc the team".into() } else { "/esc back".to_string() },
+                        // Back goes wherever this screen was opened from,
+                        // and says which: a project reached through a team
+                        // returns to that team, one reached from the
+                        // board's own list returns to the board.
+                        if reading.is_some() && which == teams_pane {
+                            "/esc the team".to_string()
+                        } else {
+                            "/esc back".to_string()
+                        },
                     ),
                 ]);
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
@@ -2316,11 +2546,7 @@ fn main() {
                 // The page follows the cursor into the project list, the
                 // way netwatch's detail follows one into a section.
                 if let Some(row) = cursor {
-                    if row < *at {
-                        *at = row;
-                    } else if row >= *at + room {
-                        *at = row + 1 - room;
-                    }
+                    *at = follow(*at, row, room);
                 }
                 *at = (*at).min(body.len().saturating_sub(room));
                 let from = *at;
@@ -2341,32 +2567,57 @@ fn main() {
             deep = None;
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            // Not "scroll": nothing on this board scrolls. The arrows move
-            // a cursor through whichever pane has the focus, and both panes
-            // window themselves around it.
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+        // The board is taller than the pane, so the arrows do one of two
+        // things and the footer has to say which. Unfocused they move the
+        // whole board; focused they move a cursor through one section, and
+        // the board follows.
+        let mut hints: Vec<Vec<(&str, String)>> = vec![
+            vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (
+                    p.dim.as_str(),
+                    if focus.is_some() { " select" } else { " scroll" }.to_string(),
+                ),
+            ],
             vec![
                 (p.accent.as_str(), "tab".into()),
                 (
                     p.dim.as_str(),
-                    if focus.is_some() { " next pane" } else { " into a pane" }.to_string(),
+                    if focus.is_some() { " next section" } else { " into a section" }.to_string(),
                 ),
             ],
-            vec![(p.dim.as_str(), "[w]indow".into())],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
         ];
+        if focus.is_some() {
+            hints.push(vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " open it".into()),
+            ]);
+        }
+        hints.push(vec![(p.dim.as_str(), "pgup/pgdn page".into())]);
+        hints.push(vec![(p.dim.as_str(), "[w]indow".into())]);
+        hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
+        hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
         let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        rows.truncate(h.saturating_sub(footer.len()));
-        while rows.len() < h.saturating_sub(footer.len()) {
-            rows.push(String::new());
+        // The board is longer than most panes are tall, and every section
+        // is now drawn whole - so the frame is a window onto it. With a
+        // section focused the window chases its cursor; with none, the
+        // arrows move the window itself.
+        let room = h.saturating_sub(footer.len()).max(1);
+        if let Some(at) = cursor {
+            board = follow(board, at, room);
         }
-        rows.extend(footer);
-        tc::draw(&rows, w, h);
+        board = board.min(rows.len().saturating_sub(room));
+        board_len = rows.len();
+        let last = (board + room).min(rows.len());
+        let mut out: Vec<String> = rows[board..last].to_vec();
+        while out.len() < room {
+            out.push(String::new());
+        }
+        out.extend(footer);
+        tc::draw(&out, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -2636,6 +2887,97 @@ mod tests {
         let row = rows[seat("sooner")];
         assert!(row.contains(" 68%"), "{}", row);
         assert!(row.contains('░'), "a 68% bar is not full: {}", row);
+    }
+
+    #[test]
+    fn the_board_walks_three_sections_and_lets_go_only_at_the_ends() {
+        // Cycles, teams, then the board's own project list, in the order
+        // they are drawn. The rule is the same one every widget here with
+        // focusable sections follows; this is the third section arriving.
+        let lens = [5usize, 14, 34];
+        assert_eq!(tc::next_section(None, &lens), Some(0));
+        assert_eq!(tc::next_section(Some(0), &lens), Some(1));
+        assert_eq!(tc::next_section(Some(1), &lens), Some(2));
+        assert_eq!(tc::next_section(Some(2), &lens), None);
+        // Down off the last cycle lands on the first team, and off the
+        // last team on the first project.
+        assert_eq!(tc::step_across_sections(0, 4, &lens, true), Some((1, 0)));
+        assert_eq!(tc::step_across_sections(1, 13, &lens, true), Some((2, 0)));
+        assert_eq!(tc::step_across_sections(2, 33, &lens, true), None);
+        // And back up the same way, into the *last* row of the section
+        // above rather than its first.
+        assert_eq!(tc::step_across_sections(2, 0, &lens, false), Some((1, 13)));
+        assert_eq!(tc::step_across_sections(1, 0, &lens, false), Some((0, 4)));
+        assert_eq!(tc::step_across_sections(0, 0, &lens, false), None);
+        // A section with nothing in it is stepped over, not landed on.
+        let gap = [5usize, 0, 34];
+        assert_eq!(tc::step_across_sections(0, 4, &gap, true), Some((2, 0)));
+        assert_eq!(tc::next_section(Some(0), &gap), Some(2));
+    }
+
+    #[test]
+    fn a_project_row_never_overflows_and_never_loses_ground_as_it_widens() {
+        // Both bugs this function exists for, stated as properties.
+        let (base, label_w, aside) = (2 + 7 + 2 + 47 + 5, 11usize, 8usize);
+        let mut had: Option<(bool, bool, bool)> = None;
+        for w in 40..200usize {
+            let (label_cost, bar, room) = project_columns(w, base, label_w, aside);
+            let bar_cost = if bar > 0 { 2 + bar } else { 0 };
+            // It fits, once there is room for the name at all. Anything
+            // wider than the pane is cut by `seg`, and what `seg` cuts is
+            // the percentage - the row's only number.
+            if base <= w - 1 {
+                let aside_cost = if room > 0 { 2 + room } else { 0 };
+                assert!(
+                    base + label_cost + bar_cost + aside_cost <= w - 1,
+                    "w={} overflows: base {} label {} bar {} aside {}",
+                    w, base, label_cost, bar_cost, aside_cost
+                );
+            } else {
+                // Too narrow even for the name: nothing optional is added
+                // on top of a row that is already over the edge.
+                assert_eq!((label_cost, bar, room), (0, 0, 0), "w={}", w);
+            }
+            // A wider pane never shows less than a narrower one did.
+            let now = (label_cost > 0, bar > 0, room >= aside);
+            if let Some(before) = had {
+                assert!(
+                    now.0 >= before.0 && now.1 >= before.1 && now.2 >= before.2,
+                    "w={} lost a column the narrower pane had: {:?} then {:?}",
+                    w, before, now
+                );
+            }
+            had = Some(now);
+        }
+        // And at the ends: nothing optional survives a very narrow pane,
+        // everything does in a wide one.
+        assert_eq!(project_columns(50, base, label_w, aside), (0, 0, 0));
+        let (label_cost, bar, room) = project_columns(190, base, label_w, aside);
+        assert!(label_cost > 0 && bar == 30 && room >= aside);
+    }
+
+    #[test]
+    fn the_window_chases_a_cursor_it_cannot_see() {
+        // Stated as what the reader sees rather than as the arithmetic:
+        // wherever the cursor is, the window has to contain it, and it has
+        // to move as little as it can to do that.
+        let holds = |at: usize, row: usize, room: usize| row >= at && row < at + room;
+        for room in [1usize, 3, 20] {
+            for start in [0usize, 5, 30] {
+                for row in [0usize, 4, 7, 12, 40] {
+                    let moved = follow(start, row, room);
+                    assert!(holds(moved, row, room), "row {} not in {}..+{}", row, moved, room);
+                    // Not moved at all when it did not need to be.
+                    if holds(start, row, room) {
+                        assert_eq!(moved, start, "moved without needing to");
+                    }
+                }
+            }
+        }
+        // Reaching down puts the cursor on the last row, not past it.
+        assert_eq!(follow(0, 40, 20) + 20, 41);
+        // Reaching up puts it on the first.
+        assert_eq!(follow(30, 4, 20), 4);
     }
 
     #[test]

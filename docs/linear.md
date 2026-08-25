@@ -110,8 +110,24 @@ down, one bar per day, both directions on a shared scale. Read together they
 say whether the queue is filling faster than it drains. In the board above, 297
 created against 88 completed.
 
-**By team** — ranked by open volume, windowing around the cursor when focused
-and there are more teams than rows. `DONE14D` follows the window.
+**By team** — ranked by open volume. `DONE14D` follows the window the header
+names.
+
+**Projects** — every project still going, whichever team owns it, running work
+first. One shared between teams shows both keys (`OPS/WEB`) and appears once.
+
+```
+ ── PROJECTS ── 34 running · 9 finished, not listed   ↑↓
+▸ OPS      uptime-monitoring                   Maintenance  █████████████ 100%
+  WEB      checkout-rewrite                    In Progress  █████████░░░░  72%  110 open
+  OPS/WEB  storage-provider-swap               Paused       ░░░░░░░░░░░░░   3%  9 open
+  CLI      offline-mode                        Idea         ░░░░░░░░░░░░░   0%  25 open
+```
+
+Finished and cancelled projects are not on the board - the heading says how
+many, because "34 running" alone reads as a count of all of them. They are all
+still on their team's own screen. `↵` here opens a project directly, without
+going through its team.
 
 ## One cycle, or one team
 
@@ -139,8 +155,8 @@ Under that, **every project the team owns**:
   cluster-migration          Completed    █████████████░░  87%  2 open · due 2024-07-26 · A Lead
 ```
 
-`↑` `↓` move a cursor through that list and the screen scrolls to follow it;
-`→` or `↵` opens the project under the cursor.
+`↑` `↓` move a cursor through that list and the screen scrolls to follow it,
+the same way the board does; `→` or `↵` opens the project under the cursor.
 
 Running work sorts first and finished work last, with a status this build has
 never heard of sorting *with* the live work rather than under the dead work —
@@ -246,29 +262,39 @@ reporting a smaller number.
 
 ## Keys
 
-The board opens with no cursor anywhere — it is a thing to read before it is a
-thing to work. `tab` focuses a pane, and the focused heading says so by
-carrying the `↑↓` marker and its visible range; `↑` `↓` then move a cursor
-through that pane, which windows itself around it.
+The board is longer than most panes are tall, and **every section is drawn
+whole** - the pane is a window onto it. So the arrows do one of two things, and
+the footer says which.
 
-Under the arrows the two panes read as **one continuous list**: `↓` off the
-bottom of the cycles steps into the top of the teams, and `↑` off the top of
-the teams steps into the *bottom* of the cycles. `tab` is the shortcut across
-a whole pane rather than the only way between them.
+The board opens with no cursor anywhere - it is a thing to read before it is a
+thing to work - and there the arrows and `PgUp` `PgDn` move the window: the way
+to read the whole board without picking a section first.
 
-You let go at exactly two places: `↑` from the first cycle, and `↓` from the
-last team. `tab` from the last pane does the same. Panes with nothing in them
-are stepped over in every direction.
+`tab` focuses a section, and the focused heading says so by carrying an arrow
+marker. The arrows then move a cursor through that section, and the window
+follows it - a cursor below the fold pulls the board down, one above it pulls
+it up, each by as little as it takes.
+
+Under the arrows the three sections read as **one continuous list**: down off
+the bottom of the cycles steps into the top of the teams, off the bottom of the
+teams into the top of the projects; up steps back the same way, into the
+*last* row of the section above. `tab` is the shortcut across a whole section
+rather than the only way between them.
+
+You let go at exactly two places: up from the first cycle, and down from the
+last project. `tab` from the last section does the same, and hands the arrows
+back to the board. Sections with nothing in them are stepped over in every
+direction.
 
 **This is the same rule in every widget here that has focusable sections.**
 
 | Key | Action |
 |---|---|
-| `tab` | focus the next pane, and from the last one back to no focus |
-| `↑` `↓` | move the cursor, crossing between panes at their ends — or step into one when none is focused |
-| `↵` `→` | open the highlighted cycle or team — and from a team, the project under its cursor |
-| `←` `esc` | back one level: a project to its team, a team to the board |
-| `↑` `↓` `PgUp` `PgDn` | move the cursor through a team's projects, or scroll any other detail screen |
+| `tab` | focus the next section, and from the last one back to no focus |
+| `↑` `↓` | scroll the board — or, with a section focused, move its cursor, crossing between sections at their ends |
+| `PgUp` `PgDn` | the same, a page at a time |
+| `↵` `→` | open the highlighted cycle, team or project — and from a team, the project under its cursor |
+| `←` `esc` | back one level: a project to wherever it was opened from, a team to the board |
 | `r` | refresh, including the open project's own record |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
