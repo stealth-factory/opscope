@@ -524,6 +524,21 @@ struct Palette {
     warn: String,
     bad: String,
     dim: String,
+    /// A colour to draw over the selected-row tint.
+    ///
+    /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
+    /// against the tint as well as the background. This is the same grey lifted
+    /// until it clears - 4.94 - and it is used *only* where the tint is on, so
+    /// an unselected row is exactly the colour it always was.
+    ///
+    /// The substitution happens inside the closure that composes the tint, not
+    /// at each call site. Seventeen sites were counted when this was found and
+    /// there were twenty-three by the time it was fixed; more than half of them
+    /// reach `dim` through a condition that has nothing to do with selection -
+    /// `if count > 0 { loud } else { dim }` - and a zero count is the normal
+    /// state, so those are the common case rather than the rare one. Anyone
+    /// fixing this a call site at a time would fix the obvious half.
+    dim_lit: String,
     grid: String,
     txt: String,
     lbl: String,
@@ -537,6 +552,7 @@ fn palette() -> Palette {
         warn: tc::rgb(255, 200, 90),
         bad: tc::rgb(255, 100, 110),
         dim: tc::rgb(127, 147, 172),
+        dim_lit: tc::rgb(140, 170, 195),
         grid: tc::rgb(60, 78, 98),
         txt: tc::rgb(225, 235, 245),
         lbl: tc::rgb(130, 165, 200),
@@ -1492,7 +1508,14 @@ fn list_view(
     for (i, pr) in prs.iter().enumerate().skip(first).take(room) {
         let here = i == selected;
         let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
-        let c = |colour: &str| format!("{}{}", tint, colour);
+        let c = |colour: &str| {
+                let colour = if tint.is_empty() || colour != p.dim {
+                    colour
+                } else {
+                    p.dim_lit.as_str()
+                };
+                format!("{}{}", tint, colour)
+            };
         let (rlabel, rcol) = review_label(&text(pr, "reviewDecision"), p);
         let (clabel, ccol) = check_label(&rollup(pr), p);
         let stacked = !pr["stackEntry"].is_null();
@@ -1959,7 +1982,14 @@ fn detail_view(
             };
             let on_cursor = idx == stack_sel;
             let tint = if on_cursor { tc::bg(38, 56, 76) } else { String::new() };
-            let c = |colour: &str| format!("{}{}", tint, colour);
+            let c = |colour: &str| {
+                let colour = if tint.is_empty() || colour != p.dim {
+                    colour
+                } else {
+                    p.dim_lit.as_str()
+                };
+                format!("{}{}", tint, colour)
+            };
             let mut name = text(node, "title");
             if let Some(pos) = position {
                 name = format!("{}. {}", pos, name);

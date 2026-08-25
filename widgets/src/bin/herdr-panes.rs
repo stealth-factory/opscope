@@ -459,6 +459,21 @@ struct Palette {
     idle: String,
     unknown: String,
     dim: String,
+    /// A colour to draw over the selected-row tint.
+    ///
+    /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
+    /// against the tint as well as the background. This is the same grey lifted
+    /// until it clears - 4.94 - and it is used *only* where the tint is on, so
+    /// an unselected row is exactly the colour it always was.
+    ///
+    /// The substitution happens inside the closure that composes the tint, not
+    /// at each call site. Seventeen sites were counted when this was found and
+    /// there were twenty-three by the time it was fixed; more than half of them
+    /// reach `dim` through a condition that has nothing to do with selection -
+    /// `if count > 0 { loud } else { dim }` - and a zero count is the normal
+    /// state, so those are the common case rather than the rare one. Anyone
+    /// fixing this a call site at a time would fix the obvious half.
+    dim_lit: String,
     txt: String,
     lbl: String,
     accent: String,
@@ -474,6 +489,7 @@ fn palette() -> Palette {
         idle: tc::rgb(128, 148, 172),
         unknown: tc::rgb(150, 150, 165),
         dim: tc::rgb(127, 147, 172),
+        dim_lit: tc::rgb(140, 170, 195),
         txt: tc::rgb(225, 235, 245),
         lbl: tc::rgb(130, 165, 200),
         accent: tc::rgb(150, 210, 255),
@@ -822,7 +838,14 @@ fn main() {
             } else {
                 String::new()
             };
-            let c = |colour: &str| format!("{}{}", tint, colour);
+            let c = |colour: &str| {
+                let colour = if tint.is_empty() || colour != p.dim {
+                    colour
+                } else {
+                    p.dim_lit.as_str()
+                };
+                format!("{}{}", tint, colour)
+            };
             let name: String = a.name.chars().take(6).collect();
             let state_cell = if loud {
                 a.state.to_uppercase()
@@ -919,7 +942,14 @@ fn main() {
             }
             let here = agents.len() + j == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
-            let c = |colour: &str| format!("{}{}", tint, colour);
+            let c = |colour: &str| {
+                let colour = if tint.is_empty() || colour != p.dim {
+                    colour
+                } else {
+                    p.dim_lit.as_str()
+                };
+                format!("{}{}", tint, colour)
+            };
             let heat = match n.cpu {
                 Some(v) if v > 0.0 => tc::heat((v / 100.0).min(1.0)),
                 _ => p.dim.clone(),
@@ -984,7 +1014,14 @@ fn main() {
                 }
                 let here = agents.len() + running.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
-                let c = |colour: &str| format!("{}{}", tint, colour);
+                let c = |colour: &str| {
+                let colour = if tint.is_empty() || colour != p.dim {
+                    colour
+                } else {
+                    p.dim_lit.as_str()
+                };
+                format!("{}{}", tint, colour)
+            };
                 let place = if show_labels {
                     let label = labels.get(&n.workspace_id).cloned().unwrap_or_default();
                     if label.is_empty() { n.workspace_id.clone() } else { label }

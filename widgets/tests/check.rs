@@ -528,6 +528,120 @@ fn every_key_the_help_text_names_is_answered() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+fn luminance(rgb: (f64, f64, f64)) -> f64 {
+    let ch = |c: f64| {
+        let c = c / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * ch(rgb.0) + 0.7152 * ch(rgb.1) + 0.0722 * ch(rgb.2)
+}
+
+fn contrast(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// The three numbers in the first `call(r, g, b)` on a line.
+fn triple(line: &str, call: &str) -> Option<(f64, f64, f64)> {
+    let at = line.find(call)?;
+    let open = line[at..].find('(')? + at;
+    let close = line[open..].find(')')? + open;
+    let n: Vec<f64> = line[open + 1..close]
+        .split(',')
+        .filter_map(|x| x.trim().parse().ok())
+        .collect();
+    (n.len() == 3).then(|| (n[0], n[1], n[2]))
+}
+
+/// Text drawn over a selection tint has to clear AA against the tint, not
+/// only against the terminal's own background.
+///
+/// CLAUDE.md has asked for this in prose since before the port, and it went
+/// unmet in four widgets for as long as there were four widgets: `dim` at
+/// (127, 147, 172) measures 3.81 on `bg(38, 56, 76)`. The count of places it
+/// reached a tinted row grew from seventeen to twenty-three while that sat
+/// open, which is what prose costs.
+///
+/// Only colours that actually meet are compared. The first version of this
+/// paired every `bg()` in a file with every grey in it and reported two
+/// widgets that were fine - one of them on a tint that exists in a test
+/// fixture, the other on a tint only ever drawn with `accent`. A check that
+/// cries wolf gets turned off.
+#[test]
+fn text_on_a_selection_tint_clears_aa() {
+    let mut wrong = Vec::new();
+    for (name, whole) in widgets() {
+        // Fixtures are not the screen.
+        let src = whole.split("#[cfg(test)]").next().unwrap_or("").to_string();
+        let mut greys: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
+        for line in src.lines() {
+            for field in ["dim", "dim_lit"] {
+                if line.trim_start().starts_with(&format!("{}: tc::rgb", field)) {
+                    if let Some(c) = triple(line, "tc::rgb") {
+                        greys.insert(field.to_string(), c);
+                    }
+                }
+            }
+        }
+        // What each tint is composed with, one line at a time.
+        for line in src.lines() {
+            let Some(tint) = triple(line, "tc::bg") else { continue };
+            // Composed inline with a named colour: that exact pair.
+            let named: Vec<&str> = ["dim_lit", "dim", "accent", "txt"]
+                .into_iter()
+                .filter(|f| line.contains(&format!("p.{}", f)))
+                .collect();
+            // Or assigned to `tint` and composed later, where the greys are
+            // what reach it - the lighter one when the widget has it.
+            let reached: Vec<String> = if line.contains("tint") && named.is_empty() {
+                greys
+                    .contains_key("dim_lit")
+                    .then(|| vec!["dim_lit".to_string()])
+                    .unwrap_or_else(|| greys.keys().cloned().collect())
+            } else {
+                named.into_iter().map(str::to_string).collect()
+            };
+            for field in reached {
+                let Some(&c) = greys.get(&field) else { continue };
+                let r = contrast(c, tint);
+                if r < 4.5 {
+                    wrong.push(format!(
+                        "{}: {} {:?} on tint {:?} measures {:.2}, under AA 4.5",
+                        name, field, c, tint, r
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "on the selected-row tint:\n{}", wrong.join("\n"));
+}
+
+/// A widget with a lighter grey has to actually reach for it.
+///
+/// The check above measures the colour and cannot see the wiring: delete the
+/// substitution inside the tint closure and `dim` goes back on the tint while
+/// `dim_lit` sits in the palette measuring beautifully. So the substitution
+/// is counted instead - once per closure that composes a tint.
+#[test]
+fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
+    let mut wrong = Vec::new();
+    for (name, whole) in widgets() {
+        let src = whole.split("#[cfg(test)]").next().unwrap_or("").to_string();
+        if !src.contains("dim_lit: tc::rgb") {
+            continue;
+        }
+        let closures = src.matches("format!(\"{}{}\", tint, colour)").count();
+        let swaps = src.matches("dim_lit.as_str()").count() + src.matches("&p.dim_lit").count();
+        if swaps < closures {
+            wrong.push(format!(
+                "{}: {} tint closures but {} reach for dim_lit",
+                name, closures, swaps
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));
+}
+
 #[test]
 fn a_poller_that_dies_records_why() {
     // CLAUDE.md's central gotcha: a thread that stops takes its
