@@ -319,6 +319,14 @@ Every list is drawn in full, always, and `↑` `↓` scroll the screen. `tab`
 focuses a list instead: the focused one is marked `▏`, `↑` `↓` then move a
 cursor `▸` inside it, and `c` copies whatever that cursor is on.
 
+Exactly one *other* heading carries `[tab] to focus`, and it is the one tab
+would actually focus next — not all of them, because tab cycles and a `[tab]`
+on all three would promise three lists that one press reaches. This heading
+used to name a key per list, `[e]` and `[f]`, pointing at keys that no longer
+existed; tab was the only one that was ever true, so tab is what is left, and
+only where it is true. A list with nothing in it never carries it, because tab
+steps over those.
+
 Under the arrows the three lists read as **one continuous list**: `↓` off the
 bottom of a list steps into the top of the next, and `↑` off the top steps
 into the *bottom* of the one above — the row you were about to reach if they

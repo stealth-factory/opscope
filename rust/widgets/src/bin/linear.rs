@@ -142,8 +142,8 @@ query($after: String) {{
   issues(first: {}, after: $after,
          filter: {{ state: {{ type: {{ nin: ["completed", "canceled",
                                           "duplicate"] }} }} }}) {{
-    nodes {{ identifier estimate startedAt createdAt
-            state {{ type }} team {{ key }} project {{ id }} }}
+    nodes {{ identifier title url estimate startedAt createdAt
+            state {{ type }} team {{ key }} project {{ id }} cycle {{ id }} }}
     pageInfo {{ hasNextPage endCursor }}
   }}
 }}"#,
@@ -181,7 +181,7 @@ const CYCLES_QUERY: &str = r#"
 {
   cycles(first: 50, filter: { isActive: { eq: true } }) {
     nodes {
-      name number startsAt endsAt progress
+      id name number startsAt endsAt progress
       issueCountHistory completedIssueCountHistory
       scopeHistory completedScopeHistory
       team { key name }
@@ -306,6 +306,22 @@ fn median(xs: &[f64]) -> Option<f64> {
     })
 }
 
+/// One open issue, as much of it as a list needs.
+///
+/// Every field here rides the pass the board already makes over every open
+/// issue, so a cycle's list of them costs no request of its own.
+#[derive(Clone, Default)]
+struct Issue {
+    ident: String,
+    title: String,
+    url: String,
+    state: String,
+    /// Hours since it was created.
+    age: f64,
+    /// None when nobody has pointed it, which is not the same as zero.
+    points: Option<f64>,
+}
+
 /// One project, as much of it as a team's screen needs.
 ///
 /// `progress` is Linear's own published figure, not one derived here: it
@@ -427,6 +443,45 @@ fn joined(parts: &[String]) -> String {
     parts.join(" · ")
 }
 
+/// What a section heading says about the keys, given where the focus is.
+///
+/// The focused one carries the arrows. Exactly one other carries `[tab]` -
+/// the one tab would actually focus next - because tab cycles, and a
+/// `[tab]` on every heading would promise three sections that one press
+/// reaches, when one press reaches one of them. netwatch learned this the
+/// expensive way with per-heading letters bound to keys that had gone; the
+/// note in its `section_head` says tab was the only one that was ever true.
+fn heading_keys(me: usize, focus: Option<usize>, lens: &[usize]) -> &'static str {
+    if focus == Some(me) {
+        "   ↑↓"
+    } else if tc::next_section(focus, lens) == Some(me) {
+        "   [tab] to focus"
+    } else {
+        ""
+    }
+}
+
+/// A count with its noun, singular when it is one.
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
+}
+
+/// Where an issue's state sorts: what is moving first, what nobody has
+/// looked at last.
+fn state_rank(state: &str) -> usize {
+    match state {
+        "started" => 0,
+        "unstarted" => 1,
+        "backlog" => 2,
+        "triage" => 3,
+        _ => 4,
+    }
+}
+
 /// Where a project's status sorts, running work first and finished last.
 ///
 /// An unknown status sorts with the live ones rather than the dead ones: a
@@ -466,6 +521,10 @@ struct State {
     proj_state: HashMap<String, HashMap<String, usize>>,
     /// Project id to the oldest thing still open in it.
     proj_oldest: HashMap<String, (f64, String)>,
+    /// Cycle id to its open issues by state, and to the issues themselves in
+    /// the order a screen shows them.
+    cycle_state: HashMap<String, HashMap<String, usize>>,
+    cycle_issues: HashMap<String, Vec<Issue>>,
     cycles: Vec<serde_json::Value>,
     created: HashMap<String, usize>,
     completed: HashMap<String, usize>,
@@ -532,6 +591,8 @@ fn one_pass(
     let mut proj_open: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut proj_state: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut proj_oldest: HashMap<String, (f64, String)> = HashMap::new();
+    let mut cycle_state: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut cycle_issues: HashMap<String, Vec<Issue>> = HashMap::new();
     let at = Utc::now().naive_utc();
     let (mut oldest_open, mut oldest_wip): (Extreme, Extreme) = (None, None);
     for it in &rows {
@@ -566,6 +627,24 @@ fn one_pass(
                     *seat = (age, text(it, "identifier"));
                 }
             }
+        }
+        // Which cycle it is in, if any, and the issue itself - both ride
+        // this pass, so a cycle's screen costs no request of its own.
+        let in_cycle = text(&it["cycle"], "id");
+        if !in_cycle.is_empty() {
+            *cycle_state
+                .entry(in_cycle.clone())
+                .or_default()
+                .entry(st.clone())
+                .or_insert(0) += 1;
+            cycle_issues.entry(in_cycle).or_default().push(Issue {
+                ident: text(it, "identifier"),
+                title: text(it, "title"),
+                url: text(it, "url"),
+                state: st.clone(),
+                age: hours_since(parse(&text(it, "createdAt")), Some(at)).unwrap_or(0.0),
+                points: it["estimate"].as_f64(),
+            });
         }
         let slot = by_team.entry(key).or_default();
         *slot.entry(st.clone()).or_insert(0) += 1;
@@ -676,6 +755,18 @@ fn one_pass(
             ctime.push(hrs);
         }
     }
+    // What is being worked first, then what is waiting, and inside each the
+    // oldest first. Ties break on the identifier so a poll cannot shuffle
+    // two equal rows under the cursor.
+    for list in cycle_issues.values_mut() {
+        list.sort_by(|a, b| {
+            state_rank(&a.state)
+                .cmp(&state_rank(&b.state))
+                .then(b.age.total_cmp(&a.age))
+                .then(a.ident.cmp(&b.ident))
+        });
+    }
+
     for (key, slot) in by_team.iter_mut() {
         let n = done
             .iter()
@@ -692,6 +783,8 @@ fn one_pass(
         guard.proj_open = proj_open;
         guard.proj_state = proj_state;
         guard.proj_oldest = proj_oldest;
+        guard.cycle_state = cycle_state;
+        guard.cycle_issues = cycle_issues;
         guard.cycles = cycles;
         guard.created = created;
         guard.completed = completed;
@@ -769,7 +862,16 @@ fn state_label(state: &str) -> &'static str {
 /// scope rising while completed stays flat is a cycle taking on work, and
 /// the two converging is one closing. Nothing here is a new request - the
 /// arrays arrive with the cycle.
-fn cycle_detail(c: &serde_json::Value, w: usize, h: usize, p: &Palette) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+fn cycle_detail(
+    c: &serde_json::Value,
+    states: &HashMap<String, usize>,
+    issues: &[Issue],
+    pick: usize,
+    w: usize,
+    h: usize,
+    p: &Palette,
+) -> (Vec<String>, Option<usize>) {
     let team = text(&c["team"], "name");
     // Linear cycles are often unnamed - the board falls back to their
     // number and so does this, or the title reads " · TEAM" with a leading
@@ -802,8 +904,8 @@ fn cycle_detail(c: &serde_json::Value, w: usize, h: usize, p: &Palette) -> Vec<S
     };
     let scope = series("scopeHistory");
     let done = series("completedScopeHistory");
-    let issues = series("issueCountHistory");
-    let issues_done = series("completedIssueCountHistory");
+    let issue_count = series("issueCountHistory");
+    let issues_closed = series("completedIssueCountHistory");
 
     let at = |v: &[f64]| v.last().copied().unwrap_or(0.0);
     let pct = if at(&scope) > 0.0 {
@@ -823,11 +925,11 @@ fn cycle_detail(c: &serde_json::Value, w: usize, h: usize, p: &Palette) -> Vec<S
         format!("{:.0} done, {:.0} left", at(&done), (at(&scope) - at(&done)).max(0.0)),
         p.txt.as_str(),
     );
-    if !issues.is_empty() {
+    if !issue_count.is_empty() {
         field(
             "issues",
-            format!("{:.0}", at(&issues)),
-            format!("{:.0} closed", at(&issues_done)),
+            format!("{:.0}", at(&issue_count)),
+            format!("{:.0} closed", at(&issues_closed)),
             p.dim.as_str(),
         );
     }
@@ -928,7 +1030,136 @@ fn cycle_detail(c: &serde_json::Value, w: usize, h: usize, p: &Palette) -> Vec<S
             rows.push(tc::seg(&parts, w - 1));
         }
     }
-    rows
+    // What is open in it right now, by state. The burn-up above is where
+    // the cycle has been; this is where it is.
+    let open: usize = states.values().sum();
+    if open > 0 {
+        let legend: Vec<(&str, usize, &str)> = STATE_ORDER
+            .iter()
+            .map(|st| (state_label(st), states.get(*st).copied().unwrap_or(0), state_colour(st, p)))
+            .filter(|x| x.1 > 0)
+            .collect();
+        rows.push(String::new());
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── OPEN BY STATE ── ".into()),
+                (p.dim.as_str(), plural(open, "issue")),
+            ],
+            w - 1,
+        ));
+        let parts: Vec<(f64, String)> = legend
+            .iter()
+            .map(|(_, n, c)| (*n as f64 / open as f64, c.to_string()))
+            .collect();
+        let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
+        let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (colour, txt) in &bar {
+            line.push((colour.as_str(), txt.clone()));
+        }
+        rows.push(tc::seg(&line, w - 1));
+        let mut legend_row: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (label, count, colour) in &legend {
+            legend_row.push((colour, "▇ ".into()));
+            legend_row.push((p.txt.as_str(), (*label).into()));
+            legend_row.push((
+                p.dim.as_str(),
+                format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
+            ));
+        }
+        rows.push(tc::seg(&legend_row, w - 1));
+    }
+
+    // The issues themselves. Only the open ones are here, because the open
+    // ones are all this widget ever fetches - so the heading says how many
+    // are closed rather than letting a count of one read as a cycle of one.
+    let closed = (at(&issues_closed) as usize).min(at(&issue_count) as usize);
+    rows.push(String::new());
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── OPEN IN THIS CYCLE ── ".into()),
+            (
+                p.dim.as_str(),
+                if closed > 0 {
+                    format!("{} · {} closed, not listed", issues.len(), closed)
+                } else {
+                    format!("{}", issues.len())
+                },
+            ),
+        ],
+        w - 1,
+    ));
+    if issues.is_empty() {
+        rows.push(tc::seg(
+            &[(
+                p.dim.as_str(),
+                if closed > 0 {
+                    "  nothing open in it - every issue is closed".into()
+                } else {
+                    "  nothing open in it".to_string()
+                },
+            )],
+            w - 1,
+        ));
+        return (rows, None);
+    }
+
+    let pick = pick.min(issues.len() - 1);
+    let mut cursor = None;
+    let widest = |xs: &mut dyn Iterator<Item = usize>| xs.max().unwrap_or(0);
+    let ident_w = widest(&mut issues.iter().map(|i| i.ident.chars().count())).max(6);
+    let state_w = widest(&mut issues.iter().map(|i| state_label(&i.state).chars().count())).max(4);
+    // Identifier, state, age and points are fixed; the title takes the rest,
+    // and is the one thing here long enough to need it.
+    let head = 2 + ident_w + 2 + state_w + 2 + 6 + 2 + 5 + 2;
+    let title_w = (w - 1).saturating_sub(head).max(10);
+    for (i, it) in issues.iter().enumerate() {
+        let here = i == pick;
+        if here {
+            cursor = Some(rows.len());
+        }
+        // A title long enough to overrun the column carries on underneath
+        // it rather than being cut. An issue titled "Verify fares · Sun
+        // Ferry Services · Peng Chau" and one cut to the same forty
+        // characters are two different issues on screen.
+        let lines = wrap(&it.title, title_w);
+        let (first, rest) = lines.split_first().map(|(a, b)| (a.clone(), b)).unwrap_or_default();
+        rows.push(tc::seg(
+            &[
+                (
+                    if here { p.accent.as_str() } else { p.dim.as_str() },
+                    format!("{} {}", if here { "▸" } else { " " }, tc::pad(&it.ident, ident_w)),
+                ),
+                (
+                    state_colour(&it.state, p),
+                    format!("  {}", tc::pad(state_label(&it.state), state_w)),
+                ),
+                (
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
+                    format!("  {}", tc::pad(&first, title_w)),
+                ),
+                (p.dim.as_str(), format!("  {:>6}", dur(Some(it.age)))),
+                // Nothing rather than "0 pts" when nobody has pointed it.
+                (
+                    p.dim.as_str(),
+                    match it.points {
+                        Some(n) if n > 0.0 => format!(" {:>4}", format!("{}p", tidy(n))),
+                        _ => "     ".to_string(),
+                    },
+                ),
+            ],
+            w - 1,
+        ));
+        for line in rest {
+            rows.push(tc::seg(
+                &[(
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
+                    format!("{}{}", " ".repeat(2 + ident_w + 2 + state_w + 2), line),
+                )],
+                w - 1,
+            ));
+        }
+    }
+    (rows, cursor)
 }
 
 /// One team in full: what it is holding, in the states it is holding it.
@@ -998,7 +1229,7 @@ fn team_detail(
             rows.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── OPEN BY STATE ── ".into()),
-                    (p.dim.as_str(), format!("{} issues", open)),
+                    (p.dim.as_str(), plural(open, "issue")),
                 ],
                 w - 1,
             ));
@@ -1298,7 +1529,7 @@ fn project_detail(
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── OPEN BY STATE ── ".into()),
-                (p.dim.as_str(), format!("{} issues", open)),
+                (p.dim.as_str(), plural(open, "issue")),
             ],
             w - 1,
         ));
@@ -1600,11 +1831,17 @@ fn main() {
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let ui_tok = ui_token.clone();
     let ui_quota = Arc::clone(&quota);
-    // How many projects the team's screen held when it was last drawn, and
-    // which one the cursor was on - read by the keys, which run before the
-    // frame that answers them is built.
-    let mut projects_len = 0usize;
+    // How long the open screen's own list was when it was last drawn, and
+    // what the cursor was on - read by the keys, which run before the frame
+    // that answers them is built. A team's screen lists its projects and a
+    // cycle's lists its open issues; only one is ever up, so one length and
+    // one cursor serve both.
+    let mut list_len = 0usize;
     let mut open_project: Option<String> = None;
+    let mut copy_url: Option<(String, String)> = None;
+    // What the last copy did, and when - shown for a few seconds on the
+    // bottom row of whichever screen asked for it.
+    let (mut note, mut note_at) = (String::new(), 0.0f64);
     // How far down the board itself is scrolled, and how tall it was when
     // it was last drawn - the keys run before the frame that answers them.
     let mut board = 0usize;
@@ -1702,17 +1939,33 @@ fn main() {
                 // A team's screen hands the arrows to its project list and
                 // scrolls itself to follow; every other screen has nothing
                 // to select, so they scroll outright.
-                "up" | "down" if detail == Some(teams_pane) && deep.is_none() => {
+                // The issue under the cursor, by its address. An issue is
+                // a leaf here - there is no screen below it - so what it
+                // offers is somewhere to go and read it.
+                "c" | "C" if copy_url.is_some() => {
+                    let (url, ident) = copy_url.clone().unwrap_or_default();
+                    (note, note_at) = if url.is_empty() {
+                        ("that issue has no url".to_string(), now())
+                    } else if tc::clipboard(&url) {
+                        (format!("copied {}", ident), now())
+                    } else {
+                        // Said out loud: a copy that silently did nothing
+                        // is indistinguishable from one that worked until
+                        // the paste comes up empty.
+                        ("could not reach the clipboard".to_string(), now())
+                    };
+                }
+                "up" | "down" if detail.is_some() && deep.is_none() && list_len > 0 => {
                     if key == "down" {
-                        pick = pick.saturating_add(1).min(projects_len.saturating_sub(1));
+                        pick = pick.saturating_add(1).min(list_len.saturating_sub(1));
                     } else {
                         pick = pick.saturating_sub(1);
                     }
                 }
-                "pgup" | "pgdn" if detail == Some(teams_pane) && deep.is_none() => {
+                "pgup" | "pgdn" if detail.is_some() && deep.is_none() && list_len > 0 => {
                     let page = tc::size().1.saturating_sub(3).max(1);
                     pick = if key == "pgdn" {
-                        pick.saturating_add(page).min(projects_len.saturating_sub(1))
+                        pick.saturating_add(page).min(list_len.saturating_sub(1))
                     } else {
                         pick.saturating_sub(page)
                     };
@@ -1967,7 +2220,7 @@ fn main() {
                 (p.dim.as_str(), format!("{} running", s.cycles.len())),
                 (
                     if here_now { p.accent.as_str() } else { p.dim.as_str() },
-                    if here_now { "   ↑↓".to_string() } else { String::new() },
+                    heading_keys(cycles_pane, focus, &pane_len).to_string(),
                 ),
             ],
             w - 1,
@@ -2219,7 +2472,7 @@ fn main() {
                 ),
                 (
                     if on_teams { p.accent.as_str() } else { p.dim.as_str() },
-                    if on_teams { "   ↑↓".to_string() } else { String::new() },
+                    heading_keys(teams_pane, focus, &pane_len).to_string(),
                 ),
             ],
             w - 1,
@@ -2316,7 +2569,7 @@ fn main() {
                 ),
                 (
                     if on_projects { p.accent.as_str() } else { p.dim.as_str() },
-                    if on_projects { "   ↑↓".to_string() } else { String::new() },
+                    heading_keys(projects_pane, focus, &pane_len).to_string(),
                 ),
             ],
             w - 1,
@@ -2418,8 +2671,8 @@ fn main() {
                 .unwrap_or(&none)
                 .clone();
             if which == teams_pane {
-                projects_len = projects.len();
-                pick = pick.min(projects_len.saturating_sub(1));
+                list_len = projects.len();
+                pick = pick.min(list_len.saturating_sub(1));
                 open_project = projects.get(pick).map(|q| q.id.clone());
             }
             // The project being read is found by its id, so a poll that
@@ -2449,13 +2702,20 @@ fn main() {
                     None,
                 )
             } else if which == cycles_pane {
-                (
-                    ranked_cycles
-                        .get(sel[cycles_pane].min(ranked_cycles.len().saturating_sub(1)))
-                        .map(|c| cycle_detail(c, w, h, &p))
-                        .unwrap_or_default(),
-                    None,
-                )
+                ranked_cycles
+                    .get(sel[cycles_pane].min(ranked_cycles.len().saturating_sub(1)))
+                    .map(|c| {
+                        let id = text(c, "id");
+                        let empty = HashMap::new();
+                        let none: Vec<Issue> = Vec::new();
+                        let states = s.cycle_state.get(&id).unwrap_or(&empty);
+                        let issues = s.cycle_issues.get(&id).unwrap_or(&none);
+                        list_len = issues.len();
+                        copy_url = issues.get(pick.min(issues.len().saturating_sub(1)))
+                            .map(|i| (i.url.clone(), i.ident.clone()));
+                        cycle_detail(c, states, issues, pick, w, h, &p)
+                    })
+                    .unwrap_or_default()
             } else {
                 team.as_ref()
                     .map(|(key, name)| {
@@ -2500,25 +2760,33 @@ fn main() {
                 detail = None;
                 deep = None;
             } else {
-                let into = if reading.is_some() {
+                // What this screen's own list is called, when it has one:
+                // a team's holds its projects and a cycle's its open
+                // issues. A screen with an empty list hands the arrows
+                // back to plain scroll and says so.
+                let listing = if reading.is_some() || list_len == 0 {
                     None
-                } else if which == teams_pane && projects_len > 0 {
-                    Some(" open it")
+                } else if which == teams_pane {
+                    Some(" project")
+                } else if which == cycles_pane {
+                    Some(" issue")
                 } else {
                     None
                 };
                 let mut hints: Vec<Vec<(&str, String)>> = vec![vec![
                     (p.accent.as_str(), "↑↓".into()),
-                    (
-                        p.dim.as_str(),
-                        if into.is_some() { " project" } else { " scroll" }.into(),
-                    ),
+                    (p.dim.as_str(), listing.unwrap_or(" scroll").to_string()),
                 ]];
-                if let Some(what) = into {
+                // Only a project can be opened; an issue is a leaf, and
+                // what a leaf offers here is its address.
+                if listing.is_some() && which == teams_pane {
                     hints.push(vec![
                         (p.accent.as_str(), "→/↵".into()),
-                        (p.dim.as_str(), what.to_string()),
+                        (p.dim.as_str(), " open it".into()),
                     ]);
+                }
+                if copy_url.is_some() {
+                    hints.push(vec![(p.dim.as_str(), "[c]opy url".into())]);
                 }
                 hints.push(vec![
                     (p.accent.as_str(), "←".into()),
@@ -2555,6 +2823,11 @@ fn main() {
                 while out.len() < room {
                     out.push(String::new());
                 }
+                if !note.is_empty() && now() - note_at < 6.0 {
+                    if let Some(row) = out.last_mut() {
+                        *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
+                    }
+                }
                 out.extend(foot);
                 tc::draw(&out, w, h);
                 std::thread::sleep(Duration::from_millis(300));
@@ -2562,8 +2835,9 @@ fn main() {
             }
         } else {
             drop(s);
-            projects_len = 0;
+            list_len = 0;
             open_project = None;
+            copy_url = None;
             deep = None;
         }
 
@@ -2677,6 +2951,105 @@ mod tests {
             }
         }
         out
+    }
+
+    fn an_issue(ident: &str, title: &str, state: &str, age: f64, points: Option<f64>) -> Issue {
+        Issue {
+            ident: ident.into(),
+            title: title.into(),
+            url: format!("https://linear.app/x/issue/{}", ident),
+            state: state.into(),
+            age,
+            points,
+        }
+    }
+
+    /// A cycle carrying the two histories its screen reads.
+    fn a_cycle(total: f64, closed: f64) -> serde_json::Value {
+        serde_json::json!({
+            "number": 7, "name": "", "endsAt": "2026-09-06T00:00:00.000Z",
+            "team": { "name": "A Team" },
+            "scopeHistory": [10.0, 10.0], "completedScopeHistory": [0.0, 2.0],
+            "issueCountHistory": [total, total], "completedIssueCountHistory": [closed, closed],
+        })
+    }
+
+    #[test]
+    fn a_cycle_lists_what_is_open_in_it_and_counts_what_is_not() {
+        // The scan behind this fetches open issues only, so a cycle of
+        // eight with seven closed has one row - and without saying so, a
+        // heading reading "1" under "issues 8" reads as a bug.
+        let issues = vec![an_issue("ABC-1", "a thing", "started", 30.0, Some(3.0))];
+        let states: HashMap<String, usize> = [("started".to_string(), 1usize)].into_iter().collect();
+        let (rows, at) = cycle_detail(&a_cycle(8.0, 7.0), &states, &issues, 0, 110, 40, &palette());
+        let out = plain(&rows);
+        assert!(out.contains("OPEN IN THIS CYCLE"), "{}", out);
+        assert!(out.contains("7 closed, not listed"), "{}", out);
+        assert!(out.contains("ABC-1"), "{}", out);
+        assert!(out.contains("a thing"), "{}", out);
+        // The state's own vocabulary, the same word the board uses.
+        assert!(out.contains("in progress"), "{}", out);
+        assert!(out.contains("3p"), "{}", out);
+        // And a cursor, on the row it named.
+        assert!(plain(&[rows[at.unwrap()].clone()]).contains("ABC-1"));
+        assert_eq!(out.matches('▸').count(), 1);
+    }
+
+    #[test]
+    fn a_cycle_with_nothing_open_says_so_and_offers_no_cursor() {
+        let (rows, at) =
+            cycle_detail(&a_cycle(4.0, 4.0), &HashMap::new(), &[], 0, 110, 40, &palette());
+        let out = plain(&rows);
+        assert!(out.contains("nothing open in it"), "{}", out);
+        // No cursor means the arrows go back to scrolling the screen, and
+        // the footer says "scroll" rather than naming a list to walk.
+        assert!(at.is_none());
+    }
+
+    #[test]
+    fn a_long_issue_title_carries_on_underneath_rather_than_being_cut() {
+        // The shape that broke it: a title built from a long chain of
+        // separated parts, far past any column a list can give it.
+        let long = "Check every published rate · northern route · via the interchange \
+                    stop · against the operator's own timetable";
+        let issues = vec![an_issue("ABC-1", long, "started", 30.0, None)];
+        let states: HashMap<String, usize> = [("started".to_string(), 1usize)].into_iter().collect();
+        let (rows, _) = cycle_detail(&a_cycle(1.0, 0.0), &states, &issues, 0, 100, 40, &palette());
+        let out = plain(&rows);
+        // Every word of it is on screen, even though no single row is wide
+        // enough to hold the title.
+        for word in long.split_whitespace() {
+            assert!(out.contains(word), "{:?} missing from:\n{}", word, out);
+        }
+        // The issue rows fit in the pane. Measured against `w`, not
+        // `w - 1`: the heading bar pads to the full width and the rows do
+        // not, so a single bound for both would pass on the wrong one.
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 100),
+            "a row ran past the pane: {:?}",
+            out.lines().max_by_key(|l| l.chars().count())
+        );
+        // An issue nobody has pointed says nothing, not "0p".
+        assert!(!out.contains("0p"), "{}", out);
+    }
+
+    #[test]
+    fn a_cycles_issues_put_what_is_moving_first_and_the_oldest_of_those_first() {
+        let mut issues = vec![
+            an_issue("ABC-3", "newer wip", "started", 10.0, None),
+            an_issue("ABC-1", "waiting", "unstarted", 900.0, None),
+            an_issue("ABC-2", "older wip", "started", 500.0, None),
+            an_issue("ABC-4", "unlooked at", "triage", 999.0, None),
+            an_issue("ABC-5", "shelved", "backlog", 999.0, None),
+        ];
+        issues.sort_by(|a, b| {
+            state_rank(&a.state)
+                .cmp(&state_rank(&b.state))
+                .then(b.age.total_cmp(&a.age))
+                .then(a.ident.cmp(&b.ident))
+        });
+        let order: Vec<&str> = issues.iter().map(|i| i.ident.as_str()).collect();
+        assert_eq!(order, ["ABC-2", "ABC-3", "ABC-1", "ABC-5", "ABC-4"]);
     }
 
     #[test]
@@ -2887,6 +3260,37 @@ mod tests {
         let row = rows[seat("sooner")];
         assert!(row.contains(" 68%"), "{}", row);
         assert!(row.contains('░'), "a 68% bar is not full: {}", row);
+    }
+
+    #[test]
+    fn one_heading_at_a_time_says_tab_and_it_is_the_one_tab_reaches() {
+        let lens = [5usize, 14, 34];
+        let says = |focus: Option<usize>| -> Vec<&'static str> {
+            (0..3).map(|me| heading_keys(me, focus, &lens)).collect()
+        };
+        // Nothing focused: the first section is where tab goes.
+        assert_eq!(says(None), ["   [tab] to focus", "", ""]);
+        // Focused: that heading takes the arrows, and the hint moves on to
+        // the one the next press actually reaches.
+        assert_eq!(says(Some(0)), ["   ↑↓", "   [tab] to focus", ""]);
+        assert_eq!(says(Some(1)), ["", "   ↑↓", "   [tab] to focus"]);
+        // From the last, tab lets go - so no heading claims it.
+        assert_eq!(says(Some(2)), ["", "", "   ↑↓"]);
+        // Never two at once, whatever the focus.
+        for focus in [None, Some(0), Some(1), Some(2)] {
+            assert_eq!(
+                says(focus).iter().filter(|h| h.contains("[tab]")).count() <= 1,
+                true,
+                "two headings claimed tab with focus {:?}",
+                focus
+            );
+        }
+        // A section with nothing in it never claims it, because tab steps
+        // over it - a hint on a heading no press reaches is the thing this
+        // is careful about.
+        let gap = [5usize, 0, 34];
+        assert_eq!(heading_keys(1, Some(0), &gap), "");
+        assert_eq!(heading_keys(2, Some(0), &gap), "   [tab] to focus");
     }
 
     #[test]

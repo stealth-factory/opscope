@@ -139,6 +139,30 @@ is left to run, and how much moved lately — the same day-over-day figure the
 board ranks cycles by, so the ordering is legible rather than mysterious. A
 cycle with no name of its own is called by its number rather than left blank.
 
+Under the burn-up, what is open in it by state, and then the issues themselves:
+
+```
+ ── OPEN IN THIS CYCLE ── 28 · 5 closed, not listed
+▸ WEB-275  in progress  Server-rendered context blocks on top of the share copy   19.3d   1p
+  WEB-300  in progress  Check every published record against its upstream source  16.0d
+  WEB-229  todo         Add an itinerary mode to the card renderer                22.1d   4p
+```
+
+What is moving comes first, then what is waiting, and inside each the oldest
+first — so the row at the top is the one that has been in progress longest. An
+issue nobody has pointed shows no points rather than `0p`. A title too long for
+its column carries on underneath rather than being cut: an issue cut to forty
+characters is a different issue on screen.
+
+**Only the open ones are listed**, because open issues are all this widget ever
+fetches — so the heading says how many are closed. Without that, a cycle of
+eight showing one row reads as a cycle of one.
+
+The arrows move a cursor through them and `[c]opy url` puts the selected
+issue's address on the clipboard, over OSC 52, the same way the pr widget does.
+An issue is a leaf here: there is no screen below it, so what it offers is
+somewhere to go and read it.
+
 A **team** gives what it is holding, broken out by state as a stacked bar, with
 triage called out separately: it is work nobody has looked at, and a team can
 hold hundreds of it while looking busy everywhere else.
@@ -275,6 +299,13 @@ marker. The arrows then move a cursor through that section, and the window
 follows it - a cursor below the fold pulls the board down, one above it pulls
 it up, each by as little as it takes.
 
+Exactly one *other* heading carries `[tab] to focus`, and it is the one tab
+would actually focus next. Not all of them: tab cycles, so a `[tab]` on every
+heading would promise three sections that one press reaches when one press
+reaches one of them. As you press it the marker moves down the board, which is
+the cycle teaching itself. A section with nothing in it never carries it,
+because tab steps over those.
+
 Under the arrows the three sections read as **one continuous list**: down off
 the bottom of the cycles steps into the top of the teams, off the bottom of the
 teams into the top of the projects; up steps back the same way, into the
@@ -295,6 +326,7 @@ direction.
 | `PgUp` `PgDn` | the same, a page at a time |
 | `↵` `→` | open the highlighted cycle, team or project — and from a team, the project under its cursor |
 | `←` `esc` | back one level: a project to wherever it was opened from, a team to the board |
+| `c` | copy the selected issue's url, on a cycle's screen |
 | `r` | refresh, including the open project's own record |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |

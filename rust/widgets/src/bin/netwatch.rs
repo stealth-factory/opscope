@@ -1058,6 +1058,7 @@ fn section_head(
     count: usize,
     note: &str,
     focused: bool,
+    next: bool,
     w: usize,
     p: &Palette,
 ) -> String {
@@ -1071,12 +1072,17 @@ fn section_head(
                 p.dim.as_str(),
                 format!("{} {}{}", count, note, if count == 1 { "" } else { "s" }),
             ),
-            // No key named here. There is one way between sections and the
-            // footer says what it is; a letter per heading meant [e] and [f]
-            // pointing at keys that no longer exist and the middle section
-            // pointing at tab, which is the only one that was ever true.
-            // The ▏ at the head of the line is the focus mark; a second one
-            // out here was just the hole the key left.
+            // One key, on the one heading it is true of. This used to name
+            // a letter per section - [e] and [f] pointing at keys that no
+            // longer existed, and the middle one pointing at tab, which was
+            // the only one that was ever true. So tab is what is left, and
+            // it is shown only on the section tab would actually focus
+            // next: it cycles, and a [tab] on all three would promise three
+            // sections that one press reaches.
+            (
+                p.accent.as_str(),
+                if next { "   [tab] to focus".to_string() } else { String::new() },
+            ),
         ],
         w - 1,
     )
@@ -1460,7 +1466,8 @@ fn detail_rows(
     .enumerate()
     {
         let focused = focus == Some(which);
-        out.push(section_head(name, counts[which], note, focused, w, p));
+        let next = tc::next_section(focus, &counts) == Some(which);
+        out.push(section_head(name, counts[which], note, focused, next, w, p));
         let room = shares[which];
         if counts[which] == 0 {
             out.push(tc::seg(&[(p.dim.as_str(), "   none".into())], w - 1));
