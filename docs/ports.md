@@ -134,11 +134,38 @@ Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
 it is about what leaves the machine; here loopback is the whole point, since a
 browser hitting a dev server on `127.0.0.1` is the traffic being asked about.
 
-The column arrives when there is room for it *after* the names, rather than
+The same chart is drawn once across the top of the main screen — everything
+moving through every listening port — when there are rows to spare after the
+table. The table is what this widget is for, so the chart yields to it.
+
+Beside the rates, each row carries **the shape** of its own traffic:
+
+```
+  PORT  BIND    WHAT       PROJECT      TRAFFIC        LAST 17s        UP    EXPOSED
+ 38611 local   node       a-project                  ·····─────────  10s   -
+ 39311 all     Python     serve        ↑503K         ▆▃▁ ▂▂▄▇▅█▃▃▁▁  4m    -
+```
+
+Each row is scaled to **its own peak**, not to the busiest port on screen. A
+shared scale would flatten every quiet port to nothing, and nothing is what a
+port with no traffic looks like. So the shape column says *shape* and the
+rates beside it say *size*, and the two are read together — a row with a full
+bar and `↑2K` is a port at its own busiest, which is not busy.
+
+The three states are kept visibly apart, the same way the chart keeps them:
+dots for cells with no sample behind them yet, a flat line for measured and
+quiet, bars for traffic. `·····─────────` is a port that appeared ten seconds
+ago and has done nothing since.
+
+Both columns arrive when there is room for them *after* the names, rather than
 past some width picked in advance: the project column is the one that gives,
-and a project's name cut in half is a different project. A port nothing is
-calling shows nothing rather than `0 B/s` — a column of zeroes down the table
-reads as a measurement that has failed.
+and a project's name cut in half is a different project. Both are measured
+against a row that already carries UP and EXPOSED whether or not the pane is
+yet wide enough to show them, so that crossing that width cannot trade one
+fact for another. The shapes are the more decorative of the two and so arrive
+last and leave first. A port nothing is calling shows nothing in the rates
+column rather than `0 B/s` — a column of zeroes down the table reads as a
+measurement that has failed.
 
 ## What it cannot see
 

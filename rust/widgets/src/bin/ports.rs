@@ -63,6 +63,12 @@ struct Traffic {
     last: HashMap<String, Counters>,
     at: f64,
     seen: HashMap<u16, VecDeque<(u64, u64, f64)>>,
+    /// The same samples summed over every listening port, kept separately
+    /// rather than added up at render time. Ports appear and disappear
+    /// mid-history, so their rings are different lengths and summing them
+    /// by index would quietly attribute one port's sample to another's
+    /// moment.
+    total: VecDeque<(u64, u64, f64)>,
 }
 
 impl Traffic {
@@ -82,6 +88,16 @@ impl Traffic {
                     ring.pop_front();
                 }
             }
+            // One entry per sample whether or not anything moved, so the
+            // chart's columns are moments rather than events - a gap in it
+            // would compress quiet minutes into no width at all.
+            let (up, down) = moved_now
+                .values()
+                .fold((0u64, 0u64), |(a, b), (u, d)| (a + u, b + d));
+            self.total.push_back((up, down, gap));
+            while self.total.len() > TRAFFIC_KEPT {
+                self.total.pop_front();
+            }
         }
         self.seen.retain(|port, _| listening.contains(port));
         self.last = now;
@@ -98,16 +114,22 @@ impl Traffic {
     /// measured over - so a chart showing only the last so many of them can
     /// say how much history *that* is, rather than how much is kept.
     fn series(&self, port: u16) -> Vec<(f64, f64, f64)> {
-        self.seen
-            .get(&port)
-            .map(|ring| {
-                ring.iter()
-                    .filter(|(_, _, gap)| *gap > 0.0)
-                    .map(|(up, down, gap)| (*up as f64 / gap, *down as f64 / gap, *gap))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.seen.get(&port).map(|r| rates(r)).unwrap_or_default()
     }
+
+    /// Every sample summed over all the listening ports.
+    fn totals(&self) -> Vec<(f64, f64, f64)> {
+        rates(&self.total)
+    }
+}
+
+/// A ring of byte counts as rates, oldest first, each keeping the gap it
+/// was measured over so a chart can say how much history it is showing.
+fn rates(ring: &VecDeque<(u64, u64, f64)>) -> Vec<(f64, f64, f64)> {
+    ring.iter()
+        .filter(|(_, _, gap)| *gap > 0.0)
+        .map(|(up, down, gap)| (*up as f64 / gap, *down as f64 / gap, *gap))
+        .collect()
 }
 
 /// How many samples of per-port traffic to keep, which is what the chart on
@@ -219,6 +241,31 @@ fn moved(
     out
 }
 
+/// Whether the two traffic columns fit, given what the row must show first.
+///
+/// Both are measured against a row that already has UP and EXPOSED on it,
+/// whether or not this pane is wide enough to be showing them yet. Without
+/// that, crossing the width where those two arrive pushed TRAFFIC back off
+/// again - a pane that got wider and said less, which is the same fault the
+/// linear board had and the reason this is a function with a test rather
+/// than arithmetic inline.
+///
+/// Returns whether the rates fit, and whether the shapes fit after them.
+fn extra_columns(
+    w: usize,
+    kind_w: usize,
+    project_w: usize,
+    traffic_w: usize,
+    spark_w: usize,
+) -> (bool, bool) {
+    // Marker and port, bind, the gap after the name, and the two columns at
+    // the end - counted always, so nothing here trades places with them.
+    let fixed = 1 + 6 + 8 + 2 + 6 + 8;
+    let room = |extra: usize| w.saturating_sub(1) >= fixed + project_w + kind_w + extra;
+    let busy = room(traffic_w);
+    (busy, busy && room(traffic_w + spark_w))
+}
+
 /// The widest name in the table, which is what the WHAT column has to be.
 fn longest_kind(rows: &[&Row]) -> usize {
     rows.iter().map(|r| r.kind.chars().count()).max().unwrap_or(0).max(4)
@@ -272,6 +319,43 @@ fn over(seconds: f64) -> String {
     }
 }
 
+/// One row's worth of shape: the last `cells` samples of a port's traffic,
+/// both directions together, in a single line of bars.
+///
+/// Scaled to its *own* peak, not to the busiest port on screen. A shared
+/// scale would flatten every quiet port to nothing, and nothing is what a
+/// port with no traffic looks like. So this column says shape and the
+/// TRAFFIC column beside it says size - and the two are read together.
+///
+/// Cells with no sample behind them are dotted, the same as the chart on the
+/// port's own screen, because a port nobody has measured yet and a port
+/// nobody is calling are not the same thing.
+fn spark(series: &[(f64, f64, f64)], cells: usize, p: &Palette) -> Vec<(String, String)> {
+    if cells == 0 {
+        return Vec::new();
+    }
+    let window: Vec<f64> = series.iter().rev().take(cells).rev().map(|s| s.0 + s.1).collect();
+    let peak = window.iter().copied().fold(0.0f64, f64::max);
+    let mut out = Vec::new();
+    if window.len() < cells {
+        out.push((p.grid.clone(), "·".repeat(cells - window.len())));
+    }
+    if peak <= 0.0 {
+        // Measured, and nothing moved: a flat baseline. Blank would put it
+        // in the same shape as a port nothing has sampled yet, and the
+        // dotted cells beside it exist precisely to keep those apart.
+        out.push((p.grid.clone(), "─".repeat(window.len())));
+        return out;
+    }
+    let cols: Vec<(f64, String)> = window.iter().map(|v| (*v, p.open.clone())).collect();
+    for row in tc::vbars(&cols, 1, peak) {
+        for (colour, text) in row {
+            out.push((colour, text));
+        }
+    }
+    out
+}
+
 /// Traffic on one port over time: out above the line, in below it.
 ///
 /// The chart is as wide as the pane. One column is one sample, newest at the
@@ -283,7 +367,14 @@ fn over(seconds: f64) -> String {
 /// was, in a gutter down the left so the plot keeps the rest of the width. A
 /// shared scale would flatten the smaller of the two into nothing, and
 /// nothing is what a source with no traffic looks like.
-fn traffic_chart(series: &[(f64, f64, f64)], gap: f64, w: usize, p: &Palette) -> Vec<String> {
+fn traffic_chart(
+    series: &[(f64, f64, f64)],
+    heading: &str,
+    rows: usize,
+    gap: f64,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     let up_peak = series.iter().map(|s| s.0).fold(0.0f64, f64::max);
     let down_peak = series.iter().map(|s| s.1).fold(0.0f64, f64::max);
     // The gutter is as wide as the wider of the two labels, so the plots
@@ -310,7 +401,7 @@ fn traffic_chart(series: &[(f64, f64, f64)], gap: f64, w: usize, p: &Palette) ->
 
     let mut out = vec![tc::seg(
         &[
-            (p.lbl.as_str(), " ── TRAFFIC ── ".into()),
+            (p.lbl.as_str(), format!(" ── {} ── ", heading)),
             (p.open.as_str(), "↑ out above".into()),
             (p.dim.as_str(), " · ".into()),
             (p.local.as_str(), "↓ in below".into()),
@@ -349,16 +440,16 @@ fn traffic_chart(series: &[(f64, f64, f64)], gap: f64, w: usize, p: &Palette) ->
                 down: bool|
      -> Vec<String> {
         let cols: Vec<(f64, String)> = window.iter().map(|s| (pick(s), colour.to_string())).collect();
-        let rows = if down {
-            tc::vbars_down(&cols, 3, peak)
+        let bars = if down {
+            tc::vbars_down(&cols, rows, peak)
         } else {
-            tc::vbars(&cols, 3, peak)
+            tc::vbars(&cols, rows, peak)
         };
         // The label sits on the row nearest the divider, which is the row a
         // full-height bar reaches: the top for the upward half, the first
         // drawn row for the downward one.
-        let on = if down { 0 } else { rows.len().saturating_sub(1) };
-        rows.into_iter()
+        let on = if down { 0 } else { bars.len().saturating_sub(1) };
+        bars.into_iter()
             .enumerate()
             .map(|(i, row)| {
                 let mut line: Vec<(&str, String)> = vec![(
@@ -1766,7 +1857,7 @@ fn detail_rows(
     // What has actually gone through it. The kernel's own per-socket byte
     // counters, summed over the connections accepted from this port - so
     // this is TCP, and a port serving anything else reads as quiet.
-    rows.extend(traffic_chart(seen, gap, w, p));
+    rows.extend(traffic_chart(seen, "TRAFFIC", 3, gap, w, p));
     rows.push(String::new());
     rows.push(tc::seg(
         &[
@@ -2430,6 +2521,25 @@ fn main() {
 
         let wide = w >= 78;
         let rates = store.traffic.lock().ok();
+        // Everything moving through every listening port, over time. The
+        // table is what this widget is for, so the chart yields to it: it is
+        // drawn only when there are rows to spare after the table, the
+        // header and the footer have taken theirs.
+        let totals = rates.as_ref().map(|t| t.totals()).unwrap_or_default();
+        let spare = h
+            .saturating_sub(rows.len() + 3 + shown.len().min(12) + 1)
+            .min(3);
+        if spare >= 3 && totals.iter().any(|(u, d, _)| *u > 0.0 || *d > 0.0) {
+            rows.extend(traffic_chart(
+                &totals,
+                "EVERYTHING MOVING",
+                spare / 2 + spare % 2,
+                refresh,
+                w,
+                &ok,
+            ));
+            rows.push(String::new());
+        }
         // The project column takes whatever the fixed ones leave: it is the
         // one that identifies the server, and the one whose contents are a
         // directory name of any length.
@@ -2446,6 +2556,9 @@ fn main() {
         // one that gives, and a project's name cut in half is a different
         // project.
         let traffic_w = 13usize;
+        // The shape column is the more decorative of the two, so it arrives
+        // after the rates and leaves before them.
+        let spark_cells = 14usize;
         let widest_project = shown
             .iter()
             .map(|r| {
@@ -2454,13 +2567,40 @@ fn main() {
             .max()
             .unwrap_or(8)
             .clamp(8, 24);
-        let without = 1 + 6 + 8 + 2 + if wide { 6 + 8 } else { 0 };
-        let busy = rates.is_some()
-            && (w - 1) >= without + widest_project + traffic_w + longest_kind(&shown);
+        let (fits, shapes) = extra_columns(
+            w,
+            longest_kind(&shown),
+            widest_project,
+            traffic_w,
+            spark_cells + 4,
+        );
+        let busy = rates.is_some() && fits;
+        let sparks = rates.is_some() && shapes;
         let traffic_w = if busy { traffic_w } else { 0 };
-        let rest = 1 + 6 + 8 + 2 + 8 + traffic_w + if wide { 6 + 8 } else { 0 };
+        // Two cells of gap either side, the same as every other column here.
+        let spark_w = if sparks { spark_cells + 4 } else { 0 };
+        // Named from the samples actually shown, so it stays true while the
+        // history is still filling.
+        let spark_head = rates
+            .as_ref()
+            .map(|t| {
+                let deepest = shown
+                    .iter()
+                    .map(|r| t.series(r.port))
+                    .map(|s| {
+                        s.iter().rev().take(spark_cells).map(|x| x.2).sum::<f64>()
+                    })
+                    .fold(0.0f64, f64::max);
+                if deepest > 0.0 {
+                    format!("LAST {}", over(deepest))
+                } else {
+                    "SHAPE".to_string()
+                }
+            })
+            .unwrap_or_else(|| "SHAPE".to_string());
+        let rest = 1 + 6 + 8 + 2 + 8 + traffic_w + spark_w + if wide { 6 + 8 } else { 0 };
         let kind_w = longest_kind(&shown).min((w - 1).saturating_sub(rest).max(4));
-        let fixed = 1 + 6 + 8 + kind_w + 2 + traffic_w + if wide { 6 + 8 } else { 0 };
+        let fixed = 1 + 6 + 8 + kind_w + 2 + traffic_w + spark_w + if wide { 6 + 8 } else { 0 };
         let name_w = std::cmp::max(8, (w - 1).saturating_sub(fixed));
         rows.push(tc::seg(
             &[
@@ -2470,6 +2610,18 @@ fn main() {
                 (
                     ok.dim.as_str(),
                     if busy { tc::pad("TRAFFIC", traffic_w) } else { String::new() },
+                ),
+                // The window the shapes cover, named rather than left to be
+                // guessed at - a sparkline without one is a shape.
+                (
+                    ok.dim.as_str(),
+                    // The same two-cell gap the cells carry, so the heading
+                    // sits over the shapes rather than two left of them.
+                    if sparks {
+                        format!("  {}  ", tc::pad(&spark_head, spark_cells))
+                    } else {
+                        String::new()
+                    },
                 ),
                 (
                     ok.dim.as_str(),
@@ -2547,6 +2699,19 @@ fn main() {
                 String::new()
             };
             let traffic_c = format!("{}{}", tint, if moving { &ok.open } else { &ok.dim });
+            // Built before the row, because every segment's colour has to
+            // outlive the borrows the row is assembled from.
+            let shape: Vec<(String, String)> = if sparks {
+                let mut out = vec![(format!("{}{}", tint, ok.dim), "  ".to_string())];
+                let seen = rates.as_ref().map(|t| t.series(row.port)).unwrap_or_default();
+                for (colour, text) in spark(&seen, spark_cells, &ok) {
+                    out.push((format!("{}{}", tint, colour), text));
+                }
+                out.push((format!("{}{}", tint, ok.dim), "  ".to_string()));
+                out
+            } else {
+                Vec::new()
+            };
             let mut line = vec![
                 (
                     port_colour.as_str(),
@@ -2558,6 +2723,9 @@ fn main() {
             ];
             if busy {
                 line.push((traffic_c.as_str(), tc::pad(&traffic_text, traffic_w)));
+            }
+            for (colour, text) in &shape {
+                line.push((colour.as_str(), text.clone()));
             }
             let up_c = format!("{}{}", tint, ok.dim);
             let exp_c = format!(
@@ -2770,6 +2938,84 @@ mod tests {
         let seen = t.series(3000);
         assert_eq!(seen.len(), 2);
         assert_eq!(seen.iter().map(|s| s.2).sum::<f64>(), 2.5);
+    }
+
+    #[test]
+    fn a_wider_pane_never_shows_fewer_columns_than_a_narrower_one() {
+        // TRAFFIC used to arrive at seventy-six and leave again at
+        // seventy-eight, where UP and EXPOSED turn up and take the room -
+        // one fact traded for another as the pane grew.
+        let (kind_w, project_w, traffic_w, spark_w) = (23usize, 22usize, 13usize, 18usize);
+        let mut had = (false, false);
+        for w in 40..220usize {
+            let now = extra_columns(w, kind_w, project_w, traffic_w, spark_w);
+            assert!(
+                now.0 >= had.0 && now.1 >= had.1,
+                "w={} lost a column the narrower pane had: {:?} then {:?}",
+                w, had, now
+            );
+            // The shapes are the more decorative of the two and never
+            // arrive on their own.
+            assert!(!now.1 || now.0, "shapes without rates at w={}", w);
+            had = now;
+        }
+        // Both ends: nothing in a narrow pane, both in a wide one.
+        assert_eq!(extra_columns(60, kind_w, project_w, traffic_w, spark_w), (false, false));
+        assert_eq!(extra_columns(210, kind_w, project_w, traffic_w, spark_w), (true, true));
+    }
+
+    #[test]
+    fn the_totals_ring_has_one_entry_per_sample_whether_or_not_anything_moved() {
+        let mut t = Traffic::default();
+        t.sample(&ss_dump(1000, 0, "222"), &[3000, 9999], 100.0);
+        // The first sample is not a reading, here as anywhere.
+        assert!(t.totals().is_empty());
+
+        // Quiet second.
+        t.sample(&ss_dump(1000, 0, "222"), &[3000, 9999], 101.0);
+        // Busy second, on both ports at once.
+        t.sample(&ss_dump(1500, 400, "222"), &[3000, 9999], 102.0);
+        let totals = t.totals();
+        assert_eq!(totals.len(), 2, "a quiet sample still takes a column");
+        assert_eq!(totals[0].0, 0.0);
+        // Summed across ports: five hundred on one, four hundred on the
+        // other, in one second.
+        assert_eq!(totals[1].0, 900.0);
+
+        // Bounded like the per-port rings, or a chart that keeps one column
+        // per sample grows for as long as the widget is up.
+        for i in 0..(TRAFFIC_KEPT + 20) {
+            t.sample(&ss_dump(2000 + i as u64, 0, "222"), &[3000], 200.0 + i as f64);
+        }
+        assert_eq!(t.totals().len(), TRAFFIC_KEPT);
+    }
+
+    #[test]
+    fn a_sparkline_keeps_unmeasured_and_quiet_apart() {
+        let p = rgb_ok();
+        let plain = |cells: Vec<(String, String)>| -> String {
+            cells.into_iter().map(|(_, t)| t).collect()
+        };
+
+        // Nothing sampled at all: every cell dotted.
+        assert_eq!(plain(spark(&[], 6, &p)), "······");
+
+        // Sampled and quiet: a baseline, which is a different thing and has
+        // to look like one - the port's own screen makes the same
+        // distinction one keypress away.
+        let quiet: Vec<(f64, f64, f64)> = (0..6).map(|_| (0.0, 0.0, 1.0)).collect();
+        assert_eq!(plain(spark(&quiet, 6, &p)), "──────");
+
+        // Partly sampled: dots for what is missing, then the rest.
+        let some: Vec<(f64, f64, f64)> = (0..2).map(|_| (0.0, 0.0, 1.0)).collect();
+        assert_eq!(plain(spark(&some, 6, &p)), "········".chars().take(4).collect::<String>() + "──");
+
+        // Scaled to its own peak, not to some other row's: the biggest
+        // sample here is full height whatever its absolute size.
+        let small: Vec<(f64, f64, f64)> = vec![(1.0, 0.0, 1.0), (8.0, 0.0, 1.0)];
+        let big: Vec<(f64, f64, f64)> = vec![(1e6, 0.0, 1.0), (8e6, 0.0, 1.0)];
+        assert_eq!(plain(spark(&small, 2, &p)), plain(spark(&big, 2, &p)));
+        assert!(plain(spark(&small, 2, &p)).ends_with('█'), "the peak is full height");
     }
 
     #[test]
