@@ -137,7 +137,10 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     // still open has a real countdown worth keeping. One cell for the star,
     // one line at the foot saying what it means.
     let any_stale = groups.iter().flat_map(|(_, g)| g.iter()).any(|l| l.stale);
-    let fixed = 15 + label_w + usize::from(any_stale) * 2;
+    // Three more when anything is cached: two for the star's column and one
+    // for the tilde the pace figure grows. Counted rather than guessed - the
+    // pace cell is four wide for "+40%" and five for "~+40%".
+    let fixed = 15 + label_w + usize::from(any_stale) * 3;
     let show_reset = (w - 1).saturating_sub(fixed + 8) >= 16;
     let tail = if show_reset { 16 } else { 0 };
     let bar_room = (w - 1).saturating_sub(fixed + tail).max(8);
@@ -203,32 +206,20 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             // exactly what nobody knows - computing it from the last
             // window's figure produces a confident number about a quantity
             // that was never measured.
-            // Suppressed for a window that is not the one we are in - rolled
-            // forward, or cached from one that has closed. Pace is spend
-            // against time elapsed, and the spend in the current window is
-            // the unmeasured half.
+            // Shown for a cached reading too, marked rather than withheld: a
+            // blank cell tells the reader nothing, and the percentage it
+            // rests on is on the same row with a star beside it.
             let closed = ahead.is_some_and(|left| left <= 0.0);
-            let cushion = if lane.projected || closed {
-                None
-            } else {
-                lead(lane.pct, lane.window_secs, lane.reset)
-            };
-            let (pace_colour, pace_txt) = pace_cell(cushion, p);
+            let guessed = lane.stale || lane.projected || closed;
+            let cushion = lead(lane.pct, lane.window_secs, lane.reset);
+            let (pace_colour, pace_txt) = pace_cell_of(cushion, guessed, p);
             let mut line: Vec<(String, String)> = vec![(
                 p.dim.clone(),
                 format!("   {} ", tc::pad(&lane.label, label_w)),
             )];
             line.extend(paced_bar(
                 used,
-                // Dropped with the pace figure and for the same reason: the
-                // mark says how far through the window we are, and putting
-                // it beside a percentage from a different window is the
-                // "well under pace" reading nobody measured.
-                if cushion.is_none() && (lane.projected || closed) {
-                    None
-                } else {
-                    elapsed_of(lane.window_secs, lane.reset)
-                },
+                elapsed_of(lane.window_secs, lane.reset),
                 bar_room,
                 hue,
                 p,

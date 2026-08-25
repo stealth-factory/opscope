@@ -474,11 +474,31 @@ fn pct_colour(pct: f64, hue: Option<(u8, u8, u8)>, p: &Palette) -> String {
 
 /// The signed cushion, coloured by whether it is one.
 fn pace_cell(value: Option<f64>, p: &Palette) -> (String, String) {
+    pace_cell_of(value, false, p)
+}
+
+/// The pace figure, with `~` when it rests on a cached percentage rather
+/// than one fetched just now.
+///
+/// The tilde is doing real work here and it is worth being clear what it
+/// covers. Where the cached window is still open the figure is a few
+/// minutes stale and the mark is honest. Where that window has closed, the
+/// percentage is the *previous* window's final one and the counter has since
+/// reset - so the figure is carried forward rather than extrapolated, and
+/// the `~` is the only thing saying so. The star beside the bar says the
+/// reading is cached; the agent's own tab says how old.
+fn pace_cell_of(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String) {
     match value {
         None => (p.dim.clone(), String::new()),
         Some(v) => (
-            if v >= 0.0 { p.ok.clone() } else { p.warn.clone() },
-            format!("  {:+.0}%", v),
+            if guessed {
+                p.dim.clone()
+            } else if v >= 0.0 {
+                p.ok.clone()
+            } else {
+                p.warn.clone()
+            },
+            format!("  {}{:+.0}%", if guessed { "~" } else { "" }, v),
         ),
     }
 }
