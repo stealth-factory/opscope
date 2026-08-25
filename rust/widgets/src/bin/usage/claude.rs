@@ -170,7 +170,11 @@ fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
 
 /// Claude Code's own cache, and only while Claude Code would still use it.
 fn claude_code_cache() -> Option<(serde_json::Value, f64)> {
-    let config = read_json(&under_home(".claude.json"))?;
+    claude_code_cache_at(&under_home(".claude.json"))
+}
+
+fn claude_code_cache_at(path: &str) -> Option<(serde_json::Value, f64)> {
+    let config = read_json(path)?;
     let c = &config["cachedUsageUtilization"];
     let u = c["utilization"].clone();
     if u.is_null() {
@@ -188,7 +192,13 @@ fn claude_code_cache() -> Option<(serde_json::Value, f64)> {
 /// Code's while it is still within the hour it trusts it for, whichever was
 /// taken more recently.
 pub fn claude_stale() -> Option<(serde_json::Value, f64)> {
-    fresher(read_snapshot(), claude_code_cache())
+    stale_from(&snapshot_path(), &under_home(".claude.json"))
+}
+
+/// The whole fallback against two named files, so a test can put a fossil
+/// and a fresh reading on disk and check which one comes back.
+fn stale_from(ours: &str, theirs: &str) -> Option<(serde_json::Value, f64)> {
+    fresher(read_snapshot_at(ours), claude_code_cache_at(theirs))
 }
 
 /// Whichever reading was taken later, and neither being present is not an
@@ -1138,6 +1148,82 @@ mod tests {
         assert!(9.6 * 86400.0 > CLAUDE_CACHE_TTL);
         assert!(59.0 * 60.0 <= CLAUDE_CACHE_TTL);
         assert!(61.0 * 60.0 > CLAUDE_CACHE_TTL);
+    }
+
+    /// A Claude Code cache file of a given age, as it writes them.
+    fn their_cache(dir: &std::path::Path, name: &str, age_secs: f64, pct: i64) -> String {
+        let path = dir.join(name);
+        let body = serde_json::json!({
+            "cachedUsageUtilization": {
+                "fetchedAtMs": (now() - age_secs) * 1000.0,
+                "utilization": {"limits": [{"group": "session", "kind": "session",
+                                            "percent": pct,
+                                            "resets_at": "2026-08-16T13:59:59.851930+00:00"}]},
+            }
+        });
+        std::fs::write(&path, body.to_string()).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    /// The bug this whole thing was written for, pinned on disk.
+    ///
+    /// A 9.6-day-old Claude Code cache and nothing of our own used to come
+    /// back as a percentage and get drawn as today's. Claude Code's own
+    /// reader returns null for it, and now so does this.
+    #[test]
+    fn a_fossil_of_theirs_is_not_a_reading() {
+        let dir = std::env::temp_dir().join(format!("tt-fossil-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("none.json").to_string_lossy().to_string();
+
+        let fossil = their_cache(&dir, "fossil.json", 9.6 * 86400.0, 11);
+        assert!(
+            stale_from(&ours, &fossil).is_none(),
+            "a cache its own owner discards was offered as a reading"
+        );
+
+        // Inside the hour it is still theirs to offer, and we take it.
+        let recent = their_cache(&dir, "recent.json", 30.0 * 60.0, 22);
+        let (got, at) = stale_from(&ours, &recent).expect("a half-hour-old reading is good");
+        assert_eq!(got["limits"][0]["percent"], 22);
+        assert!(now() - at < 3600.0);
+
+        // The boundary is theirs, not ours: an hour and a minute is out.
+        let edge = their_cache(&dir, "edge.json", 61.0 * 60.0, 33);
+        assert!(stale_from(&ours, &edge).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And with both on disk, the fresher one wins - which is the point of
+    /// keeping our own at all.
+    #[test]
+    fn our_snapshot_beats_their_cache_when_it_is_newer() {
+        let dir = std::env::temp_dir().join(format!("tt-both-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("ours.json").to_string_lossy().to_string();
+
+        // Ours taken just now, theirs half an hour ago and still valid.
+        save_snapshot_at(&ours, &serde_json::json!({
+            "limits": [{"group": "session", "kind": "session", "percent": 77,
+                        "resets_at": "2026-08-25T03:39:59.750751+00:00"}]
+        }));
+        let theirs = their_cache(&dir, "theirs.json", 30.0 * 60.0, 22);
+        let (got, _) = stale_from(&ours, &theirs).expect("something should come back");
+        assert_eq!(got["limits"][0]["percent"], 77, "the older reading won");
+
+        // With theirs expired, ours is the only one left - which is the
+        // state this machine is actually in.
+        let fossil = their_cache(&dir, "fossil.json", 9.6 * 86400.0, 11);
+        let (got, _) = stale_from(&ours, &fossil).expect("ours should still answer");
+        assert_eq!(got["limits"][0]["percent"], 77);
+
+        // And with neither, nothing - not an error, just a machine that has
+        // never had a live reading.
+        let nowhere = dir.join("nothing.json").to_string_lossy().to_string();
+        assert!(stale_from(&nowhere, &nowhere).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
