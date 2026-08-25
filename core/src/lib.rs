@@ -1173,6 +1173,42 @@ pub fn maybe_help(doc: &str) {
         println!("{}", doc.trim());
         std::process::exit(0);
     }
+    // Answered here rather than by each widget, for the same reason `--help`
+    // is: fourteen binaries that disagree about how to say their own version
+    // are fourteen answers to one question. netwatch used to answer this
+    // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
+    // number nothing set, kept up to date by nobody.
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("{}", version());
+        std::process::exit(0);
+    }
+}
+
+/// What this binary is, in one line.
+///
+/// The version, the commit it was built from, and the date of that commit.
+/// The version alone is not enough to identify a build: it changes only at a
+/// release, and almost every binary anybody runs is somewhere between two.
+///
+/// Any of the three may read `unknown` - built from a tarball with no `.git`,
+/// say. That is the honest answer and it is not a build failure; a
+/// `--version` that had to guess would be worse than one that admits it.
+pub fn version() -> String {
+    format!(
+        "{} {} ({}, {})",
+        binary_name(),
+        env!("CARGO_PKG_VERSION"),
+        env!("TOYS_COMMIT"),
+        env!("TOYS_BUILD_DATE"),
+    )
+}
+
+/// The name this binary was invoked as, for the first word of `--version`.
+fn binary_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "terminal-toys".into())
 }
 
 #[cfg(test)]

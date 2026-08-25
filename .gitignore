@@ -1,6 +1,12 @@
 target/
 .DS_Store
 
+# What a release build leaves behind, if one is run by hand.
+dist/
+terminal-toys-*.tar.gz
+terminal-toys-*.tar.gz.sha256
+CHANGELOG-release.md
+
 # Personal settings, and now secrets: config.json holds the Vercel token.
 # Variants are covered too, so a config.local.json or a stray .env cannot be
 # committed by accident.
