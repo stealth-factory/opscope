@@ -79,6 +79,56 @@ pointing at it and nothing behind it — the URL exists, answers 502, and
 nothing in `lsof` explains why. It gets its own row rather than being left out
 for lacking a socket.
 
+## Traffic
+
+The **TRAFFIC** column, and the chart on a port's own screen, come from the
+kernel's own per-socket byte counters — `bytes_sent` and `bytes_received` out
+of `ss -tine`, the same two fields netwatch reads. Nothing here is derived
+from a guess.
+
+A *listening* socket carries no bytes. The traffic is on the connections
+accepted from it, so a port's figure is the sum over every established socket
+whose **local** port is that one. Only ports something is actually listening
+on are tallied: most established sockets are outbound, and their local port is
+an ephemeral number that belongs to nothing.
+
+```
+ ── TRAFFIC ── ↑ out above · ↓ in below  · 52s of history, sampled every 1s
+    ▃▁ █▁▄▃▂ ▃▃▅ ▂▄▂▇▄                         peak 15.1 MB/s
+  ▁▆██▇█████▅███▇█████▆▁
+ ▁██████████████████████▆
+ ────────────────────────────────────────────
+```
+
+Each direction is scaled to its own peak and says what that peak was. A shared
+scale would flatten the quieter of the two into nothing, and nothing is what a
+source with no traffic looks like — the one reading this widget must never
+produce by accident.
+
+Three things it is honest about:
+
+**It counts what moved between two samples,** so a socket has to be seen twice
+to say anything. A connection that opens and closes inside one interval is
+never counted, and a long-lived one loses its last few bytes when it closes.
+At the default four-second poll that is a real gap; `-n 1` narrows it.
+
+**Rates divide by the gap that actually happened,** not by the interval that
+was asked for. `[r]` polls early, and a rate measured against the nominal
+interval would read high every time somebody pressed it.
+
+**It is TCP.** A port serving anything else reads as quiet, because these
+counters exist only for TCP sockets. Ports whose process belongs to another
+user are counted the same as any other — the byte counters need no privilege,
+even where naming the process does.
+
+Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
+it is about what leaves the machine; here loopback is the whole point, since a
+browser hitting a dev server on `127.0.0.1` is the traffic being asked about.
+
+The column appears at 96 columns and above, and a port nothing is calling
+shows nothing rather than `0 B/s` — a column of zeroes down the table reads as
+a measurement that has failed.
+
 ## What it cannot see
 
 Sockets owned by another user, which on a normal machine means everything root
@@ -303,9 +353,14 @@ are on this screen rather than an IP.
 ## Cost
 
 Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds, plus one `tailscale serve status` — no network, no root, no
-dependency beyond Tailscale for the exposure column, which is simply blank
-without it.
+seconds, one `ss -tine` for the byte counters, plus one `tailscale serve
+status` — no network, no root, no dependency beyond Tailscale for the exposure
+column, which is simply blank without it.
+
+The traffic sampling rides that same poll rather than a thread of its own. A
+second thread would buy a finer chart and would also have to be watched: a
+poller that dies is invisible, and its pane is indistinguishable from a source
+with nothing to say.
 
 ## Configuration
 
