@@ -93,17 +93,26 @@ on are tallied: most established sockets are outbound, and their local port is
 an ephemeral number that belongs to nothing.
 
 ```
- ── TRAFFIC ── ↑ out above · ↓ in below  · 52s of history, sampled every 1s
-    ▃▁ █▁▄▃▂ ▃▃▅ ▂▄▂▇▄                         peak 15.1 MB/s
-  ▁▆██▇█████▅███▇█████▆▁
- ▁██████████████████████▆
- ────────────────────────────────────────────
+ ── TRAFFIC ── ↑ out above · ↓ in below  · 44s of history, sampled every 1s
+                                             █                 ▁
+                                             █▆ ▃     ▆▄▁▂    ▁█▁▁    ▁▂▇▄▁
+↑ 4.7 MB/s ··································██▅█▂ ▄▂▇████▅ ▃▂████▄▂▂▄█████▇
+           ─────────────────────────────────────────────────────────────────
+           ··································
 ```
 
-Each direction is scaled to its own peak and says what that peak was. A shared
-scale would flatten the quieter of the two into nothing, and nothing is what a
-source with no traffic looks like — the one reading this widget must never
-produce by accident.
+The chart is as wide as the pane. One column is one sample, newest at the
+right, and each direction is scaled to its own peak and says what that peak
+was in a gutter down the left. A shared scale would flatten the quieter of the
+two into nothing, and nothing is what a source with no traffic looks like —
+the one reading this widget must never produce by accident.
+
+The dots are where there is no history yet. Left blank they would be
+indistinguishable from a stretch of real zeroes, and a quiet port and an
+unmeasured one are not the same thing. They fill in from the right as the
+samples arrive, and once the history is longer than the pane is wide the
+chart shows the most recent of it — which is what the heading's `44s of
+history` counts, not everything kept.
 
 Three things it is honest about:
 

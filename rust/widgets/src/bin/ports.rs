@@ -94,32 +94,29 @@ impl Traffic {
         (gap > 0.0).then(|| (up as f64 / gap, down as f64 / gap))
     }
 
-    /// Every kept sample as a rate, oldest first, for the chart.
-    fn series(&self, port: u16) -> Vec<(f64, f64)> {
+    /// Every kept sample as a rate, oldest first, each with the gap it was
+    /// measured over - so a chart showing only the last so many of them can
+    /// say how much history *that* is, rather than how much is kept.
+    fn series(&self, port: u16) -> Vec<(f64, f64, f64)> {
         self.seen
             .get(&port)
             .map(|ring| {
                 ring.iter()
                     .filter(|(_, _, gap)| *gap > 0.0)
-                    .map(|(up, down, gap)| (*up as f64 / gap, *down as f64 / gap))
+                    .map(|(up, down, gap)| (*up as f64 / gap, *down as f64 / gap, *gap))
                     .collect()
             })
             .unwrap_or_default()
     }
-
-    /// How long the kept samples reach back.
-    fn span(&self, port: u16) -> f64 {
-        self.seen
-            .get(&port)
-            .map(|ring| ring.iter().map(|(_, _, gap)| gap).sum())
-            .unwrap_or(0.0)
-    }
 }
 
-/// How many samples of per-port traffic to keep, which is what the chart
-/// on a port's own screen is drawn from. At the default four-second poll
-/// that is a little over six minutes.
-const TRAFFIC_KEPT: usize = 100;
+/// How many samples of per-port traffic to keep, which is what the chart on
+/// a port's own screen is drawn from.
+///
+/// The chart draws one column per sample, so this has to outlast the widest
+/// pane anyone opens it in. At the default four-second poll it is a little
+/// over half an hour.
+const TRAFFIC_KEPT: usize = 512;
 
 /// One TCP socket's byte counters, as the kernel has them.
 ///
@@ -277,18 +274,39 @@ fn over(seconds: f64) -> String {
 
 /// Traffic on one port over time: out above the line, in below it.
 ///
+/// The chart is as wide as the pane. One column is one sample, newest at the
+/// right, and until there is enough history to fill it the left of the plot
+/// carries a dotted baseline rather than bars of no height: a flat line
+/// there would say the port was quiet then, and it says nothing of the sort.
+///
 /// Each direction is scaled to its own peak and each says what that peak
-/// was, so a quiet direction is still readable beside a busy one. A shared
-/// scale would flatten the smaller of the two into nothing and it would
-/// look like no traffic at all.
-fn traffic_chart(series: &[(f64, f64)], span: f64, gap: f64, w: usize, p: &Palette) -> Vec<String> {
-    let plot = (w - 1).saturating_sub(4).max(12);
-    // The most recent `plot` samples, oldest on the left.
-    let window: Vec<(f64, f64)> = series.iter().rev().take(plot).rev().copied().collect();
-    let up: Vec<f64> = window.iter().map(|s| s.0).collect();
-    let down: Vec<f64> = window.iter().map(|s| s.1).collect();
-    let up_peak = up.iter().copied().fold(0.0f64, f64::max);
-    let down_peak = down.iter().copied().fold(0.0f64, f64::max);
+/// was, in a gutter down the left so the plot keeps the rest of the width. A
+/// shared scale would flatten the smaller of the two into nothing, and
+/// nothing is what a source with no traffic looks like.
+fn traffic_chart(series: &[(f64, f64, f64)], gap: f64, w: usize, p: &Palette) -> Vec<String> {
+    let up_peak = series.iter().map(|s| s.0).fold(0.0f64, f64::max);
+    let down_peak = series.iter().map(|s| s.1).fold(0.0f64, f64::max);
+    // The gutter is as wide as the wider of the two labels, so the plots
+    // line up under each other and the divider spans exactly the plot.
+    let label = |arrow: &str, peak: f64| {
+        if peak > 0.0 {
+            format!("{} {}", arrow, rate_of(peak))
+        } else {
+            String::new()
+        }
+    };
+    let (up_label, down_label) = (label("↑", up_peak), label("↓", down_peak));
+    let lab = up_label
+        .chars()
+        .count()
+        .max(down_label.chars().count())
+        .clamp(4, 16);
+    let plot = (w - 1).saturating_sub(lab + 2).max(12);
+    // The most recent `plot` samples, and how far back that reaches - which
+    // is not how far back the kept history reaches once it has overflowed.
+    let window: Vec<(f64, f64, f64)> = series.iter().rev().take(plot).rev().copied().collect();
+    let reach: f64 = window.iter().map(|s| s.2).sum();
+    let blank = plot - window.len();
 
     let mut out = vec![tc::seg(
         &[
@@ -296,16 +314,20 @@ fn traffic_chart(series: &[(f64, f64)], span: f64, gap: f64, w: usize, p: &Palet
             (p.open.as_str(), "↑ out above".into()),
             (p.dim.as_str(), " · ".into()),
             (p.local.as_str(), "↓ in below".into()),
-            // The window is named, because a chart of an unnamed window is
-            // a shape rather than a measurement.
+            // The window is named, because a chart of an unnamed window is a
+            // shape rather than a measurement.
             (
                 p.dim.as_str(),
-                format!("  · {} of history, sampled every {}", over(span), over(gap)),
+                if window.is_empty() {
+                    String::new()
+                } else {
+                    format!("  · {} of history, sampled every {}", over(reach), over(gap))
+                },
             ),
         ],
         w - 1,
     )];
-    if window.iter().all(|(a, b)| *a == 0.0 && *b == 0.0) {
+    if window.iter().all(|(a, b, _)| *a == 0.0 && *b == 0.0) {
         out.push(tc::seg(
             &[(
                 p.dim.as_str(),
@@ -320,44 +342,57 @@ fn traffic_chart(series: &[(f64, f64)], span: f64, gap: f64, w: usize, p: &Palet
         return out;
     }
 
-    let bars = |values: &[f64], colour: &str, peak: f64, down: bool| -> Vec<Vec<(String, String)>> {
-        let cols: Vec<(f64, String)> =
-            values.iter().map(|v| (*v, colour.to_string())).collect();
-        if down {
+    let half = |pick: fn(&(f64, f64, f64)) -> f64,
+                colour: &str,
+                peak: f64,
+                text: &str,
+                down: bool|
+     -> Vec<String> {
+        let cols: Vec<(f64, String)> = window.iter().map(|s| (pick(s), colour.to_string())).collect();
+        let rows = if down {
             tc::vbars_down(&cols, 3, peak)
         } else {
             tc::vbars(&cols, 3, peak)
-        }
-    };
-    // The peak is written beside the top row of each half, which is the
-    // row it belongs to: the tallest bar there is that number.
-    // The peak is written beside the top row of each half, which is the row
-    // it belongs to - and only when that direction has moved, because "peak
-    // -" is four cells spent saying nothing happened.
-    let drawn = |rows: Vec<Vec<(String, String)>>, peak: f64, colour: &str| -> Vec<String> {
+        };
+        // The label sits on the row nearest the divider, which is the row a
+        // full-height bar reaches: the top for the upward half, the first
+        // drawn row for the downward one.
+        let on = if down { 0 } else { rows.len().saturating_sub(1) };
         rows.into_iter()
             .enumerate()
             .map(|(i, row)| {
-                let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+                let mut line: Vec<(&str, String)> = vec![(
+                    colour,
+                    format!("{:>1$} ", if i == on { text } else { "" }, lab),
+                )];
+                // Where there is no history yet, a dotted baseline on the
+                // row against the divider. Left blank it would be
+                // indistinguishable from a stretch of real zeroes, and a
+                // quiet port and an unmeasured one are not the same thing -
+                // which is the one confusion this widget must never cause.
+                if blank > 0 {
+                    if i == on {
+                        line.push((p.grid.as_str(), "·".repeat(blank)));
+                    } else {
+                        line.push((tc::RST, " ".repeat(blank)));
+                    }
+                }
                 for (c, t) in &row {
                     line.push((c.as_str(), t.clone()));
-                }
-                if i == 0 && peak > 0.0 {
-                    line.push((colour, format!("  peak {}", rate_of(peak))));
                 }
                 tc::seg(&line, w - 1)
             })
             .collect()
     };
-    out.extend(drawn(bars(&up, &p.open, up_peak, false), up_peak, p.open.as_str()));
-    // As wide as the bars actually are, not as wide as they could have been:
-    // there is one column per sample, and until the history fills the pane a
-    // full-width rule would sit under nothing.
+    out.extend(half(|s| s.0, p.open.as_str(), up_peak, &up_label, false));
     out.push(tc::seg(
-        &[(p.grid.as_str(), format!(" {}", "─".repeat(window.len().max(1))))],
+        &[
+            (p.dim.as_str(), " ".repeat(lab + 1)),
+            (p.grid.as_str(), "─".repeat(plot)),
+        ],
         w - 1,
     ));
-    out.extend(drawn(bars(&down, &p.local, down_peak, true), down_peak, p.local.as_str()));
+    out.extend(half(|s| s.1, p.local.as_str(), down_peak, &down_label, true));
     out
 }
 
@@ -1656,8 +1691,7 @@ fn detail_rows(
     tunnel: &Option<Tunnel>,
     links: &[(String, String)],
     sel: usize,
-    seen: &[(f64, f64)],
-    reach: f64,
+    seen: &[(f64, f64, f64)],
     gap: f64,
     w: usize,
     p: &Palette,
@@ -1732,7 +1766,7 @@ fn detail_rows(
     // What has actually gone through it. The kernel's own per-socket byte
     // counters, summed over the connections accepted from this port - so
     // this is TCP, and a port serving anything else reads as quiet.
-    rows.extend(traffic_chart(seen, reach, gap, w, p));
+    rows.extend(traffic_chart(seen, gap, w, p));
     rows.push(String::new());
     rows.push(tc::seg(
         &[
@@ -2328,10 +2362,10 @@ fn main() {
                     .push((t.url.clone(), "public · cloudflare".to_string()));
             }
             view.at = view.at.min(view.links.len().saturating_sub(1));
-            let (seen, span) = store
+            let seen = store
                 .traffic
                 .lock()
-                .map(|t| (t.series(view.port), t.span(view.port)))
+                .map(|t| t.series(view.port))
                 .unwrap_or_default();
             let mut rows = detail_rows(
                 &view.row,
@@ -2340,7 +2374,6 @@ fn main() {
                 &view.links,
                 view.at,
                 &seen,
-                span,
                 refresh,
                 w,
                 &ok,
@@ -2732,8 +2765,11 @@ mod tests {
         // Half a second later, the same thousand: two thousand a second.
         t.sample(&ss_dump(4000, 0, "222"), &[3000], 102.5);
         assert_eq!(t.rate(3000), Some((2000.0, 0.0)));
-        assert_eq!(t.span(3000), 2.5);
-        assert_eq!(t.series(3000).len(), 2);
+        // Each sample carries the gap it was measured over, so a chart of
+        // the last few can say how much history they are.
+        let seen = t.series(3000);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.iter().map(|s| s.2).sum::<f64>(), 2.5);
     }
 
     #[test]
