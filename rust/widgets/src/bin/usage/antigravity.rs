@@ -65,6 +65,11 @@ pub struct Data {
     /// Which Code Assist tier the account is on. `None` means the call did
     /// not happen or did not answer, which the tab says out loud.
     live: Option<serde_json::Value>,
+    /// Why there is no tier, when there is none. The three reasons want
+    /// three different things from the reader - sign in, run the CLI, or
+    /// wait - and the old line offered "expired or the call failed", which
+    /// is the widget admitting it never looked.
+    tier_why: Missing,
     /// The quota groups, empty when the language server is not running.
     quota: Vec<serde_json::Value>,
     /// How the CLI authenticated. Read once here rather than per frame:
@@ -218,6 +223,75 @@ fn antigravity_quota() -> Option<serde_json::Value> {
 
 /// Which Code Assist tier the account is on.
 ///
+impl Data {
+    /// The reason the tier is missing, for callers outside this module -
+    /// the summary says it too, under a heading of Antigravity's own.
+    pub fn why_no_tier(&self) -> Missing {
+        if self.live.is_some() { Missing::Nothing } else { self.tier_why }
+    }
+}
+
+/// Why the tier is missing, in the three ways it can be.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Missing {
+    /// There is a tier; nothing is missing.
+    #[default]
+    Nothing,
+    /// No token file, or one with no access token in it.
+    NotSignedIn,
+    /// A token that has lapsed, with how long ago in seconds.
+    Expired(f64),
+    /// A good token and no answer. Google's, not ours.
+    NoAnswer,
+}
+
+/// The missing tier in one sentence, ending in what to do about it.
+///
+/// The line this replaces read "no tier: the CLI's access token has expired
+/// or the call failed", which names two causes, commits to neither, and asks
+/// nothing of the reader. Each of these commits, because the widget can tell
+/// them apart - it just was not looking.
+pub fn tier_note(why: Missing) -> String {
+    match why {
+        Missing::Nothing => String::new(),
+        Missing::NotSignedIn => {
+            "no tier · Antigravity has not signed in on this machine yet. \
+             Open it once and the tier appears here."
+                .into()
+        }
+        Missing::Expired(ago) => format!(
+            "no tier · Antigravity's access token expired {} ago. \
+             It refreshes them itself - open it once and this fills in.",
+            left_span(ago)
+        ),
+        Missing::NoAnswer => {
+            "no tier · the token is good, but Google's Code Assist API did not \
+             answer. Nothing to do here; it is retried every hour."
+                .into()
+        }
+    }
+}
+
+/// What is wrong with the credential, read from the same file the call uses.
+///
+/// Cheap enough to do every frame - it is a small JSON file - and it must
+/// not be cached with the call: the call is held for an hour, and a token
+/// that lapses inside that hour would otherwise be reported as an endpoint
+/// that would not answer.
+fn why_no_tier() -> Missing {
+    let Some(file) = read_json(&token_path()) else {
+        return Missing::NotSignedIn;
+    };
+    let tok = &file["token"];
+    if text(tok, "access_token").is_empty() {
+        return Missing::NotSignedIn;
+    }
+    match iso_epoch(&text(tok, "expiry")) {
+        Some(at) if at <= now() => Missing::Expired(now() - at),
+        _ => Missing::NoAnswer,
+    }
+}
+
 /// Antigravity keeps no quota and no token counts on disk - its language
 /// server refreshes a quota into memory and is not even installed between
 /// runs - so this endpoint is the only thing that can answer anything, and
@@ -275,8 +349,10 @@ fn conversation_steps(path: &str) -> Option<f64> {
 /// anywhere carries a token count.
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
+    let live = cached(caches, "antigravity", PLAN_TTL, antigravity_live);
     let mut d = Data {
-        live: cached(caches, "antigravity", PLAN_TTL, antigravity_live),
+        tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier() },
+        live,
         quota: cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota)
             .and_then(|got| got.as_array().cloned())
             .unwrap_or_default(),
@@ -568,13 +644,11 @@ fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = antigravity_quota_rows(&d.quota, w, p);
     if d.live.is_none() {
-        rows.push(tc::seg(
-            &[(
-                p.warn.as_str(),
-                "  no tier: the CLI's access token has expired or the call failed".into(),
-            )],
-            w - 1,
-        ));
+        rows.extend(
+            wrap_text(&tier_note(d.tier_why), w.saturating_sub(4).max(20))
+                .into_iter()
+                .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
+        );
         rows.push(String::new());
     }
     rows.extend(antigravity_activity(d, w, p));
@@ -854,7 +928,18 @@ mod tests {
     #[test]
     fn no_quota_is_explained_and_a_quota_is_not_contradicted() {
         let p = palette();
-        let empty = antigravity_body(&Data::default(), 90, &p).join(" ");
+        // A reason has to be named: the tab says which of the three it is,
+        // so a fixture that leaves it at "nothing is missing" is asking for
+        // a sentence there is no cause to print.
+        let empty = antigravity_body(
+            &Data {
+                tier_why: Missing::NoAnswer,
+                ..Data::default()
+            },
+            90,
+            &p,
+        )
+        .join(" ");
         assert!(empty.contains("no quota either"));
         assert!(empty.contains("no tier"));
         let with = antigravity_body(
@@ -870,6 +955,28 @@ mod tests {
         assert!(with.contains("No per-token usage is recorded locally"));
         assert!(!with.contains("no quota either"));
         assert!(!with.contains("no tier"));
+    }
+
+    #[test]
+    fn each_missing_tier_asks_for_something_different() {
+        // The line this replaced offered "expired or the call failed" for
+        // all three, which is two causes, no commitment and nothing to do.
+        let signed_out = tier_note(Missing::NotSignedIn);
+        let lapsed = tier_note(Missing::Expired(3.0 * 3600.0));
+        let silent = tier_note(Missing::NoAnswer);
+        for note in [&signed_out, &lapsed, &silent] {
+            assert!(note.starts_with("no tier · "), "{:?}", note);
+            assert!(note.trim_end().ends_with('.'), "not a sentence: {:?}", note);
+        }
+        assert!(signed_out.contains("not signed in"), "{}", signed_out);
+        assert!(lapsed.contains("3h"), "the age is the useful part: {}", lapsed);
+        assert!(silent.contains("Google"), "{}", silent);
+        // and each is a different sentence, which is the whole point
+        assert_ne!(signed_out, lapsed);
+        assert_ne!(lapsed, silent);
+        assert_ne!(signed_out, silent);
+        // nothing missing says nothing
+        assert!(tier_note(Missing::Nothing).is_empty());
     }
 
     #[test]
@@ -955,6 +1062,7 @@ mod tests {
             steps: 1234.0,
             prompts: 42,
             last: now() - 3600.0,
+            tier_why: Missing::Nothing,
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");

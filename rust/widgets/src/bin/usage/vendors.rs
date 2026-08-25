@@ -256,6 +256,26 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             w,
             p,
         ));
+        // Antigravity is quiet for a reason it can name, and the reason is
+        // the useful part - "no quota published" says the same thing about a
+        // machine that has never signed in and one whose token lapsed an
+        // hour ago. Its own heading, under that line, so the sentence has
+        // something to belong to.
+        if quiet.contains(&"antigravity") {
+            let note = crate::antigravity::tier_note(s.antigravity.why_no_tier());
+            if !note.is_empty() {
+                rows.push(String::new());
+                rows.push(tc::seg(
+                    &[(p.lbl.as_str(), "  ANTIGRAVITY".into())],
+                    w - 1,
+                ));
+                rows.extend(
+                    wrap_text(&note, w.saturating_sub(5).max(20))
+                        .into_iter()
+                        .map(|l| tc::seg(&[(p.warn.as_str(), format!("   {}", l))], w - 1)),
+                );
+            }
+        }
     }
     rows
 }
