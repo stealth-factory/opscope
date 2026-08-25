@@ -75,6 +75,21 @@ omitted, and the sheet says how many are missing rather than silently dropping
 them. Every URL is shown wrapped in full, so mouse selection still works where
 OSC 52 is blocked.
 
+## The detail view
+
+`→` or `↵` opens one deployment in full. It scrolls with `↑` `↓` — the build
+log below makes it taller than any pane — and the footer says where you are
+in it. `PgUp` `PgDn` `Home` `End` move by the page and to either end.
+
+It refetches every minute while it is open, because a build that is still
+running writes more log while you are reading it, and `r` asks again at once
+rather than waiting for that.
+
+`c` opens the copy list on **its own page**, and `←` or `esc` brings you back
+to the detail where you left it. The list used to sit at the bottom of the
+detail, which was fine until the build log went in above it: the numbers you
+press were then reliably scrolled off the screen you were pressing them from.
+
 ## The build log
 
 The detail view ends with the deployment's own build output, fetched from

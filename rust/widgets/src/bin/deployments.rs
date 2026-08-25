@@ -31,6 +31,9 @@ const API: &str = "https://api.vercel.com";
 /// How many build-log lines to ask for. Enough that the tail of a failing
 /// build is in there whole, few enough not to wait on a novel.
 const EVENT_LIMIT: usize = 200;
+/// How long a fetched detail is kept before the open page asks again. A
+/// running build's log grows while it is being read.
+const DETAIL_TTL: f64 = 60.0;
 const FILTERS: &[&str] = &["all", "failed", "production"];
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -103,6 +106,7 @@ fn fetch_detail(uid: &str, team: &str, tok: &str) -> serde_json::Value {
     // which is the thing you would otherwise open a browser for.
     if let Some(map) = got.as_object_mut() {
         map.insert("_events".into(), fetch_events(uid, team, tok));
+        map.insert("_fetched_at".into(), serde_json::json!(now()));
     }
     got
 }
@@ -594,7 +598,10 @@ fn info_overlay(
         rows.extend(build_log(detail, w, &p));
     }
 
-    let pairs = copy_items(dep, detail);
+    // The copy list is its own page now, reached with c. It was a section
+    // at the bottom of this one, which meant the numbers you press were
+    // usually scrolled off the screen by the build log above them.
+    let pairs: Vec<(String, String)> = Vec::new();
     if !pairs.is_empty() {
         rows.push(String::new());
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── COPY ──".into())], w - 1));
@@ -619,13 +626,59 @@ fn info_overlay(
         }
     }
 
+    let _ = (h, note);
+    rows
+}
+
+/// The copy list on a page of its own.
+///
+/// It used to sit under the detail, which was fine until the build log went
+/// in above it: the numbers you press were then reliably scrolled off the
+/// bottom of the screen you were pressing them from.
+fn copy_overlay(
+    dep: &serde_json::Value,
+    detail: Option<&serde_json::Value>,
+    w: usize,
+    h: usize,
+    note: &str,
+    p: &Palette,
+) -> Vec<String> {
+    let pairs = copy_items(dep, detail);
+    let mut rows = vec![tc::title("copy", w, &p.prod)];
+    rows.push(String::new());
+    if pairs.is_empty() {
+        rows.push(tc::seg(
+            &[(p.dim.as_str(), "  nothing here to copy yet".into())],
+            w - 1,
+        ));
+    }
+    for (i, (label, value)) in pairs.iter().enumerate() {
+        let room = w.saturating_sub(28);
+        let short = if value.chars().count() <= room {
+            value.clone()
+        } else {
+            format!("{}…", value.chars().take(room.saturating_sub(1)).collect::<String>())
+        };
+        rows.push(tc::seg(
+            &[
+                (p.ready.as_str(), format!("  [{}] ", i + 1)),
+                (p.txt.as_str(), format!("{:<21} ", label)),
+                (p.url.as_str(), short),
+            ],
+            w - 1,
+        ));
+    }
     while rows.len() < h.saturating_sub(2) {
         rows.push(String::new());
     }
     rows.push(tc::seg(
         &[(
             p.hint.as_str(),
-            format!(" press 1-{} to copy · ← or esc to close", pairs.len()),
+            if pairs.is_empty() {
+                " ← or esc to close".to_string()
+            } else {
+                format!(" press 1-{} to copy · ← or esc to close", pairs.len())
+            },
         )],
         w - 1,
     ));
@@ -795,6 +848,11 @@ fn main() {
     let mut only: Option<String> = None;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
     let mut overlay = false;
+    // The copy list is a page of its own, opened from the detail with c.
+    let mut copying = false;
+    // How far down the detail is scrolled. The build log makes it taller
+    // than any pane, so it has to move.
+    let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut visible = 1usize;
     let mut shown: Vec<serde_json::Value> = Vec::new();
@@ -808,7 +866,38 @@ fn main() {
                     // what the footer has always promised and what it
                     // does from the list - it used to close the overlay
                     // instead, so the key disagreed with its own hint.
-                    "left" | "esc" => overlay = false,
+                    "left" | "esc" => {
+                        if copying {
+                            copying = false;
+                        } else {
+                            overlay = false;
+                        }
+                    }
+                    "c" | "C" if !copying => copying = true,
+                    "up" | "k" | "K" if !copying => oscroll = oscroll.saturating_sub(1),
+                    "down" | "j" | "J" if !copying => oscroll = oscroll.saturating_add(1),
+                    "pgup" if !copying => {
+                        let page = tc::size().1.saturating_sub(3).max(1);
+                        oscroll = oscroll.saturating_sub(page);
+                    }
+                    "pgdn" if !copying => {
+                        let page = tc::size().1.saturating_sub(3).max(1);
+                        oscroll = oscroll.saturating_add(page);
+                    }
+                    "home" if !copying => oscroll = 0,
+                    "end" if !copying => oscroll = usize::MAX,
+                    // The detail is a live thing too - a running build's log
+                    // grows while you read it. r drops what was fetched so
+                    // the next frame asks again.
+                    "r" | "R" if !copying => {
+                        if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1)))
+                        {
+                            let uid = text(chosen, "uid");
+                            if let Ok(mut g) = details.lock() {
+                                g.remove(&uid);
+                            }
+                        }
+                    }
                     "q" | "Q" => {
                         keyboard.restore();
                         tc::restore_screen();
@@ -864,6 +953,8 @@ fn main() {
                 "right" | "enter" => {
                     if !shown.is_empty() {
                         overlay = true;
+                        copying = false;
+                        oscroll = 0;
                         note = (String::new(), 0.0);
                     }
                 }
@@ -926,7 +1017,22 @@ fn main() {
         if overlay && !shown.is_empty() {
             let chosen = shown[selected].clone();
             let uid = text(&chosen, "uid");
-            let held = details.lock().ok().and_then(|g| g.get(&uid).cloned());
+            let mut held = details.lock().ok().and_then(|g| g.get(&uid).cloned());
+            // A build that is still running writes more log while you read
+            // it, so what was fetched when the page opened stops being the
+            // whole story. Dropped after DETAIL_TTL so the next frame asks
+            // again; a finished deployment is refetched too, which costs one
+            // request a minute and keeps the rule simple.
+            if held
+                .as_ref()
+                .map(|v| now() - v["_fetched_at"].as_f64().unwrap_or(0.0) > DETAIL_TTL)
+                .unwrap_or(false)
+            {
+                if let Ok(mut g) = details.lock() {
+                    g.remove(&uid);
+                }
+                held = None;
+            }
             if held.is_none() && !uid.is_empty() {
                 let start = fetching
                     .lock()
@@ -946,7 +1052,42 @@ fn main() {
                     });
                 }
             }
-            let rows = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
+            let rows = if copying {
+                copy_overlay(&chosen, held.as_ref(), w, h, &note.0, &p)
+            } else {
+                let body = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
+                let foot = 2;
+                let room = h.saturating_sub(foot).max(1);
+                let furthest = body.len().saturating_sub(room);
+                oscroll = oscroll.min(furthest);
+                let last = (oscroll + room).min(body.len());
+                let mut out: Vec<String> = body[oscroll..last].to_vec();
+                while out.len() < room {
+                    out.push(String::new());
+                }
+                out.push(tc::seg(
+                    &[(
+                        p.hint.as_str(),
+                        if furthest > 0 {
+                            format!(
+                                " ↑↓ scroll {}-{} of {} · [c]opy · [r]efresh · ← or esc to close",
+                                oscroll + 1,
+                                last,
+                                body.len()
+                            )
+                        } else {
+                            " [c]opy · [r]efresh · ← or esc to close".to_string()
+                        },
+                    )],
+                    w - 1,
+                ));
+                out.push(if note.0.is_empty() {
+                    String::new()
+                } else {
+                    tc::seg(&[(p.ready.as_str(), format!(" {}", note.0))], w - 1)
+                });
+                out
+            };
             tc::draw(&rows, w, h);
             std::thread::sleep(Duration::from_millis(100));
             continue;
