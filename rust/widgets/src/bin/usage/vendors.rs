@@ -224,26 +224,26 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
         // their behalf - once it is, the tab reports the interval and this
         // line would be repeating a setting back at them.
         if *name == "grok" && crate::grok::asks_nobody(&s.grok) {
-            // Written to fit rather than clipped: a hint cut in half is the
-            // fault this repo keeps paying for, and "usage.grok_pin" names
-            // a setting that does not exist.
-            let long = " · only your own Grok sessions update this · usage.grok_ping";
-            let short = " · usage.grok_ping";
-            let room = (w - 1).saturating_sub("     not live".len());
+            // Two lines because both halves are worth having and neither
+            // fits beside the other at the widths these panes are dragged
+            // to: what the number is, and what to do about it. Clipping one
+            // to keep them on a single row would leave "usage.grok_pin",
+            // which names a setting that does not exist.
             rows.push(tc::seg(
                 &[
                     (p.warn.as_str(), "     not live".into()),
                     (
                         p.dim.as_str(),
-                        if long.chars().count() <= room {
-                            long.to_string()
-                        } else if short.chars().count() <= room {
-                            short.to_string()
-                        } else {
-                            String::new()
-                        },
+                        " · only your own Grok sessions update this".into(),
                     ),
                 ],
+                w - 1,
+            ));
+            rows.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    "     Set usage.grok_ping in config.json to poll x.ai instead.".into(),
+                )],
                 w - 1,
             ));
         }
