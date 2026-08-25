@@ -256,14 +256,19 @@ file is git-ignored and the token is never printed.
   "token": "",
   "token_env": "GITHUB_TOKEN",
   "accounts": [],
-  "window_days": 7,
+  "window_days": 14,
   "refresh": 120
 }
 ```
 
 Empty `accounts` discovers every org you belong to plus your personal account;
 otherwise list org logins, and `@me` for your own. `window_days` sets the window
-the board opens on; `w` cycles it from there.
+the board opens on — **14 days by default** — and `w` cycles it from there
+through 7 / 14 / 30 / 60 / 90.
+
+Fourteen rather than seven because a week is short enough that one quiet
+Friday moves every figure on the board: a merge rate, a per-day average and
+a queue trend all read as noise when a single day is a seventh of the sample.
 
 ```sh
 ./github.py                        # discovered accounts, 120s

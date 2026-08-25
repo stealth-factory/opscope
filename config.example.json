@@ -74,7 +74,7 @@
     "token": "",
     "token_env": "GITHUB_TOKEN",
     "accounts": [],
-    "window_days": 7,
+    "window_days": 14,
     "refresh": 120
   },
   "linear": {

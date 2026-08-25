@@ -22,12 +22,29 @@
 //! issueCount is exact at any volume and costs one rate-limit point per
 //! request however many are packed into it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration as Days, NaiveDate, Utc};
 use toys_core as tc;
+
+/// How many of the longest-open PRs an account's own screen names.
+/// How long ago an ISO-8601 stamp was, coarse on purpose: "47d" answers the
+/// question a queue raises and a timestamp does not.
+fn age_since(iso: &str) -> String {
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return String::new();
+    };
+    let secs = (Utc::now() - at.with_timezone(&Utc)).num_seconds().max(0);
+    if secs >= 86400 {
+        format!("{}d", secs / 86400)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+const OLDEST_WANTED: usize = 5;
 
 const API: &str = "https://api.github.com/graphql";
 const WINDOWS: &[i64] = &[7, 14, 30, 60, 90];
@@ -68,6 +85,369 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
     }
+}
+
+/// The open PRs that have been open longest, for one account.
+///
+/// The board and the row are built entirely from `issueCount` aggregates,
+/// which are exact at any volume and cost one rate-limit point per request
+/// rather than per alias. That is the right shape for counting and useless
+/// for naming: a queue of six hundred says nothing about which of them has
+/// been sitting there since June.
+///
+/// So this asks for nodes, and only when an account's own screen is opened -
+/// five of them, oldest first. One request, on demand, for the question the
+/// aggregates cannot answer.
+fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
+    let q = scope_of(acc, viewer);
+    let query = format!(
+        r#"{{
+  search(query:"{q} is:pr is:open sort:created-asc", type:ISSUE, first:{n}) {{
+    nodes {{
+      ... on PullRequest {{
+        number
+        title
+        createdAt
+        isDraft
+        repository {{ name }}
+      }}
+    }}
+  }}
+}}"#,
+        q = q,
+        n = OLDEST_WANTED
+    );
+    match graphql(&query, tok, scopes) {
+        Ok(v) => v["data"]["search"]["nodes"].clone(),
+        Err(e) => serde_json::json!({ "_error": e }),
+    }
+}
+
+/// One account in full.
+///
+/// Everything here is already on the board somewhere - the row it came from
+/// carries all of it - but the row has one line and has to choose. Open
+/// splits into what is waiting on a reviewer and what is still a draft;
+/// merged splits into what landed and what was closed unmerged; and the
+/// flow chart, which the board draws once for every account added together,
+/// is drawn here for this one alone. That last is the reason to open it: a
+/// queue growing in one account is invisible in a total that six others
+/// are also feeding.
+///
+/// No new request. The figures were fetched for the row.
+fn account_detail(
+    a: &Account,
+    oldest: Option<&serde_json::Value>,
+    w: usize,
+    h: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = vec![tc::title(&a.account, w, &p.accent)];
+    let label_w = 16usize;
+    let mut field = |name: &str, value: String, aside: String, colour: &str| {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad(name, label_w))),
+                (colour, format!("{:>7}", value)),
+                (p.dim.as_str(), format!("   {}", aside)),
+            ],
+            w - 1,
+        ));
+    };
+
+    let waiting = a.review;
+    let drafts = a.draft;
+    field(
+        "open",
+        a.open.to_string(),
+        match (waiting, drafts) {
+            (0, 0) => String::new(),
+            (r, 0) => format!("{} awaiting review", r),
+            (0, d) => format!("{} draft", d),
+            (r, d) => format!("{} awaiting review · {} draft", r, d),
+        },
+        p.pr.as_str(),
+    );
+    field("issues", a.issues.to_string(), String::new(), p.txt.as_str());
+
+    // Opened against merged over the same window is the question the row
+    // cannot answer: a queue of six hundred is a different thing depending
+    // on whether it grew by forty this week or shrank by ten.
+    let window_days = a.hist_window.unwrap_or(a.window).max(1);
+    let opened_total: i64 = a.opened_hist.values().sum();
+    let merged_total: i64 = a.hist.values().sum();
+    let net = opened_total - merged_total;
+    field(
+        "opened",
+        opened_total.to_string(),
+        format!("in {}d", window_days),
+        p.pr.as_str(),
+    );
+
+    let window = format!("in {}d", a.window);
+    field(
+        "merged",
+        a.merged.to_string(),
+        match a.dropped {
+            0 => window.clone(),
+            n => format!("{} · {} closed unmerged", window, n),
+        },
+        p.ok.as_str(),
+    );
+    if opened_total > 0 || merged_total > 0 {
+        field(
+            "net",
+            format!("{:+}", net),
+            match net {
+                0 => "the queue held level".to_string(),
+                n if n > 0 => format!("the queue grew by {}", n),
+                n => format!("the queue shrank by {}", -n),
+            },
+            if net > 0 { p.warn.as_str() } else { p.ok.as_str() },
+        );
+    }
+    if merged_total > 0 {
+        let per_day = merged_total as f64 / window_days as f64;
+        field(
+            "merged/day",
+            format!("{:.1}", per_day),
+            // How long the open queue would take at the rate actually
+            // observed. A number people usually estimate and get wrong.
+            if per_day > 0.0 && a.open > 0 {
+                format!("{:.0}d of open PRs at that rate", a.open as f64 / per_day)
+            } else {
+                String::new()
+            },
+            p.txt.as_str(),
+        );
+        let busiest = a.hist.iter().max_by_key(|(_, n)| **n);
+        if let Some((day, n)) = busiest {
+            if *n > 0 {
+                field("busiest day", n.to_string(), day.clone(), p.dim.as_str());
+            }
+        }
+        let idle = window_days as usize - a.hist.values().filter(|n| **n > 0).count();
+        if idle > 0 {
+            field(
+                "days with none",
+                idle.to_string(),
+                format!("of {}", window_days),
+                p.dim.as_str(),
+            );
+        }
+    }
+    if let Some(rate) = a.rate {
+        let bar = tc::meter(rate / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24));
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad("merge rate", label_w))),
+                (p.ok.as_str(), format!("{:>6.0}%", rate)),
+                (p.dim.as_str(), "   ".into()),
+                (p.ok.as_str(), bar),
+            ],
+            w - 1,
+        ));
+    }
+
+    // The same bar the board draws for everything at once, for this account
+    // alone: a queue is a different shape depending on whether it is waiting
+    // on reviewers or waiting on authors.
+    if a.open > 0 && h.saturating_sub(rows.len()) >= 4 {
+        let ready = (a.open - a.draft - a.review).max(0);
+        let legend: Vec<(&str, i64, &str)> = [
+            ("awaiting review", a.review, p.warn.as_str()),
+            ("ready to merge", ready, p.ok.as_str()),
+            ("draft", a.draft, p.dim.as_str()),
+        ]
+        .into_iter()
+        .filter(|x| x.1 > 0)
+        .collect();
+        if !legend.is_empty() {
+            rows.push(String::new());
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── OPEN PR STATE ── ".into()),
+                    (p.dim.as_str(), "any age".into()),
+                ],
+                w - 1,
+            ));
+            let parts: Vec<(f64, String)> = legend
+                .iter()
+                .map(|(_, n, c)| (*n as f64 / a.open as f64, c.to_string()))
+                .collect();
+            let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
+            let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            for (colour, txt) in &bar {
+                line.push((colour.as_str(), txt.clone()));
+            }
+            rows.push(tc::seg(&line, w - 1));
+            let mut key: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            for (label, count, colour) in &legend {
+                key.push((colour, "▇ ".into()));
+                key.push((p.txt.as_str(), (*label).into()));
+                key.push((
+                    p.dim.as_str(),
+                    format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / a.open as f64),
+                ));
+            }
+            rows.push(tc::seg(&key, w - 1));
+        }
+    }
+
+    // The ones that have been open longest, which no count can name.
+    if h.saturating_sub(rows.len()) >= 4 {
+        rows.push(String::new());
+        match oldest {
+            None => {
+                rows.push(tc::seg(
+                    &[(p.lbl.as_str(), " ── OLDEST OPEN ──".into())],
+                    w - 1,
+                ));
+                rows.push(tc::seg(&[(p.dim.as_str(), "  asking…".into())], w - 1));
+            }
+            Some(v) if !v["_error"].is_null() => {
+                rows.push(tc::seg(
+                    &[(p.lbl.as_str(), " ── OLDEST OPEN ──".into())],
+                    w - 1,
+                ));
+                rows.push(tc::seg(
+                    &[(p.dim.as_str(), format!("  {}", v["_error"].as_str().unwrap_or("")))],
+                    w - 1,
+                ));
+            }
+            Some(v) => {
+                let nodes = v.as_array().cloned().unwrap_or_default();
+                rows.push(tc::seg(
+                    &[
+                        (p.lbl.as_str(), " ── OLDEST OPEN ── ".into()),
+                        (
+                            p.dim.as_str(),
+                            if nodes.is_empty() {
+                                "nothing open".to_string()
+                            } else {
+                                format!("{} longest waiting", nodes.len())
+                            },
+                        ),
+                    ],
+                    w - 1,
+                ));
+                for node in nodes.iter() {
+                    let age = age_since(node["createdAt"].as_str().unwrap_or(""));
+                    let repo = node["repository"]["name"].as_str().unwrap_or("").to_string();
+                    let num = node["number"].as_i64().unwrap_or(0);
+                    let draft = node["isDraft"].as_bool().unwrap_or(false);
+                    let head = format!("  {:>5}  #{:<6}", age, num);
+                    let room = w.saturating_sub(head.chars().count() + repo.chars().count() + 6);
+                    let title = node["title"].as_str().unwrap_or("").to_string();
+                    let title: String = if title.chars().count() > room {
+                        format!("{}…", title.chars().take(room.saturating_sub(1)).collect::<String>())
+                    } else {
+                        title
+                    };
+                    rows.push(tc::seg(
+                        &[
+                            (if draft { p.dim.as_str() } else { p.warn.as_str() }, head),
+                            (p.dim.as_str(), format!("{}  ", repo)),
+                            (p.txt.as_str(), title),
+                        ],
+                        w - 1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // The same chart the board draws for every account at once, for this
+    // one on its own.
+    let want = a.hist_window.unwrap_or(a.window).max(1);
+    let base = today();
+    let mut days: Vec<String> = (0..want)
+        .rev()
+        .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
+        .collect();
+    let avail = w.saturating_sub(3).max(10);
+    if days.len() > avail {
+        days = days[days.len() - avail..].to_vec();
+    }
+    let slot = (avail / days.len().max(1)).max(1);
+    let gap = if slot >= 3 { 1 } else { 0 };
+    let barw = slot - gap;
+    let spread = |per_day: &[f64]| -> Vec<f64> {
+        let mut cols = Vec::new();
+        for (n, v) in per_day.iter().enumerate() {
+            cols.extend(std::iter::repeat_n(*v, barw));
+            if gap > 0 && n + 1 < per_day.len() {
+                cols.extend(std::iter::repeat_n(0.0, gap));
+            }
+        }
+        cols
+    };
+    let opened: Vec<f64> = days
+        .iter()
+        .map(|d| a.opened_hist.get(d).copied().unwrap_or(0) as f64)
+        .collect();
+    let merged: Vec<f64> = days
+        .iter()
+        .map(|d| a.hist.get(d).copied().unwrap_or(0) as f64)
+        .collect();
+    let (up, down) = (spread(&opened), spread(&merged));
+    // One scale both ways, or the comparison lies.
+    let hi = up
+        .iter()
+        .chain(down.iter())
+        .cloned()
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+    if h.saturating_sub(rows.len()) >= 10 && !up.is_empty() {
+        rows.push(String::new());
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── PR FLOW ── ".into()),
+                (p.dim.as_str(), format!("{}d · ", days.len())),
+                (p.pr.as_str(), format!("▲ {} opened", opened.iter().sum::<f64>() as i64)),
+                (p.dim.as_str(), " · ".into()),
+                (p.ok.as_str(), format!("▼ {} merged", merged.iter().sum::<f64>() as i64)),
+                (p.dim.as_str(), format!("   peak {}/day", hi as i64)),
+            ],
+            w - 1,
+        ));
+        for line in tc::vbars(&up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(), 3, hi) {
+            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            for (colour, ch) in &line {
+                parts.push((colour.as_str(), ch.clone()));
+            }
+            rows.push(tc::seg(&parts, w - 1));
+        }
+        rows.push(tc::seg(
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(up.len()))],
+            w - 1,
+        ));
+        for line in
+            tc::vbars_down(&down.iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(), 3, hi)
+        {
+            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            for (colour, ch) in &line {
+                parts.push((colour.as_str(), ch.clone()));
+            }
+            rows.push(tc::seg(&parts, w - 1));
+        }
+        let left = format!("{}d ago", days.len());
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!(" {}", left)),
+                (
+                    p.dim.as_str(),
+                    format!(
+                        "{:>width$}",
+                        "today",
+                        width = up.len().saturating_sub(left.chars().count() + 1)
+                    ),
+                ),
+            ],
+            w - 1,
+        ));
+    }
+    rows
 }
 
 /// What the token is allowed to see, read off the response headers.
@@ -628,7 +1008,7 @@ fn main() {
     let cfg = tc::load_config("github");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let configured: Vec<String> = tc::cfg_strings(&cfg, "accounts", &[]);
-    let start_window = tc::cfg_f64(&cfg, "window_days", 7.0) as i64;
+    let start_window = tc::cfg_f64(&cfg, "window_days", 14.0) as i64;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut named: Vec<String> = Vec::new();
@@ -675,6 +1055,10 @@ fn main() {
     let scopes = Arc::new(Mutex::new(Scopes::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let (tok, source) = token(&cfg);
+    // The poller thread takes ownership of it; the render loop needs it too,
+    // for the one on-demand request an account's own screen makes.
+    let ui_tok = tok.clone();
+    let ui_scopes = Arc::clone(&scopes);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "GITHUB_TOKEN");
         if name.is_empty() { "GITHUB_TOKEN".to_string() } else { name }
@@ -724,6 +1108,12 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut tick) = (0usize, 0usize);
+    // One account on its own screen, and how far down it is scrolled.
+    let (mut detail, mut dscroll) = (false, 0usize);
+    // The longest-open PRs per account, fetched when that account's screen
+    // is opened and kept after.
+    let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
+    let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
@@ -757,6 +1147,23 @@ fn main() {
                         cond.notify_all();
                     }
                 }
+                "right" | "enter" => {
+                    detail = true;
+                    dscroll = 0;
+                }
+                "left" | "esc" if detail => detail = false,
+                "up" if detail => dscroll = dscroll.saturating_sub(1),
+                "down" if detail => dscroll = dscroll.saturating_add(1),
+                "pgup" if detail => {
+                    let page = tc::size().1.saturating_sub(3).max(1);
+                    dscroll = dscroll.saturating_sub(page);
+                }
+                "pgdn" if detail => {
+                    let page = tc::size().1.saturating_sub(3).max(1);
+                    dscroll = dscroll.saturating_add(page);
+                }
+                "home" if detail => dscroll = 0,
+                "end" if detail => dscroll = usize::MAX,
                 "up" => selected = selected.saturating_sub(1),
                 "down" => selected += 1,
                 _ => {}
@@ -1315,8 +1722,70 @@ fn main() {
             rows.push(tc::seg(&refs, w - 1));
         }
 
+        // One account in full, opened from the row it belongs to.
+        if detail {
+            if let Some(a) = stats.get(selected.min(stats.len().saturating_sub(1))) {
+                // One request, on opening, for the question the aggregates
+                // cannot answer. Held per account so leaving and coming back
+                // does not ask again.
+                let key = a.key.clone();
+                let held = oldest.lock().ok().and_then(|g| g.get(&key).cloned());
+                if held.is_none() {
+                    let start = asking
+                        .lock()
+                        .map(|mut g| g.insert(key.clone()))
+                        .unwrap_or(false);
+                    if start {
+                        let (oldest, asking) = (Arc::clone(&oldest), Arc::clone(&asking));
+                        // key is "@me" or the org; account is the bare
+                        // login, which is what scope_of wants for "@me".
+                        let (acc, viewer, tok, scopes) =
+                            (a.key.clone(), a.account.clone(), ui_tok.clone(), Arc::clone(&ui_scopes));
+                        std::thread::spawn(move || {
+                            let got = fetch_oldest(&acc, &viewer, &tok, &scopes);
+                            if let Ok(mut g) = oldest.lock() {
+                                g.insert(acc.clone(), got);
+                            }
+                            if let Ok(mut g) = asking.lock() {
+                                g.remove(&acc);
+                            }
+                        });
+                    }
+                }
+                let body = account_detail(a, held.as_ref(), w, h, &p);
+                let hints: Vec<Vec<(&str, String)>> = vec![
+                    vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
+                    vec![
+                        (p.accent.as_str(), "←".into()),
+                        (p.dim.as_str(), "/esc back".into()),
+                    ],
+                    vec![(p.dim.as_str(), "[q]uit".into())],
+                ];
+                let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+                    .into_iter()
+                    .map(|l| format!(" {}", l))
+                    .collect();
+                let room = h.saturating_sub(foot.len()).max(1);
+                dscroll = dscroll.min(body.len().saturating_sub(room));
+                let last = (dscroll + room).min(body.len());
+                let mut out: Vec<String> = body[dscroll..last].to_vec();
+                while out.len() < room {
+                    out.push(String::new());
+                }
+                out.extend(foot);
+                tc::draw(&out, w, h);
+                std::thread::sleep(Duration::from_millis(300));
+                continue;
+            }
+            detail = false;
+        }
+
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " account".into())],
+            vec![
+                (p.accent.as_str(), "→/↵".into()),
+                (p.dim.as_str(), " account".into()),
+            ],
             vec![(p.dim.as_str(), "[w]indow".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
