@@ -251,8 +251,10 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64) {
 /// refresh happens when a session has just ended - the moment the numbers
 /// have changed and nobody is at the keyboard waiting.
 ///
-/// It starts somebody else's program, so it is off unless asked for. The
-/// handshake is the smallest one the agent answers: initialize, then close.
+/// It starts somebody else's program, which is part of what grok_ping asks
+/// for rather than a setting of its own - polling that stops working the
+/// moment the token lapses is not what anybody turned on. The handshake is
+/// the smallest one the agent answers: initialize, then close.
 fn refresh_token() {
     use std::io::Write;
     let Ok(mut child) = std::process::Command::new(under_home(CLI))
@@ -337,7 +339,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean
     // starting the CLI under somebody who is using it.
-    if cfg.grok_ping && cfg.grok_ping_after_session && newest > 0.0 {
+    if cfg.grok_ping && newest > 0.0 {
         let quiet = now() - newest;
         let handled = caches
             .live

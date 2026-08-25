@@ -884,17 +884,19 @@ Three settings, all off or hourly by default:
 
 | key | default | what it does |
 |---|---|---|
-| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing`, with the bearer token the Grok CLI leaves in `~/.grok/auth.json` |
+| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` once after a session goes quiet to refresh that token |
 | `grok_ping_minutes` | `60` | how often. The window moves over days; an hour is current without being traffic |
-| `grok_ping_after_session` | `false` | run `grok agent stdio` once after a session goes quiet, purely to refresh that token |
 
-**Off by default for two different reasons.** `grok_ping` talks to a vendor,
-and a widget that reads should not start doing that because it was launched.
-`grok_ping_after_session` is the stronger case: it starts somebody else's
-program. It exists because the token expires — mine had lapsed 8.6 days before
-I looked, on the same day the CLI last ran — and without a refresh the asking
-works for a while and then silently stops, which is the failure it was added to
-fix.
+**One setting, not two.** The refresh was a second key for one release and
+should not have been. The token expires — mine had lapsed 8.6 days before I
+looked, on the same day the CLI last ran — so asking without refreshing works
+for a while and then silently stops, which is the failure the refresh exists to
+prevent. Nobody wants the first without the second, so turning on `grok_ping`
+turns on both.
+
+**Off by default**, because it does two things a widget that reads has no
+business doing unasked: it talks to a vendor, and it starts somebody else's
+program.
 
 The screen says which state it is in, in both places it appears:
 

@@ -104,10 +104,9 @@
     "rates": {},
     "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
     "plan_cost": {},
-    "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. grok_ping_after_session runs the CLI once after a session goes quiet, which is what refreshes that token - without it the asking stops working when the token lapses. Both are off by default: one talks to a vendor, the other starts somebody else's program.",
+    "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
     "grok_ping": false,
-    "grok_ping_minutes": 60,
-    "grok_ping_after_session": false
+    "grok_ping_minutes": 60
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",

@@ -1179,16 +1179,18 @@ struct Config {
     /// Off by default: asking means a request to x.ai carrying the token its
     /// CLI left on disk, and a widget that reads should not start talking to
     /// a vendor because it was launched.
+    ///
+    /// Turning it on also permits running the Grok CLI once after a session
+    /// goes quiet, because that is what refreshes the token the request
+    /// needs. The two were separate settings for one release and should not
+    /// have been: asking without refreshing works until the token lapses and
+    /// then stops, silently, which is the failure the refresh exists to
+    /// prevent. Nobody wants the first without the second.
     grok_ping: bool,
     /// Minutes between those requests. The window it reports moves over
     /// days, so an hour is frequent enough to be current and rare enough
     /// not to be traffic.
     grok_ping_minutes: f64,
-    /// Whether to run the Grok CLI once a session goes quiet. That is what
-    /// refreshes the token the request needs - without it the token expires
-    /// and the quota silently goes back to being read off the disk. Off by
-    /// default for the stronger reason: it starts somebody else's program.
-    grok_ping_after_session: bool,
 }
 
 fn read_config() -> Config {
@@ -1225,10 +1227,6 @@ fn read_config() -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 60.0),
-        grok_ping_after_session: raw
-            .get("grok_ping_after_session")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
     }
 }
 
