@@ -824,6 +824,49 @@ seconds and these windows move over hours, so the earlier code was making six
 requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
 endpoint is retried occasionally instead of on every frame.
 
+### Claude's fallback is our own snapshot, not Claude Code's
+
+Claude Code keeps a usage cache in `~/.claude.json` under
+`cachedUsageUtilization`, and this widget read it whenever the live call
+failed. With no age check at all — which turned out to matter, because
+Claude Code's own reader has one:
+
+```js
+let r = Date.now() - n.data.fetchedAtMs;
+if (r < 0 || r > zNo) return null;      // zNo = 3600000
+```
+
+**It trusts that cache for one hour.** It writes it at most every five
+minutes (`BNo = 300000`) and discards it past sixty. On the machine this was
+found on, the entry was **9.6 days old** — Claude Code had been ignoring its
+own cache for nine days while this widget drew it as a current percentage.
+The block was byte-identical in a backup from the 16th, so it had not moved
+since the 15th, while `~/.claude.json` itself is rewritten every few seconds.
+
+Not a removal and not a regression: the key is present in every installed
+version, `2.1.243` references it more than the older ones, and the reader is
+the same logic in `2.1.233` and `2.1.243` with the same constant. Why the
+writer stopped firing on the 15th is unestablished — it is gated on an
+account match and fed from API response data, and finding out would mean
+instrumenting Claude Code.
+
+So there are two fallbacks now, newest wins:
+
+1. **Our own snapshot**, written to `$XDG_STATE_HOME/terminal-toys/claude-usage.json`
+   every time the live call answers — minutes old on a machine in use, and
+   not dependent on another program's cache still being maintained.
+2. **Claude Code's**, but only inside the hour it trusts it for.
+
+CodexBar reached the same conclusion from the other end: its Claude sources
+are the API and the CLI, never that file, and when they all fail it keeps
+its own `history/claude.json` and shows the capture age rather than blanking
+the bars.
+
+The snapshot carries the `accountUuid` Claude Code records, so switching
+accounts does not show the old one's figures — the usage response itself
+carries no account, so the marker is borrowed. A machine whose Claude Code
+never wrote the key has no marker, and then the guard is simply not applied.
+
 ### Grok is the fourth, and it is off by default
 
 Grok publishes no quota this widget can read without asking for it. The other

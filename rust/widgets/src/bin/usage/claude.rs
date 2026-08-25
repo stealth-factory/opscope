@@ -91,14 +91,114 @@ pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
 /// window whose reset has already gone by is said to have passed rather
 /// than counted down to, because a stale five-hour window describes a
 /// period that has ended.
-pub fn claude_stale() -> Option<(serde_json::Value, f64)> {
+/// How long Claude Code trusts its own cache, taken from its own reader:
+/// `let r = Date.now() - n.data.fetchedAtMs; if (r < 0 || r > zNo) return null`
+/// with `zNo = 3600000`. Identical in 2.1.233 and 2.1.243, so it is the
+/// contract rather than a detail of one build.
+const CLAUDE_CACHE_TTL: f64 = 3600.0;
+
+/// Where our own last good reading lives.
+///
+/// Claude Code keeps one in ~/.claude.json and expires it after an hour.
+/// This widget was reading that file with no age check at all, and on this
+/// machine it had been showing a reading from nine days after Claude Code
+/// stopped refreshing it - a percentage its own author discards, presented
+/// as today's.
+///
+/// So we keep our own, written whenever the live call answers. On a machine
+/// where Claude is in use that is most refreshes, which makes it minutes old
+/// rather than days, and it does not depend on another program's cache still
+/// being maintained. CodexBar does the same and for the same reason: its
+/// Claude sources are the API and the CLI, never that file, with its own
+/// snapshot shown by capture age when they all fail.
+fn snapshot_path() -> String {
+    let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        format!("{}/.local/state", std::env::var("HOME").unwrap_or_default())
+    });
+    format!("{}/terminal-toys/claude-usage.json", base)
+}
+
+/// The account the reading belongs to, so switching accounts does not show
+/// the old one's figures. Claude Code guards its cache the same way; we
+/// borrow its marker because the usage response carries no account of its
+/// own. Absent on a machine whose Claude Code has never written the key, and
+/// then the guard is simply not applied - a missing marker is not a mismatch.
+fn account_marker() -> Option<String> {
+    let config = read_json(&under_home(".claude.json"))?;
+    let uuid = text(&config["cachedUsageUtilization"], "accountUuid");
+    (!uuid.is_empty()).then_some(uuid)
+}
+
+fn save_snapshot(utilization: &serde_json::Value) {
+    save_snapshot_at(&snapshot_path(), utilization)
+}
+
+/// The write, against a named path so it can be tested without reaching for
+/// the real one or rewriting the environment out from under other tests.
+fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut body = serde_json::json!({
+        "fetchedAtMs": now() * 1000.0,
+        "utilization": utilization,
+    });
+    if let Some(uuid) = account_marker() {
+        body["accountUuid"] = serde_json::json!(uuid);
+    }
+    let _ = std::fs::write(path, body.to_string());
+}
+
+fn read_snapshot() -> Option<(serde_json::Value, f64)> {
+    read_snapshot_at(&snapshot_path())
+}
+
+fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
+    let saved = read_json(path)?;
+    let u = saved["utilization"].clone();
+    if u.is_null() {
+        return None;
+    }
+    let held = text(&saved, "accountUuid");
+    if let (false, Some(now_uuid)) = (held.is_empty(), account_marker()) {
+        if held != now_uuid {
+            return None;
+        }
+    }
+    Some((u, num(&saved, "fetchedAtMs") / 1000.0))
+}
+
+/// Claude Code's own cache, and only while Claude Code would still use it.
+fn claude_code_cache() -> Option<(serde_json::Value, f64)> {
     let config = read_json(&under_home(".claude.json"))?;
     let c = &config["cachedUsageUtilization"];
     let u = c["utilization"].clone();
     if u.is_null() {
         return None;
     }
-    Some((u, num(c, "fetchedAtMs") / 1000.0))
+    let at = num(c, "fetchedAtMs") / 1000.0;
+    let age = now() - at;
+    if !(0.0..=CLAUDE_CACHE_TTL).contains(&age) {
+        return None;
+    }
+    Some((u, at))
+}
+
+/// The best reading we have that is not live: ours if we have one, Claude
+/// Code's while it is still within the hour it trusts it for, whichever was
+/// taken more recently.
+pub fn claude_stale() -> Option<(serde_json::Value, f64)> {
+    fresher(read_snapshot(), claude_code_cache())
+}
+
+/// Whichever reading was taken later, and neither being present is not an
+/// error - it is a machine that has never had a live one. A tie goes to the
+/// first, which is ours: the one whose provenance we know.
+fn fresher<T>(ours: Option<(T, f64)>, theirs: Option<(T, f64)>) -> Option<(T, f64)> {
+    match (ours, theirs) {
+        (Some(a), Some(b)) => Some(if a.1 >= b.1 { a } else { b }),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Token counts from one transcript usage block, by priced kind.
@@ -316,6 +416,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             claude.quota_live = true;
             claude.quota_at = num(&got, "at");
             claude.quota_plan = text(&got, "plan");
+            // Kept for the next refresh that cannot reach the endpoint. The
+            // reading is held for LIVE_TTL either way, so this writes about
+            // once every two minutes rather than on every frame.
+            save_snapshot(&got["u"]);
         }
         None => {
             if let Some((u, at)) = claude_stale() {
@@ -1014,5 +1118,61 @@ pub fn tab(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     match c.profile.as_ref() {
         Some(prof) => add_section(body, claude_plan_rows(prof, w, p)),
         None => body,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule the fossil taught: Claude Code's cache is worth reading only
+    /// while Claude Code itself would read it.
+    #[test]
+    fn claude_codes_cache_is_dropped_at_the_age_it_drops_it() {
+        // From its own reader, identical in 2.1.233 and 2.1.243:
+        //   let r = Date.now() - n.data.fetchedAtMs;
+        //   if (r < 0 || r > zNo) return null;      // zNo = 3600000
+        assert_eq!(CLAUDE_CACHE_TTL, 3600.0);
+        // The machine this was written on had one 9.6 days old, drawn as a
+        // current percentage because nothing here checked the age at all.
+        assert!(9.6 * 86400.0 > CLAUDE_CACHE_TTL);
+        assert!(59.0 * 60.0 <= CLAUDE_CACHE_TTL);
+        assert!(61.0 * 60.0 > CLAUDE_CACHE_TTL);
+    }
+
+    #[test]
+    fn a_saved_reading_comes_back_the_way_it_went_in() {
+        let dir = std::env::temp_dir().join(format!("tt-claude-{}", std::process::id()));
+        let path = dir.join("claude-usage.json");
+        let path = path.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        // Nothing saved is not a failure - it is a machine that has never
+        // had a live reading.
+        assert!(read_snapshot_at(&path).is_none());
+
+        let u = serde_json::json!({
+            "limits": [{"group": "session", "kind": "session", "percent": 42,
+                        "resets_at": "2026-08-25T03:39:59.750751+00:00"}]
+        });
+        save_snapshot_at(&path, &u);
+        let (back, at) = read_snapshot_at(&path).expect("saved and not read back");
+        assert_eq!(back, u, "the reading changed shape crossing the disk");
+        assert!(
+            (now() - at).abs() < 60.0,
+            "the stamp is the moment it was taken, not the epoch: {}",
+            at
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_later_reading_wins_and_neither_is_not_a_failure() {
+        assert_eq!(fresher(Some(("ours", 100.0)), Some(("theirs", 50.0))), Some(("ours", 100.0)));
+        assert_eq!(fresher(Some(("ours", 50.0)), Some(("theirs", 100.0))), Some(("theirs", 100.0)));
+        assert_eq!(fresher(Some(("ours", 10.0)), None), Some(("ours", 10.0)));
+        assert_eq!(fresher(None, Some(("theirs", 10.0))), Some(("theirs", 10.0)));
+        assert_eq!(fresher::<&str>(None, None), None);
+        // A tie goes to ours - we know when and how it was taken.
+        assert_eq!(fresher(Some(("ours", 42.0)), Some(("theirs", 42.0))), Some(("ours", 42.0)));
     }
 }
