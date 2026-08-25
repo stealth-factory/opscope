@@ -1,4 +1,4 @@
-# `deployments.py`
+# `deployments`
 
 Vercel deployments — how they are going over time, not just what shipped last.
 
@@ -121,7 +121,7 @@ on the way out rather than on the way in.
 | `c` | copy the selected PR's… (in the detail view, the copy page) |
 | `r` | refresh now, and in the detail view fetch it again |
 | `q` | quit, from either screen |
-| `f` `p` | the state filter and the project cycle — **`deployments.py` only**; the Rust build has `s` and `/` instead |
+| `f` `p` | the state filter and the project cycle — **`deployments` only**; the Rust build has `s` and `/` instead |
 
 ## Filtering
 
@@ -192,6 +192,6 @@ Empty `teams` discovers every team you can see; empty `projects` shows all.
 Polling every 15s is 4 requests/min per team.
 
 ```sh
-./deployments.py                    # every project, 15s
-./deployments.py -n 60 my-project   # one project, slower
+./target/release/deployments                    # every project, 15s
+./target/release/deployments -n 60 my-project   # one project, slower
 ```

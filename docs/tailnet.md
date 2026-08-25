@@ -1,4 +1,4 @@
-# `tailnet.py`
+# `tailnet`
 
 Tailscale peers, and — the part plain `tailscale status` buries — *how* you are
 reaching each one.
@@ -70,7 +70,7 @@ geolocation service), every address it has, its advertised routes, and whether
 it offers itself as an exit node.
 
 It also carries **live latency** for that peer — current, average, median, min,
-max, jitter, loss and a sparkline, the same statistics `latency.py` reports,
+max, jitter, loss and a sparkline, the same statistics `latency` reports,
 measured by ICMP over the tunnel. Only the selected peer is probed, so this
 costs one ping process no matter how large the tailnet, and history is kept per
 peer so returning to one still shows its earlier samples.

@@ -1,4 +1,4 @@
-# `ports.py`
+# `ports`
 
 What is listening on this machine, what started it, and who can reach it.
 

@@ -1,4 +1,4 @@
-# `linear.py`
+# `linear`
 
 Linear across every team at once — what is outstanding, which cycles are
 running, and whether issues are being closed faster than they arrive.
@@ -364,6 +364,6 @@ dropping it is sometimes the difference between a readable board and one number
 swamping the rest.
 
 ```sh
-./linear.py                   # every team, 14-day window
-./linear.py -n 300 WEB APP    # two teams by key, slower
+./target/release/linear                   # every team, 14-day window
+./target/release/linear -n 300 WEB APP    # two teams by key, slower
 ```

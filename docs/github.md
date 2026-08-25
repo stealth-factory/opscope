@@ -1,4 +1,4 @@
-# `github.py`
+# `github`
 
 Pull requests across every org you work in — not what shipped, but whether work
 is actually moving.
@@ -305,6 +305,6 @@ Friday moves every figure on the board: a merge rate, a per-day average and
 a queue trend all read as noise when a single day is a seventh of the sample.
 
 ```sh
-./github.py                        # discovered accounts, 120s
-./github.py -n 300 acme @me        # two accounts, slower
+./target/release/github                        # discovered accounts, 120s
+./target/release/github -n 300 acme @me        # two accounts, slower
 ```

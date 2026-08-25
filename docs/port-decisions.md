@@ -6,15 +6,14 @@ never a transliteration: some of it answers differently on purpose. Telling
 side-by-side review ([TOY-8](https://linear.app/stealth-company/issue/TOY-8)),
 and this page is what that review produced.
 
-**The Python goes when [#31](https://github.com/stealth-factory/terminal-toys/pull/31)
-merges.** This page outlives it, because most of what is here is not a
-comparison — it is the reason a key is the key it is, the reason a rate is
-averaged, the reason a braille cell belongs to one trace. The Python is how
-those reasons are explained, not why they matter.
+**The Python is gone.** This page outlives it, because most of what is here
+is not a comparison — it is the reason a key is the key it is, the reason a
+rate is averaged, the reason a braille cell belongs to one trace. The Python
+is how those reasons are explained, not why they matter.
 
-Until it merges, both implementations are still in the tree, and anything not
-listed here and not obviously a Rust-only feature should be treated as a
-finding rather than a decision.
+Everything below is in the past tense on purpose: it describes a thing that
+was here, against which these decisions were made. `git log` still has it, at
+`22a9bc7^`, if a claim here ever needs checking.
 
 **Reviewed against `ac02b90`.** Verified by reading both sources, not by
 diffing them: three attempts at a mechanical key-differ each reported

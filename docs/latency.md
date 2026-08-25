@@ -1,4 +1,4 @@
-# `latency.py`
+# `latency`
 
 Continuous latency to a list of hosts, with the statistics that actually
 explain a bad connection.
@@ -108,8 +108,8 @@ baseline, not a path measurement.
 `studio` rather than clipping the interesting half.
 
 ```sh
-./latency.py                              # config targets, 0.5s
-./latency.py -i 2 1.1.1.1 example.com     # override both
+./target/release/latency                              # config targets, 0.5s
+./target/release/latency -i 2 1.1.1.1 example.com     # override both
 ```
 
 It measures *this host → each target*. Target-to-target legs need a probe on the

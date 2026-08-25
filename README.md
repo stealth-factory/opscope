@@ -26,43 +26,47 @@ impossible to unsee. One by one the fakes came down, each replaced by something
 that answers a real question. What survived is the aesthetic with the lying
 removed.
 
-Some of the theatre is still here, unapologetically. `matrix.py` computes
+Some of the theatre is still here, unapologetically. `matrix` computes
 nothing at all — it just looks good, and it knows it.
 
 ## The widgets
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`start.py`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
-| **`latency.py`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
-| **`deployments.py`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
-| **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
-| **`herdr-panes.py`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
-| **`github.py`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
-| **`pr.py`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
-| **`linear.py`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
-| **`usage.py`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
-| **`ports.py`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it to copy an address or publish it over Tailscale or Cloudflare. | — | [read →](docs/ports.md) |
-| **`netwatch.py`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
-| **`link.py`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
-| **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
-| **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
+| **`start`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
+| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
+| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
+| **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
+| **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
+| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
+| **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
+| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
+| **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it to copy an address or publish it over Tailscale or Cloudflare. | — | [read →](docs/ports.md) |
+| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
+| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
+| **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
-Each is a single self-contained script with no dependencies — pure Python 3
-standard library, 24-bit colour, and a full redraw each frame so everything
-reflows when you resize the pane.
+Each is a single self-contained binary — everything it needs is compiled in,
+`ldd` shows only libc, libm and libgcc, and there is nothing to install
+alongside. 24-bit colour, and a full redraw each frame so everything reflows
+when you resize the pane.
 
 ```sh
-python3 terminal-toys   # the front door: pick one and it runs
-./start.py              # the same thing from inside the directory
-./start.py latency      # or name one and skip the menu
+cargo build --release   # fourteen binaries in ./target/release
+```
+
+```sh
+./target/release/start          # the front door: pick one and it runs
+./target/release/start latency  # or name one and skip the menu
 ```
 
 Each widget is also an ordinary program, if you would rather go direct:
 
 ```sh
-./latency.py            # each runs standalone
-./clocks.py -h          # every widget documents itself
+./target/release/latency        # each runs standalone
+./target/release/clocks -h      # every widget documents itself
 ```
 
 They are built to sit side by side and fill a wall, but nothing assumes a
@@ -95,16 +99,17 @@ This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
-**Three widgets need a token:** `deployments.py` wants a Vercel token from
-Account Settings → Tokens, `github.py` a *classic* GitHub PAT with `repo` and
-`read:org` (fine-grained tokens reach only one org each), and `linear.py` a
-personal API key from Settings → Security & access. `pr.py` reuses the GitHub
+**Three widgets need a token:** `deployments` wants a Vercel token from
+Account Settings → Tokens, `github` a *classic* GitHub PAT with `repo` and
+`read:org` (fine-grained tokens reach only one org each), and `linear` a
+personal API key from Settings → Security & access. `pr` reuses the GitHub
 token rather than asking for its own. Every other widget runs with no
 configuration at all.
 
 ## Requirements
 
-- Python **3.9+** (`clocks.py` uses `zoneinfo`); developed on 3.12
+- A Rust toolchain to build; **nothing** to run. The binaries carry what
+  they need, SQLite included
 - A terminal with 24-bit colour
 - Per-widget: `ping`, `tailscale` or `herdr` as listed above. Each needs only
   its own, and **none needs root**
@@ -121,7 +126,7 @@ before changing one:
 - **A directional glyph points the way the thing goes.** `▲`/`▼` mark which
   half of a diverging chart a series occupies — `▲ opened` above the baseline,
   `▼ merged` below it. `↑`/`↓` mean upload and download. Where both meanings
-  meet, in `netwatch.py`'s chart, the halves are arranged so they agree: tx
+  meet, in `netwatch`'s chart, the halves are arranged so they agree: tx
   above and rx below, because a `↓` label over a line that climbs asks the
   reader to hold two directions at once, and they will believe the arrow.
 - **Measure contrast, do not eyeball it.** Every colour that draws text clears
@@ -161,23 +166,23 @@ was learned building these against Herdr: resize semantics, focus, detecting
 what a pane is running, notification gating, and the layout mistakes worth
 skipping.
 
-[`docs/rust-vs-python.md`](docs/rust-vs-python.md) records where the two
-implementations answer differently **on purpose** — the keys the Rust
-consolidated, the two it renamed, the charts it draws differently, and the
-features that exist only on one side. Anything not listed there is a finding
-rather than a decision.
+These began as Python and were ported to Rust widget by widget;
+[`docs/port-decisions.md`](docs/port-decisions.md) records what the port
+changed and why — the keys it consolidated, the two it renamed, the charts it
+draws differently. It is history now rather than a comparison, but it is the
+answer to most questions beginning *why does this key do that*.
 
-Both implementations are checked the same way. `cargo test` from `rust/` runs
-each widget's tests plus `widgets/tests/check.rs`, which reads the sources and
-fails on a poller that dies without saying why, a footer hint naming a key
-nothing answers, a hint missing from the widget's doc, and a config key read
-but never documented in `config.example.json`. `python3 check.py` covers the
-same ground for the Python.
+`cargo test` from the root runs each widget's tests plus
+`widgets/tests/check.rs`, which reads the sources and fails on a poller that
+dies without saying why, a footer hint naming a key nothing answers, a hint
+missing from the widget's doc, and a config key read but never documented in
+`config.example.json`.
 
-`common.py` holds the shared pieces — terminal sizing, a full-frame `draw()`,
+`toys-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
-text to a cell budget, `pack_hints()` for wrapping footers, non-blocking
-`Keyboard` input with arrow-key decoding, and `clipboard()` over OSC 52.
+text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
+window that keeps a cursor in view, non-blocking `Keyboard` input with
+arrow-key decoding, and `clipboard()` over OSC 52.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),

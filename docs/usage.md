@@ -1,4 +1,4 @@
-# `usage.py`
+# `usage`
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
@@ -124,7 +124,7 @@ cache had settled — 31 sessions, a longest session of `4d 10h 52m`, a longest
 streak of 21 days, Aug 1 as the busiest day.
 
 The **tokens-per-day calendar** is laid out like the contribution calendar in
-`github.py` — weekdays down the side, weeks across — so the two read the same
+`github` — weekdays down the side, weeks across — so the two read the same
 way on one wall.
 
 The only difference is cell width. That pane spans a year, so its cells are one

@@ -1,4 +1,4 @@
-# `link.py`
+# `link`
 
 How good the connection is between this machine and whoever is connected to
 it — measured, not probed.
@@ -23,7 +23,7 @@ it — measured, not probed.
 
 ## Why this is not the latency monitor
 
-`latency.py` measures paths it was told to measure, by sending pings. This one
+`latency` measures paths it was told to measure, by sending pings. This one
 measures the path **you are on**, and sends nothing at all.
 
 Every established TCP connection has a kernel that has been timing it since it

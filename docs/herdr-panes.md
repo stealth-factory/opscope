@@ -1,4 +1,4 @@
-# `herdr-panes.py`
+# `herdr-panes`
 
 Everything running under [Herdr](https://herdr.dev), across every workspace —
 and one keypress to get to any of it.
@@ -19,7 +19,7 @@ and one keypress to get to any of it.
 
  ── PROCESSES ── 7 panes running something
  COMMAND              CPU   MEM   WORKSPACE
- ▪ tailnet.py           3%   16M  infra
+ ▪ tailnet              3%   16M  infra
  ▪ pnpm                 0%  116M  some-cli
 
  ── IDLE ── 13 panes at a prompt
@@ -68,7 +68,7 @@ with `herdr integration status`.
 
 **Idle panes are detected exactly**, not guessed: a busy pane's foreground pid
 differs from its own shell pid. Command names come from `argv`, so a pane shows
-`tailnet.py` rather than `python3`.
+`tailnet` rather than `python3`.
 
 **Durations are marked `≥`** when the state was already in place before the
 widget started — we did not see it begin, so it is only a lower bound. Herdr

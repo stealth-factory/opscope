@@ -1,4 +1,4 @@
-# `netwatch.py`
+# `netwatch`
 
 Which processes are using the network, how much they have used, and how fast
 they are going right now.
@@ -425,7 +425,7 @@ the number is never a mystery, and the **totals** are untouched by it.
 | `esc` / `←` | back to the list |
 | `tab` | focus the next section, and from the last one back to scrolling |
 | `c` | copy the selected host, socket or path |
-| `e` `f` | jump straight to the endpoints or the files — **`netwatch.py` only**; the Rust build reaches every section with `tab` alone |
+| `e` `f` | jump straight to the endpoints or the files — **`netwatch` only**; the Rust build reaches every section with `tab` alone |
 | `s` | switch sort mode (`t` also works) |
 | `o` | show or hide processes you do not own |
 | `1` | sort by total data used |
@@ -436,7 +436,7 @@ the number is never a mystery, and the **totals** are untouched by it.
 ## Options
 
 ```
-netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
+netwatch [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
 ```
 
 | Option | Meaning |
