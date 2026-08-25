@@ -97,6 +97,41 @@ pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
 /// contract rather than a detail of one build.
 const CLAUDE_CACHE_TTL: f64 = 3600.0;
 
+/// How often this endpoint is actually asked, where the other agents use
+/// the shared two minutes.
+///
+/// api.anthropic.com/api/oauth/usage rate-limits this token, and the limit
+/// is shared with everything else holding it: every running copy of this
+/// widget, and Claude Code itself. Three copies on the two-minute hold came
+/// to a call every forty seconds between them and the endpoint answered 429
+/// - consistently with three running, intermittently with two, and 200 with
+/// none, which is as clear as that gets.
+///
+/// Five minutes because that is the cadence Claude Code chose for the same
+/// data: its own refresh is throttled to BNo = 300000. There is no argument
+/// for asking more often than the client that owns the number.
+const CLAUDE_LIVE_TTL: f64 = 300.0;
+
+/// How old a reading may be and still be shown as current.
+///
+/// Twice the interval it is fetched on, because a reading is that old
+/// anyway in normal running: a live one is held for CLAUDE_LIVE_TTL, so the
+/// figure on screen is anywhere from nought to five minutes behind the
+/// server whether it came from the endpoint or from the last copy of it.
+///
+/// Marking by where a reading came from rather than by how old it is put a
+/// star on a figure thirty-five seconds old while a live one four minutes
+/// old carried none - the fresher of the two flagged as the doubtful one.
+/// The mark is worth having when it means "older than this widget's own
+/// cycle"; it is noise when it means "another process fetched it".
+const CLAUDE_FRESH_FOR: f64 = 2.0 * CLAUDE_LIVE_TTL;
+
+/// True when the reading is old enough to be worth flagging, whatever its
+/// source. `quota_at` is when it was taken, not when it was read.
+fn reading_is_old(taken_at: f64) -> bool {
+    now() - taken_at > CLAUDE_FRESH_FOR
+}
+
 /// Where our own last good reading lives.
 ///
 /// Claude Code keeps one in ~/.claude.json and expires it after an hour.
@@ -415,7 +450,7 @@ pub fn claude_rates() -> (Vec<f64>, usize) {
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut claude = Data::default();
-    let live = cached(caches, "claude", LIVE_TTL, || {
+    let live = cached(caches, "claude", CLAUDE_LIVE_TTL, || {
         let (tok, plan) = claude_token()?;
         let u = claude_get("https://api.anthropic.com/api/oauth/usage", &tok)?;
         Some(serde_json::json!({ "u": u, "at": now(), "plan": plan }))
@@ -1114,7 +1149,7 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                     .find(|(g, _)| *g == group)
                     .map(|(_, s)| *s),
                 reset: rolled.0,
-                stale: !c.quota_live,
+                stale: reading_is_old(c.quota_at),
                 projected: rolled.1,
             }
         })
@@ -1170,6 +1205,62 @@ mod tests {
     /// A 9.6-day-old Claude Code cache and nothing of our own used to come
     /// back as a percentage and get drawn as today's. Claude Code's own
     /// reader returns null for it, and now so does this.
+    #[test]
+    fn the_lane_takes_its_star_from_the_age_and_not_from_quota_live() {
+        // The wiring, not just the rule. A cached reading taken a moment ago
+        // must come through unflagged, and a live-flagged one taken days ago
+        // must not - which is the pair the old `!quota_live` got backwards.
+        let with = |live: bool, taken: f64| {
+            let d = Data {
+                quota: Some(serde_json::json!({
+                    "limits": [{"group": "session", "kind": "session", "percent": 20,
+                                "resets_at": "2126-01-01T00:00:00.000000+00:00"}]
+                })),
+                quota_live: live,
+                quota_at: taken,
+                ..Data::default()
+            };
+            let got = lanes(&d);
+            assert_eq!(got.len(), 1, "the fixture should make exactly one lane");
+            got[0].stale
+        };
+        assert!(!with(false, now() - 35.0), "a 35s cached reading is not old");
+        assert!(
+            !with(false, now() - (CLAUDE_FRESH_FOR - 30.0)),
+            "just inside the window is not old"
+        );
+        assert!(
+            with(false, now() - (CLAUDE_FRESH_FOR + 30.0)),
+            "past the window it has to be flagged"
+        );
+        assert!(
+            with(true, now() - 9.6 * 86400.0),
+            "calling a nine-day-old reading live does not make it current"
+        );
+        assert!(with(false, now() - 9.6 * 86400.0));
+    }
+
+    #[test]
+    fn a_reading_is_flagged_by_its_age_not_by_who_fetched_it() {
+        // The case that prompted this: a cached reading 35 seconds old sat
+        // under a star while a live one four minutes old carried none. Both
+        // are current; only one was being doubted.
+        assert!(!reading_is_old(now() - 35.0), "35s is fresher than most live reads");
+        assert!(!reading_is_old(now() - CLAUDE_LIVE_TTL), "a live read may be this old");
+        assert!(
+            !reading_is_old(now() - (CLAUDE_FRESH_FOR - 30.0)),
+            "just inside the window is still current"
+        );
+        assert!(
+            reading_is_old(now() - (CLAUDE_FRESH_FOR + 30.0)),
+            "past twice the fetch interval it has to say so"
+        );
+        // The one this all started with.
+        assert!(reading_is_old(now() - 9.6 * 86400.0));
+        // A reading with no timestamp at all is not to be trusted quietly.
+        assert!(reading_is_old(0.0));
+    }
+
     #[test]
     fn a_fossil_of_theirs_is_not_a_reading() {
         let dir = std::env::temp_dir().join(format!("tt-fossil-{}", std::process::id()));

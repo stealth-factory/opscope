@@ -36,6 +36,18 @@ pub struct Caches {
 }
 
 pub const LIVE_TTL: f64 = 120.0;
+/// The longest a failure is held, whatever the success interval is.
+///
+/// It exists so an hourly reading does not blank a section for an hour
+/// after one transient failure. It used to be LIVE_TTL, which was the same
+/// thing while every caller asked every two minutes - and stopped being
+/// once claude moved to five. A failure held for two minutes beside a
+/// success held for five means a rate-limited poller asks *more* often than
+/// a healthy one, which is the opposite of what a 429 is asking for.
+///
+/// So it is a ceiling now rather than a fixed value: a failure waits as
+/// long as a success would have, up to five minutes.
+pub const FAILURE_CAP: f64 = 300.0;
 /// A plan does not change between refreshes; the windows do.
 pub const PLAN_TTL: f64 = 3600.0;
 
@@ -43,8 +55,9 @@ pub const PLAN_TTL: f64 = 3600.0;
 ///
 /// The pane redraws every thirty seconds; these windows move over hours. A
 /// failure is cached too, so a dead endpoint is retried occasionally rather
-/// than on every frame - but only ever for the short interval, never the
-/// long one. One transient 429 should not blank a section for an hour.
+/// than on every frame - but never for longer than FAILURE_CAP, so one
+/// transient 429 does not blank an hourly section for an hour. Nor is it
+/// ever retried sooner than a success would have been asked for.
 pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<serde_json::Value>
 where
     F: FnOnce() -> Option<serde_json::Value>,
@@ -56,7 +69,7 @@ where
         }
     }
     let value = fetch();
-    let held = if value.is_some() { ttl } else { ttl.min(LIVE_TTL) };
+    let held = if value.is_some() { ttl } else { ttl.min(FAILURE_CAP) };
     caches.live.insert(key.to_string(), (at, value.clone(), held));
     value
 }
@@ -168,4 +181,49 @@ pub fn post_json(
 ) -> Option<serde_json::Value> {
     let (text, _) = tc::post_json(url, headers, body, seconds).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule a five-minute reading broke when the cap was a fixed two
+    /// minutes: being refused must never make us ask *sooner* than being
+    /// answered would have.
+    #[test]
+    fn a_refusal_is_never_retried_sooner_than_a_success_would_be_asked() {
+        for ttl in [30.0, 120.0, 300.0, 900.0, 3600.0] {
+            let mut caches = Caches::default();
+            let key = format!("probe-{}", ttl);
+            assert!(cached(&mut caches, &key, ttl, || None).is_none());
+            let (_, _, held) = caches.live.get(&key).expect("the failure was not held");
+            assert!(
+                *held <= ttl,
+                "ttl {}: a failure held {}s would be retried before a success was due",
+                ttl,
+                held
+            );
+            assert!(
+                *held <= FAILURE_CAP,
+                "ttl {}: a failure held {}s blanks the section for too long",
+                ttl,
+                held
+            );
+        }
+    }
+
+    #[test]
+    fn a_good_reading_is_held_for_its_full_interval() {
+        let mut caches = Caches::default();
+        let one = cached(&mut caches, "probe", 300.0, || Some(serde_json::json!(1)));
+        assert_eq!(one, Some(serde_json::json!(1)));
+        // The second call must not reach the fetcher at all - that is the
+        // whole point of the hold, and what keeps the endpoint's rate down.
+        let two = cached(&mut caches, "probe", 300.0, || {
+            panic!("asked again inside the hold")
+        });
+        assert_eq!(two, Some(serde_json::json!(1)));
+        let (_, _, held) = caches.live.get("probe").unwrap();
+        assert_eq!(*held, 300.0);
+    }
 }
