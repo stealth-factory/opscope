@@ -1674,6 +1674,24 @@ mod vendors;
 
 #[cfg(test)]
 mod tests {
+
+    /// Under a day, say the hours. The quota headings used to render this
+    /// span three different ways - "~0.9 days", a truncated "0d", and
+    /// "resets today" - and all three round away the part a reader is
+    /// asking for when the reset is close.
+    #[test]
+    fn a_span_under_a_day_is_hours_and_minutes() {
+        assert_eq!(left_span(22.0 * 3600.0 + 6.0 * 60.0), "22h 6m");
+        assert_eq!(left_span(45.0 * 60.0), "45m");
+        assert_eq!(left_span(3600.0), "1h 0m");
+        // A day or more keeps days, which is what that range wants.
+        assert_eq!(left_span(5.0 * 86400.0 + 12.0 * 3600.0), "5d 12h");
+        assert_eq!(left_span(86400.0), "1d 0h");
+        // The boundary the old code fell off: just under a day is not "0d".
+        let almost = 86400.0 - 60.0;
+        assert_eq!(left_span(almost), "23h 59m");
+        assert!(!left_span(almost).starts_with('0'));
+    }
     use super::*;
 
     #[test]

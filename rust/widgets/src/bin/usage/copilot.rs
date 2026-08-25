@@ -455,8 +455,14 @@ fn copilot_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let stamp = iso_epoch(&text(live, "quota_reset_date_utc"));
         let mut when = String::new();
         if let Some(stamp) = stamp {
-            let days = ((stamp - now()) / 86400.0).floor() as i64;
-            when = if days > 0 { format!("resets in {}d", days) } else { "resets today".into() };
+            let left = stamp - now();
+            // "resets today" was already better than a truncated 0d, and
+            // the hours it was rounding away are better still.
+            when = if left > 0.0 {
+                format!("resets in {}", left_span(left))
+            } else {
+                "resetting".into()
+            };
         }
         rows.push(tc::seg(
             &[

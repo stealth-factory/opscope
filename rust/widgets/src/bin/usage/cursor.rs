@@ -435,7 +435,9 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         Some(ends) => {
             let left = ends / 1000.0 - now();
             if left > 0.0 {
-                format!("resets in {}d", (left / 86400.0) as i64)
+                // Truncated days read "resets in 0d" for the whole of the
+                // last day of a cycle, which is when it matters most.
+                format!("resets in {}", left_span(left))
             } else {
                 "resetting".to_string()
             }

@@ -623,7 +623,7 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         } else {
             window_now(begin, end, now())
         };
-        let left = current.map(|e| (e - now()) / 86400.0).filter(|days| *days >= 0.0);
+        let left = current.map(|e| e - now()).filter(|secs| *secs >= 0.0);
         rows.push(tc::seg(
             &[
                 (
@@ -632,8 +632,12 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 ),
                 (
                     p.dim.as_str(),
-                    left.map(|days| {
-                        format!("resets in {}{:.1} days", if rolled { "~" } else { "" }, days)
+                    // left_span, not a decimal of a day: "~0.9 days" is
+                    // most of a day away stated in the least useful unit,
+                    // and the reader wanting to know if they can finish
+                    // something before the reset needs hours and minutes.
+                    left.map(|secs| {
+                        format!("resets in {}{}", if rolled { "~" } else { "" }, left_span(secs))
                     })
                     .unwrap_or_default(),
                 ),
