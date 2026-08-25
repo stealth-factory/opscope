@@ -39,37 +39,37 @@ const WIDGETS: &[Widget] = &[
     Widget {
         stem: "clocks",
         help: include_str!("clocks_help.txt"),
-        doc: include_str!("../../../../docs/clocks.md"),
+        doc: include_str!("../../../docs/clocks.md"),
     },
     Widget {
         stem: "deployments",
         help: include_str!("deployments_help.txt"),
-        doc: include_str!("../../../../docs/deployments.md"),
+        doc: include_str!("../../../docs/deployments.md"),
     },
     Widget {
         stem: "github",
         help: include_str!("github_help.txt"),
-        doc: include_str!("../../../../docs/github.md"),
+        doc: include_str!("../../../docs/github.md"),
     },
     Widget {
         stem: "herdr-panes",
         help: include_str!("herdr-panes_help.txt"),
-        doc: include_str!("../../../../docs/herdr-panes.md"),
+        doc: include_str!("../../../docs/herdr-panes.md"),
     },
     Widget {
         stem: "latency",
         help: include_str!("latency_help.txt"),
-        doc: include_str!("../../../../docs/latency.md"),
+        doc: include_str!("../../../docs/latency.md"),
     },
     Widget {
         stem: "linear",
         help: include_str!("linear_help.txt"),
-        doc: include_str!("../../../../docs/linear.md"),
+        doc: include_str!("../../../docs/linear.md"),
     },
     Widget {
         stem: "link",
         help: include_str!("link_help.txt"),
-        doc: include_str!("../../../../docs/link.md"),
+        doc: include_str!("../../../docs/link.md"),
     },
     Widget {
         stem: "matrix",
@@ -81,27 +81,27 @@ const WIDGETS: &[Widget] = &[
     Widget {
         stem: "netwatch",
         help: include_str!("netwatch_help.txt"),
-        doc: include_str!("../../../../docs/netwatch.md"),
+        doc: include_str!("../../../docs/netwatch.md"),
     },
     Widget {
         stem: "ports",
         help: include_str!("ports_help.txt"),
-        doc: include_str!("../../../../docs/ports.md"),
+        doc: include_str!("../../../docs/ports.md"),
     },
     Widget {
         stem: "pr",
         help: include_str!("pr_help.txt"),
-        doc: include_str!("../../../../docs/pr.md"),
+        doc: include_str!("../../../docs/pr.md"),
     },
     Widget {
         stem: "tailnet",
         help: include_str!("tailnet_help.txt"),
-        doc: include_str!("../../../../docs/tailnet.md"),
+        doc: include_str!("../../../docs/tailnet.md"),
     },
     Widget {
         stem: "usage",
         help: include_str!("usage_help.txt"),
-        doc: include_str!("../../../../docs/usage.md"),
+        doc: include_str!("../../../docs/usage.md"),
     },
 ];
 
@@ -306,6 +306,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(first) = args.first() {
         if !first.starts_with('-') {
+            // `.py` is still accepted, and only for that: every widget here
+            // answered to that name for years and the muscle memory outlives
+            // the files. It resolves to the binary of the same stem.
             let wanted = first.strip_suffix(".py").unwrap_or(first);
             let Some(found) = WIDGETS.iter().find(|w| w.stem == wanted) else {
                 eprintln!(

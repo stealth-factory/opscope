@@ -42,14 +42,14 @@ use std::path::PathBuf;
 /// The repo root, from this crate's own location.
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("..")
         .canonicalize()
         .expect("the repo root")
 }
 
 /// Every widget binary, by stem, with its source.
 fn widgets() -> BTreeMap<String, String> {
-    let dir = root().join("rust/widgets/src/bin");
+    let dir = root().join("widgets/src/bin");
     let mut found = BTreeMap::new();
     for entry in std::fs::read_dir(&dir).expect("the bin directory").flatten() {
         let path = entry.path();
@@ -492,7 +492,7 @@ fn every_key_the_help_text_names_is_answered() {
     const VERBS: &[&str] = &[
         "opens", "cycles", "toggles", "quits", "refreshes", "closes", "copies",
     ];
-    let dir = root().join("rust/widgets/src/bin");
+    let dir = root().join("widgets/src/bin");
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
         let help = dir.join(format!("{}_help.txt", name));

@@ -1,7 +1,4 @@
-__pycache__/
-*.py[cod]
-.venv/
-venv/
+target/
 .DS_Store
 
 # Personal settings, and now secrets: config.json holds the Vercel token.
