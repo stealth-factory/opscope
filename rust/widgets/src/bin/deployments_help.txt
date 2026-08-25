@@ -12,8 +12,8 @@ Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
 → or Enter opens a full detail view for the selected deployment - state and
 failure reason, timings, regions, commit, and everything worth copying on
 number keys - r refreshes
-now, f cycles the filter (all / failed / production), p cycles which project
-is shown, q quits.
+now, s cycles the state filter (all / failed / production), / filters by text
+against the project, branch, commit subject and deployment id, q quits.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it and the
 text reaches your local clipboard even over SSH. If your terminal or

@@ -381,6 +381,31 @@ fn titled(state: &str) -> String {
 
 /// One deployment in full: state, timings, why it failed, and what to copy.
 
+/// Whether one deployment answers what was typed after `/`.
+///
+/// Over the fields the row puts on screen and the one it does not: project,
+/// state, target, branch and commit subject, plus the deployment id, because
+/// that is what a URL from somewhere else gives you to look up. The project
+/// filter this replaced could only ever say one name at a time and had to be
+/// cycled through every project to reach the last one.
+fn matches(dep: &serde_json::Value, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let meta = &dep["meta"];
+    let hay = [
+        text(dep, "name"),
+        text(dep, "state"),
+        text(dep, "target"),
+        text(dep, "uid"),
+        text(meta, "githubCommitRef"),
+        text(meta, "githubCommitMessage"),
+    ]
+    .join(" ")
+    .to_lowercase();
+    hay.contains(&needle.to_lowercase())
+}
+
 /// The build log, newest last, with what the build wrote to stderr picked
 /// out of what it wrote to stdout.
 ///
@@ -845,9 +870,9 @@ fn main() {
         Arc::new(Mutex::new(HashMap::new()));
     let fetching: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut filter = 0usize;
-    let mut only: Option<String> = None;
-    let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
+    let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
     // The copy list is a page of its own, opened from the detail with c.
     let mut copying = false;
     // How far down the detail is scrolled. The build log makes it taller
@@ -860,6 +885,24 @@ fn main() {
     loop {
         tick += 1;
         for key in keyboard.poll() {
+            // While filtering, keys are text - only escape and enter are
+            // navigation, or the filter could never contain "q".
+            if typing && !overlay {
+                match key.as_str() {
+                    "esc" => {
+                        needle.clear();
+                        typing = false;
+                    }
+                    "enter" => typing = false,
+                    "backspace" => {
+                        needle.pop();
+                    }
+                    other if other.chars().count() == 1 => needle.push_str(other),
+                    _ => {}
+                }
+                selected = 0;
+                continue;
+            }
             if overlay {
                 match key.as_str() {
                     // Left and esc come out. q quits outright, which is
@@ -940,10 +983,14 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                "f" | "F" => {
+                // s, not f: "filter" said nothing about which of the two
+                // this was once there were two, and the state filter is the
+                // one that cycles rather than types.
+                "s" | "S" => {
                     filter = (filter + 1) % FILTERS.len();
                     selected = 0;
                 }
+                "/" => typing = true,
                 "up" => selected = selected.saturating_sub(1),
                 "down" => selected += 1,
                 "pgup" => selected = selected.saturating_sub(visible),
@@ -958,34 +1005,6 @@ fn main() {
                         note = (String::new(), 0.0);
                     }
                 }
-                "p" | "P" => {
-                    let names: Vec<String> = {
-                        let guard = match state.lock() {
-                            Ok(g) => g,
-                            Err(_) => return,
-                        };
-                        let mut seen: Vec<String> = guard
-                            .deployments
-                            .iter()
-                            .map(|d| text(d, "name"))
-                            .filter(|n| !n.is_empty())
-                            .collect();
-                        seen.sort();
-                        seen.dedup();
-                        seen
-                    };
-                    // Cycles through every project and back to no filter,
-                    // so the key always has somewhere to go.
-                    only = match &only {
-                        None => names.first().cloned(),
-                        Some(current) => match names.iter().position(|n| n == current) {
-                            Some(at) if at + 1 < names.len() => Some(names[at + 1].clone()),
-                            Some(_) => None,
-                            None => names.first().cloned(),
-                        },
-                    };
-                    selected = 0;
-                }
                 _ => {}
             }
         }
@@ -999,9 +1018,7 @@ fn main() {
             note = (String::new(), 0.0);
         }
         shown = deps.clone();
-        if let Some(name) = &only {
-            shown.retain(|d| text(d, "name") == *name);
-        }
+        shown.retain(|d| matches(d, &needle));
         match FILTERS[filter] {
             "failed" => shown.retain(|d| {
                 let s = text(d, "state");
@@ -1140,12 +1157,22 @@ fn main() {
         if FILTERS[filter] != "all" {
             bits.push(FILTERS[filter].to_string());
         }
-        if let Some(name) = &only {
-            bits.push(name.clone());
+        if !needle.is_empty() {
+            bits.push(format!("/{}", needle));
         }
-        if !bits.is_empty() {
+        if !bits.is_empty() || typing {
+            // The cursor is the widget saying it is still listening: without
+            // it an empty filter and a filter you are halfway through typing
+            // look identical.
             rows.push(tc::seg(
-                &[(p.build.as_str(), format!(" filter: {}", bits.join(" + ")))],
+                &[
+                    (p.build.as_str(), format!(" filter: {}", bits.join(" + "))),
+                    (p.build.as_str(), if typing { "▏".into() } else { String::new() }),
+                    (
+                        p.dim.as_str(),
+                        if typing { "  enter to keep · esc to clear".into() } else { String::new() },
+                    ),
+                ],
                 w - 1,
             ));
         }
@@ -1314,8 +1341,8 @@ fn main() {
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
             ],
-            vec![(p.dim.as_str(), "[f]ilter".into())],
-            vec![(p.dim.as_str(), "[p]roject".into())],
+            vec![(p.dim.as_str(), format!("[s]tate {}", FILTERS[filter]))],
+            vec![(p.dim.as_str(), "[/]filter".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];

@@ -5,7 +5,7 @@ Vercel deployments — how they are going over time, not just what shipped last.
 ```
 ╺━ VERCEL DEPLOYMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  200 deploys · 20 proj  179 ready  21 error   0s ago
- ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit
+ ↑↓ select · →/↵ details · [s]tate all · [/]filter · [r]efresh · [q]uit
 
  ── ACTIVITY ── deploys/hour, last 48h
  ····▂▂·▃▃▄▄···················▂▄▆▄▃▃▃▄▂▃▃············▂▃·▃▂▂▄·▂▄█▃▂▃
@@ -116,10 +116,31 @@ on the way out rather than on the way in.
 | `→` / `Enter` | full detail view for the selected deployment |
 | `1`–`7` | inside the view, copy that item |
 | `←` / `esc` | close the detail view |
-| `f` | filter — all / failed / production |
-| `p` | cycle which project is shown |
-| `r` | refresh now |
-| `q` | quit |
+| `s` | state filter — all / failed / production |
+| `/` | filter by text — `enter` keeps it, `esc` clears it |
+| `c` | copy the selected PR's… (in the detail view, the copy page) |
+| `r` | refresh now, and in the detail view fetch it again |
+| `q` | quit, from either screen |
+| `f` `p` | the state filter and the project cycle — **`deployments.py` only**; the Rust build has `s` and `/` instead |
+
+## Filtering
+
+Two filters, and they stack.
+
+`s` cycles the **state** — all, failed, production. It is a fixed set, so it
+cycles rather than types.
+
+`/` filters by **text**, against everything the row shows and one thing it
+does not: project name, state, target, branch, commit subject, and the
+deployment id — the last because an id is what a link from somewhere else
+gives you to look something up by. Type to narrow, `enter` to keep it and go
+back to the arrows, `esc` to clear it. While typing, every key is text: `q`
+types a q rather than quitting, which is the only way a filter can contain
+one.
+
+This replaced a `p` key that cycled one project at a time. With a dozen
+projects, reaching the last meant pressing it a dozen times, and it could
+never express "the failed ones in either of these two".
 
 ## Layout
 
