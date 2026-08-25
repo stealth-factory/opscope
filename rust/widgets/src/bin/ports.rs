@@ -77,9 +77,33 @@ const KINDS: &[(&str, &str)] = &[
     ("tailscaled", "Tailscale"),
     ("sshd", "SSH"),
     ("systemd-resolve", "DNS"),
-    ("python", "Python"),
-    ("node", "Node"),
 ];
+
+/// The two that are runtimes rather than programs, and so have to be the
+/// command being run rather than a word anywhere in its path.
+///
+/// The Python anchors these - `[/ ]node(\s|$)` and `[/ ]python[0-9.]*(\s|$)`
+/// - and the port flattened both to a plain substring. Every binary that
+/// lives under a directory with `node` or `python` in it then answered to
+/// the wrong name: a standalone tool installed into `node_modules` was
+/// listed as "Node", which is the runtime it is not written in.
+const RUNTIMES: &[(&str, &str)] = &[("python", "Python"), ("node", "Node")];
+
+/// Whether a command line actually runs `name`, rather than merely passing
+/// through a directory called that.
+///
+/// A trailing version is part of the name - `python3`, `python3.11` - which
+/// is what the `[0-9.]*` in the Python's pattern is for.
+fn runs_command(cmdline: &str, name: &str) -> bool {
+    cmdline.split_whitespace().any(|word| {
+        let base = word.rsplit('/').next().unwrap_or(word);
+        match base.strip_prefix(name) {
+            Some("") => true,
+            Some(tail) => tail.chars().all(|c| c.is_ascii_digit() || c == '.'),
+            None => false,
+        }
+    })
+}
 
 /// Ports whose owner is usually root, so /proc will not say what it is.
 /// Naming them by convention is a guess, and is marked as one.
@@ -370,8 +394,12 @@ fn json_string(text: &str, key: &str) -> Option<String> {
 /// What sort of server this is, from the process itself.
 fn kind_of(cmdline: &str, port: u16) -> (String, bool) {
     if !cmdline.is_empty() {
-        for (needle, name) in KINDS {
-            if cmdline.contains(needle) {
+        for (needle, name) in KINDS.iter().chain(RUNTIMES) {
+            if if RUNTIMES.iter().any(|(n, _)| n == needle) {
+                runs_command(cmdline, needle)
+            } else {
+                cmdline.contains(needle)
+            } {
                 // Next.js rewrites its own title to next-server (v16.3.0),
                 // which hands over the framework and the version at once.
                 if let Some(version) = version_in(cmdline) {
@@ -2030,11 +2058,25 @@ fn main() {
         // The project column takes whatever the fixed ones leave: it is the
         // one that identifies the server, and the one whose contents are a
         // directory name of any length.
-        let fixed = 1 + 6 + 8 + 18 + if wide { 6 + 8 } else { 0 };
+        // The WHAT column takes the widest name it has to show, plus a gap.
+        // It used to be a flat eighteen with nothing after it, so a name of
+        // exactly that length ran straight into the project and the two read
+        // as one word - and anything longer was cut, which names a different
+        // program. Sized to the whole list rather than the visible slice, so
+        // the columns do not shift as it scrolls.
+        let rest = 1 + 6 + 8 + 2 + 8 + if wide { 6 + 8 } else { 0 };
+        let kind_w = shown
+            .iter()
+            .map(|r| r.kind.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(4, (w - 1).saturating_sub(rest).max(4));
+        let fixed = 1 + 6 + 8 + kind_w + 2 + if wide { 6 + 8 } else { 0 };
         let name_w = std::cmp::max(8, (w - 1).saturating_sub(fixed));
         rows.push(tc::seg(
             &[
-                (ok.dim.as_str(), "  PORT  BIND    WHAT              ".into()),
+                (ok.dim.as_str(), "  PORT  BIND    ".into()),
+                (ok.dim.as_str(), format!("{}  ", tc::pad("WHAT", kind_w))),
                 (ok.dim.as_str(), tc::pad("PROJECT", name_w)),
                 (
                     ok.dim.as_str(),
@@ -2096,7 +2138,7 @@ fn main() {
                     format!("{}{:<6}", if here { "▸" } else { " " }, row.port),
                 ),
                 (note_c.as_str(), format!("{:<8}", note)),
-                (kind_c.as_str(), tc::pad(&row.kind, 18)),
+                (kind_c.as_str(), format!("{}  ", tc::pad(&row.kind, kind_w))),
                 (who_c.as_str(), tc::pad(&who, name_w)),
             ];
             let up_c = format!("{}{}", tint, ok.dim);
@@ -2207,6 +2249,47 @@ fn bind_note(row: &Row, p: &Palette) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_binary_living_under_a_runtimes_path_is_not_that_runtime() {
+        // Through `kind_of`, not the helper alone: an earlier version of
+        // this test passed with the table still calling `contains`, which
+        // is the bug it was written for.
+        //
+        // A real one from this machine: a standalone browser binary that
+        // npm installed into node_modules. It is not written in Node and
+        // the widget said "Node".
+        let under = "/home/u/.nvm/versions/node/v24.18.0/lib/node_modules/agent-browser/bin/agent-browser-linux-x64";
+        assert_eq!(kind_of(under, 37397).0, "agent-browser-linux-x64");
+        assert_eq!(kind_of("/srv/python-tools/bin/collector", 9000).0, "collector");
+
+        // The runtimes themselves still answer to their names.
+        assert_eq!(kind_of("/usr/bin/node server.js", 3000).0, "Node");
+        assert_eq!(kind_of("/usr/bin/python3 app.py", 8000).0, "Python");
+
+        // And the specific frameworks still win over the runtime, which is
+        // the order the table is written in.
+        assert_eq!(kind_of("node /app/node_modules/.bin/vite", 5173).0, "Vite");
+    }
+
+    #[test]
+    fn a_runtime_is_named_only_when_it_is_the_thing_being_run() {
+        // The command really is the runtime.
+        assert!(runs_command("/usr/bin/node server.js", "node"));
+        assert!(runs_command("node server.js", "node"));
+        assert!(runs_command("/usr/bin/python3 app.py", "python"));
+        assert!(runs_command("/usr/bin/python3.11 -m http.server", "python"));
+
+        // A directory on the way to something else is not. This is the
+        // whole bug: a standalone binary installed under node_modules was
+        // listed as "Node", the runtime it is not written in.
+        assert!(!runs_command("/usr/lib/node_modules/x/bin/mytool", "node"));
+        assert!(!runs_command("/home/u/.nvm/versions/node/v24/bin/agent-browser-linux-x64", "node"));
+        assert!(!runs_command("/srv/python-tools/bin/collector", "python"));
+        // And a name that merely starts the same way is a different name.
+        assert!(!runs_command("/usr/bin/nodemon app.js", "node"));
+        assert!(!runs_command("/usr/bin/python-config", "python"));
+    }
 
     #[test]
     fn ipv6_comes_out_of_little_endian_words() {

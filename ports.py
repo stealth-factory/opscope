@@ -1292,9 +1292,19 @@ def main():
         # The project column takes whatever the fixed ones leave, because it
         # is the one that identifies the server and the one whose contents
         # are a directory name of any length.
-        fixed = 1 + 6 + 8 + 18 + (6 + 8 if wide else 0)
+        # The WHAT column takes the widest name it has to show, plus a gap.
+        # It used to be a flat eighteen with nothing after it, so a name of
+        # exactly that length ran straight into the project and the two read
+        # as one word - and anything longer was cut, which names a different
+        # program. Sized to the whole list rather than the visible slice, so
+        # the columns do not shift as it scrolls.
+        rest = 1 + 6 + 8 + 2 + 8 + (6 + 8 if wide else 0)
+        widest = max([len(r["kind"] or "") for r in shown] or [0])
+        kind_w = max(4, min(widest, max(4, (w - 1) - rest)))
+        fixed = 1 + 6 + 8 + kind_w + 2 + (6 + 8 if wide else 0)
         name_w = max(8, (w - 1) - fixed)
-        rows.append(seg([(DIM, "  PORT  BIND    WHAT              "),
+        rows.append(seg([(DIM, "  PORT  BIND    "),
+                         (DIM, pad("WHAT", kind_w) + "  "),
                          (DIM, pad("PROJECT", name_w)),
                          (DIM, "UP    EXPOSED" if wide else "")], w - 1))
         visible = max(1, h - len(rows) - 3)
@@ -1319,7 +1329,7 @@ def main():
                      ("▸" if here else " ") + "%-6d" % row["port"]),
                     (tint + note_colour, "%-8s" % note),
                     (tint + (DIM if row["guessed"] or not row["kind"] else TXT),
-                     pad(row["kind"], 18)),
+                     pad(row["kind"], kind_w) + "  "),
                     (tint + (WARN if row["gone"] else
                              DIM if row.get("user") else TXT),
                      pad(who, name_w))]
