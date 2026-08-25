@@ -1,13 +1,20 @@
-# Where the Rust and the Python differ
+# What the port changed, and why
 
-Every widget here exists twice. The Rust is not a transliteration: some of it
-answers differently on purpose, and the difference between *on purpose* and
-*a defect the port introduced* is the whole point of the side-by-side review
-([TOY-8](https://linear.app/stealth-company/issue/TOY-8)). This page is the
-durable half of that review — the divergences that were meant.
+For the length of the port every widget here existed twice, and the Rust was
+never a transliteration: some of it answers differently on purpose. Telling
+*on purpose* from *a defect the port introduced* was the whole point of the
+side-by-side review ([TOY-8](https://linear.app/stealth-company/issue/TOY-8)),
+and this page is what that review produced.
 
-Anything not listed here and not obviously a Rust-only feature should be
-treated as a finding, not a decision.
+**The Python goes when [#31](https://github.com/stealth-factory/terminal-toys/pull/31)
+merges.** This page outlives it, because most of what is here is not a
+comparison — it is the reason a key is the key it is, the reason a rate is
+averaged, the reason a braille cell belongs to one trace. The Python is how
+those reasons are explained, not why they matter.
+
+Until it merges, both implementations are still in the tree, and anything not
+listed here and not obviously a Rust-only feature should be treated as a
+finding rather than a decision.
 
 **Reviewed against `ac02b90`.** Verified by reading both sources, not by
 diffing them: three attempts at a mechanical key-differ each reported
@@ -85,14 +92,14 @@ masks into each cell and give the cell to whichever series comes later in the
 table. A cell can hold two traces' dots but only one colour, so where two
 hosts sit close together on the axis one is drawn end to end in the other's
 colour and a third can vanish as a distinct line. No number is false; the
-colour saying whose it is, is. **The Pythons still do this.**
+colour saying whose it is, is. The Pythons were never fixed — see below.
 
 **`netwatch` averages rates over about four seconds** in the Rust. Over one
 sample interval the delta really is zero whenever a bursty process is between
 bursts, so the column flickered between a figure and a dash — every reading
 correct and the column unreadable. The header names the window. Totals are
 untouched: smoothing a rate is honest, smoothing a total would not be.
-`netwatch.py` still flickers.
+`netwatch.py` was never fixed — see below.
 
 ## Columns
 
@@ -122,9 +129,20 @@ key against the Pythons', and `ports`' program-name table matches the
 Python's patterns — including the two that have to be anchored, which the
 port had flattened to substring tests until the review caught it.
 
-## Still open
+## Two bugs that leave with the Python
 
-- `ports.py` answers `i` and the Rust does not. Dropping it from the Python
-  is a decision rather than a fix.
-- The braille colour bug and `netwatch`'s rate window are both worth
-  backporting if the Python is staying.
+Both were found by this review, both are fixed in the Rust, and neither was
+ever fixed in the Python — there was no reason to, once it was going.
+
+**A braille cell showed one trace in another trace's colour.** `latency.py`
+and `link.py` merge every series' dot masks into a cell and give the cell to
+whichever series comes later in the table. Where two hosts sit close together
+on the axis, one is drawn end to end in the other's colour and a third can
+vanish as a distinct line. No number was false; the colour saying whose it
+was, was. This is the founding-rule break that started the review, and it was
+found by eye — *why does that host have two lines* — after every test had
+passed on it all day.
+
+**`netwatch.py`'s rate column flickers** between a figure and a dash, because
+over one sample interval the delta really is zero whenever a bursty process is
+between bursts. Every reading correct, the column unreadable.
