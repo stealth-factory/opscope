@@ -1345,7 +1345,10 @@ def main():
 
         foot = footer(confirm, watch, working, notice, w,
                       [[(ACCENT, "↑↓"), (DIM, " select")],
-                       [(ACCENT, "↵"), (DIM, " details")], [(DIM, "[k]ill")],
+                       # The right arrow has always opened it too, and the
+                       # footer only ever named the return. A key that works
+                       # and is not on screen is a feature nobody finds.
+                       [(ACCENT, "→/↵"), (DIM, " details")], [(DIM, "[k]ill")],
                        [(DIM, "[o]%s system"
                          % ("show" if hide_system else "hide"))],
                        [(DIM, "[r]efresh")], [(DIM, "[q]uit")]])

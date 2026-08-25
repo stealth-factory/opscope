@@ -148,7 +148,7 @@ never a dev server. Neither case is offered a prompt.
 
 ## The second screen
 
-`↵` opens the selected port, and only when there is something behind it — a
+`↵` or `→` opens the selected port, and only when there is something behind it — a
 process of yours, or a port Tailscale is already serving. Another user's
 socket does not get a screen, because the four columns already carry
 everything `/proc` will say about it, and a press that opens a repeat of the
@@ -288,7 +288,7 @@ are on this screen rather than an IP.
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a row — or an address, on the second screen |
-| `↵` | open the selected port, where there is more to show |
+| `↵` `→` | open the selected port, where there is more to show |
 | `esc` | back to the list |
 | `c` | copy the highlighted address |
 | `s` | `tailscale serve` this port, or stop serving it |
