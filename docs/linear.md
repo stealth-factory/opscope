@@ -139,6 +139,9 @@ Under that, **every project the team owns**:
   cluster-migration          Completed    █████████████░░  87%  2 open · due 2024-07-26 · A Lead
 ```
 
+`↑` `↓` move a cursor through that list and the screen scrolls to follow it;
+`→` or `↵` opens the project under the cursor.
+
 Running work sorts first and finished work last, with a status this build has
 never heard of sorting *with* the live work rather than under the dead work —
 a workspace names its own statuses, and burying an unfamiliar one would hide
@@ -160,6 +163,67 @@ project's name is a name for something else. The bar takes whatever is left,
 and when the pane is too narrow the aside sheds whole facts off the end rather
 than let one be cut in half.
 
+## One project
+
+`→` or `↵` on a project opens it. `←` or `esc` comes back to the team it was
+opened from, not to the board — one level at a time.
+
+```
+╺━ CLUSTER MIGRATION · OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+  progress              87%   █████████████████████░░░
+  status                      Completed
+  scope in points       144   102 done, 42 left
+  issues                 38   31 closed
+  scope added            +3   since it started
+  started                     2024-06-25
+  completed                   2026-05-10
+  target was                  2024-07-26
+  lead                        A Lead
+  members                 1   A Lead
+  initiative                  Infrastructure
+  oldest open          2.2y   OPS-37
+
+ ── OPEN BY STATE ── 2 issues
+ ████████████████████████████████████████████████████████████████████████████████
+ ▇ backlog 1 (50%)   ▇ todo 1 (50%)
+
+ ── MILESTONES ── 3
+  Workload Migrations                 ██████████████████████████████ 100%  2024-06-26
+  SSL Optimisations                   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%  2024-06-28
+  Cost and Performance Optimisations  ████████████████████░░░░░░░░░░  67%  2024-07-26
+
+ ── WHAT IT IS FOR ──
+  Move every workload off the old cluster and onto the managed one, and
+  retire the old one once nothing is left on it.
+```
+
+Three measures sit next to each other and none of them is the others: Linear's
+own weighted `progress`, the points, and the issue count. **Scope is labelled
+in points** for that reason — unlabelled, 87% above `102 done` of 144 above
+`31 closed` of 38 reads as one measure got wrong three times.
+
+`overdue by` appears only while the work is still running. A project that
+finished after its target date is not late, and used to read `overdue by 760d`
+because nothing was asking whether the work had since landed; a finished one
+shows when it completed and what its target *was*.
+
+Milestones are ordered by target date, undated ones last — Linear returns them
+in no order at all. Their `progress` is reported out of a hundred where a
+project's is out of one, so it is divided before it reaches a bar; fed straight
+in, every milestone read full.
+
+`── OPEN BY STATE ──` and `oldest open` come from the board's own pass over
+every open issue, so they cost nothing and stay current while the screen is up.
+They count the project across *every* team that shares it, because the screen is
+about the project rather than about whichever team's list it was opened from.
+
+Everything else — the burn-up, the milestones, the members, the description — is
+one request made when the screen opens, and again when what it fetched is older
+than the refresh interval. Fetching that for every project in the workspace
+every two minutes would be paying, continuously, for screens nobody has opened.
+While the request is out the screen says so; if it fails it says that instead,
+rather than reading "loading" for ever.
+
 ## Cost
 
 Linear allows **2,500 requests/hour** and 3,000,000 complexity points; a single
@@ -168,7 +232,8 @@ multiplied by the page size, so the request count is the limit that binds and
 the field count barely matters.
 
 A full pass over a workspace of 14 teams and ~1,200 open issues costs about
-**11 requests and 4 seconds** — one of them the whole workspace's projects,
+**11 requests and 4 seconds** — one of them the whole workspace's projects, plus
+one more each time a project's own screen is opened,
 fetched with everything else so a team's screen opens on data already in hand
 rather than showing nothing while a request goes out, so the default 120s refresh uses roughly 300
 requests an hour — an eighth of the budget. Remaining quota is read from
@@ -201,9 +266,10 @@ are stepped over in every direction.
 |---|---|
 | `tab` | focus the next pane, and from the last one back to no focus |
 | `↑` `↓` | move the cursor, crossing between panes at their ends — or step into one when none is focused |
-| `↵` `→` | open the highlighted cycle or team on a screen of its own |
-| `←` `esc` | back to the board |
-| `↑` `↓` `PgUp` `PgDn` | scroll a detail screen |
+| `↵` `→` | open the highlighted cycle or team — and from a team, the project under its cursor |
+| `←` `esc` | back one level: a project to its team, a team to the board |
+| `↑` `↓` `PgUp` `PgDn` | move the cursor through a team's projects, or scroll any other detail screen |
+| `r` | refresh, including the open project's own record |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |

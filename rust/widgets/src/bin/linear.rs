@@ -21,7 +21,7 @@
 //! screen actually shows are asked for, because complexity is charged per
 //! property and the page count is what costs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -208,6 +208,25 @@ query($after: String) {
   }
 }"#;
 
+/// One project in full, asked for only when its screen is opened.
+///
+/// The board's own pass carries what a list needs - name, status, progress,
+/// a target date. The rest is here: the burn-up, the milestones, who is on
+/// it, what it says it is for. Fetching that for every project in the
+/// workspace every two minutes would be paying, continuously, for screens
+/// nobody has opened.
+const PROJECT_QUERY: &str = r#"
+query($id: String!) {
+  project(id: $id) {
+    id name url description startedAt completedAt
+    scopeHistory completedScopeHistory
+    issueCountHistory completedIssueCountHistory
+    members(first: 20) { nodes { name } }
+    projectMilestones(first: 25) { nodes { name targetDate progress } }
+    initiatives(first: 5) { nodes { name } }
+  }
+}"#;
+
 const TEAMS_QUERY: &str = r#"
 { teams(first: 100) { nodes { key name } pageInfo { hasNextPage } } }"#;
 
@@ -305,6 +324,51 @@ struct Proj {
     lead: String,
 }
 
+/// One project's own record, fetched when its screen opens.
+///
+/// The error is kept in the same place the answer would be. A fetch that
+/// fails silently leaves a screen saying "loading" for ever, which is this
+/// widget's oldest lesson written a different way.
+fn fetch_project(id: &str, tok: &str, quota: &Arc<Mutex<Quota>>) -> serde_json::Value {
+    let vars = serde_json::json!({ "id": id });
+    match graphql(PROJECT_QUERY, tok, vars, quota) {
+        Ok(v) => v["project"].clone(),
+        Err(said) => serde_json::json!({ "_error": said }),
+    }
+}
+
+/// Break text to a width without breaking a word, and without dropping one.
+fn wrap(t: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in t.split_whitespace() {
+        let n = word.chars().count();
+        if line.is_empty() {
+            line = word.to_string();
+        } else if line.chars().count() + 1 + n <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+        }
+        // A word longer than the line has to break somewhere; it breaks at
+        // the width rather than being thrown away.
+        while line.chars().count() > width {
+            let head: String = line.chars().take(width).collect();
+            line = line.chars().skip(width).collect();
+            out.push(head);
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// A project's aside, as one string. Measured and drawn through the same
 /// call so the separator cannot be counted one way and printed another.
 fn joined(parts: &[String]) -> String {
@@ -342,6 +406,12 @@ struct State {
     /// it. The empty id is the bucket for issues in no project at all, which
     /// is why the per-project figures do not sum to the team's open count.
     proj_open: HashMap<String, HashMap<String, usize>>,
+    /// Project id to its open issues by state, across every team that shares
+    /// it - a project's own screen is about the project, not about whichever
+    /// team's screen it was opened from.
+    proj_state: HashMap<String, HashMap<String, usize>>,
+    /// Project id to the oldest thing still open in it.
+    proj_oldest: HashMap<String, (f64, String)>,
     cycles: Vec<serde_json::Value>,
     created: HashMap<String, usize>,
     completed: HashMap<String, usize>,
@@ -406,6 +476,8 @@ fn one_pass(
     let mut states: HashMap<String, usize> = HashMap::new();
     let mut by_team: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut proj_open: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut proj_state: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut proj_oldest: HashMap<String, (f64, String)> = HashMap::new();
     let at = Utc::now().naive_utc();
     let (mut oldest_open, mut oldest_wip): (Extreme, Extreme) = (None, None);
     for it in &rows {
@@ -420,11 +492,27 @@ fn one_pass(
         *states.entry(st.clone()).or_insert(0) += 1;
         // The empty string when the issue is in no project, which is a
         // real and common answer here, not a missing one.
+        let in_project = text(&it["project"], "id");
         *proj_open
             .entry(key.clone())
             .or_default()
-            .entry(text(&it["project"], "id"))
+            .entry(in_project.clone())
             .or_insert(0) += 1;
+        // A project's own screen wants these broken out, and every one of
+        // them is already in this row: no second request buys them.
+        if !in_project.is_empty() {
+            *proj_state
+                .entry(in_project.clone())
+                .or_default()
+                .entry(st.clone())
+                .or_insert(0) += 1;
+            if let Some(age) = hours_since(parse(&text(it, "createdAt")), Some(at)) {
+                let seat = proj_oldest.entry(in_project).or_insert((0.0, String::new()));
+                if age > seat.0 {
+                    *seat = (age, text(it, "identifier"));
+                }
+            }
+        }
         let slot = by_team.entry(key).or_default();
         *slot.entry(st.clone()).or_insert(0) += 1;
         *slot.entry("open".into()).or_insert(0) += 1;
@@ -535,6 +623,8 @@ fn one_pass(
         guard.by_team = by_team;
         guard.projects = projects;
         guard.proj_open = proj_open;
+        guard.proj_state = proj_state;
+        guard.proj_oldest = proj_oldest;
         guard.cycles = cycles;
         guard.created = created;
         guard.completed = completed;
@@ -782,11 +872,12 @@ fn team_detail(
     counts: &HashMap<String, usize>,
     projects: &[Proj],
     opens: &HashMap<String, usize>,
+    pick: usize,
     window: i64,
     w: usize,
     h: usize,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, Option<usize>) {
     let mut rows = vec![tc::title(&format!("{} · {}", key, name), w, &p.accent)];
     let label_w = 18usize;
     let get = |k: &str| counts.get(k).copied().unwrap_or(0);
@@ -827,10 +918,10 @@ fn team_detail(
 
     if open > 0 && h.saturating_sub(rows.len()) >= 4 {
         let legend: Vec<(&str, usize, &str)> = [
-            ("triage", triage, p.bad.as_str()),
-            ("backlog", get("backlog"), p.dim.as_str()),
-            ("unstarted", get("unstarted"), p.txt.as_str()),
-            ("in progress", get("started"), p.warn.as_str()),
+            (state_label("triage"), triage, p.bad.as_str()),
+            (state_label("backlog"), get("backlog"), p.dim.as_str()),
+            (state_label("unstarted"), get("unstarted"), p.txt.as_str()),
+            (state_label("started"), get("started"), p.warn.as_str()),
         ]
         .into_iter()
         .filter(|x| x.1 > 0)
@@ -893,7 +984,7 @@ fn team_detail(
             &[(p.dim.as_str(), "  this team owns no projects".into())],
             w - 1,
         ));
-        return rows;
+        return (rows, None);
     }
 
     // Every aside first, because the columns are sized to what is in them:
@@ -927,10 +1018,14 @@ fn team_detail(
     let label_w = widest(&mut projects.iter().map(|q| q.label.chars().count())).max(4);
     let full = widest(&mut asides.iter().map(|a| joined(a).chars().count()));
     // Everything on the row except the bar and the aside, the two that give.
+    // The marker sits in the left margin the same way the board's own two
+    // panes carry it, so the two-space indent is what it displaces.
     let head = 2 + name_w + 2 + label_w + 2 + 5 + 2;
     let bar_w = (w - 1).saturating_sub(head + full).clamp(6, 40);
     let room = (w - 1).saturating_sub(head + bar_w);
-    for (q, parts) in projects.iter().zip(&asides) {
+    let pick = pick.min(projects.len() - 1);
+    let mut cursor = None;
+    for (i, (q, parts)) in projects.iter().zip(&asides).enumerate() {
         let colour = match q.kind.as_str() {
             "started" => p.warn.as_str(),
             "completed" => p.ok.as_str(),
@@ -943,9 +1038,16 @@ fn team_detail(
         while keep > 0 && joined(&parts[..keep]).chars().count() > room {
             keep -= 1;
         }
+        let here = i == pick;
+        if here {
+            cursor = Some(rows.len());
+        }
         rows.push(tc::seg(
             &[
-                (p.txt.as_str(), format!("  {}", tc::pad(&q.name, name_w))),
+                (
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
+                    format!("{} {}", if here { "▸" } else { " " }, tc::pad(&q.name, name_w)),
+                ),
                 (colour, format!("  {}", tc::pad(&q.label, label_w))),
                 (colour, format!("  {}", tc::meter(q.progress, bar_w))),
                 (p.txt.as_str(), format!(" {:>3.0}%", 100.0 * q.progress)),
@@ -953,6 +1055,289 @@ fn team_detail(
             ],
             w - 1,
         ));
+    }
+    (rows, cursor)
+}
+
+/// One project in full.
+///
+/// Two sources meet here and neither could answer alone. `held` is the
+/// project's own record, fetched when this screen opened: its burn-up, its
+/// milestones, who is on it. `states` and `oldest` come from the board's
+/// own pass over every open issue, which is why they cost nothing and stay
+/// current while the screen is up.
+///
+/// `q` carries what the list already knew, so the screen has a name, a
+/// status and a progress figure on the frame it opens - not one request
+/// later.
+#[allow(clippy::too_many_arguments)]
+fn project_detail(
+    q: &Proj,
+    team: &str,
+    held: Option<&serde_json::Value>,
+    states: &HashMap<String, usize>,
+    oldest: Option<&(f64, String)>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let title = if team.is_empty() {
+        q.name.clone()
+    } else {
+        format!("{} · {}", q.name, team)
+    };
+    let mut rows = vec![tc::title(&title, w, &p.accent)];
+    let label_w = 18usize;
+    let mut field = |name: &str, value: String, aside: String, colour: &str| {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad(name, label_w))),
+                (colour, format!("{:>7}", value)),
+                (p.dim.as_str(), format!("   {}", aside)),
+            ],
+            w - 1,
+        ));
+    };
+
+    // Linear's own progress, the same figure the team's list shows. Derived
+    // here it would disagree with the line the reader just came from.
+    field(
+        "progress",
+        format!("{:.0}%", 100.0 * q.progress),
+        tc::meter(q.progress, w.saturating_sub(label_w + 22).clamp(6, 24)),
+        if q.progress >= 0.8 { p.ok.as_str() } else { p.txt.as_str() },
+    );
+    field(
+        "status",
+        String::new(),
+        q.label.clone(),
+        p.txt.as_str(),
+    );
+
+    let series = |v: &serde_json::Value, key: &str| -> Vec<f64> {
+        v[key].as_array().into_iter().flatten().filter_map(|x| x.as_f64()).collect()
+    };
+    let at = |v: &[f64]| v.last().copied().unwrap_or(0.0);
+    if let Some(v) = held.filter(|v| v["_error"].is_null() && !v.is_null()) {
+        let scope = series(v, "scopeHistory");
+        let done = series(v, "completedScopeHistory");
+        let issues = series(v, "issueCountHistory");
+        let issues_done = series(v, "completedIssueCountHistory");
+        if at(&scope) > 0.0 {
+            // Named in points because the percentage above is Linear's
+            // own weighting and agrees with neither this nor the issue
+            // count. Three different measures unlabelled read as one
+            // measure got wrong three times.
+            field(
+                "scope in points",
+                format!("{:.0}", at(&scope)),
+                format!("{:.0} done, {:.0} left", at(&done), (at(&scope) - at(&done)).max(0.0)),
+                p.txt.as_str(),
+            );
+        }
+        if at(&issues) > 0.0 {
+            field(
+                "issues",
+                format!("{:.0}", at(&issues)),
+                format!("{:.0} closed", at(&issues_done)),
+                p.dim.as_str(),
+            );
+        }
+        // Scope that arrived after the project opened - the number people
+        // mean when they say a project "grew".
+        let added = at(&scope) - scope.first().copied().unwrap_or(0.0);
+        if added.abs() > 0.05 {
+            field(
+                "scope added",
+                format!("{:+.0}", added),
+                "since it started".into(),
+                if added > 0.0 { p.warn.as_str() } else { p.ok.as_str() },
+            );
+        }
+    }
+
+    let record = held.unwrap_or(&serde_json::Value::Null);
+    let started = day(&text(record, "startedAt"));
+    if !started.is_empty() {
+        field("started", String::new(), started, p.dim.as_str());
+    }
+    let finished = day(&text(record, "completedAt"));
+    if !finished.is_empty() {
+        field("completed", String::new(), finished.clone(), p.ok.as_str());
+    }
+    // A finished project is not late. It was shown as "overdue by 760d"
+    // because the target date is still in the past and nothing was asking
+    // whether the work had since landed.
+    let done_with = !finished.is_empty() || q.kind == "completed" || q.kind == "canceled";
+    if !q.target.is_empty() && done_with {
+        field("target was", String::new(), q.target.clone(), p.dim.as_str());
+    } else if !q.target.is_empty() {
+        // Whether the date is still ahead, said in days rather than left to
+        // the reader to work out from today's.
+        let left = parse(&format!("{}T00:00:00", q.target))
+            .and_then(|d| hours_since(Some(Utc::now().naive_utc()), Some(d)))
+            .map(|h| (h / 24.0).ceil() as i64);
+        // The label carries the direction so the value stays short enough
+        // for the column, the way the cycle screen's "ends in" does.
+        let (label, word, colour) = match left {
+            Some(d) if d < 0 => ("overdue by", format!("{}d", -d), p.bad.as_str()),
+            Some(d) => ("target in", format!("{}d", d), p.txt.as_str()),
+            None => ("target", String::new(), p.dim.as_str()),
+        };
+        field(label, word, q.target.clone(), colour);
+    }
+    if !q.lead.is_empty() {
+        field("lead", String::new(), q.lead.clone(), p.txt.as_str());
+    }
+    if let Some(v) = held.filter(|v| v["_error"].is_null() && !v.is_null()) {
+        let names: Vec<String> = v["members"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| text(m, "name"))
+            .filter(|n| !n.is_empty())
+            .collect();
+        if !names.is_empty() {
+            field(
+                "members",
+                names.len().to_string(),
+                names.join(", "),
+                p.dim.as_str(),
+            );
+        }
+        let inits: Vec<String> = v["initiatives"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|i| text(i, "name"))
+            .filter(|n| !n.is_empty())
+            .collect();
+        if !inits.is_empty() {
+            field("initiative", String::new(), inits.join(" · "), p.dim.as_str());
+        }
+    }
+    if let Some((age, ident)) = oldest {
+        field("oldest open", dur(Some(*age)), ident.clone(), p.warn.as_str());
+    }
+
+    // What is open in it, by state, across every team that shares it.
+    let open: usize = states.values().sum();
+    if open > 0 {
+        let legend: Vec<(&str, usize, &str)> = STATE_ORDER
+            .iter()
+            .map(|st| (state_label(st), states.get(*st).copied().unwrap_or(0), state_colour(st, p)))
+            .filter(|x| x.1 > 0)
+            .collect();
+        rows.push(String::new());
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── OPEN BY STATE ── ".into()),
+                (p.dim.as_str(), format!("{} issues", open)),
+            ],
+            w - 1,
+        ));
+        let parts: Vec<(f64, String)> = legend
+            .iter()
+            .map(|(_, n, c)| (*n as f64 / open as f64, c.to_string()))
+            .collect();
+        let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
+        let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (colour, txt) in &bar {
+            line.push((colour.as_str(), txt.clone()));
+        }
+        rows.push(tc::seg(&line, w - 1));
+        let mut legend_row: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (label, count, colour) in &legend {
+            legend_row.push((colour, "▇ ".into()));
+            legend_row.push((p.txt.as_str(), (*label).into()));
+            legend_row.push((
+                p.dim.as_str(),
+                format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
+            ));
+        }
+        rows.push(tc::seg(&legend_row, w - 1));
+    }
+
+    match held {
+        None => {
+            rows.push(String::new());
+            rows.push(tc::seg(&[(p.dim.as_str(), "  asking Linear for the rest...".into())], w - 1));
+            return rows;
+        }
+        Some(v) if !v["_error"].is_null() => {
+            rows.push(String::new());
+            rows.push(tc::seg(
+                &[
+                    (p.bad.as_str(), "  could not read the project: ".into()),
+                    (p.dim.as_str(), text(v, "_error")),
+                ],
+                w - 1,
+            ));
+            return rows;
+        }
+        Some(v) if v.is_null() => {
+            rows.push(String::new());
+            rows.push(tc::seg(&[(p.bad.as_str(), "  Linear returned no such project".into())], w - 1));
+            return rows;
+        }
+        _ => {}
+    }
+    let v = held.unwrap_or(&serde_json::Value::Null);
+
+    // Milestones, in the order they fall due. Linear returns them in no
+    // order at all, and a list of dates out of order reads as noise.
+    let mut stones: Vec<(String, String, f64)> = v["projectMilestones"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            (
+                text(m, "name"),
+                text(m, "targetDate"),
+                // Milestones report progress out of a hundred where the
+                // project reports it out of one. Fed straight to a meter
+                // every one of them would read full.
+                m["progress"].as_f64().unwrap_or(0.0) / 100.0,
+            )
+        })
+        .collect();
+    // Undated last: they have no place in a sequence of dates.
+    stones.sort_by(|a, b| {
+        a.1.is_empty().cmp(&b.1.is_empty()).then(a.1.cmp(&b.1)).then(a.0.cmp(&b.0))
+    });
+    if !stones.is_empty() {
+        rows.push(String::new());
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── MILESTONES ── ".into()),
+                (p.dim.as_str(), format!("{}", stones.len())),
+            ],
+            w - 1,
+        ));
+        let name_w = stones.iter().map(|(n, _, _)| n.chars().count()).max().unwrap_or(8).max(8);
+        let bar_w = (w - 1).saturating_sub(2 + name_w + 2 + 5 + 2 + 10).clamp(6, 30);
+        for (name, date, frac) in &stones {
+            let colour = if *frac >= 1.0 { p.ok.as_str() } else { p.txt.as_str() };
+            rows.push(tc::seg(
+                &[
+                    (p.txt.as_str(), format!("  {}", tc::pad(name, name_w))),
+                    (colour, format!("  {}", tc::meter(*frac, bar_w))),
+                    (p.txt.as_str(), format!(" {:>3.0}%", 100.0 * frac)),
+                    (p.dim.as_str(), format!("  {}", date)),
+                ],
+                w - 1,
+            ));
+        }
+    }
+
+    let about = text(v, "description");
+    if !about.trim().is_empty() {
+        rows.push(String::new());
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── WHAT IT IS FOR ── ".into())], w - 1));
+        // Wrapped whole, never cut: this screen scrolls, so there is no
+        // width to buy by dropping the end of a sentence.
+        for line in wrap(&about, w.saturating_sub(4)) {
+            rows.push(tc::seg(&[(p.txt.as_str(), format!("  {}", line))], w - 1));
+        }
     }
     rows
 }
@@ -1061,6 +1446,9 @@ fn main() {
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
 
     let (tok, source) = token(&cfg);
+    // The poller takes ownership of the key; the project screen fetches on
+    // its own thread and needs one too.
+    let ui_token = tok.clone();
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "LINEAR_API_KEY");
         if name.is_empty() { "LINEAR_API_KEY".to_string() } else { name }
@@ -1129,6 +1517,26 @@ fn main() {
     // Which pane's selection is open on a screen of its own, and how far
     // down it is scrolled.
     let (mut detail, mut dscroll): (Option<usize>, usize) = (None, 0);
+    // Which project is under the cursor on a team's screen, and which one
+    // is open a level deeper.
+    //
+    // The deeper one is held by id, not by index: the list re-sorts on
+    // every poll - by status, then progress - so a refresh while the screen
+    // is up would otherwise swap out the project being read without
+    // touching the cursor.
+    let mut pick = 0usize;
+    let mut deep: Option<String> = None;
+    let mut pscroll = 0usize;
+    let held: Arc<Mutex<HashMap<String, (serde_json::Value, f64)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let ui_tok = ui_token.clone();
+    let ui_quota = Arc::clone(&quota);
+    // How many projects the team's screen held when it was last drawn, and
+    // which one the cursor was on - read by the keys, which run before the
+    // frame that answers them is built.
+    let mut projects_len = 0usize;
+    let mut open_project: Option<String> = None;
     let mut tick = 0usize;
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
@@ -1143,6 +1551,9 @@ fn main() {
                     return;
                 }
                 "r" | "R" => {
+                    if let Ok(mut g) = held.lock() {
+                        g.clear();
+                    }
                     let (lock, cond) = &*wake;
                     if let Ok(mut asked) = lock.lock() {
                         *asked = true;
@@ -1170,35 +1581,71 @@ fn main() {
                 // Enter opens whichever pane has the cursor. Without a
                 // focused pane there is nothing selected to open, which is
                 // the same rule the board's own cursor follows.
+                // A team's screen opens one of its projects; the board
+                // opens whichever pane has the cursor. Without a focused
+                // pane there is nothing selected to open, which is the
+                // same rule the board's own cursor follows.
+                "right" | "enter" if detail == Some(teams_pane) && deep.is_none() => {
+                    if let Some(id) = open_project.clone() {
+                        deep = Some(id);
+                        pscroll = 0;
+                    }
+                }
+                "right" | "enter" if detail.is_some() => {}
                 "right" | "enter" => {
                     if focus.is_some() {
                         detail = focus;
                         dscroll = 0;
+                        pick = 0;
                     }
                 }
+                // Back one level at a time: out of a project to the team
+                // that owns it, and only then to the board.
+                "left" | "esc" if deep.is_some() => deep = None,
                 "left" | "esc" if detail.is_some() => detail = None,
+                // A team's screen hands the arrows to its project list and
+                // scrolls itself to follow; every other screen has nothing
+                // to select, so they scroll outright.
+                "up" | "down" if detail == Some(teams_pane) && deep.is_none() => {
+                    if key == "down" {
+                        pick = pick.saturating_add(1).min(projects_len.saturating_sub(1));
+                    } else {
+                        pick = pick.saturating_sub(1);
+                    }
+                }
+                "pgup" | "pgdn" if detail == Some(teams_pane) && deep.is_none() => {
+                    let page = tc::size().1.saturating_sub(3).max(1);
+                    pick = if key == "pgdn" {
+                        pick.saturating_add(page).min(projects_len.saturating_sub(1))
+                    } else {
+                        pick.saturating_sub(page)
+                    };
+                }
                 // Walking off either end of a pane leaves it. There is no
                 // screen scroll here to hand the arrows to - both panes
                 // window themselves to fit - so from nothing focused they
                 // step back in at the near end, the same ring latency and
                 // link use.
                 "up" | "down" if detail.is_some() => {
+                    let at = if deep.is_some() { &mut pscroll } else { &mut dscroll };
                     if key == "down" {
-                        dscroll = dscroll.saturating_add(1);
+                        *at = at.saturating_add(1);
                     } else {
-                        dscroll = dscroll.saturating_sub(1);
+                        *at = at.saturating_sub(1);
                     }
                 }
-                "pgup" if detail.is_some() => {
+                "pgup" | "pgdn" if detail.is_some() => {
                     let page = tc::size().1.saturating_sub(3).max(1);
-                    dscroll = dscroll.saturating_sub(page);
-                }
-                "pgdn" if detail.is_some() => {
-                    let page = tc::size().1.saturating_sub(3).max(1);
-                    dscroll = dscroll.saturating_add(page);
+                    let at = if deep.is_some() { &mut pscroll } else { &mut dscroll };
+                    *at = if key == "pgdn" {
+                        at.saturating_add(page)
+                    } else {
+                        at.saturating_sub(page)
+                    };
                 }
                 "up" | "down" => {
                     let down = key == "down";
+                    pick = 0;
                     focus = match focus {
                         Some(here) => tc::step_across_sections(here, sel[here], &pane_len, down)
                             .map(|(pane, row)| {
@@ -1739,46 +2186,146 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
         }
-        // One cycle, or one team, on a screen of its own.
+        // One cycle, one team, or one of that team's projects, each on a
+        // screen of its own.
         if let Some(which) = detail {
-            let body = if which == cycles_pane {
-                ranked_cycles
-                    .get(sel[cycles_pane].min(ranked_cycles.len().saturating_sub(1)))
-                    .map(|c| cycle_detail(c, w, h, &p))
-                    .unwrap_or_default()
+            let team = ranked
+                .get(sel[teams_pane].min(ranked.len().saturating_sub(1)))
+                .cloned();
+            let none: Vec<Proj> = Vec::new();
+            let projects: Vec<Proj> = team
+                .as_ref()
+                .and_then(|(key, _)| s.projects.get(key))
+                .unwrap_or(&none)
+                .clone();
+            if which == teams_pane {
+                projects_len = projects.len();
+                pick = pick.min(projects_len.saturating_sub(1));
+                open_project = projects.get(pick).map(|q| q.id.clone());
+            }
+            // The project being read is found by its id, so a poll that
+            // re-sorts the list underneath cannot swap it for its
+            // neighbour.
+            let reading = deep
+                .as_ref()
+                .and_then(|id| projects.iter().find(|q| &q.id == id).cloned());
+            let (body, cursor) = if let Some(q) = reading.as_ref() {
+                let empty = HashMap::new();
+                let states = s.proj_state.get(&q.id).unwrap_or(&empty);
+                let oldest = s.proj_oldest.get(&q.id).cloned();
+                let record = held.lock().ok().and_then(|g| g.get(&q.id).map(|(v, _)| v.clone()));
+                (
+                    project_detail(
+                        q,
+                        team.as_ref().map(|(k, _)| k.as_str()).unwrap_or(""),
+                        record.as_ref(),
+                        states,
+                        oldest.as_ref(),
+                        w,
+                        &p,
+                    ),
+                    None,
+                )
+            } else if which == cycles_pane {
+                (
+                    ranked_cycles
+                        .get(sel[cycles_pane].min(ranked_cycles.len().saturating_sub(1)))
+                        .map(|c| cycle_detail(c, w, h, &p))
+                        .unwrap_or_default(),
+                    None,
+                )
             } else {
-                ranked
-                    .get(sel[teams_pane].min(ranked.len().saturating_sub(1)))
+                team.as_ref()
                     .map(|(key, name)| {
                         let empty = HashMap::new();
                         let counts = s.by_team.get(key).unwrap_or(&empty);
                         let opens = s.proj_open.get(key).unwrap_or(&empty);
-                        let none: Vec<Proj> = Vec::new();
-                        let projects = s.projects.get(key).unwrap_or(&none);
-                        team_detail(key, name, counts, projects, opens, s.window, w, h, &p)
+                        team_detail(key, name, counts, &projects, opens, pick, s.window, w, h, &p)
                     })
                     .unwrap_or_default()
             };
             drop(s);
+
+            // Ask for the open project's own record, once, and again once
+            // it has gone stale - the screen is left up for minutes at a
+            // time and a burn-up from ten minutes ago is not this one.
+            if let Some(q) = reading.as_ref() {
+                let due = held
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(&q.id).map(|(_, at)| now() - at > refresh))
+                    .unwrap_or(true);
+                let mine = asking.lock().map(|g| !g.contains(&q.id)).unwrap_or(false);
+                if due && mine && !ui_tok.is_empty() {
+                    if let Ok(mut g) = asking.lock() {
+                        g.insert(q.id.clone());
+                    }
+                    let (id, tok, quota) = (q.id.clone(), ui_tok.clone(), Arc::clone(&ui_quota));
+                    let (held, asking) = (Arc::clone(&held), Arc::clone(&asking));
+                    std::thread::spawn(move || {
+                        let got = fetch_project(&id, &tok, &quota);
+                        if let Ok(mut g) = held.lock() {
+                            g.insert(id.clone(), (got, now()));
+                        }
+                        if let Ok(mut g) = asking.lock() {
+                            g.remove(&id);
+                        }
+                    });
+                }
+            }
+
             if body.is_empty() {
                 detail = None;
+                deep = None;
             } else {
-                let hints: Vec<Vec<(&str, String)>> = vec![
-                    vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
-                    vec![
-                        (p.accent.as_str(), "←".into()),
-                        (p.dim.as_str(), "/esc back".into()),
-                    ],
-                    vec![(p.dim.as_str(), "[q]uit".into())],
-                ];
+                let into = if reading.is_some() {
+                    None
+                } else if which == teams_pane && projects_len > 0 {
+                    Some(" open it")
+                } else {
+                    None
+                };
+                let mut hints: Vec<Vec<(&str, String)>> = vec![vec![
+                    (p.accent.as_str(), "↑↓".into()),
+                    (
+                        p.dim.as_str(),
+                        if into.is_some() { " project" } else { " scroll" }.into(),
+                    ),
+                ]];
+                if let Some(what) = into {
+                    hints.push(vec![
+                        (p.accent.as_str(), "→/↵".into()),
+                        (p.dim.as_str(), what.to_string()),
+                    ]);
+                }
+                hints.push(vec![
+                    (p.accent.as_str(), "←".into()),
+                    (
+                        p.dim.as_str(),
+                        if reading.is_some() { "/esc the team".into() } else { "/esc back".to_string() },
+                    ),
+                ]);
+                hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
+                hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
                 let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
                     .into_iter()
                     .map(|l| format!(" {}", l))
                     .collect();
                 let room = h.saturating_sub(foot.len()).max(1);
-                dscroll = dscroll.min(body.len().saturating_sub(room));
-                let last = (dscroll + room).min(body.len());
-                let mut out: Vec<String> = body[dscroll..last].to_vec();
+                let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
+                // The page follows the cursor into the project list, the
+                // way netwatch's detail follows one into a section.
+                if let Some(row) = cursor {
+                    if row < *at {
+                        *at = row;
+                    } else if row >= *at + room {
+                        *at = row + 1 - room;
+                    }
+                }
+                *at = (*at).min(body.len().saturating_sub(room));
+                let from = *at;
+                let last = (from + room).min(body.len());
+                let mut out: Vec<String> = body[from..last].to_vec();
                 while out.len() < room {
                     out.push(String::new());
                 }
@@ -1789,6 +2336,9 @@ fn main() {
             }
         } else {
             drop(s);
+            projects_len = 0;
+            open_project = None;
+            deep = None;
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -1836,6 +2386,29 @@ mod tests {
         }
     }
 
+    /// Which screen column a string starts at.
+    ///
+    /// `str::find` answers in bytes, and the cursor marker is three of them
+    /// for one column - so two rows that line up on screen came back two
+    /// apart and failed a test about alignment.
+    fn col(line: &str, needle: &str) -> usize {
+        let at = line.find(needle).unwrap_or_else(|| panic!("{:?} not in {:?}", needle, line));
+        line[..at].chars().count()
+    }
+
+    /// A team's screen as plain text. `pick` is the project under the
+    /// cursor, which every test but the cursor's own leaves at the first.
+    fn team_rows(
+        counts: &HashMap<String, usize>,
+        projects: &[Proj],
+        opens: &HashMap<String, usize>,
+        w: usize,
+    ) -> String {
+        let (rows, _) =
+            team_detail("ABC", "A Team", counts, projects, opens, 0, 14, w, 40, &palette());
+        plain(&rows)
+    }
+
     /// The plain text of a rendered row, with the colour escapes taken out.
     fn plain(rows: &[String]) -> String {
         let joined = rows.join("\n");
@@ -1864,7 +2437,7 @@ mod tests {
             a_project("p2", "old-thing", "Done", "completed", 1.0),
         ];
         let opens: HashMap<String, usize> = [("p1".to_string(), 4usize)].into_iter().collect();
-        let out = plain(&team_detail("ABC", "A Team", &counts, &projects, &opens, 14, 100, 40, &palette()));
+        let out = team_rows(&counts, &projects, &opens, 100);
         assert!(out.contains("PROJECTS"), "{}", out);
         assert!(out.contains("hallway-lights"), "{}", out);
         assert!(out.contains("4 open"), "{}", out);
@@ -1886,12 +2459,12 @@ mod tests {
         let projects = vec![a_project("p1", "hallway-lights", "In Progress", "started", 0.5)];
         let opens: HashMap<String, usize> =
             [("p1".to_string(), 4usize), (String::new(), 5)].into_iter().collect();
-        let out = plain(&team_detail("ABC", "A Team", &counts, &projects, &opens, 14, 100, 40, &palette()));
+        let out = team_rows(&counts, &projects, &opens, 100);
         assert!(out.contains("5 open in no project"), "{}", out);
 
         // With none loose, the aside is not there to be read past.
         let opens: HashMap<String, usize> = [("p1".to_string(), 4usize)].into_iter().collect();
-        let out = plain(&team_detail("ABC", "A Team", &counts, &projects, &opens, 14, 100, 40, &palette()));
+        let out = team_rows(&counts, &projects, &opens, 100);
         assert!(!out.contains("in no project"), "{}", out);
     }
 
@@ -1907,14 +2480,14 @@ mod tests {
             a_project("p2", "short", "In Progress", "started", 0.1),
         ];
         let out =
-            plain(&team_detail("ABC", "A Team", &counts, &projects, &HashMap::new(), 14, 130, 40, &palette()));
+            team_rows(&counts, &projects, &HashMap::new(), 130);
         assert!(out.contains(long), "{}", out);
         // And the short one still lines up under it.
         let row = out.lines().find(|l| l.contains("short")).unwrap();
         let wide = out.lines().find(|l| l.contains(long)).unwrap();
         assert_eq!(
-            row.find("In Progress").unwrap(),
-            wide.find("Completed").unwrap(),
+            col(row, "In Progress"),
+            col(wide, "Completed"),
             "status column ragged:\n{}\n{}",
             wide,
             row
@@ -1928,14 +2501,14 @@ mod tests {
         q.target = "2024-07-26".into();
         q.lead = "Wilhelmina".into();
         let opens: HashMap<String, usize> = [("p1".to_string(), 2usize)].into_iter().collect();
-        let wide = plain(&team_detail("ABC", "A", &counts, &[q.clone()], &opens, 14, 130, 40, &palette()));
+        let wide = team_rows(&counts, &[q.clone()], &opens, 130);
         let row = wide.lines().find(|l| l.contains("a-project")).unwrap();
         assert!(row.contains("2 open · due 2024-07-26 · Wilhelmina"), "{}", row);
 
         // Squeezed, the last fact leaves whole. What is left is still true,
         // and no half-written name is on screen claiming to be someone.
         for w in [58usize, 64, 70, 76, 82] {
-            let out = plain(&team_detail("ABC", "A", &counts, &[q.clone()], &opens, 14, w, 40, &palette()));
+            let out = team_rows(&counts, &[q.clone()], &opens, w);
             let row = out.lines().find(|l| l.contains("a-project")).unwrap();
             let aside = row.split("50%").nth(1).unwrap().trim();
             assert!(
@@ -1949,10 +2522,127 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_marks_one_project_and_says_which_row_it_is_on() {
+        let counts: HashMap<String, usize> = [("open".to_string(), 3usize)].into_iter().collect();
+        let projects = vec![
+            a_project("p1", "first", "In Progress", "started", 0.1),
+            a_project("p2", "second", "In Progress", "started", 0.2),
+            a_project("p3", "third", "In Progress", "started", 0.3),
+        ];
+        let (rows, at) =
+            team_detail("ABC", "A", &counts, &projects, &HashMap::new(), 1, 14, 100, 40, &palette());
+        let at = at.expect("a project list has a cursor");
+        assert!(plain(&[rows[at].clone()]).contains("second"), "{}", plain(&[rows[at].clone()]));
+        // Exactly one marker, so the reader is never asked which of two is
+        // the one enter would open.
+        assert_eq!(plain(&rows).matches('▸').count(), 1);
+
+        // A cursor past the end lands on the last project rather than
+        // falling off it - the list shortens under the cursor whenever a
+        // poll lands.
+        let (rows, at) =
+            team_detail("ABC", "A", &counts, &projects, &HashMap::new(), 99, 14, 100, 40, &palette());
+        assert!(plain(&[rows[at.unwrap()].clone()]).contains("third"));
+    }
+
+    #[test]
+    fn a_project_screen_is_found_by_id_so_a_resort_cannot_swap_it() {
+        // This is the whole reason the open project is held by id. The
+        // list re-sorts on every poll; holding an index would have left
+        // the screen showing whichever project fell into that slot.
+        let mut projects = vec![
+            a_project("p1", "first", "In Progress", "started", 0.1),
+            a_project("p2", "second", "In Progress", "started", 0.2),
+        ];
+        let open = "p2".to_string();
+        let before = projects.iter().find(|q| q.id == open).cloned().unwrap();
+        projects.reverse();
+        let after = projects.iter().find(|q| q.id == open).cloned().unwrap();
+        assert_eq!(before.name, after.name);
+        assert_eq!(after.name, "second");
+        // And the index that used to point at it now points elsewhere.
+        assert_eq!(projects[1].name, "first");
+    }
+
+    #[test]
+    fn a_project_screen_shows_what_it_has_before_the_rest_arrives() {
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        let states: HashMap<String, usize> =
+            [("started".to_string(), 2usize), ("triage".to_string(), 1)].into_iter().collect();
+        // Nothing fetched yet: the name, status and progress the list
+        // already knew are on the first frame, and the screen says a
+        // request is out rather than looking empty.
+        let out = plain(&project_detail(&q, "ABC", None, &states, None, 100, &palette()));
+        assert!(out.contains("HALLWAY-LIGHTS · ABC"), "{}", out);
+        assert!(out.contains(" 50%"), "{}", out);
+        assert!(out.contains("In Progress"), "{}", out);
+        assert!(out.contains("OPEN BY STATE"), "{}", out);
+        assert!(out.contains("asking Linear"), "{}", out);
+    }
+
+    #[test]
+    fn a_finished_project_is_not_called_late() {
+        // It read "overdue by 760d" on a project completed two years ago,
+        // because nothing was asking whether the work had since landed.
+        let mut q = a_project("p1", "old-thing", "Completed", "completed", 1.0);
+        q.target = "2024-07-26".into();
+        let record = serde_json::json!({ "completedAt": "2024-08-01T00:00:00.000Z" });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(!out.contains("overdue"), "{}", out);
+        assert!(out.contains("2024-08-01"), "{}", out);
+        assert!(out.contains("target was"), "{}", out);
+
+        // Still running and past its date, it is late and says so.
+        let mut q = a_project("p2", "live-thing", "In Progress", "started", 0.4);
+        q.target = "2024-07-26".into();
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&serde_json::json!({})), &HashMap::new(), None, 100, &palette()));
+        assert!(out.contains("overdue by"), "{}", out);
+    }
+
+    #[test]
+    fn a_project_fetch_that_failed_says_so_instead_of_asking_for_ever() {
+        // A screen stuck on "loading" is this widget's oldest lesson: a
+        // failure nobody records is indistinguishable from a slow answer.
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        let bad = serde_json::json!({ "_error": "HTTP 502 from Linear" });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&bad), &HashMap::new(), None, 100, &palette()));
+        assert!(out.contains("could not read the project"), "{}", out);
+        assert!(out.contains("HTTP 502"), "{}", out);
+        assert!(!out.contains("asking Linear"), "{}", out);
+    }
+
+    #[test]
+    fn milestones_fall_in_date_order_and_their_bars_are_out_of_a_hundred() {
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        // Linear reports a milestone's progress out of 100 and a project's
+        // out of 1. Fed straight to the meter, every milestone read full.
+        let record = serde_json::json!({
+            "projectMilestones": { "nodes": [
+                { "name": "later", "targetDate": "2026-09-05", "progress": 0.0 },
+                { "name": "undated", "targetDate": null, "progress": 50.0 },
+                { "name": "sooner", "targetDate": "2026-09-03", "progress": 67.86 },
+            ]},
+        });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        let rows: Vec<&str> = out.lines().collect();
+        let seat = |name: &str| rows.iter().position(|l| l.contains(name)).unwrap();
+        assert!(seat("sooner") < seat("later"), "{}", out);
+        assert!(seat("later") < seat("undated"), "dated milestones come first:\n{}", out);
+        // 67.86 out of a hundred, not 6786%.
+        let row = rows[seat("sooner")];
+        assert!(row.contains(" 68%"), "{}", row);
+        assert!(row.contains('░'), "a 68% bar is not full: {}", row);
+    }
+
+    #[test]
     fn a_team_with_no_projects_says_so_rather_than_showing_an_empty_heading() {
         let counts: HashMap<String, usize> = [("open".to_string(), 3usize)].into_iter().collect();
         let out =
-            plain(&team_detail("ABC", "A Team", &counts, &[], &HashMap::new(), 14, 100, 40, &palette()));
+            team_rows(&counts, &[], &HashMap::new(), 100);
         assert!(out.contains("owns no projects"), "{}", out);
     }
 
