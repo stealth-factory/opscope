@@ -688,6 +688,10 @@ fn main() {
     let (mut selected, mut scroll, mut visible) = (0usize, 0usize, 1usize);
     // None, "copy" or "info".
     let mut view: Option<&'static str> = None;
+    // Where the copy list was opened from, so closing it puts you back
+    // there. It used to drop to the machine list whichever screen you had
+    // been reading, which loses your place for the sake of one keystroke.
+    let mut copy_from: Option<&'static str> = None;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut listed: Vec<serde_json::Value> = Vec::new();
     let derp = derp_regions();
@@ -713,7 +717,9 @@ fn main() {
                     // else: right and enter go in, left and esc come
                     // out, and no widget needs a letter of its own for
                     // it. `i` used to open this and no longer does.
-                    "left" | "esc" => view = None,
+                    "left" | "esc" => {
+                        view = copy_from.take();
+                    }
                     // q quits from here too. It used to close the view
                     // instead, which is its own kind of trap: the key
                     // appears to do nothing to a widget you are trying
@@ -723,7 +729,14 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
-                    "c" | "C" => view = if view != Some("copy") { Some("copy") } else { None },
+                    "c" | "C" => {
+                        view = if view != Some("copy") {
+                            copy_from = view;
+                            Some("copy")
+                        } else {
+                            copy_from.take()
+                        }
+                    }
                     digit
                         if view == Some("copy")
                             && digit.len() == 1
@@ -761,7 +774,11 @@ fn main() {
                     selected = 0;
                 }
                 "g" | "G" => show_graph = !show_graph,
-                "n" | "N" => {
+                // i, as latency names the same key. n was this widget's
+                // own letter for it and meant nothing to a reader coming
+                // from the widget beside it; i was free here because the
+                // info screen moved to the arrows.
+                "i" | "I" => {
                     if let Ok(mut g) = refresh_now.lock() {
                         *g = tc::cycle(REFRESH_CHOICES, *g);
                     }
@@ -776,12 +793,14 @@ fn main() {
                 "c" | "C" => {
                     if !listed.is_empty() {
                         view = Some("copy");
+                        copy_from = None;
                         note = (String::new(), 0.0);
                     }
                 }
                 "right" | "enter" => {
                     if !listed.is_empty() {
                         view = Some("info");
+                        copy_from = None;
                     }
                 }
                 _ => {}
@@ -1113,7 +1132,10 @@ fn main() {
             vec![(p.dim.as_str(), "[c]opy".into())],
             vec![(p.dim.as_str(), "[g]raph".into())],
             vec![(p.dim.as_str(), "[o]ffline".into())],
-            vec![(p.dim.as_str(), format!("[n]={}s", interval))],
+            // The current value is worth the three cells: this key cycles
+            // rather than toggles, so "[i]nterval" alone would not say what
+            // pressing it is about to change from.
+            vec![(p.dim.as_str(), format!("[i]nterval {}s", interval))],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];

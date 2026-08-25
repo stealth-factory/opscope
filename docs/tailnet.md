@@ -98,7 +98,7 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | `c` | copy addresses |
 | `g` | show/hide the live throughput graphs |
 | `o` | hide offline peers |
-| `n` | poll interval — 1 / 2 / 5 / 10 / 30s |
+| `i` | poll interval — 1 / 2 / 5 / 10 / 30s |
 | `r` | refresh now |
 | `q` | quit |
 
@@ -121,5 +121,5 @@ peer dominates.
 "tailnet": { "refresh": 2, "history": 180 }
 ```
 
-Graph resolution follows the poll interval, so `n` doubles as a zoom control.
+Graph resolution follows the poll interval, so `i` doubles as a zoom control.
 Needs the `tailscale` CLI; no root required.

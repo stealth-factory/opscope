@@ -135,8 +135,12 @@ to run and quietly show nothing, which was worse.
 
 `↵` hands the terminal over: cursor restored, raw mode off, the widget gets a
 normal terminal and this process waits. Quit the widget and the launcher
-takes the terminal back and rechecks, so a token you set or a package you
-installed while you were away is reflected without restarting.
+takes the terminal back.
+
+Every widget is listed, whether or not this machine can run it. A widget that
+is missing a tool or a token says so on its own screen, in its own words,
+and `q` brings you back here - which is a better place to learn it than a
+menu that has quietly hidden the row.
 
 Naming one skips the menu entirely, and anything after it is passed straight
 through:
@@ -163,7 +167,6 @@ the middle of a pipeline it adds nothing to.
 |---|---|
 | `↑` `↓` / `j` `k` | select a widget |
 | `↵` / `→` | launch it, and come back here when it quits |
-| `r` | recheck what is installed and configured |
 | `q` | quit |
 
 ## Cost

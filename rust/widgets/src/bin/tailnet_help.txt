@@ -25,8 +25,8 @@ latency over the tunnel — current, average, median, min, max, jitter, loss and
 a sparkline — measured the same way the latency monitor does. Only the selected
 peer is probed, so this costs one ping process regardless of tailnet size.
 
-n cycles the poll interval while running (1/2/5/10/30s), the same way the
-latency monitor's i key does; the graph resolution follows it. -n sets the
+i cycles the poll interval while running (1/2/5/10/30s), the same key the
+latency monitor uses for it; the graph resolution follows it. -n sets the
 starting value, and `tailnet.refresh` in config.json sets the default.
 
 Keys: up/down select a peer, right or Enter opens a full machine info view and left
