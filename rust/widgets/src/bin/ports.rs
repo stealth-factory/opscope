@@ -222,6 +222,11 @@ fn moved(
     out
 }
 
+/// The widest name in the table, which is what the WHAT column has to be.
+fn longest_kind(rows: &[&Row]) -> usize {
+    rows.iter().map(|r| r.kind.chars().count()).max().unwrap_or(0).max(4)
+}
+
 /// A rate in as few cells as it can be read in, for a table column.
 ///
 /// One significant figure and a single-letter unit: five cells at most, so
@@ -2391,11 +2396,7 @@ fn main() {
         rows.push(String::new());
 
         let wide = w >= 78;
-        // The traffic column is the first thing to go and the last to
-        // arrive: it is the only one that is not about what the port *is*.
-        // Its two rates are eleven cells plus a gap.
         let rates = store.traffic.lock().ok();
-        let busy = w >= 96 && rates.is_some();
         // The project column takes whatever the fixed ones leave: it is the
         // one that identifies the server, and the one whose contents are a
         // directory name of any length.
@@ -2405,14 +2406,27 @@ fn main() {
         // as one word - and anything longer was cut, which names a different
         // program. Sized to the whole list rather than the visible slice, so
         // the columns do not shift as it scrolls.
-        let traffic_w = if busy { 13 } else { 0 };
-        let rest = 1 + 6 + 8 + 2 + 8 + traffic_w + if wide { 6 + 8 } else { 0 };
-        let kind_w = shown
+        // The traffic column is the first to go and the last to arrive: it
+        // is the only one here not about what the port *is*. It arrives when
+        // there is room for it *after* the names, rather than past some
+        // number of columns picked in advance - the project column is the
+        // one that gives, and a project's name cut in half is a different
+        // project.
+        let traffic_w = 13usize;
+        let widest_project = shown
             .iter()
-            .map(|r| r.kind.chars().count())
+            .map(|r| {
+                if r.project.is_empty() { &r.user } else { &r.project }.chars().count()
+            })
             .max()
-            .unwrap_or(0)
-            .clamp(4, (w - 1).saturating_sub(rest).max(4));
+            .unwrap_or(8)
+            .clamp(8, 24);
+        let without = 1 + 6 + 8 + 2 + if wide { 6 + 8 } else { 0 };
+        let busy = rates.is_some()
+            && (w - 1) >= without + widest_project + traffic_w + longest_kind(&shown);
+        let traffic_w = if busy { traffic_w } else { 0 };
+        let rest = 1 + 6 + 8 + 2 + 8 + traffic_w + if wide { 6 + 8 } else { 0 };
+        let kind_w = longest_kind(&shown).min((w - 1).saturating_sub(rest).max(4));
         let fixed = 1 + 6 + 8 + kind_w + 2 + traffic_w + if wide { 6 + 8 } else { 0 };
         let name_w = std::cmp::max(8, (w - 1).saturating_sub(fixed));
         rows.push(tc::seg(

@@ -125,9 +125,11 @@ Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
 it is about what leaves the machine; here loopback is the whole point, since a
 browser hitting a dev server on `127.0.0.1` is the traffic being asked about.
 
-The column appears at 96 columns and above, and a port nothing is calling
-shows nothing rather than `0 B/s` — a column of zeroes down the table reads as
-a measurement that has failed.
+The column arrives when there is room for it *after* the names, rather than
+past some width picked in advance: the project column is the one that gives,
+and a project's name cut in half is a different project. A port nothing is
+calling shows nothing rather than `0 B/s` — a column of zeroes down the table
+reads as a measurement that has failed.
 
 ## What it cannot see
 
