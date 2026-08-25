@@ -30,9 +30,9 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   shows only libc, libm and libgcc. Keep it that way: a crate that wants a
   system library at run time is the one kind that cannot come in. If a
   widget needs an external *tool*
-  (`ping`, `tailscale`, `herdr`) it degrades gracefully when that tool is
-  absent - that is a different thing from a library and the rule is
-  unchanged.
+  (`curl`, `ss`, `ping`, `tailscale`, `herdr`) it says so and stops, or goes
+  on without what that tool would have told it - that is a different thing
+  from a library and the rule is unchanged.
 - **Config, never hardcoded.** Hostnames, cities, tokens and account lists go
   in `config.json` (git-ignored) via `load_config()`. Add new keys to
   `config.example.json` in the same commit — and **use the section name the
@@ -66,9 +66,30 @@ screen, exactly like "there is no data":
 - **a footer hint naming a key no match arm answers** — a hint bound to
   nothing says the feature is there;
 - **a footer hint missing from the widget's doc**;
+- **a key the `--help` text names that nothing answers** — `--help` is where
+  someone looks when the footer was not enough, and until this check went in
+  nothing read those files at all;
 - **a config key a widget reads that is not in `config.example.json`** — an
   undiscoverable setting is not a setting;
-- **a section in the example no widget reads**.
+- **a section in the example no widget reads**, and separately **a key in the
+  example the widget never reads** — checking the section alone passes a
+  widget that reads three of its four keys and ignores the fourth;
+- **a bare `cfg.get()` with no fallback in the same statement** — `cfg_f64`
+  and its siblings take a default by signature, so they cannot go wrong; a
+  raw `get()` can, and then a key deleted from `config.json` lands on zero or
+  on a panic instead of on the widget's own default;
+- **text on the selected-row tint measuring under AA 4.5** — the convention
+  above, which was prose here from before the port and went unmet in four
+  widgets for as long as there were four widgets. The number of places
+  the failing grey reached a tinted row grew from seventeen to twenty-three
+  while it sat open, which is what prose costs. Only colours that actually
+  meet are compared: the first version paired every tint in a file with every
+  grey in it and flagged two widgets that were fine;
+- **a widget that defines a lighter grey and never reaches for it** — the
+  contrast check measures the colour and cannot see the wiring. Delete the
+  substitution inside the tint closure and the light grey sits in the palette
+  measuring beautifully while the dark one goes back on the tint, so the
+  substitutions are counted instead, one per closure that composes a tint.
 
 The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
 `[::1]`, `[[bin]]` and `args[0]` out; the glyphs `↵ → ← ↑ ↓`; the names
@@ -81,6 +102,13 @@ footer, and a key answered anywhere other than those two forms. Both halves
 have been wrong before — three versions of this check cried wolf in one day,
 and a checker that cries wolf gets turned off — so when it fires, read the
 flag before believing it, and when it is quiet, that is not proof.
+
+The help reader is cruder still and admits it. Only two shapes count, a
+letter right after `press` and a letter right before a verb, because reading
+every single letter took the `a` out of "with a longer" and reported a key
+called `a`. So in `Enter, i or c opens`, only `c` touches the verb and a
+stale `i` beside it goes unseen — catching one of the two still lands the
+reader in the right sentence.
 
 `check.py` covered the same ground for the Python, plus unbound names -
 which the compiler now makes impossible. It went with the Python.
@@ -138,17 +166,23 @@ which the compiler now makes impossible. It went with the Python.
 ## Layout of the code
 
 `toys-core` holds everything shared: terminal sizing, full-frame `draw()`,
-24-bit `rgb()`, `seg()` for clipping coloured segments to a cell budget,
-`pack_hints()`, `follow()` for a window that keeps a cursor in view, bar
-and chart helpers (`vbars`, `vbars_down`, `braille_plot`,
-`stacked_bar`, `meter`, `skeleton`), `config_token_warning()` for
-widgets holding a secret, non-blocking `Keyboard`, and OSC 52
-`clipboard()`.
+24-bit `rgb()` and the green→amber→red `heat()` ramp, `seg()` for clipping
+coloured segments to a cell budget, `pack_hints()`, `follow()` for a window
+that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,
+`stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
+`config_token_warning()` for widgets holding a secret, non-blocking
+`Keyboard`, and OSC 52 `clipboard()`.
+
+Braille line charts are not in there. `latency` and `link` each keep their
+own `braille_canvas`, and the two are not the same function: latency's series
+carries the gaps a ping can leave, link's is told how many slots the axis
+holds. Copy from whichever is closer rather than expecting core to have one.
 
 `docs/port-decisions.md` records what the port changed from the Python and
-why - the keys it consolidated, the two it renamed, the charts it draws
-differently. It is history rather than a comparison now, and it is the answer
-to most questions beginning *why does this key do that*.
+why - the keys it consolidated, the three it renamed, the charts it draws
+differently, and what was built afterwards on the Rust side alone. It is
+history rather than a comparison now, and it is the answer to most questions
+beginning *why does this key do that*.
 
 `docs/building-herdr-panels.md` records what was learned driving these from
 Herdr: resize semantics, focus, and the layout mistakes worth skipping.

@@ -35,23 +35,23 @@ nothing at all — it just looks good, and it knows it.
 |---|---|---|---|
 | **`start`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
 | **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
-| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
+| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](docs/deployments.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
-| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
-| **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
-| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
+| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
+| **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
+| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
 | **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
-| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it to copy an address or publish it over Tailscale or Cloudflare. | — | [read →](docs/ports.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic | [read →](docs/ports.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
-Each is a single self-contained binary — everything it needs is compiled in,
-`ldd` shows only libc, libm and libgcc, and there is nothing to install
-alongside. 24-bit colour, and a full redraw each frame so everything reflows
-when you resize the pane.
+Each is a single self-contained binary — every library it needs is compiled
+in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
+alongside it. 24-bit colour, and a full redraw each frame so everything
+reflows when you resize the pane.
 
 ```sh
 cargo build --release   # fourteen binaries in ./target/release
@@ -91,9 +91,11 @@ widget in a 30-column strip still says something useful.
 
 ## Configuration
 
-Every widget reads optional settings from the first of
-`$TERMINAL_TOYS_CONFIG`, `~/.config/terminal-toys/config.json`, or
-`config.json` beside the scripts. Copy `config.example.json` to start.
+Every widget reads optional settings from the first readable of
+`$TERMINAL_TOYS_CONFIG`, `$XDG_CONFIG_HOME/terminal-toys/config.json`
+(`~/.config/terminal-toys/config.json` where that is unset), `config.json` in
+the working directory, and `config.json` beside the binary. Copy
+`config.example.json` to start.
 
 This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
@@ -108,11 +110,13 @@ configuration at all.
 
 ## Requirements
 
-- A Rust toolchain to build; **nothing** to run. The binaries carry what
-  they need, SQLite included
+- A Rust toolchain to build; **no library to install** to run — the binaries
+  carry what they link against, SQLite included
 - A terminal with 24-bit colour
-- Per-widget: `ping`, `tailscale` or `herdr` as listed above. Each needs only
-  its own, and **none needs root**
+- Per-widget, the external *tools* the table above names: `curl`, `ss`,
+  `ping`, `tailscale`, `herdr`. Each widget needs only its own; one that
+  cannot work without its tool says so rather than drawing an empty pane; and
+  **none needs root**
 
 ## Design
 
@@ -168,15 +172,18 @@ skipping.
 
 These began as Python and were ported to Rust widget by widget;
 [`docs/port-decisions.md`](docs/port-decisions.md) records what the port
-changed and why — the keys it consolidated, the two it renamed, the charts it
-draws differently. It is history now rather than a comparison, but it is the
-answer to most questions beginning *why does this key do that*.
+changed and why — the keys it consolidated, the three it renamed, the charts
+it draws differently, and what was built afterwards on the Rust side alone. It
+is history now rather than a comparison, but it is the answer to most
+questions beginning *why does this key do that*.
 
 `cargo test` from the root runs each widget's tests plus
 `widgets/tests/check.rs`, which reads the sources and fails on a poller that
-dies without saying why, a footer hint naming a key nothing answers, a hint
-missing from the widget's doc, and a config key read but never documented in
-`config.example.json`.
+dies without saying why, a footer or `--help` line naming a key nothing
+answers, a hint missing from the widget's doc, a config key read but never
+documented in `config.example.json` — or documented there and never read, or
+read with no fallback behind it — and a colour that draws text on the
+selected-row tint below WCAG AA.
 
 `toys-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
@@ -186,9 +193,14 @@ arrow-key decoding, and `clipboard()` over OSC 52.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
-`braille_plot()` for continuous lines at 2×4 sub-pixels a cell, `stacked_bar()`
-for proportions, `meter()` for a gauge, and `skeleton()` for the shimmer that
-stands in for a figure still being fetched.
+`stacked_bar()` for proportions, `meter()` for a gauge, and `skeleton()` for
+the shimmer that stands in for a figure still being fetched.
+
+Braille line charts are not among them. `latency` and `link` each keep their
+own `braille_canvas`, and the two are not the same function: latency's series
+carries the gaps a ping can leave, and link's is told how many slots the axis
+holds, so that a session younger than the chart takes its own share of the
+width rather than being stretched across all of it.
 
 ## License
 
