@@ -161,6 +161,12 @@ was learned building these against Herdr: resize semantics, focus, detecting
 what a pane is running, notification gating, and the layout mistakes worth
 skipping.
 
+[`docs/rust-vs-python.md`](docs/rust-vs-python.md) records where the two
+implementations answer differently **on purpose** — the keys the Rust
+consolidated, the two it renamed, the charts it draws differently, and the
+features that exist only on one side. Anything not listed there is a finding
+rather than a decision.
+
 Both implementations are checked the same way. `cargo test` from `rust/` runs
 each widget's tests plus `widgets/tests/check.rs`, which reads the sources and
 fails on a poller that dies without saying why, a footer hint naming a key

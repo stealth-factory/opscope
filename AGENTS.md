@@ -139,5 +139,13 @@ impossible.
 widgets holding a secret, non-blocking `Keyboard`, and OSC 52
 `clipboard()`.
 
+`docs/rust-vs-python.md` records where the two implementations answer
+differently on purpose. Anything not listed there is a finding rather than a
+decision, and a new deliberate divergence belongs in it.
+
+`docs/rust-vs-python.md` records where the two implementations answer
+differently on purpose. Anything not listed there is a finding rather than a
+decision, and a new deliberate divergence belongs in it.
+
 `docs/building-herdr-panels.md` records what was learned driving these from
 Herdr: resize semantics, focus, and the layout mistakes worth skipping.
