@@ -46,6 +46,9 @@ pub struct Data {
     quota: Option<serde_json::Value>,
     quota_live: bool,
     quota_at: f64,
+    /// Why the last attempt did not answer, when it did not. Empty while it
+    /// is answering.
+    quota_why: String,
     quota_plan: String,
     profile: Option<serde_json::Value>,
     /// Output tokens per second, sorted, and how many transcripts it came
@@ -73,6 +76,16 @@ pub fn claude_token() -> Option<(String, String)> {
 }
 
 pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
+    claude_try(url, tok).ok()
+}
+
+/// The same request, keeping why it failed.
+///
+/// `.ok()?` threw that away, so the tab could say a reading was old and
+/// never why. The server had been answering "too many requests" for an hour
+/// while the screen said "cached" and a credential with three hours left on
+/// it got the blame.
+fn claude_try(url: &str, tok: &str) -> Result<serde_json::Value, String> {
     let body = tc::get(
         url,
         &[
@@ -81,8 +94,8 @@ pub fn claude_get(url: &str, tok: &str) -> Option<serde_json::Value> {
         ],
         20,
     )
-    .ok()?;
-    serde_json::from_str(&body).ok()
+    .map_err(|said| refusal(&said))?;
+    serde_json::from_str(&body).map_err(|e| format!("unreadable answer: {}", e))
 }
 
 /// What Claude Code last fetched, for when the live call cannot run.
@@ -114,17 +127,19 @@ const CLAUDE_LIVE_TTL: f64 = 300.0;
 
 /// How old a reading may be and still be shown as current.
 ///
-/// Twice the interval it is fetched on, because a reading is that old
-/// anyway in normal running: a live one is held for CLAUDE_LIVE_TTL, so the
-/// figure on screen is anywhere from nought to five minutes behind the
-/// server whether it came from the endpoint or from the last copy of it.
+/// Half an hour. A reading is already up to five minutes behind the server
+/// in normal running - a live one is held for CLAUDE_LIVE_TTL - and a quota
+/// window that turns over weekly does not move enough in half an hour to
+/// mislead anyone. It is also where the backoff stops doubling, so the
+/// screen starts saying "old" at the same moment the widget has given up
+/// trying quickly.
 ///
 /// Marking by where a reading came from rather than by how old it is put a
 /// star on a figure thirty-five seconds old while a live one four minutes
 /// old carried none - the fresher of the two flagged as the doubtful one.
 /// The mark is worth having when it means "older than this widget's own
 /// cycle"; it is noise when it means "another process fetched it".
-const CLAUDE_FRESH_FOR: f64 = 2.0 * CLAUDE_LIVE_TTL;
+const CLAUDE_FRESH_FOR: f64 = 1800.0;
 
 /// True when the reading is old enough to be worth flagging, whatever its
 /// source. `quota_at` is when it was taken, not when it was read.
@@ -184,10 +199,6 @@ fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
     let _ = std::fs::write(path, body.to_string());
 }
 
-fn read_snapshot() -> Option<(serde_json::Value, f64)> {
-    read_snapshot_at(&snapshot_path())
-}
-
 fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
     let saved = read_json(path)?;
     let u = saved["utilization"].clone();
@@ -201,11 +212,6 @@ fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
         }
     }
     Some((u, num(&saved, "fetchedAtMs") / 1000.0))
-}
-
-/// Claude Code's own cache, and only while Claude Code would still use it.
-fn claude_code_cache() -> Option<(serde_json::Value, f64)> {
-    claude_code_cache_at(&under_home(".claude.json"))
 }
 
 fn claude_code_cache_at(path: &str) -> Option<(serde_json::Value, f64)> {
@@ -450,11 +456,26 @@ pub fn claude_rates() -> (Vec<f64>, usize) {
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut claude = Data::default();
+    // The reason rides along in the cached value, so it is held and shown
+    // for as long as the failure it describes rather than only on the frame
+    // the request happened to be made.
     let live = cached(caches, "claude", CLAUDE_LIVE_TTL, || {
-        let (tok, plan) = claude_token()?;
-        let u = claude_get("https://api.anthropic.com/api/oauth/usage", &tok)?;
-        Some(serde_json::json!({ "u": u, "at": now(), "plan": plan }))
+        let Some((tok, plan)) = claude_token() else {
+            return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
+        };
+        match claude_try("https://api.anthropic.com/api/oauth/usage", &tok) {
+            Ok(u) => Some(serde_json::json!({ "u": u, "at": now(), "plan": plan })),
+            Err(why) => Some(serde_json::json!({ "why": why })),
+        }
     });
+    // A cached entry carrying only a reason is a refusal, not a reading.
+    let live = match live {
+        Some(got) if !text(&got, "why").is_empty() => {
+            claude.quota_why = text(&got, "why");
+            None
+        }
+        other => other,
+    };
     match live {
         Some(got) => {
             claude.quota = Some(got["u"].clone());
@@ -564,8 +585,14 @@ pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
     lanes.sort_by_key(|l| claude_lane_rank(l));
     let src = if c.quota_live {
         "live".to_string()
-    } else {
+    } else if c.quota_why.is_empty() {
         format!("cached {} ago", ago(c.quota_at))
+    } else {
+        // Why, not just how old. "cached 4m ago" tells a reader the number
+        // is behind and leaves them to guess whether their login has
+        // lapsed; naming the refusal is the difference between closing a
+        // spare pane and going through a credential that was never wrong.
+        format!("cached {} ago · {}", ago(c.quota_at), c.quota_why)
     };
     let hue = agent_hue("claude");
     let mut rows = vec![tc::seg(
@@ -1205,6 +1232,74 @@ mod tests {
     /// A 9.6-day-old Claude Code cache and nothing of our own used to come
     /// back as a percentage and get drawn as today's. Claude Code's own
     /// reader returns null for it, and now so does this.
+    #[test]
+    fn the_tab_says_why_it_is_on_a_cached_reading() {
+        // The whole point of keeping curl's message. "cached 4m ago" leaves
+        // a reader to guess whether their login lapsed; this morning that
+        // guess cost an hour on a credential with three hours left on it.
+        let p = palette();
+        let bare = |rows: Vec<String>| {
+            rows.iter()
+                .map(|r| {
+                    let mut out = String::new();
+                    let mut cs = r.chars();
+                    while let Some(c) = cs.next() {
+                        if c == '\x1b' {
+                            for n in cs.by_ref() {
+                                if n.is_ascii_alphabetic() {
+                                    break;
+                                }
+                            }
+                        } else {
+                            out.push(c)
+                        }
+                    }
+                    out
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let with = |live: bool, why: &str| {
+            let d = Data {
+                quota: Some(serde_json::json!({
+                    "limits": [{"group": "session", "kind": "session", "percent": 20,
+                                "resets_at": "2026-08-26T00:00:00.000000+00:00"}]
+                })),
+                quota_live: live,
+                quota_at: now() - 240.0,
+                quota_why: why.to_string(),
+                ..Data::default()
+            };
+            bare(claude_quota(&d, 100, &p))
+        };
+
+        let refused = with(false, "too many requests - something else is polling the same token");
+        assert!(refused.contains("cached"), "{}", refused);
+        assert!(
+            refused.contains("too many requests"),
+            "the reason was dropped again: {}",
+            refused
+        );
+
+        // No reason recorded is the old wording, unchanged.
+        // The heading carries a · of its own, so the check is for the
+        // reason's words rather than for the separator - which is what the
+        // first version of this test got wrong, and why it was run before
+        // being believed.
+        let quiet = with(false, "");
+        assert!(quiet.contains("cached"), "{}", quiet);
+        assert!(
+            !quiet.contains("too many requests"),
+            "a reason appeared from nowhere: {}",
+            quiet
+        );
+
+        // And a live reading says nothing about refusals at all.
+        let good = with(true, "");
+        assert!(good.contains("live"), "{}", good);
+        assert!(!good.contains("cached"), "{}", good);
+    }
+
     #[test]
     fn the_lane_takes_its_star_from_the_age_and_not_from_quota_live() {
         // The wiring, not just the rule. A cached reading taken a moment ago

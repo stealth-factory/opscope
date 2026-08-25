@@ -70,6 +70,8 @@ pub struct Data {
     /// wait - and the old line offered "expired or the call failed", which
     /// is the widget admitting it never looked.
     tier_why: Missing,
+    /// What the endpoint said, when it said anything. Empty otherwise.
+    tier_said: String,
     /// The quota groups, empty when the language server is not running.
     quota: Vec<serde_json::Value>,
     /// How the CLI authenticated. Read once here rather than per frame:
@@ -245,6 +247,7 @@ pub enum Missing {
     NoAnswer,
 }
 
+
 /// The missing tier in one sentence, ending in what to do about it.
 ///
 /// The line this replaces read "no tier: the CLI's access token has expired
@@ -272,6 +275,16 @@ pub fn tier_note(why: Missing) -> String {
     }
 }
 
+/// The same, with the server's own words when there are any.
+pub fn tier_note_said(why: Missing, said: &str) -> String {
+    let base = tier_note(why);
+    match (base.is_empty(), said.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => base,
+        (false, false) => format!("{} It said: {}.", base, said),
+    }
+}
+
 /// What is wrong with the credential, read from the same file the call uses.
 ///
 /// Cheap enough to do every frame - it is a small JSON file - and it must
@@ -292,24 +305,23 @@ fn why_no_tier() -> Missing {
     }
 }
 
-/// Antigravity keeps no quota and no token counts on disk - its language
-/// server refreshes a quota into memory and is not even installed between
-/// runs - so this endpoint is the only thing that can answer anything, and
-/// what it answers is the subscription rather than the spend.
-///
-/// The access token expires hourly and Antigravity refreshes it; an expired
-/// one is skipped rather than refreshed here, for the same reason Claude's
-/// is: that is the CLI's job and racing it would be rude.
-fn antigravity_live() -> Option<serde_json::Value> {
-    let file = read_json(&token_path())?;
+fn antigravity_said() -> Result<serde_json::Value, String> {
+    let Some(file) = read_json(&token_path()) else {
+        return Err(String::new());
+    };
     let tok = &file["token"];
     let access = text(tok, "access_token");
     let expiry = iso_epoch(&text(tok, "expiry"));
     if access.is_empty() || expiry.is_some_and(|at| at <= now()) {
-        return None;
+        return Err(String::new());
     }
-    post_json(
-        CODE_ASSIST_API,
+    post_try(CODE_ASSIST_API, &access)
+}
+
+/// The same call, keeping why it failed.
+fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
+    post_json_said(
+        url,
         &[
             ("Authorization", &format!("Bearer {}", access)),
             ("Content-Type", "application/json"),
@@ -349,9 +361,22 @@ fn conversation_steps(path: &str) -> Option<f64> {
 /// anywhere carries a token count.
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
-    let live = cached(caches, "antigravity", PLAN_TTL, antigravity_live);
+    // The refusal is cached with the failure, so it is shown for as long as
+    // the failure lasts rather than only on the frame the call was made.
+    let live = cached(caches, "antigravity", PLAN_TTL, || {
+        match antigravity_said() {
+            Ok(v) => Some(v),
+            Err(why) => Some(serde_json::json!({ "terminal_toys_refusal": why })),
+        }
+    });
+    let said = live
+        .as_ref()
+        .map(|v| text(v, "terminal_toys_refusal"))
+        .unwrap_or_default();
+    let live = if said.is_empty() { live } else { None };
     let mut d = Data {
         tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier() },
+        tier_said: said,
         live,
         quota: cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota)
             .and_then(|got| got.as_array().cloned())
@@ -645,7 +670,7 @@ fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = antigravity_quota_rows(&d.quota, w, p);
     if d.live.is_none() {
         rows.extend(
-            wrap_text(&tier_note(d.tier_why), w.saturating_sub(4).max(20))
+            wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
                 .into_iter()
                 .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
         );
@@ -1063,6 +1088,7 @@ mod tests {
             prompts: 42,
             last: now() - 3600.0,
             tier_why: Missing::Nothing,
+            tier_said: String::new(),
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");

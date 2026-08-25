@@ -33,31 +33,43 @@ pub struct Caches {
     pub transcripts: HashMap<String, ((u64, u64), HashMap<String, (String, String, Tokens)>)>,
     /// key -> (when, value, ttl)
     pub live: HashMap<String, (f64, Option<serde_json::Value>, f64)>,
+    /// key -> refusals in a row, which is what the backoff doubles on.
+    /// Cleared the moment one gets through.
+    pub fails: HashMap<String, u32>,
 }
 
 pub const LIVE_TTL: f64 = 120.0;
-/// The longest a failure is held, whatever the success interval is.
+/// Where a refusal starts waiting, and where it stops.
 ///
-/// It exists so an hourly reading does not blank a section for an hour
-/// after one transient failure. It used to be LIVE_TTL, which was the same
-/// thing while every caller asked every two minutes - and stopped being
-/// once claude moved to five. A failure held for two minutes beside a
-/// success held for five means a rate-limited poller asks *more* often than
-/// a healthy one, which is the opposite of what a 429 is asking for.
+/// Two minutes for the first, because one failure is usually nothing - a
+/// dropped connection, a server having a moment - and waiting five for it
+/// would make a blip look like an outage. Doubling after that, because a
+/// refusal that keeps coming is not a blip, and the flat hold this replaced
+/// walked back in at the same rate however many times it was turned away.
+/// That is what sustains a rate limit rather than clearing it.
 ///
-/// So it is a ceiling now rather than a fixed value: a failure waits as
-/// long as a success would have, up to five minutes.
-pub const FAILURE_CAP: f64 = 300.0;
+/// 120, 240, 480, 960, then 1800 and no further. The ceiling is thirty
+/// minutes because that is when the screen starts calling a reading old:
+/// backing off past the point where the reader is told something is wrong
+/// would leave the widget quietly not trying.
+pub const BACKOFF_FROM: f64 = 120.0;
+pub const BACKOFF_MAX: f64 = 1800.0;
+
+/// How long to wait after `n` refusals in a row.
+pub fn backoff(n: u32) -> f64 {
+    let doubled = BACKOFF_FROM * 2f64.powi(n.saturating_sub(1).min(16) as i32);
+    doubled.min(BACKOFF_MAX)
+}
 /// A plan does not change between refreshes; the windows do.
 pub const PLAN_TTL: f64 = 3600.0;
 
 /// Hold a reading for a while, but never hold a failure that long.
 ///
 /// The pane redraws every thirty seconds; these windows move over hours. A
-/// failure is cached too, so a dead endpoint is retried occasionally rather
-/// than on every frame - but never for longer than FAILURE_CAP, so one
-/// transient 429 does not blank an hourly section for an hour. Nor is it
-/// ever retried sooner than a success would have been asked for.
+/// refusal is held too, so a dead endpoint is retried occasionally rather
+/// than on every frame - and held longer each time it is refused again, so
+/// an endpoint saying "too often" is not answered at the same rate that
+/// provoked it.
 pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<serde_json::Value>
 where
     F: FnOnce() -> Option<serde_json::Value>,
@@ -69,7 +81,17 @@ where
         }
     }
     let value = fetch();
-    let held = if value.is_some() { ttl } else { ttl.min(FAILURE_CAP) };
+    let held = if value.is_some() {
+        caches.fails.remove(key);
+        ttl
+    } else {
+        let n = caches.fails.entry(key.to_string()).or_insert(0);
+        *n += 1;
+        // Never longer than the interval itself would have been, for a
+        // reading asked for hourly: backing an hourly plan read off to
+        // thirty minutes is fine, but it must not exceed the hour.
+        backoff(*n).min(ttl.max(BACKOFF_FROM))
+    };
     caches.live.insert(key.to_string(), (at, value.clone(), held));
     value
 }
@@ -163,6 +185,39 @@ pub struct Lane {
     pub projected: bool,
 }
 
+/// What a refused request said, in words a reader can act on.
+///
+/// `tc::get` returns curl's own message, which for `--fail` names the status
+/// - "curl: (22) The requested URL returned error: 429". Every caller here
+/// threw that away with `.ok()?`, so the screen could say a reading was old
+/// but never why, and an hour went into checking a credential that was fine
+/// while the server had already said "too many requests".
+///
+/// The code is read out of that message rather than guessed at. Anything
+/// unrecognised is passed through as the reason it was, which is still more
+/// than nothing.
+pub fn refusal(said: &str) -> String {
+    let code = said
+        .rsplit_once("error: ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(|c| c.parse::<u16>().ok());
+    match code {
+        Some(429) => "too many requests - something else is polling the same token".into(),
+        Some(401) | Some(403) => "the token was refused - the agent may need signing in again".into(),
+        Some(404) => "the endpoint is gone".into(),
+        Some(c) if (500..600).contains(&c) => format!("the server answered {}", c),
+        Some(c) => format!("the server answered {}", c),
+        // A timeout or a dead network never reaches a status at all.
+        None if said.contains("timed out") || said.contains("Timeout") => {
+            "the request timed out".into()
+        }
+        None if said.contains("Could not resolve") || said.contains("Failed to connect") => {
+            "could not reach it".into()
+        }
+        None => said.trim_start_matches("curl: ").to_string(),
+    }
+}
+
 /// An HTTPS GET carrying a bearer token, returning parsed JSON.
 ///
 /// The token goes to curl on its standard input, never in its arguments:
@@ -179,36 +234,114 @@ pub fn post_json(
     body: &str,
     seconds: u64,
 ) -> Option<serde_json::Value> {
-    let (text, _) = tc::post_json(url, headers, body, seconds).ok()?;
-    serde_json::from_str(&text).ok()
+    post_json_said(url, headers, body, seconds).ok()
+}
+
+/// The same POST, keeping why it failed rather than discarding it.
+pub fn post_json_said(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    seconds: u64,
+) -> Result<serde_json::Value, String> {
+    let (text, _) = tc::post_json(url, headers, body, seconds).map_err(|said| refusal(&said))?;
+    serde_json::from_str(&text).map_err(|e| format!("unreadable answer: {}", e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The rule a five-minute reading broke when the cap was a fixed two
-    /// minutes: being refused must never make us ask *sooner* than being
-    /// answered would have.
+    /// The string this was built from is the one curl actually produced
+    /// against api.anthropic.com while three widgets shared a token.
     #[test]
-    fn a_refusal_is_never_retried_sooner_than_a_success_would_be_asked() {
+    fn a_refusal_says_which_refusal_it_was() {
+        let real = "curl: (22) The requested URL returned error: 429";
+        assert!(
+            refusal(real).contains("too many requests"),
+            "the message that cost an hour: {:?}",
+            refusal(real)
+        );
+        assert!(refusal(real).contains("same token"), "and what to do about it");
+
+        for (said, want) in [
+            ("curl: (22) The requested URL returned error: 401", "token was refused"),
+            ("curl: (22) The requested URL returned error: 403", "token was refused"),
+            ("curl: (22) The requested URL returned error: 503", "answered 503"),
+            ("curl: (28) Operation timed out after 20000 ms", "timed out"),
+            ("curl: (6) Could not resolve host: api.anthropic.com", "could not reach it"),
+        ] {
+            assert!(refusal(said).contains(want), "{:?} -> {:?}", said, refusal(said));
+        }
+
+        // Anything unrecognised comes through as itself rather than as
+        // nothing, which is what the old .ok()? made of all of them.
+        let odd = "curl: (35) SSL connect error";
+        assert_eq!(refusal(odd), "(35) SSL connect error");
+        assert!(!refusal(odd).is_empty());
+    }
+
+    /// The sequence, and why it is not a flat hold: the one it replaced
+    /// walked back in at the same interval however many times it was turned
+    /// away, which sustains a rate limit rather than clearing it.
+    #[test]
+    fn a_refusal_waits_longer_each_time_it_is_refused() {
+        assert_eq!(backoff(1), 120.0, "one failure is usually nothing");
+        assert_eq!(backoff(2), 240.0);
+        assert_eq!(backoff(3), 480.0);
+        assert_eq!(backoff(4), 960.0);
+        assert_eq!(backoff(5), BACKOFF_MAX, "and then it stops doubling");
+        assert_eq!(backoff(50), BACKOFF_MAX, "including well past the point of doubling");
+        // Never zero and never negative, whatever it is handed.
+        assert_eq!(backoff(0), 120.0);
+        for n in 0..40 {
+            let w = backoff(n);
+            assert!(w >= BACKOFF_FROM && w <= BACKOFF_MAX, "n={} gave {}", n, w);
+        }
+        // Strictly growing until the ceiling, which is the whole point.
+        for n in 1..5 {
+            assert!(backoff(n) < backoff(n + 1), "n={} did not grow", n);
+        }
+    }
+
+    #[test]
+    fn the_hold_grows_across_calls_and_a_success_forgets_them() {
+        let mut caches = Caches::default();
+        let held = |c: &Caches| c.live.get("probe").map(|(_, _, h)| *h).unwrap();
+
+        for (call, want) in [(1, 120.0), (2, 240.0), (3, 480.0)] {
+            // Force the hold to have lapsed, so the next call really asks.
+            caches.live.remove("probe");
+            assert!(cached(&mut caches, "probe", 900.0, || None).is_none());
+            assert_eq!(held(&caches), want, "refusal {}", call);
+        }
+
+        // One that gets through clears the tally, so the next blip starts
+        // from two minutes again rather than from eight.
+        caches.live.remove("probe");
+        assert!(cached(&mut caches, "probe", 900.0, || Some(serde_json::json!(1))).is_some());
+        assert_eq!(held(&caches), 900.0, "a good reading is held for its own interval");
+        caches.live.remove("probe");
+        assert!(cached(&mut caches, "probe", 900.0, || None).is_none());
+        assert_eq!(held(&caches), 120.0, "the count did not reset on success");
+    }
+
+    /// An hourly reading may back off, but not past its own interval - and a
+    /// two-minute one is never held for longer than the backoff says.
+    #[test]
+    fn the_backoff_never_outlasts_the_interval_it_belongs_to() {
         for ttl in [30.0, 120.0, 300.0, 900.0, 3600.0] {
             let mut caches = Caches::default();
             let key = format!("probe-{}", ttl);
             assert!(cached(&mut caches, &key, ttl, || None).is_none());
-            let (_, _, held) = caches.live.get(&key).expect("the failure was not held");
+            let (_, _, held) = caches.live.get(&key).unwrap();
             assert!(
-                *held <= ttl,
-                "ttl {}: a failure held {}s would be retried before a success was due",
+                *held <= ttl.max(BACKOFF_FROM),
+                "ttl {}: held {}s, past the interval it belongs to",
                 ttl,
                 held
             );
-            assert!(
-                *held <= FAILURE_CAP,
-                "ttl {}: a failure held {}s blanks the section for too long",
-                ttl,
-                held
-            );
+            assert!(*held <= BACKOFF_MAX, "ttl {}: held {}s", ttl, held);
         }
     }
 
