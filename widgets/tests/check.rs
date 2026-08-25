@@ -47,6 +47,53 @@ fn root() -> PathBuf {
         .expect("the repo root")
 }
 
+/// Every `<name>_lit` the palette defines.
+fn colours_ending_in_lit(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        if !t.contains(": tc::rgb(") {
+            continue;
+        }
+        if let Some(field) = t.split(':').next() {
+            if field.ends_with("_lit") && !field.contains(' ') {
+                found.push(field.to_string());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Whether a palette colour is ever handed to the closure that composes a
+/// selection tint.
+///
+/// Most colours are drawn straight - `p.bad.as_str()` - and never meet a
+/// tint; blaming those is how a contrast check starts crying wolf, which
+/// this file has already had to fix twice. A colour counts if it is named on
+/// a line that calls the tint helper, or if it is returned by one of the
+/// small colour pickers whose result is then handed to it.
+fn handed_to_a_tint(src: &str, field: &str) -> bool {
+    let named = format!("p.{}", field);
+    let mentions = |line: &str| match line.find(&named) {
+        // `p.dim` is a prefix of `p.dim_lit`.
+        Some(at) => !line[at + named.len()..].starts_with('_'),
+        None => false,
+    };
+    src.lines().any(|line| {
+        let composes = line.contains("c(") || line.contains("c_of(") || line.contains("tinted(");
+        let picker = line.trim_start().starts_with("\"") && line.contains("=> &p.");
+        (composes && mentions(line)) || (picker && mentions(line))
+    })
+}
+
+/// A source with its own test module removed. Fixtures are not the screen,
+/// and a colour or a key that only appears in one is not shipped.
+fn without_tests(src: &str) -> String {
+    src.split("#[cfg(test)]").next().unwrap_or("").to_string()
+}
+
 /// Every widget binary, by stem, with its source.
 fn widgets() -> BTreeMap<String, String> {
     let dir = root().join("widgets/src/bin");
@@ -57,14 +104,21 @@ fn widgets() -> BTreeMap<String, String> {
             continue;
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let mut src = std::fs::read_to_string(&path).unwrap_or_default();
+        // Each file's own tests are dropped before joining, not after. Split
+        // on the first `#[cfg(test)]` of the joined blob and a widget with
+        // submodules is read only as far as its main file's tests - usage's
+        // are two thirds of the way down, so its eight submodules, seven
+        // thousand lines, were invisible to every check that did it that way.
+        let mut src = without_tests(&std::fs::read_to_string(&path).unwrap_or_default());
         // A widget split across a directory - usage - reads as one widget.
         let sub = dir.join(&stem);
         if sub.is_dir() {
             for part in std::fs::read_dir(&sub).expect("a widget directory").flatten() {
                 if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
                     src.push('\n');
-                    src.push_str(&std::fs::read_to_string(part.path()).unwrap_or_default());
+                    src.push_str(&without_tests(
+                        &std::fs::read_to_string(part.path()).unwrap_or_default(),
+                    ));
                 }
             }
         }
@@ -562,47 +616,85 @@ fn triple(line: &str, call: &str) -> Option<(f64, f64, f64)> {
 /// reached a tinted row grew from seventeen to twenty-three while that sat
 /// open, which is what prose costs.
 ///
-/// Only colours that actually meet are compared. The first version of this
-/// paired every `bg()` in a file with every grey in it and reported two
-/// widgets that were fine - one of them on a tint that exists in a test
-/// fixture, the other on a tint only ever drawn with `accent`. A check that
-/// cries wolf gets turned off.
+/// It checks **every** palette colour a widget defines, not the one that was
+/// measured first. The version before this one looked only at `dim` and
+/// `dim_lit`, and a review found three more failing on the same tint through
+/// the same closures - `bad` at 4.17, `unknown` at 4.11, and `idle` at 3.85,
+/// which is what most of herdr-panes' rows are. A check that only knows
+/// about the bug it was written for finds that bug and stops.
+///
+/// A colour with a `_lit` twin is exempt: the twin is what reaches the tint,
+/// and it is measured instead. Only colours that meet a tint are compared -
+/// an earlier version paired every `bg()` in a file with every colour in it
+/// and reported two widgets that were fine, one on a tint that exists only
+/// in a test fixture. A check that cries wolf gets turned off.
 #[test]
 fn text_on_a_selection_tint_clears_aa() {
     let mut wrong = Vec::new();
-    for (name, whole) in widgets() {
-        // Fixtures are not the screen.
-        let src = whole.split("#[cfg(test)]").next().unwrap_or("").to_string();
-        let mut greys: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
+    for (name, src) in widgets() {
+        // Every colour the palette defines, by field.
+        let mut colours: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
         for line in src.lines() {
-            for field in ["dim", "dim_lit"] {
-                if line.trim_start().starts_with(&format!("{}: tc::rgb", field)) {
-                    if let Some(c) = triple(line, "tc::rgb") {
-                        greys.insert(field.to_string(), c);
-                    }
-                }
+            let t = line.trim_start();
+            let Some(field) = t.split(':').next() else { continue };
+            if !t.contains(": tc::rgb(") || field.contains(' ') || field.is_empty() {
+                continue;
+            }
+            if let Some(c) = triple(line, "tc::rgb") {
+                colours.insert(field.to_string(), c);
             }
         }
-        // What each tint is composed with, one line at a time.
         for line in src.lines() {
             let Some(tint) = triple(line, "tc::bg") else { continue };
-            // Composed inline with a named colour: that exact pair.
-            let named: Vec<&str> = ["dim_lit", "dim", "accent", "txt"]
-                .into_iter()
-                .filter(|f| line.contains(&format!("p.{}", f)))
+            // Composed inline with one named colour: that exact pair. Or
+            // assigned to `tint` and composed later by a closure, in which
+            // case every colour in the palette can reach it.
+            let inline: Vec<String> = colours
+                .keys()
+                .filter(|f| {
+                    // `p.dim` is a prefix of `p.dim_lit`; without the guard a
+                    // line drawing only the lighter one would be blamed for
+                    // the darker one it never draws.
+                    let needle = format!("p.{}", f);
+                    match line.find(&needle) {
+                        None => false,
+                        Some(at) => !line[at + needle.len()..].starts_with('_'),
+                    }
+                })
+                .cloned()
                 .collect();
-            // Or assigned to `tint` and composed later, where the greys are
-            // what reach it - the lighter one when the widget has it.
-            let reached: Vec<String> = if line.contains("tint") && named.is_empty() {
-                greys
-                    .contains_key("dim_lit")
-                    .then(|| vec!["dim_lit".to_string()])
-                    .unwrap_or_else(|| greys.keys().cloned().collect())
+            let reached: Vec<String> = if !inline.is_empty() {
+                inline
+            } else if line.contains("tint") {
+                // Not every colour in the palette reaches the tint - most are
+                // drawn straight, as `p.bad.as_str()`. Only the ones handed to
+                // the closure count, either directly or through a colour
+                // picker whose arms return them. Without this the check
+                // reported github's `bad`, which is only ever drawn on the
+                // plain background, and a check that cries wolf gets turned
+                // off - which is the note this file already carries twice.
+                colours
+                    .keys()
+                    .filter(|f| handed_to_a_tint(&src, f))
+                    .cloned()
+                    .collect()
             } else {
-                named.into_iter().map(str::to_string).collect()
+                continue;
             };
             for field in reached {
-                let Some(&c) = greys.get(&field) else { continue };
+                // Gridlines are not text, and say so where they are defined.
+                if field.contains("grid") {
+                    continue;
+                }
+                // The lighter twin is what reaches the tint, so the twin is
+                // what gets measured. Skipping both - which this did briefly,
+                // and which passed a mutation that put a failing value back
+                // into a `_lit` field - measures nothing at all.
+                let field = match colours.contains_key(&format!("{}_lit", field)) {
+                    true => format!("{}_lit", field),
+                    false => field,
+                };
+                let Some(&c) = colours.get(&field) else { continue };
                 let r = contrast(c, tint);
                 if r < 4.5 {
                     wrong.push(format!(
@@ -613,6 +705,8 @@ fn text_on_a_selection_tint_clears_aa() {
             }
         }
     }
+    wrong.sort();
+    wrong.dedup();
     assert!(wrong.is_empty(), "on the selected-row tint:\n{}", wrong.join("\n"));
 }
 
@@ -631,12 +725,35 @@ fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
             continue;
         }
         let closures = src.matches("format!(\"{}{}\", tint, colour)").count();
-        let swaps = src.matches("dim_lit.as_str()").count() + src.matches("&p.dim_lit").count();
-        if swaps < closures {
-            wrong.push(format!(
-                "{}: {} tint closures but {} reach for dim_lit",
-                name, closures, swaps
-            ));
+        // Every lighter colour the palette defines has to be reached for by
+        // every closure that composes a tint. Counting only `dim_lit` let a
+        // mutation through: unwiring the `idle_c` arm left the dim_lit count
+        // untouched and the check green, which is the shape of hole this
+        // test exists to close.
+        // A swap and the guard that reaches it come in pairs. Counting
+        // occurrences alone cannot see a guard that has been neutered - the
+        // body still mentions the lighter colour, so the count is unchanged
+        // and the check stays green while the swap never fires.
+        for lit in colours_ending_in_lit(&src) {
+            let base = lit.trim_end_matches("_lit");
+            let swaps = src.matches(&format!("p.{}.as_str()", lit)).count();
+            let guards = src.matches(&format!("colour == p.{} {{", base)).count();
+            if swaps != guards {
+                wrong.push(format!(
+                    "{}: {} reached {} times but guarded on `colour == p.{}` {} times",
+                    name, lit, swaps, base, guards
+                ));
+            }
+        }
+        for lit in colours_ending_in_lit(&src) {
+            let swaps = src.matches(&format!("p.{}.as_str()", lit)).count()
+                + src.matches(&format!("&p.{}", lit)).count();
+            if swaps < closures {
+                wrong.push(format!(
+                    "{}: {} tint closures but {} reach for {}",
+                    name, closures, swaps, lit
+                ));
+            }
         }
     }
     assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));

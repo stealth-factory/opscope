@@ -454,17 +454,22 @@ enum Row {
 
 struct Palette {
     blocked: String,
+    blocked_lit: String,
     done: String,
     working: String,
     idle: String,
+    idle_lit: String,
     unknown: String,
+    unknown_lit: String,
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
     /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
     /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where the tint is on, so
-    /// an unselected row is exactly the colour it always was.
+    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// untinted row is exactly the colour it always was. Not quite the same as
+    /// "unselected": herdr-panes tints a blocked or done row whether or not it
+    /// is selected, and those get the lighter colours too.
     ///
     /// The substitution happens inside the closure that composes the tint, not
     /// at each call site. Seventeen sites were counted when this was found and
@@ -479,15 +484,19 @@ struct Palette {
     accent: String,
     proc: String,
     idle_c: String,
+    idle_c_lit: String,
 }
 
 fn palette() -> Palette {
     Palette {
         blocked: tc::rgb(255, 105, 115),
+        blocked_lit: tc::rgb(255, 128, 136),
         done: tc::rgb(90, 240, 160),
         working: tc::rgb(255, 200, 90),
         idle: tc::rgb(128, 148, 172),
+        idle_lit: tc::rgb(152, 168, 188),
         unknown: tc::rgb(150, 150, 165),
+        unknown_lit: tc::rgb(165, 165, 178),
         dim: tc::rgb(127, 147, 172),
         dim_lit: tc::rgb(140, 170, 195),
         txt: tc::rgb(225, 235, 245),
@@ -495,6 +504,7 @@ fn palette() -> Palette {
         accent: tc::rgb(150, 210, 255),
         proc: tc::rgb(170, 190, 215),
         idle_c: tc::rgb(122, 138, 160),
+        idle_c_lit: tc::rgb(155, 167, 184),
     }
 }
 
@@ -839,10 +849,24 @@ fn main() {
                 String::new()
             };
             let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.idle {
+                    p.idle_lit.as_str()
+                } else if colour == p.unknown {
+                    p.unknown_lit.as_str()
+                } else if colour == p.blocked {
+                    p.blocked_lit.as_str()
+                } else if colour == p.idle_c {
+                    p.idle_c_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };
@@ -943,10 +967,24 @@ fn main() {
             let here = agents.len() + j == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.idle {
+                    p.idle_lit.as_str()
+                } else if colour == p.unknown {
+                    p.unknown_lit.as_str()
+                } else if colour == p.blocked {
+                    p.blocked_lit.as_str()
+                } else if colour == p.idle_c {
+                    p.idle_c_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };
@@ -1015,10 +1053,24 @@ fn main() {
                 let here = agents.len() + running.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.idle {
+                    p.idle_lit.as_str()
+                } else if colour == p.unknown {
+                    p.unknown_lit.as_str()
+                } else if colour == p.blocked {
+                    p.blocked_lit.as_str()
+                } else if colour == p.idle_c {
+                    p.idle_c_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };

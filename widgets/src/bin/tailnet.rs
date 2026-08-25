@@ -512,6 +512,7 @@ fn sample_rates(state: &mut State, data: &serde_json::Value, history: usize) {
 struct Palette {
     online: String,
     offline: String,
+    offline_lit: String,
     direct: String,
     relay: String,
     dim: String,
@@ -526,6 +527,7 @@ fn palette() -> Palette {
     Palette {
         online: tc::rgb(90, 240, 160),
         offline: tc::rgb(120, 130, 150),
+        offline_lit: tc::rgb(144, 152, 169),
         direct: tc::rgb(90, 240, 160),
         relay: tc::rgb(255, 190, 90),
         dim: tc::rgb(127, 147, 172),
@@ -1023,7 +1025,16 @@ fn main() {
             let up = mine || peer["Online"].as_bool().unwrap_or(false);
             let here = idx == selected;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-            let c = |colour: &str| format!("{}{}", tint, colour);
+            let c = |colour: &str| {
+                // offline is what a peer that is not up is drawn in, and it
+                // measured 3.67 on this tint - the worst in the widget.
+                let colour = if !tint.is_empty() && colour == p.offline {
+                    p.offline_lit.as_str()
+                } else {
+                    colour
+                };
+                format!("{}{}", tint, colour)
+            };
             let path_direct = !text(peer, "CurAddr").is_empty();
             // "this" rather than DIRECT or a relay name: the path column
             // answers how the traffic gets there, and for this machine it

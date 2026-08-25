@@ -523,13 +523,16 @@ struct Palette {
     ok: String,
     warn: String,
     bad: String,
+    bad_lit: String,
     dim: String,
     /// A colour to draw over the selected-row tint.
     ///
     /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
     /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where the tint is on, so
-    /// an unselected row is exactly the colour it always was.
+    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// untinted row is exactly the colour it always was. Not quite the same as
+    /// "unselected": herdr-panes tints a blocked or done row whether or not it
+    /// is selected, and those get the lighter colours too.
     ///
     /// The substitution happens inside the closure that composes the tint, not
     /// at each call site. Seventeen sites were counted when this was found and
@@ -551,6 +554,7 @@ fn palette() -> Palette {
         ok: tc::rgb(90, 240, 160),
         warn: tc::rgb(255, 200, 90),
         bad: tc::rgb(255, 100, 110),
+        bad_lit: tc::rgb(255, 128, 136),
         dim: tc::rgb(127, 147, 172),
         dim_lit: tc::rgb(140, 170, 195),
         grid: tc::rgb(60, 78, 98),
@@ -1509,10 +1513,18 @@ fn list_view(
         let here = i == selected;
         let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
         let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.bad {
+                    p.bad_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };
@@ -1983,10 +1995,18 @@ fn detail_view(
             let on_cursor = idx == stack_sel;
             let tint = if on_cursor { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.bad {
+                    p.bad_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };

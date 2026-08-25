@@ -63,7 +63,7 @@ git log --format='%s' "$range" | awk -v known="$scopes" -F': ' '
         if (!good) { print "everything else\t" $0; next }
         for (i = 1; i <= n; i++) print parts[i] "\t" rest
     }
-' | sort -f -t"$(printf '\t')" -k1,1 | awk -F'\t' '
+' | sort -f -s -t"$(printf '\t')" -k1,1 | awk -F'\t' '
     $1 != seen { if (seen != "") printf "\n"; printf "### %s\n\n", $1; seen = $1 }
     { printf "- %s\n", $2 }
 '

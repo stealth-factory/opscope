@@ -356,10 +356,15 @@ fn account_detail(
                     };
                     let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                     let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Same shape as the other widgets that do this, so one rule
+                // reads them all: a guard per colour, each reaching its own
+                // lighter twin.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };
@@ -795,8 +800,10 @@ struct Palette {
     ///
     /// `dim` is 3.81 against `bg(38, 56, 76)`, under the 4.5 CLAUDE.md asks for
     /// against the tint as well as the background. This is the same grey lifted
-    /// until it clears - 4.94 - and it is used *only* where the tint is on, so
-    /// an unselected row is exactly the colour it always was.
+    /// until it clears - 4.94 - and it is used *only* where a tint is on, so an
+    /// untinted row is exactly the colour it always was. Not quite the same as
+    /// "unselected": herdr-panes tints a blocked or done row whether or not it
+    /// is selected, and those get the lighter colours too.
     ///
     /// The substitution happens inside the closure that composes the tint, not
     /// at each call site. Seventeen sites were counted when this was found and
@@ -1725,10 +1732,15 @@ fn main() {
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
-                let colour = if tint.is_empty() || colour != p.dim {
+                // Same shape as the other widgets that do this, so one rule
+                // reads them all: a guard per colour, each reaching its own
+                // lighter twin.
+                let colour = if tint.is_empty() {
                     colour
-                } else {
+                } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else {
+                    colour
                 };
                 format!("{}{}", tint, colour)
             };

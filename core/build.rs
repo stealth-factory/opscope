@@ -64,9 +64,48 @@ fn main() {
 
     println!("cargo:rustc-env=TOYS_COMMIT={}", commit);
     println!("cargo:rustc-env=TOYS_BUILD_DATE={}", date);
-    // Rebuild when the checked-out commit changes. Without this the sha is
-    // whatever it was the first time core compiled, and a `--version` that
-    // names the wrong commit is worse than one that says "unknown".
-    println!("cargo:rerun-if-changed=../.git/HEAD");
+
+    // Rebuild when the checked-out commit changes, or the sha is whatever it
+    // was the first time core compiled and `--version` names the wrong
+    // commit - worse than one that says "unknown", because it looks right.
+    //
+    // Watching `.git/HEAD` alone does not do it, and fails two ways at once.
+    // On a branch checkout that file holds `ref: refs/heads/<branch>` and
+    // does not change when a commit lands; what moves is the ref it names.
+    // And in a linked worktree there is no `.git` directory at all - `.git`
+    // is a file pointing elsewhere - so the path does not exist, which cargo
+    // reads as "always rerun". Correct output, by accident, and only here.
+    //
+    // So git is asked where these actually live. `--git-path` resolves a
+    // worktree's real git directory, and the ref is followed to the file
+    // that moves. packed-refs covers a ref with no loose file of its own,
+    // and HEAD itself covers a detached checkout, where it holds the sha.
+    let watch = |path: &str| {
+        let resolved = Command::new("git")
+            .args(["rev-parse", "--git-path", path])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(file) = resolved {
+            println!("cargo:rerun-if-changed={}", file);
+        }
+    };
+    watch("HEAD");
+    watch("packed-refs");
+    if let Some(head_ref) = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        watch(&head_ref);
+    }
+
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }

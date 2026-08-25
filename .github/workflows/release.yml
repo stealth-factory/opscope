@@ -23,13 +23,23 @@ jobs:
     # glibc 2.35.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, not a tag. A tag is mutable: re-running this
+      # workflow on the same release tag could execute different action code
+      # than the release was built with, which makes "reproducible" a word
+      # rather than a property. Comments carry the human-readable version so
+      # a reader can tell what these are without resolving them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The changelog reads the history between two tags, and the build
           # stamps the commit into --version. A shallow clone has neither.
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          # An exact version, for the same reason. `stable` moves, and two
+          # builds of one tag compiled by different compilers are two
+          # different binaries wearing one version number.
+          toolchain: "1.98.0"
 
       - name: The tag and the manifest must agree
         run: |
