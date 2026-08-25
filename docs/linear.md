@@ -113,6 +113,53 @@ created against 88 completed.
 **By team** — ranked by open volume, windowing around the cursor when focused
 and there are more teams than rows. `DONE14D` follows the window.
 
+## One cycle, or one team
+
+`↵` or `→` on the highlighted row opens it on a screen of its own; `←` or `esc`
+comes back; `↑` `↓` and `PgUp` `PgDn` scroll it when it is longer than the pane.
+
+A **cycle** gives its progress, its scope and how much of it is closed, how long
+is left to run, and how much moved lately — the same day-over-day figure the
+board ranks cycles by, so the ordering is legible rather than mysterious. A
+cycle with no name of its own is called by its number rather than left blank.
+
+A **team** gives what it is holding, broken out by state as a stacked bar, with
+triage called out separately: it is work nobody has looked at, and a team can
+hold hundreds of it while looking busy everywhere else.
+
+Under that, **every project the team owns**:
+
+```
+ ── PROJECTS ── 6 · 672 open in no project
+  uptime-monitoring          In Progress  ███████████████ 100%  10 open
+  search-relevance           In Progress  █████████████░░  88%  1 open · A Lead
+  storage-provider-swap      Paused       █░░░░░░░░░░░░░░   3%  due 2026-04-10 · A Lead
+  offline-mode               Idea         ░░░░░░░░░░░░░░░   0%  25 open · A Lead
+  runtime-metrics            Maintenance  ███████████████ 100%  A Lead
+  cluster-migration          Completed    █████████████░░  87%  2 open · due 2024-07-26 · A Lead
+```
+
+Running work sorts first and finished work last, with a status this build has
+never heard of sorting *with* the live work rather than under the dead work —
+a workspace names its own statuses, and burying an unfamiliar one would hide
+real work. The status is shown by the workspace's own name for it — `In
+Progress`, not `started` — and its type picks the colour.
+
+The percentage is **Linear's own published `progress`**, not a figure derived
+here. The board fetches only what is open, so a project that is finished has
+nothing left for this widget to count; taking Linear's number is the only way
+the two agree. That is also why a project can read 87% and still show open
+issues, and why the per-project counts do not sum to the team's open total —
+which is what `672 open in no project` is there to say. Without it a column of
+numbers sits three lines under a larger one and reads as a bug.
+
+Projects are shared: one owned by two teams appears on both screens.
+
+Columns are sized to what is in them — no name is ever cut, because half a
+project's name is a name for something else. The bar takes whatever is left,
+and when the pane is too narrow the aside sheds whole facts off the end rather
+than let one be cut in half.
+
 ## Cost
 
 Linear allows **2,500 requests/hour** and 3,000,000 complexity points; a single
@@ -121,7 +168,9 @@ multiplied by the page size, so the request count is the limit that binds and
 the field count barely matters.
 
 A full pass over a workspace of 14 teams and ~1,200 open issues costs about
-**10 requests and 4 seconds**, so the default 120s refresh uses roughly 300
+**11 requests and 4 seconds** — one of them the whole workspace's projects,
+fetched with everything else so a team's screen opens on data already in hand
+rather than showing nothing while a request goes out, so the default 120s refresh uses roughly 300
 requests an hour — an eighth of the budget. Remaining quota is read from
 `X-RateLimit-Requests-Remaining` and shown in the header.
 
@@ -152,6 +201,9 @@ are stepped over in every direction.
 |---|---|
 | `tab` | focus the next pane, and from the last one back to no focus |
 | `↑` `↓` | move the cursor, crossing between panes at their ends — or step into one when none is focused |
+| `↵` `→` | open the highlighted cycle or team on a screen of its own |
+| `←` `esc` | back to the board |
+| `↑` `↓` `PgUp` `PgDn` | scroll a detail screen |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |
