@@ -65,34 +65,66 @@ fn main() {
     println!("cargo:rustc-env=TOYS_COMMIT={}", commit);
     println!("cargo:rustc-env=TOYS_BUILD_DATE={}", date);
 
-    // Run on every build, which is the only thing that makes the stamp
-    // true - and getting that takes a directive, not the absence of one.
+    // What has to rerun this script, and what must not.
     //
-    // "Emit no `rerun-if-*` and cargo reruns when any file in the package
-    // changes" is true only while the script emits none at all. This one
-    // has always emitted `rerun-if-env-changed` below, which overrides the
-    // default outright: the script then reruns when SOURCE_DATE_EPOCH
-    // changes and at no other time. Removing the watches did not make it
-    // run always, it made it run almost never - a full rebuild of every
-    // crate left the stamp naming a commit four ahead of it and carrying a
-    // `-dirty` the tree had not had for hours.
+    // Two false starts are worth recording, because each looked right.
     //
-    // A path that does not exist cannot be stat-ed, and cargo answers that
-    // by rerunning. It is a sentinel, not a file: nothing should ever
-    // create it.
+    // Watching `.git/HEAD` alone fails twice over: on a branch checkout
+    // that file holds `ref: refs/heads/<branch>` and does not move when a
+    // commit lands, and in a linked worktree there is no `.git` directory
+    // at all. So git is asked where these actually live, and the ref HEAD
+    // names is followed to the file that does move.
     //
-    // Watching `.git/HEAD` does not work: on a branch checkout that file
-    // holds `ref: refs/heads/<branch>` and does not move when a commit
-    // lands. Watching the ref it names fixes the commit half - but nothing
-    // in `.git` moves when a source file is edited, so `-dirty` stayed
-    // absent while the tree was dirty. A marker that says "clean" over a
-    // modified tree is worse than no marker: it is a claim, and it is false.
+    // Then the watches were removed altogether, on the theory that a
+    // script emitting no `rerun-if-changed` runs on every build. That rule
+    // holds only for a script emitting no `rerun-if-*` of any kind, and
+    // this one emits `rerun-if-env-changed` below - which overrides the
+    // default outright. The result was a script that ran almost never: a
+    // clean tree four commits later still stamped the old sha and a
+    // `-dirty` that was hours stale, and a thirty-second full rebuild did
+    // not move it.
     //
-    // The cost was measured rather than feared. The script is three git
-    // calls; cargo compares the environment it emits and only rebuilds
-    // dependents when it changes, so a no-op rebuild is 0.03s. The first
-    // build after the tree goes from clean to dirty relinks the fourteen
-    // binaries, which is exactly when their stamp has genuinely changed.
-    println!("cargo:rerun-if-changed=.stamp-every-build");
+    // Running it unconditionally does work, and costs twenty-eight seconds
+    // on every no-op build, because a rerun relinks all fourteen binaries
+    // whether or not the stamp changed. `cargo test` is the ritual before
+    // every commit here, so that is the wrong trade.
+    //
+    // So both halves are watched explicitly. The git files cover the
+    // commit; the source trees cover `-dirty`, and cost nothing, because a
+    // source edit was going to rebuild those crates anyway. What this
+    // cannot see is a new untracked file that no crate compiles - the
+    // stamp stays clean for one build longer than it should, which is the
+    // one gap left and a smaller lie than either of the above.
+    let watch_git = |path: &str| {
+        let resolved = Command::new("git")
+            .args(["rev-parse", "--git-path", path])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(file) = resolved {
+            println!("cargo:rerun-if-changed={}", file);
+        }
+    };
+    watch_git("HEAD");
+    watch_git("packed-refs");
+    if let Some(head_ref) = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        watch_git(&head_ref);
+    }
+    // Cargo walks a directory watch recursively, so these two cover every
+    // source file in the workspace without naming one.
+    for dir in ["../core/src", "../widgets/src", "../Cargo.toml", "../Cargo.lock"] {
+        println!("cargo:rerun-if-changed={}", dir);
+    }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }
