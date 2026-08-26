@@ -1931,9 +1931,18 @@ mod tests {
     /// /dev/null, so `run` and `ports`'s `refusal` - both of which read it -
     /// had nothing to read, and a permission or login failure arrived as an
     /// exit status.
+    ///
+    /// `/bin/sh` by absolute path, not `sh`. A release build failed on a
+    /// macOS runner with `sh: No such file or directory` - the shell was
+    /// there, the PATH the job inherited was not what it should have been.
+    /// The behaviour under test has nothing to do with PATH lookup, and a
+    /// test that can fail for a reason it is not testing blocks releases
+    /// and teaches people to re-run until it is green. `/bin/sh` is
+    /// guaranteed on both platforms this ships to.
     #[test]
     fn a_command_that_failed_hands_back_what_it_complained() {
-        let out = run_full(&["sh", "-c", "echo 'needs an operator' >&2; exit 3"], 5)
+        const SH: &str = "/bin/sh";
+        let out = run_full(&[SH, "-c", "echo 'needs an operator' >&2; exit 3"], 5)
             .expect("sh ran");
         assert!(!out.status.success());
         assert!(
@@ -1941,10 +1950,10 @@ mod tests {
             "stderr was {:?}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let why = run(&["sh", "-c", "echo 'needs an operator' >&2; exit 3"], 5)
+        let why = run(&[SH, "-c", "echo 'needs an operator' >&2; exit 3"], 5)
             .expect_err("exit 3 is an error");
         assert!(why.contains("needs an operator"), "{:?}", why);
         // Capturing stderr must not cost stdout on the way past.
-        assert_eq!(run(&["sh", "-c", "echo fine"], 5).unwrap().trim(), "fine");
+        assert_eq!(run(&[SH, "-c", "echo fine"], 5).unwrap().trim(), "fine");
     }
 }
