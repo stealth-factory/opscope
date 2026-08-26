@@ -1,5 +1,7 @@
 # `ports`
 
+[← all docs](README.md)
+
 What is listening on this machine, what started it, and who can reach it.
 
 ```

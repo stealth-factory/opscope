@@ -1,5 +1,7 @@
 # `latency`
 
+[← all docs](README.md)
+
 Continuous latency to a list of hosts, with the statistics that actually
 explain a bad connection.
 

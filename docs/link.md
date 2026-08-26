@@ -1,5 +1,7 @@
 # `link`
 
+[← all docs](README.md)
+
 How good the connection is between this machine and whoever is connected to
 it — measured, not probed.
 

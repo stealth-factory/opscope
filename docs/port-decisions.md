@@ -1,5 +1,7 @@
 # What the port changed, and why
 
+[← all docs](README.md)
+
 For the length of the port every widget here existed twice, and the Rust was
 never a transliteration: some of it answers differently on purpose. Telling
 *on purpose* from *a defect the port introduced* was the whole point of the

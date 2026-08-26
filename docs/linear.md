@@ -1,5 +1,7 @@
 # `linear`
 
+[← all docs](README.md)
+
 Linear across every team at once — what is outstanding, which cycles are
 running, and whether issues are being closed faster than they arrive.
 

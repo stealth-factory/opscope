@@ -1,5 +1,7 @@
 # `clocks`
 
+[← all docs](README.md)
+
 This server's clock, the clocks counting down, a pomodoro, and everyone else's
 clock — the four things you need to know about time while working across
 timezones.

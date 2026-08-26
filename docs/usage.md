@@ -1,5 +1,7 @@
 # `usage`
 
+[← all docs](README.md)
+
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
 the four that publish one and a subscription for the five that do.

@@ -1,5 +1,7 @@
 # `tailnet`
 
+[← all docs](README.md)
+
 Tailscale peers, and — the part plain `tailscale status` buries — *how* you are
 reaching each one.
 

@@ -1,5 +1,7 @@
 # `github`
 
+[← all docs](README.md)
+
 Pull requests across every org you work in — not what shipped, but whether work
 is actually moving.
 

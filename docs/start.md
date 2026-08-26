@@ -1,5 +1,7 @@
 # `start`
 
+[← all docs](README.md)
+
 The front door: every widget, what it does, and whether it will work on this
 machine.
 

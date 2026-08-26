@@ -1,5 +1,7 @@
 # `herdr-panes`
 
+[← all docs](README.md)
+
 Everything running under [Herdr](https://herdr.dev), across every workspace —
 and one keypress to get to any of it.
 

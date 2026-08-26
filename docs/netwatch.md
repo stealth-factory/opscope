@@ -1,5 +1,7 @@
 # `netwatch`
 
+[← all docs](README.md)
+
 Which processes are using the network, how much they have used, and how fast
 they are going right now.
 

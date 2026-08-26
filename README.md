@@ -118,35 +118,20 @@ configuration at all.
   cannot work without its tool says so rather than drawing an empty pane; and
   **none needs root**
 
-## Design
+## Documentation
 
-A few conventions hold across all of them, and the reasoning is worth knowing
-before changing one:
+Every widget has a page of its own — what it shows, where each number comes
+from, every key it answers to, and the settings it reads. They are linked
+from the table above, and listed together in [`docs/`](docs/README.md).
 
-- **Spend extra width on more content, not padding.** Widgets add columns as a
-  pane grows and drop them as it shrinks, rather than truncating.
-- **Never truncate a key hint.** Footers wrap across as many lines as they need
-  and never split a hint, because `[±]25` teaches a key that does not exist.
-- **A directional glyph points the way the thing goes.** `▲`/`▼` mark which
-  half of a diverging chart a series occupies — `▲ opened` above the baseline,
-  `▼ merged` below it. `↑`/`↓` mean upload and download. Where both meanings
-  meet, in `netwatch`'s chart, the halves are arranged so they agree: tx
-  above and rx below, because a `↓` label over a line that climbs asks the
-  reader to hold two directions at once, and they will believe the arrow.
-- **Measure contrast, do not eyeball it.** Every colour that draws text clears
-  WCAG AA against both the terminal background *and* the selected-row tint,
-  with the measured ratios recorded beside the definitions.
-- **Say what a number means when it is not obvious.** Counters that reset with
-  a daemon, durations that predate the process, aggregates that hide their
-  outliers — each is labelled rather than left to mislead.
-- **Never show a stale figure under a fresh label.** Change a setting and the
-  numbers it governs shimmer until real ones land, rather than sitting there
-  looking current. The same rule kills silent truncation: a chart that cannot
-  fit its window says `54d of 90d`, and a token missing a scope is named rather
-  than left to quietly undercount.
-- **Optional enhancements, never requirements.** The clipboard goes through
-  OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
-  available and skipped silently where not.
+Four pages are about the repository rather than a widget:
+
+| | |
+|---|---|
+| [Design conventions](docs/design.md) | the rules every widget holds to, and why each was paid for |
+| [Internals](docs/internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
+| [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
+| [Building Herdr panels](docs/building-herdr-panels.md) | resize semantics, focus, and the layout mistakes worth skipping |
 
 ## Bundled skill
 
@@ -163,44 +148,14 @@ in Linear: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b
 canonical list either way, so a feature that looks missing may already be
 filed there with a reason.
 
-## Building your own
+## Contributing
 
-[`docs/building-herdr-panels.md`](docs/building-herdr-panels.md) collects what
-was learned building these against Herdr: resize semantics, focus, detecting
-what a pane is running, notification gating, and the layout mistakes worth
-skipping.
-
-These began as Python and were ported to Rust widget by widget;
-[`docs/port-decisions.md`](docs/port-decisions.md) records what the port
-changed and why — the keys it consolidated, the three it renamed, the charts
-it draws differently, and what was built afterwards on the Rust side alone. It
-is history now rather than a comparison, but it is the answer to most
-questions beginning *why does this key do that*.
-
-`cargo test` from the root runs each widget's tests plus
-`widgets/tests/check.rs`, which reads the sources and fails on a poller that
-dies without saying why, a footer or `--help` line naming a key nothing
-answers, a hint missing from the widget's doc, a config key read but never
-documented in `config.example.json` — or documented there and never read, or
-read with no fallback behind it — and a colour that draws text on the
-selected-row tint below WCAG AA.
-
-`toys-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
-24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
-text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
-window that keeps a cursor in view, non-blocking `Keyboard` input with
-arrow-key decoding, and `clipboard()` over OSC 52.
-
-The chart helpers are worth knowing before drawing anything new: `vbars()` and
-its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
-`stacked_bar()` for proportions, `meter()` for a gauge, and `skeleton()` for
-the shimmer that stands in for a figure still being fetched.
-
-Braille line charts are not among them. `latency` and `link` each keep their
-own `braille_canvas`, and the two are not the same function: latency's series
-carries the gaps a ping can leave, and link's is told how many slots the axis
-holds, so that a session younger than the chart takes its own share of the
-width rather than being stretched across all of it.
+`cargo test` from the root is the gate: each widget's own tests, plus
+[`widgets/tests/check.rs`](widgets/tests/check.rs), which reads the sources
+and fails on the things a compiler cannot see — a poller that dies without
+saying why, a key hinted but unanswered, a setting read but undocumented, a
+colour below WCAG AA on a selected row. [Internals](docs/internals.md)
+explains what each check is defending.
 
 ## License
 

@@ -1,5 +1,7 @@
 # `pr`
 
+[← all docs](README.md)
+
 The pull requests you have to follow up on, and a dashboard for whichever one
 you open.
 
