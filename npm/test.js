@@ -191,11 +191,15 @@ test('pack.js refuses a tarball stamped with a different version', () => {
   const dir = scratch();
   try {
     const version = packer.versionFromCargo(repoRoot);
+    // A leftover must differ from Cargo.toml, not just look like
+    // another version today. 9.9.9 would stop being a mismatch
+    // the day the manifest is that number.
+    const leftover = version === '0.0.0' ? '0.0.1' : '0.0.0';
     const bins = platform.binsFromManifest(repoRoot);
     const artifacts = path.join(dir, 'artifacts');
     fs.mkdirSync(artifacts);
     for (const p of platform.PLATFORMS) {
-      makeTarball(artifacts, p.rust, 'v9.9.9', bins);
+      makeTarball(artifacts, p.rust, `v${leftover}`, bins);
     }
     assert.throws(
       () =>
