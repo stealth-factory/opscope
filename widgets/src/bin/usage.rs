@@ -1198,6 +1198,19 @@ struct Config {
     /// the quota whenever Antigravity is closed and spares nothing that the
     /// tier request has not already spent.
     antigravity_remote: bool,
+    /// Whether the widget may start the `agy` CLI to read the quota it
+    /// serves, when nothing else has one.
+    ///
+    /// On by default, and the only thing here that runs somebody else's
+    /// program. Three things make that defensible where Grok's equivalent
+    /// is off: it is the reader's own CLI, already installed and signed in;
+    /// it is started under a pseudo-terminal of ours, killed by pid the
+    /// moment the reading is taken, and reaped, so nothing outlives the
+    /// fetch; and a CLI the reader started themselves is found by the
+    /// ordinary local probe long before this runs, so this can never shut
+    /// one down. Turn it off and the quota lasts an hour past the last time
+    /// Antigravity ran, which is the token's life.
+    antigravity_start: bool,
     /// Minutes between those requests. Five, so the figure on screen is
     /// one a reader can act on: the window it reports moves over days, but
     /// the spend inside it moves while they work, and an hour-old reading
@@ -1242,6 +1255,10 @@ fn read_config() -> Config {
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
         antigravity_remote: raw
             .get("antigravity_remote")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        antigravity_start: raw
+            .get("antigravity_start")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
     }

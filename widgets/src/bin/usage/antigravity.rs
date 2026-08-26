@@ -43,6 +43,186 @@ fn token_path() -> String {
 
 const CODE_ASSIST_API: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 
+/// How long to wait for a started `agy` to serve its quota.
+///
+/// Measured at a few seconds on this machine: the ports open immediately
+/// and answer nothing, and the quota service comes up behind them. So the
+/// wait is on an endpoint that parses, never on a port that exists.
+const AGY_READY: f64 = 25.0;
+/// A started `agy` is expensive next to reading a socket, so its answer is
+/// held far longer than the local probe's.
+const AGY_TTL: f64 = 900.0;
+
+/// Where the CLI might be, in the order CodexBar looks.
+fn agy_path() -> Option<String> {
+    if let Ok(named) = std::env::var("ANTIGRAVITY_CLI_PATH") {
+        if !named.is_empty() && std::path::Path::new(&named).exists() {
+            return Some(named);
+        }
+    }
+    let mut seen = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        seen.extend(path.split(':').map(|dir| format!("{}/agy", dir)));
+    }
+    seen.push(under_home(".local/bin/agy"));
+    seen.push("/opt/homebrew/bin/agy".into());
+    seen.push("/usr/local/bin/agy".into());
+    seen.into_iter().find(|p| std::path::Path::new(p).exists())
+}
+
+/// Every listening TCP port belonging to `pid` or anything it started.
+///
+/// Descendants matter: the port that answers is not always the process that
+/// was launched. On this machine the quota came from a child, so a search
+/// scoped to the pid alone finds two ports that answer nothing and gives up.
+fn ports_under(pid: i32) -> Vec<u16> {
+    let mut family = vec![pid.to_string()];
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let child = entry.file_name().to_string_lossy().to_string();
+        if !child.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", child)) else {
+            continue;
+        };
+        // The command name sits in brackets and may itself contain spaces,
+        // so the fields after it are found from the last ')' rather than by
+        // splitting the whole line.
+        let Some(after) = stat.rsplit_once(')') else { continue };
+        if after.1.split_whitespace().nth(1) == Some(&pid.to_string()) {
+            family.push(child);
+        }
+    }
+    let mut inodes = std::collections::HashSet::new();
+    for who in &family {
+        for fd in std::fs::read_dir(format!("/proc/{}/fd", who))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if let Some(rest) = target.to_string_lossy().strip_prefix("socket:[") {
+                inodes.insert(rest.trim_end_matches(']').to_string());
+            }
+        }
+    }
+    let mut ports = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(body) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        ports.extend(listening_ports(&body, &inodes));
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// Start `agy`, read the quota it serves, and stop it again.
+///
+/// A pseudo-terminal is not decoration. Started with its input on
+/// /dev/null the CLI opens ports that answer nothing for as long as you
+/// wait; given a pty it serves the quota within seconds. Both were measured
+/// here before this was written.
+///
+/// The child is ours alone: it is killed by the pid we were handed and
+/// nothing is matched by name, so a CLI the reader started themselves can
+/// never be shut by this. That one is found by the ordinary local probe
+/// long before this runs.
+fn agy_quota() -> Result<Vec<serde_json::Value>, String> {
+    let Some(path) = agy_path() else {
+        return Err("no `agy` on this machine - install the Antigravity CLI, \
+                    or set ANTIGRAVITY_CLI_PATH"
+            .into());
+    };
+    let mut master: libc::c_int = 0;
+    // SAFETY: forkpty writes the master fd through the pointer and returns
+    // in both processes, 0 in the child. The child immediately execs and
+    // never returns, so nothing here runs twice.
+    let pid = unsafe {
+        libc::forkpty(
+            &mut master,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if pid < 0 {
+        return Err("could not start `agy`: no pseudo-terminal available".into());
+    }
+    if pid == 0 {
+        // SAFETY: child side. Replace this process with the CLI; if that
+        // fails there is nothing to return to, so it exits.
+        unsafe {
+            let c = std::ffi::CString::new(path.clone()).unwrap_or_default();
+            let argv = [c.as_ptr(), std::ptr::null()];
+            libc::execv(c.as_ptr(), argv.as_ptr());
+            libc::_exit(127);
+        }
+    }
+    let out = agy_wait(pid, master);
+    // SAFETY: our own child, by pid. Reaped so it cannot be left a zombie
+    // for as long as the widget runs.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, std::ptr::null_mut(), 0);
+        libc::close(master);
+    }
+    out
+}
+
+/// Poll a started CLI until its quota endpoint parses, or time runs out.
+fn agy_wait(pid: i32, master: libc::c_int) -> Result<Vec<serde_json::Value>, String> {
+    // The pty has to be drained or the child blocks writing into a full
+    // buffer and never finishes starting. Nothing it prints is read for
+    // meaning - this widget does not scrape terminal output.
+    // SAFETY: setting O_NONBLOCK on a descriptor we own.
+    unsafe {
+        let flags = libc::fcntl(master, libc::F_GETFL);
+        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    let mut scratch = [0u8; 8192];
+    let deadline = now() + AGY_READY;
+    let mut ports_seen = false;
+    while now() < deadline {
+        // SAFETY: reading into our own buffer from our own descriptor.
+        loop {
+            let got = unsafe {
+                libc::read(master, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
+            };
+            if got <= 0 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        for port in ports_under(pid) {
+            ports_seen = true;
+            let url = format!("http://127.0.0.1:{}{}", port, ANTIGRAVITY_RPC);
+            let Some(got) = post_json(&url, &[("Content-Type", "application/json")], "{}", 4)
+            else {
+                continue;
+            };
+            let body = if got["response"].as_object().is_some_and(|o| !o.is_empty()) {
+                &got["response"]
+            } else {
+                &got
+            };
+            if let Some(groups) = body["groups"].as_array() {
+                if !groups.is_empty() {
+                    return Ok(groups.clone());
+                }
+            }
+        }
+    }
+    Err(if ports_seen {
+        "`agy` started but served no quota - it may not be signed in".into()
+    } else {
+        "`agy` started and opened no port".into()
+    })
+}
+
 /// The same quota summary the language server answers, from Google.
 ///
 /// This was thought not to exist. The tab said so, and said it in the
@@ -93,12 +273,10 @@ pub struct Data {
     quota: Vec<serde_json::Value>,
     /// Why there is no quota, when there is none. Empty when there is.
     quota_why: String,
-    /// True when the groups above came from Google rather than from the
-    /// language server on this machine. The two agree in shape and very
-    /// nearly in value, so nothing else can tell them apart - and a reader
-    /// wondering why there are numbers with the app shut deserves the
-    /// answer.
-    quota_remote: bool,
+    /// Which of the three answered. They agree in shape and very nearly in
+    /// value, so nothing else can tell them apart - and a reader wondering
+    /// why there are numbers with the app shut deserves the answer.
+    quota_from: From,
     /// How the CLI authenticated. Read once here rather than per frame:
     /// the tab is redrawn on every keypress and this is a file on disk.
     auth: String,
@@ -256,6 +434,20 @@ impl Data {
     pub fn why_no_tier(&self) -> Missing {
         if self.live.is_some() { Missing::Nothing } else { self.tier_why }
     }
+}
+
+/// Which source the quota on screen came from.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum From {
+    /// A language server already running - the app's, or a CLI the reader
+    /// started. Nothing was launched and nothing left the machine.
+    #[default]
+    Local,
+    /// Google, on the endpoint the tier comes from. Works for as long as
+    /// the token lasts, which is an hour past the last run.
+    Google,
+    /// A CLI this widget started, read, and stopped again.
+    Agy,
 }
 
 /// Why the tier is missing, in the three ways it can be.
@@ -507,18 +699,26 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // Google's is asked only when there is no server to ask, and is held far
     // longer - it is a record rather than a live meter, and unlike the local
     // one it is a request that leaves this machine.
+    // Three sources, cheapest first, and every one of them optional.
+    //
+    // A language server already running costs a socket read, so it is
+    // always tried. Google costs one request and works for as long as the
+    // token lasts. Starting the CLI costs a process and several seconds, so
+    // it is last however preferred it is - being last is not being
+    // disfavoured, it is being expensive.
     if d.quota.is_empty() {
+        let mut why = String::new();
         match remote_token(cfg.antigravity_remote) {
-            // Decided here, so it survives a held failure and is the same
-            // sentence on every frame until the thing it names changes.
-            Err(why) => d.quota_why = why,
+            // Decided before the cache, so it survives a held failure and
+            // is the same sentence on every frame until it changes.
+            Err(said) => why = said,
             Ok(access) => {
-                let mut why = String::new();
+                let mut asked = String::new();
                 let got = cached(caches, "antigravity-remote", PLAN_TTL, || {
                     match remote_quota(&access) {
                         Ok(groups) => Some(serde_json::Value::Array(groups)),
                         Err(said) => {
-                            why = said;
+                            asked = said;
                             None
                         }
                     }
@@ -527,17 +727,47 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
                 match got {
                     Some(groups) => {
                         d.quota = groups;
-                        d.quota_remote = true;
+                        d.quota_from = From::Google;
                     }
                     None => {
-                        d.quota_why = if why.is_empty() {
+                        why = if asked.is_empty() {
                             "Google did not answer, and the refusal is still held".to_string()
                         } else {
-                            why
+                            asked
                         }
                     }
                 }
             }
+        }
+        if d.quota.is_empty() && cfg.antigravity_start {
+            let mut asked = String::new();
+            let got = cached(caches, "antigravity-agy", AGY_TTL, || match agy_quota() {
+                Ok(groups) => Some(serde_json::Value::Array(groups)),
+                Err(said) => {
+                    asked = said;
+                    None
+                }
+            })
+            .and_then(|got| got.as_array().cloned());
+            match got {
+                Some(groups) => {
+                    d.quota = groups;
+                    d.quota_from = From::Agy;
+                    why.clear();
+                }
+                // Both failed. The CLI's reason is the later and more
+                // specific one, so it wins - "Google refused the token" and
+                // "`agy` is not signed in" are the same fault said twice,
+                // and the second names what to do.
+                None => {
+                    if !asked.is_empty() {
+                        why = asked;
+                    }
+                }
+            }
+        }
+        if d.quota.is_empty() {
+            d.quota_why = why;
         }
     }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
@@ -619,7 +849,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// sitting at 0% - they are real limits, not padding, and are left in.
 fn antigravity_quota_rows(
     groups: &[serde_json::Value],
-    remote: bool,
+    from: From,
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
@@ -629,15 +859,24 @@ fn antigravity_quota_rows(
     // The long form names where the number comes from, which matters here
     // more than elsewhere; the short one still says it is not this machine's
     // own tally. Shortened before it can clip, as the other headers are.
-    let mut note = if remote {
-        " · account-wide, from Google - the app is not running"
-    } else {
-        " · account-wide, from the local language server"
+    let (mut note, short, tiny) = match from {
+        From::Google => (
+            " · account-wide, from Google - the app is not running",
+            " · from Google",
+            " · remote",
+        ),
+        From::Agy => (
+            " · account-wide, from `agy`, started for this reading",
+            " · from `agy`",
+            " · agy",
+        ),
+        From::Local => (
+            " · account-wide, from the local language server",
+            " · from the local server",
+            " · local",
+        ),
     };
-    for shorter in [
-        if remote { " · from Google" } else { " · from the local server" },
-        if remote { " · remote" } else { " · local" },
-    ] {
+    for shorter in [short, tiny] {
         if 13 + "live".len() + note.chars().count() <= w.saturating_sub(1) {
             break;
         }
@@ -834,7 +1073,7 @@ fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 }
 
 fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = antigravity_quota_rows(&d.quota, d.quota_remote, w, p);
+    let mut rows = antigravity_quota_rows(&d.quota, d.quota_from, w, p);
     if d.live.is_none() {
         rows.extend(
             wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
@@ -1145,7 +1384,7 @@ mod tests {
                 ("Gemini 3 Pro", "5h", 0.996),
                 ("Claude Sonnet 4.5", "weekly", 1.0),
             ]),
-            false,
+            From::Local,
             96,
             &p,
         );
@@ -1164,7 +1403,7 @@ mod tests {
         let p = palette();
         let rows = antigravity_quota_rows(
             &[serde_json::json!({"displayName": "GPT", "buckets": []})],
-            false,
+            From::Local,
             96,
             &p,
         );
@@ -1177,9 +1416,9 @@ mod tests {
     fn the_source_note_shortens_before_it_can_clip() {
         let p = palette();
         let quota = groups(&[("Gemini 3 Pro", "weekly", 0.5)]);
-        let wide = antigravity_quota_rows(&quota, false, 120, &p)[0].clone();
-        let narrow = antigravity_quota_rows(&quota, false, 60, &p)[0].clone();
-        let tight = antigravity_quota_rows(&quota, false, 30, &p)[0].clone();
+        let wide = antigravity_quota_rows(&quota, From::Local, 120, &p)[0].clone();
+        let narrow = antigravity_quota_rows(&quota, From::Local, 60, &p)[0].clone();
+        let tight = antigravity_quota_rows(&quota, From::Local, 30, &p)[0].clone();
         assert!(wide.contains("from the local language server"));
         assert!(narrow.contains("from the local server"));
         assert!(tight.contains("local"));
@@ -1309,7 +1548,7 @@ mod tests {
         let p = palette();
         let cfg = Config::default();
         let d = Data {
-            quota_remote: false,
+            quota_from: From::Local,
             quota_why: String::new(),
             quota: groups(&[
                 ("Gemini 3 Pro", "weekly", 0.25),

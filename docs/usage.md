@@ -352,8 +352,32 @@ and the heading says which was read:
 So the quota survives the app being closed — for as long as the token lasts,
 which is an hour, because the refresh token beside it is deliberately left
 alone. Running `agy` does not extend that: it refreshes in memory and writes
-nothing back, verified by running `agy models` and finding the token file
-byte-identical afterwards.
+nothing back, verified by backdating the `expiry` field, running `agy models`
+against it, and finding the file byte-identical afterwards, mtime included.
+
+**Three sources, cheapest first**, each of them optional:
+
+| order | source | costs | works when |
+|---|---|---|---|
+| 1 | a language server already running — the app's, or an `agy` you started | a socket read | Antigravity is open |
+| 2 | Google, `retrieveUserQuotaSummary` | one request | within an hour of the last run |
+| 3 | `agy`, started by the widget (`antigravity_start`) | a process, a few seconds | whenever the CLI is signed in |
+
+Being last is not being disfavoured — it is being expensive. The third is the
+only one that always works, and the only one that runs another program.
+
+**The pty is not decoration.** Started with its input on `/dev/null` the CLI
+opens ports that answer nothing for as long as you wait; given a pseudo-terminal
+it serves the quota within seconds. Both were measured before this was written.
+The port that answers also belonged to a *child* of the process launched, so
+the search covers descendants — scoped to the pid alone it finds two ports that
+answer nothing and gives up.
+
+Nothing outlives the fetch: the child is killed by the pid `forkpty` returned
+and then reaped, never matched by name, so a CLI you started yourself can
+never be shut down by this — and it would have been found by source 1 long
+before source 3 ran. Verified by counting `agy` processes before and after a
+frame that used it: zero either side.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
@@ -954,6 +978,7 @@ Three settings, all off or hourly by default:
 
 | key | default | what it does |
 |---|---|---|
+| `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
 | `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
