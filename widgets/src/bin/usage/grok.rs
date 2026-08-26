@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
-use toys_core as tc;
+use opscope_core as tc;
 
 use crate::shared::*;
 use crate::*;

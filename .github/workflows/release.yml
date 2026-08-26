@@ -199,14 +199,36 @@ jobs:
         if: ${{ !matrix.cross }}
         shell: bash
         run: |
+          set -euo pipefail
           # A binary that builds and cannot start is not an artefact. Only
           # meaningful where the runner can execute what it just built,
           # which is every entry in this matrix today.
-          out=$(./target/${{ matrix.target }}/release/start --version)
-          echo "$out"
-          case "$out" in
-            *unknown*) echo "the build stamp did not resolve" >&2; exit 1 ;;
-          esac
+          #
+          # Every binary, found by looking rather than named here. This step
+          # used to run one, by name, and when that one was renamed the step
+          # kept pointing at a path that no longer existed - which surfaced
+          # as `No such file or directory` at release time, on a change that
+          # had passed every other check. Nothing here knows what the
+          # binaries are called, so nothing here can go stale.
+          n=0
+          for b in target/${{ matrix.target }}/release/*; do
+            [ -f "$b" ] && [ -x "$b" ] || continue
+            case "$b" in *.d|*.rlib|*.dSYM) continue ;; esac
+            out=$("$b" --version)
+            echo "$out"
+            case "$out" in
+              *unknown*)
+                echo "the build stamp did not resolve for $b" >&2; exit 1 ;;
+            esac
+            n=$((n + 1))
+          done
+          # And a count, because a glob that matches nothing would otherwise
+          # let this step pass having tested nothing at all.
+          if [ "$n" -lt 14 ]; then
+            echo "only $n binaries ran; expected all 14" >&2
+            exit 1
+          fi
+          echo "$n binaries ran and reported themselves"
 
       - name: A tarball, and its checksum
         shell: bash
@@ -218,9 +240,9 @@ jobs:
             v[0-9]*) version="${GITHUB_REF_NAME}" ;;
             *)       version="dev" ;;
           esac
-          name="terminal-toys-${version}-${{ matrix.target }}"
+          name="opscope-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          # The binaries, and the docs that explain them - `start` embeds
+          # The binaries, and the docs that explain them - `opscope` embeds
           # them but a person reading the tarball has no other copy.
           for b in target/${{ matrix.target }}/release/*; do
             [ -f "$b" ] && [ -x "$b" ] || continue
@@ -237,8 +259,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            terminal-toys-*.tar.gz
-            terminal-toys-*.tar.gz.sha256
+            opscope-*.tar.gz
+            opscope-*.tar.gz.sha256
           if-no-files-found: error
 
   publish:

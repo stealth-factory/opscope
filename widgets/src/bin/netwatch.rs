@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use toys_core as tc;
+use opscope_core as tc;
 
 const SERIES: usize = 240;
 
@@ -373,7 +373,7 @@ fn wire_label(names: &[String]) -> String {
 /// another line and leave the body sized for a footer that is not there.
 ///
 /// link.rs carries the same function; TOY-7 tracks folding the pair into
-/// toys-core rather than fixing anything here twice.
+/// opscope-core rather than fixing anything here twice.
 fn scroll_label(first: usize, last: usize, total: usize) -> String {
     format!("rows {:>3}-{:>3} of {:>3}", first, last, total)
 }
@@ -1844,7 +1844,7 @@ fn main() {
                     // for one job and a section heading advertising a letter
                     // of its own - and no key at all for the middle one.
                     // Where it goes, and which sections it steps over, is
-                    // toys-core's rule rather than this widget's.
+                    // opscope-core's rule rather than this widget's.
                     "tab" => focus = tc::next_section(focus, &section_len),
                     "c" | "C" => {
                         if !pending_copy.is_empty() {

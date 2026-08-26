@@ -128,4 +128,4 @@ shown — are not tied to the day and survive.
 The flash colour's text contrast is derived from its luminance, so a dark
 choice stays readable rather than turning the panel into a block.
 
-State lives in `~/.local/state/terminal-toys/pomodoro.json`.
+State lives in `~/.local/state/opscope/pomodoro.json`.

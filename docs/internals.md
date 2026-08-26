@@ -19,9 +19,9 @@ selected-row tint below WCAG AA.
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
 
-## `toys-core`
+## `opscope-core`
 
-`toys-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
+`opscope-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with

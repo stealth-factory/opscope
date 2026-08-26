@@ -132,11 +132,11 @@ jobs:
           perl -0pi -e 's/\n(## \[)/\n\n$1/g; s/\n{3,}/\n\n/g' CHANGELOG.md
           # Only the first version key, which is the workspace package's. A
           # global replace would also rewrite a dependency pinned at the
-          # same number - toys-core is, deliberately.
+          # same number - opscope-core is, deliberately.
           sed -i "0,/^version = \"$CURRENT\"$/s//version = \"$NEXT\"/" Cargo.toml
           # And the path dependency, which carries a version so that cargo
           # is willing to package the crate at all.
-          sed -i "s/^toys-core = { path = \"..\/core\", version = \"$CURRENT\" }$/toys-core = { path = \"..\/core\", version = \"$NEXT\" }/" widgets/Cargo.toml
+          sed -i "s/^opscope-core = { path = \"..\/core\", version = \"$CURRENT\" }$/opscope-core = { path = \"..\/core\", version = \"$NEXT\" }/" widgets/Cargo.toml
           grep -q "^version = \"$NEXT\"$" Cargo.toml || {
             echo "the manifest did not take the bump" >&2; exit 1; }
           # The lock carries the workspace crates' own versions, and a lock

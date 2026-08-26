@@ -3,8 +3,8 @@ target/
 
 # What a release build leaves behind, if one is run by hand.
 dist/
-terminal-toys-*.tar.gz
-terminal-toys-*.tar.gz.sha256
+opscope-*.tar.gz
+opscope-*.tar.gz.sha256
 CHANGELOG-release.md
 
 # Personal settings, and now secrets: config.json holds the Vercel token.

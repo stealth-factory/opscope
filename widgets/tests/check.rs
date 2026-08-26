@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -23,7 +23,7 @@
 //!
 //! These are tests rather than a fifteenth binary for two reasons: they
 //! then run on every `cargo test` instead of waiting to be remembered, and
-//! `start`'s menu asserts that every `[[bin]]` in the manifest is on it, so
+//! `opscope`'s menu asserts that every `[[bin]]` in the manifest is on it, so
 //! a checker binary would have to be listed as a widget it is not.
 //!
 //! Two of check.py's five do not need porting and are recorded here rather

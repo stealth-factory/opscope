@@ -230,6 +230,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opscope-core"
+version = "0.1.3"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
+name = "opscope-widgets"
+version = "0.1.3"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "libc",
+ "opscope-core",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "phf"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -383,28 +405,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "toys-core"
-version = "0.1.3"
-dependencies = [
- "chrono",
- "chrono-tz",
- "libc",
- "serde_json",
-]
-
-[[package]]
-name = "toys-widgets"
-version = "0.1.3"
-dependencies = [
- "chrono",
- "chrono-tz",
- "libc",
- "rusqlite",
- "serde_json",
- "toys-core",
 ]
 
 [[package]]

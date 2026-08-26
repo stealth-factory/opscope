@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to config.json (git-ignored) or ~/.config/terminal-toys/config.json. Every key is optional; anything omitted keeps the tool's default.",
+  "_comment": "Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the tool's default.",
   "latency": {
     "hosts": [
       "1.1.1.1",
