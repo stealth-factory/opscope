@@ -131,10 +131,24 @@ jobs:
               ;;
             macOS)
               # otool lists the binary's own path on the first line, hence
-              # the tail. libSystem carries libc, libm and the pthreads;
-              # libiconv and libresolv come in through the standard library.
+              # the tail below.
+              #
+              # By location, not by name. Everything under /usr/lib and
+              # /System/Library ships with macOS and is present on any Mac -
+              # libSystem carries libc, libm and the pthreads, and chrono's
+              # clock feature reaches CoreFoundation through iana-time-zone
+              # to read the system timezone. What this is actually looking
+              # for is a dylib the user would have to install, and those
+              # live somewhere else: /opt/homebrew/lib/libsqlite3.dylib is
+              # the exact thing that must never appear here, because
+              # rusqlite is taken with `bundled` so that it does not.
+              #
+              # An earlier version listed dylib names instead and failed on
+              # CoreFoundation, which is not a leak. Naming what is allowed
+              # meant guessing the whole list correctly from another
+              # platform; naming where it may come from does not.
               tool="otool -L"
-              allowed='libSystem\.B\.dylib|libiconv|libresolv|libc\+\+'
+              allowed='^\s*/usr/lib/|^\s*/System/Library/'
               ;;
           esac
           bad=0
@@ -144,8 +158,11 @@ jobs:
             leaked=$($tool "$b" 2>/dev/null | tail -n +2 \
                      | grep -vE "$allowed" | grep -v '^[[:space:]]*$' || true)
             if [ -n "$leaked" ]; then
-              echo "$(basename "$b") links something it should carry:" >&2
-              echo "$leaked" >&2
+              # stdout as well as stderr: reading a failed job's log needs
+              # admin rights on the repository, and the first time this
+              # fired the reason was not visible to the person who wrote it.
+              echo "$(basename "$b") links something it should carry:"
+              echo "$leaked"
               bad=1
             fi
           done
