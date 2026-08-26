@@ -54,6 +54,22 @@ const CURSOR_LANES: &[(&str, &str, f64)] = &[
     ("api", "apiPercentUsed", 0.62),
 ];
 
+/// Grok Bot's weekly included allowance, which Cursor's own API calls
+/// "sand" - the name that shows up in the spend breakdown as
+/// `sand-default` and `sand-automation`.
+///
+/// It is not one of the three plan lanes and does not share their window:
+/// the plan lanes run to the monthly billing cycle, this one resets
+/// weekly on a date the response states. Drawing it against the cycle's
+/// clock would put its pace marker in the wrong place every time.
+///
+/// A different host from the RPC above, and a different credential: this
+/// one is cookie-authenticated and rejects the app's bearer token.
+const SAND: &str = "https://cursor.com/api/dashboard/get-sand-usage-status";
+const SAND_KEY: &str = "cursor:sand";
+/// The allowance is weekly, so this need not be brisk.
+const SAND_TTL: f64 = 900.0;
+
 /// The events RPC's own ceiling per request.
 const EVENT_PAGE: usize = 1000;
 /// Enough pages to reach past any sane window.
@@ -78,6 +94,12 @@ pub struct Data {
     events: Option<serde_json::Value>,
     /// GetAggregatedUsageEvents: per-model cents over the window.
     spend: Option<serde_json::Value>,
+    /// get-sand-usage-status: the Grok Bot weekly allowance, when a cookie
+    /// was configured and the account has one.
+    sand: Option<serde_json::Value>,
+    /// Why it is not showing, when a cookie was configured and it still is
+    /// not. Empty when none was configured - that is not a failure.
+    sand_why: String,
     hashes: i64,
     conversations: i64,
     models: i64,
@@ -160,6 +182,52 @@ fn cursor_live() -> Option<serde_json::Value> {
 /// is what Ultra includes.
 fn cursor_plan() -> Option<serde_json::Value> {
     cursor_rpc("GetPlanInfo", &serde_json::json!({}))
+}
+
+/// The Grok Bot allowance, or why it could not be read.
+///
+/// Best-effort by contract: every failure here has to leave Cursor's three
+/// monthly bars exactly as they were, because this is an extra lane and not
+/// a precondition for the rest of the tab.
+fn sand_status(cookie: &str, seconds: u64) -> Result<serde_json::Value, String> {
+    if cookie.is_empty() {
+        return Err(String::new());
+    }
+    let jar = format!("WorkosCursorSessionToken={}", cookie);
+    post_json_said(
+        SAND,
+        &[
+            ("Cookie", jar.as_str()),
+            ("Content-Type", "application/json"),
+            // The dashboard checks this for CSRF and refuses without it.
+            ("Origin", "https://cursor.com"),
+            ("User-Agent", "terminal-toys"),
+        ],
+        "{}",
+        seconds,
+    )
+}
+
+/// The percentage, the window it covers, and when it resets - or nothing.
+///
+/// Nothing is the right answer in two different situations, and neither is
+/// an error: an account with no Bot allowance at all, and a response that
+/// carries the flag but no percentage. Cursor states the first as
+/// `hasNonZeroIncludedLimit`, and drawing a 0% bar for an account that was
+/// never given the allowance would invent a limit that does not exist.
+fn sand_lane(v: &serde_json::Value) -> Option<(f64, Option<f64>, Option<f64>)> {
+    if v["hasNonZeroIncludedLimit"].as_bool() != Some(true) {
+        return None;
+    }
+    let pct = loose(&v["usagePercent"])?;
+    let start = iso_epoch(&text(v, "currentPeriodStart"));
+    let reset = iso_epoch(&text(v, "nextResetTimestampUtc"));
+    // The window only means anything as a pair, and only forwards.
+    let secs = match (start, reset) {
+        (Some(s), Some(e)) if e > s => Some(e - s),
+        _ => None,
+    };
+    Some((pct.clamp(0.0, 100.0), secs, reset))
 }
 
 /// Per-model tokens and real cost over a window.
@@ -349,7 +417,7 @@ fn read_tracking(con: &Connection) -> rusqlite::Result<Tracking> {
     })
 }
 
-pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
+pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let mut d = Data::default();
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
@@ -358,6 +426,28 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
+    // Deliberately last of the four and deliberately unable to affect them:
+    // this is an extra allowance, and an account without one is the normal
+    // case rather than a fault.
+    if !cfg.cursor_cookie.is_empty() {
+        let mut why = String::new();
+        d.sand = cached(caches, SAND_KEY, SAND_TTL, || {
+            match sand_status(&cfg.cursor_cookie, 20) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    why = e;
+                    None
+                }
+            }
+        });
+        if d.sand.is_none() {
+            d.sand_why = if why.is_empty() {
+                "cursor.com did not answer".to_string()
+            } else {
+                why
+            };
+        }
+    }
     let path = under_home(".cursor/ai-tracking/ai-code-tracking.db");
     if !std::path::Path::new(&path).exists() {
         d.why = "no tracking database".into();
@@ -412,6 +502,19 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         };
         out.push(Lane {
             label: (*label).to_string(),
+            pct,
+            window_secs: secs,
+            reset,
+            stale: false,
+            projected: false,
+        });
+    }
+    // Its own window, not the billing cycle's. The summary ranks lanes
+    // against each other and prints each one's reset, so handing it the
+    // monthly dates for a weekly allowance would misreport both.
+    if let Some((pct, secs, reset)) = d.sand.as_ref().and_then(sand_lane) {
+        out.push(Lane {
+            label: "grok bot".to_string(),
             pct,
             window_secs: secs,
             reset,
@@ -497,6 +600,57 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         line.push((pace_colour, pace_txt));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
+    }
+    // Grok Bot sits under the three plan lanes, after a gap, because it is
+    // not one of them: a separate weekly allowance with its own reset,
+    // which the heading above cannot speak for. So this row carries its
+    // own countdown, and the blank line says it is not a fourth slice of
+    // the thing above it.
+    //
+    // Full hue rather than a fourth step down the ramp, for two measured
+    // reasons. The ramp encodes narrowing scope - included, then auto,
+    // then api - and this allowance is not narrower than any of them, so a
+    // darker tint would state a relationship that does not exist. And the
+    // ramp has no room left: the percentage is drawn in the bar's own
+    // colour, api at 0.62 already measures 5.29 against the background,
+    // and the next step that reads as distinct from it, 0.50, measures
+    // 4.10 - under AA. 0.56 clears at 4.66 and is indistinguishable from
+    // api by eye. Full hue is 10.74, and the gap above does the work the
+    // colour would have been doing badly.
+    if let Some((pct, secs, reset)) = d.sand.as_ref().and_then(sand_lane) {
+        let used = (pct / 100.0).clamp(0.0, 1.0);
+        let hue = base;
+        rows.push(String::new());
+        let (pace_colour, pace_txt) = pace_cell(lead(pct, secs, reset), p);
+        let resets = match reset.map(|e| e - now()) {
+            Some(left) if left > 0.0 => format!("  {}", left_span(left)),
+            Some(_) => "  resetting".to_string(),
+            None => String::new(),
+        };
+        let mut line: Vec<(String, String)> =
+            vec![(p.dim.clone(), format!(" {:<9}", "grok bot"))];
+        line.extend(paced_bar(
+            used,
+            elapsed_of(secs, reset),
+            // Narrower than the plan lanes by the width of the reset cell,
+            // so adding that column cannot push this row into a clip.
+            w.saturating_sub(50).max(8),
+            Some(hue),
+            p,
+        ));
+        line.push((pct_colour(pct, Some(hue), p), pct_text(pct)));
+        line.push((pace_colour, pace_txt));
+        line.push((p.dim.clone(), resets));
+        let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        rows.push(tc::seg(&refs, w - 1));
+    } else if !d.sand_why.is_empty() {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), " grok bot  ".into()),
+                (p.warn.as_str(), d.sand_why.clone()),
+            ],
+            w - 1,
+        ));
     }
     if let Some(limit) = loose(&plan["limit"]).filter(|v| *v != 0.0) {
         // Deliberately dollars rather than a fourth bar. This is spend
@@ -970,6 +1124,83 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(!why.is_empty(), "a missing table must carry a reason");
+    }
+
+    /// A real-shaped response, from the field names CodexBar's Cursor
+    /// provider decodes. Weekly window: 1700000000 -> 1700604800.
+    fn sand(flag: serde_json::Value, pct: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "hasNonZeroIncludedLimit": flag,
+            "usagePercent": pct,
+            "currentPeriodStart": "2023-11-14T22:13:20Z",
+            "nextResetTimestampUtc": "2023-11-21T22:13:20Z",
+            "hasAvailableUsage": true,
+        })
+    }
+
+    #[test]
+    fn an_account_with_no_bot_allowance_draws_no_bot_bar() {
+        // The whole point of the flag. A 0% bar here would state a limit
+        // the account was never given, which is the one thing this widget
+        // must not do - and 0% is exactly what an untouched allowance
+        // looks like, so the two are indistinguishable without it.
+        assert_eq!(sand_lane(&sand(serde_json::json!(false), serde_json::json!(0.0))), None);
+        assert_eq!(sand_lane(&sand(serde_json::json!(null), serde_json::json!(12.0))), None);
+        assert_eq!(sand_lane(&serde_json::json!({})), None);
+        // The flag alone is not enough: no percentage, no bar.
+        assert_eq!(sand_lane(&sand(serde_json::json!(true), serde_json::json!(null))), None);
+    }
+
+    #[test]
+    fn the_bot_lane_keeps_its_own_week_not_the_billing_cycle() {
+        let got = sand_lane(&sand(serde_json::json!(true), serde_json::json!(62.5)));
+        let (pct, secs, reset) = got.expect("an allowance the account has");
+        assert!((pct - 62.5).abs() < 1e-9);
+        // Seven days, not the month the plan lanes run to.
+        assert_eq!(secs, Some(604_800.0));
+        assert_eq!(reset, Some(1_700_604_800.0));
+
+        // And it reaches the summary screen as its own lane, alongside the
+        // plan's - which is what puts it on [+].
+        let d = Data {
+            live: Some(serde_json::json!({
+                "planUsage": { "totalPercentUsed": 9.5 },
+                "billingCycleStart": "1700000000000",
+                "billingCycleEnd": "1702592000000",
+            })),
+            sand: Some(sand(serde_json::json!(true), serde_json::json!(62.5))),
+            ..Data::default()
+        };
+        let lanes = lanes(&d);
+        assert_eq!(lanes.len(), 2);
+        let bot = lanes.iter().find(|l| l.label == "grok bot").expect("a grok bot lane");
+        assert_eq!(bot.window_secs, Some(604_800.0), "took the monthly window");
+        assert_eq!(bot.reset, Some(1_700_604_800.0), "took the monthly reset");
+        // The plan lane beside it must be untouched by any of this.
+        let inc = lanes.iter().find(|l| l.label == "included").unwrap();
+        assert_eq!(inc.window_secs, Some(2_592_000.0));
+    }
+
+    #[test]
+    fn a_bot_reading_that_failed_leaves_the_plan_bars_alone() {
+        // Best-effort by contract: this lane is an extra, and an extra that
+        // can take the tab down with it is worse than no extra.
+        let d = Data {
+            live: Some(serde_json::json!({
+                "planUsage": { "totalPercentUsed": 9.5, "limit": 40000.0, "totalSpend": 33099.0 },
+                "billingCycleStart": "1700000000000",
+                "billingCycleEnd": "1702592000000",
+            })),
+            sand: None,
+            sand_why: "cursor.com did not answer".into(),
+            ..Data::default()
+        };
+        assert_eq!(lanes(&d).len(), 1, "a failed extra invented or removed a lane");
+        let rows = cursor_quota(&d, 110, &palette());
+        let joined = rows.join("\n");
+        assert!(joined.contains("included"), "plan bar lost: {}", joined);
+        assert!(joined.contains("$330.99"), "spend lost: {}", joined);
+        assert!(joined.contains("did not answer"), "reason not shown: {}", joined);
     }
 
     #[test]
