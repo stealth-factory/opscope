@@ -3,6 +3,19 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.1.1] - 2026-08-26
+
+### Bug Fixes
+
+- **ci**: Fetch git-cliff directly instead of through an installer action (#45)
+- **ci**: Tidy what the release PR writes (#47)
+- Ignore config backups, which the existing rules did not cover (#49)
+- **ci**: Put the blank line back between the release notes and the rule (#50)
+
+### CI
+
+- Build and test every pull request (#48)
+
 ## [0.1.0] - 2026-08-26
 
 The first tagged release, and the baseline the version numbers count from.
