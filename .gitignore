@@ -12,6 +12,12 @@ CHANGELOG-release.md
 # committed by accident.
 config.json
 config.*.json
+# And anything derived from it. `config.*.json` does not cover
+# `config.json.bak-20260825-120228`, which is the shape an editor or a
+# careless `cp` actually leaves behind - the name ends in the timestamp,
+# not in .json. Two such files were sitting untracked in this checkout,
+# holding live tokens, one `git add -A` away from a public commit.
+config.json.*
 !config.example.json
 .env
 .env.*
