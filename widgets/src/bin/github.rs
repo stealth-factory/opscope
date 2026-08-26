@@ -519,7 +519,17 @@ fn graphql(
             }
         }
     }
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    // GraphQL answers 200 with an `errors` array, so a successful request is
+    // not a successful query. Read past it and every alias the query asked
+    // for is missing, which `count_at` turns into zeros - and those zeros go
+    // into the day cache as historical fact, so the affected days are never
+    // retried and the chart shows a quiet week that never happened. linear
+    // and pr both refuse this in the same place; github did not.
+    if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
+        return Err(first["message"].as_str().unwrap_or("").chars().take(80).collect());
+    }
+    Ok(data)
 }
 
 /// Flag a token that will undercount rather than fail.
@@ -857,7 +867,13 @@ fn one_pass(
                 let why = who["errors"][0]["message"]
                     .as_str()
                     .unwrap_or("no viewer login in the response");
-                return Err(format!("who am I: {}", &why[..why.len().min(50)]));
+                // By characters, not bytes: a message with any multibyte
+                // character crossing byte fifty would panic the slice, and
+                // this one comes from a server.
+                return Err(format!(
+                    "who am I: {}",
+                    why.chars().take(50).collect::<String>()
+                ));
             }
         };
     }
@@ -927,18 +943,13 @@ fn one_pass(
         let data = match graphql(&build_query(acc, days_now, viewer), tok, scopes) {
             Ok(d) => d,
             Err(e) => {
-                failed.push(format!("{} ({})", acc, e.chars().take(20).collect::<String>()));
+                // Fifty characters, which is what the branch below used to
+                // take before `graphql` started refusing an errors payload
+                // itself and made that branch unreachable.
+                failed.push(format!("{} ({})", acc, e.chars().take(50).collect::<String>()));
                 continue;
             }
         };
-        if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
-            failed.push(format!(
-                "{} ({})",
-                acc,
-                first["message"].as_str().unwrap_or("").chars().take(50).collect::<String>()
-            ));
-            continue;
-        }
         let d = &data["data"];
         if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
             rate = Some((d["rateLimit"]["remaining"].as_i64().unwrap_or(0), limit));

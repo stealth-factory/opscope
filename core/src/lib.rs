@@ -1404,6 +1404,13 @@ mod tests {
         let tool = dir.join("definitely-not-a-real-tool");
         std::fs::write(&tool, "#!/bin/sh\n").unwrap();
 
+        // PATH is process-wide and cargo runs a binary's tests in parallel,
+        // so this is held for as long as the value is borrowed. `missing()`
+        // reads PATH, and a second test calling it mid-swap would see a
+        // directory holding one fake tool - failing for a reason that has
+        // nothing to do with what it was testing, and only sometimes.
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let held = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", dir.to_string_lossy().to_string());
 

@@ -1037,6 +1037,12 @@ fn phase_of(there: &chrono::DateTime<Tz>, p: &Palette) -> (String, &'static str)
 /// UTC: a clock quietly showing the wrong city is worse than one absent.
 fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
     let mut out = Vec::new();
+    // Whether the key is there at all, which is a different thing from it
+    // being empty. Absent means nobody has said what they want and a default
+    // is a kindness; present means they have, and substituting four cities
+    // of our own for the answer they gave is the widget telling them about
+    // somewhere they did not ask about.
+    let asked = cfg.get("cities").and_then(|v| v.as_array()).is_some();
     if let Some(items) = cfg.get("cities").and_then(|v| v.as_array()) {
         for pair in items {
             let name = pair.get(0).and_then(|v| v.as_str()).unwrap_or("");
@@ -1060,7 +1066,11 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
         });
         return out;
     }
-    if out.is_empty() {
+    // Only when nothing was configured. A list that was set and parsed to
+    // nothing - empty, or every zone a typo - is left empty, so the row that
+    // is missing is the question rather than a plausible answer to a
+    // different one.
+    if out.is_empty() && !asked {
         for (name, zone) in [
             ("San Francisco", "America/Los_Angeles"),
             ("London", "Europe/London"),

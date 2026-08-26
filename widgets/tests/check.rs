@@ -546,7 +546,14 @@ fn every_config_read_falls_back_to_a_code_default() {
             let statement = &rest[..stop];
             let guarded = statement.contains("unwrap_or")
                 || statement.contains("unwrap_or_else")
-                || statement.contains("unwrap_or_default");
+                || statement.contains("unwrap_or_default")
+                // Asking whether a key is *there* has no value to default.
+                // clocks needs it: a `cities` list that was set and came to
+                // nothing must stay nothing, where an absent one gets the
+                // code's four. Collapsing those two is the bug, and the
+                // fallback this rule asks for is what would collapse them.
+                || statement.contains(".is_some()")
+                || statement.contains(".is_none()");
             if !guarded {
                 wrong.push(format!(
                     "{}: reads {:?} from config with no fallback in the statement",
