@@ -450,6 +450,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 reset: iso_epoch(&text(bucket, "resetTime")),
                 stale: false,
                 projected: false,
+                            apart: false,
             });
         }
     }

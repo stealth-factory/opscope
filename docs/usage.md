@@ -934,6 +934,31 @@ costs one attempt rather than one every five minutes.
 business doing unasked: it talks to a vendor, and it starts somebody else's
 program.
 
+**Cached or live is a question about age, not about source.** A reading is
+shown as current when it was taken within the last half hour, whatever
+fetched it — the same rule and the same half hour as Claude's. Marking by
+source instead put a star on a figure thirty seconds old while a live one
+four minutes old carried none, and here it was worse: the live answer was
+being discarded (below), so the row read `not live` whether the ping was
+working or not, and turning it on changed nothing a reader could see.
+
+**A period without a percentage is still a reading.** x.ai has stopped
+sending `creditUsagePercent` for accounts on unified billing — both
+`/v1/billing` and `?format=credits` answer 200, name the current weekly
+period, and omit it, with every other figure zero. Refusing that answer
+meant falling back to the newest line in the client log, which can be a
+fossil: on the machine this was found on it was eleven days old and about a
+window that had closed a week before that, shown as current with a rolled
+forward reset. The server's answer now wins. Where it names the window but
+no percentage, the log's figure is used **only if it is about that same
+window** — a percentage from a window that has closed is not this one's —
+and otherwise the row says there is no figure rather than drawing a bar.
+
+An agent that publishes no percentage has no bar to rank, so it moves to
+`No quota published by:` on `[+]`, with a line saying which of the two
+reasons applies: nobody is asking, or the ask worked and x.ai had nothing
+to report.
+
 The screen says which state it is in, in both places it appears:
 
 ```
@@ -945,6 +970,14 @@ The screen says which state it is in, in both places it appears:
 ```
 ── WEEKLY QUOTA ── resets in 1.1 days
  live · polled x.ai just now, every 5m
+```
+
+```
+── WEEKLY QUOTA ── resets in 6d 20h
+ live · polled x.ai just now, every 5m
+
+ no credit figure for this period
+ window 26 Aug → 2 Sep
 ```
 
 When asking is on and the figure still is not the server's, the row says
@@ -1104,7 +1137,7 @@ refresh makes a tab a row longer.
 
 | Key | Action |
 |---|---|
-| `←` `→` / `tab` | switch agent |
+| `←` `→` / `tab` | switch agent. The new tab opens at its top: the tabs are different lengths and shapes, so a remembered offset opens the next one part-way down with its heading scrolled off |
 | `↑` `↓` | scroll the tab |
 | `pgup` `pgdn` | scroll a page |
 | `home` `end` | jump to the top or bottom |

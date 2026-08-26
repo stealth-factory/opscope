@@ -1488,9 +1488,17 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let (mut active, mut tick) = (0i64, 0usize);
-    // One offset per tab. Switching away and back keeps your place, which
-    // matters when a tab is forty rows and you were reading the bottom of it.
-    let mut offsets: HashMap<String, usize> = HashMap::new();
+    // Switching tabs lands at the top of the new one.
+    //
+    // This used to be one offset per tab, kept so that switching away and
+    // back returned you to where you were reading. In use that is the wrong
+    // trade: the tabs are different lengths and different shapes, so a
+    // remembered offset from a forty-row tab opens the next one part-way
+    // down with its heading scrolled off, and the first thing a reader does
+    // on arriving somewhere new is look at the top of it. Only one offset is
+    // needed now, carried across frames of the same tab and dropped the
+    // moment the tab changes.
+    let (mut carried, mut shown) = (0usize, String::new());
 
     loop {
         tick += 1;
@@ -1574,7 +1582,7 @@ fn main() {
         let reserved = tc::pack_hints(&hints, w - 2, "  ").len();
         let avail = h.saturating_sub(rows.len() + reserved).max(1);
         let top = body.len().saturating_sub(avail);
-        let mut off = offsets.get(&name).copied().unwrap_or(0).min(top);
+        let mut off = if name == shown { carried.min(top) } else { 0 };
         if to_top {
             off = 0;
         }
@@ -1589,7 +1597,8 @@ fn main() {
             off = (off as i64 + move_).clamp(0, top as i64) as usize;
         }
         off = off.min(top);
-        offsets.insert(name.clone(), off);
+        carried = off;
+        shown = name.clone();
 
         let view: Vec<String> = body.iter().skip(off).take(avail).cloned().collect();
         let where_ = if top > 0 {

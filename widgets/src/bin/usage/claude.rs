@@ -1178,6 +1178,7 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                 reset: rolled.0,
                 stale: reading_is_old(c.quota_at),
                 projected: rolled.1,
+                            apart: false,
             }
         })
         .collect()

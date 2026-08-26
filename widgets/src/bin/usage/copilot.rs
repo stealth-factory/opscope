@@ -351,6 +351,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: stamp,
             stale: false,
             projected: false,
+                    apart: false,
         });
     }
     out

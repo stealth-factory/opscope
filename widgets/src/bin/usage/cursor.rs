@@ -503,6 +503,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset,
             stale: false,
             projected: false,
+                    apart: false,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes
@@ -516,6 +517,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset,
             stale: false,
             projected: false,
+            apart: true,
         });
     }
     out

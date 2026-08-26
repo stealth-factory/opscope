@@ -78,6 +78,10 @@ const CACHE: &str = "grok:session:";
 #[derive(Clone, Default)]
 struct Quota {
     pct: Option<f64>,
+    /// When this reading was taken, as epoch seconds - the log line's own
+    /// `ts`, or the moment of the fetch. Not when it was read: the tab
+    /// judges a reading by its age, and those are different numbers.
+    taken: Option<f64>,
     kind: String,
     start: String,
     end: String,
@@ -207,6 +211,7 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
         let period = &cfg["currentPeriod"];
         let got = Quota {
             pct: val_of(&cfg["creditUsagePercent"]),
+            taken: iso_epoch(&text(&d, "ts")),
             kind: text(period, "type"),
             start: text(period, "start"),
             end: text(period, "end"),
@@ -254,17 +259,30 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     match got.as_ref() {
         None => (from_log(), false, at, "x.ai did not answer".to_string()),
         Some(body) => match quota_from(body) {
-            Some(q) => (Some(q), true, at, String::new()),
-            // A 200 that names the period but sends a null percentage. The
-            // log reading is kept, because it is the only percentage there
-            // is, but the row must not read as though the server confirmed
-            // it - it did not, and it is a window older than this one.
-            None => (
-                from_log(),
-                false,
-                at,
-                "x.ai sent no percentage for this period".to_string(),
-            ),
+            Some(mut q) => {
+                let why = String::new();
+                if q.pct.is_none() {
+                    // The server named the window but not the spend. The log
+                    // may still hold a percentage, and it is usable only if
+                    // it is about this same window: a figure from a window
+                    // that has closed is not this one's, however it got here.
+                    match from_log() {
+                        Some(l) if l.start == q.start && l.end == q.end => {
+                            q.pct = l.pct;
+                            q.taken = l.taken;
+                        }
+                        // No reason recorded here on purpose. The row that
+                        // stands where the bar would be already says there
+                        // is no figure for this period, and the freshness
+                        // line saying it too was the same sentence twice.
+                        // quota_why is for the cases that line cannot show:
+                        // a lapsed token, a refusal, an unreadable answer.
+                        _ => {}
+                    }
+                }
+                (Some(q), true, at, why)
+            }
+            None => (from_log(), false, at, "x.ai sent no usable reading".to_string()),
         },
     }
 }
@@ -518,18 +536,58 @@ fn fetch_billing(key: &str, seconds: u64) -> Option<serde_json::Value> {
     )
 }
 
+/// How old a reading may be and still be shown as current.
+///
+/// Half an hour, the same figure and the same reasoning as Claude's
+/// CLAUDE_FRESH_FOR: a credit window that turns over weekly does not move
+/// enough in half an hour to mislead anyone.
+///
+/// This tab used to mark by *where* a reading came from - `stale` was
+/// simply "not from the server" - and that is the mistake claude.rs already
+/// wrote down: it flags the fresher of two readings as the doubtful one.
+/// Here it was worse, because the live answer was being discarded (see
+/// quota_from) and the fallback was a log line eleven days old, so the row
+/// said "not live" whether the ping was working or not, and turning the
+/// ping on changed nothing a reader could see.
+const GROK_FRESH_FOR: f64 = 1800.0;
+
+/// True when the reading is old enough to be worth flagging, whatever its
+/// source. A reading with no timestamp at all is treated as old, because
+/// unknown age is not evidence of youth.
+fn reading_is_old(taken: Option<f64>) -> bool {
+    taken.is_none_or(|t| now() - t > GROK_FRESH_FOR)
+}
+
 /// The billing body in the same shape the log parser produces, so the rest
 /// of the tab cannot tell which of the two it is looking at.
 fn quota_from(d: &serde_json::Value) -> Option<Quota> {
     let cfg = &d["config"];
     let period = &cfg["currentPeriod"];
-    let pct = val_of(&cfg["creditUsagePercent"]);
-    pct?;
+    // The period is what makes this a reading; the percentage is optional.
+    //
+    // It used to be the other way round - no percentage, no reading - and
+    // that has stopped being true of the endpoint. x.ai no longer sends
+    // `creditUsagePercent` for unified-billing accounts: both `/v1/billing`
+    // and `?format=credits` answer 200, name the current weekly period, and
+    // omit it entirely. Refusing the whole answer for that meant falling
+    // back to the newest log line, which on this machine was written eleven
+    // days ago about a window that closed a week before that - a fossil
+    // shown as current while the server's own answer, naming the window we
+    // are actually in, was thrown away.
+    //
+    // The log parser has always accepted a reading whose percentage is
+    // absent, for exactly this reason. The two are consistent now.
+    let start = text(period, "start");
+    let end = text(period, "end");
+    if start.is_empty() || end.is_empty() {
+        return None;
+    }
     Some(Quota {
-        pct,
+        pct: val_of(&cfg["creditUsagePercent"]),
+        taken: Some(now()),
         kind: text(period, "type"),
-        start: text(period, "start"),
-        end: text(period, "end"),
+        start,
+        end,
         tier: String::new(),
         on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
         on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
@@ -588,17 +646,36 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             _ => None,
         },
         reset,
-        // Not live means the percentage was measured in some earlier window
-        // and this one's spend is unknown. The row says so rather than
-        // letting a stale figure read as current.
-        stale: !d.quota_live,
+        // By age, not by source. A figure the server sent four minutes ago
+        // and one the log recorded thirty seconds ago are both current; a
+        // live fetch of a reading taken days earlier is not.
+        stale: reading_is_old(q.taken),
         projected,
+            apart: false,
     }]
 }
 
 /// True when nothing is asking the server on the reader's behalf, so the
 /// figures move only when they use Grok on this machine. The summary says so
 /// under the row; once asking is on, the tab reports the interval instead.
+/// Why Grok publishes no bar, when it does not.
+///
+/// "No quota published" covers two situations that want opposite things
+/// from the reader. Nobody is asking, and they could turn asking on - or
+/// the ask is working and x.ai is the one with nothing to report, in which
+/// case there is nothing for them to do and a prompt to change a setting
+/// would be a wild goose chase.
+pub fn why_no_lane(d: &Data) -> &'static str {
+    if d.quota.is_none() {
+        return "";
+    }
+    if d.quota_live {
+        "x.ai answered, and published no credit figure for this period.          Accounts on unified billing stopped carrying one; the window it          does state is on the GROK tab."
+    } else {
+        ""
+    }
+}
+
 pub fn asks_nobody(d: &Data) -> bool {
     d.quota_every <= 0.0
 }
@@ -626,6 +703,7 @@ fn every(seconds: f64) -> String {
 fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut out = Vec::new();
     if d.quota_every > 0.0 {
+        let fresh = !reading_is_old(d.quota.as_ref().and_then(|q| q.taken));
         let ago = now() - d.quota_at;
         let last = if d.quota_at <= 0.0 {
             "not yet".to_string()
@@ -636,9 +714,13 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         };
         out.push(tc::seg(
             &[
+                // Whether the figure is current, which is a question about
+                // its age. It used to be a question about its source, so a
+                // working ping still read "not live" for as long as the
+                // answer it fetched was being discarded.
                 (
-                    if d.quota_live { p.ok.as_str() } else { p.warn.as_str() },
-                    if d.quota_live { "  live" } else { "  not live" }.to_string(),
+                    if fresh { p.ok.as_str() } else { p.warn.as_str() },
+                    if fresh { "  live" } else { "  not live" }.to_string(),
                 ),
                 (
                     p.dim.as_str(),
@@ -727,9 +809,13 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
 fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
-    let quota = d.quota.as_ref().filter(|q| q.pct.is_some());
-    if let Some(q) = quota {
-        let pct = q.pct.unwrap_or(0.0);
+    // Not filtered on the percentage any more. A reading that names the
+    // window but not the spend is still a reading, and hiding the whole
+    // section for it is the failure this repo keeps paying for: the pane
+    // goes blank and a reader cannot tell an account with no quota from a
+    // widget that has stopped working. The window, the countdown and the
+    // reason are all still true; only the bar needs a number.
+    if let Some(q) = d.quota.as_ref() {
         // The one real remaining-quota figure in this widget: everything
         // else here counts what was spent. It leads the tab for that
         // reason.
@@ -771,20 +857,31 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             (Some(b), Some(e)) if e > b => (Some(e - b), Some(e)),
             _ => (None, None),
         };
-        let mut line: Vec<(String, String)> = vec![(
-            pct_colour(pct, hue, p),
-            format!(" {:<5}", format!("{:.0}%", pct)),
-        )];
-        line.extend(paced_bar(
-            (pct / 100.0).clamp(0.0, 1.0),
-            elapsed_of(span, reset),
-            w.saturating_sub(38).max(10),
-            hue,
-            p,
-        ));
-        line.push((p.dim.clone(), "  credits used".into()));
-        line.push(pace_cell(lead(pct, span, reset), p));
-        rows.push(seg_of(&line, w));
+        // The bar is the one part that needs a number. Without one the row
+        // says so in words rather than drawing an empty gauge, which would
+        // read as nought per cent used.
+        match q.pct {
+            Some(pct) => {
+                let mut line: Vec<(String, String)> = vec![(
+                    pct_colour(pct, hue, p),
+                    format!(" {:<5}", format!("{:.0}%", pct)),
+                )];
+                line.extend(paced_bar(
+                    (pct / 100.0).clamp(0.0, 1.0),
+                    elapsed_of(span, reset),
+                    w.saturating_sub(38).max(10),
+                    hue,
+                    p,
+                ));
+                line.push((p.dim.clone(), "  credits used".into()));
+                line.push(pace_cell(lead(pct, span, reset), p));
+                rows.push(seg_of(&line, w));
+            }
+            None => rows.push(tc::seg(
+                &[(p.dim.as_str(), "  no credit figure for this period".into())],
+                w - 1,
+            )),
+        }
 
         let (from, to) = (short_day(&q.start), short_day(&q.end));
         let window = if from.is_empty() || to.is_empty() {
@@ -897,11 +994,17 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut note = "Totals are a running count per session, summed as deltas so a session \
                     spanning days lands on the right one."
         .to_string();
-    if quota.is_some() {
-        note.push_str(
+    // Either way it is the server's own figure and not an inference - but
+    // which of the two routes it took is a different sentence, and the note
+    // named only the log for as long as the log was the only route that
+    // ever produced one.
+    if d.quota.is_some() {
+        note.push_str(if d.quota_live {
+            " The quota above is the server's own figure, asked for directly - not inferred."
+        } else {
             " The quota above is the server's own figure, read from the client log - not \
-             inferred.",
-        );
+             inferred."
+        });
     }
     for line in wrap_text(&note, w.saturating_sub(4).max(20)) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
@@ -1104,25 +1207,85 @@ mod tests {
     }
 
     #[test]
-    fn a_live_reading_is_neither_stale_nor_projected() {
-        // The same fixture, marked as having come from the server. Its
-        // window is then the window we are in: nothing to roll forward, and
-        // nothing to qualify.
+    fn a_reading_is_judged_by_its_age_not_by_where_it_came_from() {
+        // This asserted the opposite until the rule changed: that a reading
+        // is current "by definition" when it came from the server. That is
+        // the mistake claude.rs already wrote down - it flags the fresher of
+        // two readings as the doubtful one - and here it meant a working
+        // ping still read "not live", because the answer it fetched was
+        // being discarded and an eleven-day-old log line shown instead.
+        let base = newest_quota([LOG_LINE].into_iter()).expect("a reading");
+
+        // Taken a minute ago: current, and its window is the one we are in.
         let d = Data {
             ok: true,
-            quota: newest_quota([LOG_LINE].into_iter()),
+            quota: Some(Quota { taken: Some(now() - 60.0), ..base.clone() }),
             quota_live: true,
             ..Default::default()
         };
         let got = lanes(&d);
         assert_eq!(got.len(), 1);
-        assert!(!got[0].stale, "a live reading is current by definition");
+        assert!(!got[0].stale, "a minute-old reading is current");
         assert!(!got[0].projected, "a live window was read, not worked out");
         assert_eq!(
             got[0].reset,
             iso_epoch("2026-08-17T00:00:00.000000+00:00"),
             "a live window is reported as the server gave it, not rolled"
         );
+
+        // Fetched just now, but of a reading taken days ago. Still old:
+        // fetching an old number does not make it a new one.
+        let d = Data {
+            ok: true,
+            quota: Some(Quota { taken: Some(now() - 5.0 * 86400.0), ..base.clone() }),
+            quota_live: true,
+            ..Default::default()
+        };
+        assert!(lanes(&d)[0].stale, "a live fetch of an old reading read as current");
+
+        // And the other direction: nothing was fetched, the log supplied it
+        // thirty seconds ago, and that is current whatever its source.
+        let d = Data {
+            ok: true,
+            quota: Some(Quota { taken: Some(now() - 30.0), ..base.clone() }),
+            quota_live: false,
+            ..Default::default()
+        };
+        assert!(!lanes(&d)[0].stale, "flagged for its source rather than its age");
+
+        // A reading that cannot say when it was taken is treated as old:
+        // unknown age is not evidence of youth.
+        let d = Data {
+            ok: true,
+            quota: Some(Quota { taken: None, ..base }),
+            quota_live: true,
+            ..Default::default()
+        };
+        assert!(lanes(&d)[0].stale, "an undateable reading passed as current");
+    }
+
+    #[test]
+    fn a_period_the_server_names_is_a_reading_even_with_no_percentage() {
+        // x.ai stopped sending creditUsagePercent for unified-billing
+        // accounts: 200, the current weekly period, and no percentage at
+        // all. Refusing that answer meant falling back to a log line about
+        // a window that had already closed - a fossil shown as current
+        // while the server's own answer was thrown away.
+        let body = serde_json::json!({"config": {
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "start": "2026-08-26T02:09:41.289406+00:00",
+                "end": "2026-09-02T02:09:41.289406+00:00"
+            },
+            "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
+        }});
+        let q = quota_from(&body).expect("a named period is a reading");
+        assert_eq!(q.pct, None, "invented a percentage the server did not send");
+        assert_eq!(q.start, "2026-08-26T02:09:41.289406+00:00");
+        assert!(q.taken.is_some(), "a live reading knows when it was taken");
+
+        // An answer naming no period at all is still not a reading.
+        assert!(quota_from(&serde_json::json!({"config": {}})).is_none());
     }
 
     /// The roll itself, on a fixed clock - `lanes` has to ask the real one.

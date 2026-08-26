@@ -782,6 +782,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["resets_at"].as_f64(),
             stale: true,
             projected: false,
+                    apart: false,
         }];
     };
     let mut out: Vec<Lane> = Vec::new();
@@ -798,6 +799,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
+                    apart: false,
         });
     }
     for extra in live["additional_rate_limits"].as_array().into_iter().flatten() {
@@ -817,6 +819,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
+                    apart: false,
         });
     }
     out

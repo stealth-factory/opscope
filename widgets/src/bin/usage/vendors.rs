@@ -156,17 +156,25 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             )],
             w - 1,
         ));
-        // Ranked by usage, except where the lanes nest. Claude's five-hour
-        // window sits inside its weekly one, which contains the
-        // model-scoped limit in turn, and reading them widest-last says
-        // more than reading them by percentage - which also reorders itself
-        // as the numbers move, so the bar under the cursor is not the one
-        // that was there a refresh ago.
+        // Ranked by usage, except where the agent's own order already means
+        // something. Claude's five-hour window sits inside its weekly one,
+        // which contains the model-scoped limit in turn; Cursor's three plan
+        // lanes are a widening scope - api inside auto inside included -
+        // followed by an allowance that is not part of them at all. For both,
+        // reading them in the agent's order says more than reading them by
+        // percentage, and percentage reorders itself as the numbers move, so
+        // the bar under the cursor is not the one that was there a refresh
+        // ago. It also made this screen disagree with the agent's own tab
+        // about the order of the very same bars.
         let mut inner = lanes.clone();
-        if *name != "claude" {
+        if !matches!(*name, "claude" | "cursor") {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }
         for lane in &inner {
+            // The same break the agent's tab draws, for the same reason.
+            if lane.apart {
+                rows.push(String::new());
+            }
             let used = (lane.pct / 100.0).clamp(0.0, 1.0);
             // "cached" used to replace the countdown outright, which threw
             // away a fact to report an adjective. A reading a few minutes old
@@ -303,6 +311,18 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
         // machine that has never signed in and one whose token lapsed an
         // hour ago. Its own heading, under that line, so the sentence has
         // something to belong to.
+        if quiet.contains(&"grok") {
+            let note = crate::grok::why_no_lane(&s.grok);
+            if !note.is_empty() {
+                rows.push(String::new());
+                rows.push(tc::seg(&[(p.lbl.as_str(), "  GROK".into())], w - 1));
+                rows.extend(
+                    wrap_text(note, w.saturating_sub(5).max(20))
+                        .into_iter()
+                        .map(|l| tc::seg(&[(p.dim.as_str(), format!("   {}", l))], w - 1)),
+                );
+            }
+        }
         if quiet.contains(&"antigravity") {
             let note = crate::antigravity::tier_note(s.antigravity.why_no_tier());
             if !note.is_empty() {
@@ -398,6 +418,7 @@ mod tests {
             reset: None,
             stale: false,
             projected: false,
+                    apart: false,
         };
         // grok has more lanes and a higher total, and still ranks below the
         // provider with the single worst one - which a flat sort by

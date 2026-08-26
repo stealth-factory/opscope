@@ -183,6 +183,12 @@ pub struct Lane {
     /// shown with a `~`, because a date this widget calculated and a date
     /// the server sent are not the same kind of fact.
     pub projected: bool,
+    /// True when this lane is not part of the group above it and should be
+    /// separated from it. Cursor's Grok Bot allowance is the case this
+    /// exists for: three plan lanes on the monthly cycle, then a weekly
+    /// allowance that is not a fourth slice of them. Carried on the lane so
+    /// the agent's own tab and the summary cannot drift apart on it.
+    pub apart: bool,
 }
 
 /// What a refused request said, in words a reader can act on.
