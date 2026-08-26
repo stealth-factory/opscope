@@ -174,6 +174,40 @@ which the compiler now makes impossible. It went with the Python.
   says more than the fixture did — it confirms the string is real and
   explains what it identifies. Describe the shape, never the value: *a
   fixture named a real device* is enough.
+- **A tool-installer action can break on a day nothing here changed.**
+  `taiki-e/install-action` had no manifest for the pinned git-cliff, fell
+  back to whatever `cargo-binstall` it could fetch, and that one was old
+  enough not to parse a `Cargo.toml` saying `edition = "2024"`. The release
+  job died before reading a commit. A pinned release URL and a `sha256sum
+  -c` in the same step cannot drift like that, and they say exactly what
+  ran.
+- **`$( )` strips every trailing newline, so you cannot pad one on.** A PR
+  body came out as `---## [0.1.1]`, and the fix — appending empty strings
+  to the `printf` inside the substitution — could not possibly have worked
+  and shipped anyway, because it was read rather than run. Join the pieces
+  explicitly: `printf '%s\n\n%s\n' "$a" "$b"`.
+- **A `#` comment inside a line continuation is an argument, not a
+  comment.** The backslash joins the lines first, so the `#` and everything
+  after it reach the command. It looks completely ordinary in a diff.
+  `bash -n` over every `run:` block in every workflow catches it in about a
+  second.
+- **`gh pr view <branch>` finds the most recently *merged* PR when no open
+  one exists.** So a create-or-update that asks it takes the update path
+  after the first release, rewrites the closed PR, opens nothing, and
+  reports no error — the next release is simply never offered. Ask
+  `gh pr list --state open` and act on the number. `--jq '.[0].number'`
+  needs `// empty` beside it, or jq prints the four characters `null`,
+  which is a non-empty string that lands on the same wrong branch.
+- **Under squash merge a branch is permanently ahead of main.** The
+  squashed commit is a different object, so comparing commits can never
+  tell you a branch merged — a cleanup written that way refuses to delete
+  anything and reports every branch as unmerged. Ask the pull request.
+- **Name the shell by path in a test.** A release build failed on a macOS
+  runner with `sh: No such file or directory`; the shell was there and the
+  PATH was not. Three targets built, one test failed for a reason it was
+  not testing, and the tag was left with no release on it. A test that can
+  fail for a reason it does not test teaches people to press the button
+  again until it goes green, which is how a real failure gets waved past.
 
 ## Layout of the code
 
