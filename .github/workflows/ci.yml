@@ -1,0 +1,57 @@
+# Builds and tests every pull request.
+#
+# Until this existed, nothing did. CodeQL read the workflows and a title
+# check read the title; no job compiled the tree, so a pull request could
+# go green on a change that did not build. The only thing running
+# `cargo test` was release.yml, which fires on a tag - meaning the first
+# time anything ran the tests was after the version had been decided and
+# the release notes written.
+#
+# That matters more here than in most repositories, because
+# widgets/tests/check.rs is not a unit test suite. It checks the things
+# the compiler cannot - a footer naming a key nothing answers, a config
+# key missing from the example, text failing contrast on a selected row -
+# and every check in it exists because something shipped broken and looked,
+# on screen, exactly like "there is no data". A check nobody runs is prose.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A second push to a branch cancels the first. Nobody needs the results of
+# a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          # The same exact version release.yml builds with. A pull request
+          # that passes here and fails at release time on a compiler
+          # difference is the one outcome this job exists to prevent.
+          toolchain: "1.98.0"
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
+
+      - name: Tests
+        # Debug, not release. release.yml covers the release profile on
+        # three platforms; this is the fast gate, and the checks that matter
+        # most here read source files rather than run compiled code.
+        run: cargo test --workspace --all-targets
+
+      - name: It builds
+        # --all-targets above builds the test harnesses but not necessarily
+        # every binary as a binary. Fourteen of them ship; all fourteen
+        # should compile before a change is merged.
+        run: cargo build --workspace --bins
