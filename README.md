@@ -67,7 +67,7 @@ unpacks it — no version to fill in, because it asks which release is
 current:
 
 ```sh
-R=https://github.com/stealth-factory/terminal-toys/releases
+R=https://github.com/stealth-factory/opscope/releases
 V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' $R/latest | sed 's|.*/||')
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64")   A=aarch64-apple-darwin ;;
@@ -83,7 +83,7 @@ tar -xzf $T.tar.gz && cd $T
 ```
 
 Or take them by hand from the
-[latest release](https://github.com/stealth-factory/terminal-toys/releases/latest)
+[latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
 The fourteen binaries are right there, beside `config.example.json` and a
