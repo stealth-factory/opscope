@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "toys-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "toys-widgets"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "chrono-tz",

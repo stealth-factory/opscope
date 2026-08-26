@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.1.2] - 2026-08-26
+
+### Bug Fixes
+
+- **ci**: Do not offer a release for documentation alone (#53)
+
+### Documentation
+
+- Say that prebuilt binaries exist, and how a release is cut (#51)
+
 ## [0.1.1] - 2026-08-26
 
 ### Bug Fixes
