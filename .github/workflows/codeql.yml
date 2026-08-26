@@ -29,15 +29,26 @@
 # nothing else is given up.
 name: CodeQL
 
+# Manual only, until the organisation configuration above is sorted.
+#
+# This ran once on push and did exactly what it should: the Rust extractor
+# read the whole crate and produced a database, and then the upload was
+# refused - "CodeQL analyses from advanced configurations cannot be
+# processed when the default setup is enabled". The analysis is fine; the
+# submission is what is blocked.
+#
+# A check that can only ever be red teaches nothing, and would be red on
+# every push to main after the port lands. So the automatic triggers are
+# parked here, in the order they should be restored:
+#
+#   push:         { branches: [main] }
+#   pull_request: { branches: [main] }
+#   schedule:     [ { cron: "17 4 * * 1" } ]     # weekly, as default setup had
+#
+# Put those back the moment the repository is attached to a configuration
+# with code_scanning_default_setup disabled, and delete this comment.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    # Weekly, as default setup had it. Monday, early, off the hour so it is
-    # not queued behind everything else that asks for midnight.
-    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions: {}
 
