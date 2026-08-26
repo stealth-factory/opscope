@@ -78,6 +78,11 @@ const CACHE: &str = "grok:session:";
 #[derive(Clone, Default)]
 struct Quota {
     pct: Option<f64>,
+    /// The same week split by product, where the answer carries it:
+    /// GrokBuild, GrokChat, GrokImagine. Empty when it does not, which is
+    /// every reading the log recorded - this arrived with the credits
+    /// endpoint and the log lines predate it.
+    products: Vec<(String, f64)>,
     /// When this reading was taken, as epoch seconds - the log line's own
     /// `ts`, or the moment of the fetch. Not when it was read: the tab
     /// judges a reading by its age, and those are different numbers.
@@ -211,6 +216,7 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
         let period = &cfg["currentPeriod"];
         let got = Quota {
             pct: val_of(&cfg["creditUsagePercent"]),
+            products: products_of(cfg),
             taken: iso_epoch(&text(&d, "ts")),
             kind: text(period, "type"),
             start: text(period, "start"),
@@ -558,6 +564,30 @@ fn reading_is_old(taken: Option<f64>) -> bool {
     taken.is_none_or(|t| now() - t > GROK_FRESH_FOR)
 }
 
+/// The week split by product, in the order the server lists them.
+///
+/// A product with nothing spent omits `usagePercent` exactly as the total
+/// does, and for the same reason, so an absent one reads as nought here
+/// too. Products are kept even at nought: which of the three is idle is
+/// part of the answer, and dropping them would leave a reader unable to
+/// tell an unused product from one the server stopped reporting.
+fn products_of(cfg: &serde_json::Value) -> Vec<(String, f64)> {
+    cfg["productUsage"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| {
+                    let name = text(entry, "product");
+                    if name.is_empty() {
+                        return None;
+                    }
+                    Some((name, val_of(&entry["usagePercent"]).unwrap_or(0.0)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The billing body in the same shape the log parser produces, so the rest
 /// of the tab cannot tell which of the two it is looking at.
 fn quota_from(d: &serde_json::Value) -> Option<Quota> {
@@ -583,7 +613,29 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         return None;
     }
     Some(Quota {
-        pct: val_of(&cfg["creditUsagePercent"]),
+        // An absent percentage against a named period means nought, not
+        // unknown. This is proto3 omitting a scalar at its default, and it
+        // was mistaken here for the field having been withdrawn.
+        //
+        // The evidence is inside a single response. Alongside the credit
+        // figure the endpoint returns `productUsage`, one entry per product,
+        // and on this account it reads:
+        //
+        //     [{"product":"GrokBuild","usagePercent":1.0},
+        //      {"product":"GrokChat"},{"product":"GrokImagine"}]
+        //
+        // The product with usage carries the key; the two at zero omit it,
+        // in the same array, in the same answer. Watched over time as well:
+        // this account's weekly window reset at 02:09, read with no
+        // percentage at all while nothing had been spent, and began
+        // reporting 1.0 once it had - same endpoint, same headers, same
+        // token.
+        //
+        // So nought is the real reading and not a guess, which is the only
+        // reason it may be drawn. A period this cannot parse is still
+        // unknown, and still refused above.
+        pct: Some(val_of(&cfg["creditUsagePercent"]).unwrap_or(0.0)),
+        products: products_of(cfg),
         taken: Some(now()),
         kind: text(period, "type"),
         start,
@@ -915,6 +967,24 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             ],
             w - 1,
         ));
+        // The same week split by product. Worth a row of its own because
+        // the bar above is one number for three different things, and which
+        // of them is spending is the part a reader can act on.
+        if !q.products.is_empty() {
+            let split = q
+                .products
+                .iter()
+                .map(|(name, pct)| format!("{} {}", name, pct_text(*pct).trim()))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), "  by product ".into()),
+                    (p.txt.as_str(), split),
+                ],
+                w - 1,
+            ));
+        }
         rows.push(String::new());
     }
 
@@ -1265,12 +1335,13 @@ mod tests {
     }
 
     #[test]
-    fn a_period_the_server_names_is_a_reading_even_with_no_percentage() {
-        // x.ai stopped sending creditUsagePercent for unified-billing
-        // accounts: 200, the current weekly period, and no percentage at
-        // all. Refusing that answer meant falling back to a log line about
-        // a window that had already closed - a fossil shown as current
-        // while the server's own answer was thrown away.
+    fn a_named_period_with_no_percentage_is_nought_used() {
+        // This asserted `None` for one commit, on the reading that x.ai had
+        // withdrawn the field for unified-billing accounts. It had not:
+        // proto3 omits a scalar sitting at its default, so no key means
+        // nought. The answer's own `productUsage` array settles it - the
+        // product with usage carries `usagePercent`, the two at nought omit
+        // it, in the same array of the same response.
         let body = serde_json::json!({"config": {
             "currentPeriod": {
                 "type": "USAGE_PERIOD_TYPE_WEEKLY",
@@ -1278,14 +1349,32 @@ mod tests {
                 "end": "2026-09-02T02:09:41.289406+00:00"
             },
             "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
+            "productUsage": [
+                {"product": "GrokBuild", "usagePercent": 1.0},
+                {"product": "GrokChat"},
+                {"product": "GrokImagine"}
+            ],
         }});
         let q = quota_from(&body).expect("a named period is a reading");
-        assert_eq!(q.pct, None, "invented a percentage the server did not send");
+        assert_eq!(q.pct, Some(0.0), "an omitted default read as unknown");
         assert_eq!(q.start, "2026-08-26T02:09:41.289406+00:00");
         assert!(q.taken.is_some(), "a live reading knows when it was taken");
 
-        // An answer naming no period at all is still not a reading.
+        // A percentage that is present is taken as sent, nought included -
+        // a real 0.0 on the wire and an omitted one mean the same thing.
+        let mut with = body.clone();
+        with["config"]["creditUsagePercent"] = serde_json::json!(1.0);
+        assert_eq!(quota_from(&with).unwrap().pct, Some(1.0));
+        with["config"]["creditUsagePercent"] = serde_json::json!(0.0);
+        assert_eq!(quota_from(&with).unwrap().pct, Some(0.0));
+
+        // An answer naming no period at all is still not a reading: nought
+        // is only knowable against a window the server stated.
         assert!(quota_from(&serde_json::json!({"config": {}})).is_none());
+        assert!(quota_from(&serde_json::json!({"config": {
+            "creditUsagePercent": 5.0
+        }}))
+        .is_none());
     }
 
     /// The roll itself, on a fixed clock - `lanes` has to ask the real one.

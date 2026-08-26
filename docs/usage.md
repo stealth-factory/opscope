@@ -942,22 +942,39 @@ four minutes old carried none, and here it was worse: the live answer was
 being discarded (below), so the row read `not live` whether the ping was
 working or not, and turning it on changed nothing a reader could see.
 
-**A period without a percentage is still a reading.** x.ai has stopped
-sending `creditUsagePercent` for accounts on unified billing — both
-`/v1/billing` and `?format=credits` answer 200, name the current weekly
-period, and omit it, with every other figure zero. Refusing that answer
-meant falling back to the newest line in the client log, which can be a
-fossil: on the machine this was found on it was eleven days old and about a
-window that had closed a week before that, shown as current with a rolled
-forward reset. The server's answer now wins. Where it names the window but
-no percentage, the log's figure is used **only if it is about that same
-window** — a percentage from a window that has closed is not this one's —
-and otherwise the row says there is no figure rather than drawing a bar.
+**A period without a percentage means nought used, not unknown.** The
+credits endpoint omits `creditUsagePercent` when it is zero — proto3 leaves
+out a scalar sitting at its default. That was briefly mistaken here for the
+field having been withdrawn for accounts on unified billing, and the row
+said there was no figure when the true figure was nought.
 
-An agent that publishes no percentage has no bar to rank, so it moves to
-`No quota published by:` on `[+]`, with a line saying which of the two
-reasons applies: nobody is asking, or the ask worked and x.ai had nothing
-to report.
+The answer settles it against itself. Alongside the credit percentage it
+returns `productUsage`, one entry per product:
+
+```json
+"productUsage": [{"product": "GrokBuild", "usagePercent": 3.0},
+                 {"product": "GrokChat"},
+                 {"product": "GrokImagine"}]
+```
+
+The product with usage carries the key; the two at nought omit it, in the
+same array of the same response. Watched over time as well: a weekly window
+that had just reset returned no percentage at all, and began reporting one
+once anything had been spent — same endpoint, same headers, same token. So
+nought here is the reading rather than a guess, which is the only reason it
+may be drawn. A response naming no period at all is still refused: nought
+is only knowable against a window the server stated.
+
+That split is drawn under the window, because the bar above is one number
+for three different things and which of them is spending is the part a
+reader can act on.
+
+**The server's answer wins over the log.** Where the live answer names the
+window but the log holds a percentage, the log's figure is used only if it
+is about that same window — a percentage from a window that has closed is
+not this one's. Before that rule the tab preferred an eleven-day-old log
+line, about a window that had closed a week earlier, over the server's
+current one, and rolled its reset forward with a `~`.
 
 The screen says which state it is in, in both places it appears:
 
@@ -973,11 +990,12 @@ The screen says which state it is in, in both places it appears:
 ```
 
 ```
-── WEEKLY QUOTA ── resets in 6d 20h
+── WEEKLY QUOTA ── resets in 6d 19h
  live · polled x.ai just now, every 5m
 
- no credit figure for this period
+ 3%   ██┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  credits used
  window 26 Aug → 2 Sep
+ by product GrokBuild 3.0% · GrokChat 0% · GrokImagine 0%
 ```
 
 When asking is on and the figure still is not the server's, the row says
