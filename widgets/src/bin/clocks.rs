@@ -221,14 +221,48 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
         ink: tc::rgb(255, 200, 90),
     });
 
-    let into_day = now.num_seconds_from_midnight() as i64;
+    let (into_day, day_len) = day_bounds(&now);
     out.push(Countdown {
         label: "End of Day".into(),
-        left: 86400 - into_day,
-        frac: into_day as f64 / 86400.0,
+        left: day_len - into_day,
+        frac: into_day as f64 / day_len as f64,
         ink: tc::rgb(175, 130, 255),
     });
     out
+}
+
+/// How far into the local day `now` is, and how long that day runs.
+///
+/// Measured between two midnights rather than assumed to be 86,400
+/// seconds: the day the clocks go forward is 23 hours long and the day
+/// they go back is 25, and a fixed span puts both the time remaining and
+/// the bar an hour out for the whole of a transition day. Generic over the
+/// zone so the transition can be tested against a real one rather than
+/// whichever zone this machine happens to be in.
+fn day_bounds<T: TimeZone>(now: &chrono::DateTime<T>) -> (i64, i64) {
+    let zone = now.timezone();
+    // Midnight itself is sometimes the hour that does not exist - Chile and
+    // Lebanon have moved their clocks at exactly that moment - so take the
+    // first minute of the day that does.
+    let midnight = |day: chrono::NaiveDate| {
+        (0..180).find_map(|m| {
+            zone.from_local_datetime(
+                &(day.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                    + chrono::Duration::minutes(m)),
+            )
+            .earliest()
+        })
+    };
+    let today = now.date_naive();
+    match (midnight(today), midnight(today + chrono::Duration::days(1))) {
+        (Some(start), Some(end)) if end.timestamp() > start.timestamp() => (
+            (now.timestamp() - start.timestamp()).max(0),
+            end.timestamp() - start.timestamp(),
+        ),
+        // A day the zone cannot place at all: fall back to the wall clock,
+        // which is what the day looks like on every day but the two it moves.
+        _ => (now.num_seconds_from_midnight() as i64, 86_400),
+    }
 }
 
 /// Seconds each flash stays lit.
@@ -301,7 +335,9 @@ fn herdr_toast(title: &str, body: &str) {
     if std::env::var("HERDR_ENV").unwrap_or_default() != "1" {
         return;
     }
-    let _ = std::process::Command::new("herdr")
+    let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());
+    reap(&mut sent);
+    if let Ok(child) = std::process::Command::new("herdr")
         // --body, not a second positional: `herdr notification show` takes
         // one <TITLE> and the body is an option. Passing it positionally
         // fails with "unknown option" - silently, since stderr is nulled -
@@ -310,7 +346,27 @@ fn herdr_toast(title: &str, body: &str) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        sent.push(child);
+    }
+}
+
+/// Toasts already sent, still holding an exit status nobody has read.
+///
+/// A `Child` that is never waited on stays a zombie for as long as the
+/// widget runs, and an ignored pomodoro toasts once a minute - a panel
+/// left alone for a day would leave hundreds of them behind. Each toast
+/// clears the ones before it, which needs no thread of its own.
+static SENT: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+/// Drop the handle of every toast that has finished.
+///
+/// `try_wait` does not block, so a `herdr` that hangs keeps its slot in
+/// the list rather than holding up the render loop. A handle that cannot
+/// be waited on at all is dropped too: keeping it reaps nothing.
+fn reap(sent: &mut Vec<std::process::Child>) {
+    sent.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
 }
 
 /// The pomodoro, and the state it keeps between runs.
@@ -322,6 +378,10 @@ fn herdr_toast(title: &str, body: &str) {
 struct Pomodoro {
     phase: Phase,
     running: bool,
+    /// pomodoro_enabled, then whatever the state file remembers: whether
+    /// the timer is on screen at all. It is the visibility flag in
+    /// clocks.py - and stored under the same "enabled" key - not a flag
+    /// for whether it runs, which no setting starts.
     shown: bool,
     /// When the current phase ends, while running.
     deadline: f64,
@@ -337,11 +397,14 @@ struct Pomodoro {
     /// The day the tally belongs to, as %Y-%m-%d. Kept so a panel left
     /// running over midnight zeroes rather than adding to yesterday.
     day: String,
-    /// pomodoro_enabled: whether it starts running. clocks.py reads this
-    /// and the port did not, so setting it did nothing here.
-    enabled: bool,
-    /// pomodoro_notify: ring the terminal bell on a phase change. Read for
-    /// the same reason.
+    /// show_hints: whether the pomodoro's key hints are under the panel.
+    /// A display preference rather than timer state, but it rides in the
+    /// same file - under "hints" - so the panel comes back looking how it
+    /// was left.
+    hints: bool,
+    /// pomodoro_notify: announce a phase change to the terminal and to
+    /// Herdr. clocks.py reads this and the port did not, so setting it did
+    /// nothing here.
     notify: bool,
 }
 
@@ -388,10 +451,14 @@ impl Pomodoro {
         let mut it = Pomodoro {
             phase: Phase::Focus,
             running: false,
-            // On screen from the start, paused. Hidden and paused are
-            // different things, and the Python shows it from the first
-            // frame with "paused" against it.
-            shown: true,
+            // Off until [p], which is what clocks.py does and what the doc
+            // promises: pomodoro_enabled is its visibility flag and it
+            // defaults to false. Hardcoding this true put an optional
+            // panel on screen for everyone who had turned it off.
+            shown: cfg
+                .get("pomodoro_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             deadline: 0.0,
             left: focus * 60.0,
             done: 0,
@@ -405,10 +472,13 @@ impl Pomodoro {
                 .unwrap_or(true),
             rang_at: -1,
             day: today(),
-            enabled: cfg
-                .get("pomodoro_enabled")
+            // Visible by default, as clocks.py has it: the hints are how
+            // the keys are found in the first place, and starting hidden
+            // means a reader has to already know the key that reveals them.
+            hints: cfg
+                .get("show_hints")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+                .unwrap_or(true),
             // True, as clocks.py has it: a break ending is worth saying
             // out loud, and a machine with no config should behave the
             // same under either implementation.
@@ -418,7 +488,10 @@ impl Pomodoro {
                 .unwrap_or(true),
         };
         it.left = it.duration();
-        it.running = it.enabled;
+        // Never running from config alone. Setting it running here left the
+        // deadline at zero, and a deadline of zero falls back to a `left`
+        // that nothing decrements: a timer frozen at 25:00 with no "paused"
+        // beside it. Only a saved deadline resumes a block, in load().
         it.load();
         it
     }
@@ -438,11 +511,15 @@ impl Pomodoro {
         if let Some(v) = d.get("focus").and_then(|v| v.as_f64()) {
             self.focus = v;
         }
+        // "enabled" is visibility and "hints" is the hint preference - the
+        // port had the second one holding the first, so hiding the panel
+        // rewrote whether the keys are listed and hiding the keys moved
+        // the panel.
         if let Some(v) = d.get("enabled").and_then(|v| v.as_bool()) {
-            self.enabled = v;
+            self.shown = v;
         }
         if let Some(v) = d.get("hints").and_then(|v| v.as_bool()) {
-            self.shown = v;
+            self.hints = v;
         }
         if d.get("day").and_then(|v| v.as_str()) != Some(self.day.as_str()) {
             return; // a new day starts a fresh count
@@ -485,10 +562,10 @@ impl Pomodoro {
             },
             "completed": self.done,
             "focus": self.focus,
-            "enabled": self.enabled,
+            "enabled": self.shown,
             "running": self.running,
             "was_running": self.running,
-            "hints": self.shown,
+            "hints": self.hints,
             "left": self.left,
             "deadline": self.deadline,
         });
@@ -602,8 +679,7 @@ impl Pomodoro {
         self.save();
     }
 
-    /// Lengthen or shorten the focus block, in minutes.
-    /// Lengthen or shorten the block you are actually in.
+    /// Lengthen or shorten the block you are actually in, in minutes.
     ///
     /// Whichever phase is running: focus during focus, and that break during
     /// a break. It used to write to `focus` whatever the phase, so pressing
@@ -611,16 +687,27 @@ impl Pomodoro {
     /// countdown alone - and the hint beside it read "focus" while the line
     /// above it read BREAK. Both breaks keep their own length, so shortening
     /// a short break does not shorten the long one.
-    fn adjust(&mut self, delta: f64, now: f64) {
+    ///
+    /// It takes no clock: moving the finish line needs the size of the
+    /// change, not the time of it.
+    fn adjust(&mut self, delta: f64) {
+        let before = self.duration();
         let slot = match self.phase {
             Phase::Focus => &mut self.focus,
             Phase::Short => &mut self.short,
             Phase::Long => &mut self.long,
         };
         *slot = (*slot + delta).clamp(1.0, 180.0);
-        self.left = self.duration();
+        // Move the finish line by however much the block actually changed -
+        // the clamp can make that less than was asked for - rather than
+        // starting the block again. A minute added twenty minutes into a
+        // twenty-five minute block leaves six, not twenty-six. Shortening
+        // below what has already gone leaves the block over, which is
+        // true, and the counter says so by climbing.
+        let moved = self.duration() - before;
+        self.left += moved;
         if self.running {
-            self.deadline = now + self.left;
+            self.deadline += moved;
         }
         self.save();
     }
@@ -655,7 +742,19 @@ impl Pomodoro {
             return false;
         }
         self.rang_at = minute;
-        self.alert(&format!("{} over", self.phase.label()));
+        // Every channel gets the same sentence, and how far over is part of
+        // it: the render loop used to send a second, richer toast of its
+        // own, which meant two notifications under Herdr and one even with
+        // pomodoro_notify off.
+        self.alert(&format!(
+            "{} elapsed{}",
+            self.phase.label(),
+            if over >= 60.0 {
+                format!(", {} over", hms(over as i64))
+            } else {
+                String::new()
+            }
+        ));
         true
     }
 
@@ -712,14 +811,6 @@ fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let mut flash_started: Option<f64> = None;
-    // Visible by default, as clocks.py has it: the hints are how the keys
-    // are found in the first place, and starting hidden means a reader has
-    // to already know the key that reveals them. [?] toggles, and
-    // show_hints in the config still decides either way.
-    let mut tips = cfg
-        .get("show_hints")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut scroll = 0usize;
@@ -741,7 +832,15 @@ fn main() {
                 // place that knows how many there are.
                 "end" => scroll = usize::MAX / 2,
                 "p" | "P" => pomo.toggle(seconds()),
-                "?" | "h" => tips = !tips,
+                // show_hints decides where this starts and [?] moves it,
+                // but the answer outlives the session: it rides in the
+                // pomodoro's state file, so hiding the hints once hides
+                // them tomorrow too. It used to live in a local nothing
+                // wrote down.
+                "?" | "h" => {
+                    pomo.hints = !pomo.hints;
+                    pomo.save();
+                }
                 // Everything below moves a timer that is not running, so
                 // it is ignored rather than silently acted on.
                 _ if !pomo.shown => {}
@@ -750,8 +849,8 @@ fn main() {
                 "s" | "S" | "b" | "B" | "e" | "E" => pomo.advance(seconds()),
                 "r" | "R" => pomo.restart(seconds()),
                 "0" | "c" => pomo.reset_count(),
-                "+" | "=" => pomo.adjust(1.0, seconds()),
-                "-" | "_" => pomo.adjust(-1.0, seconds()),
+                "+" | "=" => pomo.adjust(1.0),
+                "-" | "_" => pomo.adjust(-1.0),
                 _ => {}
             }
         }
@@ -792,20 +891,9 @@ fn main() {
         // midnight must zero rather than keep adding to yesterday.
         pomo.roll_day();
         if pomo.tick(stamp) {
+            // The flash only. tick() has already alerted on every channel
+            // the settings allow, the toast among them.
             flash_started = Some(stamp);
-            let over = pomo.overtime(stamp);
-            herdr_toast(
-                "Pomodoro",
-                &format!(
-                    "{} elapsed{}",
-                    pomo.phase.label(),
-                    if over >= 60.0 {
-                        format!(", {} over", hms(over as i64))
-                    } else {
-                        String::new()
-                    }
-                ),
-            );
         }
         if pomo.shown {
             let over = pomo.overtime(stamp);
@@ -936,7 +1024,7 @@ fn main() {
             (p.accent.as_str(), "↑↓".into()),
             (p.dim.as_str(), " cities".into()),
         ]];
-        if pomo.shown && tips {
+        if pomo.shown && pomo.hints {
             hints.push(vec![
                 (p.dim.as_str(), "[space] ".into()),
                 (
@@ -979,7 +1067,10 @@ fn main() {
             // way back. Names the action rather than the state.
             hints.push(vec![(
                 p.dim.as_str(),
-                format!("[?]{} pomodoro tips", if tips { "hide" } else { "show" }),
+                format!(
+                    "[?]{} pomodoro tips",
+                    if pomo.hints { "hide" } else { "show" }
+                ),
             )]);
         }
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
@@ -1247,20 +1338,20 @@ mod tests {
             bell: false,
             rang_at: 0,
             day: today(),
-            enabled: false,
+            hints: true,
             notify: false,
         };
 
         pomo.phase = Phase::Focus;
-        pomo.adjust(5.0, 0.0);
+        pomo.adjust(5.0);
         assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 5.0, 15.0));
 
         pomo.phase = Phase::Short;
-        pomo.adjust(-2.0, 0.0);
+        pomo.adjust(-2.0);
         assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 3.0, 15.0));
 
         pomo.phase = Phase::Long;
-        pomo.adjust(1.0, 0.0);
+        pomo.adjust(1.0);
         assert_eq!((pomo.focus, pomo.short, pomo.long), (30.0, 3.0, 16.0));
 
         // And the hint reports the block in progress, not one named block.
@@ -1271,7 +1362,7 @@ mod tests {
         // A block cannot be argued below a minute or above three hours.
         pomo.phase = Phase::Short;
         for _ in 0..10 {
-            pomo.adjust(-1.0, 0.0);
+            pomo.adjust(-1.0);
         }
         assert_eq!(pomo.short, 1.0);
         assert_eq!((pomo.focus, pomo.long), (30.0, 16.0), "the others are untouched");
@@ -1295,12 +1386,12 @@ mod tests {
         // new() loads and adjust() saves, so this needs its own state.
         let _held = sandbox("nudge");
         let mut pomo = Pomodoro::new(&serde_json::json!({}));
-        pomo.adjust(5.0, 0.0);
+        pomo.adjust(5.0);
         assert_eq!(pomo.focus, 30.0);
         assert_eq!(pomo.duration(), 30.0 * 60.0);
         // It cannot be driven to zero or beyond a working day.
         for _ in 0..100 {
-            pomo.adjust(-10.0, 0.0);
+            pomo.adjust(-10.0);
         }
         assert!(pomo.focus >= 1.0, "focus fell to {}", pomo.focus);
     }
@@ -1619,5 +1710,134 @@ mod tests {
         let items = countdowns(evening, &Office::from_config(&serde_json::json!({})));
         assert_eq!(items[1].label, "Start of Office Hour");
         assert_eq!(items[1].left, 12 * 3600);
+    }
+
+    #[test]
+    fn a_day_the_clocks_move_is_not_twenty_four_hours() {
+        // Britain moves at one in the morning on the last Sunday of March
+        // and back on the last Sunday of October - in 2026, the 29th and
+        // the 25th. Held against a fixed 86,400 seconds, both days put the
+        // time remaining and the bar an hour out.
+        let london: Tz = "Europe/London".parse().unwrap();
+
+        let spring = london.with_ymd_and_hms(2026, 3, 29, 0, 30, 0).unwrap();
+        let (into, len) = day_bounds(&spring);
+        assert_eq!(len, 23 * 3600, "the day the clocks go forward is 23 hours");
+        // Half past midnight, with the jump still ahead: twenty-two and a
+        // half hours of the day left, not the twenty-three and a half a
+        // fixed day gives.
+        assert_eq!(len - into, 22 * 3600 + 1800);
+
+        let autumn = london.with_ymd_and_hms(2026, 10, 25, 0, 30, 0).unwrap();
+        let (into, len) = day_bounds(&autumn);
+        assert_eq!(len, 25 * 3600, "the day they go back is 25 hours");
+        assert_eq!(len - into, 24 * 3600 + 1800);
+
+        // And a day nothing happens on is still a plain day.
+        let plain = london.with_ymd_and_hms(2026, 8, 22, 6, 0, 0).unwrap();
+        assert_eq!(day_bounds(&plain), (6 * 3600, 86_400));
+    }
+
+    #[test]
+    fn a_finished_toast_is_reaped_rather_than_left_a_zombie() {
+        // Every notification spawns a process, and one nobody waits on is a
+        // zombie for the life of the widget - an ignored pomodoro sends one
+        // a minute, so a panel left alone all day would leave hundreds.
+        let mut sent = Vec::new();
+        for _ in 0..3 {
+            match std::process::Command::new("true")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => sent.push(child),
+                Err(_) => return, // nothing to spawn on this machine
+            }
+        }
+        // They exit in milliseconds, but "immediately" is not a promise the
+        // scheduler makes: allow a second before believing otherwise.
+        for _ in 0..100 {
+            reap(&mut sent);
+            if sent.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sent.is_empty(), "{} toasts left unreaped", sent.len());
+    }
+
+    #[test]
+    fn the_timer_is_off_until_asked_for_and_never_starts_itself() {
+        let _held = sandbox("enabled");
+        // With nothing configured there is nothing on screen, which is what
+        // the help text and the doc both promise. It was hardcoded shown.
+        let off = Pomodoro::new(&serde_json::json!({}));
+        assert!(!off.shown, "an optional panel was on screen unasked");
+        assert!(!off.running);
+
+        // pomodoro_enabled puts it there - paused. Setting `running` from
+        // it left the deadline at zero, and with no deadline the countdown
+        // reads a `left` that nothing decrements: a timer frozen at the
+        // full block with nothing on the row saying it was not moving.
+        let on = Pomodoro::new(&serde_json::json!({"pomodoro_enabled": true}));
+        assert!(on.shown);
+        assert!(!on.running, "a block nobody sat down for was being counted");
+        let now = 1_000.0;
+        assert_eq!(on.remaining(now), on.duration());
+        assert_eq!(on.remaining(now + 600.0), on.duration(), "a paused timer moved");
+    }
+
+    #[test]
+    fn the_hint_preference_is_not_the_pomodoros_visibility() {
+        // One field held both: "hints" in the state file was written from
+        // whether the panel was shown, so hiding the panel rewrote the [?]
+        // preference - which was itself never saved, and came back every
+        // restart.
+        let _held = sandbox("hints");
+        let shown = serde_json::json!({"pomodoro_enabled": true});
+
+        let mut p = Pomodoro::new(&shown);
+        assert!(p.hints, "show_hints defaults to on");
+        p.hints = false; // what [?] does
+        p.save();
+        let back = Pomodoro::new(&shown);
+        assert!(!back.hints, "the hint preference did not survive a restart");
+        assert!(back.shown, "hiding the hints hid the panel with them");
+
+        // And the other way about: hiding the panel leaves the hints alone.
+        let mut p = Pomodoro::new(&shown);
+        p.hints = true;
+        p.save();
+        p.toggle(0.0); // what [p] does
+        assert!(!p.shown);
+        let back = Pomodoro::new(&shown);
+        assert!(!back.shown, "the panel came back after being hidden");
+        assert!(back.hints, "hiding the panel rewrote the hint preference");
+    }
+
+    #[test]
+    fn a_nudge_moves_the_finish_line_rather_than_starting_the_block_over() {
+        // Twenty minutes into a twenty-five minute block, one more minute
+        // means six left. It used to mean twenty-six: the new length was
+        // assigned whole and the deadline rebuilt from now, so every nudge
+        // threw away however far in you were.
+        let _held = sandbox("nudge-keeps-progress");
+        let mut pomo = Pomodoro::new(&serde_json::json!({}));
+        pomo.shown = true;
+        pomo.start_stop(0.0);
+        let twenty = 20.0 * 60.0;
+        pomo.adjust(1.0);
+        assert_eq!(pomo.remaining(twenty), 6.0 * 60.0);
+
+        // Paused, where `left` is the number that counts.
+        pomo.start_stop(twenty);
+        assert_eq!(pomo.left, 6.0 * 60.0);
+        pomo.adjust(-2.0);
+        assert_eq!(pomo.left, 4.0 * 60.0);
+
+        // Cut shorter than the time already spent and the block is over,
+        // which is true - the counter climbs rather than claiming minutes
+        // that have gone.
+        pomo.adjust(-20.0);
+        assert!(pomo.signed(twenty) < 0.0, "{} left", pomo.left);
     }
 }

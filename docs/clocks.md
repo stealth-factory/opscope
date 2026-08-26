@@ -96,7 +96,7 @@ shown — are not tied to the day and survive.
 | `space` | pause / resume |
 | `s` `b` `e` | start a break during focus, end one during a break — the footer names whichever applies |
 | `r` | restart the current phase |
-| `+` `-` | focus length, snapped to multiples of five. `=` works as `+`, so it needs no shift, and the footer writes the pair as `[±]` |
+| `+` `-` | one minute on or off **whichever block is running** — focus, short break or long break — clamped to 1–180. The finish line moves by however much the block actually changed, so a minute added twenty minutes into a twenty-five minute block leaves six, not twenty-six. `=` works as `+`, so it needs no shift, and the footer writes the pair as `[±]` |
 | `0` `c` | zero today's completed tally |
 | `?` `h` | hide/show the pomodoro controls |
 | `q` | quit |
