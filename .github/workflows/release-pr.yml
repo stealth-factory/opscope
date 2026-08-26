@@ -180,14 +180,16 @@ jobs:
             "to it - the branch is force-pushed - and edit the changelog on" \
             "main instead if something reads badly." \
             "" \
-            "---" \
-            "" \
-            "")
+            "---")
           notes=$(awk '/^## \[/{n++} n==1' CHANGELOG.md | head -60)
+          # $( ) strips every trailing newline, so no number of empty
+          # printf arguments can put a blank line between the two halves -
+          # the first attempt at this shipped `---## [0.1.1]`. The
+          # separator has to be joined back in explicitly.
+          full=$(printf '%s\n\n%s\n' "$body" "$notes")
           if gh pr view "$branch" --json number >/dev/null 2>&1; then
-            gh pr edit "$branch" --title "release: v${NEXT}" \
-              --body "$body$notes"
+            gh pr edit "$branch" --title "release: v${NEXT}" --body "$full"
           else
             gh pr create --base main --head "$branch" \
-              --title "release: v${NEXT}" --body "$body$notes"
+              --title "release: v${NEXT}" --body "$full"
           fi
