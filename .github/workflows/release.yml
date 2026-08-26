@@ -47,14 +47,31 @@ jobs:
           # month. 22.04 is glibc 2.35.
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
-          # macos-14 is Apple Silicon, macos-13 is Intel. Both are pinned
-          # for the same reason: `macos-latest` has silently changed arch
-          # before, which would swap what an artefact contains without the
+          # Both macOS arches are built on one Apple Silicon runner.
+          #
+          # macos-13, the Intel image, is retired: a job asking for it
+          # queues forever, which is what the first three runs of this
+          # workflow did while the other two got runners in seconds. The
+          # Intel images that replaced it are `-large` runners and bill
+          # even on a public repository, where the standard ones are free.
+          #
+          # Cross-compiling costs nothing and Apple's toolchain does it
+          # natively - an arm64 Mac has always been able to target x86_64.
+          # What it cannot do is run the result, so the x86_64 binaries are
+          # built and packaged but their tests are not executed here. That
+          # is stated rather than hidden: `cross: true` is what turns those
+          # steps off, and TOY-40 already owns "what actually works on a
+          # Mac" as a question.
+          #
+          # macos-15 rather than macos-14: 14 is deprecated, and this is a
+          # pin either way, because `macos-latest` has silently changed
+          # arch before and would swap an artefact's contents without its
           # name changing.
           - target: aarch64-apple-darwin
-            runs-on: macos-14
+            runs-on: macos-15
           - target: x86_64-apple-darwin
-            runs-on: macos-13
+            runs-on: macos-15
+            cross: true
     steps:
       # Pinned to a commit, not a tag. A tag is mutable: re-running this
       # workflow on the same release tag could execute different action code
@@ -109,7 +126,14 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --release --target ${{ matrix.target }}
+      - name: Tests
+        # Skipped for the cross-compiled target, which this runner cannot
+        # execute. The same sources are tested on the native arm64 leg in
+        # the same run, so the code is covered; what is not covered is
+        # x86_64-specific behaviour, and there is none in this tree that
+        # the arm64 build would not also show.
+        if: ${{ !matrix.cross }}
+        run: cargo test --release --target ${{ matrix.target }}
 
       - run: cargo build --release --target ${{ matrix.target }}
 
@@ -169,6 +193,8 @@ jobs:
           [ "$bad" = 0 ]
 
       - name: It runs, and says what it is
+        # Same reason: an x86_64 binary will not start on this host.
+        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           # A binary that builds and cannot start is not an artefact. Only
