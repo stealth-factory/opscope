@@ -195,7 +195,7 @@ jobs:
             "It tags the merge commit and starts \`release.yml\` there: three" \
             "platforms built and tested, checked for anything dynamically" \
             "linked beyond the C runtime, tarballed with checksums," \
-            "attached to a GitHub Release, and published to npm so" \
+            "published to npm, then attached to a GitHub Release so" \
             "\`npx @stealth-factory/terminal-toys\` is this version." \
             "" \
             "This PR rewrites itself on every merge to main. Do not commit" \

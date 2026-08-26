@@ -48,7 +48,12 @@ child.on('error', (err) => {
 
 child.on('exit', (code, signal) => {
   if (signal) {
-    process.kill(process.pid, signal);
+    // Re-raising the signal while this process still has a handler
+    // for it re-enters that handler, which then no-ops because the
+    // child is already gone, and this process can exit 0. 128+n is
+    // what a shell reports when a child dies of that signal.
+    const n = { SIGINT: 2, SIGTERM: 15 }[signal];
+    process.exit(n ? 128 + n : 1);
     return;
   }
   process.exit(code ?? 1);
