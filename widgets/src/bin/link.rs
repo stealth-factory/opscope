@@ -44,7 +44,6 @@ const MIN_CHART: usize = 12;
 fn scroll_label(first: usize, last: usize, total: usize) -> String {
     format!("rows {:>3}-{:>3} of {:>3}", first, last, total)
 }
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// The hues sessions are drawn in, kept as numbers so a faded set can be
 /// mixed from the same six.
 const HUES: &[(u8, u8, u8)] = &[
@@ -83,7 +82,6 @@ struct Session {
     /// that has the previous reading to subtract.
     recent_loss: Option<f64>,
     delivery: Option<f64>,
-    cwnd: Option<f64>,
     mss: Option<f64>,
     lastsnd: Option<f64>,
     lastrcv: Option<f64>,
@@ -248,7 +246,6 @@ fn sessions() -> Result<Vec<Session>, String> {
             retrans_bytes: num(&m, "bytes_retrans").unwrap_or(0.0),
             recent_loss: None,
             delivery: num(&m, "delivery_rate"),
-            cwnd: num(&m, "cwnd"),
             mss: num(&m, "mss"),
             lastsnd: num(&m, "lastsnd"),
             lastrcv: num(&m, "lastrcv"),
@@ -368,20 +365,6 @@ fn colour_for<'a>(ratio: Option<f64>, loss: Option<f64>, p: &'a Palette) -> &'a 
     }
 }
 
-fn sparkline(values: &[f64], width: usize) -> String {
-    if values.is_empty() {
-        return String::new();
-    }
-    let window: Vec<f64> = values.iter().rev().take(width).rev().copied().collect();
-    let hi = window.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
-    window
-        .iter()
-        .map(|v| {
-            let level = ((v / hi) * (SPARK.len() - 1) as f64).round() as usize;
-            SPARK[level.min(SPARK.len() - 1)]
-        })
-        .collect()
-}
 
 /// Fit samples to the columns available, by median.
 ///
@@ -1683,15 +1666,6 @@ mod tests {
         assert_eq!(got, vec![10.0, 10.0]);
         // Fewer samples than columns is left alone.
         assert_eq!(condense(&[1.0, 2.0], 8), vec![1.0, 2.0]);
-    }
-
-    #[test]
-    fn a_sparkline_scales_to_its_own_peak() {
-        let line = sparkline(&[0.0, 5.0, 10.0], 3);
-        let chars: Vec<char> = line.chars().collect();
-        assert_eq!(chars.len(), 3);
-        assert_eq!(chars[0], '▁');
-        assert_eq!(chars[2], '█');
     }
 
     #[test]

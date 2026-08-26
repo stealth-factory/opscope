@@ -858,8 +858,6 @@ fn braille_row(masks: &[u8], colour: &str) -> Vec<(String, String)> {
 // processes and out of nothing at all for anybody else's, which is why the
 // screen says so rather than showing empty lists.
 
-const SECTIONS: [&str; 3] = ["endpoints", "connections", "files"];
-
 /// Reverse DNS, off the drawing thread.
 ///
 /// A PTR lookup takes half a second when it works and longer when it does

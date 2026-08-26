@@ -51,6 +51,14 @@ monitors, builds — with the command, CPU and memory. **IDLE** lists panes at a
 shell prompt by directory, because the panel is also how you navigate: a shell
 sitting in a repo is somewhere you want to jump to even with nothing running.
 
+There is a third answer, and PROCESSES carries it too. A pane the CLI could
+not be asked about is neither running something nor resting: it sorts to the
+top with `⚠ could not be read` and the reason on its own row, and the heading
+counts it apart — `3 panes running something · 29 could not be read`. It is
+kept visible on purpose, and `[i]` hides only panes known to be at a prompt,
+because an unreadable pane filtered out of sight is exactly the shape this
+widget exists to avoid: a failure that looks like an empty list.
+
 ## How it knows
 
 Everything comes from the Herdr CLI, so this is a Herdr client rather than a

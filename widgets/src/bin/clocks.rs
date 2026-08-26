@@ -1202,8 +1202,16 @@ struct Palette {
     head: String,
     big_top: String,
     big_base: String,
+    // Nothing draws these three. They are clocks.py's palette carried
+    // over whole, and a palette is a set: taking the unused thirds out
+    // would leave the rest looking chosen rather than inherited, and the
+    // file they were inherited from is now deleted, so there would be
+    // nothing left to check them against.
+    #[allow(dead_code)]
     bar: String,
+    #[allow(dead_code)]
     sun: String,
+    #[allow(dead_code)]
     moon: String,
 }
 
