@@ -47,6 +47,66 @@ fn root() -> PathBuf {
         .expect("the repo root")
 }
 
+/// Every selection tint a widget composes, and how it was reached.
+///
+/// Returns `(tint, inline_colour)` - the colour named on the same line when
+/// the tint is composed inline, and `None` when it is bound to a `tint`
+/// variable and handed to a closure later.
+///
+/// A whole statement at a time, not a line at a time. herdr-panes binds its
+/// tint across nine lines:
+///
+/// ```ignore
+/// let tint = if here {
+///     tc::bg(38, 56, 76)
+/// } else if a.state == "blocked" {
+/// ```
+///
+/// The line carrying that first `bg()` names no colour and does not contain
+/// the word "tint", so a line-by-line scan saw neither and checked nothing
+/// for it. It happened not to matter only because the same tint appears on
+/// its own line twice more in the same file; alone, or changed on its own, an
+/// AA failure there would have gone unseen.
+fn tints_of(src: &str) -> Vec<((f64, f64, f64), Option<String>)> {
+    let mut found = Vec::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        // A binding whose name is `tint`: take the statement to its end.
+        let binds_tint = line.contains("let tint")
+            || line.trim_start().starts_with("tint =")
+            || line.contains("let tint:");
+        if binds_tint {
+            let mut depth: i32 = 0;
+            let mut j = i;
+            loop {
+                let l = lines[j];
+                depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+                if let Some(t) = triple(l, "tc::bg") {
+                    found.push((t, None));
+                }
+                // The statement ends at a `;` once every brace has closed.
+                if depth <= 0 && l.trim_end().ends_with(';') {
+                    break;
+                }
+                j += 1;
+                if j >= lines.len() || j > i + 40 {
+                    break;
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        // Otherwise a bg() composed inline, with the colour on the same line.
+        if let Some(t) = triple(line, "tc::bg") {
+            found.push((t, Some(line.to_string())));
+        }
+        i += 1;
+    }
+    found
+}
+
 /// Every `<name>_lit` the palette defines.
 fn colours_ending_in_lit(src: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -644,35 +704,36 @@ fn text_on_a_selection_tint_clears_aa() {
                 colours.insert(field.to_string(), c);
             }
         }
-        for line in src.lines() {
-            let Some(tint) = triple(line, "tc::bg") else { continue };
-            // Composed inline with one named colour: that exact pair. Or
-            // assigned to `tint` and composed later by a closure, in which
-            // case every colour in the palette can reach it.
-            let inline: Vec<String> = colours
-                .keys()
-                .filter(|f| {
-                    // `p.dim` is a prefix of `p.dim_lit`; without the guard a
-                    // line drawing only the lighter one would be blamed for
-                    // the darker one it never draws.
-                    let needle = format!("p.{}", f);
-                    match line.find(&needle) {
-                        None => false,
-                        Some(at) => !line[at + needle.len()..].starts_with('_'),
-                    }
-                })
-                .cloned()
-                .collect();
+        for (tint, inline_line) in tints_of(&src) {
+            // Composed inline with a named colour: that exact pair. Bound to
+            // `tint` and handed to a closure: every colour the closure is
+            // given can land on it.
+            let inline: Vec<String> = match inline_line.as_ref() {
+                None => Vec::new(),
+                Some(line) => colours
+                    .keys()
+                    .filter(|f| {
+                        // `p.dim` is a prefix of `p.dim_lit`; without the
+                        // guard a line drawing only the lighter one would be
+                        // blamed for the darker one it never draws.
+                        let needle = format!("p.{}", f);
+                        match line.find(&needle) {
+                            None => false,
+                            Some(at) => !line[at + needle.len()..].starts_with('_'),
+                        }
+                    })
+                    .cloned()
+                    .collect(),
+            };
             let reached: Vec<String> = if !inline.is_empty() {
                 inline
-            } else if line.contains("tint") {
+            } else if inline_line.is_none() {
                 // Not every colour in the palette reaches the tint - most are
-                // drawn straight, as `p.bad.as_str()`. Only the ones handed to
-                // the closure count, either directly or through a colour
-                // picker whose arms return them. Without this the check
-                // reported github's `bad`, which is only ever drawn on the
-                // plain background, and a check that cries wolf gets turned
-                // off - which is the note this file already carries twice.
+                // drawn straight, as `p.bad.as_str()`. Only the ones handed
+                // to a closure count, directly or through a colour picker
+                // whose arms return them. Without this the check reported
+                // github's `bad`, which is only ever drawn on the plain
+                // background, and a check that cries wolf gets turned off.
                 colours
                     .keys()
                     .filter(|f| handed_to_a_tint(&src, f))
