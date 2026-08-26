@@ -72,16 +72,37 @@ jobs:
         run: |
           set -euo pipefail
           current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+
+          # Is there anything since the last tag that changes what a user
+          # gets? git-cliff bumps the patch for any commit at all, which
+          # would offer a release for a README edit - a version whose
+          # binaries are byte-for-byte the last one's. That is noise in a
+          # project that ships binaries, and it is noise in the pooled
+          # model specifically: every doc tweak would raise a release PR
+          # somebody has to form an opinion about.
+          #
+          # So only feat, fix, perf and revert start a release, plus any
+          # `type!:` breaking marker. Everything else still reaches the
+          # changelog - it rides along with the next real change rather
+          # than being dropped.
+          last=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          range="${last:+${last}..}HEAD"
+          releasable=$(git log "$range" --format=%s \
+            | grep -cE '^(feat|fix|perf|revert)(\(.+\))?!?:|^[a-z]+(\(.+\))?!:' \
+            || true)
+
           # --bumped-version gives the tag name; strip the v for the manifest.
           next=$(git cliff --bumped-version 2>/dev/null | tr -d 'v' || true)
-          if [ -z "$next" ] || [ "$next" = "$current" ]; then
-            # Nothing releasable since the last tag - only chores, or
-            # nothing at all. No release PR, and any existing one is left
-            # alone rather than being rewritten to say the same thing.
+          if [ -z "$next" ] || [ "$next" = "$current" ] || [ "$releasable" -eq 0 ]; then
+            # Nothing releasable since the last tag - only docs and chores,
+            # or nothing at all. No release PR, and any existing one is
+            # left alone rather than being rewritten to say the same thing.
             echo "nothing to release: still $current"
+            echo "  ${releasable} releasable commits in ${range}"
             echo "release=no" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "${releasable} releasable commits in ${range}"
           echo "$current -> $next"
           echo "release=yes" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
