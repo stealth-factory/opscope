@@ -198,3 +198,9 @@ beginning *why does this key do that*.
 
 `docs/building-herdr-panels.md` records what was learned driving these from
 Herdr: resize semantics, focus, and the layout mistakes worth skipping.
+
+`docs/releasing.md` is the release pipeline: what decides the version, what
+merging the release pull request sets off, and the parts that look broken
+but are not. Read it before changing anything under `.github/workflows/` -
+the four files there depend on each other in ways that are not obvious from
+any one of them.
