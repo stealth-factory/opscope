@@ -102,6 +102,13 @@ jobs:
           # workflow rebuilds its branch from main on every push, so it
           # starts from the same file and produces the same result.
           git cliff --unreleased --tag "v${NEXT}" --prepend CHANGELOG.md
+          # Prepending leaves the new heading flush against the paragraph
+          # above it and a doubled blank line below. Both render, and both
+          # look like a mistake in a file that is read as raw markdown at
+          # least as often as it is rendered. One blank line before every
+          # version heading, never more than one anywhere - in that order,
+          # because the insert is what can create a third newline.
+          perl -0pi -e 's/\n(## \[)/\n\n$1/g; s/\n{3,}/\n\n/g' CHANGELOG.md
           # Only the first version key, which is the workspace package's. A
           # global replace would also rewrite a dependency pinned at the
           # same number - toys-core is, deliberately.
@@ -115,6 +122,16 @@ jobs:
           # disagreeing with its manifest makes the next build rewrite it
           # as a stray diff.
           cargo update --workspace --offline 2>/dev/null || cargo update --workspace
+          # And prove the bumped tree is coherent before anyone is asked to
+          # merge it. --locked fails if the lock and the manifests disagree,
+          # which is the one way this step can go wrong and the one thing
+          # nothing downstream would catch in time: the release PR is opened
+          # by GITHUB_TOKEN, so GitHub holds its workflow runs for approval
+          # and it effectively arrives with no CI. Without this, a bad bump
+          # would surface after the merge had already been tagged, leaving a
+          # tag with no release attached to it.
+          cargo metadata --locked --format-version 1 > /dev/null
+          echo "manifests and lock agree at ${NEXT}"
 
       - name: Open or update the release PR
         if: steps.next.outputs.release == 'yes'
@@ -164,6 +181,7 @@ jobs:
             "main instead if something reads badly." \
             "" \
             "---" \
+            "" \
             "")
           notes=$(awk '/^## \[/{n++} n==1' CHANGELOG.md | head -60)
           if gh pr view "$branch" --json number >/dev/null 2>&1; then
