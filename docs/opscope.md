@@ -1,4 +1,4 @@
-# `start`
+# `opscope`
 
 [← all docs](README.md)
 
@@ -6,7 +6,7 @@ The front door: every widget, what it does, and whether it will work on this
 machine.
 
 ```
-╺━ TERMINAL TOYS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  13 widgets · 2 need something first   ↵ launches one, q leaves
 
  ▸ netwatch     Which processes are using the network, how much…   ss installed
@@ -133,7 +133,7 @@ on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
 `link`, `netwatch`, `latency` and `herdr-panes` all do this, via
-`cannot_start` in `toys-core`. The first two used to exit; the second two used
+`cannot_start` in `opscope-core`. The first two used to exit; the second two used
 to run and quietly show nothing, which was worse.
 
 ## Launching## Launching
@@ -151,16 +151,16 @@ Naming one skips the menu entirely, and anything after it is passed straight
 through:
 
 ```sh
-./target/release/start                    # the menu
-./target/release/start netwatch           # straight into one
-./target/release/start netwatch -i 2 -n 5 # arguments go to the widget
-./target/release/start link --help        # including --help
+opscope                    # the menu
+opscope netwatch           # straight into one
+opscope netwatch -i 2 -n 5 # arguments go to the widget
+opscope link --help        # including --help
 ```
 
 A widget is looked for beside the launcher's own binary, so a release
 unpacked anywhere works without a path being configured.
 
-`start netwatch.py` is still accepted, and only for that: every widget here
+`opscope netwatch.py` is still accepted, and only for that: every widget here
 answered to that name for years and the muscle memory outlives the files.
 The suffix is stripped and the binary of the same stem runs.
 

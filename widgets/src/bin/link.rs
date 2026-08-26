@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use toys_core as tc;
+use opscope_core as tc;
 
 const IDLE_AFTER: f64 = 300.0;
 
@@ -1304,7 +1304,7 @@ fn graph(
     history: &HashMap<String, Vec<f64>>,
     w: usize,
     h: usize,
-    // `start` keeps a session's glyph and hue the same on its own screen as
+    // `opscope` keeps a session's glyph and hue the same on its own screen as
     // in the list: opening the ▲ row and finding a ● chart reads as a
     // different connection.
     start_at: usize,

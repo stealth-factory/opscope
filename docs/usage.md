@@ -434,8 +434,8 @@ Claude's is — so the section is simply absent between refreshes rather than
 stale.
 
 And the response is **gated on the client string**. Sent as plain
-`terminal-toys` it returns no tier at all, just an `ineligibleTiers` entry
-reading `UNSUPPORTED_CLIENT`. Sent as `terminal-toys (antigravity-cli)` it
+`opscope` it returns no tier at all, just an `ineligibleTiers` entry
+reading `UNSUPPORTED_CLIENT`. Sent as `opscope (antigravity-cli)` it
 answers properly — the parenthesised form names the client being spoken for
 while still saying who is calling, which is the honest version of what would
 otherwise be a plain impersonation.
@@ -948,7 +948,7 @@ instrumenting Claude Code.
 
 So there are two fallbacks now, newest wins:
 
-1. **Our own snapshot**, written to `$XDG_STATE_HOME/terminal-toys/claude-usage.json`
+1. **Our own snapshot**, written to `$XDG_STATE_HOME/opscope/claude-usage.json`
    every time the live call answers — minutes old on a machine in use, and
    not dependent on another program's cache still being maintained.
 2. **Claude Code's**, but only inside the hour it trusts it for.

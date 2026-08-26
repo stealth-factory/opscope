@@ -1,6 +1,6 @@
 # Documentation
 
-[← terminal-toys](../README.md)
+[← opscope](../README.md)
 
 One page per widget: what it shows, where every number on it comes from,
 each key it answers to, and the settings it reads.
@@ -9,7 +9,7 @@ each key it answers to, and the settings it reads.
 
 | | |
 |---|---|
-| [`start`](start.md) | The front door: every widget, what it does, and whether it will work on this machine. |
+| [`opscope`](opscope.md) | The front door: every widget, what it does, and whether it will work on this machine. |
 | [`latency`](latency.md) | Continuous latency to a list of hosts, with the statistics that actually explain a bad connection. |
 | [`deployments`](deployments.md) | Vercel deployments — how they are going over time, not just what shipped last. |
 | [`tailnet`](tailnet.md) | Tailscale peers, and — the part plain `tailscale status` buries — *how* you are reaching each one. |
@@ -31,7 +31,7 @@ saying so at length would be the joke explained.
 | | |
 |---|---|
 | [Design](design.md) | The rules every widget holds to, and what each one cost to learn. |
-| [Internals](internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot. |
+| [Internals](internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot. |
 | [Port decisions](port-decisions.md) | What the Rust port changed from the Python, and why. |
 | [Building herdr panels](building-herdr-panels.md) | Driving these from Herdr: resize semantics, focus, and the layout mistakes worth skipping. |
 | [Releasing](releasing.md) | How a version is decided, what merging the release PR sets off, and what to do when it goes wrong. |

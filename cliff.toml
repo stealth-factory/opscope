@@ -3,9 +3,9 @@
 # git-cliff reads the conventional commits since the last tag. It never
 # runs cargo, which is why it is here: release-plz determines what changed
 # by running `cargo package --verify`, and this workspace cannot be
-# packaged - start.rs embeds the repo's own docs with
+# packaged - opscope.rs embeds the repo's own docs with
 # include_str!("../../../docs/clocks.md"), reaching outside the crate, so a
-# packaged toys-widgets has no docs/ and will not compile. There is no
+# packaged opscope-widgets has no docs/ and will not compile. There is no
 # option to skip that step.
 #
 # Squash merge means the PR title is the commit subject, so these rules are

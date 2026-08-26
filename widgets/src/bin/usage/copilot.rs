@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 use rusqlite::{Connection, OpenFlags};
-use toys_core as tc;
+use opscope_core as tc;
 
 use crate::shared::*;
 use crate::*;
@@ -170,7 +170,7 @@ fn copilot_live() -> Option<serde_json::Value> {
         COPILOT_USER_API,
         &[
             ("Authorization", &auth),
-            ("User-Agent", "terminal-toys"),
+            ("User-Agent", "opscope"),
             ("Accept", "application/json"),
         ],
         20,

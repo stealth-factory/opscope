@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Datelike, Duration as Days, NaiveDate, TimeZone, Utc};
-use toys_core as tc;
+use opscope_core as tc;
 
 /// The priced kinds, in the order every rate card lists them.
 const RATE_KINDS: &[&str] = &[

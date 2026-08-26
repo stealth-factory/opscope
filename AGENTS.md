@@ -1,7 +1,7 @@
-# Working on terminal-toys
+# Working on opscope
 
 Linear team: <https://linear.app/stealth-company/team/TOY/overview>
-Linear project: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/issues>
+Linear project: <https://linear.app/stealth-company/project/opscope-e829b47d84b8/issues>
 
 **Everything is tracked there** — planned widgets, the per-widget port
 reviews, and the decisions waiting on William. Before starting anything,
@@ -11,7 +11,7 @@ filed and already decided against.
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Fourteen Rust binaries sharing `toys-core`, built with `cargo build
+Fourteen Rust binaries sharing `opscope-core`, built with `cargo build
 --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
@@ -211,7 +211,7 @@ which the compiler now makes impossible. It went with the Python.
 
 ## Layout of the code
 
-`toys-core` holds everything shared: terminal sizing, full-frame `draw()`,
+`opscope-core` holds everything shared: terminal sizing, full-frame `draw()`,
 24-bit `rgb()` and the green→amber→red `heat()` ramp, `seg()` for clipping
 coloured segments to a cell budget, `pack_hints()`, `follow()` for a window
 that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,

@@ -273,7 +273,7 @@ that fetch on another process's behalf.
 
 ## Relation to traffic-ctrl
 
-This is the terminal-toys equivalent of
+This is the opscope equivalent of
 [`traffic-ctrl`](https://github.com/stealth-factory/traffic-ctrl), a Swift
 tool that does the same job on macOS with `nettop`. The feature set is
 matched; the interface is this repository's, not that one's, and the data
@@ -297,7 +297,7 @@ it as a machine honestly can:
 
  ── PROCESS ──
   command   curl -s -o ~/tmp/big.bin --limit-rate 400k https://…/__down
-  directory ~/projects/terminal-toys
+  directory ~/projects/opscope
 
  ── TALKING TO ── 1 endpoint
    HOST                              PORTS            RX         TX       RATE

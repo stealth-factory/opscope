@@ -1,6 +1,6 @@
-# terminal-toys
+# opscope
 
-**Sci-fi hacker terminal toys from the movies — except these tell you the
+**Sci-fi hacker opscope from the movies — except these tell you the
 truth.**
 
 Fill your screen with glowing panels, scrolling graphs and blinking status
@@ -8,7 +8,7 @@ readouts. The difference is that every number on them is real: actual network
 latency, actual deployments, actual machines on your tailnet, actual agents
 waiting on you.
 
-[![terminal-toys — click to watch the 26-second demo](docs/demo-poster.jpg)](docs/demo.mp4)
+[![opscope — click to watch the 26-second demo](docs/demo-poster.jpg)](docs/demo.mp4)
 
 *Seven widgets running at once — every figure live. [Watch the 26s demo →](docs/demo.mp4)*
 
@@ -33,7 +33,7 @@ nothing at all — it just looks good, and it knows it.
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`start`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
+| **`opscope`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/opscope.md) |
 | **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
 | **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](docs/deployments.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
@@ -80,7 +80,7 @@ unpacks it — no version to fill in, because it asks which release is
 current:
 
 ```sh
-R=https://github.com/stealth-factory/terminal-toys/releases
+R=https://github.com/stealth-factory/opscope/releases
 V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' $R/latest | sed 's|.*/||')
 case "$(uname -s) $(uname -m)" in
   "Darwin arm64")   A=aarch64-apple-darwin ;;
@@ -88,7 +88,7 @@ case "$(uname -s) $(uname -m)" in
   "Linux x86_64")   A=x86_64-unknown-linux-gnu ;;
   *) echo "no build for $(uname -sm); build from source below" >&2 ;;
 esac
-T=terminal-toys-$V-$A
+T=opscope-$V-$A
 curl -fsSLO $R/download/$V/$T.tar.gz
 curl -fsSLO $R/download/$V/$T.tar.gz.sha256
 shasum -a 256 -c $T.tar.gz.sha256    # sha256sum -c on Linux; either is fine
@@ -96,7 +96,7 @@ tar -xzf $T.tar.gz && cd $T
 ```
 
 Or take them by hand from the
-[latest release](https://github.com/stealth-factory/terminal-toys/releases/latest)
+[latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
 The fourteen binaries are right there, beside `config.example.json` and a
@@ -104,7 +104,7 @@ copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like — or put the binaries on your `PATH`:
 
 ```sh
-sudo cp start clocks deployments github herdr-panes latency linear link \
+sudo cp opscope clocks deployments github herdr-panes latency linear link \
         matrix netwatch ports pr tailnet usage /usr/local/bin/
 ```
 
@@ -130,12 +130,12 @@ cargo build --release   # fourteen binaries in ./target/release
 
 ## Running them
 
-`start` is the front door — a menu of the fourteen, with a live preview of
+`opscope` is the front door — a menu of the fourteen, with a live preview of
 whichever is highlighted:
 
 ```sh
-start          # pick one and it runs
-start latency  # or name one and skip the menu
+opscope          # pick one and it runs
+opscope latency  # or name one and skip the menu
 ```
 
 Each widget is also an ordinary program, if you would rather go direct:
@@ -146,8 +146,8 @@ clocks -h      # every widget documents itself
 ```
 
 Those are the names as they sit on your `PATH`. From an unpacked tarball or
-a build tree, reach for them where they are — `./start`, or
-`./target/release/start`.
+a build tree, reach for them where they are — `./opscope`, or
+`./target/release/opscope`.
 
 They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
@@ -173,8 +173,8 @@ widget in a 30-column strip still says something useful.
 ## Configuration
 
 Every widget reads optional settings from the first readable of
-`$TERMINAL_TOYS_CONFIG`, `$XDG_CONFIG_HOME/terminal-toys/config.json`
-(`~/.config/terminal-toys/config.json` where that is unset), `config.json` in
+`$OPSCOPE_CONFIG`, `$XDG_CONFIG_HOME/opscope/config.json`
+(`~/.config/opscope/config.json` where that is unset), `config.json` in
 the working directory, and `config.json` beside the binary. Copy
 `config.example.json` to start.
 
@@ -213,7 +213,7 @@ Five pages are about the repository rather than a widget:
 | | |
 |---|---|
 | [Design conventions](docs/design.md) | the rules every widget holds to, and why each was paid for |
-| [Internals](docs/internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
+| [Internals](docs/internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
 | [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
 | [Building Herdr panels](docs/building-herdr-panels.md) | resize semantics, focus, and the layout mistakes worth skipping |
 | [Releasing](docs/releasing.md) | how a version is decided, what merging the release PR sets off, and what to do when it goes wrong |
@@ -229,7 +229,7 @@ it after an upgrade.
 ## What is being worked on
 
 Planned widgets, open questions and the state of the Rust port are tracked
-in Linear: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/issues>. The link needs access to the workspace; the issues are the
+in Linear: <https://linear.app/stealth-company/project/opscope-e829b47d84b8/issues>. The link needs access to the workspace; the issues are the
 canonical list either way, so a feature that looks missing may already be
 filed there with a reason.
 

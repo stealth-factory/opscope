@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone};
 use rusqlite::{Connection, OpenFlags};
-use toys_core as tc;
+use opscope_core as tc;
 
 use crate::shared::*;
 use crate::*;
@@ -170,7 +170,7 @@ fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Valu
             ("Authorization", bearer.as_str()),
             ("Content-Type", "application/json"),
             ("Connect-Protocol-Version", "1"),
-            ("User-Agent", "terminal-toys"),
+            ("User-Agent", "opscope"),
         ],
         &body.to_string(),
         25,
@@ -205,7 +205,7 @@ fn sand_status() -> Result<serde_json::Value, String> {
             ("Authorization", bearer.as_str()),
             ("Content-Type", "application/json"),
             ("Connect-Protocol-Version", "1"),
-            ("User-Agent", "terminal-toys"),
+            ("User-Agent", "opscope"),
         ],
         "{}",
         20,

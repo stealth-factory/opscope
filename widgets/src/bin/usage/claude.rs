@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone};
-use toys_core as tc;
+use opscope_core as tc;
 
 use crate::shared::*;
 use crate::*;
@@ -90,7 +90,7 @@ fn claude_try(url: &str, tok: &str) -> Result<serde_json::Value, String> {
         url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
-            ("User-Agent", "terminal-toys"),
+            ("User-Agent", "opscope"),
         ],
         20,
     )
@@ -165,7 +165,7 @@ fn snapshot_path() -> String {
     let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
         format!("{}/.local/state", std::env::var("HOME").unwrap_or_default())
     });
-    format!("{}/terminal-toys/claude-usage.json", base)
+    format!("{}/opscope/claude-usage.json", base)
 }
 
 /// The account the reading belongs to, so switching accounts does not show

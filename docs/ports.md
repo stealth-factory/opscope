@@ -344,7 +344,7 @@ the mount the first one already owns.
   credentials and a DNS record, which is a setup task rather than a keypress,
   and is not attempted. `cloudflared` holds no listening socket — it dials out
   — so nothing in `/proc` ties it to the port it serves; its pid and URL are
-  written under `$XDG_STATE_HOME/terminal-toys/tunnels` so a tunnel survives
+  written under `$XDG_STATE_HOME/opscope/tunnels` so a tunnel survives
   the widget restarting and can still be found and closed.
 
 ### Why only these two

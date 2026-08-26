@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration as Days, NaiveDate, Utc};
-use toys_core as tc;
+use opscope_core as tc;
 
 /// How many of the longest-open PRs an account's own screen names.
 /// How long ago an ISO-8601 stamp was, coarse on purpose: "47d" answers the
@@ -500,7 +500,7 @@ fn graphql(
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("Content-Type", "application/json"),
-            ("User-Agent", "terminal-toys"),
+            ("User-Agent", "opscope"),
         ],
         &body,
         30,
