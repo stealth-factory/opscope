@@ -1,0 +1,119 @@
+# A tag produces a release: fourteen Linux binaries, their checksums, and a
+# changelog built from the commit subjects since the last tag.
+#
+# Nothing here rewrites the source it is building. The version in Cargo.toml
+# and the tag are checked against each other and the build stops if they
+# disagree, rather than the workflow editing the manifest to make them match
+# - a build that edits its own source produces a binary no checkout can
+# reproduce, which is a strange thing to hand somebody.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # Pinned, not `-latest`. The oldest glibc a binary runs on is the one it
+    # was built against, so that is a decision rather than something to
+    # inherit from whatever the runner image became this month. 22.04 is
+    # glibc 2.35.
+    runs-on: ubuntu-22.04
+    steps:
+      # Pinned to a commit, not a tag. A tag is mutable: re-running this
+      # workflow on the same release tag could execute different action code
+      # than the release was built with, which makes "reproducible" a word
+      # rather than a property. Comments carry the human-readable version so
+      # a reader can tell what these are without resolving them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The changelog reads the history between two tags, and the build
+          # stamps the commit into --version. A shallow clone has neither.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          # An exact version, for the same reason. `stable` moves, and two
+          # builds of one tag compiled by different compilers are two
+          # different binaries wearing one version number.
+          toolchain: "1.98.0"
+
+      - name: The tag and the manifest must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag v$tag but Cargo.toml says $manifest" >&2
+            echo "bump the manifest and tag that commit, rather than having" >&2
+            echo "this workflow rewrite the source it is building" >&2
+            exit 1
+          fi
+          echo "v$tag"
+
+      - name: The release profile still unwinds
+        run: |
+          # Three widgets wrap their poll thread in catch_unwind and record
+          # why it stopped. Under panic = "abort" those arms are unreachable
+          # and the source reads as protected while the binary is not - it
+          # was shipped that way once. Costs about 4.5% of the total size,
+          # measured.
+          grep -q '^panic = "unwind"$' Cargo.toml || {
+            echo "Cargo.toml no longer sets panic = unwind" >&2; exit 1; }
+          # And nothing here may quietly override it.
+          if [ -n "${RUSTFLAGS:-}" ]; then
+            echo "RUSTFLAGS is set ($RUSTFLAGS) and could undo the profile" >&2
+            exit 1
+          fi
+
+      - run: cargo test --release
+
+      - run: cargo build --release
+
+      - name: Nothing dynamic beyond the C runtime
+        run: |
+          # rusqlite is taken with `bundled` so SQLite is compiled in, and
+          # the promise on the tin is that a binary needs nothing installed
+          # alongside it. Checked rather than asserted: a crate that starts
+          # wanting a system library would otherwise ship quietly.
+          allowed='linux-vdso|libc\.so|libm\.so|libgcc_s\.so|ld-linux'
+          bad=0
+          for b in $(cargo metadata --no-deps --format-version 1 \
+                     | grep -o '"name":"[a-z-]*","src_path":"[^"]*bin/[a-z-]*\.rs"' \
+                     | sed 's/.*bin\///; s/\.rs"//'); do
+            [ -x "target/release/$b" ] || continue
+            leaked=$(ldd "target/release/$b" | grep -vE "$allowed" | grep -v '^\s*$' || true)
+            if [ -n "$leaked" ]; then
+              echo "$b links something it should carry:" >&2
+              echo "$leaked" >&2
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ]
+
+      - name: Changelog
+        run: ./.github/changelog.sh "$GITHUB_REF_NAME" > CHANGELOG-release.md
+
+      - name: One tarball, and its checksum
+        run: |
+          name="terminal-toys-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$name"
+          # The binaries, and the docs that explain them - `start` embeds
+          # them but a person reading the tarball has no other copy.
+          find target/release -maxdepth 1 -type f -executable ! -name '*.*' \
+            -exec cp {} "dist/$name/" \;
+          cp -r docs README.md LICENSE config.example.json "dist/$name/"
+          tar -C dist -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          ls -la "$name.tar.gz"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file CHANGELOG-release.md \
+            terminal-toys-*.tar.gz terminal-toys-*.tar.gz.sha256

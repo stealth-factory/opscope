@@ -1,0 +1,34 @@
+Clocks: this server's, everyone else's, and the ones counting down.
+
+A big clock in the machine's own timezone, countdown bars for the next hour,
+office hours and the end of day, an optional pomodoro, and a world clock
+covering the hubs you care about.
+
+The pomodoro is off until you press p. It runs the standard 25/5 with a longer
+break every fourth session, all configurable, and persists across restarts so
+relaunching the panel does not cost you a session.
+
+A phase does not end itself. When the time is up the counter keeps going,
+showing how far over you are, and the bar rescales so a growing red section
+represents the overrun — the longer you ignore it, the more of the bar is red.
+The whole panel also flashes twice, a second apart, on every alert - visible
+with the sound muted. The terminal is alerted when the phase elapses and again
+every minute it keeps running: BEL plus OSC 9 and OSC 777 desktop notifications, which are the only
+channels that survive SSH. Under Herdr it additionally raises a native toast
+with a sound — additive, never required, and skipped entirely elsewhere.
+
+Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
+countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
+it with them, space pauses or
+resumes, r restarts the phase, s starts a break during focus and ends one during
+a break - b and e do the same, and the footer names whichever applies - +/-
+change the focus length, ? hides or shows the pomodoro controls,
+0 zeroes today's completed count, q quits.
+
+The completed tally is per day: it resets when the date changes, including
+while the panel is running. Preferences - focus length, whether the timer is
+shown - are not tied to the day and persist.
+
+Big digits show this server's system-timezone clock. Below it, each hub
+is shown in its own timezone, sorted west to east, coloured by whether people
+there are plausibly at work.

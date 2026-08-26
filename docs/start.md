@@ -1,4 +1,6 @@
-# `start.py`
+# `start`
+
+[← all docs](README.md)
 
 The front door: every widget, what it does, and whether it will work on this
 machine.
@@ -15,7 +17,7 @@ machine.
    usage        How much the coding agents have been used…         reads what is logged in
    …
 
- ── NETWATCH ── python3 netwatch.py
+ ── NETWATCH ── ./target/release/netwatch
    needs `ss`
 
  ↑↓ select  ↵ launch  [r]echeck  [q]uit
@@ -26,19 +28,22 @@ and it runs; quit it and you are back here.
 
 ## Nothing is described twice
 
-The launcher holds no list of widgets, no descriptions, and no requirements
-of its own. All three are read at startup from where they already live:
+The launcher writes none of this down twice. Every widget's description and
+requirements are the ones that already exist elsewhere, compiled in at build
+time rather than restated here:
 
-- **Which widgets exist** — every `.py` in the directory that is not
-  `common.py`, `check.py`, or the launcher itself. The same rule `check.py`
-  uses, so the two can never disagree about what a widget is.
-- **What each one does** — its own first docstring line, the one you get from
-  `python3 <widget> --help`.
+- **What each one does** — the same help text the binary itself answers
+  `--help` with, and its doc page from `docs/`, both taken with
+  `include_str!`. A doc page and the launcher's description of it cannot
+  drift apart, because they are the same bytes.
+- **Which widgets exist** — a list in the launcher's own source, one entry
+  per binary. It is the one thing that is written down, because a binary
+  cannot enumerate its siblings the way a directory of scripts could.
 - **What each one needs** — the Needs column of the README's widget table.
 
 That last one is deliberate. It could have been restated here, and then there
 would be two descriptions of every requirement, drifting apart quietly. The
-README's version cannot rot: `check.py` fails any widget missing a row in
+README's version cannot rot: `check.rs` fails any widget missing a row in
 that table.
 
 The practical effect is that adding a widget adds it here. There is no list
@@ -63,7 +68,7 @@ highlighted widget — its doc page's own opening example, marked as one.
 
 Every widget's doc page opens with a rendering of the widget it describes,
 maintained by whoever wrote it, so there is no second copy of anything here
-either — the same arrangement as the descriptions. `matrix.py` has no doc
+either — the same arrangement as the descriptions. `matrix` has no doc
 page on purpose and so has no picture; it gets the description alone.
 
 It says `example` on the frame because it is one. Static numbers in a live
@@ -127,43 +132,44 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-`link.py`, `netwatch.py`, `latency.py` and `herdr-panes.py` all do this, via
-`cannot_start` in `common.py`. The first two used to exit; the second two used
+`link`, `netwatch`, `latency` and `herdr-panes` all do this, via
+`cannot_start` in `toys-core`. The first two used to exit; the second two used
 to run and quietly show nothing, which was worse.
 
 ## Launching## Launching
 
 `↵` hands the terminal over: cursor restored, raw mode off, the widget gets a
 normal terminal and this process waits. Quit the widget and the launcher
-takes the terminal back and rechecks, so a token you set or a package you
-installed while you were away is reflected without restarting.
+takes the terminal back.
+
+Every widget is listed, whether or not this machine can run it. A widget that
+is missing a tool or a token says so on its own screen, in its own words,
+and `q` brings you back here - which is a better place to learn it than a
+menu that has quietly hidden the row.
 
 Naming one skips the menu entirely, and anything after it is passed straight
 through:
 
 ```sh
-python3 terminal-toys         # the directory itself is runnable
-./start.py                    # the menu, from inside it
-./start.py netwatch           # straight into one
-./start.py netwatch -i 2 -n 5 # arguments go to the widget
-./start.py link --help        # including --help
+./target/release/start                    # the menu
+./target/release/start netwatch           # straight into one
+./target/release/start netwatch -i 2 -n 5 # arguments go to the widget
+./target/release/start link --help        # including --help
 ```
 
-The first form works because of `__main__.py`, which is Python's own
-convention for an entry point: a directory containing one can be run by
-name. It holds three lines and hands straight over to this script, so the
-collection can be started without knowing which file inside it to name.
+A widget is looked for beside the launcher's own binary, so a release
+unpacked anywhere works without a path being configured.
 
-That form uses `exec`, so the launcher replaces itself rather than sitting in
-the middle of a pipeline it adds nothing to.
+`start netwatch.py` is still accepted, and only for that: every widget here
+answered to that name for years and the muscle memory outlives the files.
+The suffix is stripped and the binary of the same stem runs.
 
 ## Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | select a widget |
-| `↵` | launch it, and come back here when it quits |
-| `r` | recheck what is installed and configured |
+| `↵` / `→` | launch it, and come back here when it quits |
 | `q` | quit |
 
 ## Cost

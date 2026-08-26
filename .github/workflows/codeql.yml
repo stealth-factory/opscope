@@ -1,0 +1,87 @@
+# CodeQL, in advanced setup rather than default.
+#
+# Default setup cannot do this. Its API accepts only actions, c-cpp, csharp,
+# go, java-kotlin, javascript-typescript, python, ruby and swift - `rust` is
+# refused with a 422 - so the repository was still scanning `python` months
+# after the last .py file was deleted, which is to say scanning nothing.
+#
+# Rust support is public preview, from CodeQL 2.22.1. It needs no build step:
+# the extractor reads the sources, so there is no `autobuild` here and no
+# `build-mode`, which is how github/codeql-action's own Rust check runs.
+#
+# `actions` is scanned alongside it, and is not padding - this repository
+# publishes a release workflow that handles a tag and writes to the releases
+# API, and that file is exactly the kind of thing the actions queries read.
+#
+# THIS FILE DOES NOT RUN YET, and that is not a mistake in it. GitHub disables
+# advanced workflows while default setup is on, and default setup here is
+# pinned by an enforced organisation configuration ("GitHub recommended"),
+# so the repository cannot turn it off: the API answers 422, "controlled by
+# organization administrators".
+#
+# The fix is not to detach this repository from that configuration. The same
+# configuration enforces secret scanning, push protection, Dependabot alerts
+# and private vulnerability reporting, and this repository is public with
+# "secrets never enter the tree" as its first rule - trading push protection
+# for Rust analysis would be a bad bargain. What is needed is a sibling
+# configuration, identical but with code_scanning_default_setup disabled,
+# attached to this repository alone. Then this file starts working and
+# nothing else is given up.
+name: CodeQL
+
+# Manual only, until the organisation configuration above is sorted.
+#
+# This ran once on push and did exactly what it should: the Rust extractor
+# read the whole crate and produced a database, and then the upload was
+# refused - "CodeQL analyses from advanced configurations cannot be
+# processed when the default setup is enabled". The analysis is fine; the
+# submission is what is blocked.
+#
+# A check that can only ever be red teaches nothing, and would be red on
+# every push to main after the port lands. So the automatic triggers are
+# parked here, in the order they should be restored:
+#
+#   push:         { branches: [main] }
+#   pull_request: { branches: [main] }
+#   schedule:     [ { cron: "17 4 * * 1" } ]     # weekly, as default setup had
+#
+# Put those back the moment the repository is attached to a configuration
+# with code_scanning_default_setup disabled, and delete this comment.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # The three this needs and nothing else: read the code, write the
+      # findings, and read Actions metadata for the workflow scan.
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
+        with:
+          languages: ${{ matrix.language }}
+          # security-extended over the default suite. This is fourteen
+          # binaries that read a machine's own state and hold three API
+          # tokens; the extra queries are the point of running this at all.
+          queries: security-extended
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
+        with:
+          category: "/language:${{ matrix.language }}"

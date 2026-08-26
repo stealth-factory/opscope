@@ -1,4 +1,6 @@
-# `netwatch.py`
+# `netwatch`
+
+[← all docs](README.md)
 
 Which processes are using the network, how much they have used, and how fast
 they are going right now.
@@ -181,6 +183,15 @@ interfaces actually moved. When they agree, the list below is the whole
 picture. When they do not, the difference is traffic passing through, and
 the percentage says how much of the story the table is telling.
 
+There is a second way the table can be showing less than everything, and it
+says so too. When there are more processes than rows, the header adds
+**`showing 1-14`** beside the count, and the table follows the cursor rather
+than staying at the top of the list — so `↑` `↓` scroll it, and the selected
+row is always on screen. Without the window the cursor walked off the bottom
+of a short pane and disappeared, while `→` still opened whatever it was
+invisibly sitting on. The label is absent when every process fits, because
+then there is nothing to say.
+
 Only real interfaces are counted — loopback, `tailscale0`, `docker0`, bridges
 and veth pairs are skipped, because a forwarded packet leaves through a card
 as well and counting both would count it twice. Which ones were counted is
@@ -287,32 +298,69 @@ it as a machine honestly can:
  ── PROCESS ──
   command   curl -s -o ~/tmp/big.bin --limit-rate 400k https://…/__down
   directory ~/projects/terminal-toys
-  started   6s ago
 
- ── TALKING TO ── 1 connection
-  162.159.140.220               https  ↓   3.2 MB ↑    722 B   411.2 KB/s
+ ── TALKING TO ── 1 endpoint
+   HOST                              PORTS            RX         TX       RATE
+   162.159.140.220                   https    ↓   3.2 MB ↑    722 B 411.2 KB/s
 
- ── WRITING TO ── where a download would be landing
-  ~/tmp/big.bin                                     3.0 MB   +425.8 KB/s
+ ── CONNECTIONS ── 2 sockets
+   SOCKET                                LOCAL STATE          RX         TX
+   162.159.140.220:443                   50206 open   ↓   3.2 MB ↑    722 B
+   162.159.140.220:443                   43738 open   ↓   1.1 MB ↑    310 B
+
+ ── FILES ── 1 file
+   PATH                                                  SIZE      GROWTH
+   ~/tmp/big.bin                                       3.0 MB +425.7 KB/s
 
  ── DISK ── read 0 B · written 3.0 MB since it started
- HTTPS hides the URL and the filename. Who it talks to and what it writes
- are above.
+ HTTPS hides the request path and the remote filename — not the local file
+ it is writing, which FILES names above, nor who it is talking to.
 ```
 
-Three lists, and `tab` moves between them — the focused one is marked `▏` and
-takes the arrow keys, and `c` copies whatever is selected in it.
+Every list is drawn in full, always, and `↑` `↓` scroll the screen. `tab`
+focuses a list instead: the focused one is marked `▏`, `↑` `↓` then move a
+cursor `▸` inside it, and `c` copies whatever that cursor is on.
+
+Exactly one *other* heading carries `[tab] to focus`, and it is the one tab
+would actually focus next — not all of them, because tab cycles and a `[tab]`
+on all three would promise three lists that one press reaches. This heading
+used to name a key per list, `[e]` and `[f]`, pointing at keys that no longer
+existed; tab was the only one that was ever true, so tab is what is left, and
+only where it is true. A list with nothing in it never carries it, because tab
+steps over those.
+
+Under the arrows the three lists read as **one continuous list**: `↓` off the
+bottom of a list steps into the top of the next, and `↑` off the top steps
+into the *bottom* of the one above — the row you were about to reach if they
+had never been separate. `tab` is the shortcut across a whole list rather
+than the only way between them.
+
+You let go of the lists at exactly two places: `↑` from the very first row,
+and `↓` from the very last. Both put you back to scrolling the screen, as
+does `tab` from the last list. Lists with nothing in them are stepped over in
+every direction, since there would be nothing to put the cursor on.
+
+**This is the same rule in every widget here that has focusable sections.**
 
 **TALKING TO** ranks the remote hosts by what they have carried since launch.
 Hosts, not sockets: a process opening six connections to one CDN is one thing
 being talked to. Peers resolve to names in the background — the address shows
-until the answer arrives, and a lookup is never made twice. The highlighted
-host gets its own small rx/tx chart, which is the quickest way to see whether
-it is the one doing the work.
+until the answer arrives, and a lookup is never made twice. The row the cursor
+is on gets its own small rx/tx chart, drawn directly beneath it, which is the
+quickest way to see whether that host is the one doing the work.
 
 **CONNECTIONS** is the sockets themselves, open right now, which is a
 different question: one host may hold six of them, and a socket that has
-closed still shows what it carried.
+closed still shows what it carried. It charts the same way TALKING TO does —
+the cursor's socket gets an rx/tx chart under its row.
+
+**LOCAL** is the port at this end, and it is the only column that tells those
+six apart. Five sockets to one CDN all read `1.2.3.4:443`, because the
+address and port shown are the *peer's* and the peer's port is 443 on every
+one of them; what differs is the port here. Without it the list is five
+identical lines and "why are there so many of these" has no answer on screen.
+The name is `ss`'s and `netstat`'s own — both label that column *Local
+Address:Port*. A socket seen before the port could be read shows `-`.
 
 A hostname is a best-effort label rather than the domain that was asked for.
 CDNs, shared addresses, encrypted DNS and connection reuse all mean one
@@ -361,17 +409,25 @@ Decimal — `KB` is 1,000 bytes, `MB` is 1,000,000 — which is how link rates a
 data caps are quoted, and therefore what these numbers are usefully compared
 against.
 
+Every **rate** — `NOW`, `DOWN`, `UP`, the per-endpoint and per-socket figures,
+and a file's growth — is an average over the last **ten seconds**, not over
+the one-second sample. Almost all traffic is bursty, so an instantaneous rate
+is honest and unreadable: a process that is steadily busy flickers between a
+figure and a dash. An average over a stated window is just as true and can
+actually be read. The header says the window (`every 1s · rates over 10s`) so
+the number is never a mystery, and the **totals** are untouched by it.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k` | select a process — or an item within the focused section |
+| `↑` `↓` / `j` `k` | select a process in the list — on the detail screen, scroll it, or move the cursor inside a focused section |
+| `PgUp` `PgDn` `Home` `End` | move the detail screen by a page, or to either end |
 | `↵` / `→` | open the selected process |
 | `esc` / `←` | back to the list |
-| `tab` | cycle the focused section: endpoints → connections → files |
-| `e` | focus the endpoints |
-| `f` | focus the open files |
+| `tab` | focus the next section, and from the last one back to scrolling |
 | `c` | copy the selected host, socket or path |
+| `e` `f` | jump straight to the endpoints or the files — **`netwatch` only**; the Rust build reaches every section with `tab` alone |
 | `s` | switch sort mode (`t` also works) |
 | `o` | show or hide processes you do not own |
 | `1` | sort by total data used |
@@ -382,7 +438,7 @@ against.
 ## Options
 
 ```
-netwatch.py [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
+netwatch [-i SECONDS] [-n COUNT] [--sort total|live] [--external] [--plain]
 ```
 
 | Option | Meaning |

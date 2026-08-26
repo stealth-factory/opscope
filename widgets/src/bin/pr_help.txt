@@ -1,0 +1,17 @@
+Watch the pull requests you have to follow up on.
+
+A list of open PRs, and a dashboard for whichever one is selected: checks,
+reviews, mergeability, and - when the PR belongs to a stack - the stack it
+sits in and the order that stack has to merge in.
+
+    pr [-n SECONDS] [search terms ...]
+
+Extra arguments are appended to the search, so `pr.py org:acme` narrows to one
+organisation and `pr.py author:@me` to your own. With none given it uses
+`pr.query` from config, which defaults to everything you are involved in.
+
+Credentials: reuses `github.token` from config.json, or $GITHUB_TOKEN. A
+classic token with `repo` and `read:org`, the same one github.py uses.
+
+Keys: up/down select, enter opens a PR, esc goes back, / filters, s cycles the
+sort, o reverses it, r refreshes, q quits.

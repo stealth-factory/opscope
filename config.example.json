@@ -35,7 +35,26 @@
       ]
     ],
     "work_start_hour": 9,
-    "work_end_hour": 18
+    "work_end_hour": 18,
+    "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
+    "show_hints": true,
+    "_work_days_comment": "Which days count as working days, as names (sun, mon, ...) or numbers. Drives the working-day shading.",
+    "work_days": ["mon", "tue", "wed", "thu", "fri"],
+    "pomodoro_enabled": false,
+    "pomodoro_focus_minutes": 25,
+    "pomodoro_short_break_minutes": 5,
+    "pomodoro_long_break_minutes": 15,
+    "pomodoro_sessions_before_long_break": 4,
+    "pomodoro_bell": true,
+    "pomodoro_notify": true,
+    "pomodoro_flash": true,
+    "pomodoro_flash_count": 2,
+    "pomodoro_flash_gap": 1.0,
+    "pomodoro_flash_rgb": [
+      246,
+      248,
+      252
+    ]
   },
   "deployments": {
     "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
@@ -47,6 +66,8 @@
     "projects": []
   },
   "tailnet": {
+    "_comment_history": "rate samples kept per peer; the chart is a window on to this",
+    "history": 180,
     "refresh": 5
   },
   "herdr_panes": {
@@ -57,7 +78,7 @@
     "token": "",
     "token_env": "GITHUB_TOKEN",
     "accounts": [],
-    "window_days": 7,
+    "window_days": 14,
     "refresh": 120
   },
   "linear": {
@@ -86,7 +107,14 @@
     "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
     "rates": {},
     "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
-    "plan_cost": {}
+    "plan_cost": {},
+    "_antigravity_remote_comment": "Antigravity publishes its quota two ways: a language server that runs inside the app, and Google, which serves the same summary on the endpoint the tier already comes from. The local one is preferred and this only decides whether the remote one may be asked when the app is shut. On by default - it is the same host and the same credential the tier request already uses. Turn it off and the quota is absent whenever Antigravity is closed; the tab then says so, and names this key.",
+    "antigravity_remote": true,
+    "_antigravity_start_comment": "Whether the widget may start the `agy` CLI to read the quota it serves, when nothing else has one. On by default, and the only setting here that runs another program. It is your own CLI, already installed and signed in; it is started under a pseudo-terminal, killed by pid as soon as the reading is taken, and reaped, so nothing outlives the fetch; and a CLI you started yourself is found by the ordinary local probe long before this runs, so this can never shut one of yours down. Off means the quota lasts an hour past the last time Antigravity ran, which is the token's life.",
+    "antigravity_start": true,
+    "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
+    "grok_ping": false,
+    "grok_ping_minutes": 5
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",

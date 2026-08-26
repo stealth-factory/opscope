@@ -1,11 +1,13 @@
-# `deployments.py`
+# `deployments`
+
+[← all docs](README.md)
 
 Vercel deployments — how they are going over time, not just what shipped last.
 
 ```
 ╺━ VERCEL DEPLOYMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  200 deploys · 20 proj  179 ready  21 error   0s ago
- ↑↓ select · [c]opy · [r]efresh [f]ilter [p]roject [q]uit
+ ↑↓ select · →/↵ details · [s]tate all · [/]filter · [r]efresh · [q]uit
 
  ── ACTIVITY ── deploys/hour, last 48h
  ····▂▂·▃▃▄▄···················▂▄▆▄▃▃▃▄▂▃▃············▂▃·▃▂▂▄·▂▄█▃▂▃
@@ -75,17 +77,72 @@ omitted, and the sheet says how many are missing rather than silently dropping
 them. Every URL is shown wrapped in full, so mouse selection still works where
 OSC 52 is blocked.
 
+## The detail view
+
+`→` or `↵` opens one deployment in full. It scrolls with `↑` `↓` — the build
+log below makes it taller than any pane — and the footer says where you are
+in it. `PgUp` `PgDn` `Home` `End` move by the page and to either end.
+
+It refetches every minute while it is open, because a build that is still
+running writes more log while you are reading it, and `r` asks again at once
+rather than waiting for that.
+
+`c` opens the copy list on **its own page**, and `←` or `esc` brings you back
+to the detail where you left it. The list used to sit at the bottom of the
+detail, which was fine until the build log went in above it: the numbers you
+press were then reliably scrolled off the screen you were pressing them from.
+
+## The build log
+
+The detail view ends with the deployment's own build output, fetched from
+`/v3/deployments/{id}/events` on the same trip as the rest of the detail.
+`errorMessage` above it says a build failed and names a code; the log says
+which line of somebody's config did it, which is the thing you would
+otherwise open a browser for.
+
+What the build wrote to **stderr** is drawn in the error colour among the
+stdout lines, because on a failed build that is the one line worth finding
+and it arrives among dozens that look alike. Long lines wrap rather than
+clip — a stack trace cut at the pane edge is the half without the path in it.
+
+The last 200 lines are requested. A long build runs to thousands and the
+pane shows a few dozen, so asking for all of them would spend the wait on
+text nobody reads; the tail is the useful end, since a build explains itself
+on the way out rather than on the way in.
+
 ## Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | move the selection |
-| `Enter` / `i` / `c` | full detail view for the selected deployment |
+| `→` / `Enter` | full detail view for the selected deployment |
 | `1`–`7` | inside the view, copy that item |
-| `f` | filter — all / failed / production |
-| `p` | cycle which project is shown |
-| `r` | refresh now |
-| `q` | quit |
+| `←` / `esc` | close the detail view |
+| `s` | state filter — all / failed / production |
+| `/` | filter by text — `enter` keeps it, `esc` clears it |
+| `c` | copy the selected PR's… (in the detail view, the copy page) |
+| `r` | refresh now, and in the detail view fetch it again |
+| `q` | quit, from either screen |
+| `f` `p` | the state filter and the project cycle — **`deployments` only**; the Rust build has `s` and `/` instead |
+
+## Filtering
+
+Two filters, and they stack.
+
+`s` cycles the **state** — all, failed, production. It is a fixed set, so it
+cycles rather than types.
+
+`/` filters by **text**, against everything the row shows and one thing it
+does not: project name, state, target, branch, commit subject, and the
+deployment id — the last because an id is what a link from somewhere else
+gives you to look something up by. Type to narrow, `enter` to keep it and go
+back to the arrows, `esc` to clear it. While typing, every key is text: `q`
+types a q rather than quitting, which is the only way a filter can contain
+one.
+
+This replaced a `p` key that cycled one project at a time. With a dozen
+projects, reaching the last meant pressing it a dozen times, and it could
+never express "the failed ones in either of these two".
 
 ## Layout
 
@@ -137,6 +194,6 @@ Empty `teams` discovers every team you can see; empty `projects` shows all.
 Polling every 15s is 4 requests/min per team.
 
 ```sh
-./deployments.py                    # every project, 15s
-./deployments.py -n 60 my-project   # one project, slower
+./target/release/deployments                    # every project, 15s
+./target/release/deployments -n 60 my-project   # one project, slower
 ```

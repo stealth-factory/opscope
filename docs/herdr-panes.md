@@ -1,4 +1,6 @@
-# `herdr-panes.py`
+# `herdr-panes`
+
+[← all docs](README.md)
 
 Everything running under [Herdr](https://herdr.dev), across every workspace —
 and one keypress to get to any of it.
@@ -19,14 +21,14 @@ and one keypress to get to any of it.
 
  ── PROCESSES ── 7 panes running something
  COMMAND              CPU   MEM   WORKSPACE
- ▪ tailnet.py           3%   16M  infra
+ ▪ tailnet              3%   16M  infra
  ▪ pnpm                 0%  116M  some-cli
 
  ── IDLE ── 13 panes at a prompt
  ▫ work/site                  site
  ▫ …/another-monorepo         monorepo
 
- ↑↓ select   ↵ switch to this pane   [o]idle [w]labels [r]efresh [q]uit
+ ↑↓ select   ↵ switch to this pane   [i]dle [l]abels [r]efresh [q]uit
 ```
 
 ## Why it is ordered this way
@@ -51,6 +53,14 @@ monitors, builds — with the command, CPU and memory. **IDLE** lists panes at a
 shell prompt by directory, because the panel is also how you navigate: a shell
 sitting in a repo is somewhere you want to jump to even with nothing running.
 
+There is a third answer, and PROCESSES carries it too. A pane the CLI could
+not be asked about is neither running something nor resting: it sorts to the
+top with `⚠ could not be read` and the reason on its own row, and the heading
+counts it apart — `3 panes running something · 29 could not be read`. It is
+kept visible on purpose, and `[i]` hides only panes known to be at a prompt,
+because an unreadable pane filtered out of sight is exactly the shape this
+widget exists to avoid: a failure that looks like an empty list.
+
 ## How it knows
 
 Everything comes from the Herdr CLI, so this is a Herdr client rather than a
@@ -68,20 +78,47 @@ with `herdr integration status`.
 
 **Idle panes are detected exactly**, not guessed: a busy pane's foreground pid
 differs from its own shell pid. Command names come from `argv`, so a pane shows
-`tailnet.py` rather than `python3`.
+`tailnet` rather than `python3`.
 
 **Durations are marked `≥`** when the state was already in place before the
 widget started — we did not see it begin, so it is only a lower bound. Herdr
 does not timestamp state changes, so transitions are tracked here.
 
+## When it does not all fit
+
+The three lists read as one under the arrows, and the pane is a window onto
+that one list. The header above them is pinned — the counts and the
+`▸ N agents waiting for you` line are the reason to have the widget open, and
+they never scroll away.
+
+The window follows the cursor: it holds still while the cursor moves inside
+it, and moves by as little as it takes when the cursor would leave. It is
+measured in **rows**, not entries, because an agent takes two rows — its
+second carries the directory and the pane title — while a process takes one.
+Counted in entries it admits more rows than the pane has, they are cut off the
+bottom, and the cursor goes with them: it kept moving past the last drawn row
+and disappeared, while `Enter` still switched to whatever it was invisibly
+sitting on.
+
+A heading whose section is not all on screen says so — `── IDLE ── 15 panes at
+a prompt · showing 4-15` — and one the window has scrolled clean past says
+`none on screen` rather than standing over nothing, which reads as a section
+that has failed to load. A section entirely on screen says nothing: a range on
+a list you can see all of is noise.
+
+The idle heading is drawn whenever there are idle panes, at every height. It
+used to be rationed — granted a heading only if the lists above had left room
+— and dropping it silently left the footer offering `[i]dle` with nothing
+behind it.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `Home` `End` | select, across all three sections |
+| `↑` `↓` `Home` `End` | select, across all three sections; the window follows |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
-| `o` | show/hide the idle section |
-| `w` | workspace labels vs pane ids |
+| `i` | show/hide the idle section — `o` in the Python, which is being retired |
+| `l` | workspace labels vs pane ids |
 | `r` | refresh now |
 | `q` | quit |
 

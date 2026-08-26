@@ -1,4 +1,6 @@
-# `ports.py`
+# `ports`
+
+[← all docs](README.md)
 
 What is listening on this machine, what started it, and who can reach it.
 
@@ -79,6 +81,105 @@ pointing at it and nothing behind it — the URL exists, answers 502, and
 nothing in `lsof` explains why. It gets its own row rather than being left out
 for lacking a socket.
 
+## Traffic
+
+The **TRAFFIC** column, and the chart on a port's own screen, come from the
+kernel's own per-socket byte counters — `bytes_sent` and `bytes_received` out
+of `ss -tine`, the same two fields netwatch reads. Nothing here is derived
+from a guess.
+
+A *listening* socket carries no bytes. The traffic is on the connections
+accepted from it, so a port's figure is the sum over every established socket
+whose **local** port is that one. Only ports something is actually listening
+on are tallied: most established sockets are outbound, and their local port is
+an ephemeral number that belongs to nothing.
+
+```
+ ── TRAFFIC ── ↑ out above · ↓ in below  · 44s of history, sampled every 1s
+                                             █                 ▁
+                                             █▆ ▃     ▆▄▁▂    ▁█▁▁    ▁▂▇▄▁
+↑ 4.7 MB/s ··································██▅█▂ ▄▂▇████▅ ▃▂████▄▂▂▄█████▇
+           ─────────────────────────────────────────────────────────────────
+           ··································
+```
+
+The chart is as wide as the pane. One column is one sample, newest at the
+right, and each direction is scaled to its own peak and says what that peak
+was in a gutter down the left. A shared scale would flatten the quieter of the
+two into nothing, and nothing is what a source with no traffic looks like —
+the one reading this widget must never produce by accident.
+
+The dots are where there is no history yet. Left blank they would be
+indistinguishable from a stretch of real zeroes, and a quiet port and an
+unmeasured one are not the same thing. They fill in from the right as the
+samples arrive, and once the history is longer than the pane is wide the
+chart shows the most recent of it — which is what the heading's `44s of
+history` counts, not everything kept.
+
+Three things it is honest about:
+
+**It counts what moved between two samples,** so a socket has to be seen twice
+to say anything. A connection that opens and closes inside one interval is
+never counted, and a long-lived one loses its last few bytes when it closes.
+At the default four-second poll that is a real gap; `-n 1` narrows it.
+
+**Rates divide by the gap that actually happened,** not by the interval that
+was asked for. `[r]` polls early, and a rate measured against the nominal
+interval would read high every time somebody pressed it.
+
+**It is TCP.** A port serving anything else reads as quiet, because these
+counters exist only for TCP sockets. Ports whose process belongs to another
+user are counted the same as any other — the byte counters need no privilege,
+even where naming the process does.
+
+Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
+it is about what leaves the machine; here loopback is the whole point, since a
+browser hitting a dev server on `127.0.0.1` is the traffic being asked about.
+
+The same chart is drawn once across the top of the main screen — everything
+moving through every listening port — when there are rows to spare after the
+table. The table is what this widget is for, so the chart yields to it.
+
+Beside the rates, each row carries **the shape** of its own traffic:
+
+```
+  PORT  BIND    WHAT       PROJECT      TRAFFIC        LAST 17s        UP    EXPOSED
+ 38611 local   node       a-project                  ·····─────────  10s   -
+ 39311 all     Python     serve        ↑503K         ▆▃▁ ▂▂▄▇▅█▃▃▁▁  4m    -
+```
+
+Each row is scaled to **its own peak**, not to the busiest port on screen. A
+shared scale would flatten every quiet port to nothing, and nothing is what a
+port with no traffic looks like. So the shape column says *shape* and the
+rates beside it say *size*, and the two are read together — a row with a full
+bar and `↑2K` is a port at its own busiest, which is not busy.
+
+The three states are kept visibly apart, the same way the chart keeps them:
+dots for cells with no sample behind them yet, a flat line for measured and
+quiet, bars for traffic. `·····─────────` is a port that appeared ten seconds
+ago and has done nothing since.
+
+Both columns arrive when there is room for them *after* the names, rather than
+past some width picked in advance: the project column is the one that gives,
+and a project's name cut in half is a different project. Both are measured
+against a row that already carries UP and EXPOSED whether or not the pane is
+yet wide enough to show them, so that crossing that width cannot trade one
+fact for another. The shapes are the more decorative of the two and so arrive
+last and leave first. A port nothing is calling shows nothing in the rates
+column rather than `0 B/s` — a column of zeroes down the table reads as a
+measurement that has failed.
+
+## When the scan itself breaks
+
+If the poller stops, the header carries `! poller stopped - see the pane it
+was started from` and the table holds whatever it last knew. It used to catch
+the failure and return an empty list, so the pane read `0 listening` — a
+machine with nothing running on it, which is a thing this widget is supposed
+to be able to say truthfully.
+
+The traffic sampler is separate: if it stops, the columns it feeds go quiet
+and the line says so, while the table below carries on being found.
+
 ## What it cannot see
 
 Sockets owned by another user, which on a normal machine means everything root
@@ -148,7 +249,7 @@ never a dev server. Neither case is offered a prompt.
 
 ## The second screen
 
-`↵` opens the selected port, and only when there is something behind it — a
+`↵` or `→` opens the selected port, and only when there is something behind it — a
 process of yours, or a port Tailscale is already serving. Another user's
 socket does not get a screen, because the four columns already carry
 everything `/proc` will say about it, and a press that opens a repeat of the
@@ -288,7 +389,7 @@ are on this screen rather than an IP.
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a row — or an address, on the second screen |
-| `↵` | open the selected port, where there is more to show |
+| `↵` `→` | open the selected port, where there is more to show |
 | `esc` | back to the list |
 | `c` | copy the highlighted address |
 | `s` | `tailscale serve` this port, or stop serving it |
@@ -303,9 +404,14 @@ are on this screen rather than an IP.
 ## Cost
 
 Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds, plus one `tailscale serve status` — no network, no root, no
-dependency beyond Tailscale for the exposure column, which is simply blank
-without it.
+seconds, one `ss -tine` for the byte counters, plus one `tailscale serve
+status` — no network, no root, no dependency beyond Tailscale for the exposure
+column, which is simply blank without it.
+
+The traffic sampling rides that same poll rather than a thread of its own. A
+second thread would buy a finer chart and would also have to be watched: a
+poller that dies is invisible, and its pane is indistinguishable from a source
+with nothing to say.
 
 ## Configuration
 

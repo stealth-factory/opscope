@@ -1,0 +1,76 @@
+[package]
+name = "toys-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+toys-core = { path = "../core" }
+libc = "0.2"
+serde_json = "1"
+# clocks needs these; nothing else does yet, and an unused dependency costs
+# nothing at run time because LTO drops what no binary reaches.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+# usage reads three of its six agent vendors out of SQLite files, which is
+# what Cursor, Copilot and Antigravity each keep their history in. Python
+# has sqlite3 in its standard library; this is the equivalent, bundled so
+# that the binary still runs on a machine with no sqlite installed - the
+# single executable being the point of the port.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[[bin]]
+name = "ports"
+path = "src/bin/ports.rs"
+
+[[bin]]
+name = "netwatch"
+path = "src/bin/netwatch.rs"
+
+[[bin]]
+name = "latency"
+path = "src/bin/latency.rs"
+
+[[bin]]
+name = "matrix"
+path = "src/bin/matrix.rs"
+
+[[bin]]
+name = "link"
+path = "src/bin/link.rs"
+
+[[bin]]
+name = "clocks"
+path = "src/bin/clocks.rs"
+
+[[bin]]
+name = "herdr-panes"
+path = "src/bin/herdr-panes.rs"
+
+[[bin]]
+name = "deployments"
+path = "src/bin/deployments.rs"
+
+[[bin]]
+name = "start"
+path = "src/bin/start.rs"
+
+[[bin]]
+name = "linear"
+path = "src/bin/linear.rs"
+
+[[bin]]
+name = "pr"
+path = "src/bin/pr.rs"
+
+[[bin]]
+name = "github"
+path = "src/bin/github.rs"
+
+[[bin]]
+name = "tailnet"
+path = "src/bin/tailnet.rs"
+
+[[bin]]
+name = "usage"
+path = "src/bin/usage.rs"

@@ -1,0 +1,21 @@
+Linear delivery metrics across every team in the workspace.
+
+What is outstanding, what the running cycles look like, and whether issues are
+being closed faster than they arrive.
+
+    linear [-n SECONDS] [team-key ...]
+
+Team keys are the prefixes on issue identifiers - XFY, SYS and so on. With
+none given every team is included, minus anything in `linear.exclude_teams`.
+
+Triage is counted apart from the backlog throughout. An auto-filed intake
+queue and a groomed backlog are different populations, and adding them
+together produces a number that means nothing.
+
+Credentials: `linear.token` in config.json, or $LINEAR_API_KEY. A personal API
+key from Settings - Security & access - Personal API keys. The API is called
+directly, so no CLI is required.
+
+Keys: tab focuses a pane — the cycles, then the teams, then no focus at all —
+and up/down move the cursor in whichever is focused, leaving it if you walk off
+either end. r refreshes now, w cycles the window (7/14/30/60/90 days), q quits.

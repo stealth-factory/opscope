@@ -1,0 +1,42 @@
+# Design conventions
+
+[← all docs](README.md)
+
+A few rules hold across all fourteen widgets. They are here rather than in
+the README because they are for whoever changes one, not for whoever runs
+one — and because each of them was paid for by something that shipped
+wrong first.
+
+- **Spend extra width on more content, not padding.** Widgets add columns as a
+  pane grows and drop them as it shrinks, rather than truncating.
+- **Never truncate a key hint.** Footers wrap across as many lines as they need
+  and never split a hint, because `[±]25` teaches a key that does not exist.
+- **A directional glyph points the way the thing goes.** `▲`/`▼` mark which
+  half of a diverging chart a series occupies — `▲ opened` above the baseline,
+  `▼ merged` below it. `↑`/`↓` mean upload and download. Where both meanings
+  meet, in `netwatch`'s chart, the halves are arranged so they agree: tx
+  above and rx below, because a `↓` label over a line that climbs asks the
+  reader to hold two directions at once, and they will believe the arrow.
+- **Measure contrast, do not eyeball it.** Every colour that draws text clears
+  WCAG AA against both the terminal background *and* the selected-row tint,
+  with the measured ratios recorded beside the definitions.
+- **Say what a number means when it is not obvious.** Counters that reset with
+  a daemon, durations that predate the process, aggregates that hide their
+  outliers — each is labelled rather than left to mislead.
+- **Never show a stale figure under a fresh label.** Change a setting and the
+  numbers it governs shimmer until real ones land, rather than sitting there
+  looking current. The same rule kills silent truncation: a chart that cannot
+  fit its window says `54d of 90d`, and a token missing a scope is named rather
+  than left to quietly undercount.
+- **Optional enhancements, never requirements.** The clipboard goes through
+  OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
+  available and skipped silently where not.
+
+## Where these are enforced
+
+Four of them are not prose. `cargo test` runs
+[`widgets/tests/check.rs`](../widgets/tests/check.rs), which reads the
+sources and fails on a footer hint naming a key nothing answers, a hint
+missing from the widget's doc, a config key read but never documented,
+and a colour drawing text on the selected-row tint below WCAG AA. See
+[internals](internals.md#the-checks).

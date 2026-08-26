@@ -1,4 +1,6 @@
-# `pr.py`
+# `pr`
+
+[← all docs](README.md)
 
 The pull requests you have to follow up on, and a dashboard for whichever one
 you open.
@@ -93,7 +95,7 @@ diff.
 
 Heights are **linear against the oldest PR**, which is worth knowing when the
 spread is wide: with an outlier at 3.9 years, everything under a couple of
-months lands on the same lowest block. `latency.py` solves the same problem
+months lands on the same lowest block. `latency` solves the same problem
 with a log scale; this chart has not adopted one yet.
 
 ## Which PRs, and why it takes three searches
@@ -283,7 +285,7 @@ one you open — so the view paints a loading shimmer and fills in.
 
 **Reuses `github.token`** from `config.json`, or `$GITHUB_TOKEN`. No second
 credential: it is the same classic token with `repo` and `read:org` that
-`github.py` uses. Set `pr.token` only to point this widget at a different
+`github` uses. Set `pr.token` only to point this widget at a different
 account.
 
 ## Configuration
@@ -303,9 +305,9 @@ account.
 Add, remove or rename sources freely — `review-requested:@me` and
 `is:open is:pr org:acme` are both reasonable entries, and the names are what
 `f` cycles through. Anything on the command line is appended to *every* source,
-so `./pr.py org:acme` narrows the lot without editing config.
+so `./target/release/pr org:acme` narrows the lot without editing config.
 
 ```sh
-./pr.py                          # everything you are involved in
-./pr.py -n 120 review-requested:@me   # only what is waiting on your review
+./target/release/pr                          # everything you are involved in
+./target/release/pr -n 120 review-requested:@me   # only what is waiting on your review
 ```

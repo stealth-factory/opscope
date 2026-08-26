@@ -1,4 +1,6 @@
-# `latency.py`
+# `latency`
+
+[← all docs](README.md)
 
 Continuous latency to a list of hosts, with the statistics that actually
 explain a bad connection.
@@ -22,6 +24,17 @@ explain a bad connection.
         └────────────────────────────────────────────────
          300s ago                                     now
 ```
+
+## A host that will not answer, and a ping that will not run
+
+They are not the same thing and no longer look the same. A host that does not
+reply is a result — it shows as loss, which is what the widget is for. A
+`ping` this widget could not start is a failure of its own, and the row now
+carries the reason and turns its name red, rather than sitting empty and
+being retried every two seconds in silence for as long as the widget is up.
+
+The figures beside it stay. They were true when they were taken, and they are
+the last thing that target was known to be doing.
 
 ## Why the shape of it
 
@@ -108,8 +121,8 @@ baseline, not a path measurement.
 `studio` rather than clipping the interesting half.
 
 ```sh
-./latency.py                              # config targets, 0.5s
-./latency.py -i 2 1.1.1.1 example.com     # override both
+./target/release/latency                              # config targets, 0.5s
+./target/release/latency -i 2 1.1.1.1 example.com     # override both
 ```
 
 It measures *this host → each target*. Target-to-target legs need a probe on the

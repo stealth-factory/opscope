@@ -1,4 +1,6 @@
-# `tailnet.py`
+# `tailnet`
+
+[← all docs](README.md)
 
 Tailscale peers, and — the part plain `tailscale status` buries — *how* you are
 reaching each one.
@@ -70,7 +72,7 @@ geolocation service), every address it has, its advertised routes, and whether
 it offers itself as an exit node.
 
 It also carries **live latency** for that peer — current, average, median, min,
-max, jitter, loss and a sparkline, the same statistics `latency.py` reports,
+max, jitter, loss and a sparkline, the same statistics `latency` reports,
 measured by ICMP over the tunnel. Only the selected peer is probed, so this
 costs one ping process no matter how large the tailnet, and history is kept per
 peer so returning to one still shows its earlier samples.
@@ -93,11 +95,12 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a peer |
-| `Enter` / `i` | machine info view |
+| `→` / `Enter` | machine info view — `i` in the Python, which is being retired |
+| `←` / `esc` | back out of the info or copy view |
 | `c` | copy addresses |
 | `g` | show/hide the live throughput graphs |
 | `o` | hide offline peers |
-| `n` | poll interval — 1 / 2 / 5 / 10 / 30s |
+| `i` | poll interval — 1 / 2 / 5 / 10 / 30s |
 | `r` | refresh now |
 | `q` | quit |
 
@@ -120,5 +123,5 @@ peer dominates.
 "tailnet": { "refresh": 2, "history": 180 }
 ```
 
-Graph resolution follows the poll interval, so `n` doubles as a zoom control.
+Graph resolution follows the poll interval, so `i` doubles as a zoom control.
 Needs the `tailscale` CLI; no root required.

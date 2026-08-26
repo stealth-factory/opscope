@@ -1,4 +1,6 @@
-# `usage.py`
+# `usage`
+
+[← all docs](README.md)
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
@@ -124,7 +126,7 @@ cache had settled — 31 sessions, a longest session of `4d 10h 52m`, a longest
 streak of 21 days, Aug 1 as the busiest day.
 
 The **tokens-per-day calendar** is laid out like the contribution calendar in
-`github.py` — weekdays down the side, weeks across — so the two read the same
+`github` — weekdays down the side, weeks across — so the two read the same
 way on one wall.
 
 The only difference is cell width. That pane spans a year, so its cells are one
@@ -324,6 +326,100 @@ a Claude/GPT pair at 0%; those are real limits and are left in.
 
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
+
+That was written here as *"the one agent with no account-wide quota endpoint
+at all"*, and it was wrong. Google serves the same summary the language
+server does:
+
+```
+POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
+```
+
+Same bearer token the tier already uses, and the reason it looked absent is
+the body: `loadCodeAssist` wants `{"metadata":{"pluginType":"GEMINI"}}`, and
+sending that here is a 400 naming `metadata` as an unknown field — which
+reads exactly like an endpoint that is not there. It takes `{}`. What comes
+back is the same shape group for group and bucket for bucket, so it needs no
+parser of its own.
+
+The local server is still preferred: it is the app's own answer and moves as
+the app is used, where Google's is a record. The remote one is asked only
+when there is no server to ask, held for an hour rather than two minutes,
+and the heading says which was read:
+
+```
+ ── QUOTA ── live · account-wide, from Google - the app is not running
+```
+
+So the quota survives the app being closed — for as long as the token lasts,
+which is an hour, because the refresh token beside it is deliberately left
+alone. Running `agy` does not extend that: it refreshes in memory and writes
+nothing back, verified by backdating the `expiry` field, running `agy models`
+against it, and finding the file byte-identical afterwards, mtime included.
+
+**Three sources, cheapest first**, each of them optional:
+
+| order | source | costs | works when |
+|---|---|---|---|
+| 1 | a language server already running — the app's, or an `agy` you started | a socket read | Antigravity is open |
+| 2 | Google, `retrieveUserQuotaSummary` | one request | within an hour of the last run |
+| 3 | `agy`, started by the widget (`antigravity_start`) | a process, a few seconds | whenever the CLI is signed in |
+
+Being last is not being disfavoured — it is being expensive. The third is the
+only one that always works, and the only one that runs another program.
+
+**The pty is not decoration.** Started with its input on `/dev/null` the CLI
+opens ports that answer nothing for as long as you wait; given a pseudo-terminal
+it serves the quota within seconds. Both were measured before this was written.
+The port that answers also belonged to a *child* of the process launched, so
+the search covers descendants — scoped to the pid alone it finds two ports that
+answer nothing and gives up.
+
+Nothing outlives the fetch: the child is killed by the pid `forkpty` returned
+and then reaped, never matched by name, so a CLI you started yourself can
+never be shut down by this — and it would have been found by source 1 long
+before source 3 ran. Verified by counting `agy` processes before and after a
+frame that used it: zero either side.
+
+**Every step that can fail says which step it was**, on the tab and on `[+]`,
+because "no quota" covered four situations wanting different things from the
+reader:
+
+```
+ no quota either: Antigravity's token expired 51m ago - it refreshes them
+ itself, so open it or run `agy` once and sign in
+ no quota either: asking Google is off - set usage.antigravity_remote to true
+ no quota either: Antigravity has not signed in on this machine - run `agy`
+ once and sign in
+ no quota either: Google refused the Antigravity token: …
+```
+
+The first three are decided before anything leaves the machine, and before
+the cache, so the sentence survives a held failure. A reason captured inside
+the fetch closure does not: `cached` holds a refusal without re-running it,
+so the row reverted to a generic "Google did not answer" about a token that
+had expired an hour earlier and was never sent.
+
+When neither source answers, `[+]` names the agent with the reason rather
+than sending the reader to open an app that would not have helped:
+
+```
+  ANTIGRAVITY
+   no quota · neither the language server inside the app nor Google
+   answered. Open Antigravity, or sign in again if its token has lapsed.
+```
+
+That sentence used to be empty whenever the tier read perfectly well, which
+is most of the time — so the summary named the agent as quiet and then said
+nothing about why.
+
+**The roll-call is what is left over.** `No quota published by: …` once led
+this block and named every quiet agent, with the explanations below it. That
+reads backwards, and it said the same thing twice for any agent that had a
+reason, since each reason already opens by saying there is no quota. Now
+each agent that can explain itself leads with its own heading, and the
+roll-call lists only those with nothing to say — vanishing entirely when
+they all have.
 
 The tier comes from the endpoint the CLI authenticates against:
 
@@ -824,6 +920,215 @@ seconds and these windows move over hours, so the earlier code was making six
 requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
 endpoint is retried occasionally instead of on every frame.
 
+### Claude's fallback is our own snapshot, not Claude Code's
+
+Claude Code keeps a usage cache in `~/.claude.json` under
+`cachedUsageUtilization`, and this widget read it whenever the live call
+failed. With no age check at all — which turned out to matter, because
+Claude Code's own reader has one:
+
+```js
+let r = Date.now() - n.data.fetchedAtMs;
+if (r < 0 || r > zNo) return null;      // zNo = 3600000
+```
+
+**It trusts that cache for one hour.** It writes it at most every five
+minutes (`BNo = 300000`) and discards it past sixty. On the machine this was
+found on, the entry was **9.6 days old** — Claude Code had been ignoring its
+own cache for nine days while this widget drew it as a current percentage.
+The block was byte-identical in a backup from the 16th, so it had not moved
+since the 15th, while `~/.claude.json` itself is rewritten every few seconds.
+
+Not a removal and not a regression: the key is present in every installed
+version, `2.1.243` references it more than the older ones, and the reader is
+the same logic in `2.1.233` and `2.1.243` with the same constant. Why the
+writer stopped firing on the 15th is unestablished — it is gated on an
+account match and fed from API response data, and finding out would mean
+instrumenting Claude Code.
+
+So there are two fallbacks now, newest wins:
+
+1. **Our own snapshot**, written to `$XDG_STATE_HOME/terminal-toys/claude-usage.json`
+   every time the live call answers — minutes old on a machine in use, and
+   not dependent on another program's cache still being maintained.
+2. **Claude Code's**, but only inside the hour it trusts it for.
+
+CodexBar reached the same conclusion from the other end: its Claude sources
+are the API and the CLI, never that file, and when they all fail it keeps
+its own `history/claude.json` and shows the capture age rather than blanking
+the bars.
+
+The snapshot carries the `accountUuid` Claude Code records, so switching
+accounts does not show the old one's figures — the usage response itself
+carries no account, so the marker is borrowed. A machine whose Claude Code
+never wrote the key has no marker, and then the guard is simply not applied.
+
+### Grok is the fourth, and it is off by default
+
+Grok publishes no quota this widget can read without asking for it. The other
+five agents each answer a host — `api.anthropic.com`, `chatgpt.com`,
+`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. Grok makes
+no call at all: its figures come from `~/.grok/logs/unified.jsonl`, the log its
+own CLI writes, so they move **only when you use Grok on this machine**.
+
+That failed quietly. A log left alone for nine days had the widget showing 23%
+of a credit window that had closed on the 19th, while the account had spent 57%
+of the window it was actually in. More than double, with nothing on screen to
+say the figure was old.
+
+Three settings, all off or hourly by default:
+
+| key | default | what it does |
+|---|---|---|
+| `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
+| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
+| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
+| `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
+
+### Grok Bot (Cursor's weekly allowance)
+
+Cursor grants a weekly included allowance for its Grok Bot, separate from
+the monthly plan. It is not part of `included` / `auto` / `api` and does not
+share their reset, so it draws as a fourth bar carrying its own countdown,
+and appears on `[+]` as its own lane.
+
+It needs no configuration: `DashboardService/GetSandUsageStatus` is reached
+with the same bearer token, on the same RPC service, as the three plan lanes.
+
+That is worth stating, because the obvious route is a dead end. Cursor's own
+website calls this as `POST cursor.com/api/dashboard/get-sand-usage-status`,
+which is cookie-authenticated and answers the app's bearer token — and that
+same token sent as a cookie — with a redirect to the login provider. Reading
+only the website's route leads to putting a browser session cookie in
+`config.json`; the Connect service exposes the same call, and the token
+already on disk is enough.
+
+It is **best-effort by contract**: a missing, refused or unparseable answer
+leaves the three plan bars exactly as they were. An extra lane must never be
+able to take the tab down with it.
+
+The bar is drawn only when the account actually has an allowance —
+Cursor states that as `hasNonZeroIncludedLimit`, and a 0% bar for an account
+that was never granted one would invent a limit that does not exist. With a
+cookie set and the lane still absent, the row says why instead.
+
+**One setting, not two.** The refresh was a second key for one release and
+should not have been. The token expires — mine had lapsed 8.6 days before I
+looked, on the same day the CLI last ran — so asking without refreshing works
+for a while and then silently stops, which is the failure the refresh exists to
+prevent. Nobody wants the first without the second, so turning on `grok_ping`
+turns on both.
+
+**The refresh is keyed on the token, not on a session.** For a while it fired
+only in the six hours after a session ended, and the token turned out to last
+about six hours too — so anyone who had not run Grok since yesterday was in the
+failure above with the fix switched on. It now also fires when the token is
+about to lapse, whatever the last session was, subject to the same two guards:
+`grok_ping` is on, and nothing is running that the CLI would start underneath.
+It is attempted once per expiry value, so a login that has genuinely run out
+costs one attempt rather than one every five minutes.
+
+**Off by default**, because it does two things a widget that reads has no
+business doing unasked: it talks to a vendor, and it starts somebody else's
+program.
+
+**Cached or live is a question about age, not about source.** A reading is
+shown as current when it was taken within the last half hour, whatever
+fetched it — the same rule and the same half hour as Claude's. Marking by
+source instead put a star on a figure thirty seconds old while a live one
+four minutes old carried none, and here it was worse: the live answer was
+being discarded (below), so the row read `not live` whether the ping was
+working or not, and turning it on changed nothing a reader could see.
+
+**A period without a percentage means nought used, not unknown.** The
+credits endpoint omits `creditUsagePercent` when it is zero — proto3 leaves
+out a scalar sitting at its default. That was briefly mistaken here for the
+field having been withdrawn for accounts on unified billing, and the row
+said there was no figure when the true figure was nought.
+
+The answer settles it against itself. Alongside the credit percentage it
+returns `productUsage`, one entry per product:
+
+```json
+"productUsage": [{"product": "GrokBuild", "usagePercent": 3.0},
+                 {"product": "GrokChat"},
+                 {"product": "GrokImagine"}]
+```
+
+The product with usage carries the key; the two at nought omit it, in the
+same array of the same response. Watched over time as well: a weekly window
+that had just reset returned no percentage at all, and began reporting one
+once anything had been spent — same endpoint, same headers, same token. So
+nought here is the reading rather than a guess, which is the only reason it
+may be drawn. A response naming no period at all is still refused: nought
+is only knowable against a window the server stated.
+
+That split is drawn under the window, because the bar above is one number
+for three different things and which of them is spending is the part a
+reader can act on.
+
+**The server's answer wins over the log.** Where the live answer names the
+window but the log holds a percentage, the log's figure is used only if it
+is about that same window — a percentage from a window that has closed is
+not this one's. Before that rule the tab preferred an eleven-day-old log
+line, about a window that had closed a week earlier, over the server's
+current one, and rolled its reset forward with a `~`.
+
+The screen says which state it is in, in both places it appears:
+
+```
+── WEEKLY QUOTA ── resets in ~1.1 days
+ not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
+ Only your own Grok sessions update it. usage.grok_ping polls x.ai instead.
+```
+
+```
+── WEEKLY QUOTA ── resets in 1.1 days
+ live · polled x.ai just now, every 5m
+```
+
+```
+── WEEKLY QUOTA ── resets in 6d 19h
+ live · polled x.ai just now, every 5m
+
+ 3%   ██┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  credits used
+ window 26 Aug → 2 Sep
+ by product GrokBuild 3.0% · GrokChat 0% · GrokImagine 0%
+```
+
+When asking is on and the figure still is not the server's, the row says
+which of the reasons applies rather than leaving `not live` to cover all of
+them — only some are the reader's to fix:
+
+```
+ not live · polled x.ai just now, every 5m · the token lapsed 3h ago - the Grok CLI refreshes it
+ not live · polled x.ai 4m ago, every 5m · x.ai did not answer
+ not live · polled x.ai just now, every 5m · x.ai sent no percentage for this period
+```
+
+The last of those is a 200 that names the billing period but sends a null
+percentage. The log's reading is kept, because it is the only percentage
+there is — but it belongs to an earlier window, so the row stays marked
+`not live` and its reset keeps the `~` that says the date is rolled forward
+rather than stated.
+
+The age quoted is the **reading's**, not the file's. The CLI touches that log
+whenever it starts, so a file written minutes ago can still hold a credit
+figure from a fortnight back, and "written 17m ago" beside a percentage reads
+as a fresh percentage.
+
+When the recorded window has closed, its end date is rolled forward on the
+window's own measured length until it covers now — the length is measured
+rather than assumed to be seven days, because the server states the period type
+and a fortnightly window should not be guessed weekly. That is a calculation
+rather than a reading, so the countdown carries a `~`, and the **pace figure is
+suppressed**: pace is usage against time elapsed, and how much of the current
+window has been spent is exactly what nobody knows.
+
+CodexBar reaches the same endpoint and hits the same wall — it reads the cached
+credential and does not refresh it either, so an expired token drops it back to
+local session files, as this does to the log.
+
 ## The pace mark on every quota bar
 
 ```
@@ -948,7 +1253,7 @@ refresh makes a tab a row longer.
 
 | Key | Action |
 |---|---|
-| `←` `→` / `tab` | switch agent |
+| `←` `→` / `tab` | switch agent. The new tab opens at its top: the tabs are different lengths and shapes, so a remembered offset opens the next one part-way down with its heading scrolled off |
 | `↑` `↓` | scroll the tab |
 | `pgup` `pgdn` | scroll a page |
 | `home` `end` | jump to the top or bottom |

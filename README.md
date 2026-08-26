@@ -26,43 +26,47 @@ impossible to unsee. One by one the fakes came down, each replaced by something
 that answers a real question. What survived is the aesthetic with the lying
 removed.
 
-Some of the theatre is still here, unapologetically. `matrix.py` computes
+Some of the theatre is still here, unapologetically. `matrix` computes
 nothing at all — it just looks good, and it knows it.
 
 ## The widgets
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`start.py`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
-| **`latency.py`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
-| **`deployments.py`** | Vercel deployments over time — activity per hour, build-time drift, and a copy sheet for the dashboard, preview and PR URLs. | a Vercel token | [read →](docs/deployments.md) |
-| **`tailnet.py`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
-| **`herdr-panes.py`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
-| **`github.py`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar. | a GitHub token | [read →](docs/github.md) |
-| **`pr.py`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | a GitHub token | [read →](docs/pr.md) |
-| **`linear.py`** | Linear across every team: what is outstanding, the running cycles and their scope creep, and issues created against completed. | a Linear API key | [read →](docs/linear.md) |
-| **`usage.py`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
-| **`ports.py`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it to copy an address or publish it over Tailscale or Cloudflare. | — | [read →](docs/ports.md) |
-| **`netwatch.py`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
-| **`link.py`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
-| **`clocks.py`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
-| **`matrix.py`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
+| **`start`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/start.md) |
+| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` | [read →](docs/latency.md) |
+| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](docs/deployments.md) |
+| **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
+| **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
+| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
+| **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
+| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
+| **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic | [read →](docs/ports.md) |
+| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
+| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
+| **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
-Each is a single self-contained script with no dependencies — pure Python 3
-standard library, 24-bit colour, and a full redraw each frame so everything
+Each is a single self-contained binary — every library it needs is compiled
+in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
+alongside it. 24-bit colour, and a full redraw each frame so everything
 reflows when you resize the pane.
 
 ```sh
-python3 terminal-toys   # the front door: pick one and it runs
-./start.py              # the same thing from inside the directory
-./start.py latency      # or name one and skip the menu
+cargo build --release   # fourteen binaries in ./target/release
+```
+
+```sh
+./target/release/start          # the front door: pick one and it runs
+./target/release/start latency  # or name one and skip the menu
 ```
 
 Each widget is also an ordinary program, if you would rather go direct:
 
 ```sh
-./latency.py            # each runs standalone
-./clocks.py -h          # every widget documents itself
+./target/release/latency        # each runs standalone
+./target/release/clocks -h      # every widget documents itself
 ```
 
 They are built to sit side by side and fill a wall, but nothing assumes a
@@ -70,8 +74,8 @@ multiplexer — each is an ordinary terminal program. Tile them however you like
 
 ## Building the wall
 
-Ten widgets tile into whatever space you have. A layout that works on a wide
-screen:
+Fourteen widgets tile into whatever space you have. A layout that works on a
+wide screen:
 
 ```
 ┌────────────────────┬──────────────────┬────────────┐
@@ -87,57 +91,47 @@ widget in a 30-column strip still says something useful.
 
 ## Configuration
 
-Every widget reads optional settings from the first of
-`$TERMINAL_TOYS_CONFIG`, `~/.config/terminal-toys/config.json`, or
-`config.json` beside the scripts. Copy `config.example.json` to start.
+Every widget reads optional settings from the first readable of
+`$TERMINAL_TOYS_CONFIG`, `$XDG_CONFIG_HOME/terminal-toys/config.json`
+(`~/.config/terminal-toys/config.json` where that is unset), `config.json` in
+the working directory, and `config.json` beside the binary. Copy
+`config.example.json` to start.
 
 This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
-**Three widgets need a token:** `deployments.py` wants a Vercel token from
-Account Settings → Tokens, `github.py` a *classic* GitHub PAT with `repo` and
-`read:org` (fine-grained tokens reach only one org each), and `linear.py` a
-personal API key from Settings → Security & access. `pr.py` reuses the GitHub
+**Three widgets need a token:** `deployments` wants a Vercel token from
+Account Settings → Tokens, `github` a *classic* GitHub PAT with `repo` and
+`read:org` (fine-grained tokens reach only one org each), and `linear` a
+personal API key from Settings → Security & access. `pr` reuses the GitHub
 token rather than asking for its own. Every other widget runs with no
 configuration at all.
 
 ## Requirements
 
-- Python **3.9+** (`clocks.py` uses `zoneinfo`); developed on 3.12
+- A Rust toolchain to build; **no library to install** to run — the binaries
+  carry what they link against, SQLite included
 - A terminal with 24-bit colour
-- Per-widget: `ping`, `tailscale` or `herdr` as listed above. Each needs only
-  its own, and **none needs root**
+- Per-widget, the external *tools* the table above names: `curl`, `ss`,
+  `ping`, `tailscale`, `herdr`. Each widget needs only its own; one that
+  cannot work without its tool says so rather than drawing an empty pane; and
+  **none needs root**
 
-## Design
+## Documentation
 
-A few conventions hold across all of them, and the reasoning is worth knowing
-before changing one:
+Every widget has a page of its own — what it shows, where each number comes
+from, every key it answers to, and the settings it reads. They are linked
+from the table above, and listed together in [`docs/`](docs/README.md).
 
-- **Spend extra width on more content, not padding.** Widgets add columns as a
-  pane grows and drop them as it shrinks, rather than truncating.
-- **Never truncate a key hint.** Footers wrap across as many lines as they need
-  and never split a hint, because `[±]25` teaches a key that does not exist.
-- **A directional glyph points the way the thing goes.** `▲`/`▼` mark which
-  half of a diverging chart a series occupies — `▲ opened` above the baseline,
-  `▼ merged` below it. `↑`/`↓` mean upload and download. Where both meanings
-  meet, in `netwatch.py`'s chart, the halves are arranged so they agree: tx
-  above and rx below, because a `↓` label over a line that climbs asks the
-  reader to hold two directions at once, and they will believe the arrow.
-- **Measure contrast, do not eyeball it.** Every colour that draws text clears
-  WCAG AA against both the terminal background *and* the selected-row tint,
-  with the measured ratios recorded beside the definitions.
-- **Say what a number means when it is not obvious.** Counters that reset with
-  a daemon, durations that predate the process, aggregates that hide their
-  outliers — each is labelled rather than left to mislead.
-- **Never show a stale figure under a fresh label.** Change a setting and the
-  numbers it governs shimmer until real ones land, rather than sitting there
-  looking current. The same rule kills silent truncation: a chart that cannot
-  fit its window says `54d of 90d`, and a token missing a scope is named rather
-  than left to quietly undercount.
-- **Optional enhancements, never requirements.** The clipboard goes through
-  OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
-  available and skipped silently where not.
+Four pages are about the repository rather than a widget:
+
+| | |
+|---|---|
+| [Design conventions](docs/design.md) | the rules every widget holds to, and why each was paid for |
+| [Internals](docs/internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
+| [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
+| [Building Herdr panels](docs/building-herdr-panels.md) | resize semantics, focus, and the layout mistakes worth skipping |
 
 ## Bundled skill
 
@@ -147,23 +141,21 @@ for it — copy it to `~/.claude/skills/herdr/` to install. It is Herdr's own
 file, not covered by this repository's licence, and `herdr --skill` regenerates
 it after an upgrade.
 
-## Building your own
+## What is being worked on
 
-[`docs/building-herdr-panels.md`](docs/building-herdr-panels.md) collects what
-was learned building these against Herdr: resize semantics, focus, detecting
-what a pane is running, notification gating, and the layout mistakes worth
-skipping.
+Planned widgets, open questions and the state of the Rust port are tracked
+in Linear: <https://linear.app/stealth-company/project/terminal-toys-e829b47d84b8/issues>. The link needs access to the workspace; the issues are the
+canonical list either way, so a feature that looks missing may already be
+filed there with a reason.
 
-`common.py` holds the shared pieces — terminal sizing, a full-frame `draw()`,
-24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
-text to a cell budget, `pack_hints()` for wrapping footers, non-blocking
-`Keyboard` input with arrow-key decoding, and `clipboard()` over OSC 52.
+## Contributing
 
-The chart helpers are worth knowing before drawing anything new: `vbars()` and
-its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
-`braille_plot()` for continuous lines at 2×4 sub-pixels a cell, `stacked_bar()`
-for proportions, `meter()` for a gauge, and `skeleton()` for the shimmer that
-stands in for a figure still being fetched.
+`cargo test` from the root is the gate: each widget's own tests, plus
+[`widgets/tests/check.rs`](widgets/tests/check.rs), which reads the sources
+and fails on the things a compiler cannot see — a poller that dies without
+saying why, a key hinted but unanswered, a setting read but undocumented, a
+colour below WCAG AA on a selected row. [Internals](docs/internals.md)
+explains what each check is defending.
 
 ## License
 

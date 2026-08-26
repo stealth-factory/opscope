@@ -1,4 +1,6 @@
-# `linear.py`
+# `linear`
+
+[← all docs](README.md)
 
 Linear across every team at once — what is outstanding, which cycles are
 running, and whether issues are being closed faster than they arrive.
@@ -91,7 +93,7 @@ decision.
 backlog / todo / in progress. Not windowed: it answers "how much is there right
 now", and does not move when you change the window.
 
-**Active cycles** — every team's running cycle, from a single query. Progress
+**Active cycles** — every team's running cycle, walked like everything else; one request while they fit a page. Progress
 bar, points completed against scope, and days remaining.
 
 `+175 added` is the number to watch: scope added *after* the cycle opened. A
@@ -110,8 +112,159 @@ down, one bar per day, both directions on a shared scale. Read together they
 say whether the queue is filling faster than it drains. In the board above, 297
 created against 88 completed.
 
-**By team** — ranked by open volume, scrolling when focused and there are more
-teams than rows. `DONE14D` follows the window.
+**By team** — ranked by open volume. `DONE14D` follows the window the header
+names.
+
+**Projects** — every project still going, whichever team owns it, running work
+first. One shared between teams shows both keys (`OPS/WEB`) and appears once.
+
+```
+ ── PROJECTS ── 34 running · 9 finished, not listed   ↑↓
+▸ OPS      uptime-monitoring                   Maintenance  █████████████ 100%
+  WEB      checkout-rewrite                    In Progress  █████████░░░░  72%  110 open
+  OPS/WEB  storage-provider-swap               Paused       ░░░░░░░░░░░░░   3%  9 open
+  CLI      offline-mode                        Idea         ░░░░░░░░░░░░░   0%  25 open
+```
+
+Finished and cancelled projects are not on the board - the heading says how
+many, because "34 running" alone reads as a count of all of them. They are all
+still on their team's own screen. `↵` here opens a project directly, without
+going through its team.
+
+## One cycle, or one team
+
+`↵` or `→` on the highlighted row opens it on a screen of its own; `←` or `esc`
+comes back; `↑` `↓` and `PgUp` `PgDn` scroll it when it is longer than the pane.
+
+A **cycle** gives its progress, its scope and how much of it is closed, how long
+is left to run, and how much moved lately — the same day-over-day figure the
+board ranks cycles by, so the ordering is legible rather than mysterious. A
+cycle with no name of its own is called by its number rather than left blank.
+
+Under the burn-up, what is open in it by state, and then the issues themselves:
+
+```
+ ── OPEN IN THIS CYCLE ── 28 · 5 closed, not listed
+▸ WEB-275  in progress  Server-rendered context blocks on top of the share copy   19.3d   1p
+  WEB-300  in progress  Check every published record against its upstream source  16.0d
+  WEB-229  todo         Add an itinerary mode to the card renderer                22.1d   4p
+```
+
+What is moving comes first, then what is waiting, and inside each the oldest
+first — so the row at the top is the one that has been in progress longest. An
+issue nobody has pointed shows no points rather than `0p`. A title too long for
+its column carries on underneath rather than being cut: an issue cut to forty
+characters is a different issue on screen.
+
+**Only the open ones are listed**, because open issues are all this widget ever
+fetches — so the heading says how many are closed. Without that, a cycle of
+eight showing one row reads as a cycle of one.
+
+The arrows move a cursor through them and `[c]opy url` puts the selected
+issue's address on the clipboard, over OSC 52, the same way the pr widget does.
+An issue is a leaf here: there is no screen below it, so what it offers is
+somewhere to go and read it.
+
+A **team** gives what it is holding, broken out by state as a stacked bar, with
+triage called out separately: it is work nobody has looked at, and a team can
+hold hundreds of it while looking busy everywhere else.
+
+Under that, **every project the team owns**:
+
+```
+ ── PROJECTS ── 6 · 672 open in no project
+  uptime-monitoring          In Progress  ███████████████ 100%  10 open
+  search-relevance           In Progress  █████████████░░  88%  1 open · A Lead
+  storage-provider-swap      Paused       █░░░░░░░░░░░░░░   3%  due 2026-04-10 · A Lead
+  offline-mode               Idea         ░░░░░░░░░░░░░░░   0%  25 open · A Lead
+  runtime-metrics            Maintenance  ███████████████ 100%  A Lead
+  cluster-migration          Completed    █████████████░░  87%  2 open · due 2024-07-26 · A Lead
+```
+
+`↑` `↓` move a cursor through that list and the screen scrolls to follow it,
+the same way the board does; `→` or `↵` opens the project under the cursor.
+
+Running work sorts first and finished work last, with a status this build has
+never heard of sorting *with* the live work rather than under the dead work —
+a workspace names its own statuses, and burying an unfamiliar one would hide
+real work. The status is shown by the workspace's own name for it — `In
+Progress`, not `started` — and its type picks the colour.
+
+The percentage is **Linear's own published `progress`**, not a figure derived
+here. The board fetches only what is open, so a project that is finished has
+nothing left for this widget to count; taking Linear's number is the only way
+the two agree. That is also why a project can read 87% and still show open
+issues, and why the per-project counts do not sum to the team's open total —
+which is what `672 open in no project` is there to say. Without it a column of
+numbers sits three lines under a larger one and reads as a bug.
+
+Projects are shared: one owned by two teams appears on both screens.
+
+Columns are sized to what is in them — no name is ever cut, because half a
+project's name is a name for something else. The bar takes whatever is left,
+and when the pane is too narrow the aside sheds whole facts off the end rather
+than let one be cut in half.
+
+## One project
+
+`→` or `↵` on a project opens it. `←` or `esc` comes back to the team it was
+opened from, not to the board — one level at a time.
+
+```
+╺━ CLUSTER MIGRATION · OPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+  progress              87%   █████████████████████░░░
+  status                      Completed
+  scope in points       144   102 done, 42 left
+  issues                 38   31 closed
+  scope added            +3   since it started
+  started                     2024-06-25
+  completed                   2026-05-10
+  target was                  2024-07-26
+  lead                        A Lead
+  members                 1   A Lead
+  initiative                  Infrastructure
+  oldest open          2.2y   OPS-37
+
+ ── OPEN BY STATE ── 2 issues
+ ████████████████████████████████████████████████████████████████████████████████
+ ▇ backlog 1 (50%)   ▇ todo 1 (50%)
+
+ ── MILESTONES ── 3
+  Workload Migrations                 ██████████████████████████████ 100%  2024-06-26
+  SSL Optimisations                   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%  2024-06-28
+  Cost and Performance Optimisations  ████████████████████░░░░░░░░░░  67%  2024-07-26
+
+ ── WHAT IT IS FOR ──
+  Move every workload off the old cluster and onto the managed one, and
+  retire the old one once nothing is left on it.
+```
+
+Three measures sit next to each other and none of them is the others: Linear's
+own weighted `progress`, the points, and the issue count. **Scope is labelled
+in points** for that reason — unlabelled, 87% above `102 done` of 144 above
+`31 closed` of 38 reads as one measure got wrong three times.
+
+`overdue by` appears only while the work is still running. A project that
+finished after its target date is not late, and used to read `overdue by 760d`
+because nothing was asking whether the work had since landed; a finished one
+shows when it completed and what its target *was*.
+
+Milestones are ordered by target date, undated ones last — Linear returns them
+in no order at all. Their `progress` is reported out of a hundred where a
+project's is out of one, so it is divided before it reaches a bar; fed straight
+in, every milestone read full.
+
+`── OPEN BY STATE ──` and `oldest open` come from the board's own pass over
+every open issue, so they cost nothing and stay current while the screen is up.
+They count the project across *every* team that shares it, because the screen is
+about the project rather than about whichever team's list it was opened from.
+
+Everything else — the burn-up, the milestones, the members, the description — is
+one request made when the screen opens, and again when what it fetched is older
+than the refresh interval. Fetching that for every project in the workspace
+every two minutes would be paying, continuously, for screens nobody has opened.
+While the request is out the screen says so; if it fails it says that instead,
+rather than reading "loading" for ever.
 
 ## Cost
 
@@ -121,7 +274,10 @@ multiplied by the page size, so the request count is the limit that binds and
 the field count barely matters.
 
 A full pass over a workspace of 14 teams and ~1,200 open issues costs about
-**10 requests and 4 seconds**, so the default 120s refresh uses roughly 300
+**11 requests and 4 seconds** — one of them the whole workspace's projects, plus
+one more each time a project's own screen is opened,
+fetched with everything else so a team's screen opens on data already in hand
+rather than showing nothing while a request goes out, so the default 120s refresh uses roughly 300
 requests an hour — an eighth of the budget. Remaining quota is read from
 `X-RateLimit-Requests-Remaining` and shown in the header.
 
@@ -130,16 +286,59 @@ paged through at 250 records a time. Pagination is capped at 12 pages per query
 and the header says `truncated` when the cap is reached, rather than quietly
 reporting a smaller number.
 
+The teams and the active cycles are walked the same way. A cycle walk that
+hits the cap makes the heading read `at least 600 running` rather than `600
+running`. Two nested connections are marked rather than walked, because
+walking them would re-fetch a whole project record per page to settle a
+question that is almost always already settled: a project's `members` row
+reads `21+` with a trailing `…`, and its MILESTONES heading `25+`, when
+Linear says the page it returned was not the last. Those rows show a page,
+not necessarily everything.
+
 ## Keys
 
-Two sections scroll — the cycles and the team table — so the arrows need to
-know which one they are in. `tab` moves the focus, and the focused heading says
-so by carrying the `↑↓` marker and its visible range.
+The board is longer than most panes are tall, and **every section is drawn
+whole** - the pane is a window onto it. So the arrows do one of two things, and
+the footer says which.
+
+The board opens with no cursor anywhere - it is a thing to read before it is a
+thing to work - and there the arrows and `PgUp` `PgDn` move the window: the way
+to read the whole board without picking a section first.
+
+`tab` focuses a section, and the focused heading says so by carrying an arrow
+marker. The arrows then move a cursor through that section, and the window
+follows it - a cursor below the fold pulls the board down, one above it pulls
+it up, each by as little as it takes.
+
+Exactly one *other* heading carries `[tab] to focus`, and it is the one tab
+would actually focus next. Not all of them: tab cycles, so a `[tab]` on every
+heading would promise three sections that one press reaches when one press
+reaches one of them. As you press it the marker moves down the board, which is
+the cycle teaching itself. A section with nothing in it never carries it,
+because tab steps over those.
+
+Under the arrows the three sections read as **one continuous list**: down off
+the bottom of the cycles steps into the top of the teams, off the bottom of the
+teams into the top of the projects; up steps back the same way, into the
+*last* row of the section above. `tab` is the shortcut across a whole section
+rather than the only way between them.
+
+You let go at exactly two places: up from the first cycle, and down from the
+last project. `tab` from the last section does the same, and hands the arrows
+back to the board. Sections with nothing in them are stepped over in every
+direction.
+
+**This is the same rule in every widget here that has focusable sections.**
 
 | Key | Action |
 |---|---|
-| `tab` | move focus between the cycles and the team table |
-| `↑` `↓` | scroll the focused section |
+| `tab` | focus the next section, and from the last one back to no focus |
+| `↑` `↓` | scroll the board — or, with a section focused, move its cursor, crossing between sections at their ends |
+| `PgUp` `PgDn` | the same, a page at a time |
+| `↵` `→` | open the highlighted cycle, team or project — and from a team, the project under its cursor |
+| `←` `esc` | back one level: a project to wherever it was opened from, a team to the board |
+| `c` | copy the selected issue's url, on a cycle's screen |
+| `r` | refresh, including the open project's own record |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now |
 | `q` | quit |
@@ -176,6 +375,6 @@ dropping it is sometimes the difference between a readable board and one number
 swamping the rest.
 
 ```sh
-./linear.py                   # every team, 14-day window
-./linear.py -n 300 WEB APP    # two teams by key, slower
+./target/release/linear                   # every team, 14-day window
+./target/release/linear -n 300 WEB APP    # two teams by key, slower
 ```

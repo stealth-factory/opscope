@@ -1,0 +1,7 @@
+Digital rain.
+
+Falling glyphs with truecolor fade trails: near-white head, bright green
+shoulder, and a smooth decay over each drop's length. Glyphs mutate in place
+independently of the drops, and the field reflows on terminal resize.
+
+    matrix

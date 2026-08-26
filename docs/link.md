@@ -1,4 +1,6 @@
-# `link.py`
+# `link`
+
+[← all docs](README.md)
 
 How good the connection is between this machine and whoever is connected to
 it — measured, not probed.
@@ -23,7 +25,7 @@ it — measured, not probed.
 
 ## Why this is not the latency monitor
 
-`latency.py` measures paths it was told to measure, by sending pings. This one
+`latency` measures paths it was told to measure, by sending pings. This one
 measures the path **you are on**, and sends nothing at all.
 
 Every established TCP connection has a kernel that has been timing it since it
@@ -120,6 +122,7 @@ are still true about the path, just not about the terminal.
 |---|---|
 | `↑` `↓` | select a session |
 | `↵` / `i` | open that connection on its own screen |
+| `n` / `p` | on the detail screen, step to the next or previous connection |
 | `esc` | back to the list |
 | `w` | cycle the chart's span: 1m, 5m, 15m, 1h |
 | `o` | hide or show sessions idle over five minutes |
