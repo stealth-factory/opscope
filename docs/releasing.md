@@ -41,9 +41,18 @@ subject**, so in practice the version is decided by PR titles.
 | Title starts with | Effect |
 |---|---|
 | `feat:` / `feat(scope):` | minor — `0.1.0` → `0.2.0` |
-| `fix:`, `perf:`, `refactor:` … | patch — `0.1.0` → `0.1.1` |
-| `chore:`, `docs:`, `style:` … | appears in the changelog, moves nothing |
+| `fix:`, `perf:`, `revert:` | patch — `0.1.0` → `0.1.1` |
+| any type with `!:` | breaking — minor below 1.0.0, see below |
+| `docs:`, `chore:`, `ci:`, `style:`, `test:`, `refactor:` | rides along with the next release; starts none by itself |
 | `release:` | skipped entirely — these are the machinery's own commits |
+
+**A batch of documentation and chores raises no release pull request.**
+git-cliff would bump the patch for any commit at all, which means a README
+edit could offer a version whose binaries are byte-for-byte the previous
+one's. That is noise in a project that ships binaries, and worse noise in a
+pooled model, where every release PR is something somebody has to form an
+opinion about. Those commits are not dropped — they appear in the changelog
+of whatever release comes next.
 
 Below 1.0.0 a breaking change moves the minor rather than the major. That
 is semver's own rule for `0.x`, and it is why this project can still make
@@ -63,7 +72,8 @@ mention and may not count towards the version.
 4. Watch `release.yml`. Roughly five minutes for three platforms.
 
 If no release PR exists, nothing releasable has landed since the last tag —
-only chores, or nothing at all.
+only documentation and chores, or nothing at all. The run log says which,
+and gives the count it found.
 
 ## Things worth knowing
 
