@@ -125,8 +125,11 @@ impl Office {
             .unwrap_or_else(|| vec![0, 1, 2, 3, 4]);
         Office {
             days,
-            start: tc::cfg_usize(cfg, "work_start_hour", 9) as u32,
-            end: tc::cfg_usize(cfg, "work_end_hour", 18) as u32,
+            // Hours are 0..=23. An out-of-range value used to reach
+            // NaiveTime::from_hms_opt and unwrap, so a typo of 24 aborted
+            // the widget on the first frame instead of rendering.
+            start: (tc::cfg_usize(cfg, "work_start_hour", 9) as u32).min(23),
+            end: (tc::cfg_usize(cfg, "work_end_hour", 18) as u32).min(23),
         }
     }
 
@@ -1496,6 +1499,16 @@ mod tests {
         // And nonsense falls back rather than emptying the week.
         let junk = Office::from_config(&serde_json::json!({"work_days": []}));
         assert_eq!(junk.days, vec![0, 1, 2, 3, 4]);
+        // An hour that is not an hour used to unwrap on the first frame.
+        let wild = Office::from_config(&serde_json::json!({
+            "work_start_hour": 24,
+            "work_end_hour": 99
+        }));
+        assert!(wild.start <= 23 && wild.end <= 23);
+        let noon = Local.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap();
+        let _ = wild.next_open(&noon);
+        let _ = wild.prev_close(&noon);
+        let _ = countdowns(noon, &wild);
     }
 
     #[test]

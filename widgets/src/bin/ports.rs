@@ -44,6 +44,31 @@ const SYSTEM_PORTS: &[u16] = &[22, 53, 123, 323, 631, 5353];
 static CONFIGURED_PORTS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
 
 /// Whether a port belongs to the machine rather than to something started.
+/// The configured system-port list, or None when the key is absent.
+///
+/// Present-and-empty is an answer: hide nothing. Absent means use the
+/// built-in defaults. A number that is not a port is dropped rather than
+/// wrapped - `65558 as u16` is 22, and hiding SSH because of a typo is
+/// worse than ignoring the typo.
+fn configured_system_ports(cfg: &serde_json::Value) -> Option<Vec<u16>> {
+    // Asking whether the key is there has no value to default: empty
+    // means hide nothing, absent means the built-in list.
+    if cfg.get("system_ports").is_none() {
+        return None;
+    }
+    Some(
+        cfg["system_ports"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64())
+                    .filter_map(|n| u16::try_from(n).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
 fn is_system_port(port: u16) -> bool {
     match CONFIGURED_PORTS.get() {
         Some(list) => list.contains(&port),
@@ -2113,20 +2138,15 @@ fn main() {
     // Both of ports' config keys were documented and read by nobody.
     // Config is the default; argv still overrides.
     let cfg = tc::load_config("ports");
-    let listed: Vec<u16> = cfg
-        .get("system_ports")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|n| n as u16).collect())
-        .unwrap_or_default();
-    if !listed.is_empty() {
+    if let Some(listed) = configured_system_ports(&cfg) {
         let _ = CONFIGURED_PORTS.set(listed);
     }
-    let mut refresh = tc::cfg_f64(&cfg, "refresh", 4.0).max(1.0);
+    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0).max(1.0);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         if (args[i] == "-n" || args[i] == "--refresh") && i + 1 < args.len() {
-            refresh = args[i + 1].parse::<f64>().unwrap_or(4.0).max(1.0);
+            refresh = tc::poll_secs(args[i + 1].parse().unwrap_or(4.0), 4.0).max(1.0);
             i += 2;
         } else {
             i += 1;
@@ -3287,6 +3307,24 @@ mod tests {
                    INF |  https://calm-fox-runs.trycloudflare.com  |\n";
         assert_eq!(quick_url(log), "https://calm-fox-runs.trycloudflare.com");
         assert_eq!(quick_url("INF starting tunnel"), "");
+    }
+
+    #[test]
+    fn an_empty_system_port_list_is_not_the_defaults() {
+        // Absent means the built-in list. Present and empty means hide
+        // nothing. The two used to collapse because `[]` was read as
+        // unset, so `"system_ports": []` kept hiding 22 and 53.
+        assert!(configured_system_ports(&serde_json::json!({})).is_none());
+        assert_eq!(
+            configured_system_ports(&serde_json::json!({"system_ports": []})),
+            Some(vec![])
+        );
+        // A number that is not a port is dropped, not wrapped. 65558 as
+        // u16 is 22, and hiding SSH for a typo is worse than ignoring it.
+        assert_eq!(
+            configured_system_ports(&serde_json::json!({"system_ports": [22, 65558, 65535]})),
+            Some(vec![22, 65535])
+        );
     }
 
     #[test]

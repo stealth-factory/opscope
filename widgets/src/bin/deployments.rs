@@ -804,7 +804,7 @@ fn copy_overlay(
 fn main() {
     tc::maybe_help(include_str!("deployments_help.txt"));
     let cfg = tc::load_config("deployments");
-    let mut refresh = tc::cfg_f64(&cfg, "refresh", 15.0);
+    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 15.0), 15.0).max(5.0);
     let limit = tc::cfg_usize(&cfg, "limit", 100);
     let mut teams = tc::cfg_strings(&cfg, "teams", &[]);
     let configured: Vec<String> = tc::cfg_strings(&cfg, "projects", &[]);
@@ -815,7 +815,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-n" | "--refresh" if i + 1 < args.len() => {
-                refresh = args[i + 1].parse::<f64>().unwrap_or(15.0).max(5.0);
+                refresh = tc::poll_secs(args[i + 1].parse().unwrap_or(15.0), 15.0).max(5.0);
                 i += 2;
             }
             "-t" | "--team" if i + 1 < args.len() => {

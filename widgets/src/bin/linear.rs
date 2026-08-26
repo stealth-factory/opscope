@@ -1553,6 +1553,8 @@ fn project_detail(
                 p.dim.as_str(),
             );
         }
+        // Same honesty as members: this connection is five nodes, and
+        // presenting that page as the list would hide the rest.
         let inits: Vec<String> = v["initiatives"]["nodes"]
             .as_array()
             .into_iter()
@@ -1560,8 +1562,24 @@ fn project_detail(
             .map(|i| text(i, "name"))
             .filter(|n| !n.is_empty())
             .collect();
+        let more_inits = v["initiatives"]["pageInfo"]["hasNextPage"]
+            .as_bool()
+            .unwrap_or(false);
         if !inits.is_empty() {
-            field("initiative", String::new(), inits.join(" · "), p.dim.as_str());
+            field(
+                "initiative",
+                if more_inits {
+                    format!("{}+", inits.len())
+                } else {
+                    String::new()
+                },
+                if more_inits {
+                    format!("{} · …", inits.join(" · "))
+                } else {
+                    inits.join(" · ")
+                },
+                p.dim.as_str(),
+            );
         }
     }
     if let Some((age, ident)) = oldest {
@@ -1759,7 +1777,7 @@ fn main() {
     let cfg = tc::load_config("linear");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let exclude: Vec<String> = tc::cfg_strings(&cfg, "exclude_teams", &[]);
-    let start_window = tc::cfg_f64(&cfg, "window_days", 14.0) as i64;
+    let start_window = (tc::cfg_f64(&cfg, "window_days", 14.0) as i64).max(1);
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut keep: Vec<String> = Vec::new();
@@ -1777,6 +1795,7 @@ fn main() {
             _ => i += 1,
         }
     }
+    refresh = tc::poll_secs(refresh, 120.0);
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {

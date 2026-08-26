@@ -1644,7 +1644,7 @@ fn main() {
     // which is the precedence netwatch.py uses. These five were documented
     // in config.example.json and read by nobody.
     let cfg = tc::load_config("netwatch");
-    let mut interval = tc::cfg_f64(&cfg, "interval", 1.0).max(0.2);
+    let mut interval = tc::poll_secs(tc::cfg_f64(&cfg, "interval", 1.0), 1.0).max(0.2);
     let mut limit = tc::cfg_usize(&cfg, "limit", 0);
     let mut external = cfg
         .get("external")
@@ -1658,7 +1658,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-i" | "--interval" if i + 1 < args.len() => {
-                interval = args[i + 1].parse::<f64>().unwrap_or(1.0).max(0.2);
+                interval = tc::poll_secs(args[i + 1].parse().unwrap_or(1.0), 1.0).max(0.2);
                 i += 2;
             }
             "-n" | "--limit" if i + 1 < args.len() => {
@@ -1702,12 +1702,21 @@ fn main() {
     }));
     let poller = Arc::clone(&state);
     std::thread::spawn(move || loop {
+        // A poller that dies takes its explanation with it, and an empty
+        // table looks exactly like a machine with no sockets on it.
         {
             let mut guard = match poller.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            sample(&mut guard, external);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sample(&mut guard, external);
+            }))
+            .is_err()
+            {
+                guard.err = "poller stopped - see the pane it was started from".into();
+                return;
+            }
         }
         std::thread::sleep(Duration::from_secs_f64(interval));
     });

@@ -1104,7 +1104,7 @@ fn main() {
     let cfg = tc::load_config("github");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let configured: Vec<String> = tc::cfg_strings(&cfg, "accounts", &[]);
-    let start_window = tc::cfg_f64(&cfg, "window_days", 14.0) as i64;
+    let start_window = (tc::cfg_f64(&cfg, "window_days", 14.0) as i64).max(1);
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut named: Vec<String> = Vec::new();
@@ -1122,6 +1122,7 @@ fn main() {
             _ => i += 1,
         }
     }
+    refresh = tc::poll_secs(refresh, 120.0).max(30.0);
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {

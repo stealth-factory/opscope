@@ -1247,7 +1247,7 @@ fn read_config() -> Config {
             .flatten()
             .filter_map(|(k, v)| v.as_f64().map(|v| (k.clone(), v)))
             .collect(),
-        refresh: tc::cfg_f64(&raw, "refresh", 30.0),
+        refresh: tc::poll_secs(tc::cfg_f64(&raw, "refresh", 30.0), 30.0),
         grok_ping: raw
             .get("grok_ping")
             .and_then(|v| v.as_bool())
@@ -1468,7 +1468,7 @@ fn main() {
     let mut refresh = cfg.refresh;
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = args[1].parse().unwrap_or(refresh);
+        refresh = tc::poll_secs(args[1].parse().unwrap_or(refresh), refresh);
     }
 
     let p = palette();

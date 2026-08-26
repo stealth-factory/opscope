@@ -22,8 +22,9 @@
 //! Python behaviour rather than the more idiomatic Rust one.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 pub const HIDE: &str = "\x1b[?25l";
 pub const SHOW: &str = "\x1b[?25h";
@@ -157,10 +158,55 @@ pub fn setup() {
     flush();
 }
 
-extern "C" fn handle_signal(_sig: libc::c_int) {
-    out(&format!("{}{}{}{}", SHOW, RST, CLEAR, HOME));
-    flush();
-    std::process::exit(0);
+/// The bytes `handle_signal` writes. Built as a constant so the handler
+/// never formats, allocates, or takes the stdout lock - any of which can
+/// deadlock if the signal arrives while `draw` is already writing.
+const SCREEN_RESTORE: &str = concat!("\x1b[?25h", "\x1b[0m", "\x1b[2J", "\x1b[H");
+
+/// Saved cbreak settings, written by `Keyboard` and read by the handler.
+///
+/// The flag is published after the struct, so a handler that sees it true
+/// sees a complete copy. A mutex is not an option: locking one from a
+/// signal handler is how the previous version could hang instead of
+/// restoring the terminal.
+static TERM_FD: AtomicI32 = AtomicI32::new(-1);
+static HAS_TERMIOS: AtomicBool = AtomicBool::new(false);
+static mut SAVED_IOS: libc::termios = unsafe { std::mem::zeroed() };
+
+fn remember_termios(fd: i32, ios: libc::termios) {
+    unsafe {
+        SAVED_IOS = ios;
+    }
+    TERM_FD.store(fd, Ordering::Release);
+    HAS_TERMIOS.store(true, Ordering::Release);
+}
+
+fn forget_termios() {
+    HAS_TERMIOS.store(false, Ordering::Release);
+}
+
+/// Restore the saved termios and the screen, using only async-signal-safe
+/// calls, then `_exit`. `process::exit` runs atexit handlers and can
+/// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
+/// runs either way, so the handler has to give the shell its echo back.
+extern "C" fn handle_signal(sig: libc::c_int) {
+    if HAS_TERMIOS.load(Ordering::Acquire) {
+        let fd = TERM_FD.load(Ordering::Acquire);
+        if fd >= 0 {
+            let ios = unsafe { SAVED_IOS };
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSANOW, &ios);
+            }
+        }
+    }
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            SCREEN_RESTORE.as_ptr() as *const libc::c_void,
+            SCREEN_RESTORE.len(),
+        );
+        libc::_exit(128 + sig);
+    }
 }
 
 /// Put the terminal back the way it was found.
@@ -263,6 +309,22 @@ pub fn load_config(section: &str) -> serde_json::Value {
 /// A setting, or the default when it is absent or the wrong shape.
 pub fn cfg_f64(cfg: &serde_json::Value, key: &str, fallback: f64) -> f64 {
     cfg.get(key).and_then(|v| v.as_f64()).unwrap_or(fallback)
+}
+
+/// A wait that `Duration::from_secs_f64` will accept.
+///
+/// A missing or malformed setting falls back. A value that is finite and
+/// positive is kept. Anything else - negative, NaN, infinite - used to
+/// panic the poller after the first read, which froze the pane on its
+/// initial data with no error, the same silence a dead thread leaves.
+pub fn poll_secs(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else if fallback.is_finite() && fallback > 0.0 {
+        fallback
+    } else {
+        1.0
+    }
 }
 
 pub fn cfg_usize(cfg: &serde_json::Value, key: &str, fallback: usize) -> usize {
@@ -929,6 +991,7 @@ impl Keyboard {
             raw.c_cc[libc::VMIN] = 0;
             raw.c_cc[libc::VTIME] = 0;
             unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
+            remember_termios(fd, saved);
             Some(saved)
         } else {
             None
@@ -944,6 +1007,7 @@ impl Keyboard {
 
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
+            forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
         }
     }
@@ -969,6 +1033,7 @@ impl Keyboard {
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 0;
         unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &raw) };
+        remember_termios(self.fd, saved);
         self.saved = Some(saved);
         self.buf.clear();
     }
@@ -1821,6 +1886,26 @@ mod tests {
         assert_eq!(
             cfg_strings(&given, "hosts", &fallback),
             vec!["a.example".to_string(), "b.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_broken_refresh_does_not_reach_from_secs_f64() {
+        // Duration::from_secs_f64 panics on anything that is not finite
+        // and positive. A config of -1, or `nan` from a mistyped `-n`,
+        // used to take the poller down after the first read.
+        assert_eq!(poll_secs(-1.0, 120.0), 120.0);
+        assert_eq!(poll_secs(f64::NAN, 30.0), 30.0);
+        assert_eq!(poll_secs(f64::INFINITY, 4.0), 4.0);
+        assert_eq!(poll_secs(0.0, 2.0), 2.0);
+        assert_eq!(poll_secs(15.0, 120.0), 15.0);
+        // A broken fallback still has to be a duration.
+        assert_eq!(poll_secs(-1.0, f64::NAN), 1.0);
+        // And the bytes the handler writes are the same four sequences
+        // restore_screen formats - so a drift here is a drift on Ctrl-C.
+        assert_eq!(
+            format!("{}{}{}{}", SHOW, RST, CLEAR, HOME),
+            SCREEN_RESTORE
         );
     }
 

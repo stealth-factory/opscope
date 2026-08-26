@@ -299,6 +299,25 @@ fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
     tc::flush();
 }
 
+/// The status a supervisor should see for a launched widget.
+///
+/// `ExitStatus::code()` is `None` when the child died from a signal, and
+/// treating that as 0 made a crash look like a successful run. Unix
+/// convention is 128 plus the signal; anywhere else, a plain failure.
+fn child_exit(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
+}
+
 fn main() {
     // A widget name is resolved before --help is looked at, so that
     // `start netwatch --help` is netwatch's help, not this one's. Every
@@ -330,7 +349,7 @@ fn main() {
             // something to sit between you and a widget you already named.
             let status = std::process::Command::new(&path).args(&args[1..]).status();
             std::process::exit(match status {
-                Ok(s) => s.code().unwrap_or(0),
+                Ok(s) => child_exit(s),
                 Err(e) => {
                     eprintln!("{}: {}", path.display(), e);
                     2
@@ -616,6 +635,24 @@ mod tests {
         // Three lines at most: this is a note, not the doc page.
         assert_eq!(wrap(&"word ".repeat(60), 10).len(), 3);
         assert!(wrap("", 8).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_killed_by_signal_is_not_success() {
+        // `kill -s TERM $$` exits by signal, so `code()` is None. The
+        // previous fallback turned that into 0, which is how a crashed
+        // widget became a successful launch.
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -s TERM $$"])
+            .status()
+            .expect("spawn sh");
+        assert!(
+            status.code().is_none(),
+            "expected a signal death, got {:?}",
+            status.code()
+        );
+        assert_eq!(child_exit(status), 128 + 15);
     }
 
     #[test]

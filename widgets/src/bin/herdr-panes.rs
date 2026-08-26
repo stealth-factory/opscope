@@ -663,10 +663,10 @@ fn main() {
     // this widget is hyphenated. A mismatched key is read as absent rather
     // than as an error, so it is worth saying out loud.
     let cfg = tc::load_config("herdr_panes");
-    let mut refresh = tc::cfg_f64(&cfg, "refresh", 4.0);
+    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 4.0), 4.0);
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
-        refresh = args[1].parse::<f64>().unwrap_or(4.0).max(1.0);
+        refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
     }
 
     let absent = tc::missing(&["herdr"]);

@@ -697,7 +697,7 @@ fn main() {
     tc::maybe_help(include_str!("pr_help.txt"));
     let cfg = tc::load_config("pr");
     let gh = tc::load_config("github");
-    let mut refresh = tc::cfg_f64(&cfg, "refresh", 60.0);
+    let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 50);
     // GitHub search has no OR, so anything that is a union of conditions has
     // to be several searches merged.
@@ -719,7 +719,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-n" | "--refresh" if i + 1 < args.len() => {
-                refresh = args[i + 1].parse().unwrap_or(60.0);
+                refresh = tc::poll_secs(args[i + 1].parse().unwrap_or(60.0), 60.0);
                 i += 2;
             }
             other if !other.starts_with('-') => {

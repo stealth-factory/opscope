@@ -413,12 +413,17 @@ fn main() {
     if !named.is_empty() {
         let _ = CONFIGURED_PORTS.set(named);
     }
-    let refresh = tc::cfg_f64(&cfg, "refresh", 2.0).max(0.5);
+    let refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 2.0), 2.0).max(0.5);
     let windows: Vec<f64> = {
         let got = cfg
             .get("windows")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect::<Vec<f64>>())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64())
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .collect::<Vec<f64>>()
+            })
             .unwrap_or_default();
         if got.is_empty() {
             vec![60.0, 300.0, 900.0, 3600.0]
