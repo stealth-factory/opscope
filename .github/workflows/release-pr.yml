@@ -180,14 +180,32 @@ jobs:
             "to it - the branch is force-pushed - and edit the changelog on" \
             "main instead if something reads badly." \
             "" \
-            "---" \
-            "" \
-            "")
+            "---")
           notes=$(awk '/^## \[/{n++} n==1' CHANGELOG.md | head -60)
-          if gh pr view "$branch" --json number >/dev/null 2>&1; then
-            gh pr edit "$branch" --title "release: v${NEXT}" \
-              --body "$body$notes"
+          # $( ) strips every trailing newline, so no number of empty
+          # printf arguments can put a blank line between the two halves -
+          # the first attempt at this shipped `---## [0.1.1]`. The
+          # separator has to be joined back in explicitly.
+          full=$(printf '%s\n\n%s\n' "$body" "$notes")
+          # An explicit search for an OPEN pull request, by number. Asking
+          # `gh pr view "$branch"` instead would work exactly once: with no
+          # open PR on the branch it falls back to the most recently merged
+          # one, so the cycle after a release would find the merged PR, take
+          # the edit path, and rewrite that closed PR's title and body -
+          # leaving no new release PR and no error to say so. The next
+          # release would simply never be offered.
+          #
+          # `// empty` matters too: on no match `.[0].number` is jq's null,
+          # which prints the four characters `null` - a non-empty string
+          # that would send this straight down the edit path it is here to
+          # avoid.
+          open=$(gh pr list --head "$branch" --base main --state open \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$open" ]; then
+            echo "updating #${open}"
+            gh pr edit "$open" --title "release: v${NEXT}" --body "$full"
           else
+            echo "opening a new release PR"
             gh pr create --base main --head "$branch" \
-              --title "release: v${NEXT}" --body "$body$notes"
+              --title "release: v${NEXT}" --body "$full"
           fi
