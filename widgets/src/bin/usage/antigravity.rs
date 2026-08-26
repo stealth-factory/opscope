@@ -43,6 +43,23 @@ fn token_path() -> String {
 
 const CODE_ASSIST_API: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 
+/// The same quota summary the language server answers, from Google.
+///
+/// This was thought not to exist. The tab said so, and said it in the
+/// strongest terms - that with the app closed there was nothing to ask, on
+/// any machine, for anybody - because the only quota this widget knew about
+/// came out of a process that dies with the IDE.
+///
+/// It does exist, it is on the endpoint the tier already comes from, and the
+/// body is empty rather than the `pluginType` metadata `loadCodeAssist`
+/// wants: sending that here is a 400 naming `metadata` as an unknown field,
+/// which reads exactly like an endpoint that is not there.
+///
+/// What comes back is the same shape the language server sends, group for
+/// group and bucket for bucket, so it needs no parser of its own.
+const REMOTE_QUOTA_API: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+
 /// The Connect method the language server answers the quota on.
 const ANTIGRAVITY_RPC: &str =
     "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
@@ -72,8 +89,14 @@ pub struct Data {
     tier_why: Missing,
     /// What the endpoint said, when it said anything. Empty otherwise.
     tier_said: String,
-    /// The quota groups, empty when the language server is not running.
+    /// The quota groups, empty when neither source answered.
     quota: Vec<serde_json::Value>,
+    /// True when the groups above came from Google rather than from the
+    /// language server on this machine. The two agree in shape and very
+    /// nearly in value, so nothing else can tell them apart - and a reader
+    /// wondering why there are numbers with the app shut deserves the
+    /// answer.
+    quota_remote: bool,
     /// How the CLI authenticated. Read once here rather than per frame:
     /// the tab is redrawn on every keypress and this is a file on disk.
     auth: String,
@@ -289,7 +312,8 @@ pub fn why_no_lane(d: &Data) -> String {
     if !tier.is_empty() {
         return tier;
     }
-    "no quota · Antigravity publishes none to any server. The percentages      come from a language server that runs inside the app, so start it and      they appear here."
+    "no quota · neither the language server inside the app nor Google \
+     answered. Open Antigravity, or sign in again if its token has lapsed."
         .into()
 }
 
@@ -338,6 +362,32 @@ fn antigravity_said() -> Result<serde_json::Value, String> {
 
 /// The same call, keeping why it failed.
 fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
+    post_body(url, access, "{\"metadata\":{\"pluginType\":\"GEMINI\"}}")
+}
+
+/// The quota summary Google holds, when nothing local is serving one.
+///
+/// Preferred second, not first: the language server is the app's own answer
+/// and moves as it is used, while this is what Google has recorded. They
+/// agree in shape and very nearly in value, so the tab cannot tell them
+/// apart - which is the point, and why the row says which it read.
+fn remote_quota() -> Option<Vec<serde_json::Value>> {
+    let file = read_json(&token_path())?;
+    let tok = &file["token"];
+    let access = text(tok, "access_token");
+    let expiry = iso_epoch(&text(tok, "expiry"));
+    if access.is_empty() || expiry.is_some_and(|at| at <= now()) {
+        return None;
+    }
+    let got = post_body(REMOTE_QUOTA_API, &access, "{}").ok()?;
+    let groups = got["groups"].as_array()?;
+    if groups.is_empty() {
+        return None;
+    }
+    Some(groups.clone())
+}
+
+fn post_body(url: &str, access: &str, body: &str) -> Result<serde_json::Value, String> {
     post_json_said(
         url,
         &[
@@ -350,7 +400,7 @@ fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
             // actually calling.
             ("User-Agent", "terminal-toys (antigravity-cli)"),
         ],
-        "{\"metadata\":{\"pluginType\":\"GEMINI\"}}",
+        body,
         20,
     )
 }
@@ -404,6 +454,20 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             .unwrap_or_default(),
         ..Data::default()
     };
+    // Local first: it is the app's own answer and moves as the app is used.
+    // Google's is asked only when there is no server to ask, and is held far
+    // longer - it is a record rather than a live meter, and unlike the local
+    // one it is a request that leaves this machine.
+    if d.quota.is_empty() {
+        if let Some(groups) = cached(caches, "antigravity-remote", PLAN_TTL, || {
+            remote_quota().map(serde_json::Value::Array)
+        })
+        .and_then(|got| got.as_array().cloned())
+        {
+            d.quota = groups;
+            d.quota_remote = true;
+        }
+    }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
         .into_iter()
         .flatten()
@@ -481,15 +545,27 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// red means the same here as on every other tab. Every plan reports every
 /// family it covers, so a Gemini-only account still gets a Claude/GPT pair
 /// sitting at 0% - they are real limits, not padding, and are left in.
-fn antigravity_quota_rows(groups: &[serde_json::Value], w: usize, p: &Palette) -> Vec<String> {
+fn antigravity_quota_rows(
+    groups: &[serde_json::Value],
+    remote: bool,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     if groups.is_empty() {
         return Vec::new();
     }
     // The long form names where the number comes from, which matters here
     // more than elsewhere; the short one still says it is not this machine's
     // own tally. Shortened before it can clip, as the other headers are.
-    let mut note = " · account-wide, from the local language server";
-    for shorter in [" · from the local server", " · local"] {
+    let mut note = if remote {
+        " · account-wide, from Google - the app is not running"
+    } else {
+        " · account-wide, from the local language server"
+    };
+    for shorter in [
+        if remote { " · from Google" } else { " · from the local server" },
+        if remote { " · remote" } else { " · local" },
+    ] {
         if 13 + "live".len() + note.chars().count() <= w.saturating_sub(1) {
             break;
         }
@@ -686,7 +762,7 @@ fn antigravity_activity(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 }
 
 fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = antigravity_quota_rows(&d.quota, w, p);
+    let mut rows = antigravity_quota_rows(&d.quota, d.quota_remote, w, p);
     if d.live.is_none() {
         rows.extend(
             wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
@@ -735,11 +811,20 @@ mod tests {
             quota: Vec::new(),
             ..Data::default()
         };
-        assert!(lanes(&signed_in).is_empty(), "no language server, no lanes");
+        assert!(lanes(&signed_in).is_empty(), "no groups, no lanes");
         let note = why_no_lane(&signed_in);
         assert!(!note.is_empty(), "a quiet agent with no reason given");
+        // Both sources are named, because reaching this line means both
+        // were tried - the language server inside the app, and Google.
+        // Naming only the first would send a reader to open an app that
+        // would not have helped when the token is what has lapsed.
         assert!(note.contains("language server"), "{}", note);
-        assert!(note.contains("start it"), "says nothing to do about it: {}", note);
+        assert!(note.contains("Google"), "the remote source went unmentioned: {}", note);
+        assert!(
+            note.contains("Open Antigravity") && note.contains("sign in"),
+            "says nothing to do about it: {}",
+            note
+        );
 
         // A missing tier is still the reason when that is what is wrong,
         // and it must not be replaced by the general one.
@@ -959,6 +1044,7 @@ mod tests {
                 ("Gemini 3 Pro", "5h", 0.996),
                 ("Claude Sonnet 4.5", "weekly", 1.0),
             ]),
+            false,
             96,
             &p,
         );
@@ -977,6 +1063,7 @@ mod tests {
         let p = palette();
         let rows = antigravity_quota_rows(
             &[serde_json::json!({"displayName": "GPT", "buckets": []})],
+            false,
             96,
             &p,
         );
@@ -989,9 +1076,9 @@ mod tests {
     fn the_source_note_shortens_before_it_can_clip() {
         let p = palette();
         let quota = groups(&[("Gemini 3 Pro", "weekly", 0.5)]);
-        let wide = antigravity_quota_rows(&quota, 120, &p)[0].clone();
-        let narrow = antigravity_quota_rows(&quota, 60, &p)[0].clone();
-        let tight = antigravity_quota_rows(&quota, 30, &p)[0].clone();
+        let wide = antigravity_quota_rows(&quota, false, 120, &p)[0].clone();
+        let narrow = antigravity_quota_rows(&quota, false, 60, &p)[0].clone();
+        let tight = antigravity_quota_rows(&quota, false, 30, &p)[0].clone();
         assert!(wide.contains("from the local language server"));
         assert!(narrow.contains("from the local server"));
         assert!(tight.contains("local"));
@@ -1121,6 +1208,7 @@ mod tests {
         let p = palette();
         let cfg = Config::default();
         let d = Data {
+            quota_remote: false,
             quota: groups(&[
                 ("Gemini 3 Pro", "weekly", 0.25),
                 ("Gemini 3 Pro", "5h", 0.996),

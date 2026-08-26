@@ -325,17 +325,39 @@ a Claude/GPT pair at 0%; those are real limits and are left in.
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
 
-This is the one agent here with **no account-wide quota endpoint at all**.
-Every other tab can report a limit from a server whatever is running locally;
-this one cannot, because the numbers exist in a process rather than on an
-account. So on `[+]` it appears under its own name, with which of the two reasons
-applies — a tier it could not read, or the commoner one:
+That was written here as *"the one agent with no account-wide quota endpoint
+at all"*, and it was wrong. Google serves the same summary the language
+server does:
+
+```
+POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
+```
+
+Same bearer token the tier already uses, and the reason it looked absent is
+the body: `loadCodeAssist` wants `{"metadata":{"pluginType":"GEMINI"}}`, and
+sending that here is a 400 naming `metadata` as an unknown field — which
+reads exactly like an endpoint that is not there. It takes `{}`. What comes
+back is the same shape group for group and bucket for bucket, so it needs no
+parser of its own.
+
+The local server is still preferred: it is the app's own answer and moves as
+the app is used, where Google's is a record. The remote one is asked only
+when there is no server to ask, held for an hour rather than two minutes,
+and the heading says which was read:
+
+```
+ ── QUOTA ── live · account-wide, from Google - the app is not running
+```
+
+So the quota survives the app being closed. What still does not is a lapsed
+token — and when neither answers, `[+]` names the agent with both reasons at
+once rather than sending the reader to open an app that would not have
+helped:
 
 ```
   ANTIGRAVITY
-   no quota · Antigravity publishes none to any server. The percentages come
-   from a language server that runs inside the app, so start it and they
-   appear here.
+   no quota · neither the language server inside the app nor Google
+   answered. Open Antigravity, or sign in again if its token has lapsed.
 ```
 
 That sentence used to be empty whenever the tier read perfectly well, which
