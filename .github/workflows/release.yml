@@ -1,27 +1,60 @@
-# A tag produces a release: fourteen Linux binaries, their checksums, and a
-# changelog built from the commit subjects since the last tag.
+# A tag produces a release: three platforms' binaries, their checksums, and
+# a changelog built from the commit subjects since the last tag.
 #
 # Nothing here rewrites the source it is building. The version in Cargo.toml
 # and the tag are checked against each other and the build stops if they
 # disagree, rather than the workflow editing the manifest to make them match
 # - a build that edits its own source produces a binary no checkout can
-# reproduce, which is a strange thing to hand somebody.
+# reproduce, which is a strange thing to hand somebody. cut-release.yml does
+# the bump, in a real commit, before the tag exists.
 name: release
 
 on:
   push:
     tags: ['v*']
+  # So the build can be exercised without cutting a release. Everything runs
+  # except the publish job, which is gated on a tag ref rather than on the
+  # trigger - neither of these can publish even by accident.
+  workflow_dispatch:
+  # And on any change to the release machinery itself, because the first
+  # time a release build runs should not be the release. Deliberately not
+  # every pull request: this is three full builds and most changes here
+  # cannot affect it.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/changelog.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 
 permissions:
   contents: write
 
 jobs:
-  linux:
-    # Pinned, not `-latest`. The oldest glibc a binary runs on is the one it
-    # was built against, so that is a decision rather than something to
-    # inherit from whatever the runner image became this month. 22.04 is
-    # glibc 2.35.
-    runs-on: ubuntu-22.04
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      # Every platform reports, rather than the first failure hiding the
+      # others. When something breaks on one arch it is worth knowing
+      # whether it broke on all three.
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned, not `-latest`. The oldest glibc a binary runs on is the
+          # one it was built against, so that is a decision rather than
+          # something to inherit from whatever the runner image became this
+          # month. 22.04 is glibc 2.35.
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+          # macos-14 is Apple Silicon, macos-13 is Intel. Both are pinned
+          # for the same reason: `macos-latest` has silently changed arch
+          # before, which would swap what an artefact contains without the
+          # name changing.
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: x86_64-apple-darwin
+            runs-on: macos-13
     steps:
       # Pinned to a commit, not a tag. A tag is mutable: re-running this
       # workflow on the same release tag could execute different action code
@@ -40,15 +73,23 @@ jobs:
           # builds of one tag compiled by different compilers are two
           # different binaries wearing one version number.
           toolchain: "1.98.0"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: The tag and the manifest must agree
+        # Only meaningful on a tag; a dispatch has no version to check.
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
           manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "$tag" != "$manifest" ]; then
             echo "tag v$tag but Cargo.toml says $manifest" >&2
-            echo "bump the manifest and tag that commit, rather than having" >&2
-            echo "this workflow rewrite the source it is building" >&2
+            echo "cut-release.yml bumps the manifest in a commit and tags" >&2
+            echo "that commit, rather than having this workflow rewrite the" >&2
+            echo "source it is building" >&2
             exit 1
           fi
           echo "v$tag"
@@ -68,52 +109,119 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --release
+      - run: cargo test --release --target ${{ matrix.target }}
 
-      - run: cargo build --release
+      - run: cargo build --release --target ${{ matrix.target }}
 
       - name: Nothing dynamic beyond the C runtime
+        shell: bash
         run: |
           # rusqlite is taken with `bundled` so SQLite is compiled in, and
           # the promise on the tin is that a binary needs nothing installed
           # alongside it. Checked rather than asserted: a crate that starts
           # wanting a system library would otherwise ship quietly.
-          allowed='linux-vdso|libc\.so|libm\.so|libgcc_s\.so|ld-linux'
+          #
+          # The two platforms name their own runtime differently and are
+          # asked with different tools, so the allowance is per-platform
+          # rather than one list that has to be loose enough for both.
+          case "${{ runner.os }}" in
+            Linux)
+              tool="ldd"
+              allowed='linux-vdso|libc\.so|libm\.so|libgcc_s\.so|ld-linux'
+              ;;
+            macOS)
+              # otool lists the binary's own path on the first line, hence
+              # the tail. libSystem carries libc, libm and the pthreads;
+              # libiconv and libresolv come in through the standard library.
+              tool="otool -L"
+              allowed='libSystem\.B\.dylib|libiconv|libresolv|libc\+\+'
+              ;;
+          esac
           bad=0
-          for b in $(cargo metadata --no-deps --format-version 1 \
-                     | grep -o '"name":"[a-z-]*","src_path":"[^"]*bin/[a-z-]*\.rs"' \
-                     | sed 's/.*bin\///; s/\.rs"//'); do
-            [ -x "target/release/$b" ] || continue
-            leaked=$(ldd "target/release/$b" | grep -vE "$allowed" | grep -v '^\s*$' || true)
+          for b in target/${{ matrix.target }}/release/*; do
+            [ -f "$b" ] && [ -x "$b" ] || continue
+            case "$b" in *.d|*.rlib|*.dSYM) continue ;; esac
+            leaked=$($tool "$b" 2>/dev/null | tail -n +2 \
+                     | grep -vE "$allowed" | grep -v '^[[:space:]]*$' || true)
             if [ -n "$leaked" ]; then
-              echo "$b links something it should carry:" >&2
+              echo "$(basename "$b") links something it should carry:" >&2
               echo "$leaked" >&2
               bad=1
             fi
           done
           [ "$bad" = 0 ]
 
-      - name: Changelog
-        run: ./.github/changelog.sh "$GITHUB_REF_NAME" > CHANGELOG-release.md
-
-      - name: One tarball, and its checksum
+      - name: It runs, and says what it is
+        shell: bash
         run: |
-          name="terminal-toys-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          # A binary that builds and cannot start is not an artefact. Only
+          # meaningful where the runner can execute what it just built,
+          # which is every entry in this matrix today.
+          out=$(./target/${{ matrix.target }}/release/start --version)
+          echo "$out"
+          case "$out" in
+            *unknown*) echo "the build stamp did not resolve" >&2; exit 1 ;;
+          esac
+
+      - name: A tarball, and its checksum
+        shell: bash
+        run: |
+          # On a tag this is v0.2.0; on a pull request it is "41/merge",
+          # whose slash would become a directory in the tarball. Anything
+          # that is not a version is just called dev.
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*) version="${GITHUB_REF_NAME}" ;;
+            *)       version="dev" ;;
+          esac
+          name="terminal-toys-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           # The binaries, and the docs that explain them - `start` embeds
           # them but a person reading the tarball has no other copy.
-          find target/release -maxdepth 1 -type f -executable ! -name '*.*' \
-            -exec cp {} "dist/$name/" \;
+          for b in target/${{ matrix.target }}/release/*; do
+            [ -f "$b" ] && [ -x "$b" ] || continue
+            case "$b" in *.d|*.rlib|*.dSYM) continue ;; esac
+            cp "$b" "dist/$name/"
+          done
           cp -r docs README.md LICENSE config.example.json "dist/$name/"
           tar -C dist -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          # shasum is on both; sha256sum is not on macOS.
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           ls -la "$name.tar.gz"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            terminal-toys-*.tar.gz
+            terminal-toys-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    # A tag, and only a tag. A manual dispatch exercises the whole build and
+    # stops here, so the workflow can be tested without leaving a release
+    # behind under a version nobody meant to cut.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Changelog
+        run: ./.github/changelog.sh "$GITHUB_REF_NAME" > CHANGELOG-release.md
 
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -la artifacts
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file CHANGELOG-release.md \
-            terminal-toys-*.tar.gz terminal-toys-*.tar.gz.sha256
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256
