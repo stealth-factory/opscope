@@ -110,7 +110,7 @@
     "plan_cost": {},
     "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
     "grok_ping": false,
-    "grok_ping_minutes": 60
+    "grok_ping_minutes": 5
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",

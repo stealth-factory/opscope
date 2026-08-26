@@ -885,7 +885,7 @@ Three settings, all off or hourly by default:
 | key | default | what it does |
 |---|---|---|
 | `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` once after a session goes quiet to refresh that token |
-| `grok_ping_minutes` | `60` | how often. The window moves over days; an hour is current without being traffic |
+| `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
 **One setting, not two.** The refresh was a second key for one release and
 should not have been. The token expires — mine had lapsed 8.6 days before I

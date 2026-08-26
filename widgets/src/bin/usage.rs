@@ -1187,9 +1187,11 @@ struct Config {
     /// then stops, silently, which is the failure the refresh exists to
     /// prevent. Nobody wants the first without the second.
     grok_ping: bool,
-    /// Minutes between those requests. The window it reports moves over
-    /// days, so an hour is frequent enough to be current and rare enough
-    /// not to be traffic.
+    /// Minutes between those requests. Five, so the figure on screen is
+    /// one a reader can act on: the window it reports moves over days, but
+    /// the spend inside it moves while they work, and an hour-old reading
+    /// of a live session is exactly the stale number this asks the server
+    /// to avoid. One small GET twelve times an hour is not traffic.
     grok_ping_minutes: f64,
 }
 
@@ -1226,7 +1228,7 @@ fn read_config() -> Config {
             .get("grok_ping")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 60.0),
+        grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
     }
 }
 
