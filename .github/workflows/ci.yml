@@ -23,11 +23,21 @@ on:
 permissions:
   contents: read
 
-# A second push to a branch cancels the first. Nobody needs the results of
-# a commit that has already been replaced.
+# A second push to a pull request cancels the first: nobody needs the
+# results of a commit that has already been replaced.
+#
+# Never on main, though. A run there is the only record that a commit was
+# built and tested, and one of them was cancelled seconds after it started
+# - leaving a commit on main with no evidence either way, which is the same
+# silence this repo spends so much effort not shipping. Every commit that
+# lands gets its own verdict, even if three land in a minute.
+#
+# The group names the pull request explicitly rather than leaning on
+# github.ref, which is a different shape for each event and easy to collide
+# by accident.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
