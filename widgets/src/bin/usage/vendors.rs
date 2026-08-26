@@ -324,7 +324,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             }
         }
         if quiet.contains(&"antigravity") {
-            let note = crate::antigravity::tier_note(s.antigravity.why_no_tier());
+            let note = crate::antigravity::why_no_lane(&s.antigravity);
             if !note.is_empty() {
                 rows.push(String::new());
                 rows.push(tc::seg(

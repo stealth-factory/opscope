@@ -325,6 +325,23 @@ a Claude/GPT pair at 0%; those are real limits and are left in.
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
 
+This is the one agent here with **no account-wide quota endpoint at all**.
+Every other tab can report a limit from a server whatever is running locally;
+this one cannot, because the numbers exist in a process rather than on an
+account. So `[+]` lists it under `No quota published by:` and says which of
+the two reasons applies — a tier it could not read, or the commoner one:
+
+```
+  ANTIGRAVITY
+   no quota · Antigravity publishes none to any server. The percentages come
+   from a language server that runs inside the app, so start it and they
+   appear here.
+```
+
+That line used to be empty whenever the tier read perfectly well, which is
+most of the time — so the summary named the agent as quiet and then said
+nothing about why.
+
 The tier comes from the endpoint the CLI authenticates against:
 
 ```

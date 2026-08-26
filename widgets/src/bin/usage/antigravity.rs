@@ -275,6 +275,24 @@ pub fn tier_note(why: Missing) -> String {
     }
 }
 
+/// Why Antigravity publishes no bar, for the summary screen.
+///
+/// A missing tier is one reason and was the only one this said out loud,
+/// so an account whose tier reads perfectly well produced an empty note
+/// and "No quota published by: antigravity" with nothing after it. The
+/// commoner reason by far is the other one: unlike every other agent here
+/// Antigravity has no account-wide quota endpoint at all, and its
+/// percentages live in a language server that exists only while the app is
+/// running. Its own tab has always said so; the summary had not.
+pub fn why_no_lane(d: &Data) -> String {
+    let tier = tier_note(d.why_no_tier());
+    if !tier.is_empty() {
+        return tier;
+    }
+    "no quota · Antigravity publishes none to any server. The percentages      come from a language server that runs inside the app, so start it and      they appear here."
+        .into()
+}
+
 /// The same, with the server's own words when there are any.
 pub fn tier_note_said(why: Missing, said: &str) -> String {
     let base = tier_note(why);
@@ -705,6 +723,35 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_signed_in_account_with_no_running_app_still_says_why() {
+        // The summary said "No quota published by: antigravity" and then
+        // nothing, because the only reason it knew how to give was a
+        // missing tier - and this account's tier is fine. The commoner
+        // reason went unsaid: there is no server to ask.
+        let signed_in = Data {
+            live: Some(serde_json::json!({"currentTier": {"id": "free"}})),
+            quota: Vec::new(),
+            ..Data::default()
+        };
+        assert!(lanes(&signed_in).is_empty(), "no language server, no lanes");
+        let note = why_no_lane(&signed_in);
+        assert!(!note.is_empty(), "a quiet agent with no reason given");
+        assert!(note.contains("language server"), "{}", note);
+        assert!(note.contains("start it"), "says nothing to do about it: {}", note);
+
+        // A missing tier is still the reason when that is what is wrong,
+        // and it must not be replaced by the general one.
+        let lapsed = Data {
+            live: None,
+            tier_why: Missing::Expired(3600.0),
+            ..Data::default()
+        };
+        let note = why_no_lane(&lapsed);
+        assert!(note.contains("expired"), "tier reason lost: {}", note);
+        assert!(!note.contains("language server"), "two reasons at once: {}", note);
+    }
     use super::*;
 
     /// A conversation store built here rather than found on this machine:
