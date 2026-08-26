@@ -548,12 +548,44 @@ fn sample(state: &mut State, external: bool) {
     } else {
         socket_owners()
     };
+    absorb(state, stamp, &found, &owners, counters, err);
+}
+
+/// Fold one reading into the running totals.
+///
+/// Split from `sample` so the arithmetic can be exercised without a machine
+/// that happens to have the right sockets open on it.
+fn absorb(
+    state: &mut State,
+    stamp: f64,
+    found: &HashMap<String, Seen>,
+    owners: &HashMap<String, (i32, String)>,
+    counters: Option<(u64, u64, Vec<String>)>,
+    err: String,
+) {
+    // A failed `ss` is not a machine with no sockets, and the difference
+    // matters more than it looks: this used to say why and then go on to
+    // overwrite `state.last` with the empty map it had been handed. The
+    // next good poll found no baseline for a socket that had been open for
+    // hours, counted its whole lifetime as one interval's traffic, and
+    // divided that by the gap since the failed poll. The number that
+    // reached the screen was not merely wrong, it was enormous, and it
+    // stayed in the totals afterwards.
+    //
+    // `state.last` and `state.stamp` are one baseline and have to move
+    // together: keeping the counters while advancing the clock would divide
+    // two intervals of traffic by one interval of time, which is the same
+    // bug with a smaller number on it. So a failed reading advances
+    // neither - it records why and changes nothing else.
+    state.err = err;
+    if !state.err.is_empty() {
+        return;
+    }
     let gap = if state.stamp > 0.0 {
         (stamp - state.stamp).max(1e-6)
     } else {
         0.0
     };
-    state.err = err;
 
     // A row with nothing left in the window really is idle, and says so.
     for row in state.totals.values_mut() {
@@ -567,7 +599,7 @@ fn sample(state: &mut State, external: bool) {
     }
 
     let first = state.stamp == 0.0;
-    for (inode, seen) in &found {
+    for (inode, seen) in found {
         let was = state.last.get(inode).copied();
         // A socket opened since the last sample started at zero when it was
         // created, so all of its counters are traffic that happened while
@@ -2423,6 +2455,59 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_ss_read_does_not_reset_the_counter_baselines() {
+        // One socket, open throughout, whose kernel counters only ever
+        // climb. `ss` answers, fails, then answers again.
+        let socket = |sent, recv| {
+            let mut one = HashMap::new();
+            one.insert(
+                "42".to_string(),
+                Seen {
+                    sent,
+                    recv,
+                    peer: "192.0.2.1".into(),
+                    port: 443,
+                    mine: 51000,
+                    cgroup: String::new(),
+                },
+            );
+            one
+        };
+        let owners = HashMap::new();
+        let mut state = State::default();
+
+        // The first reading is a baseline: a socket already open when we
+        // started did its megabytes before we were watching.
+        absorb(&mut state, 1000.0, &socket(1_000_000, 2_000_000), &owners, None, String::new());
+        assert_eq!(state.stamp, 1000.0);
+        assert_eq!(state.last.get("42"), Some(&(1_000_000, 2_000_000)));
+
+        // `ss` wedges or will not run. It must say so and leave the
+        // baseline alone - both halves of it, the counters and the clock
+        // they were read at.
+        absorb(&mut state, 1001.0, &HashMap::new(), &owners, None, "ss would not run".into());
+        assert_eq!(state.err, "ss would not run");
+        assert_eq!(state.last.get("42"), Some(&(1_000_000, 2_000_000)), "baseline cleared");
+        assert_eq!(state.stamp, 1000.0, "clock advanced without the counters it pairs with");
+
+        // Two seconds after the last good reading, half a kilobyte up and a
+        // kilobyte down. Before the fix this socket had no baseline left,
+        // so the whole megabyte of its lifetime counted as traffic in the
+        // one second since the failed poll.
+        absorb(&mut state, 1002.0, &socket(1_000_500, 2_001_000), &owners, None, String::new());
+        assert!(state.err.is_empty(), "a good reading must clear the error: {}", state.err);
+        let row = state
+            .totals
+            .get(&(0, "(unattributed)".to_string()))
+            .expect("the socket has a row");
+        assert_eq!((row.up, row.down), (500, 1000), "counted a lifetime as one interval");
+        // 500 bytes and 1000 bytes over the two seconds since the last
+        // reading that had numbers in it.
+        assert!((row.up_rate - 250.0).abs() < 1.0, "{}", row.up_rate);
+        assert!((row.down_rate - 500.0).abs() < 1.0, "{}", row.down_rate);
+    }
 
     /// Colour is not width: `len()` counts escape bytes, so every column
     /// check below measures the text alone.

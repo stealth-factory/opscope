@@ -90,6 +90,15 @@ struct Session {
     raw: HashMap<String, String>,
 }
 
+/// Seconds before an external command is given up on, as link.py gave it.
+///
+/// One polling thread feeds this whole widget, and `.output()` waits for
+/// ever: a wedged `ss` used to hold that thread open with the pane still
+/// drawing its last frame, which is the failure a frozen pane is worst at
+/// showing. Bounded, the poll comes back with "ss did not answer in 5s" on
+/// the error line and tries again at the next interval.
+const RUN_TIMEOUT: u64 = 5;
+
 /// A command's output, or why it could not be had.
 ///
 /// `run` folds every failure into an empty string, which is right for the
@@ -98,18 +107,11 @@ struct Session {
 /// reporting no sockets are the same thing, and one of them is a quiet
 /// machine while the other is a broken pane imitating one.
 fn run_or(args: &[&str]) -> Result<String, String> {
-    match std::process::Command::new(args[0]).args(&args[1..]).output() {
-        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(out) => Err(format!("{} exited {}", args[0], out.status)),
-        Err(e) => Err(format!("{} did not run: {}", args[0], e)),
-    }
+    tc::run(args, RUN_TIMEOUT)
 }
 
 fn run(args: &[&str]) -> String {
-    match std::process::Command::new(args[0]).args(&args[1..]).output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => String::new(),
-    }
+    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
 }
 
 /// Ports this machine accepts connections on.
@@ -120,6 +122,26 @@ fn run(args: &[&str]) -> String {
 /// Ports named in config, to be treated as inbound whether or not `ss`
 /// reports them listening right now. Set once at startup.
 static CONFIGURED_PORTS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// The `ports` key, read as port numbers.
+///
+/// A checked conversion, not `as`: a port is sixteen bits and JSON numbers
+/// are not, so `70000 as u16` wraps to 4464 and the widget would go on to
+/// treat sessions on 4464 as inbound while ignoring the port the operator
+/// asked for - a wrong answer wearing the shape of a right one. An entry
+/// that is not a port is dropped instead, which leaves the setting doing
+/// nothing rather than doing something else.
+fn configured_ports(cfg: &serde_json::Value) -> Vec<u16> {
+    cfg.get("ports")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64())
+                .filter_map(|n| u16::try_from(n).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn listening_ports() -> Result<Vec<u16>, String> {
     // Seeded from config, as link.py does, then whatever is actually
@@ -404,11 +426,7 @@ struct State {
 fn main() {
     tc::maybe_help(include_str!("link_help.txt"));
     let cfg = tc::load_config("link");
-    let named: Vec<u16> = cfg
-        .get("ports")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|n| n as u16).collect())
-        .unwrap_or_default();
+    let named = configured_ports(&cfg);
     if !named.is_empty() {
         let _ = CONFIGURED_PORTS.set(named);
     }
@@ -1769,10 +1787,42 @@ mod tests {
         // rendered as "No inbound sessions".
         let why = run_or(&["definitely-not-a-real-binary-xyz", "--version"])
             .expect_err("a missing binary must not read as empty output");
-        assert!(why.contains("did not run"), "{}", why);
+        // The wording belongs to the shared runner; what this widget needs
+        // is that the failure names the command and is not empty.
         assert!(why.contains("definitely-not-a-real-binary-xyz"), "{}", why);
         // A command that does run still comes back as Ok.
         assert!(run_or(&["true"]).is_ok());
+        // And one that runs and fails is an error, not empty output - the
+        // whole reason this returns a Result.
+        assert!(run_or(&["false"]).is_err());
+    }
+
+    #[test]
+    fn a_command_that_never_answers_is_given_up_on() {
+        // The one polling thread feeds every pane here, so an unbounded
+        // wait froze the widget on its last frame with nothing said. A
+        // second is enough to prove the bound; RUN_TIMEOUT itself is five,
+        // which is too long to spend in a test.
+        let began = std::time::Instant::now();
+        let why = tc::run(&["sleep", "30"], 1).expect_err("a wedged child must not wait for ever");
+        assert!(began.elapsed() < Duration::from_secs(20), "{:?}", began.elapsed());
+        assert!(why.contains("did not answer"), "{}", why);
+    }
+
+    #[test]
+    fn a_port_too_big_to_be_one_is_dropped_rather_than_wrapped() {
+        // `70000 as u16` is 4464, a real port belonging to somebody else:
+        // the widget would have called sessions on 4464 inbound and never
+        // looked at what was asked for. Nothing on screen could say so.
+        let cfg = serde_json::json!({"ports": [22, 70000, 65535, 4_294_967_296u64]});
+        let got = configured_ports(&cfg);
+        assert!(!got.contains(&4464), "70000 wrapped into a different port: {:?}", got);
+        assert!(!got.contains(&0), "a multiple of 65536 wrapped to port 0: {:?}", got);
+        // The two that are ports survive, including the top of the range.
+        assert_eq!(got, vec![22, 65535]);
+        // A key that is absent or the wrong shape is simply no ports.
+        assert!(configured_ports(&serde_json::json!({})).is_empty());
+        assert!(configured_ports(&serde_json::json!({"ports": 22})).is_empty());
     }
 
     #[test]

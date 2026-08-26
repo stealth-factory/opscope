@@ -311,8 +311,8 @@ it as a machine honestly can:
    ~/tmp/big.bin                                       3.0 MB +425.7 KB/s
 
  ── DISK ── read 0 B · written 3.0 MB since it started
- HTTPS hides the URL and the filename. Who it talks to and what it writes
- are above.
+ HTTPS hides the request path and the remote filename — not the local file
+ it is writing, which FILES names above, nor who it is talking to.
 ```
 
 Every list is drawn in full, always, and `↑` `↓` scroll the screen. `tab`
