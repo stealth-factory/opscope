@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-toys-core = { path = "../core" }
+# A version alongside the path. release-plz runs `cargo package` to work
+# out what changed since the last tag, and cargo refuses to package a
+# dependency that has no version requirement. release-plz keeps this in
+# step when it bumps, so the two crates cannot drift apart - they are one
+# product and are versioned together.
+toys-core = { path = "../core", version = "0.1.0" }
 libc = "0.2"
 serde_json = "1"
 # clocks needs these; nothing else does yet, and an unused dependency costs

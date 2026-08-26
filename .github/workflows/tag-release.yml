@@ -1,0 +1,68 @@
+# Tags the release once its pull request is merged.
+#
+# release-pr.yml prepares; this fires when that preparation lands on main
+# and turns it into a tag. release.yml then builds and publishes off the
+# tag. Three small workflows rather than one large one, because each half
+# has a different trigger and a different thing that can go wrong.
+#
+# It fires on any push to main and does nothing unless the version in the
+# manifest has no tag yet - so a hand-cut tag still works, and re-running
+# this is harmless.
+name: tag-release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          # The tag has to be pushed by something other than GITHUB_TOKEN.
+          # A tag it creates triggers no workflow, so release.yml would
+          # never run and the release would exist with no binaries on it -
+          # which looks like a broken build rather than a missing token.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Tag it, if this version has not been tagged
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "no version in Cargo.toml" >&2; exit 1
+          fi
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "${tag} exists; nothing to do"
+            exit 0
+          fi
+          if [ -z "${RELEASE_TOKEN_SET:-}" ] && [ -z "${{ secrets.RELEASE_TOKEN }}" ]; then
+            # Better to say so than to push a tag that silently builds
+            # nothing. The tag would land, release.yml would not run, and
+            # the release would sit there with no binaries attached.
+            echo "RELEASE_TOKEN is not set." >&2
+            echo "A tag pushed with the default GITHUB_TOKEN triggers no" >&2
+            echo "workflow, so release.yml would never build anything." >&2
+            echo "Add a fine-grained PAT with Contents and Pull requests" >&2
+            echo "read/write as the RELEASE_TOKEN secret." >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Annotated, so `git describe` sees it without --tags and the tag
+          # carries who made it and when.
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          echo "pushed ${tag}; release.yml takes it from here"

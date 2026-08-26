@@ -23,7 +23,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release.yml'
-      - '.github/changelog.sh'
+      - 'cliff.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
 
@@ -230,8 +230,20 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Changelog
-        run: ./.github/changelog.sh "$GITHUB_REF_NAME" > CHANGELOG-release.md
+      - name: Notes for this release
+        run: |
+          # The top section of CHANGELOG.md, which release-pr.yml wrote
+          # when it prepared this version. Taking it from the file rather
+          # than regenerating means the notes on the release are the same
+          # text that was reviewed in the release PR, character for
+          # character - a changelog regenerated here could differ if a
+          # commit landed in between.
+          awk '/^## \[/{n++} n==1' CHANGELOG.md > CHANGELOG-release.md
+          if [ ! -s CHANGELOG-release.md ]; then
+            echo "no section found in CHANGELOG.md for this release" >&2
+            exit 1
+          fi
+          cat CHANGELOG-release.md
 
       - name: Release
         env:
