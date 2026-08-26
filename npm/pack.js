@@ -49,19 +49,27 @@ function walkFiles(dir, acc) {
   return acc;
 }
 
-function findTarball(artifacts, rustTarget) {
+function findTarball(artifacts, version, rustTarget) {
+  // The suffix alone is not enough: a leftover from another tag
+  // would pack those binaries under this version. The release
+  // workflow names the archive opscope-vX.Y.Z-<target>.tar.gz;
+  // accept the form without the v as well so a local pack of an
+  // unpacked tree does not have to invent a prefix.
   const files = walkFiles(artifacts).filter((f) => {
     const base = path.basename(f);
-    return base.endsWith(`-${rustTarget}.tar.gz`) && !base.endsWith('.sha256');
+    return (
+      base === `opscope-v${version}-${rustTarget}.tar.gz` ||
+      base === `opscope-${version}-${rustTarget}.tar.gz`
+    );
   });
   if (files.length === 0) {
     throw new Error(
-      `no tarball for ${rustTarget} under ${artifacts} — the publish job cannot invent a platform the build did not produce`,
+      `no tarball for ${version} ${rustTarget} under ${artifacts} — the publish job cannot invent a platform the build did not produce`,
     );
   }
   if (files.length > 1) {
     throw new Error(
-      `several tarballs for ${rustTarget}: ${files.join(', ')}`,
+      `several tarballs for ${version} ${rustTarget}: ${files.join(', ')}`,
     );
   }
   return files[0];
@@ -165,7 +173,7 @@ function pack(opts) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'opscope-pack-'));
   try {
     for (const p of platform.PLATFORMS) {
-      const tarball = findTarball(artifacts, p.rust);
+      const tarball = findTarball(artifacts, version, p.rust);
       const extracted = path.join(scratch, p.rust);
       extract(tarball, extracted);
       const src = findBinDir(extracted, bins);

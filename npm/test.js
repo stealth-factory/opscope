@@ -184,6 +184,34 @@ test('pack.js refuses a version that is not the manifest', () => {
   );
 });
 
+test('pack.js refuses a tarball stamped with a different version', () => {
+  // The rust-target suffix used to be enough. A leftover from
+  // another tag would then publish those binaries under this
+  // version, and the Cargo.toml check would not see it.
+  const dir = scratch();
+  try {
+    const version = packer.versionFromCargo(repoRoot);
+    const bins = platform.binsFromManifest(repoRoot);
+    const artifacts = path.join(dir, 'artifacts');
+    fs.mkdirSync(artifacts);
+    for (const p of platform.PLATFORMS) {
+      makeTarball(artifacts, p.rust, 'v9.9.9', bins);
+    }
+    assert.throws(
+      () =>
+        packer.pack({
+          repoRoot,
+          version,
+          artifacts,
+          out: path.join(dir, 'out'),
+        }),
+      /no tarball/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('pack.js refuses to publish when a platform tarball is missing', () => {
   const dir = scratch();
   try {
