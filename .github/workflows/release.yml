@@ -298,6 +298,14 @@ jobs:
           node-version: "22"
           registry-url: https://registry.npmjs.org
 
+      - name: npm that can do trusted publishing
+        run: |
+          # Node 22 ships npm 10.x. Trusted publishing's OIDC
+          # handshake needs 11.5.1 or later; without it the
+          # no-token path never attempts OIDC and 404s.
+          npm install -g npm@11.5.1
+          test "$(npm --version)" = "11.5.1"
+
       - name: Pack the npm packages from those tarballs
         run: |
           set -euo pipefail

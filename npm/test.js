@@ -325,6 +325,48 @@ test('the shim reports 130 when start dies of SIGINT', () => {
   }
 });
 
+test('the shim reports 129 when start dies of SIGHUP', () => {
+  // SIGHUP is not one of the two signals the shim forwards. The
+  // exit map still has to name it, or a child that dies of it
+  // reports as a generic 1.
+  const wanted = platform.currentPlatform();
+  assert.ok(wanted, `this test host is ${platform.describeHost()}`);
+
+  const dir = scratch();
+  try {
+    const version = packer.versionFromCargo(repoRoot);
+    const scopeDir = path.join(dir, 'node_modules', '@stealth-factory');
+    const launcherDir = path.join(scopeDir, 'terminal-toys');
+    const platDir = path.join(scopeDir, path.basename(wanted.pkg));
+    fs.mkdirSync(path.join(launcherDir, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(platDir, 'bin'), { recursive: true });
+
+    fs.copyFileSync(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
+    fs.copyFileSync(
+      path.join(__dirname, 'bin/terminal-toys'),
+      path.join(launcherDir, 'bin/terminal-toys'),
+    );
+    fs.chmodSync(path.join(launcherDir, 'bin/terminal-toys'), 0o755);
+    fs.writeFileSync(
+      path.join(launcherDir, 'package.json'),
+      JSON.stringify({ name: platform.LAUNCHER, version, bin: { 'terminal-toys': 'bin/terminal-toys' } }),
+    );
+    fs.writeFileSync(
+      path.join(platDir, 'package.json'),
+      JSON.stringify({ name: wanted.pkg, version }),
+    );
+    fs.writeFileSync(path.join(platDir, 'bin/start'), '#!/bin/sh\nkill -s HUP $$\n');
+    fs.chmodSync(path.join(platDir, 'bin/start'), 0o755);
+
+    const run = spawnSync('node', [path.join(launcherDir, 'bin/terminal-toys')], {
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, 129, `status=${run.status} stderr=${run.stderr}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('postinstall fails on an unsupported platform with the sentence', () => {
   const dir = scratch();
   try {

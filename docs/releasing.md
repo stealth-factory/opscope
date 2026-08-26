@@ -149,4 +149,7 @@ is missing, or the `@stealth-factory` org does not exist, and nothing
 was published on either side. Fix the publisher or the secret, then
 re-dispatch `release.yml` at that tag. A version already on npm is
 skipped rather than republished, so a retry after npm succeeded and
-the GitHub step failed will finish the release.
+the GitHub step failed will finish the release. `gh release create`
+deletes its own leftover draft if the upload fails; if a draft is
+still there and blocks the retry, delete it and re-dispatch. If the
+release already exists and is published, it already shipped.
