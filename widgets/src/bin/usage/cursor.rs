@@ -63,9 +63,16 @@ const CURSOR_LANES: &[(&str, &str, f64)] = &[
 /// weekly on a date the response states. Drawing it against the cycle's
 /// clock would put its pace marker in the wrong place every time.
 ///
-/// A different host from the RPC above, and a different credential: this
-/// one is cookie-authenticated and rejects the app's bearer token.
-const SAND: &str = "https://cursor.com/api/dashboard/get-sand-usage-status";
+/// Reached through the same RPC service and the same bearer token as the
+/// three plan lanes. Cursor's own dashboard calls this over the website as
+/// `POST /api/dashboard/get-sand-usage-status`, which is cookie-only and
+/// answers the app's token with a redirect to the login provider - so the
+/// obvious reading is that this needs a browser session. It does not: the
+/// Connect service exposes the same call, and the token already on disk is
+/// enough. Worth stating, because the website's route is the documented
+/// one and following it would have put a credential in config.json for no
+/// reason at all.
+const SAND_METHOD: &str = "GetSandUsageStatus";
 const SAND_KEY: &str = "cursor:sand";
 /// The allowance is weekly, so this need not be brisk.
 const SAND_TTL: f64 = 900.0;
@@ -189,22 +196,19 @@ fn cursor_plan() -> Option<serde_json::Value> {
 /// Best-effort by contract: every failure here has to leave Cursor's three
 /// monthly bars exactly as they were, because this is an extra lane and not
 /// a precondition for the rest of the tab.
-fn sand_status(cookie: &str, seconds: u64) -> Result<serde_json::Value, String> {
-    if cookie.is_empty() {
-        return Err(String::new());
-    }
-    let jar = format!("WorkosCursorSessionToken={}", cookie);
+fn sand_status() -> Result<serde_json::Value, String> {
+    let tok = cursor_token().ok_or("no Cursor token on this disk")?;
+    let bearer = format!("Bearer {}", tok);
     post_json_said(
-        SAND,
+        &format!("{}{}", CURSOR_RPC, SAND_METHOD),
         &[
-            ("Cookie", jar.as_str()),
+            ("Authorization", bearer.as_str()),
             ("Content-Type", "application/json"),
-            // The dashboard checks this for CSRF and refuses without it.
-            ("Origin", "https://cursor.com"),
+            ("Connect-Protocol-Version", "1"),
             ("User-Agent", "terminal-toys"),
         ],
         "{}",
-        seconds,
+        20,
     )
 }
 
@@ -417,7 +421,7 @@ fn read_tracking(con: &Connection) -> rusqlite::Result<Tracking> {
     })
 }
 
-pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
+pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
@@ -429,24 +433,16 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // Deliberately last of the four and deliberately unable to affect them:
     // this is an extra allowance, and an account without one is the normal
     // case rather than a fault.
-    if !cfg.cursor_cookie.is_empty() {
-        let mut why = String::new();
-        d.sand = cached(caches, SAND_KEY, SAND_TTL, || {
-            match sand_status(&cfg.cursor_cookie, 20) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    why = e;
-                    None
-                }
-            }
-        });
-        if d.sand.is_none() {
-            d.sand_why = if why.is_empty() {
-                "cursor.com did not answer".to_string()
-            } else {
-                why
-            };
+    let mut why = String::new();
+    d.sand = cached(caches, SAND_KEY, SAND_TTL, || match sand_status() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            why = e;
+            None
         }
+    });
+    if d.sand.is_none() && !why.is_empty() {
+        d.sand_why = why;
     }
     let path = under_home(".cursor/ai-tracking/ai-code-tracking.db");
     if !std::path::Path::new(&path).exists() {

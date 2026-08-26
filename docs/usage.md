@@ -884,7 +884,6 @@ Three settings, all off or hourly by default:
 
 | key | default | what it does |
 |---|---|---|
-| `cursor_cookie` | *(empty)* | a cursor.com session cookie (`WorkosCursorSessionToken`). Enables the **Grok Bot** lane — Cursor's weekly included allowance, which its API calls `sand` and which is what `sand-default` and `sand-automation` in the spend breakdown are drawn from |
 | `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
@@ -895,17 +894,20 @@ the monthly plan. It is not part of `included` / `auto` / `api` and does not
 share their reset, so it draws as a fourth bar carrying its own countdown,
 and appears on `[+]` as its own lane.
 
-`POST cursor.com/api/dashboard/get-sand-usage-status` is where it lives. Two
-things make it unlike every other reading here:
+It needs no configuration: `DashboardService/GetSandUsageStatus` is reached
+with the same bearer token, on the same RPC service, as the three plan lanes.
 
-- **It needs a different credential.** The bearer token Cursor's app leaves
-  in `~/.config/cursor/auth.json` is refused by the dashboard host — both as
-  a token and as a cookie, it is answered with a redirect to the login
-  provider. Only a browser session cookie works, which is why this is a
-  config key rather than something read off the disk.
-- **It is best-effort by contract.** A missing, refused or unparseable
-  answer leaves the three plan bars exactly as they were. An extra lane must
-  never be able to take the tab down with it.
+That is worth stating, because the obvious route is a dead end. Cursor's own
+website calls this as `POST cursor.com/api/dashboard/get-sand-usage-status`,
+which is cookie-authenticated and answers the app's bearer token — and that
+same token sent as a cookie — with a redirect to the login provider. Reading
+only the website's route leads to putting a browser session cookie in
+`config.json`; the Connect service exposes the same call, and the token
+already on disk is enough.
+
+It is **best-effort by contract**: a missing, refused or unparseable answer
+leaves the three plan bars exactly as they were. An extra lane must never be
+able to take the tab down with it.
 
 The bar is drawn only when the account actually has an allowance —
 Cursor states that as `hasNonZeroIncludedLimit`, and a 0% bar for an account

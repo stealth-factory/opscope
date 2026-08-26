@@ -1187,15 +1187,6 @@ struct Config {
     /// then stops, silently, which is the failure the refresh exists to
     /// prevent. Nobody wants the first without the second.
     grok_ping: bool,
-    /// A cursor.com session cookie, which is the only credential the Grok
-    /// Bot allowance is readable with.
-    ///
-    /// Cursor's dashboard host does not accept the bearer token its app
-    /// leaves in `~/.config/cursor/auth.json` - both that token and the
-    /// same string sent as a cookie are answered with a redirect to the
-    /// login provider. Empty by default, so the lane is simply absent
-    /// until somebody supplies one.
-    cursor_cookie: String,
     /// Minutes between those requests. Five, so the figure on screen is
     /// one a reader can act on: the window it reports moves over days, but
     /// the spend inside it moves while they work, and an hour-old reading
@@ -1238,7 +1229,6 @@ fn read_config() -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
-        cursor_cookie: tc::cfg_str(&raw, "cursor_cookie", ""),
     }
 }
 
