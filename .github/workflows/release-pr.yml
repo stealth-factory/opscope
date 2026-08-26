@@ -47,9 +47,25 @@ jobs:
           # on a tag push to trigger one.
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
-      - uses: taiki-e/install-action@6ee6c3ab83eab434138dfa928d72abc7eae14793 # v2
-        with:
-          tool: git-cliff@2.13.1
+      - name: Install git-cliff
+        run: |
+          set -euo pipefail
+          # The published binary, fetched and checksummed here rather than
+          # through an installer action. install-action has no manifest for
+          # this version and falls back to whatever cargo-binstall it can
+          # find, which was old enough not to parse an `edition = "2024"`
+          # manifest - so the install failed on a detail of a tool that was
+          # only ever meant to deliver a tool. Four lines of curl cannot
+          # drift like that, and the checksum says exactly what ran.
+          ver=2.13.1
+          sha=9a1263f24e59a2f508c7b3d3283c9dea94a8bf697f96dbc18cc783cac6284546
+          url="https://github.com/orhun/git-cliff/releases/download/v${ver}"
+          url="${url}/git-cliff-${ver}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$url" -o /tmp/cliff.tar.gz
+          echo "${sha}  /tmp/cliff.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/cliff.tar.gz -C /tmp
+          sudo install "/tmp/git-cliff-${ver}/git-cliff" /usr/local/bin/
+          git-cliff --version
 
       - name: What the next version would be
         id: next
