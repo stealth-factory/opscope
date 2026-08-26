@@ -55,3 +55,11 @@ jobs:
         # every binary as a binary. Fourteen of them ship; all fourteen
         # should compile before a change is merged.
         run: cargo build --workspace --bins
+
+      - name: The npm packages pack and fail clearly
+        # cargo test already runs npm/test.js via widgets/tests/npm.rs
+        # when node is on PATH, which this runner has. Said again here
+        # so a future change that drops that rust test cannot make the
+        # packer untested: these are the checks that a missing tarball
+        # or an unsupported platform still fail with a sentence.
+        run: node --test npm/test.js

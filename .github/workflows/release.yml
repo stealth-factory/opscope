@@ -275,6 +275,61 @@ jobs:
           fi
           cat CHANGELOG-release.md
 
+      # The four npm packages are generated from the tarballs this
+      # job just built, not maintained in git. That is what keeps
+      # `npx @stealth-factory/terminal-toys@0.2.0` and `v0.2.0` the
+      # same binaries: there is no second copy to forget to bump.
+      #
+      # npm first, then the GitHub release. A missing token or a
+      # missing `@stealth-factory` org then fails the job with
+      # nothing published on either side, which is agreement. The
+      # other order leaves a GitHub release whose version npm has
+      # never heard of, and `gh release create` will not run twice.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Pack the npm packages from those tarballs
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node npm/pack.js --version "$version" --artifacts artifacts --out npm-dist
+          ls -la npm-dist/@stealth-factory
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # An automation token, not a granular one: publishing four
+          # packages at a tag is exactly what those are for.
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not set." >&2
+            echo "Create the @stealth-factory org on npm, then an" >&2
+            echo "automation token, and store it as the NPM_TOKEN" >&2
+            echo "repository secret, before cutting a release." >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          publish() {
+            local dir="$1"
+            local name
+            name=$(node -p 'require(process.argv[1]).name' "$dir/package.json")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already on npm"
+            else
+              npm publish "$dir" --access public
+            fi
+          }
+          # Platforms first. The launcher lists them as
+          # optionalDependencies at this same version, and npm will
+          # try to fetch them the moment the launcher is published.
+          for pkg in npm-dist/@stealth-factory/terminal-toys-*; do
+            publish "$pkg"
+          done
+          publish npm-dist/@stealth-factory/terminal-toys
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}

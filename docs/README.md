@@ -34,3 +34,4 @@ saying so at length would be the joke explained.
 | [Internals](internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot. |
 | [Port decisions](port-decisions.md) | What the Rust port changed from the Python, and why. |
 | [Building herdr panels](building-herdr-panels.md) | Driving these from Herdr: resize semantics, focus, and the layout mistakes worth skipping. |
+| [Releasing](releasing.md) | How a version is decided, what merging the release PR sets off, and what to do when it goes wrong. |

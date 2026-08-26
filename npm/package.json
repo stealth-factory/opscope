@@ -1,0 +1,45 @@
+{
+  "name": "@stealth-factory/terminal-toys",
+  "version": "0.0.0-dev",
+  "description": "Sci-fi terminal widgets that show only real data.",
+  "bin": {
+    "terminal-toys": "bin/terminal-toys"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node --test test.js"
+  },
+  "optionalDependencies": {
+    "@stealth-factory/terminal-toys-linux-x64": "0.0.0-dev",
+    "@stealth-factory/terminal-toys-darwin-arm64": "0.0.0-dev",
+    "@stealth-factory/terminal-toys-darwin-x64": "0.0.0-dev"
+  },
+  "files": [
+    "bin",
+    "platform.js",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stealth-factory/terminal-toys.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stealth-factory/terminal-toys/issues"
+  },
+  "homepage": "https://github.com/stealth-factory/terminal-toys#readme",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "terminal",
+    "tui",
+    "widgets",
+    "dashboard"
+  ]
+}

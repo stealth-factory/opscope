@@ -3,6 +3,7 @@ target/
 
 # What a release build leaves behind, if one is run by hand.
 dist/
+npm-dist/
 terminal-toys-*.tar.gz
 terminal-toys-*.tar.gz.sha256
 CHANGELOG-release.md
