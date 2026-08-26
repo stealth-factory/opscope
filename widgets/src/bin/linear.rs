@@ -177,9 +177,16 @@ query($after: String, $since: DateTimeOrDuration!) {{
     )
 }
 
+/// The running cycles, walked to the end.
+///
+/// Fifty is more than most workspaces have running at once - which is
+/// exactly why the fifty-first used to go missing without a word. Walking
+/// costs nothing while they fit one page: `pages` stops the moment Linear
+/// says there is no next one, so the common case is the one request it
+/// always was.
 const CYCLES_QUERY: &str = r#"
-{
-  cycles(first: 50, filter: { isActive: { eq: true } }) {
+query($after: String) {
+  cycles(first: 50, after: $after, filter: { isActive: { eq: true } }) {
     nodes {
       id name number startsAt endsAt progress
       issueCountHistory completedIssueCountHistory
@@ -221,14 +228,28 @@ query($id: String!) {
     id name url description startedAt completedAt
     scopeHistory completedScopeHistory
     issueCountHistory completedIssueCountHistory
-    members(first: 20) { nodes { name } }
-    projectMilestones(first: 25) { nodes { name targetDate progress } }
-    initiatives(first: 5) { nodes { name } }
+    members(first: 20) { nodes { name } pageInfo { hasNextPage } }
+    projectMilestones(first: 25) {
+      nodes { name targetDate progress }
+      pageInfo { hasNextPage }
+    }
+    initiatives(first: 5) { nodes { name } pageInfo { hasNextPage } }
   }
 }"#;
 
+/// Every team, walked to the end.
+///
+/// This is the list every other figure on the board is filtered through, so
+/// a team missing from it takes its issues, its cycles and its projects with
+/// it - and the board would have said nothing. It asked for `hasNextPage`
+/// and never read it.
 const TEAMS_QUERY: &str = r#"
-{ teams(first: 100) { nodes { key name } pageInfo { hasNextPage } } }"#;
+query($after: String) {
+  teams(first: 100, after: $after) {
+    nodes { key name }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
 
 fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
@@ -523,6 +544,10 @@ struct State {
     /// the keys have asked for.
     window: i64,
     truncated: bool,
+    /// The cycle walk stopped at the page cap, so `cycles` is a floor. Kept
+    /// apart from `truncated`, which is drawn against the open-issue count
+    /// and would be pointing at the wrong number.
+    cycles_capped: bool,
     err: String,
     fetched: f64,
 }
@@ -556,11 +581,13 @@ fn one_pass(
         .format("%Y-%m-%dT00:00:00.000Z")
         .to_string();
 
-    let teams_res = graphql(TEAMS_QUERY, tok, serde_json::json!({}), quota)?;
-    let teams: Vec<(String, String)> = teams_res["teams"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    // Every counter below is filtered through these keys, so a team left
+    // off the end of the first page understates all of them at once. The
+    // cap joins the board's own truncation marker for that reason.
+    let (team_nodes, cap_teams) =
+        pages(tok, TEAMS_QUERY, &["teams"], &serde_json::json!({}), quota)?;
+    let teams: Vec<(String, String)> = team_nodes
+        .iter()
         .map(|t| (text(t, "key"), text(t, "name")))
         .filter(|(key, _)| wanted(key))
         .collect();
@@ -650,13 +677,11 @@ fn one_pass(
     }
 
     // The running cycles, each already carrying its own burndown.
-    let cycles_res = graphql(CYCLES_QUERY, tok, serde_json::json!({}), quota)?;
-    let cycles: Vec<serde_json::Value> = cycles_res["cycles"]["nodes"]
-        .as_array()
+    let (cycle_nodes, cycles_capped) =
+        pages(tok, CYCLES_QUERY, &["cycles"], &serde_json::json!({}), quota)?;
+    let cycles: Vec<serde_json::Value> = cycle_nodes
         .into_iter()
-        .flatten()
         .filter(|c| keys.contains(&text(&c["team"], "key")))
-        .cloned()
         .collect();
 
     // Every project, filed under each team that owns it. A project can be
@@ -780,7 +805,8 @@ fn one_pass(
         guard.oldest_open = oldest_open;
         guard.oldest_wip = oldest_wip;
         guard.window = days;
-        guard.truncated = capped || cap2 || cap3 || cap4;
+        guard.truncated = capped || cap2 || cap3 || cap4 || cap_teams;
+        guard.cycles_capped = cycles_capped;
         guard.fetched = now();
         guard.err = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
@@ -847,6 +873,19 @@ fn state_colour<'a>(state: &str, p: &'a Palette) -> &'a str {
         "backlog" => &p.dim,
         "unstarted" => &p.accent,
         _ => &p.warn,
+    }
+}
+
+/// How many cycles are running - or, when the walk stopped at the page cap,
+/// how many are known to be running.
+///
+/// A count that stopped counting is a floor, and saying "at least" is the
+/// difference between a board that is quiet and a board that gave up.
+fn running_label(n: usize, capped: bool) -> String {
+    if capped {
+        format!("at least {} running", n)
+    } else {
+        format!("{} running", n)
     }
 }
 
@@ -1499,11 +1538,18 @@ fn project_detail(
             .map(|m| text(m, "name"))
             .filter(|n| !n.is_empty())
             .collect();
+        // A page of members, not necessarily every member. Paginating it
+        // would mean asking for the whole project record again - burn-up,
+        // milestones and all - per page, every time this screen opens, to
+        // settle a question that is almost always already settled. So the
+        // connection says whether there are more and the row carries it:
+        // "21+" is honest where "21" would be wrong.
+        let more = v["members"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
         if !names.is_empty() {
             field(
                 "members",
-                names.len().to_string(),
-                names.join(", "),
+                if more { format!("{}+", names.len()) } else { names.len().to_string() },
+                if more { format!("{}, …", names.join(", ")) } else { names.join(", ") },
                 p.dim.as_str(),
             );
         }
@@ -1588,6 +1634,9 @@ fn project_detail(
 
     // Milestones, in the order they fall due. Linear returns them in no
     // order at all, and a list of dates out of order reads as noise.
+    let more_stones = v["projectMilestones"]["pageInfo"]["hasNextPage"]
+        .as_bool()
+        .unwrap_or(false);
     let mut stones: Vec<(String, String, f64)> = v["projectMilestones"]["nodes"]
         .as_array()
         .into_iter()
@@ -1612,7 +1661,16 @@ fn project_detail(
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── MILESTONES ── ".into()),
-                (p.dim.as_str(), format!("{}", stones.len())),
+                // Same rule as the members row: a page of milestones is not
+                // necessarily every milestone, and "25" would say it was.
+                (
+                    p.dim.as_str(),
+                    if more_stones {
+                        format!("{}+", stones.len())
+                    } else {
+                        stones.len().to_string()
+                    },
+                ),
             ],
             w - 1,
         ));
@@ -2222,7 +2280,7 @@ fn main() {
                     if here_now { p.accent.as_str() } else { p.lbl.as_str() },
                     " ── ACTIVE CYCLES ── ".into(),
                 ),
-                (p.dim.as_str(), format!("{} running", s.cycles.len())),
+                (p.dim.as_str(), running_label(s.cycles.len(), s.cycles_capped)),
                 (
                     if here_now { p.accent.as_str() } else { p.dim.as_str() },
                     heading_keys(cycles_pane, focus, &pane_len).to_string(),
@@ -3286,6 +3344,110 @@ mod tests {
         assert!(out.contains("could not read the project"), "{}", out);
         assert!(out.contains("HTTP 502"), "{}", out);
         assert!(!out.contains("asking Linear"), "{}", out);
+    }
+
+    #[test]
+    fn a_page_of_milestones_is_not_reported_as_every_milestone() {
+        // The same rule one heading down. MILESTONES printed the length of
+        // the page it was given, so a project with more than the twenty-five
+        // asked for read as a project with exactly twenty-five.
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        let stones = |more: bool| {
+            serde_json::json!({
+                "projectMilestones": {
+                    "nodes": [
+                        { "name": "kick-off", "targetDate": "2026-09-03", "progress": 100.0 },
+                        { "name": "cutover", "targetDate": "2026-09-05", "progress": 0.0 },
+                    ],
+                    "pageInfo": { "hasNextPage": more },
+                },
+            })
+        };
+        let shown = |v: &serde_json::Value| {
+            plain(&project_detail(&q, "ABC", Some(v), &HashMap::new(), None, 100, &palette()))
+        };
+        let out = shown(&stones(true));
+        assert!(out.contains("MILESTONES ── 2+"), "a page that did not end is a floor:\n{}", out);
+        let out = shown(&stones(false));
+        assert!(out.contains("MILESTONES ── 2"), "{}", out);
+        assert!(!out.contains("2+"), "nothing is missing, so nothing is marked:\n{}", out);
+
+        // A record from before the flag was asked for reads as a plain total
+        // rather than as suspect - the same allowance the members row makes.
+        let old = serde_json::json!({
+            "projectMilestones": { "nodes": [
+                { "name": "kick-off", "targetDate": "2026-09-03", "progress": 100.0 },
+            ]},
+        });
+        assert!(!shown(&old).contains("1+"), "no flag is not the same as a flag saying more");
+    }
+
+    #[test]
+    fn a_page_of_members_is_not_reported_as_every_member() {
+        let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
+        // Linear hands back a page and says whether there are more. The row
+        // used to count the page and print the figure as the project's
+        // membership, which for a project with more members than a page
+        // holds is a wrong number, not a rounded one.
+        let record = serde_json::json!({
+            "members": {
+                "nodes": [ { "name": "ada" }, { "name": "grace" } ],
+                "pageInfo": { "hasNextPage": true },
+            },
+        });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(out.contains("2+"), "a page that did not end is a floor:\n{}", out);
+        assert!(out.contains("ada, grace, …"), "and the list says so too:\n{}", out);
+
+        // The connection ended, so the count is the count.
+        let record = serde_json::json!({
+            "members": {
+                "nodes": [ { "name": "ada" }, { "name": "grace" } ],
+                "pageInfo": { "hasNextPage": false },
+            },
+        });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(!out.contains("2+"), "nothing is missing, so nothing is marked:\n{}", out);
+        assert!(out.contains("ada, grace"), "{}", out);
+        assert!(!out.contains('…'), "{}", out);
+
+        // A record with no pageInfo at all - an older shape, or a fixture -
+        // reads as complete rather than as suspect.
+        let record = serde_json::json!({ "members": { "nodes": [ { "name": "ada" } ] } });
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(!out.contains("1+"), "{}", out);
+    }
+
+    #[test]
+    fn a_cycle_count_that_stopped_counting_does_not_call_itself_a_total() {
+        assert_eq!(running_label(4, false), "4 running");
+        assert_eq!(running_label(600, true), "at least 600 running");
+    }
+
+    #[test]
+    fn every_walked_connection_asks_for_a_cursor_and_hands_one_back() {
+        // pages() sends $after and moves on pageInfo.endCursor. A query
+        // missing either is walked in place: the same first page fetched
+        // PAGE_CAP times, or one page returned as the whole connection.
+        // TEAMS_QUERY asked for hasNextPage, offered no endCursor, and was
+        // not walked at all - which is how a hundred teams became all of
+        // them.
+        let walked: [(&str, String); 6] = [
+            ("teams", TEAMS_QUERY.into()),
+            ("cycles", CYCLES_QUERY.into()),
+            ("projects", PROJECTS_QUERY.into()),
+            ("open", open_query()),
+            ("created", created_query()),
+            ("done", done_query()),
+        ];
+        for (name, q) in &walked {
+            assert!(q.contains("$after: String"), "{} declares no cursor:\n{}", name, q);
+            assert!(q.contains("after: $after"), "{} never passes its cursor:\n{}", name, q);
+            assert!(q.contains("endCursor"), "{} asks for no endCursor:\n{}", name, q);
+        }
     }
 
     #[test]

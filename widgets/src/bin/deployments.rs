@@ -71,21 +71,107 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
-/// Every team the token can see, so deployments are not just personal.
+/// The team ids in one page of `/v2/teams`, and the cursor for the next.
 ///
-/// An empty list on failure is deliberate: the personal scope still works,
-/// and a widget that refused to start because one endpoint was down would
-/// be worse than one showing fewer rows.
-fn discover_teams(tok: &str) -> Vec<String> {
-    let Ok(res) = api("/v2/teams", tok) else {
-        return Vec::new();
-    };
-    res["teams"]
+/// Vercel pages every list endpoint the same way: `pagination.next` is the
+/// timestamp to hand back as `until`, and it is null on the last page.
+/// Split out so the paging can be tested without a token.
+fn teams_page(res: &serde_json::Value) -> (Vec<String>, Option<i64>) {
+    let ids = res["teams"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|t| t["id"].as_str().map(String::from))
-        .collect()
+        .collect();
+    let next = &res["pagination"]["next"];
+    // Documented as a number; read as a string too, because a cursor that
+    // arrives quoted would otherwise stop the walk one page in and look
+    // exactly like an account with fewer teams in it.
+    let next = next
+        .as_i64()
+        .or_else(|| next.as_str().and_then(|s| s.parse().ok()));
+    (ids, next)
+}
+
+/// How many pages of teams to walk before giving up on the cursor.
+const TEAM_PAGES: usize = 20;
+
+/// Every team the token can see, so deployments are not just personal.
+///
+/// All of them, which took a second version: the endpoint answers one page
+/// at a time and the first version asked once. Deployments are then never
+/// requested for the teams that were on the pages nobody asked for, while
+/// the widget goes on describing itself as covering every team the token
+/// can see - a partial board presented as a whole one.
+///
+/// An empty list on failure is deliberate and stays: the personal scope
+/// still works, and a widget that refused to start because one endpoint was
+/// down would be worse than one showing fewer rows. The *silence* was not
+/// deliberate, so what comes back beside the ids is why the walk stopped,
+/// for the screen to say out loud.
+fn discover_teams(tok: &str) -> (Vec<String>, Option<String>) {
+    walk_teams(|until| {
+        let mut path = "/v2/teams?limit=100".to_string();
+        if let Some(mark) = until {
+            path += &format!("&until={}", mark);
+        }
+        api(&path, tok)
+    })
+}
+
+/// The walk itself, over whatever is answering.
+///
+/// The fetch is a parameter so the paging can be tested without a token,
+/// and paging is exactly what was wrong: one page was read and the rest of
+/// the teams were never asked about. On this machine that is the only half
+/// of this function anything can check.
+fn walk_teams(
+    mut fetch: impl FnMut(Option<i64>) -> Result<serde_json::Value, String>,
+) -> (Vec<String>, Option<String>) {
+    let mut ids: Vec<String> = Vec::new();
+    let mut until: Option<i64> = None;
+    for _ in 0..TEAM_PAGES {
+        let res = match fetch(until) {
+            Ok(res) => res,
+            Err(said) => {
+                let stopped = if ids.is_empty() {
+                    format!("could not list teams ({}) - personal scope only", said)
+                } else {
+                    format!("team list stopped early ({}) - teams may be missing", said)
+                };
+                return (ids, Some(stopped));
+            }
+        };
+        let (page, next) = teams_page(&res);
+        for id in page {
+            // The cursor is a creation timestamp and the boundary team can
+            // come back on both sides of it. A repeated id would be a
+            // repeated scope: the same deployments fetched twice and listed
+            // twice.
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        match next {
+            None => return (ids, None),
+            // A cursor that has not moved would ask for the same page for
+            // ever. Stopping is right; stopping quietly is not.
+            Some(mark) if Some(mark) == until => {
+                return (
+                    ids,
+                    Some("team list stopped early (the cursor stopped moving)".into()),
+                )
+            }
+            Some(mark) => until = Some(mark),
+        }
+    }
+    (
+        ids,
+        Some(format!(
+            "team list stopped early (more than {} pages) - teams may be missing",
+            TEAM_PAGES
+        )),
+    )
 }
 
 /// Per-deployment detail: why it failed, timings, regions, aliases.
@@ -774,8 +860,14 @@ fn main() {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
         if name.is_empty() { "VERCEL_TOKEN".to_string() } else { name }
     };
+    // Why the discovered scope is not everything, when it is not. Kept for
+    // the poller rather than said once: `err` is rebuilt every round, and a
+    // board that is missing a team goes on missing it every round too.
+    let mut scope_note: Option<String> = None;
     if !tok.is_empty() && teams.is_empty() {
-        teams = discover_teams(&tok);
+        let (found, stopped) = discover_teams(&tok);
+        teams = found;
+        scope_note = stopped;
     }
 
     let state = Arc::new(Mutex::new(State::default()));
@@ -786,6 +878,7 @@ fn main() {
     let poll_projects = projects.clone();
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
+    let poll_scope = scope_note.clone();
     std::thread::spawn(move || loop {
         if poll_token.is_empty() {
             if let Ok(mut guard) = poller.lock() {
@@ -842,12 +935,21 @@ fn main() {
             if let Ok(mut guard) = poller.lock() {
                 // A failed round keeps the last good list rather than
                 // blanking the board: stale rows with a message beside them
-                // say more than an empty screen does.
+                // say more than an empty screen does. Judged on this round's
+                // own error, before the standing one is added to it: a scope
+                // that was never complete is not a round that failed.
                 if !out.is_empty() || err.is_empty() {
                     guard.deployments = out;
                     guard.fetched = now();
                 }
-                guard.err = err;
+                // A scope that was never complete is a caveat about which
+                // teams are being asked at all, so it goes in front of
+                // whatever this round has to say rather than under it.
+                guard.err = match (&poll_scope, err.is_empty()) {
+                    (None, _) => err,
+                    (Some(said), true) => said.clone(),
+                    (Some(said), false) => format!("{} · {}", said, err),
+                };
             }
         }
         let (lock, cond) = &*poller_wake;
@@ -1500,5 +1602,101 @@ mod tests {
         assert_eq!(titled("READY"), "Ready");
         assert_eq!(titled("INITIALIZING"), "Initializing");
         assert_eq!(titled(""), "");
+    }
+
+    #[test]
+    fn a_page_of_teams_hands_back_the_cursor_for_the_next_one() {
+        // The shape Vercel answers with. Reading only `teams` and stopping
+        // is how a token that can see thirty teams got deployments for the
+        // first twenty, on a board describing itself as covering them all.
+        let page = serde_json::json!({
+            "teams": [{"id": "team_one"}, {"id": "team_two"}],
+            "pagination": {"count": 2, "next": 1588720733602i64, "prev": 0}
+        });
+        let (ids, next) = teams_page(&page);
+        assert_eq!(ids, vec!["team_one".to_string(), "team_two".to_string()]);
+        assert_eq!(next, Some(1588720733602));
+
+        // The last page says so with a null cursor, and that is the only
+        // thing that means the walk is done.
+        let last = serde_json::json!({
+            "teams": [{"id": "team_three"}],
+            "pagination": {"count": 1, "next": serde_json::Value::Null}
+        });
+        assert_eq!(teams_page(&last).1, None);
+
+        // A quoted cursor is still a cursor: read as absent it would stop
+        // the walk one page in and look like a smaller account.
+        let quoted = serde_json::json!({
+            "teams": [], "pagination": {"next": "1588720733602"}
+        });
+        assert_eq!(teams_page(&quoted).1, Some(1588720733602));
+
+        // An answer with neither in it is an empty page and a finished walk,
+        // not a panic.
+        assert_eq!(teams_page(&serde_json::json!({})), (Vec::new(), None));
+    }
+
+    #[test]
+    fn every_page_of_teams_is_asked_for() {
+        // Three pages, and the second and third are only reached by handing
+        // the cursor back. The first version of this stopped after page one
+        // and never requested a deployment for the teams below the fold.
+        let mut asked: Vec<Option<i64>> = Vec::new();
+        let (ids, stopped) = walk_teams(|until| {
+            asked.push(until);
+            Ok(match until {
+                None => serde_json::json!({
+                    "teams": [{"id": "team_a"}, {"id": "team_b"}],
+                    "pagination": {"next": 300}
+                }),
+                // The boundary team comes back on both sides of a timestamp
+                // cursor; a second copy would be a second scope, fetched and
+                // listed twice.
+                Some(300) => serde_json::json!({
+                    "teams": [{"id": "team_b"}, {"id": "team_c"}],
+                    "pagination": {"next": 200}
+                }),
+                _ => serde_json::json!({
+                    "teams": [{"id": "team_d"}],
+                    "pagination": {"next": serde_json::Value::Null}
+                }),
+            })
+        });
+        assert_eq!(asked, vec![None, Some(300), Some(200)]);
+        assert_eq!(ids, ["team_a", "team_b", "team_c", "team_d"]);
+        assert_eq!(stopped, None, "a complete walk has nothing to explain");
+
+        // A page that fails halfway leaves a list that is not the whole
+        // list, and says so - the board is missing a team either way, and
+        // the difference is whether the screen admits it.
+        let (some, stopped) = walk_teams(|until| match until {
+            None => Ok(serde_json::json!({
+                "teams": [{"id": "team_a"}], "pagination": {"next": 300}
+            })),
+            _ => Err("curl exited 28".into()),
+        });
+        assert_eq!(some, ["team_a"]);
+        let said = stopped.expect("a half-read list has to say so");
+        assert!(said.contains("curl exited 28"), "{}", said);
+
+        // Nothing at all still starts the widget on the personal scope, and
+        // still explains why that is all there is.
+        let (none, stopped) = walk_teams(|_| Err("HTTP 403".into()));
+        assert!(none.is_empty());
+        assert!(stopped.unwrap_or_default().contains("HTTP 403"));
+
+        // A cursor that never moves is a walk that would never end. It stops,
+        // and it does not pretend the list is complete.
+        let mut rounds = 0;
+        let (ids, stopped) = walk_teams(|_| {
+            rounds += 1;
+            Ok(serde_json::json!({
+                "teams": [{"id": "team_a"}], "pagination": {"next": 300}
+            }))
+        });
+        assert_eq!(ids, ["team_a"]);
+        assert!(rounds <= TEAM_PAGES, "the walk ran {} times", rounds);
+        assert!(stopped.is_some(), "a walk that gave up has to say so");
     }
 }

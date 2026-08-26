@@ -91,7 +91,7 @@ decision.
 backlog / todo / in progress. Not windowed: it answers "how much is there right
 now", and does not move when you change the window.
 
-**Active cycles** — every team's running cycle, from a single query. Progress
+**Active cycles** — every team's running cycle, walked like everything else; one request while they fit a page. Progress
 bar, points completed against scope, and days remaining.
 
 `+175 added` is the number to watch: scope added *after* the cycle opened. A
@@ -283,6 +283,15 @@ Linear's connections expose no `totalCount`, so anything counted has to be
 paged through at 250 records a time. Pagination is capped at 12 pages per query
 and the header says `truncated` when the cap is reached, rather than quietly
 reporting a smaller number.
+
+The teams and the active cycles are walked the same way. A cycle walk that
+hits the cap makes the heading read `at least 600 running` rather than `600
+running`. Two nested connections are marked rather than walked, because
+walking them would re-fetch a whole project record per page to settle a
+question that is almost always already settled: a project's `members` row
+reads `21+` with a trailing `…`, and its MILESTONES heading `25+`, when
+Linear says the page it returned was not the last. Those rows show a page,
+not necessarily everything.
 
 ## Keys
 

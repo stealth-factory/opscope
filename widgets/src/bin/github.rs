@@ -845,6 +845,21 @@ fn palette() -> Palette {
     }
 }
 
+/// One page of the orgs the viewer belongs to, from `after` onwards.
+///
+/// A hundred at a time, and the caller follows `endCursor` until GitHub
+/// says there is no next page.
+fn orgs_query(after: Option<&str>) -> String {
+    let at = match after {
+        Some(c) => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        None => String::new(),
+    };
+    format!(
+        "{{ viewer {{ login organizations(first: 100{}) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ login }} }} }} }}",
+        at
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
@@ -879,19 +894,39 @@ fn one_pass(
     }
     let mut accounts = state.lock().map(|g| g.accounts.clone()).unwrap_or_default();
     if accounts.is_empty() {
-        // Every org you belong to, plus your own account.
-        let d = graphql(
-            "{ viewer { login organizations(first:20) { nodes { login } } } }",
-            tok,
-            scopes,
-        )?;
-        accounts = d["data"]["viewer"]["organizations"]["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|o| o["login"].as_str().unwrap_or("").to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Every org you belong to, plus your own account - and *every* is
+        // what docs/github.md promises for an empty `accounts`. One page of
+        // twenty kept that promise only for people who belong to fewer than
+        // twenty; past that the extra orgs were not undercounted, they were
+        // never asked about, and every headline on the board was a total
+        // over an account list that nothing on screen said was short. So
+        // the cursor is followed to the end.
+        let mut cursor: Option<String> = None;
+        loop {
+            let d = graphql(&orgs_query(cursor.as_deref()), tok, scopes)?;
+            let conn = &d["data"]["viewer"]["organizations"];
+            accounts.extend(
+                conn["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| o["login"].as_str().unwrap_or("").to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+            let next = conn["pageInfo"]["endCursor"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // This runs on the poller thread: a cursor that stops advancing
+            // has to end the loop rather than spin it.
+            if !conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
+                || next.is_empty()
+                || Some(&next) == cursor.as_ref()
+            {
+                break;
+            }
+            cursor = Some(next);
+        }
         accounts.push("@me".into());
         if let Ok(mut g) = state.lock() {
             g.accounts = accounts.clone();
@@ -1961,6 +1996,24 @@ mod tests {
         // A fine-grained token sends no scope header at all, so there is
         // nothing to check and nothing to claim.
         assert_eq!(scope_warning(&Scopes::default()), "");
+    }
+
+    #[test]
+    fn org_discovery_follows_the_cursor() {
+        // The first page asks for no cursor at all, and for the page
+        // information that says whether there is another.
+        let first = orgs_query(None);
+        assert!(first.contains("organizations(first: 100)"), "{}", first);
+        assert!(first.contains("hasNextPage") && first.contains("endCursor"));
+        // A cursor is a string GitHub chose, so it goes in quoted rather
+        // than pasted: it has carried `=` and `==` for as long as it has
+        // been base64.
+        let next = orgs_query(Some("Y3Vyc29yOnYyOpHOAAQ="));
+        assert!(
+            next.contains(r#"organizations(first: 100, after: "Y3Vyc29yOnYyOpHOAAQ=")"#),
+            "{}",
+            next
+        );
     }
 
     #[test]

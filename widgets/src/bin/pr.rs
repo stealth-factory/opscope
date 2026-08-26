@@ -136,7 +136,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       reviewRequests(first: 12) { nodes { requestedReviewer {
         ... on User { login } ... on Team { name } } } }
       commits(last: 1) { nodes { commit { statusCheckRollup {
-        state contexts(first: 25) { nodes {
+        state contexts(first: 25) { totalCount nodes {
           ... on CheckRun { name conclusion status startedAt completedAt }
           ... on StatusContext { context state } } } } } } }
     }
@@ -284,6 +284,10 @@ struct State {
     orgs: Vec<String>,
     prs: Vec<serde_json::Value>,
     total: usize,
+    /// Set when a source filled its page, so `total` is a floor and every
+    /// count drawn from `prs` describes what was fetched rather than what
+    /// is open.
+    capped: bool,
     query: String,
     detail: Option<serde_json::Value>,
     stack_rows: Vec<StackRow>,
@@ -434,6 +438,28 @@ fn fetch_detail(
     Ok(())
 }
 
+/// How many open pull requests the pooled sources really cover, and whether
+/// that number is a floor rather than a count.
+///
+/// A source that filled its page has more behind it, and the sources
+/// overlap - `orgs` and `authored` find the same PR all day - so the
+/// `issueCount`s cannot be added up. Two things are known exactly: the union
+/// holds every distinct PR already in hand, and it holds the whole of any
+/// single source, so it is no smaller than the largest `issueCount`. The
+/// larger of those is the floor the header reports. When nothing filled its
+/// page the pool *is* the union and the number is a plain total.
+fn union_total(sources: &[(i64, usize)], pooled: usize) -> (usize, bool) {
+    let capped = sources.iter().any(|(counted, got)| *counted > *got as i64);
+    if !capped {
+        return (pooled, false);
+    }
+    let floor = sources
+        .iter()
+        .map(|(counted, _)| (*counted).max(0) as usize)
+        .fold(pooled, usize::max);
+    (floor, true)
+}
+
 fn fetch_list(
     tok: &str,
     source: &str,
@@ -445,19 +471,50 @@ fn fetch_list(
 ) -> Result<(), String> {
     let need_viewer = state.lock().map(|g| g.viewer.is_empty()).unwrap_or(true);
     if need_viewer {
-        let who = graphql(
-            "{ viewer { login organizations(first:20) { nodes { login } } } }",
-            tok,
-            serde_json::json!({}),
-        )?;
+        // Every org, not the first page of them. `@mine` is built out of
+        // this list as owner qualifiers, so an org missing here is not an
+        // undercount - it is a scope the board never searched, and nothing
+        // downstream can tell that from an org with no open PRs.
+        let mut login = String::new();
+        let mut orgs: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let who = graphql(
+                "query($after: String) { viewer { login \
+                 organizations(first: 100, after: $after) { \
+                 pageInfo { hasNextPage endCursor } nodes { login } } } }",
+                tok,
+                serde_json::json!({ "after": cursor }),
+            )?;
+            if login.is_empty() {
+                login = text(&who["viewer"], "login");
+            }
+            let conn = &who["viewer"]["organizations"];
+            orgs.extend(
+                conn["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| text(o, "login"))
+                    .filter(|o| !o.is_empty()),
+            );
+            let next = conn["pageInfo"]["endCursor"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // This runs on the poller thread: a cursor that stops advancing
+            // has to end the loop rather than spin it.
+            if !conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
+                || next.is_empty()
+                || Some(&next) == cursor.as_ref()
+            {
+                break;
+            }
+            cursor = Some(next);
+        }
         if let Ok(mut g) = state.lock() {
-            g.viewer = text(&who["viewer"], "login");
-            g.orgs = who["viewer"]["organizations"]["nodes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|o| text(o, "login"))
-                .collect();
+            g.viewer = login;
+            g.orgs = orgs;
         }
     }
     let (viewer, orgs) = state
@@ -476,6 +533,7 @@ fn fetch_list(
     // source filled its page, so a truncated union is not read as a total.
     let mut pool: HashMap<String, serde_json::Value> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    let mut counted: Vec<(i64, usize)> = Vec::new();
     for (i, (name, _)) in pairs.iter().enumerate() {
         let block = &d[format!("s{}", i)];
         let got: Vec<&serde_json::Value> = block["nodes"]
@@ -484,6 +542,8 @@ fn fetch_list(
             .flatten()
             .filter(|n| !n.is_null())
             .collect();
+        // What the search says it matched, beside what it handed over.
+        counted.push((block["issueCount"].as_i64().unwrap_or(0), got.len()));
         for n in got {
             let url = text(n, "url");
             let entry = pool.entry(url.clone()).or_insert_with(|| {
@@ -507,7 +567,9 @@ fn fetch_list(
             .map(|(n, _)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        g.total = nodes.len();
+        let (total, capped) = union_total(&counted, nodes.len());
+        g.total = total;
+        g.capped = capped;
         g.prs = nodes;
         g.fetched = now();
         g.err = if source == "config" {
@@ -775,11 +837,12 @@ fn main() {
 
     loop {
         tick += 1;
-        let (prs, total, detail, stack_rows, loading, err, fetched, stages, target) =
+        let (prs, total, capped, detail, stack_rows, loading, err, fetched, stages, target) =
             match state.lock() {
                 Ok(g) => (
                     g.prs.clone(),
                     g.total,
+                    g.capped,
                     g.detail.clone(),
                     g.stack_rows.clone(),
                     g.loading,
@@ -957,7 +1020,19 @@ fn main() {
         let (w, h) = tc::size();
         let mut rows = vec![tc::title("pr watch", w, &p.pr)];
         let mut head = vec![
-            (p.dim.as_str(), format!(" {} of {}", shown.len(), total)),
+            // "at least", because a source that filled its page has more
+            // behind it and the sources overlap, so the union cannot be
+            // added up - only bounded from below. docs/pr.md has promised
+            // the header would say so since before the port.
+            (
+                p.dim.as_str(),
+                format!(
+                    " {} of {}{}",
+                    shown.len(),
+                    if capped { "at least " } else { "" },
+                    total
+                ),
+            ),
             (
                 p.dim.as_str(),
                 if !needle.is_empty() || source_filter != "all" {
@@ -1045,6 +1120,8 @@ fn main() {
                 // board, not a redefinition of it.
                 rows.extend(stats_view(
                     &sort_prs(&prs, SORTS[sort_at], newest_first),
+                    total,
+                    capped,
                     w,
                     &p,
                 ));
@@ -1112,7 +1189,13 @@ fn main() {
 /// median and the state bar lurch on every keystroke made them unreadable
 /// and, worse, made them look like statements about the whole board when
 /// they described three matching rows.
-fn stats_view(prs: &[serde_json::Value], w: usize, p: &Palette) -> Vec<String> {
+fn stats_view(
+    prs: &[serde_json::Value],
+    total: usize,
+    capped: bool,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     let mut rows = vec![String::new()];
     if prs.is_empty() {
         return rows;
@@ -1153,7 +1236,17 @@ fn stats_view(prs: &[serde_json::Value], w: usize, p: &Palette) -> Vec<String> {
         &[
             (p.lbl.as_str(), " ── STATE ── ".into()),
             (p.txt.as_str(), format!("{}", n)),
-            (p.dim.as_str(), " open · ".into()),
+            // Everything after this counts the PRs in hand. When a source
+            // filled its page they are a sample of the board rather than
+            // the board, and the line has to say which it is describing.
+            (
+                p.dim.as_str(),
+                if capped {
+                    format!(" fetched of at least {} open · ", total)
+                } else {
+                    " open · ".to_string()
+                },
+            ),
             (p.dim.as_str(), format!("{} draft", drafts)),
             (p.dim.as_str(), " · ".into()),
             (
@@ -1860,11 +1953,28 @@ fn detail_view(
             .flatten()
             .filter(|c| !c.is_null())
             .collect();
+        // The query asks for one page of contexts, and a repository with
+        // more of them than that fits sent back a page rather than all of
+        // them - so `ctx.len()` is how many arrived, not how many ran. The
+        // rollup reports the true count for a point of field complexity, and
+        // a run that is missing here is exactly the one worth knowing about:
+        // a failure outside the page cannot be named, only counted.
+        let counted = roll["contexts"]["totalCount"].as_i64().unwrap_or(0).max(0) as usize;
+        // Never below what is in hand: a missing field must not turn eleven
+        // checks into "11 of 0".
+        let counted = counted.max(ctx.len());
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── CHECKS ── ".into()),
                 (scol, state.into()),
-                (p.dim.as_str(), format!("   {} total", ctx.len())),
+                (
+                    p.dim.as_str(),
+                    if ctx.len() < counted {
+                        format!("   {} of {} fetched", ctx.len(), counted)
+                    } else {
+                        format!("   {} total", counted)
+                    },
+                ),
             ],
             w - 1,
         ));
@@ -2116,6 +2226,24 @@ mod tests {
         .unwrap();
         let (root, _, _) = stack_of(1, &prs);
         assert!(root.is_some());
+    }
+
+    #[test]
+    fn a_page_that_filled_up_turns_the_total_into_a_floor() {
+        // Nothing filled its page: the pool is the union, exactly.
+        assert_eq!(union_total(&[(30, 30), (12, 12)], 35), (35, false));
+        // `orgs` filled its page of 50 with 212 behind it. The sources
+        // overlap, so 212 + 12 would be nonsense - but the union contains
+        // the whole of `orgs`, so it holds at least 212.
+        assert_eq!(union_total(&[(212, 50), (12, 12)], 58), (212, true));
+        // A capped source can still be smaller than what is already pooled,
+        // and then the pool is the better floor of the two.
+        assert_eq!(union_total(&[(51, 50), (3, 3)], 53), (53, true));
+        // One source, capped, with nothing else to add to it.
+        assert_eq!(union_total(&[(60, 50)], 50), (60, true));
+        // No sources is no floor, and above all not a claim of zero open
+        // PRs dressed up as one.
+        assert_eq!(union_total(&[], 0), (0, false));
     }
 
     #[test]
