@@ -25,6 +25,12 @@
       "skillPath": "skills/branch-cleanup/SKILL.md",
       "computedHash": "193e4544e944ab7131034a62a8fb0a00b5bb4bdda68163f63ac13796eed4a121"
     },
+    "bro": {
+      "source": "luchasarie/bro-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "03f15a4f78fa2d95e53a2fa9077a32e0bb2923a8d0e68733e6d9e78d10aa0e0f"
+    },
     "code-complexity-stats-pr": {
       "source": "stealth-factory/skills",
       "sourceType": "github",
