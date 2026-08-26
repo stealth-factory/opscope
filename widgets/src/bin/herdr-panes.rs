@@ -55,16 +55,40 @@ fn herdr_action(args: &[&str]) -> bool {
     tc::run(&argv, RUN_TIMEOUT).is_ok()
 }
 
-/// Run a herdr command and hand back the `result` object it printed.
-fn herdr(args: &[&str]) -> Option<serde_json::Value> {
+/// The `result` object out of one herdr answer, or why there is none.
+///
+/// Split from the running of the command, because the running is not where
+/// the failure shows: herdr answers a request it cannot serve with an
+/// `error` object and exit status 0, so a pane that does not exist and a
+/// pane with nothing to say arrive as two commands that both succeeded.
+/// They are told apart by shape here or they are not told apart at all.
+fn result_of(text: &str) -> Result<serde_json::Value, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("unreadable answer: {}", e))?;
+    if let Some(said) = parsed.get("error") {
+        let message = said["message"].as_str().unwrap_or("").trim();
+        return Err(if message.is_empty() {
+            format!("herdr said {}", said)
+        } else {
+            message.to_string()
+        });
+    }
+    match parsed.get("result") {
+        Some(serde_json::Value::Null) | None => Err("herdr answered with no result".into()),
+        Some(value) => Ok(value.clone()),
+    }
+}
+
+/// Run a herdr command and hand back its `result`, or why there is none.
+fn herdr_result(args: &[&str]) -> Result<serde_json::Value, String> {
     let mut argv = vec!["herdr"];
     argv.extend_from_slice(args);
-    let text = tc::run(&argv, RUN_TIMEOUT).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
-    match parsed.get("result") {
-        Some(serde_json::Value::Null) | None => None,
-        Some(value) => Some(value.clone()),
-    }
+    result_of(&tc::run(&argv, RUN_TIMEOUT)?)
+}
+
+/// The same, for the callers that have nothing to do with the reason.
+fn herdr(args: &[&str]) -> Option<serde_json::Value> {
+    herdr_result(args).ok()
 }
 
 /// Keep the end of a path, marking the cut so it does not read as a name.
@@ -218,7 +242,32 @@ fn showing(window: &std::ops::Range<usize>, first: usize, len: usize) -> String 
     }
 }
 
-/// A pane with no agent in it: either running something, or at a prompt.
+/// What a pane with no agent in it is doing.
+///
+/// Three states rather than a bool, because the third one is real: a pane
+/// whose probe failed is neither running nor resting, and filing it as
+/// either says something true has been established when nothing has.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Doing {
+    Running,
+    Prompt,
+    /// `pane process-info` did not answer. The default, because a pane
+    /// nobody has managed to look at has told us nothing.
+    #[default]
+    Unknown,
+}
+
+/// Unreadable first, then what is running, then the prompts: the row that
+/// wants looking at is the one where the widget cannot say.
+fn doing_rank(doing: Doing) -> usize {
+    match doing {
+        Doing::Unknown => 0,
+        Doing::Running => 1,
+        Doing::Prompt => 2,
+    }
+}
+
+/// A pane with no agent in it: running something, at a prompt, or unread.
 #[derive(Clone, Default)]
 struct Panel {
     pane_id: String,
@@ -226,7 +275,11 @@ struct Panel {
     workspace_id: String,
     command: String,
     cwd: String,
-    idle: bool,
+    doing: Doing,
+    /// Why the probe failed, when it did. Carried rather than counted: a
+    /// number of panes nobody could read is a smaller answer than "pane
+    /// not found" or "herdr did not answer in 15s".
+    why: String,
     cpu: Option<f64>,
     rss: Option<u64>,
 }
@@ -268,18 +321,43 @@ fn text_at(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
 
-/// The foreground process of a pane, if it is running one.
+/// What a pane's foreground process is, or why we could not tell.
 ///
-/// A pane sitting at its shell prompt has nothing to report, and the test
-/// for that is that the foreground pid is the shell's own.
-fn foreground(pane_id: &str) -> Option<(i32, Vec<String>, String, String)> {
-    let info = herdr(&["pane", "process-info", "--pane", pane_id])?;
+/// Three answers rather than two, and that is the whole point of the type.
+/// A pane at its shell prompt and a probe that failed used to arrive here
+/// as the same `None`, and the caller wrote that down as idle - so a herdr
+/// that had stopped answering turned a board full of working panes into a
+/// board full of resting ones, with nothing on screen saying otherwise.
+enum Front {
+    /// Running something: its pid, argv, name and directory.
+    Running(i32, Vec<String>, String, String),
+    /// At its shell prompt - the foreground pid is the shell's own.
+    Prompt,
+    /// The probe did not answer, so which of the two this is nobody knows.
+    Unknown(String),
+}
+
+/// What one `pane process-info` answer says the pane is doing.
+///
+/// Split from the request so all three answers can be tested on a value
+/// rather than on a live Herdr, the way `parse_proc_stat` is.
+fn classify(info: &serde_json::Value) -> Front {
     let process = &info["process_info"];
-    let front = process["foreground_processes"].as_array()?.first()?.clone();
-    let pid = front["pid"].as_i64()? as i32;
-    let busy = process["shell_pid"].as_i64() != Some(pid as i64);
-    if !busy {
-        return None;
+    let Some(front) = process["foreground_processes"]
+        .as_array()
+        .and_then(|a| a.first())
+    else {
+        return Front::Unknown("no foreground process reported".into());
+    };
+    let Some(pid) = front["pid"].as_i64() else {
+        return Front::Unknown("foreground process has no pid".into());
+    };
+    // The shell's own pid in the foreground is the prompt being what is in
+    // the foreground. An absent `shell_pid` is not that - it says nothing -
+    // so it goes on as running rather than resting, which is the direction
+    // that cannot repeat the bug this type exists for.
+    if process["shell_pid"].as_i64() == Some(pid) {
+        return Front::Prompt;
     }
     let argv = front["argv"]
         .as_array()
@@ -289,7 +367,20 @@ fn foreground(pane_id: &str) -> Option<(i32, Vec<String>, String, String)> {
                 .collect()
         })
         .unwrap_or_default();
-    Some((pid, argv, text_at(&front, "name"), text_at(&front, "cwd")))
+    Front::Running(
+        pid as i32,
+        argv,
+        text_at(front, "name"),
+        text_at(front, "cwd"),
+    )
+}
+
+/// The foreground process of a pane, the prompt, or the failed probe.
+fn foreground(pane_id: &str) -> Front {
+    match herdr_result(&["pane", "process-info", "--pane", pane_id]) {
+        Ok(info) => classify(&info),
+        Err(why) => Front::Unknown(why),
+    }
 }
 
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
@@ -326,8 +417,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
         }
         let (_, began, exact) = seen.since[&pane_id].clone();
         let (cpu, rss) = match foreground(&pane_id) {
-            Some((pid, _, _, _)) => cpu_of(seen, pid, at, hz),
-            None => (None, None),
+            Front::Running(pid, _, _, _) => cpu_of(seen, pid, at, hz),
+            // An agent's state comes from `agent list`, not from the probe,
+            // so a failed probe costs the row its CPU and memory and
+            // nothing else - and those already draw as `-` and `--` when
+            // there is no reading, which there is not.
+            Front::Prompt | Front::Unknown(_) => (None, None),
         };
         agents.push(Agent {
             name: text_at(entry, "agent"),
@@ -357,20 +452,37 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             let pane_id = text_at(pane, "pane_id");
             let front = foreground(&pane_id);
             let (cpu, rss) = match &front {
-                Some((pid, _, _, _)) => cpu_of(seen, *pid, at, hz),
-                None => (None, None),
+                Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
+                Front::Prompt | Front::Unknown(_) => (None, None),
             };
-            let (command, cwd) = match &front {
-                Some((_, argv, name, cwd)) => (
-                    command_label(argv, name),
-                    if cwd.is_empty() { text_at(pane, "cwd") } else { cwd.clone() },
+            let (doing, command, cwd, why) = match front {
+                Front::Running(_, argv, name, cwd) => (
+                    Doing::Running,
+                    command_label(&argv, &name),
+                    if cwd.is_empty() { text_at(pane, "cwd") } else { cwd },
+                    String::new(),
                 ),
-                None => (String::new(), text_at(pane, "cwd")),
+                Front::Prompt => (
+                    Doing::Prompt,
+                    String::new(),
+                    text_at(pane, "cwd"),
+                    String::new(),
+                ),
+                // The pane's own directory still comes from `pane list`, so
+                // an unread pane is not a blank row - it is a row that says
+                // where it is and that nobody could see into it.
+                Front::Unknown(why) => (
+                    Doing::Unknown,
+                    String::new(),
+                    text_at(pane, "cwd"),
+                    why,
+                ),
             };
             panels.push(Panel {
                 tab_id: text_at(pane, "tab_id"),
                 workspace_id: text_at(pane, "workspace_id"),
-                idle: front.is_none(),
+                doing,
+                why,
                 pane_id,
                 command,
                 cwd,
@@ -379,16 +491,17 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             });
         }
     }
-    // Busy first, and the busiest of those first: the point of the section
-    // is what is costing something.
+    // Unread first, then busy, and the busiest of those first: the point of
+    // the section is what is costing something, and above that, what the
+    // widget could not find out at all.
     // Idle last, and that ordering is load-bearing twice over. The screen
-    // draws `running` then `resting`, and both the cursor and the window are
+    // draws `busy` then `resting`, and both the cursor and the window are
     // indices into `agents ++ panels` - so the two agree only because
-    // `panels` is already running-then-resting. Reorder this and the cursor
-    // silently marks one pane while enter switches to another.
+    // `panels` is already unread-then-running-then-resting. Reorder this and
+    // the cursor silently marks one pane while enter switches to another.
     panels.sort_by(|a, b| {
-        a.idle
-            .cmp(&b.idle)
+        doing_rank(a.doing)
+            .cmp(&doing_rank(b.doing))
             .then(b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)))
     });
 
@@ -690,8 +803,16 @@ fn main() {
             ),
             Err(_) => return,
         };
-        let running: Vec<&Panel> = panels.iter().filter(|n| !n.idle).collect();
-        let resting: Vec<&Panel> = panels.iter().filter(|n| n.idle).collect();
+        // Everything that is not known to be at a prompt shares the
+        // PROCESSES section, unread panes at the top of it. They are counted
+        // apart in the heading, because "running something" is a claim and
+        // the whole point of the unread ones is that the claim cannot be
+        // made. [i] hides only the panes we know are resting: hiding one we
+        // could not read would be the old bug wearing the new type.
+        let busy: Vec<&Panel> = panels.iter().filter(|n| n.doing != Doing::Prompt).collect();
+        let resting: Vec<&Panel> = panels.iter().filter(|n| n.doing == Doing::Prompt).collect();
+        let unread: Vec<&&Panel> = busy.iter().filter(|n| n.doing == Doing::Unknown).collect();
+        let running = busy.len() - unread.len();
         rows_now = agents
             .iter()
             .cloned()
@@ -699,7 +820,7 @@ fn main() {
             .chain(
                 panels
                     .iter()
-                    .filter(|n| show_idle || !n.idle)
+                    .filter(|n| show_idle || n.doing != Doing::Prompt)
                     .cloned()
                     .map(Row::Process),
             )
@@ -801,8 +922,9 @@ fn main() {
         let chrome = rows.len()
             + 2                                       // AGENTS, and its column head
             + 2 + usize::from(wide)                   // blank, PROCESSES, its column head
+            + usize::from(!unread.is_empty())         // why they could not be read
             + usize::from(agents.is_empty())          // the line that stands in for a list
-            + usize::from(running.is_empty())
+            + usize::from(busy.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
             + footer.len()
             + 1;                                      // the note line
@@ -933,21 +1055,21 @@ fn main() {
         }
 
         rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), " ── PROCESSES ── ".into()),
-                (
-                    p.dim.as_str(),
-                    format!(
-                        "{} pane{} running something",
-                        running.len(),
-                        plural(running.len())
-                    ),
-                ),
-                (p.dim.as_str(), showing(&window, agents.len(), running.len())),
-            ],
-            w - 1,
-        ));
+        let mut heading = vec![
+            (p.lbl.as_str(), " ── PROCESSES ── ".into()),
+            (
+                p.dim.as_str(),
+                format!("{} pane{} running something", running, plural(running)),
+            ),
+        ];
+        if !unread.is_empty() {
+            heading.push((
+                p.unknown.as_str(),
+                format!("  · {} could not be read", unread.len()),
+            ));
+        }
+        heading.push((p.dim.as_str(), showing(&window, agents.len(), busy.len())));
+        rows.push(tc::seg(&heading, w - 1));
         if wide {
             rows.push(tc::seg(
                 &[(
@@ -960,7 +1082,20 @@ fn main() {
                 w - 1,
             ));
         }
-        for (j, n) in running.iter().enumerate() {
+        // The reason, on a line of its own rather than after the count in
+        // the heading: on an eighty-column pane the heading runs out of room
+        // exactly where the reason starts, and the reason is the half worth
+        // keeping. They fail one reason at a time - the socket, or a pane
+        // going away between the listing and the probe - so the first one
+        // speaks for all of them.
+        if let Some(n) = unread.first() {
+            let why = if n.why.is_empty() { "no reason given" } else { &n.why };
+            rows.push(tc::seg(
+                &[(p.unknown.as_str(), format!("   ⚠ {}", why))],
+                w - 1,
+            ));
+        }
+        for (j, n) in busy.iter().enumerate() {
             if !window.contains(&(agents.len() + j)) {
                 continue;
             }
@@ -992,11 +1127,31 @@ fn main() {
                 Some(v) if v > 0.0 => tc::heat((v / 100.0).min(1.0)),
                 _ => p.dim.clone(),
             };
+            // An unread pane says so in words where a command would go. A
+            // bare "?" is what a running pane with unparseable argv shows,
+            // and the two are not the same thing at all.
+            let unreadable = n.doing == Doing::Unknown;
             let mut line = vec![
-                (c(&p.proc), format!("{}▪ ", if here { "▸" } else { " " })),
                 (
-                    c(&p.txt),
-                    tc::pad(if n.command.is_empty() { "?" } else { &n.command }, 20),
+                    c(if unreadable { &p.unknown } else { &p.proc }),
+                    format!(
+                        "{}{} ",
+                        if here { "▸" } else { " " },
+                        if unreadable { '⚠' } else { '▪' }
+                    ),
+                ),
+                (
+                    c(if unreadable { &p.unknown } else { &p.txt }),
+                    tc::pad(
+                        if unreadable {
+                            "could not be read"
+                        } else if n.command.is_empty() {
+                            "?"
+                        } else {
+                            &n.command
+                        },
+                        20,
+                    ),
                 ),
                 (c(&heat), percent(n.cpu)),
             ];
@@ -1017,7 +1172,9 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
         }
-        if running.is_empty() {
+        // True only when nothing was unread either: an empty section with a
+        // pane the probe failed on is not a Herdr where everything rests.
+        if busy.is_empty() {
             rows.push(tc::seg(
                 &[(p.dim.as_str(), "   every other pane is idle at a prompt".into())],
                 w - 1,
@@ -1041,16 +1198,16 @@ fn main() {
                     ),
                     (
                         p.dim.as_str(),
-                        showing(&window, agents.len() + running.len(), resting.len()),
+                        showing(&window, agents.len() + busy.len(), resting.len()),
                     ),
                 ],
                 w - 1,
             ));
             for (j, n) in resting.iter().enumerate() {
-                if !window.contains(&(agents.len() + running.len() + j)) {
+                if !window.contains(&(agents.len() + busy.len() + j)) {
                     continue;
                 }
-                let here = agents.len() + running.len() + j == selected;
+                let here = agents.len() + busy.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
@@ -1305,5 +1462,84 @@ mod tests {
         assert_eq!(rss, 4096 * 4096, "rss is in pages, reported in bytes");
         // A truncated line has no fields to find and must not be guessed at.
         assert_eq!(parse_proc_stat("42 (short) S 1 2 3"), None);
+    }
+
+    #[test]
+    fn a_failed_command_is_told_from_a_quiet_one() {
+        // What herdr answers a request it cannot serve, verbatim in shape:
+        // an `error` object, no `result`, and exit status 0. Nothing about
+        // having run the command says it did not work, so a reader looking
+        // only for `result` cannot tell this from a pane with nothing to
+        // report - which is how a failed probe used to become "idle".
+        let failed = r#"{"error":{"code":"pane_not_found","message":"pane not found"},"id":"p"}"#;
+        assert_eq!(result_of(failed).unwrap_err(), "pane not found");
+        // An error with no message still has to say something.
+        assert!(!result_of(r#"{"error":{"code":"busy"}}"#)
+            .unwrap_err()
+            .is_empty());
+        // Output that is not JSON at all is a failure, not a silence.
+        assert!(result_of("herdr: no server on this socket").is_err());
+        // A null result is nothing, and says so rather than handing it on.
+        assert!(result_of(r#"{"id":"p","result":null}"#).is_err());
+        // And a result that is there arrives whole.
+        let answered = r#"{"id":"p","result":{"process_info":{"pane_id":"w1:p1"}}}"#;
+        assert_eq!(
+            result_of(answered).unwrap()["process_info"]["pane_id"],
+            "w1:p1"
+        );
+    }
+
+    #[test]
+    fn a_pane_at_its_prompt_and_a_pane_nobody_could_read_are_not_one_answer() {
+        let info = |front: serde_json::Value, shell: i64| {
+            serde_json::json!({
+                "process_info": {"foreground_processes": [front], "shell_pid": shell}
+            })
+        };
+        let shell = serde_json::json!({
+            "pid": 200, "argv": ["/bin/bash"], "name": "bash", "cwd": "/w"
+        });
+        // The foreground pid is the shell's own: the prompt is what is in
+        // front. This is the only thing that means idle.
+        assert!(matches!(classify(&info(shell, 200)), Front::Prompt));
+
+        let build = serde_json::json!({
+            "pid": 311, "argv": ["/usr/bin/python3", "/w/build.py"],
+            "name": "python3", "cwd": "/w"
+        });
+        match classify(&info(build, 200)) {
+            Front::Running(pid, argv, name, cwd) => {
+                assert_eq!(pid, 311);
+                assert_eq!(command_label(&argv, &name), "build.py");
+                assert_eq!(cwd, "/w");
+            }
+            _ => panic!("a pane running something is running something"),
+        }
+
+        // An answer with nothing readable in it is neither of those. It used
+        // to fall through to the same `None` as the prompt, and the pane
+        // joined IDLE with no sign that anything had gone wrong.
+        assert!(matches!(classify(&serde_json::json!({})), Front::Unknown(_)));
+        assert!(matches!(
+            classify(&info(serde_json::json!({"argv": ["sh"]}), 200)),
+            Front::Unknown(_)
+        ));
+
+        // An absent shell_pid says nothing, so it cannot say "prompt".
+        let alone = serde_json::json!({
+            "process_info": {"foreground_processes": [{"pid": 7, "name": "vi"}]}
+        });
+        assert!(matches!(classify(&alone), Front::Running(7, _, _, _)));
+    }
+
+    #[test]
+    fn the_unread_panes_sort_above_the_busy_ones() {
+        // The section draws in this order and the cursor indexes it, so the
+        // rank is what keeps the two agreeing - and it puts the row the
+        // widget could not answer for at the top, where a failure belongs.
+        assert!(doing_rank(Doing::Unknown) < doing_rank(Doing::Running));
+        assert!(doing_rank(Doing::Running) < doing_rank(Doing::Prompt));
+        // A pane nobody has looked at yet is unread, not resting.
+        assert_eq!(Doing::default(), Doing::Unknown);
     }
 }

@@ -291,14 +291,11 @@ fn parse_iso(iso: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(&iso[..19], "%Y-%m-%dT%H:%M:%S").ok()
 }
 
-/// The age of an ISO-8601 timestamp, coarsely.
-fn seen(iso: &str) -> String {
-    let Some(at) = parse_iso(iso) else {
-        return "  -".into();
-    };
-    let s = (chrono::Utc::now().naive_utc() - at).num_seconds().max(0);
+/// A span of seconds in three or four cells: 45s, 12m, 6h, 3d.
+fn brief(s: f64) -> String {
+    let s = s.max(0.0) as i64;
     if s < 90 {
-        "now".into()
+        format!("{}s", s)
     } else if s < 5400 {
         format!("{}m", s / 60)
     } else if s < 172_800 {
@@ -306,6 +303,15 @@ fn seen(iso: &str) -> String {
     } else {
         format!("{}d", s / 86400)
     }
+}
+
+/// The age of an ISO-8601 timestamp, coarsely.
+fn seen(iso: &str) -> String {
+    let Some(at) = parse_iso(iso) else {
+        return "  -".into();
+    };
+    let s = (chrono::Utc::now().naive_utc() - at).num_seconds().max(0);
+    if s < 90 { "now".into() } else { brief(s as f64) }
 }
 
 /// ISO-8601 to a readable local time, or nothing when unset.
@@ -391,6 +397,14 @@ struct Prober {
     samples: HashMap<String, Vec<Option<f64>>>,
     want: Option<(String, String)>,
     pid: Option<i32>,
+    /// Why the selected peer has no latency, when the reason is this
+    /// widget's own rather than the network's. `tailscale` is checked at
+    /// startup and `ping` is not, so on a host with one and not the other
+    /// the spawn failed, was thrown away, and was retried every two seconds
+    /// for as long as the widget was up - while an empty history suppressed
+    /// the whole latency section, which is what a peer nobody had pinged
+    /// yet looks like too.
+    err: String,
 }
 
 fn rtt_of(line: &str) -> Option<f64> {
@@ -406,6 +420,12 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
     loop {
         let target = shared.lock().ok().and_then(|g| g.want.clone());
         let Some((machine, ip)) = target else {
+            // Nothing selected to probe - this machine, or a peer that is
+            // offline. Nothing has failed, and a reason left over from the
+            // last peer would be read as belonging to this one.
+            if let Ok(mut g) = shared.lock() {
+                g.err.clear();
+            }
             std::thread::sleep(Duration::from_millis(400));
             continue;
         };
@@ -416,12 +436,18 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
             .spawn();
         let mut child = match child {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
+                let why = format!("ping will not start: {}", e);
+                if let Ok(mut g) = shared.lock() {
+                    g.err = why;
+                }
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
+        // It started, so whatever stopped it last time is over.
         if let Ok(mut g) = shared.lock() {
+            g.err.clear();
             g.pid = Some(child.id() as i32);
         }
         if let Some(stdout) = child.stdout.take() {
@@ -447,10 +473,28 @@ fn prober_loop(shared: Arc<Mutex<Prober>>) {
                 }
             }
         }
+        // Whether the selection moved on while that ping was running. If it
+        // did, the stream ended because we stopped it and there is nothing
+        // to report; if it did not, ping died on its own - which used to
+        // restart it immediately, in silence, as fast as the kernel would
+        // spawn it, for a peer whose latency section stayed empty.
+        let moved_on = shared
+            .lock()
+            .map(|g| g.want.as_ref().map(|w| w.0.as_str()) != Some(machine.as_str()))
+            .unwrap_or(true);
         let _ = child.kill();
-        let _ = child.wait();
+        let status = child.wait();
         if let Ok(mut g) = shared.lock() {
             g.pid = None;
+            if !moved_on {
+                g.err = match &status {
+                    Ok(s) => format!("ping stopped ({})", s),
+                    Err(e) => format!("ping stopped: {}", e),
+                };
+            }
+        }
+        if !moved_on {
+            std::thread::sleep(Duration::from_secs(2));
         }
     }
 }
@@ -480,6 +524,9 @@ struct State {
     rates: HashMap<String, Vec<(f64, f64)>>,
     counters: HashMap<String, (u64, u64, f64)>,
     endpoints_at: f64,
+    /// When `data` last came back parseable. A failed poll keeps the rows it
+    /// cannot replace, so this is what says how old they are.
+    data_at: f64,
 }
 
 /// Turn cumulative byte counters into per-second rates.
@@ -657,6 +704,7 @@ fn main() {
                     g.err.clear();
                     sample_rates(&mut g, d, history);
                     g.data = Some(d.clone());
+                    g.data_at = now();
                 }
             }
             if let Some(eps) = eps {
@@ -707,8 +755,14 @@ fn main() {
     };
 
     loop {
-        let (data, eps_now, err, rates) = match state.lock() {
-            Ok(g) => (g.data.clone(), g.endpoints.clone(), g.err.clone(), g.rates.clone()),
+        let (data, eps_now, err, rates, data_at) = match state.lock() {
+            Ok(g) => (
+                g.data.clone(),
+                g.endpoints.clone(),
+                g.err.clone(),
+                g.rates.clone(),
+                g.data_at,
+            ),
             Err(_) => return,
         };
 
@@ -828,6 +882,25 @@ fn main() {
             continue;
         };
 
+        // A poll that fails after a good one keeps the rows it cannot
+        // replace, which is the right thing to do and used to be done in
+        // silence: `err` was only ever drawn in place of the peer list, so
+        // once there was a list to draw instead, a tailnet that had stopped
+        // answering went on looking exactly like one where nothing had
+        // changed. The rows stay, and say what they are.
+        let stale = if err.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "polling is failing, these rows are cached, {} old ({})",
+                brief(now() - data_at),
+                err
+            )
+        };
+        if !stale.is_empty() {
+            rows.push(tc::seg(&[(p.relay.as_str(), format!(" ! {}", stale))], w - 1));
+        }
+
         let me = data["Self"].clone();
         let peers: Vec<serde_json::Value> = data["Peer"]
             .as_object()
@@ -910,12 +983,20 @@ fn main() {
                     .flatten()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                let latency = prober
+                let (latency, probe_err) = prober
                     .lock()
                     .ok()
-                    .and_then(|g| g.samples.get(&peer_name(&chosen)).cloned())
+                    .map(|g| {
+                        (
+                            g.samples.get(&peer_name(&chosen)).cloned().unwrap_or_default(),
+                            g.err.clone(),
+                        )
+                    })
                     .unwrap_or_default();
-                info_overlay(&chosen, &eps_now, &users, w, h, &rates, &latency, &derp, &p)
+                info_overlay(
+                    &chosen, &eps_now, &users, w, h, &rates, &latency, &probe_err, &stale, &derp,
+                    &p,
+                )
             } else {
                 copy_overlay(&chosen, &eps_now, w, h, &note.0, &p)
             };
@@ -1168,10 +1249,17 @@ fn info_overlay(
     h: usize,
     rates: &HashMap<String, Vec<(f64, f64)>>,
     latency: &[Option<f64>],
+    probe_err: &str,
+    stale: &str,
     derp: &HashMap<String, String>,
     p: &Palette,
 ) -> Vec<String> {
     let mut rows = vec![tc::title("machine info", w, &p.accent)];
+    // Every field below is out of the same cached status as the list behind
+    // this view, so it carries the same warning.
+    if !stale.is_empty() {
+        rows.push(tc::seg(&[(p.relay.as_str(), format!(" ! {}", stale))], w - 1));
+    }
     let dns = text(peer, "DNSName").trim_end_matches('.').to_string();
     let owner = users
         .get(&peer["UserID"].as_i64().unwrap_or(0).to_string())
@@ -1340,6 +1428,10 @@ fn info_overlay(
         }
     }
 
+    // Exactly the peers the main loop hands to the prober: not this machine,
+    // and not one that is offline. "probing…" sat on this machine's own row
+    // for as long as you left it open, for a ping that is never sent.
+    let probed = up && !peer["_self"].as_bool().unwrap_or(false);
     let pings: Vec<f64> = latency.iter().filter_map(|x| *x).collect();
     if !latency.is_empty() {
         rows.push(String::new());
@@ -1421,7 +1513,7 @@ fn info_overlay(
                 w - 1,
             ));
         }
-    } else if up {
+    } else if probed && probe_err.is_empty() {
         rows.push(String::new());
         rows.push(tc::seg(
             &[
@@ -1430,6 +1522,27 @@ fn info_overlay(
             ],
             w - 1,
         ));
+    }
+    // Why there is nothing to report, when the reason is this widget's own.
+    // It follows the figures rather than replacing them, the way latency's
+    // rows do: the samples taken before the probe broke are still true, and
+    // still the last thing this peer was known to be doing.
+    if probed && !probe_err.is_empty() {
+        if latency.is_empty() {
+            rows.push(String::new());
+            rows.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " latency  ".into()),
+                    (p.relay.as_str(), probe_err.to_string()),
+                ],
+                w - 1,
+            ));
+        } else {
+            rows.push(tc::seg(
+                &[(p.relay.as_str(), format!("   ! {}", probe_err))],
+                w - 1,
+            ));
+        }
     }
 
     if let Some(hist) = rates.get(&peer_name(peer)).filter(|h| !h.is_empty()) {

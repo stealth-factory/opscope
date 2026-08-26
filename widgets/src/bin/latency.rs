@@ -101,6 +101,23 @@ struct Stats {
 }
 
 impl Target {
+    /// Record one reading and keep only the last `window` of them.
+    ///
+    /// Retention lives here rather than beside a push because it used to
+    /// live beside one push and not the other: the trim sat inside the loop
+    /// that reads `ping`'s output, so a target whose `ping` exits at once -
+    /// an unresolvable name, a host with no route to it - appended a loss
+    /// from the retry path every two seconds and never trimmed. The vector
+    /// grew for as long as the pane was up and `stats()` reread the whole
+    /// of it every frame. One door in, one rule.
+    fn record(&mut self, at: f64, rtt: Option<f64>, window: usize) {
+        self.samples.push((at, rtt));
+        if self.samples.len() > window {
+            let drop = self.samples.len() - window;
+            self.samples.drain(..drop);
+        }
+    }
+
     /// Round trips that arrived, newest last.
     fn rtts(&self) -> Vec<f64> {
         self.samples.iter().filter_map(|(_, r)| *r).collect()
@@ -364,18 +381,14 @@ fn watch(
                         format!("recovered after {:.0}s", stamp - since));
                 }
                 target.alive = true;
-                target.samples.push((stamp, Some(rtt)));
+                target.record(stamp, Some(rtt), window);
             } else if is_loss(&line) {
                 if target.down_since.is_none() {
                     target.down_since = Some(stamp);
                     log(&events, &hue, &label, "LOSS", "no reply".into());
                 }
                 target.alive = false;
-                target.samples.push((stamp, None));
-            }
-            if target.samples.len() > window {
-                let drop = target.samples.len() - window;
-                target.samples.drain(..drop);
+                target.record(stamp, None, window);
             }
         }
         let _ = child.wait();
@@ -405,7 +418,7 @@ fn watch(
         }
         if let Ok(mut guard) = shared.lock() {
             guard[index].alive = false;
-            guard[index].samples.push((now(), None));
+            guard[index].record(now(), None, window);
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -632,10 +645,17 @@ fn graph(
         .copied()
         .collect();
     if seen.is_empty() {
-        return (
-            vec![tc::seg(&[(p.dim.as_str(), "  collecting…".into())], w - 1)],
-            span,
-        );
+        // Nothing to plot has two causes and they are not the same. With no
+        // targets there is nothing to collect and never will be, so
+        // "collecting…" is a promise the widget cannot keep - it is the
+        // pane looking busy over an empty list, which is the shape this
+        // repo's checks exist to catch.
+        let why = if targets.is_empty() {
+            "  no hosts configured - set latency.hosts in config.json"
+        } else {
+            "  collecting…"
+        };
+        return (vec![tc::seg(&[(p.dim.as_str(), why.into())], w - 1)], span);
     }
     let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min).max(0.05) * 0.8;
     let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
@@ -1248,6 +1268,32 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_that_never_answers_does_not_grow_for_ever() {
+        // The retry path - `ping` exited, sleep two seconds, try again -
+        // records a loss each time round. Its retention used to sit in the
+        // loop over `ping`'s output, which a target that exits immediately
+        // never enters, so an unreachable host grew the vector by a sample
+        // every two seconds for as long as the pane was up and made
+        // `stats()` reread all of it every frame.
+        let window = 8;
+        let mut t = Target::default();
+        for i in 0..500 {
+            t.record(i as f64, None, window);
+            assert!(t.samples.len() <= window, "grew to {} at {}", t.samples.len(), i);
+        }
+        assert_eq!(t.samples.len(), window);
+        // What is kept is the newest, not the oldest.
+        assert_eq!(t.samples.first().map(|(at, _)| *at), Some(492.0));
+        assert_eq!(t.samples.last().map(|(at, _)| *at), Some(499.0));
+        // Answers are held to the same rule.
+        let mut t = Target::default();
+        for i in 0..500 {
+            t.record(i as f64, Some(i as f64), window);
+        }
+        assert_eq!(t.samples.len(), window);
+    }
 
     #[test]
     fn a_reply_gives_up_its_round_trip() {
