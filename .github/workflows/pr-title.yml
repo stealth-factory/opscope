@@ -40,6 +40,11 @@ jobs:
             chore
             style
             revert
+            # The release PR titles itself `release: vX.Y.Z`. cliff.toml
+            # skips that prefix so a changelog never opens by announcing
+            # that the last changelog was written - but the title still has
+            # to pass this check, which it only does if the type is listed.
+            release
           # A scope is welcome and usually the widget - fix(ports): ... -
           # but not required: plenty of changes are not about one widget.
           requireScope: false

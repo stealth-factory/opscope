@@ -5,16 +5,18 @@
 # and the tag are checked against each other and the build stops if they
 # disagree, rather than the workflow editing the manifest to make them match
 # - a build that edits its own source produces a binary no checkout can
-# reproduce, which is a strange thing to hand somebody. cut-release.yml does
+# reproduce, which is a strange thing to hand somebody. release-pr.yml does
 # the bump, in a real commit, before the tag exists.
 name: release
 
 on:
   push:
     tags: ['v*']
-  # So the build can be exercised without cutting a release. Everything runs
-  # except the publish job, which is gated on a tag ref rather than on the
-  # trigger - neither of these can publish even by accident.
+  # Two uses. Dispatching at a branch exercises the whole build without
+  # cutting a release, because the publish job is gated on the ref being a
+  # tag. Dispatching at a tag does publish, and is how tag-release.yml
+  # starts this workflow: a tag it pushes with GITHUB_TOKEN triggers
+  # nothing, and workflow_dispatch is the documented exception.
   workflow_dispatch:
   # And on any change to the release machinery itself, because the first
   # time a release build runs should not be the release. Deliberately not
@@ -104,9 +106,9 @@ jobs:
           manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "$tag" != "$manifest" ]; then
             echo "tag v$tag but Cargo.toml says $manifest" >&2
-            echo "cut-release.yml bumps the manifest in a commit and tags" >&2
-            echo "that commit, rather than having this workflow rewrite the" >&2
-            echo "source it is building" >&2
+            echo "release-pr.yml bumps the manifest in a commit, and" >&2
+            echo "tag-release.yml tags that commit, rather than having" >&2
+            echo "this workflow rewrite the source it is building" >&2
             exit 1
           fi
           echo "v$tag"
@@ -242,9 +244,11 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-22.04
-    # A tag, and only a tag. A manual dispatch exercises the whole build and
-    # stops here, so the workflow can be tested without leaving a release
-    # behind under a version nobody meant to cut.
+    # A tag, and only a tag - whatever started the run. Dispatching at a
+    # branch exercises the whole build and stops here, so the workflow can
+    # be tested without leaving a release behind under a version nobody
+    # meant to cut. Dispatching at a tag is a real release, and is how
+    # tag-release.yml gets here.
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

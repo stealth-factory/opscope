@@ -16,6 +16,9 @@ on:
 
 permissions:
   contents: write
+  # To start release.yml at the new tag. See below for why that is not
+  # something the tag push can be relied on to do by itself.
+  actions: write
 
 concurrency:
   group: tag-release
@@ -28,15 +31,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          # The tag has to be pushed by something other than GITHUB_TOKEN.
-          # A tag it creates triggers no workflow, so release.yml would
-          # never run and the release would exist with no binaries on it -
-          # which looks like a broken build rather than a missing token.
-          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Tag it, if this version has not been tagged
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        id: tag
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -46,23 +43,35 @@ jobs:
           tag="v${version}"
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "${tag} exists; nothing to do"
+            echo "tagged=no" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-          if [ -z "${RELEASE_TOKEN_SET:-}" ] && [ -z "${{ secrets.RELEASE_TOKEN }}" ]; then
-            # Better to say so than to push a tag that silently builds
-            # nothing. The tag would land, release.yml would not run, and
-            # the release would sit there with no binaries attached.
-            echo "RELEASE_TOKEN is not set." >&2
-            echo "A tag pushed with the default GITHUB_TOKEN triggers no" >&2
-            echo "workflow, so release.yml would never build anything." >&2
-            echo "Add a fine-grained PAT with Contents and Pull requests" >&2
-            echo "read/write as the RELEASE_TOKEN secret." >&2
-            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Annotated, so `git describe` sees it without --tags and the tag
-          # carries who made it and when.
+          # Annotated, so the tag carries who made it and when.
           git tag -a "$tag" -m "$tag"
           git push origin "$tag"
-          echo "pushed ${tag}; release.yml takes it from here"
+          echo "pushed ${tag}"
+          echo "tagged=yes" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Start the release build at that tag
+        if: steps.tag.outputs.tagged == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A tag pushed with GITHUB_TOKEN triggers no workflow, so the
+          # push above will not have started release.yml on its own, and
+          # the tag would otherwise sit there with no binaries attached -
+          # which reads as a broken build rather than a missing step.
+          #
+          # workflow_dispatch is the documented exception to that rule: a
+          # dispatch made with GITHUB_TOKEN does create a run. Dispatching
+          # at the tag gives that run github.ref = refs/tags/vX.Y.Z, which
+          # is what release.yml checks the manifest against and what gates
+          # its publish job. So the build is started explicitly instead of
+          # depending on a personal access token being present.
+          gh workflow run release.yml --ref "$TAG"
+          echo "dispatched release.yml at ${TAG}"

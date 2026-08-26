@@ -39,11 +39,12 @@ jobs:
           # The whole history and every tag: the version is computed from
           # the commits since the last one.
           fetch-depth: 0
-          # A PAT, not the default token. Events created with GITHUB_TOKEN
-          # trigger no workflows, so the release PR would arrive with no CI
-          # and could not pass a required check. The same token pushes the
-          # tag later, where the consequence is worse: release.yml would
-          # never fire and the release would have no binaries.
+          # RELEASE_TOKEN is optional and only affects this workflow. A
+          # pull request opened with GITHUB_TOKEN gets no CI runs, so the
+          # release PR arrives with no checks on it; with a PAT it is an
+          # ordinary PR. Nothing downstream depends on it - tag-release.yml
+          # starts the build with an explicit dispatch rather than relying
+          # on a tag push to trigger one.
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - uses: taiki-e/install-action@6ee6c3ab83eab434138dfa928d72abc7eae14793 # v2
@@ -77,7 +78,14 @@ jobs:
           CURRENT: ${{ steps.next.outputs.current }}
         run: |
           set -euo pipefail
-          git cliff --tag "v${NEXT}" -o CHANGELOG.md
+          # --unreleased --prepend, not a regenerate. CHANGELOG.md has a
+          # hand-written header and a hand-written 0.1.0 section covering
+          # the ~200 commits from before any of this existed, and
+          # regenerating the whole file from history would replace both
+          # with an unreadable wall. Prepending is also idempotent: this
+          # workflow rebuilds its branch from main on every push, so it
+          # starts from the same file and produces the same result.
+          git cliff --unreleased --tag "v${NEXT}" --prepend CHANGELOG.md
           # Only the first version key, which is the workspace package's. A
           # global replace would also rewrite a dependency pinned at the
           # same number - toys-core is, deliberately.
@@ -130,7 +138,7 @@ jobs:
           body=$(printf '%s\n' \
             "Merging this cuts **v${NEXT}**." \
             "" \
-            "It tags the merge commit, which fires \`release.yml\`: three" \
+            "It tags the merge commit and starts \`release.yml\` there: three" \
             "platforms built and tested, checked for anything dynamically" \
             "linked beyond the C runtime, tarballed with checksums, and" \
             "attached to a GitHub Release." \

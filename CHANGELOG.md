@@ -1,0 +1,29 @@
+# Changelog
+
+Every release, and what changed in it. Generated from the commit subjects,
+which is why they are worth writing carefully.
+
+## [0.1.0] - 2026-08-26
+
+The first tagged release, and the baseline the version numbers count from.
+
+Everything before this point is the project finding its shape: ten fabricated
+panels, then the slow replacement of each one with something wired to a real
+source, then a port of the lot from Python to Rust. Roughly two hundred commits
+of that, written before there was a changelog to write them for, and summarising
+them line by line here would say less than this paragraph does.
+
+What the release contains:
+
+- **Fourteen widgets**, one binary each: `clocks`, `deployments`, `github`,
+  `herdr-panes`, `latency`, `linear`, `link`, `matrix`, `netwatch`, `ports`,
+  `pr`, `start`, `tailnet` and `usage`.
+- **Self-contained binaries.** SQLite is compiled in; nothing is linked beyond
+  the platform's own C runtime, and the build fails if that stops being true.
+- **Three targets**: `x86_64-unknown-linux-gnu` (built against glibc 2.35),
+  `aarch64-apple-darwin` and `x86_64-apple-darwin`.
+- **Every number on screen is real.** `matrix` is the one deliberate exception
+  and computes nothing on purpose.
+
+From here the version is computed from conventional commit subjects, and this
+file is written by the release machinery rather than by hand.
