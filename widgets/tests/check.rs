@@ -359,10 +359,42 @@ fn handled_keys(src: &str) -> BTreeSet<String> {
 }
 
 /// The config section a widget declares, and the keys it reads from it.
+/// Rejoin a wrapped method chain onto the line it belongs to.
+///
+/// `cfg.get("show_hints")` and the same call split over two lines are one
+/// read, and rustfmt picks between them on line width alone - so a scanner
+/// working a line at a time sees the first and is blind to the second.
+/// Two real settings, clocks' `show_hints` and `work_days`, sat
+/// undocumented behind exactly that shape while this check reported all
+/// clear. A blind spot in a check that exists to find undocumented
+/// settings is worse than no check, because it is read as proof.
+///
+/// Only a newline whose next non-space character is `.` is removed, which
+/// is narrow enough that nothing else on either line changes meaning.
+/// Widening the receiver instead - accepting `raw.get(` and `gh.get(` as
+/// well as `cfg.get(` - was tried and reverted: it picks up `cwnd` and
+/// `reord_seen`, which are fields link reads out of `ss` output and not
+/// config at all.
+fn join_chains(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        if line.trim_start().starts_with('.') && !out.is_empty() {
+            out.push_str(line.trim_start());
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut sections = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    for line in src.lines() {
+    let joined = join_chains(src);
+    for line in joined.lines() {
         if let Some(at) = line.find("load_config(\"") {
             let after = &line[at + 13..];
             if let Some(end) = after.find('"') {
