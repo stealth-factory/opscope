@@ -1187,6 +1187,17 @@ struct Config {
     /// then stops, silently, which is the failure the refresh exists to
     /// prevent. Nobody wants the first without the second.
     grok_ping: bool,
+    /// Whether Antigravity's quota may be asked of Google when nothing is
+    /// serving it locally.
+    ///
+    /// On by default, unlike `grok_ping`, and the difference is what the
+    /// request is. Grok's asks a vendor for a reading nothing on this
+    /// machine has. This one asks for the same reading the app already
+    /// serves over localhost, from the same host and with the same
+    /// credential the tier is already fetched with. Turning it off costs
+    /// the quota whenever Antigravity is closed and spares nothing that the
+    /// tier request has not already spent.
+    antigravity_remote: bool,
     /// Minutes between those requests. Five, so the figure on screen is
     /// one a reader can act on: the window it reports moves over days, but
     /// the spend inside it moves while they work, and an hour-old reading
@@ -1229,6 +1240,10 @@ fn read_config() -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
+        antigravity_remote: raw
+            .get("antigravity_remote")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
     }
 }
 

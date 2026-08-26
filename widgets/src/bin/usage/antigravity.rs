@@ -91,6 +91,8 @@ pub struct Data {
     tier_said: String,
     /// The quota groups, empty when neither source answered.
     quota: Vec<serde_json::Value>,
+    /// Why there is no quota, when there is none. Empty when there is.
+    quota_why: String,
     /// True when the groups above came from Google rather than from the
     /// language server on this machine. The two agree in shape and very
     /// nearly in value, so nothing else can tell them apart - and a reader
@@ -312,9 +314,12 @@ pub fn why_no_lane(d: &Data) -> String {
     if !tier.is_empty() {
         return tier;
     }
-    "no quota · neither the language server inside the app nor Google \
-     answered. Open Antigravity, or sign in again if its token has lapsed."
-        .into()
+    // The remote attempt knows exactly which step failed, and that is more
+    // use than any sentence written in advance.
+    if !d.quota_why.is_empty() {
+        return format!("no quota · {}", d.quota_why);
+    }
+    "no quota · neither the language server inside the app nor Google answered.".into()
 }
 
 /// The same, with the server's own words when there are any.
@@ -371,20 +376,64 @@ fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
 /// and moves as it is used, while this is what Google has recorded. They
 /// agree in shape and very nearly in value, so the tab cannot tell them
 /// apart - which is the point, and why the row says which it read.
-fn remote_quota() -> Option<Vec<serde_json::Value>> {
-    let file = read_json(&token_path())?;
+/// Everything that can be decided without leaving the machine, decided
+/// before anything is cached.
+///
+/// The reason has to survive a cache hit. `cached` holds a failure for a
+/// while and does not re-run the closure that produced it, so a reason
+/// captured inside that closure is gone by the next frame and the row falls
+/// back to whatever generic sentence is left - which is how this said
+/// "Google did not answer" about a token that had expired an hour earlier
+/// and was never sent.
+fn remote_token(allowed: bool) -> Result<String, String> {
+    if !allowed {
+        return Err("asking Google is off - set usage.antigravity_remote to true".into());
+    }
+    let Some(file) = read_json(&token_path()) else {
+        return Err(
+            "Antigravity has not signed in on this machine - run `agy` once and sign in".into(),
+        );
+    };
     let tok = &file["token"];
     let access = text(tok, "access_token");
-    let expiry = iso_epoch(&text(tok, "expiry"));
-    if access.is_empty() || expiry.is_some_and(|at| at <= now()) {
-        return None;
+    if access.is_empty() {
+        return Err("the Antigravity token file holds no session - sign in again".into());
     }
-    let got = post_body(REMOTE_QUOTA_API, &access, "{}").ok()?;
-    let groups = got["groups"].as_array()?;
-    if groups.is_empty() {
-        return None;
+    // A lapsed token is not sent. It would be refused, and the refusal would
+    // then be the only thing reported, which says less than the expiry does:
+    // this one names how long ago and what refreshes it.
+    if let Some(expiry) = iso_epoch(&text(tok, "expires")) {
+        if expiry <= now() {
+            return Err(expired_note(now() - expiry));
+        }
     }
-    Some(groups.clone())
+    if let Some(expiry) = iso_epoch(&text(tok, "expiry")) {
+        if expiry <= now() {
+            return Err(expired_note(now() - expiry));
+        }
+    }
+    Ok(access)
+}
+
+fn expired_note(ago: f64) -> String {
+    format!(
+        "Antigravity's token expired {} ago - it refreshes them itself, so open it \
+         or run `agy` once and sign in",
+        left_span(ago)
+    )
+}
+
+/// The ask itself, once the credential is known to be worth sending.
+fn remote_quota(access: &str) -> Result<Vec<serde_json::Value>, String> {
+    let got = post_body(REMOTE_QUOTA_API, access, "{}")
+        .map_err(|said| format!("Google refused the Antigravity token: {}", said))?;
+    match got["groups"].as_array() {
+        Some(groups) if !groups.is_empty() => Ok(groups.clone()),
+        // A 200 with nothing in it. Not a failure to report as one, but not
+        // a reading either, and the difference matters when the reader is
+        // deciding whether to go and open something.
+        _ => Err("Google answered with no quota groups for this account".into()),
+    }
 }
 
 fn post_body(url: &str, access: &str, body: &str) -> Result<serde_json::Value, String> {
@@ -427,7 +476,7 @@ fn conversation_steps(path: &str) -> Option<f64> {
 /// Each conversation is its own SQLite file with a `steps` table - one row
 /// per step the agent took - so the counts are real work done. No table
 /// anywhere carries a token count.
-pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
+pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
     // The refusal is cached with the failure, so it is shown for as long as
     // the failure lasts rather than only on the frame the call was made.
@@ -459,13 +508,36 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // longer - it is a record rather than a live meter, and unlike the local
     // one it is a request that leaves this machine.
     if d.quota.is_empty() {
-        if let Some(groups) = cached(caches, "antigravity-remote", PLAN_TTL, || {
-            remote_quota().map(serde_json::Value::Array)
-        })
-        .and_then(|got| got.as_array().cloned())
-        {
-            d.quota = groups;
-            d.quota_remote = true;
+        match remote_token(cfg.antigravity_remote) {
+            // Decided here, so it survives a held failure and is the same
+            // sentence on every frame until the thing it names changes.
+            Err(why) => d.quota_why = why,
+            Ok(access) => {
+                let mut why = String::new();
+                let got = cached(caches, "antigravity-remote", PLAN_TTL, || {
+                    match remote_quota(&access) {
+                        Ok(groups) => Some(serde_json::Value::Array(groups)),
+                        Err(said) => {
+                            why = said;
+                            None
+                        }
+                    }
+                })
+                .and_then(|got| got.as_array().cloned());
+                match got {
+                    Some(groups) => {
+                        d.quota = groups;
+                        d.quota_remote = true;
+                    }
+                    None => {
+                        d.quota_why = if why.is_empty() {
+                            "Google did not answer, and the refusal is still held".to_string()
+                        } else {
+                            why
+                        }
+                    }
+                }
+            }
         }
     }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
@@ -775,11 +847,27 @@ fn antigravity_body(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     // The absence is only worth explaining while it is one. With the quota
     // drawn above, a paragraph about why there is no quota contradicts the
     // screen.
+    //
+    // When there is no quota, the sentence carries the step that failed
+    // rather than the shape of the problem. "It comes from the language
+    // server while Antigravity is running" is true and was all this said,
+    // and it sends a reader to open an app when the actual fault can be a
+    // session signed out, a token an hour old, or a setting turned off -
+    // none of which opening the app on its own would settle.
+    let absent = if d.quota_why.is_empty() {
+        "No tokens are recorded locally, and no quota either: it comes \
+         from the language server while Antigravity is running, so start \
+         it and this fills in."
+            .to_string()
+    } else {
+        format!(
+            "No tokens are recorded locally, and no quota either: {}",
+            d.quota_why
+        )
+    };
     rows.extend(no_local(
         if d.quota.is_empty() {
-            "No tokens are recorded locally, and no quota either: it comes \
-             from the language server while Antigravity is running, so start \
-             it and this fills in."
+            absent.as_str()
         } else {
             "No per-token usage is recorded locally - the conversations and \
              steps above are what there is."
@@ -801,41 +889,54 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
 mod tests {
 
     #[test]
-    fn a_signed_in_account_with_no_running_app_still_says_why() {
-        // The summary said "No quota published by: antigravity" and then
-        // nothing, because the only reason it knew how to give was a
-        // missing tier - and this account's tier is fine. The commoner
-        // reason went unsaid: there is no server to ask.
-        let signed_in = Data {
+    fn the_note_says_which_step_failed_not_that_something_did() {
+        // "No quota" covered four situations wanting different things from
+        // the reader: never signed in, signed out since, an hour-old token,
+        // and a Google that said no. Only one of them is fixed by opening
+        // the app, so the note carries whichever actually happened.
+        let with = |why: &str| Data {
             live: Some(serde_json::json!({"currentTier": {"id": "free"}})),
             quota: Vec::new(),
+            quota_why: why.to_string(),
             ..Data::default()
         };
-        assert!(lanes(&signed_in).is_empty(), "no groups, no lanes");
-        let note = why_no_lane(&signed_in);
-        assert!(!note.is_empty(), "a quiet agent with no reason given");
-        // Both sources are named, because reaching this line means both
-        // were tried - the language server inside the app, and Google.
-        // Naming only the first would send a reader to open an app that
-        // would not have helped when the token is what has lapsed.
-        assert!(note.contains("language server"), "{}", note);
-        assert!(note.contains("Google"), "the remote source went unmentioned: {}", note);
-        assert!(
-            note.contains("Open Antigravity") && note.contains("sign in"),
-            "says nothing to do about it: {}",
-            note
-        );
 
-        // A missing tier is still the reason when that is what is wrong,
-        // and it must not be replaced by the general one.
+        let d = with("Antigravity's token expired 2h ago - it refreshes them itself");
+        assert!(lanes(&d).is_empty(), "no groups, no lanes");
+        let note = why_no_lane(&d);
+        assert!(note.starts_with("no quota · "), "{}", note);
+        assert!(note.contains("expired 2h ago"), "the step that failed was dropped: {}", note);
+
+        // Off by configuration is a reason too, and names the key.
+        let note = why_no_lane(&with(
+            "asking Google is off - set usage.antigravity_remote to true",
+        ));
+        assert!(note.contains("usage.antigravity_remote"), "{}", note);
+
+        // A tier that cannot be read still wins: it is the older problem and
+        // opening the app is what fixes it.
         let lapsed = Data {
             live: None,
             tier_why: Missing::Expired(3600.0),
+            quota_why: "Google refused the Antigravity token".into(),
             ..Data::default()
         };
         let note = why_no_lane(&lapsed);
         assert!(note.contains("expired"), "tier reason lost: {}", note);
-        assert!(!note.contains("language server"), "two reasons at once: {}", note);
+        assert!(!note.contains("Google refused"), "two reasons at once: {}", note);
+    }
+
+    #[test]
+    fn the_remote_ask_refuses_before_it_leaves_the_machine() {
+        // Turned off, and there is no request to make - the reason names the
+        // key rather than blaming the network.
+        let off = remote_token(false).unwrap_err();
+        assert!(off.contains("usage.antigravity_remote"), "{}", off);
+        // It may name Google - that is where the request would have gone -
+        // but it must not report a refusal or a silence that never happened.
+        for blame in ["refused", "did not answer", "no quota groups"] {
+            assert!(!off.contains(blame), "blamed the server for a setting: {}", off);
+        }
     }
     use super::*;
 
@@ -1209,6 +1310,7 @@ mod tests {
         let cfg = Config::default();
         let d = Data {
             quota_remote: false,
+            quota_why: String::new(),
             quota: groups(&[
                 ("Gemini 3 Pro", "weekly", 0.25),
                 ("Gemini 3 Pro", "5h", 0.996),

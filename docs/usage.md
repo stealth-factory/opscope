@@ -349,10 +349,33 @@ and the heading says which was read:
  ── QUOTA ── live · account-wide, from Google - the app is not running
 ```
 
-So the quota survives the app being closed. What still does not is a lapsed
-token — and when neither answers, `[+]` names the agent with both reasons at
-once rather than sending the reader to open an app that would not have
-helped:
+So the quota survives the app being closed — for as long as the token lasts,
+which is an hour, because the refresh token beside it is deliberately left
+alone. Running `agy` does not extend that: it refreshes in memory and writes
+nothing back, verified by running `agy models` and finding the token file
+byte-identical afterwards.
+
+**Every step that can fail says which step it was**, on the tab and on `[+]`,
+because "no quota" covered four situations wanting different things from the
+reader:
+
+```
+ no quota either: Antigravity's token expired 51m ago - it refreshes them
+ itself, so open it or run `agy` once and sign in
+ no quota either: asking Google is off - set usage.antigravity_remote to true
+ no quota either: Antigravity has not signed in on this machine - run `agy`
+ once and sign in
+ no quota either: Google refused the Antigravity token: …
+```
+
+The first three are decided before anything leaves the machine, and before
+the cache, so the sentence survives a held failure. A reason captured inside
+the fetch closure does not: `cached` holds a refusal without re-running it,
+so the row reverted to a generic "Google did not answer" about a token that
+had expired an hour earlier and was never sent.
+
+When neither source answers, `[+]` names the agent with the reason rather
+than sending the reader to open an app that would not have helped:
 
 ```
   ANTIGRAVITY
@@ -931,6 +954,7 @@ Three settings, all off or hourly by default:
 
 | key | default | what it does |
 |---|---|---|
+| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
 | `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
