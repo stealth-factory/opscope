@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.1.3] - 2026-08-26
+
+### Bug Fixes
+
+- **ci**: Never cancel a run on main (#57)
+
+### Documentation
+
+- Record what the release automation cost to get right (#55)
+- Make the download instructions actually lead somewhere (#56)
+
 ## [0.1.2] - 2026-08-26
 
 ### Bug Fixes
