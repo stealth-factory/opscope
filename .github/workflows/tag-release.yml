@@ -1,0 +1,77 @@
+# Tags the release once its pull request is merged.
+#
+# release-pr.yml prepares; this fires when that preparation lands on main
+# and turns it into a tag. release.yml then builds and publishes off the
+# tag. Three small workflows rather than one large one, because each half
+# has a different trigger and a different thing that can go wrong.
+#
+# It fires on any push to main and does nothing unless the version in the
+# manifest has no tag yet - so a hand-cut tag still works, and re-running
+# this is harmless.
+name: tag-release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  # To start release.yml at the new tag. See below for why that is not
+  # something the tag push can be relied on to do by itself.
+  actions: write
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag it, if this version has not been tagged
+        id: tag
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "no version in Cargo.toml" >&2; exit 1
+          fi
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "${tag} exists; nothing to do"
+            echo "tagged=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Annotated, so the tag carries who made it and when.
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          echo "pushed ${tag}"
+          echo "tagged=yes" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Start the release build at that tag
+        if: steps.tag.outputs.tagged == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A tag pushed with GITHUB_TOKEN triggers no workflow, so the
+          # push above will not have started release.yml on its own, and
+          # the tag would otherwise sit there with no binaries attached -
+          # which reads as a broken build rather than a missing step.
+          #
+          # workflow_dispatch is the documented exception to that rule: a
+          # dispatch made with GITHUB_TOKEN does create a run. Dispatching
+          # at the tag gives that run github.ref = refs/tags/vX.Y.Z, which
+          # is what release.yml checks the manifest against and what gates
+          # its publish job. So the build is started explicitly instead of
+          # depending on a personal access token being present.
+          gh workflow run release.yml --ref "$TAG"
+          echo "dispatched release.yml at ${TAG}"

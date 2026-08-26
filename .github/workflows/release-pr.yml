@@ -1,0 +1,159 @@
+# Keeps a standing pull request describing the next release.
+#
+# Every merge to main updates it: the version git-cliff computes from the
+# conventional commits since the last tag, the changelog entry for them,
+# and the manifest bump. Merging that PR is the release decision. Nothing
+# is tagged, built or published until you do.
+#
+# This is release-please's shape, built by hand. release-plz would have
+# given it for free and cannot run here: it determines what changed with
+# `cargo package --verify`, and this workspace will not package, because
+# start.rs embeds the repo's docs from outside its own crate. git-cliff
+# reads git history and nothing else.
+name: release-pr
+
+on:
+  push:
+    branches: [main]
+  # For when you want to see what the next release would be without
+  # waiting for a merge.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One at a time. Two pushes in quick succession would otherwise race to
+# force-push the same branch, and the loser would leave the PR describing
+# a version that skipped a commit.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The whole history and every tag: the version is computed from
+          # the commits since the last one.
+          fetch-depth: 0
+          # RELEASE_TOKEN is optional and only affects this workflow. A
+          # pull request opened with GITHUB_TOKEN gets no CI runs, so the
+          # release PR arrives with no checks on it; with a PAT it is an
+          # ordinary PR. Nothing downstream depends on it - tag-release.yml
+          # starts the build with an explicit dispatch rather than relying
+          # on a tag push to trigger one.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - uses: taiki-e/install-action@6ee6c3ab83eab434138dfa928d72abc7eae14793 # v2
+        with:
+          tool: git-cliff@2.13.1
+
+      - name: What the next version would be
+        id: next
+        run: |
+          set -euo pipefail
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          # --bumped-version gives the tag name; strip the v for the manifest.
+          next=$(git cliff --bumped-version 2>/dev/null | tr -d 'v' || true)
+          if [ -z "$next" ] || [ "$next" = "$current" ]; then
+            # Nothing releasable since the last tag - only chores, or
+            # nothing at all. No release PR, and any existing one is left
+            # alone rather than being rewritten to say the same thing.
+            echo "nothing to release: still $current"
+            echo "release=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$current -> $next"
+          echo "release=yes" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Write the changelog and bump the manifest
+        if: steps.next.outputs.release == 'yes'
+        env:
+          NEXT: ${{ steps.next.outputs.next }}
+          CURRENT: ${{ steps.next.outputs.current }}
+        run: |
+          set -euo pipefail
+          # --unreleased --prepend, not a regenerate. CHANGELOG.md has a
+          # hand-written header and a hand-written 0.1.0 section covering
+          # the ~200 commits from before any of this existed, and
+          # regenerating the whole file from history would replace both
+          # with an unreadable wall. Prepending is also idempotent: this
+          # workflow rebuilds its branch from main on every push, so it
+          # starts from the same file and produces the same result.
+          git cliff --unreleased --tag "v${NEXT}" --prepend CHANGELOG.md
+          # Only the first version key, which is the workspace package's. A
+          # global replace would also rewrite a dependency pinned at the
+          # same number - toys-core is, deliberately.
+          sed -i "0,/^version = \"$CURRENT\"$/s//version = \"$NEXT\"/" Cargo.toml
+          # And the path dependency, which carries a version so that cargo
+          # is willing to package the crate at all.
+          sed -i "s/^toys-core = { path = \"..\/core\", version = \"$CURRENT\" }$/toys-core = { path = \"..\/core\", version = \"$NEXT\" }/" widgets/Cargo.toml
+          grep -q "^version = \"$NEXT\"$" Cargo.toml || {
+            echo "the manifest did not take the bump" >&2; exit 1; }
+          # The lock carries the workspace crates' own versions, and a lock
+          # disagreeing with its manifest makes the next build rewrite it
+          # as a stray diff.
+          cargo update --workspace --offline 2>/dev/null || cargo update --workspace
+
+      - name: Open or update the release PR
+        if: steps.next.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          NEXT: ${{ steps.next.outputs.next }}
+        run: |
+          set -euo pipefail
+          branch="release"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add CHANGELOG.md Cargo.toml Cargo.lock widgets/Cargo.toml
+          if git diff --cached --quiet; then
+            echo "nothing changed since the last run"
+            exit 0
+          fi
+          # printf rather than a heredoc: the indentation that keeps a
+          # heredoc inside this YAML block would land in the message, and an
+          # unindented body ends the block scalar.
+          printf '%s\n' \
+            "release: v${NEXT}" \
+            "" \
+            "The manifest moves ahead of the tag so the tag can point at a" \
+            "commit whose version already matches it. release.yml checks" \
+            "they agree and refuses to build otherwise, which is only a" \
+            "meaningful check when nothing in the pipeline edits the" \
+            "manifest on the way past." \
+            "" \
+            "Prepared by the release-pr workflow. Merging this is the" \
+            "release." \
+            | git commit -q -F -
+          # Force, because this branch is the bot's alone and is rewritten
+          # from main every time. Nobody should be committing to it.
+          git push -f origin "$branch"
+
+          body=$(printf '%s\n' \
+            "Merging this cuts **v${NEXT}**." \
+            "" \
+            "It tags the merge commit and starts \`release.yml\` there: three" \
+            "platforms built and tested, checked for anything dynamically" \
+            "linked beyond the C runtime, tarballed with checksums, and" \
+            "attached to a GitHub Release." \
+            "" \
+            "This PR rewrites itself on every merge to main. Do not commit" \
+            "to it - the branch is force-pushed - and edit the changelog on" \
+            "main instead if something reads badly." \
+            "" \
+            "---" \
+            "")
+          notes=$(awk '/^## \[/{n++} n==1' CHANGELOG.md | head -60)
+          if gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr edit "$branch" --title "release: v${NEXT}" \
+              --body "$body$notes"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "release: v${NEXT}" --body "$body$notes"
+          fi

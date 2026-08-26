@@ -1,0 +1,57 @@
+# The pull request title has to be a conventional commit.
+#
+# Squash merge means the title becomes the commit subject on main, and the
+# version and the changelog are both computed from those subjects. A
+# badly-titled PR is therefore not untidy, it is a change that the next
+# release will not mention and may not count towards the version.
+#
+# This is why the repository setting "Default to PR title for squash merge
+# commits" has to be on. Without it a single-commit PR squashes to that
+# commit's own message instead, and this check passes while the message
+# that actually lands never saw it.
+name: pr-title
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          # The types git-cliff knows about. feat and fix move the version;
+          # the rest appear in the changelog without bumping anything.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            style
+            revert
+            # The release PR titles itself `release: vX.Y.Z`. cliff.toml
+            # skips that prefix so a changelog never opens by announcing
+            # that the last changelog was written - but the title still has
+            # to pass this check, which it only does if the type is listed.
+            release
+          # A scope is welcome and usually the widget - fix(ports): ... -
+          # but not required: plenty of changes are not about one widget.
+          requireScope: false
+          # The subject is a sentence, so it starts lowercase and does not
+          # end in a full stop. git-cliff capitalises it in the changelog.
+          subjectPattern: ^(?![A-Z])(?!.*\.$).+$
+          subjectPatternError: |
+            The subject "{subject}" in "{title}" should start with a
+            lowercase letter and not end with a full stop. It becomes a
+            changelog line, where it is capitalised for you.
