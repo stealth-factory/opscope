@@ -53,35 +53,92 @@ in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
 alongside it. 24-bit colour, and a full redraw each frame so everything
 reflows when you resize the pane.
 
-Download the ones for your machine from the
-[latest release](https://github.com/stealth-factory/terminal-toys/releases/latest)
-— Linux x86-64, macOS Apple Silicon, macOS Intel. Every tarball ships with a
-`.sha256` beside it:
+## Getting them
+
+There is no installer and nothing to package-manage yet — no `npx`, no
+`brew`. You download three files, or you build fourteen. Both take about a
+minute.
+
+### Download a release
+
+Linux x86-64, macOS Apple Silicon and macOS Intel are built for every tag.
+This works out which one you want, checks it against its own checksum, and
+unpacks it — no version to fill in, because it asks which release is
+current:
 
 ```sh
-tar -xzf terminal-toys-*.tar.gz && cd terminal-toys-*/
+R=https://github.com/stealth-factory/terminal-toys/releases
+V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' $R/latest | sed 's|.*/||')
+case "$(uname -s) $(uname -m)" in
+  "Darwin arm64")   A=aarch64-apple-darwin ;;
+  "Darwin x86_64")  A=x86_64-apple-darwin ;;
+  "Linux x86_64")   A=x86_64-unknown-linux-gnu ;;
+  *) echo "no build for $(uname -sm); build from source below" >&2 ;;
+esac
+T=terminal-toys-$V-$A
+curl -fsSLO $R/download/$V/$T.tar.gz
+curl -fsSLO $R/download/$V/$T.tar.gz.sha256
+shasum -a 256 -c $T.tar.gz.sha256    # sha256sum -c on Linux; either is fine
+tar -xzf $T.tar.gz && cd $T
 ```
 
-Or build them yourself, which needs only a Rust toolchain:
+Or take them by hand from the
+[latest release](https://github.com/stealth-factory/terminal-toys/releases/latest)
+— every tarball has a `.sha256` beside it.
+
+The fourteen binaries are right there, beside `config.example.json` and a
+copy of the docs. Nothing else is needed to run them, so this folder can
+live wherever you like — or put the binaries on your `PATH`:
+
+```sh
+sudo cp start clocks deployments github herdr-panes latency linear link \
+        matrix netwatch ports pr tailnet usage /usr/local/bin/
+```
+
+**On macOS, download with `curl` rather than a browser.** These binaries are
+not signed or notarised, and a browser marks what it downloads with
+`com.apple.quarantine`, which makes Gatekeeper refuse to run them. `curl`
+does not set that mark. If you did use a browser, clear it:
+
+```sh
+xattr -d com.apple.quarantine ./*
+```
+
+*(Written from how Gatekeeper is documented to behave — this repo has no Mac
+to check it on. If it is wrong, that is worth an issue.)*
+
+### Or build them
+
+Needs a Rust toolchain and nothing else:
 
 ```sh
 cargo build --release   # fourteen binaries in ./target/release
 ```
 
+## Running them
+
+`start` is the front door — a menu of the fourteen, with a live preview of
+whichever is highlighted:
+
 ```sh
-./target/release/start          # the front door: pick one and it runs
-./target/release/start latency  # or name one and skip the menu
+start          # pick one and it runs
+start latency  # or name one and skip the menu
 ```
 
 Each widget is also an ordinary program, if you would rather go direct:
 
 ```sh
-./target/release/latency        # each runs standalone
-./target/release/clocks -h      # every widget documents itself
+latency        # each runs standalone
+clocks -h      # every widget documents itself
 ```
 
+Those are the names as they sit on your `PATH`. From an unpacked tarball or
+a build tree, reach for them where they are — `./start`, or
+`./target/release/start`.
+
 They are built to sit side by side and fill a wall, but nothing assumes a
-multiplexer — each is an ordinary terminal program. Tile them however you like.
+multiplexer — each is an ordinary terminal program. Tile them however you
+like.
 
 ## Building the wall
 
@@ -121,8 +178,11 @@ configuration at all.
 
 ## Requirements
 
-- A Rust toolchain to build; **no library to install** to run — the binaries
-  carry what they link against, SQLite included
+- **Nothing to install to run them** — the binaries carry what they link
+  against, SQLite included. A Rust toolchain only if you build rather than
+  download
+- Linux x86-64 or macOS, Apple Silicon or Intel. A Linux arm64 build is not
+  produced yet; that machine builds from source
 - A terminal with 24-bit colour
 - Per-widget, the external *tools* the table above names: `curl`, `ss`,
   `ping`, `tailscale`, `herdr`. Each widget needs only its own; one that
