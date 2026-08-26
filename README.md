@@ -58,16 +58,13 @@ reflows when you resize the pane.
 If you have Node, this is the whole thing:
 
 ```sh
-npx @stealth-factory/terminal-toys
+npx opscope
 ```
 
 It installs the launcher and the fourteen binaries for this machine, and
-starts the menu. `npx @stealth-factory/terminal-toys latency` skips the
-menu. Linux x86-64 (glibc), macOS Apple Silicon and macOS Intel are
-published; anything else fails at install with a sentence saying so.
-
-`npx terminal-toys` (no scope) is a different package, unrelated, and
-cannot be this one — that name was taken.
+starts the menu. `npx opscope latency` skips the menu. Linux x86-64
+(glibc), macOS Apple Silicon and macOS Intel are published; anything else
+fails at install with a sentence saying so.
 
 There is no Homebrew formula yet. You can also download three files, or
 build fourteen. Both take about a minute.

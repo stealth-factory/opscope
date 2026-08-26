@@ -196,7 +196,7 @@ jobs:
             "platforms built and tested, checked for anything dynamically" \
             "linked beyond the C runtime, tarballed with checksums," \
             "published to npm, then attached to a GitHub Release so" \
-            "\`npx @stealth-factory/terminal-toys\` is this version." \
+            "\`npx opscope\` is this version." \
             "" \
             "This PR rewrites itself on every merge to main. Do not commit" \
             "to it - the branch is force-pushed - and edit the changelog on" \

@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,12 +19,10 @@
 const fs = require('fs');
 const path = require('path');
 
-// The unscoped name `terminal-toys` is a different package on npm —
-// joke CLI commands, unrelated, published first. `npx terminal-toys`
-// therefore cannot be this project. The GitHub org is the scope that
-// cannot collide, and it is the one `npx` has to name.
-const SCOPE = '@stealth-factory';
-const LAUNCHER = `${SCOPE}/terminal-toys`;
+// The unscoped name is free, which is why this is `opscope` and
+// not a scoped package. `npx opscope` is the command somebody
+// with only Node is asked to type.
+const LAUNCHER = 'opscope';
 
 // One row per artefact the release workflow actually produces. A
 // platform that is only a wish is not a row: Alpine, Windows and
@@ -38,7 +36,7 @@ const LAUNCHER = `${SCOPE}/terminal-toys`;
 // tarball suffix, and is how pack.js finds the right artefact.
 const PLATFORMS = [
   {
-    pkg: `${SCOPE}/terminal-toys-linux-x64`,
+    pkg: 'opscope-linux-x64',
     os: 'linux',
     cpu: 'x64',
     libc: 'glibc',
@@ -46,14 +44,14 @@ const PLATFORMS = [
     label: 'Linux x86_64 (glibc)',
   },
   {
-    pkg: `${SCOPE}/terminal-toys-darwin-arm64`,
+    pkg: 'opscope-darwin-arm64',
     os: 'darwin',
     cpu: 'arm64',
     rust: 'aarch64-apple-darwin',
     label: 'macOS Apple Silicon',
   },
   {
-    pkg: `${SCOPE}/terminal-toys-darwin-x64`,
+    pkg: 'opscope-darwin-x64',
     os: 'darwin',
     cpu: 'x64',
     rust: 'x86_64-apple-darwin',
@@ -64,7 +62,7 @@ const PLATFORMS = [
 // The fourteen binaries, read from the manifest rather than restated.
 // A restated list is how a fifteenth widget ships in the tarball and
 // not in the npm package, and the launcher then cannot launch it.
-// `[[bin]]` is the same list `start` already asserts against.
+// `[[bin]]` is the same list `opscope` already asserts against.
 function binsFromManifest(repoRoot) {
   const toml = fs.readFileSync(path.join(repoRoot, 'widgets/Cargo.toml'), 'utf8');
   const bins = [];
@@ -76,8 +74,8 @@ function binsFromManifest(repoRoot) {
   if (bins.length === 0) {
     throw new Error('widgets/Cargo.toml named no [[bin]] entries');
   }
-  if (!bins.includes('start')) {
-    throw new Error('widgets/Cargo.toml has no start binary; the launcher cannot launch');
+  if (!bins.includes('opscope')) {
+    throw new Error('widgets/Cargo.toml has no opscope binary; the launcher cannot launch');
   }
   return bins;
 }
@@ -152,7 +150,7 @@ function unsupportedMessage(h) {
     publishedPlatforms(),
     '',
     'Windows, Alpine/musl, 32-bit and Linux arm64 are not published.',
-    'Build from source: https://github.com/stealth-factory/terminal-toys',
+    'Build from source: https://github.com/stealth-factory/opscope',
   ].join('\n');
 }
 
@@ -188,10 +186,10 @@ function resolveStart(h) {
     err.code = 'MISSING_OPTIONAL';
     throw err;
   }
-  const start = path.join(dir, 'bin', 'start');
+  const start = path.join(dir, 'bin', LAUNCHER);
   if (!fs.existsSync(start)) {
     const err = new Error(
-      `${wanted.pkg} is installed but bin/start is missing. Reinstall the package.`,
+      `${wanted.pkg} is installed but bin/${LAUNCHER} is missing. Reinstall the package.`,
     );
     err.code = 'CORRUPT_OPTIONAL';
     throw err;
@@ -204,7 +202,6 @@ function requireInstalled(h) {
 }
 
 module.exports = {
-  SCOPE,
   LAUNCHER,
   PLATFORMS,
   binsFromManifest,

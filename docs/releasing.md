@@ -31,9 +31,8 @@ merge the release PR
                                       tarballed with checksums, packed
                                       into four npm packages from those
                                       same tarballs so
-                                      `npx @stealth-factory/terminal-toys`
-                                      is this version, then attached
-                                      to a GitHub Release
+                                      `npx opscope` is this version,
+                                      then attached to a GitHub Release
 ```
 
 ## What decides the version
@@ -103,13 +102,13 @@ triggers no workflow, so `tag-release.yml` starts the build with an explicit
 rather than relying on the push to do it.
 
 **npm publish uses trusted publishing, with `NPM_TOKEN` as a fallback.**
-Create the `@stealth-factory` org on npm (the unscoped name `terminal-toys`
-is a different package and cannot be this one). Then either configure each
-of the four packages as a trusted publisher for this repository's
-`release.yml` — no token; the job has `id-token: write` and publishes with
-provenance — or store a granular access token with permission to publish
-under that org as the `NPM_TOKEN` repository secret. Classic automation
-tokens were revoked in November 2025 and will not work.
+The four packages are unscoped (`opscope` and one optional dependency
+per platform). Configure each as a trusted publisher for this
+repository's `release.yml` — no token; the job has `id-token: write`
+and publishes with provenance — or store a granular access token with
+permission to publish them as the `NPM_TOKEN` repository secret.
+Classic automation tokens were revoked in November 2025 and will not
+work.
 
 The job does not fail closed on an empty secret: that would block the
 OIDC path. Publish itself fails if neither trusted publishing nor the
@@ -145,8 +144,8 @@ fetched trades a small mistake for a confusing one.
 
 **npm publish failed and there is no GitHub release.** That is the
 intended failure: trusted publishing is not configured and `NPM_TOKEN`
-is missing, or the `@stealth-factory` org does not exist, and nothing
-was published on either side. Fix the publisher or the secret, then
+is missing, and nothing was published on either side. Fix the
+publisher or the secret, then
 re-dispatch `release.yml` at that tag. A version already on npm is
 skipped rather than republished, so a retry after npm succeeded and
 the GitHub step failed will finish the release. `gh release create`

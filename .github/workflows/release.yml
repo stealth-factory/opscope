@@ -306,13 +306,13 @@ jobs:
 
       # The four npm packages are generated from the tarballs this
       # job just built, not maintained in git. That is what keeps
-      # `npx @stealth-factory/terminal-toys@0.2.0` and `v0.2.0` the
+      # `npx opscope@0.2.0` and `v0.2.0` the
       # same binaries: there is no second copy to forget to bump.
       #
-      # npm first, then the GitHub release. A missing org, a
-      # missing trusted-publisher setup, or a missing token then
-      # fails the job with nothing published on either side, which
-      # is agreement. The other order leaves a GitHub release whose
+      # npm first, then the GitHub release. A missing
+      # trusted-publisher setup or a missing token then fails the
+      # job with nothing published on either side, which is
+      # agreement. The other order leaves a GitHub release whose
       # version npm has never heard of, and `gh release create`
       # will not run twice.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -333,7 +333,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           node npm/pack.js --version "$version" --artifacts artifacts --out npm-dist
-          ls -la npm-dist/@stealth-factory
+          ls -la npm-dist
 
       - name: Publish to npm
         env:
@@ -365,10 +365,10 @@ jobs:
           # Platforms first. The launcher lists them as
           # optionalDependencies at this same version, and npm will
           # try to fetch them the moment the launcher is published.
-          for pkg in npm-dist/@stealth-factory/terminal-toys-*; do
+          for pkg in npm-dist/opscope-*; do
             publish "$pkg"
           done
-          publish npm-dist/@stealth-factory/terminal-toys
+          publish npm-dist/opscope
 
       - name: Release
         env:

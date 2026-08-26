@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -76,15 +76,17 @@ function extract(tarball, dest) {
 }
 
 function findBinDir(extracted, bins) {
-  // The tarball wraps a directory named after itself. Look for `start`
-  // rather than assuming the wrapper's name, so a `dev` artefact and a
-  // `v0.1.2` artefact unpack the same way.
+  // The tarball wraps a directory named after itself. Look for the
+  // launcher rather than assuming the wrapper's name, so a `dev`
+  // artefact and a `v0.1.2` artefact unpack the same way.
   const files = walkFiles(extracted);
-  const start = files.find((f) => path.basename(f) === 'start');
-  if (!start) {
-    throw new Error(`extracted ${extracted} but there is no start binary in it`);
+  const launcher = files.find((f) => path.basename(f) === platform.LAUNCHER);
+  if (!launcher) {
+    throw new Error(
+      `extracted ${extracted} but there is no ${platform.LAUNCHER} binary in it`,
+    );
   }
-  const dir = path.dirname(start);
+  const dir = path.dirname(launcher);
   const missing = bins.filter((b) => !fs.existsSync(path.join(dir, b)));
   if (missing.length) {
     throw new Error(
@@ -115,7 +117,7 @@ function platformManifest(p, version) {
     license: 'AGPL-3.0-or-later',
     repository: {
       type: 'git',
-      url: 'git+https://github.com/stealth-factory/terminal-toys.git',
+      url: 'git+https://github.com/stealth-factory/opscope.git',
     },
     publishConfig: { access: 'public' },
   };
@@ -160,7 +162,7 @@ function pack(opts) {
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
 
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-toys-pack-'));
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'opscope-pack-'));
   try {
     for (const p of platform.PLATFORMS) {
       const tarball = findTarball(artifacts, p.rust);
@@ -182,8 +184,8 @@ function pack(opts) {
     writeJson(path.join(launcherDir, 'package.json'), launcherManifest(version));
     copyFile(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
     copyFile(path.join(__dirname, 'postinstall.js'), path.join(launcherDir, 'postinstall.js'));
-    copyFile(path.join(__dirname, 'bin/terminal-toys'), path.join(launcherDir, 'bin/terminal-toys'));
-    fs.chmodSync(path.join(launcherDir, 'bin/terminal-toys'), 0o755);
+    copyFile(path.join(__dirname, 'bin/opscope'), path.join(launcherDir, 'bin/opscope'));
+    fs.chmodSync(path.join(launcherDir, 'bin/opscope'), 0o755);
     copyFile(path.join(__dirname, 'README.md'), path.join(launcherDir, 'README.md'));
     copyFile(license, path.join(launcherDir, 'LICENSE'));
   } finally {

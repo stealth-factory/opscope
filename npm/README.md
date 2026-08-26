@@ -1,18 +1,15 @@
-# @stealth-factory/terminal-toys
+# opscope
 
 Sci-fi terminal widgets that show only real data.
 
 ```sh
-npx @stealth-factory/terminal-toys
+npx opscope
 ```
 
 That is the launcher: a menu of the fourteen widgets, or name one and skip
-it (`npx @stealth-factory/terminal-toys latency`). The binaries it starts
-are the ones attached to the GitHub release of the same version —
-`--version` on any of them answers with that version, commit and date.
-
-`npx terminal-toys` (unscoped) is a different package, unrelated, and
-cannot be this one.
+it (`npx opscope latency`). The binaries it starts are the ones attached
+to the GitHub release of the same version — `--version` on any of them
+answers with that version, commit and date.
 
 ## Platforms
 
@@ -26,4 +23,4 @@ downloads the Linux binaries.
 
 ## Source
 
-<https://github.com/stealth-factory/terminal-toys>
+<https://github.com/stealth-factory/opscope>

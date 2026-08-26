@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ const { spawn } = require('child_process');
 const { constants } = require('os');
 const platform = require('../platform');
 
-// The native `start` binary, from the platform package npm installed
+// The native `opscope` binary, from the platform package npm installed
 // beside us. Exec-ing it — rather than reimplementing the menu in JS —
 // is what keeps `--version` answering with the same version, commit
 // and date as the GitHub release: it is the same binary.

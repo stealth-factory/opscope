@@ -1,18 +1,18 @@
 {
-  "name": "@stealth-factory/terminal-toys",
+  "name": "opscope",
   "version": "0.0.0-dev",
   "description": "Sci-fi terminal widgets that show only real data.",
   "bin": {
-    "terminal-toys": "bin/terminal-toys"
+    "opscope": "bin/opscope"
   },
   "scripts": {
     "postinstall": "node postinstall.js",
     "test": "node --test test.js"
   },
   "optionalDependencies": {
-    "@stealth-factory/terminal-toys-linux-x64": "0.0.0-dev",
-    "@stealth-factory/terminal-toys-darwin-arm64": "0.0.0-dev",
-    "@stealth-factory/terminal-toys-darwin-x64": "0.0.0-dev"
+    "opscope-linux-x64": "0.0.0-dev",
+    "opscope-darwin-arm64": "0.0.0-dev",
+    "opscope-darwin-x64": "0.0.0-dev"
   },
   "files": [
     "bin",
@@ -29,14 +29,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/stealth-factory/terminal-toys.git"
+    "url": "git+https://github.com/stealth-factory/opscope.git"
   },
   "bugs": {
-    "url": "https://github.com/stealth-factory/terminal-toys/issues"
+    "url": "https://github.com/stealth-factory/opscope/issues"
   },
-  "homepage": "https://github.com/stealth-factory/terminal-toys#readme",
+  "homepage": "https://github.com/stealth-factory/opscope#readme",
   "license": "AGPL-3.0-or-later",
   "keywords": [
+    "opscope",
     "terminal",
     "tui",
     "widgets",

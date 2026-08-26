@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -37,7 +37,7 @@ function rustTargetsFromReleaseYml() {
 }
 
 function makeTarball(dir, rustTarget, tag, bins) {
-  const name = `terminal-toys-${tag}-${rustTarget}`;
+  const name = `opscope-${tag}-${rustTarget}`;
   const root = path.join(dir, name);
   fs.mkdirSync(root, { recursive: true });
   for (const b of bins) {
@@ -54,7 +54,7 @@ function makeTarball(dir, rustTarget, tag, bins) {
 }
 
 function scratch() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-toys-npm-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'opscope-npm-'));
 }
 
 test('every release target has an npm platform, and no extra ones', () => {
@@ -67,16 +67,16 @@ test('every release target has an npm platform, and no extra ones', () => {
   );
 });
 
-test('the packer takes every [[bin]], including start', () => {
+test('the packer takes every [[bin]], including opscope', () => {
   const bins = platform.binsFromManifest(repoRoot);
-  assert.ok(bins.includes('start'));
+  assert.ok(bins.includes('opscope'));
   assert.equal(bins.length, 14);
   assert.deepEqual(bins, [...bins].sort());
 });
 
 test('the launcher exposes one bin name, not fourteen', () => {
   const manifest = require('./package.json');
-  assert.deepEqual(Object.keys(manifest.bin), ['terminal-toys']);
+  assert.deepEqual(Object.keys(manifest.bin), ['opscope']);
 });
 
 test('this machine, on Linux glibc x64, is the linux-x64 package', () => {
@@ -85,7 +85,7 @@ test('this machine, on Linux glibc x64, is the linux-x64 package', () => {
     cpu: 'x64',
     libc: 'glibc',
   });
-  assert.equal(wanted.pkg, '@stealth-factory/terminal-toys-linux-x64');
+  assert.equal(wanted.pkg, 'opscope-linux-x64');
 });
 
 test('Windows, musl and 32-bit match nothing', () => {
@@ -139,12 +139,12 @@ test('pack.js stamps one version onto all four packages', () => {
     );
     assert.equal(launcher.name, platform.LAUNCHER);
     assert.equal(launcher.version, version);
-    assert.deepEqual(Object.keys(launcher.bin), ['terminal-toys']);
+    assert.deepEqual(Object.keys(launcher.bin), ['opscope']);
     assert.deepEqual(launcher.scripts, { postinstall: 'node postinstall.js' });
     for (const p of platform.PLATFORMS) {
       assert.equal(launcher.optionalDependencies[p.pkg], version);
     }
-    assert.ok(fs.existsSync(path.join(result.launcher, 'bin/terminal-toys')));
+    assert.ok(fs.existsSync(path.join(result.launcher, 'bin/opscope')));
     assert.ok(fs.existsSync(path.join(result.launcher, 'postinstall.js')));
     assert.ok(fs.existsSync(path.join(result.launcher, 'LICENSE')));
 
@@ -232,7 +232,7 @@ test('pack.js refuses a tarball that is missing a widget', () => {
   }
 });
 
-test('the shim execs start from the matching platform package', () => {
+test('the shim execs opscope from the matching platform package', () => {
   const wanted = platform.currentPlatform();
   // The fake layout below is for this host. A runner we do not publish
   // for would fail earlier, at currentPlatform(), and that path is
@@ -242,38 +242,38 @@ test('the shim execs start from the matching platform package', () => {
   const dir = scratch();
   try {
     const version = packer.versionFromCargo(repoRoot);
-    const scopeDir = path.join(dir, 'node_modules', '@stealth-factory');
-    const launcherDir = path.join(scopeDir, 'terminal-toys');
-    const platDir = path.join(scopeDir, path.basename(wanted.pkg));
+    const modules = path.join(dir, 'node_modules');
+    const launcherDir = path.join(modules, 'opscope');
+    const platDir = path.join(modules, wanted.pkg);
     fs.mkdirSync(path.join(launcherDir, 'bin'), { recursive: true });
     fs.mkdirSync(path.join(platDir, 'bin'), { recursive: true });
 
     fs.copyFileSync(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
     fs.copyFileSync(path.join(__dirname, 'postinstall.js'), path.join(launcherDir, 'postinstall.js'));
     fs.copyFileSync(
-      path.join(__dirname, 'bin/terminal-toys'),
-      path.join(launcherDir, 'bin/terminal-toys'),
+      path.join(__dirname, 'bin/opscope'),
+      path.join(launcherDir, 'bin/opscope'),
     );
-    fs.chmodSync(path.join(launcherDir, 'bin/terminal-toys'), 0o755);
+    fs.chmodSync(path.join(launcherDir, 'bin/opscope'), 0o755);
     fs.writeFileSync(
       path.join(launcherDir, 'package.json'),
-      JSON.stringify({ name: platform.LAUNCHER, version, bin: { 'terminal-toys': 'bin/terminal-toys' } }),
+      JSON.stringify({ name: platform.LAUNCHER, version, bin: { opscope: 'bin/opscope' } }),
     );
     fs.writeFileSync(
       path.join(platDir, 'package.json'),
       JSON.stringify({ name: wanted.pkg, version }),
     );
     fs.writeFileSync(
-      path.join(platDir, 'bin/start'),
-      '#!/bin/sh\necho "start 0.1.2 (deadbeef, 2026-08-26)"\n',
+      path.join(platDir, 'bin/opscope'),
+      '#!/bin/sh\necho "opscope 0.1.2 (deadbeef, 2026-08-26)"\n',
     );
-    fs.chmodSync(path.join(platDir, 'bin/start'), 0o755);
+    fs.chmodSync(path.join(platDir, 'bin/opscope'), 0o755);
 
-    const run = spawnSync('node', [path.join(launcherDir, 'bin/terminal-toys'), '--version'], {
+    const run = spawnSync('node', [path.join(launcherDir, 'bin/opscope'), '--version'], {
       encoding: 'utf8',
     });
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /start 0\.1\.2 \(deadbeef, 2026-08-26\)/);
+    assert.match(run.stdout, /opscope 0\.1\.2 \(deadbeef, 2026-08-26\)/);
 
     const post = spawnSync('node', [path.join(launcherDir, 'postinstall.js')], {
       encoding: 'utf8',
@@ -284,28 +284,28 @@ test('the shim execs start from the matching platform package', () => {
   }
 });
 
-test('the shim reports 130 when start dies of SIGINT', () => {
+test('the shim reports 130 when opscope dies of SIGINT', () => {
   const wanted = platform.currentPlatform();
   assert.ok(wanted, `this test host is ${platform.describeHost()}`);
 
   const dir = scratch();
   try {
     const version = packer.versionFromCargo(repoRoot);
-    const scopeDir = path.join(dir, 'node_modules', '@stealth-factory');
-    const launcherDir = path.join(scopeDir, 'terminal-toys');
-    const platDir = path.join(scopeDir, path.basename(wanted.pkg));
+    const modules = path.join(dir, 'node_modules');
+    const launcherDir = path.join(modules, 'opscope');
+    const platDir = path.join(modules, wanted.pkg);
     fs.mkdirSync(path.join(launcherDir, 'bin'), { recursive: true });
     fs.mkdirSync(path.join(platDir, 'bin'), { recursive: true });
 
     fs.copyFileSync(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
     fs.copyFileSync(
-      path.join(__dirname, 'bin/terminal-toys'),
-      path.join(launcherDir, 'bin/terminal-toys'),
+      path.join(__dirname, 'bin/opscope'),
+      path.join(launcherDir, 'bin/opscope'),
     );
-    fs.chmodSync(path.join(launcherDir, 'bin/terminal-toys'), 0o755);
+    fs.chmodSync(path.join(launcherDir, 'bin/opscope'), 0o755);
     fs.writeFileSync(
       path.join(launcherDir, 'package.json'),
-      JSON.stringify({ name: platform.LAUNCHER, version, bin: { 'terminal-toys': 'bin/terminal-toys' } }),
+      JSON.stringify({ name: platform.LAUNCHER, version, bin: { opscope: 'bin/opscope' } }),
     );
     fs.writeFileSync(
       path.join(platDir, 'package.json'),
@@ -313,10 +313,10 @@ test('the shim reports 130 when start dies of SIGINT', () => {
     );
     // The child dies of SIGINT. Re-raising that signal on the shim
     // used to re-enter the handler and exit 0.
-    fs.writeFileSync(path.join(platDir, 'bin/start'), '#!/bin/sh\nkill -s INT $$\n');
-    fs.chmodSync(path.join(platDir, 'bin/start'), 0o755);
+    fs.writeFileSync(path.join(platDir, 'bin/opscope'), '#!/bin/sh\nkill -s INT $$\n');
+    fs.chmodSync(path.join(platDir, 'bin/opscope'), 0o755);
 
-    const run = spawnSync('node', [path.join(launcherDir, 'bin/terminal-toys')], {
+    const run = spawnSync('node', [path.join(launcherDir, 'bin/opscope')], {
       encoding: 'utf8',
     });
     assert.equal(run.status, 130, `status=${run.status} stderr=${run.stderr}`);
@@ -325,7 +325,7 @@ test('the shim reports 130 when start dies of SIGINT', () => {
   }
 });
 
-test('the shim reports 129 when start dies of SIGHUP', () => {
+test('the shim reports 129 when opscope dies of SIGHUP', () => {
   // SIGHUP is not one of the two signals the shim forwards. The
   // exit map still has to name it, or a child that dies of it
   // reports as a generic 1.
@@ -335,30 +335,30 @@ test('the shim reports 129 when start dies of SIGHUP', () => {
   const dir = scratch();
   try {
     const version = packer.versionFromCargo(repoRoot);
-    const scopeDir = path.join(dir, 'node_modules', '@stealth-factory');
-    const launcherDir = path.join(scopeDir, 'terminal-toys');
-    const platDir = path.join(scopeDir, path.basename(wanted.pkg));
+    const modules = path.join(dir, 'node_modules');
+    const launcherDir = path.join(modules, 'opscope');
+    const platDir = path.join(modules, wanted.pkg);
     fs.mkdirSync(path.join(launcherDir, 'bin'), { recursive: true });
     fs.mkdirSync(path.join(platDir, 'bin'), { recursive: true });
 
     fs.copyFileSync(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
     fs.copyFileSync(
-      path.join(__dirname, 'bin/terminal-toys'),
-      path.join(launcherDir, 'bin/terminal-toys'),
+      path.join(__dirname, 'bin/opscope'),
+      path.join(launcherDir, 'bin/opscope'),
     );
-    fs.chmodSync(path.join(launcherDir, 'bin/terminal-toys'), 0o755);
+    fs.chmodSync(path.join(launcherDir, 'bin/opscope'), 0o755);
     fs.writeFileSync(
       path.join(launcherDir, 'package.json'),
-      JSON.stringify({ name: platform.LAUNCHER, version, bin: { 'terminal-toys': 'bin/terminal-toys' } }),
+      JSON.stringify({ name: platform.LAUNCHER, version, bin: { opscope: 'bin/opscope' } }),
     );
     fs.writeFileSync(
       path.join(platDir, 'package.json'),
       JSON.stringify({ name: wanted.pkg, version }),
     );
-    fs.writeFileSync(path.join(platDir, 'bin/start'), '#!/bin/sh\nkill -s HUP $$\n');
-    fs.chmodSync(path.join(platDir, 'bin/start'), 0o755);
+    fs.writeFileSync(path.join(platDir, 'bin/opscope'), '#!/bin/sh\nkill -s HUP $$\n');
+    fs.chmodSync(path.join(platDir, 'bin/opscope'), 0o755);
 
-    const run = spawnSync('node', [path.join(launcherDir, 'bin/terminal-toys')], {
+    const run = spawnSync('node', [path.join(launcherDir, 'bin/opscope')], {
       encoding: 'utf8',
     });
     assert.equal(run.status, 129, `status=${run.status} stderr=${run.stderr}`);
@@ -370,7 +370,7 @@ test('the shim reports 129 when start dies of SIGHUP', () => {
 test('postinstall fails on an unsupported platform with the sentence', () => {
   const dir = scratch();
   try {
-    const launcherDir = path.join(dir, 'node_modules', '@stealth-factory', 'terminal-toys');
+    const launcherDir = path.join(dir, 'node_modules', 'opscope');
     fs.mkdirSync(launcherDir, { recursive: true });
     fs.copyFileSync(path.join(__dirname, 'platform.js'), path.join(launcherDir, 'platform.js'));
     fs.copyFileSync(path.join(__dirname, 'postinstall.js'), path.join(launcherDir, 'postinstall.js'));
@@ -401,4 +401,21 @@ test('postinstall fails on an unsupported platform with the sentence', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('nothing under npm/ still says the old project name', () => {
+  // The leftover name is how npx would install a different package.
+  // Built, not written, so this file is not itself a hit.
+  const old = ['terminal', 'toys'].join('-');
+  const hits = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (fs.readFileSync(full, 'utf8').includes(old)) hits.push(path.relative(__dirname, full));
+    }
+  }
+  walk(__dirname);
+  assert.deepEqual(hits, [], `still named ${old}: ${hits.join(', ')}`);
 });
