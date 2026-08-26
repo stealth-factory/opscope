@@ -884,7 +884,7 @@ Three settings, all off or hourly by default:
 
 | key | default | what it does |
 |---|---|---|
-| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` once after a session goes quiet to refresh that token |
+| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
 **One setting, not two.** The refresh was a second key for one release and
@@ -893,6 +893,15 @@ looked, on the same day the CLI last ran — so asking without refreshing works
 for a while and then silently stops, which is the failure the refresh exists to
 prevent. Nobody wants the first without the second, so turning on `grok_ping`
 turns on both.
+
+**The refresh is keyed on the token, not on a session.** For a while it fired
+only in the six hours after a session ended, and the token turned out to last
+about six hours too — so anyone who had not run Grok since yesterday was in the
+failure above with the fix switched on. It now also fires when the token is
+about to lapse, whatever the last session was, subject to the same two guards:
+`grok_ping` is on, and nothing is running that the CLI would start underneath.
+It is attempted once per expiry value, so a login that has genuinely run out
+costs one attempt rather than one every five minutes.
 
 **Off by default**, because it does two things a widget that reads has no
 business doing unasked: it talks to a vendor, and it starts somebody else's
@@ -908,8 +917,24 @@ The screen says which state it is in, in both places it appears:
 
 ```
 ── WEEKLY QUOTA ── resets in 1.1 days
- live · polled x.ai just now, every 1h
+ live · polled x.ai just now, every 5m
 ```
+
+When asking is on and the figure still is not the server's, the row says
+which of the reasons applies rather than leaving `not live` to cover all of
+them — only some are the reader's to fix:
+
+```
+ not live · polled x.ai just now, every 5m · the token lapsed 3h ago - the Grok CLI refreshes it
+ not live · polled x.ai 4m ago, every 5m · x.ai did not answer
+ not live · polled x.ai just now, every 5m · x.ai sent no percentage for this period
+```
+
+The last of those is a 200 that names the billing period but sends a null
+percentage. The log's reading is kept, because it is the only percentage
+there is — but it belongs to an earlier window, so the row stays marked
+`not live` and its reset keeps the `~` that says the date is rolled forward
+rather than stated.
 
 The age quoted is the **reading's**, not the file's. The CLI touches that log
 whenever it starts, so a file written minutes ago can still hold a credit

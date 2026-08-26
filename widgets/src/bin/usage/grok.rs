@@ -45,6 +45,11 @@ const CLI: &str = ".grok/bin/grok";
 const PING_KEY: &str = "grok:billing";
 /// Cache key for the last session-end refresh, so one ending refreshes once.
 const SEEN_KEY: &str = "grok:session-seen";
+/// Cache key for the last expiry a refresh was attempted against.
+const EXPIRY_KEY: &str = "grok:token-expiry";
+/// Refresh this long before the token actually lapses, so the ask that
+/// follows is not the one that discovers it has.
+const TOKEN_MARGIN: f64 = 600.0;
 /// How long a session must be quiet before it counts as over. Long enough
 /// that a pause for thought is not an ending.
 const SESSION_QUIET: f64 = 120.0;
@@ -105,6 +110,9 @@ pub struct Data {
     /// Seconds between asks, so the tab can say what the interval is rather
     /// than leaving the reader to find it in a config file.
     quota_every: f64,
+    /// Why the figure on screen is not the server's, when it is not. Empty
+    /// when it is, or when nothing is asking.
+    quota_why: String,
 }
 
 /// The integer following `key` on a line.
@@ -225,21 +233,39 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
 /// Held between asks rather than asked on every frame: the pane redraws
 /// every thirty seconds and this window moves over days, so the interval is
 /// the configured one and the reading in between is the one already had.
-fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64) {
+/// The credit window, whether it came from the server, when it was asked
+/// for, and - when it did not - which of the four reasons applies.
+fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, String) {
     let from_log = || {
         newest_quota(tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str))
     };
     if !cfg.grok_ping {
-        return (from_log(), false, 0.0);
+        return (from_log(), false, 0.0, String::new());
     }
+    let key = match usable_token() {
+        Ok(k) => k,
+        Err(why) => return (from_log(), false, 0.0, why),
+    };
     let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
-    let got = cached(caches, PING_KEY, ttl, || live_quota(QUOTA_TIMEOUT));
+    let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
     let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
-    match got.as_ref().and_then(quota_from) {
-        Some(q) => (Some(q), true, at),
-        None => (from_log(), false, at),
+    match got.as_ref() {
+        None => (from_log(), false, at, "x.ai did not answer".to_string()),
+        Some(body) => match quota_from(body) {
+            Some(q) => (Some(q), true, at, String::new()),
+            // A 200 that names the period but sends a null percentage. The
+            // log reading is kept, because it is the only percentage there
+            // is, but the row must not read as though the server confirmed
+            // it - it did not, and it is a window older than this one.
+            None => (
+                from_log(),
+                false,
+                at,
+                "x.ai sent no percentage for this period".to_string(),
+            ),
+        },
     }
 }
 
@@ -285,11 +311,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // missing is the failure this repo keeps paying for. ok stays false,
         // so the tab says there are no sessions - under the quota, not
         // instead of it.
-        let (quota, quota_live, quota_at) = quota_now(caches, cfg);
+        let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg);
         return Data {
             quota,
             quota_live,
             quota_at,
+            quota_why,
             quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
             ..Data::default()
         };
@@ -358,6 +385,43 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             caches.live.remove(PING_KEY);
         }
     }
+    // The gate above fires only in the six hours after a session ends, and
+    // the token lapses on its own clock about that often - measured at six
+    // hours on the machine this was found on. So anyone who has not run
+    // Grok since yesterday had the asking silently switched off, which is
+    // the exact failure the refresh above exists to prevent and says so in
+    // its own comment. Reaching it needs a gate keyed on the token rather
+    // than on a session.
+    //
+    // Both of the original guards are kept: nothing happens unless asking
+    // was turned on, and nothing starts the CLI underneath somebody who is
+    // using it. What is dropped is the upper bound on how long ago they
+    // last did.
+    //
+    // Deduped on the expiry value, not on time. A refresh that does not
+    // move the expiry - a login that has genuinely run out - must be tried
+    // once and then left alone; a CLI respawned every five minutes for ever
+    // is a worse failure than the stale row it was trying to fix.
+    if cfg.grok_ping {
+        let quiet = if newest > 0.0 { now() - newest } else { f64::MAX };
+        let expiry = token_expiry();
+        if let Some(expiry) = expiry {
+            let tried = caches
+                .live
+                .get(EXPIRY_KEY)
+                .and_then(|(_, v, _)| v.as_ref())
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN);
+            if quiet > SESSION_QUIET && expiry <= now() + TOKEN_MARGIN && tried != expiry {
+                refresh_token();
+                caches.live.insert(
+                    EXPIRY_KEY.to_string(),
+                    (now(), Some(serde_json::json!(expiry)), f64::MAX),
+                );
+                caches.live.remove(PING_KEY);
+            }
+        }
+    }
     let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
@@ -369,6 +433,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         quota: quota_read.0,
         quota_live: quota_read.1,
         quota_at: quota_read.2,
+        quota_why: quota_read.3,
         quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
     }
 }
@@ -391,21 +456,61 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
 /// a round trip, and the log is a better answer than a failed request. The
 /// CLI refreshes the token whenever it runs, so this works for as long as
 /// Grok is in use and stops when it is not, which is the honest shape.
-fn live_quota(seconds: u64) -> Option<serde_json::Value> {
-    let raw = std::fs::read_to_string(under_home(AUTH)).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    // Keyed by issuer and account, so the entry is found by shape rather
-    // than by a name that is different on every machine.
-    let entry = parsed
-        .as_object()?
-        .values()
-        .find(|v| v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty()))?;
-    let key = entry["key"].as_str()?;
+/// The token entry the CLI left on disk, or why there is not one.
+///
+/// Keyed by issuer and account, so the entry is found by shape rather than
+/// by a name that is different on every machine.
+fn token_entry() -> Result<serde_json::Value, String> {
+    let raw = std::fs::read_to_string(under_home(AUTH))
+        .map_err(|_| "the Grok CLI has left no token on this disk".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|_| "the token the CLI left is not readable JSON".to_string())?;
+    parsed
+        .as_object()
+        .and_then(|o| {
+            o.values()
+                .find(|v| v.get("key").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty()))
+        })
+        .cloned()
+        .ok_or_else(|| "the token file names no account".to_string())
+}
+
+/// When the token on disk lapses, as epoch seconds.
+fn token_expiry() -> Option<f64> {
+    iso_epoch(&text(&token_entry().ok()?, "expires_at"))
+}
+
+/// The bearer token to ask with, or why the ask cannot even be tried.
+///
+/// The expiry is checked here rather than left to the server so a lapsed
+/// token costs no request - but the reason is carried out instead of being
+/// flattened to None, because "not live" for a token that lapsed an hour
+/// ago and "not live" for an endpoint that is down are the same two words
+/// for two different things, and only one of them is fixed by waiting.
+fn usable_token() -> Result<String, String> {
+    token_of(&token_entry()?, now())
+}
+
+/// The same decision, over a value and a clock, so it can be tested without
+/// a token on disk and without waiting for one to lapse.
+fn token_of(entry: &serde_json::Value, at: f64) -> Result<String, String> {
+    let key = entry["key"]
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| "the token file names no account".to_string())?
+        .to_string();
     if let Some(expiry) = iso_epoch(&text(entry, "expires_at")) {
-        if expiry <= now() {
-            return None;
+        if expiry <= at {
+            return Err(format!(
+                "the token lapsed {} ago - the Grok CLI refreshes it",
+                left_span(at - expiry)
+            ));
         }
     }
+    Ok(key)
+}
+
+fn fetch_billing(key: &str, seconds: u64) -> Option<serde_json::Value> {
     get_json(
         BILLING,
         &[("Authorization", &format!("Bearer {}", key))],
@@ -538,6 +643,18 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 (
                     p.dim.as_str(),
                     format!(" · polled x.ai {}, every {}", last, every(d.quota_every)),
+                ),
+                // "not live" alone is one phrase for four situations, and
+                // three of them are fixable by the reader. Saying which
+                // costs a clause and is the difference between a widget
+                // that looks broken and one that says what to do.
+                (
+                    p.dim.as_str(),
+                    if d.quota_why.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", d.quota_why)
+                    },
                 ),
             ],
             w - 1,
@@ -1052,6 +1169,62 @@ mod tests {
     }
 
     #[test]
+    fn a_lapsed_token_is_reported_as_lapsed_not_as_missing() {
+        // These were one answer - None - and the tab said "not live" for
+        // both. Only one of them is the reader's to fix, so they have to
+        // read differently.
+        // 2001-09-09T01:46:40Z, so the ISO stamps below are readable.
+        let at = 1_000_000_000.0;
+        let live = serde_json::json!({
+            "key": "k", "expires_at": "2001-09-09T01:46:40Z" // at + 0, see below
+        });
+        // A token with no expiry at all is usable: the server is the judge.
+        assert_eq!(token_of(&serde_json::json!({"key": "k"}), at), Ok("k".into()));
+
+        // Lapsed an hour ago.
+        let gone = serde_json::json!({"key": "k", "expires_at": "2001-09-09T00:46:40Z"});
+        let why = token_of(&gone, at).unwrap_err();
+        assert!(why.contains("lapsed"), "{}", why);
+        assert!(why.contains("Grok CLI"), "says what refreshes it: {}", why);
+
+        // Still good for an hour.
+        let good = serde_json::json!({"key": "k", "expires_at": "2001-09-09T02:46:40Z"});
+        assert_eq!(token_of(&good, at), Ok("k".into()));
+
+        // Exactly at the boundary counts as lapsed, not as usable.
+        assert!(token_of(&live, at).is_err());
+
+        // No key is a different reason again.
+        let why = token_of(&serde_json::json!({"expires_at": "x"}), at).unwrap_err();
+        assert!(why.contains("no account"), "{}", why);
+    }
+
+    #[test]
+    fn the_badge_says_which_of_the_reasons_applies() {
+        // "not live" on its own was the same two words for a lapsed token,
+        // a dead endpoint and a null percentage.
+        let p = palette();
+        let d = Data {
+            quota: newest_quota([LOG_LINE].into_iter()),
+            quota_live: false,
+            quota_at: now() - 30.0,
+            quota_every: 300.0,
+            quota_why: "the token lapsed 3h ago - the Grok CLI refreshes it".into(),
+            ..Data::default()
+        };
+        let rows = freshness(&d, 110, &p);
+        let joined = rows.join("\n");
+        assert!(joined.contains("not live"), "{}", joined);
+        assert!(joined.contains("token lapsed"), "reason missing: {}", joined);
+
+        // And says nothing extra when the reading is the server's.
+        let ok = Data { quota_live: true, quota_why: String::new(), ..d.clone() };
+        let joined = freshness(&ok, 110, &p).join("\n");
+        assert!(joined.contains("live"), "{}", joined);
+        assert!(!joined.contains(" · the"), "invented a reason: {}", joined);
+    }
+
+    #[test]
     fn the_tab_carries_its_subscription_at_every_width_the_wall_uses() {
         // The bar's width is what is left after the labels, and this pane
         // is dragged narrow on a phone. A panicking tab takes the whole
@@ -1069,6 +1242,7 @@ mod tests {
             quota_live: false,
             quota_at: 0.0,
             quota_every: 0.0,
+            quota_why: String::new(),
         };
         for w in [40usize, 80, 200] {
             let rows = tab(&d, w, 24, &Config::default(), &p);
