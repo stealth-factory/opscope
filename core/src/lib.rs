@@ -279,13 +279,25 @@ pub fn cfg_str(cfg: &serde_json::Value, key: &str, fallback: &str) -> String {
         .to_string()
 }
 
+/// A list of settings, or the default when nobody has given one.
+///
+/// A list that is there and empty is an answer, not the absence of one, and
+/// it is the one case the earlier version got wrong: it read `[]` as "unset"
+/// and handed back the fallback, so `"hosts": []` had latency pinging two
+/// addresses the config had just said it did not want. Absent means nobody
+/// has said what they want and a default is a kindness; present means they
+/// have, and substituting a list of our own is the widget talking about
+/// something it was not asked about.
+///
+/// Anything that is not an array at all - a string where a list belongs -
+/// is not an answer either, so it falls back with the absent case.
 pub fn cfg_strings(cfg: &serde_json::Value, key: &str, fallback: &[&str]) -> Vec<String> {
     match cfg.get(key).and_then(|v| v.as_array()) {
-        Some(items) if !items.is_empty() => items
+        Some(items) => items
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
-        _ => fallback.iter().map(|s| s.to_string()).collect(),
+        None => fallback.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -527,9 +539,30 @@ pub fn post_json(
         .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
         .collect();
     if !(200..300).contains(&status) {
-        return Err(format!("HTTP {}", status));
+        return Err(refused(status, &body));
     }
     Ok((body, found))
+}
+
+/// What a refused POST says: the status, and the body that explains it.
+///
+/// The status on its own is the half of a refusal that never says what to
+/// do about it. Linear and GitHub put the missing scope, the malformed
+/// field and the expired token in the body - which is the case the comment
+/// on `post_json` keeps the body for - and returning `HTTP 400` alone sent
+/// a reader to the API documentation for something the API had already
+/// explained.
+///
+/// Squeezed onto one line and capped the way every other subprocess
+/// complaint here is, so an HTML error page cannot take the whole pane.
+fn refused(status: u16, body: &str) -> String {
+    let said: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let said: String = said.chars().take(200).collect();
+    if said.is_empty() {
+        format!("HTTP {}", status)
+    } else {
+        format!("HTTP {}: {}", status, said)
+    }
 }
 
 /// Split curl's `--dump-header -` output into its last header block and
@@ -1113,7 +1146,12 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
 /// the pane kept drawing its last frame as though it were current.
 ///
 /// Returns everything the child produced, so a caller that needs the exit
-/// status or stderr - to say why a command refused - still has them.
+/// status or stderr - to say why a command refused - still has them. Both
+/// pipes are captured for that reason: `run` below and `ports`'s `refusal`
+/// each read `stderr` to name a refusal, and while it was sent to /dev/null
+/// they had nothing to read, so "tailscale serve needs an operator" and
+/// every other permission, login and bad-argument message arrived as an
+/// exit status or as the word "refused".
 pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, String> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -1124,14 +1162,14 @@ pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, Str
         .args(rest)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{}: {}", program, e))?;
     let pid = child.id() as i32;
     let (tx, rx) = mpsc::channel();
-    // wait_with_output drains the pipe while it waits; doing the wait on
-    // this side and the read afterwards would deadlock on a child that
-    // fills its stdout buffer.
+    // wait_with_output drains both pipes while it waits; doing the wait on
+    // this side and the reads afterwards would deadlock on a child that
+    // fills its stdout or stderr buffer.
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
     });
@@ -1756,5 +1794,72 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A list that is there and empty said something; a list that is not
+    /// there did not. The first version read both as "unset", so
+    /// `"hosts": []` had latency pinging the two resolvers its config had
+    /// just declined.
+    #[test]
+    fn an_empty_list_is_an_answer_and_a_missing_one_is_not() {
+        let fallback = ["1.1.1.1", "8.8.8.8"];
+        let said_none = serde_json::json!({ "hosts": [] });
+        assert!(
+            cfg_strings(&said_none, "hosts", &fallback).is_empty(),
+            "an empty list is the answer, not the absence of one"
+        );
+        let silent = serde_json::json!({ "window": 600 });
+        assert_eq!(
+            cfg_strings(&silent, "hosts", &fallback),
+            vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+            "nobody said, so the default is a kindness"
+        );
+        // Not a list at all is not an answer either.
+        let wrong = serde_json::json!({ "hosts": "1.1.1.1" });
+        assert_eq!(cfg_strings(&wrong, "hosts", &fallback).len(), 2);
+        let given = serde_json::json!({ "hosts": ["a.example", "b.example"] });
+        assert_eq!(
+            cfg_strings(&given, "hosts", &fallback),
+            vec!["a.example".to_string(), "b.example".to_string()]
+        );
+    }
+
+    /// The status names that a request was refused; only the body names
+    /// what to do about it.
+    #[test]
+    fn a_refused_post_carries_what_the_api_said() {
+        let said = refused(401, "{\"message\":\"Bad credentials\"}");
+        assert!(said.contains("401"), "{:?}", said);
+        assert!(said.contains("Bad credentials"), "{:?}", said);
+        // A body over several lines still arrives as one row.
+        let wrapped = refused(403, "{\n  \"message\": \"Resource not accessible\"\n}");
+        assert!(!wrapped.contains('\n'), "{:?}", wrapped);
+        assert!(wrapped.contains("Resource not accessible"), "{:?}", wrapped);
+        // An error page cannot spend the whole pane.
+        let long = refused(502, &"x".repeat(4000));
+        assert!(long.chars().count() < 240, "{} characters", long.chars().count());
+        // And a server that says nothing still says which refusal it was.
+        assert_eq!(refused(500, "   \n"), "HTTP 500");
+    }
+
+    /// stderr is where a command says why it refused. It was sent to
+    /// /dev/null, so `run` and `ports`'s `refusal` - both of which read it -
+    /// had nothing to read, and a permission or login failure arrived as an
+    /// exit status.
+    #[test]
+    fn a_command_that_failed_hands_back_what_it_complained() {
+        let out = run_full(&["sh", "-c", "echo 'needs an operator' >&2; exit 3"], 5)
+            .expect("sh ran");
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("needs an operator"),
+            "stderr was {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let why = run(&["sh", "-c", "echo 'needs an operator' >&2; exit 3"], 5)
+            .expect_err("exit 3 is an error");
+        assert!(why.contains("needs an operator"), "{:?}", why);
+        // Capturing stderr must not cost stdout on the way past.
+        assert_eq!(run(&["sh", "-c", "echo fine"], 5).unwrap().trim(), "fine");
     }
 }

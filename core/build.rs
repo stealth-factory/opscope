@@ -65,47 +65,21 @@ fn main() {
     println!("cargo:rustc-env=TOYS_COMMIT={}", commit);
     println!("cargo:rustc-env=TOYS_BUILD_DATE={}", date);
 
-    // Rebuild when the checked-out commit changes, or the sha is whatever it
-    // was the first time core compiled and `--version` names the wrong
-    // commit - worse than one that says "unknown", because it looks right.
+    // No `rerun-if-changed` at all, which makes cargo run this on every
+    // build. That is deliberate and it is the only thing that makes the
+    // stamp true.
     //
-    // Watching `.git/HEAD` alone does not do it, and fails two ways at once.
-    // On a branch checkout that file holds `ref: refs/heads/<branch>` and
-    // does not change when a commit lands; what moves is the ref it names.
-    // And in a linked worktree there is no `.git` directory at all - `.git`
-    // is a file pointing elsewhere - so the path does not exist, which cargo
-    // reads as "always rerun". Correct output, by accident, and only here.
+    // Watching `.git/HEAD` does not work: on a branch checkout that file
+    // holds `ref: refs/heads/<branch>` and does not move when a commit
+    // lands. Watching the ref it names fixes the commit half - but nothing
+    // in `.git` moves when a source file is edited, so `-dirty` stayed
+    // absent while the tree was dirty. A marker that says "clean" over a
+    // modified tree is worse than no marker: it is a claim, and it is false.
     //
-    // So git is asked where these actually live. `--git-path` resolves a
-    // worktree's real git directory, and the ref is followed to the file
-    // that moves. packed-refs covers a ref with no loose file of its own,
-    // and HEAD itself covers a detached checkout, where it holds the sha.
-    let watch = |path: &str| {
-        let resolved = Command::new("git")
-            .args(["rev-parse", "--git-path", path])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        if let Some(file) = resolved {
-            println!("cargo:rerun-if-changed={}", file);
-        }
-    };
-    watch("HEAD");
-    watch("packed-refs");
-    if let Some(head_ref) = Command::new("git")
-        .args(["symbolic-ref", "-q", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        watch(&head_ref);
-    }
-
+    // The cost was measured rather than feared. The script is three git
+    // calls; cargo compares the environment it emits and only rebuilds
+    // dependents when it changes, so a no-op rebuild is 0.03s. The first
+    // build after the tree goes from clean to dirty relinks the fourteen
+    // binaries, which is exactly when their stamp has genuinely changed.
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }
