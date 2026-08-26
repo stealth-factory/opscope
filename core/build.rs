@@ -65,9 +65,21 @@ fn main() {
     println!("cargo:rustc-env=TOYS_COMMIT={}", commit);
     println!("cargo:rustc-env=TOYS_BUILD_DATE={}", date);
 
-    // No `rerun-if-changed` at all, which makes cargo run this on every
-    // build. That is deliberate and it is the only thing that makes the
-    // stamp true.
+    // Run on every build, which is the only thing that makes the stamp
+    // true - and getting that takes a directive, not the absence of one.
+    //
+    // "Emit no `rerun-if-*` and cargo reruns when any file in the package
+    // changes" is true only while the script emits none at all. This one
+    // has always emitted `rerun-if-env-changed` below, which overrides the
+    // default outright: the script then reruns when SOURCE_DATE_EPOCH
+    // changes and at no other time. Removing the watches did not make it
+    // run always, it made it run almost never - a full rebuild of every
+    // crate left the stamp naming a commit four ahead of it and carrying a
+    // `-dirty` the tree had not had for hours.
+    //
+    // A path that does not exist cannot be stat-ed, and cargo answers that
+    // by rerunning. It is a sentinel, not a file: nothing should ever
+    // create it.
     //
     // Watching `.git/HEAD` does not work: on a branch checkout that file
     // holds `ref: refs/heads/<branch>` and does not move when a commit
@@ -81,5 +93,6 @@ fn main() {
     // dependents when it changes, so a no-op rebuild is 0.03s. The first
     // build after the tree goes from clean to dirty relinks the fourteen
     // binaries, which is exactly when their stamp has genuinely changed.
+    println!("cargo:rerun-if-changed=.stamp-every-build");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }
