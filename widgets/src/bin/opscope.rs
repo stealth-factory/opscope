@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -16,7 +16,7 @@
 
 //! Every widget here, what it does, and whether it will work on this machine.
 //!
-//! A port of start.py, which reads the directory it sits in and parses each
+//! A port of start.py, which read the directory it sat in and parsed each
 //! script's docstring. A compiled binary has no directory to read, so the
 //! same three things - the summary, the paragraph under it, and the picture
 //! from the doc page - are compiled in from the same files the Python
@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use toys_core as tc;
+use opscope_core as tc;
 
 /// Each widget's own words, taken from the files that already hold them:
 /// the help text every binary answers `--help` with, and the doc page that
@@ -358,7 +358,7 @@ fn main() {
         }
     }
 
-    tc::maybe_help(include_str!("start_help.txt"));
+    tc::maybe_help(include_str!("opscope_help.txt"));
     let p = palette();
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -386,7 +386,7 @@ fn main() {
             selected = WIDGETS.len() - 1;
         }
 
-        let mut body = vec![tc::title("terminal toys", w, &p.accent)];
+        let mut body = vec![tc::title("opscope", w, &p.accent)];
         body.push(tc::seg(
             &[(
                 p.dim.as_str(),
@@ -558,8 +558,12 @@ mod tests {
         }
         assert!(built.len() > 1, "no binaries found in the manifest");
         for name in built {
-            // The menu does not list itself.
-            if name == "start" {
+            // The menu does not list itself. Taken from the crate's own bin
+            // name rather than written out, because the launcher has been
+            // renamed once already and a hardcoded name here fails as
+            // "opscope is built but is not on the menu" - which reads like a
+            // missing widget rather than a stale string in this test.
+            if name == env!("CARGO_BIN_NAME") {
                 continue;
             }
             assert!(

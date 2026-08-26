@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveTime, Offset, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
-use toys_core as tc;
+use opscope_core as tc;
 
 /// Five rows per digit, as clocks.py draws them.
 const BIG: &[(char, [&str; 5])] = &[
@@ -423,7 +423,7 @@ fn state_file() -> String {
             std::env::var("HOME").unwrap_or_default()
         )
     });
-    format!("{}/terminal-toys/pomodoro.json", base)
+    format!("{}/opscope/pomodoro.json", base)
 }
 
 /// Today, in the form the state file stores.

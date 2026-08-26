@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -30,7 +30,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use toys_core as tc;
+use opscope_core as tc;
 
 /// The machine's own ports, hidden behind `o` by default: they are never
 /// the answer to "which port is my dev server on".
@@ -1258,7 +1258,7 @@ fn tunnel_dir() -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}/.local/state", std::env::var("HOME").unwrap_or_default()));
-    let path = format!("{}/terminal-toys/tunnels", base);
+    let path = format!("{}/opscope/tunnels", base);
     match std::fs::create_dir_all(&path) {
         Ok(()) => path,
         Err(_) => String::new(),

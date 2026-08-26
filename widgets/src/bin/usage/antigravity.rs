@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
-use toys_core as tc;
+use opscope_core as tc;
 
 use crate::shared::*;
 use crate::*;
@@ -635,11 +635,11 @@ fn post_body(url: &str, access: &str, body: &str) -> Result<serde_json::Value, S
             ("Authorization", &format!("Bearer {}", access)),
             ("Content-Type", "application/json"),
             // Google gates this response on the client string. Sent as
-            // plain terminal-toys it answers UNSUPPORTED_CLIENT and returns
+            // plain opscope it answers UNSUPPORTED_CLIENT and returns
             // no tier at all; the parenthesised form is the conventional way
             // to name the client being spoken for while still saying who is
             // actually calling.
-            ("User-Agent", "terminal-toys (antigravity-cli)"),
+            ("User-Agent", "opscope (antigravity-cli)"),
         ],
         body,
         20,
@@ -675,12 +675,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let live = cached(caches, "antigravity", PLAN_TTL, || {
         match antigravity_said() {
             Ok(v) => Some(v),
-            Err(why) => Some(serde_json::json!({ "terminal_toys_refusal": why })),
+            Err(why) => Some(serde_json::json!({ "opscope_refusal": why })),
         }
     });
     let said = live
         .as_ref()
-        .map(|v| text(v, "terminal_toys_refusal"))
+        .map(|v| text(v, "opscope_refusal"))
         .unwrap_or_default();
     let live = if said.is_empty() { live } else { None };
     let mut d = Data {

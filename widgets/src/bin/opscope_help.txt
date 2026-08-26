@@ -1,14 +1,14 @@
 Every widget here, what it does, and whether it will work on this machine.
 
-Thirteen scripts in a directory is a list you have to already know. This is
-the front door: pick one and it runs, quit it and you are back here.
+Fourteen binaries on a PATH is a list you have to already know. This is the
+front door: pick one and it runs, quit it and you are back here.
 
-    start [WIDGET] [ARGS...]
+    opscope [WIDGET] [ARGS...]
 
 Nothing is described twice. The name and the summary are each widget's own
 first docstring line, and the note underneath is the paragraph that follows
-it - both already maintained, and already checked by check.py, so a widget
-cannot appear here saying something its own file does not.
+it - both already maintained, and both checked by widgets/tests/check.rs,
+so a widget cannot appear here saying something its own file does not.
 
 Nothing is said here about whether a widget will work. A widget that cannot
 run says so itself, on its own screen, in its own words - which is where
@@ -17,6 +17,6 @@ place that knows what it actually needs.
 
 Keys: up/down select, enter launches, q quits.
 
-start.py rescans its directory on r. This one has no directory to
-rescan - the list is compiled in - so there is no recheck key here,
-and none is advertised.
+The Python original rescanned its directory on r. This one has no directory
+to rescan - the list is compiled in - so there is no recheck key here, and
+none is advertised.

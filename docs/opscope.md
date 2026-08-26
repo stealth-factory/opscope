@@ -6,7 +6,7 @@ The front door: every widget, what it does, and whether it will work on this
 machine.
 
 ```
-╺━ TERMINAL TOYS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  13 widgets · 2 need something first   ↵ launches one, q leaves
 
  ▸ netwatch     Which processes are using the network, how much…   ss installed
@@ -133,7 +133,7 @@ on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
 `link`, `netwatch`, `latency` and `herdr-panes` all do this, via
-`cannot_start` in `toys-core`. The first two used to exit; the second two used
+`cannot_start` in `opscope-core`. The first two used to exit; the second two used
 to run and quietly show nothing, which was worse.
 
 ## Launching## Launching

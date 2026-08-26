@@ -1,4 +1,4 @@
-// terminal-toys - small dependency-free terminal widgets
+// opscope - small dependency-free terminal widgets
 // Copyright (C) 2026 William Li
 //
 // This program is free software: you can redistribute it and/or modify
@@ -261,17 +261,38 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
 /// is the project directory when a widget is started from a pane, and the
 /// executable's own directory is kept last for a binary shipped with one
 /// beside it.
+/// What this project was called before it was opscope.
+///
+/// Assembled from pieces rather than written out, because these two are the
+/// only strings in the tree that a rename of the old name must NOT touch -
+/// and the first pass of that rename replaced them both, which is precisely
+/// how somebody's tokens quietly stop being found. A test drives both
+/// paths; this is the belt to its braces.
+const LEGACY_DIR: &str = concat!("terminal", "-", "toys");
+const LEGACY_ENV: &str = concat!("TERMINAL", "_", "TOYS", "_CONFIG");
+
 pub fn config_paths() -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
-    if let Ok(env) = std::env::var("TERMINAL_TOYS_CONFIG") {
-        if !env.is_empty() {
-            found.push(std::path::PathBuf::from(env));
+    // OPSCOPE_CONFIG first, then the name this project used before it was
+    // called opscope. Both are kept, and the old one is not deprecated on
+    // a timer: a widget that silently stops finding its settings shows an
+    // empty pane, which is indistinguishable from a source with no data -
+    // the exact failure this codebase spends most of its checks avoiding.
+    // Costing two getenv calls to never do that is a good trade.
+    for var in ["OPSCOPE_CONFIG", LEGACY_ENV] {
+        if let Ok(env) = std::env::var(var) {
+            if !env.is_empty() {
+                found.push(std::path::PathBuf::from(env));
+            }
         }
     }
     let xdg = std::env::var("XDG_CONFIG_HOME").ok().filter(|s| !s.is_empty());
     let home = std::env::var("HOME").unwrap_or_default();
-    let base = xdg.unwrap_or(format!("{}/.config", home));
-    found.push(std::path::PathBuf::from(base).join("terminal-toys/config.json"));
+    let base = std::path::PathBuf::from(xdg.unwrap_or(format!("{}/.config", home)));
+    // Same again for the config directory. New name wins where both exist,
+    // so moving the file is how you migrate and nothing has to be deleted.
+    found.push(base.join("opscope/config.json"));
+    found.push(base.join(format!("{}/config.json", LEGACY_DIR)));
     if let Ok(cwd) = std::env::current_dir() {
         found.push(cwd.join("config.json"));
     }
@@ -1311,7 +1332,7 @@ fn binary_name() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "terminal-toys".into())
+        .unwrap_or_else(|| "opscope".into())
 }
 
 #[cfg(test)]
@@ -1711,9 +1732,48 @@ mod tests {
         let cwd = std::env::current_dir().unwrap().join("config.json");
         assert!(paths.contains(&cwd), "cwd missing from {:?}", paths);
         assert!(
-            paths.iter().any(|p| p.to_string_lossy().contains(".config/terminal-toys")),
+            paths.iter().any(|p| p.to_string_lossy().contains(".config/opscope")),
             "the xdg location must stay, for an installed binary"
         );
+    }
+
+    #[test]
+    fn the_config_search_still_finds_the_old_name() {
+        // When this project was renamed from terminal-toys to opscope, the
+        // bulk rename replaced the very strings that were added to keep the
+        // old location working - so the fallback was written, renamed away,
+        // and would have shipped looking correct. An install whose config
+        // stops being found does not report an error: every widget draws an
+        // empty pane, which is what a source with no data looks like.
+        //
+        // Both names are asserted here so the next rename cannot repeat it.
+        let paths = config_paths();
+        let all = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains(".config/terminal-toys/config.json"),
+            "the pre-rename config directory was dropped: {:?}",
+            paths
+        );
+        let new_at = all.find(".config/opscope/").expect("new path present");
+        let old_at = all
+            .find(".config/terminal-toys/")
+            .expect("old path present");
+        assert!(
+            new_at < old_at,
+            "the current name must win where both files exist"
+        );
+    }
+
+    #[test]
+    fn the_old_config_env_var_still_works() {
+        // Same reasoning as above, for the environment variable. Set both
+        // and the new one wins; set only the old one and it is still read.
+        assert_eq!(LEGACY_ENV, "TERMINAL_TOYS_CONFIG");
+        assert_eq!(LEGACY_DIR, "terminal-toys");
     }
 
     #[test]

@@ -218,9 +218,9 @@ jobs:
             v[0-9]*) version="${GITHUB_REF_NAME}" ;;
             *)       version="dev" ;;
           esac
-          name="terminal-toys-${version}-${{ matrix.target }}"
+          name="opscope-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          # The binaries, and the docs that explain them - `start` embeds
+          # The binaries, and the docs that explain them - `opscope` embeds
           # them but a person reading the tarball has no other copy.
           for b in target/${{ matrix.target }}/release/*; do
             [ -f "$b" ] && [ -x "$b" ] || continue
@@ -237,8 +237,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            terminal-toys-*.tar.gz
-            terminal-toys-*.tar.gz.sha256
+            opscope-*.tar.gz
+            opscope-*.tar.gz.sha256
           if-no-files-found: error
 
   publish:
