@@ -328,8 +328,8 @@ disguise: no process, no port, no section.
 This is the one agent here with **no account-wide quota endpoint at all**.
 Every other tab can report a limit from a server whatever is running locally;
 this one cannot, because the numbers exist in a process rather than on an
-account. So `[+]` lists it under `No quota published by:` and says which of
-the two reasons applies — a tier it could not read, or the commoner one:
+account. So on `[+]` it appears under its own name, with which of the two reasons
+applies — a tier it could not read, or the commoner one:
 
 ```
   ANTIGRAVITY
@@ -338,9 +338,17 @@ the two reasons applies — a tier it could not read, or the commoner one:
    appear here.
 ```
 
-That line used to be empty whenever the tier read perfectly well, which is
-most of the time — so the summary named the agent as quiet and then said
+That sentence used to be empty whenever the tier read perfectly well, which
+is most of the time — so the summary named the agent as quiet and then said
 nothing about why.
+
+**The roll-call is what is left over.** `No quota published by: …` once led
+this block and named every quiet agent, with the explanations below it. That
+reads backwards, and it said the same thing twice for any agent that had a
+reason, since each reason already opens by saying there is no quota. Now
+each agent that can explain itself leads with its own heading, and the
+roll-call lists only those with nothing to say — vanishing entirely when
+they all have.
 
 The tier comes from the endpoint the CLI authenticates against:
 

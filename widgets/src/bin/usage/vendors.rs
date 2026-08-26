@@ -87,6 +87,53 @@ fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
     groups.sort_by(|a, b| worst(&b.1).total_cmp(&worst(&a.1)));
 }
 
+/// The agents publishing nothing, each under its own name.
+///
+/// The order used to be the other way round: one "No quota published by:
+/// grok, antigravity." and then, below it, the headings explaining them.
+/// That reads backwards - the reader meets a list of names and has to carry
+/// them down to the paragraphs - and it stated the same fact twice for
+/// every agent that had a reason, because each reason already opens by
+/// saying there is no quota.
+///
+/// So the roll-call is what is left over. Only agents with nothing to say
+/// appear in it, and when every quiet agent has explained itself there is
+/// no such line at all.
+///
+/// Split out from summary_tab because the State it needs cannot be built
+/// from another module - every agent's Data keeps its fields private - so
+/// this is the only shape the ordering is testable in.
+fn quiet_block(said: &[(&str, String, bool)], w: usize, p: &Palette) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut unexplained: Vec<&str> = Vec::new();
+    for (name, note, warn) in said {
+        if note.is_empty() {
+            unexplained.push(name);
+            continue;
+        }
+        rows.push(tc::seg(
+            &[(p.lbl.as_str(), format!("  {}", name.to_uppercase()))],
+            w - 1,
+        ));
+        let tone = if *warn { p.warn.as_str() } else { p.dim.as_str() };
+        rows.extend(
+            wrap_text(note, w.saturating_sub(5).max(20))
+                .into_iter()
+                .map(|l| tc::seg(&[(tone, format!("   {}", l))], w - 1)),
+        );
+        rows.push(String::new());
+    }
+    if !unexplained.is_empty() {
+        rows.extend(no_local(
+            &format!("No quota published by: {}.", unexplained.join(", ")),
+            "",
+            w,
+            p,
+        ));
+    }
+    rows
+}
+
 fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     let mut groups: Vec<(&str, Vec<Lane>)> = Vec::new();
     let mut quiet: Vec<&str> = Vec::new();
@@ -300,44 +347,19 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     }
     if !quiet.is_empty() {
         rows.push(String::new());
-        rows.extend(no_local(
-            &format!("No quota published by: {}.", quiet.join(", ")),
-            "",
-            w,
-            p,
-        ));
-        // Antigravity is quiet for a reason it can name, and the reason is
-        // the useful part - "no quota published" says the same thing about a
-        // machine that has never signed in and one whose token lapsed an
-        // hour ago. Its own heading, under that line, so the sentence has
-        // something to belong to.
-        if quiet.contains(&"grok") {
-            let note = crate::grok::why_no_lane(&s.grok);
-            if !note.is_empty() {
-                rows.push(String::new());
-                rows.push(tc::seg(&[(p.lbl.as_str(), "  GROK".into())], w - 1));
-                rows.extend(
-                    wrap_text(note, w.saturating_sub(5).max(20))
-                        .into_iter()
-                        .map(|l| tc::seg(&[(p.dim.as_str(), format!("   {}", l))], w - 1)),
-                );
+        let mut said: Vec<(&str, String, bool)> = Vec::new();
+        for name in &quiet {
+            match *name {
+                "grok" => said.push((name, crate::grok::why_no_lane(&s.grok).to_string(), false)),
+                // Antigravity's can be a credential that has lapsed, which
+                // is the reader's to fix, so it keeps the warning tone.
+                "antigravity" => {
+                    said.push((name, crate::antigravity::why_no_lane(&s.antigravity), true))
+                }
+                _ => said.push((name, String::new(), false)),
             }
         }
-        if quiet.contains(&"antigravity") {
-            let note = crate::antigravity::why_no_lane(&s.antigravity);
-            if !note.is_empty() {
-                rows.push(String::new());
-                rows.push(tc::seg(
-                    &[(p.lbl.as_str(), "  ANTIGRAVITY".into())],
-                    w - 1,
-                ));
-                rows.extend(
-                    wrap_text(&note, w.saturating_sub(5).max(20))
-                        .into_iter()
-                        .map(|l| tc::seg(&[(p.warn.as_str(), format!("   {}", l))], w - 1)),
-                );
-            }
-        }
+        rows.extend(quiet_block(&said, w, p));
     }
     rows
 }
@@ -394,6 +416,77 @@ fn unknown(name: &str, installed: &HashMap<String, Presence>, w: usize, p: &Pale
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rendered rows with the colour escapes stripped, so a test can read
+    /// what is on screen rather than how it was painted.
+    fn plain(rows: &[String]) -> Vec<String> {
+        let strip = |s: &String| {
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out.trim_end().to_string()
+        };
+        rows.iter().map(strip).collect()
+    }
+
+    #[test]
+    fn a_quiet_agent_is_explained_under_its_own_name() {
+        let p = palette();
+        let said = vec![(
+            "antigravity",
+            "no quota - it publishes none to any server.".to_string(),
+            true,
+        )];
+        let rows = plain(&quiet_block(&said, 90, &p));
+        let head = rows
+            .iter()
+            .position(|r| r.contains("ANTIGRAVITY"))
+            .expect("a heading");
+        let line = rows
+            .iter()
+            .position(|r| r.contains("publishes none"))
+            .expect("the reason");
+        assert!(head < line, "the sentence came before the name it is about:\n{:#?}", rows);
+
+        // And when every quiet agent has said why, the roll-call that used
+        // to lead is gone rather than repeating them.
+        assert!(
+            !rows.iter().any(|r| r.contains("No quota published by")),
+            "named twice:\n{:#?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn an_agent_with_nothing_to_say_is_still_named() {
+        // The roll-call is not dropped, only reduced to what is left.
+        let p = palette();
+        let said = vec![
+            ("antigravity", "no quota - the app is closed.".to_string(), true),
+            ("copilot", String::new(), false),
+        ];
+        let rows = plain(&quiet_block(&said, 90, &p));
+        let roll = rows
+            .iter()
+            .find(|r| r.contains("No quota published by"))
+            .expect("a roll-call for the one with no reason");
+        assert!(roll.contains("copilot"), "{}", roll);
+        assert!(!roll.contains("antigravity"), "explained and listed: {}", roll);
+        // The explained one still leads with its heading.
+        let head = rows.iter().position(|r| r.contains("ANTIGRAVITY")).unwrap();
+        let rollat = rows.iter().position(|r| r.contains("No quota published by")).unwrap();
+        assert!(head < rollat, "roll-call above the explanations:\n{:#?}", rows);
+    }
 
     #[test]
     fn an_agent_with_no_quota_is_named_rather_than_dropped() {
