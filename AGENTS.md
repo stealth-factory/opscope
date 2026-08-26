@@ -156,6 +156,18 @@ which the compiler now makes impossible. It went with the Python.
   because the stale line it was written to catch had already been corrected
   in another session's dirty tree. Run a new check against `HEAD` — stash,
   or `git show HEAD:<path>` the files it reads — before believing it.
+- **A build script that emits any `rerun-if-*` stops watching files.** The
+  rule that cargo reruns a script when any file in the package changes
+  applies only to a script emitting no `rerun-if-*` directive at all. One
+  `rerun-if-env-changed` is enough to override it, so deleting the
+  `rerun-if-changed` watches here did not make the version stamp always
+  rebuild - it made it rebuild almost never, and `--version` reported a
+  four-commit-old sha with a stale `-dirty` while the tree was clean. A
+  full thirty-second rebuild did not move it. Watching nothing and watching
+  everything are both wrong: unconditional reruns relink all fourteen
+  binaries on every no-op build, measured at 28s against 0.04s. Watch the
+  git files `git rev-parse --git-path` resolves - the only form that works
+  in a linked worktree, where `.git` is a file - plus the source trees.
 - **The commit that removes a secret is the likeliest place to restate it.**
   "The fixture used `<the actual name>`, which is a device on this tailnet"
   is the most natural sentence to write when documenting the fix, and it
