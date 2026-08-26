@@ -53,6 +53,17 @@ in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
 alongside it. 24-bit colour, and a full redraw each frame so everything
 reflows when you resize the pane.
 
+Download the ones for your machine from the
+[latest release](https://github.com/stealth-factory/terminal-toys/releases/latest)
+— Linux x86-64, macOS Apple Silicon, macOS Intel. Every tarball ships with a
+`.sha256` beside it:
+
+```sh
+tar -xzf terminal-toys-*.tar.gz && cd terminal-toys-*/
+```
+
+Or build them yourself, which needs only a Rust toolchain:
+
 ```sh
 cargo build --release   # fourteen binaries in ./target/release
 ```
@@ -132,6 +143,7 @@ Four pages are about the repository rather than a widget:
 | [Internals](docs/internals.md) | `toys-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
 | [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
 | [Building Herdr panels](docs/building-herdr-panels.md) | resize semantics, focus, and the layout mistakes worth skipping |
+| [Releasing](docs/releasing.md) | how a version is decided, what merging the release PR sets off, and what to do when it goes wrong |
 
 ## Bundled skill
 
