@@ -303,7 +303,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             // Two lines because both halves are worth having and neither
             // fits beside the other at the widths these panes are dragged
             // to: what the number is, and what to do about it. Clipping one
-            // to keep them on a single row would leave "usage.grok_pin",
+            // to keep them on a single row would leave "agent_usage.grok_pin",
             // which names a setting that does not exist.
             rows.push(tc::seg(
                 &[
@@ -318,7 +318,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
             rows.push(tc::seg(
                 &[(
                     p.dim.as_str(),
-                    "     Set usage.grok_ping in config.json to poll x.ai instead.".into(),
+                    "     Set agent_usage.grok_ping in config.json to poll x.ai instead.".into(),
                 )],
                 w - 1,
             ));

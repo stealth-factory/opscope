@@ -37,6 +37,11 @@ struct Widget {
 
 const WIDGETS: &[Widget] = &[
     Widget {
+        stem: "agent-usage",
+        help: include_str!("agent-usage_help.txt"),
+        doc: include_str!("../../../docs/agent-usage.md"),
+    },
+    Widget {
         stem: "clocks",
         help: include_str!("clocks_help.txt"),
         doc: include_str!("../../../docs/clocks.md"),
@@ -97,11 +102,6 @@ const WIDGETS: &[Widget] = &[
         stem: "tailnet",
         help: include_str!("tailnet_help.txt"),
         doc: include_str!("../../../docs/tailnet.md"),
-    },
-    Widget {
-        stem: "usage",
-        help: include_str!("usage_help.txt"),
-        doc: include_str!("../../../docs/usage.md"),
     },
 ];
 
