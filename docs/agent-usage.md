@@ -94,7 +94,7 @@ the vendor, so a busy tab and an empty summary row can both be true. Claude
 needs a signed-in token and Anthropic's usage endpoint; Cursor needs
 `~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
 in `~/.copilot/config.json`; Grok needs either `creditUsagePercent` in
-`~/.grok/logs/unified.jsonl` or `usage.grok_ping` to poll x.ai. Each of those
+`~/.grok/logs/unified.jsonl` or `agent_usage.grok_ping` to poll x.ai. Each of those
 is a different missing step, so each quiet agent says which one it is.
 
 A lane whose reading came from a cache rather than a live call says `cached`
@@ -434,7 +434,7 @@ reason, since each reason already opens by saying there is no quota. Claude,
 Cursor, Grok and Copilot now explain themselves the same way Antigravity does,
 so the roll-call lists only a name we still have nothing to say about —
 vanishing entirely when they all have. An agent that is neither detected nor
-listed in `usage.agents` is not on this screen at all.
+listed in `agent_usage.agents` is not on this screen at all.
 
 The tier comes from the endpoint the CLI authenticates against:
 

@@ -175,7 +175,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
 
 /// The summary, limited to the agents that have a tab on this machine.
 ///
-/// Discovery and `usage.agents` already decided who is worth showing; `[+]`
+/// Discovery and `agent_usage.agents` already decided who is worth showing; `[+]`
 /// used to walk every name in ORDER instead, so a quiet agent the reader
 /// never enabled still landed in a roll-call at the bottom, and a quiet
 /// agent they *did* enable got only that roll-call rather than a section.
@@ -567,7 +567,7 @@ mod tests {
             "no quota · no token - Cursor has not signed in here"
         ));
         assert!(quiet_is_actionable(
-            "no quota · asking x.ai is off (set usage.grok_ping to poll)"
+            "no quota · asking x.ai is off (set agent_usage.grok_ping to poll)"
         ));
         assert!(!quiet_is_actionable(
             "no quota · Anthropic answered, and published no limit percentages."

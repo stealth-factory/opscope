@@ -735,7 +735,7 @@ pub fn why_no_lane(d: &Data) -> String {
             .into();
     }
     if d.quota_every <= 0.0 {
-        return "no quota · asking x.ai is off (set usage.grok_ping to poll) and \
+        return "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
                 ~/.grok/logs/unified.jsonl has no creditUsagePercent."
             .into();
     }
