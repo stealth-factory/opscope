@@ -1,0 +1,22 @@
+Config: every setting the widgets actually read, and a way to change it.
+
+The valid key set is config.example.json, compiled in, so a key added there
+appears here. Each row is one setting: what it is now, what the example uses,
+and whether the file sets it at all. Tokens stay hidden until you ask.
+
+The path on the first line is the file the widgets would actually read — first
+match among OPSCOPE_CONFIG, the XDG directory, ./config.json and beside the
+binary. A write goes there and nowhere else.
+
+A running widget will not pick a change up until it restarts. This pane says
+which one.
+
+    config
+
+Keys: up/down (and PgUp/PgDn, Home/End) move the list. Enter opens a field to
+edit; a boolean is toggled and written at once. The value is checked against
+the example's shape before anything is written. s toggles whether tokens are
+shown. r refreshes from disk. c copies a value that is not a token. q quits.
+
+Writes are atomic and a newly created file is 0600. A value that would leave
+the file unreadable is refused.

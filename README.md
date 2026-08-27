@@ -48,6 +48,7 @@ nothing at all — it just looks good, and it knows it.
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/100)) | [read →](docs/netwatch.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](docs/link.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
+| **`config`** | Every setting the widgets actually read, what it is set to, and a way to change it without hand-editing a git-ignored file. | — | [read →](docs/config.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
 **Four are Linux-only today.** `latency`, `ports`, `netwatch` and `link` read

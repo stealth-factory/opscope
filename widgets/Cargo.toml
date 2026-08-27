@@ -48,6 +48,10 @@ name = "clocks"
 path = "src/bin/clocks.rs"
 
 [[bin]]
+name = "config"
+path = "src/bin/config.rs"
+
+[[bin]]
 name = "herdr-panes"
 path = "src/bin/herdr-panes.rs"
 

@@ -435,6 +435,41 @@ pub fn load_config(section: &str) -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// The file `load_config` would actually read: the first path that exists
+/// and parses. `None` when nothing does, so a writer can create the
+/// preferred location rather than guessing — writing anywhere else is a
+/// silent no-op, because the next `load_config` will not look there.
+pub fn resolved_config_path() -> Option<std::path::PathBuf> {
+    first_readable_config(&config_paths())
+}
+
+/// The same rule as `load_config`, pointed at an explicit list so a test
+/// can feed it files without touching `OPSCOPE_CONFIG` and racing every
+/// other test that reads `config_paths`.
+pub fn first_readable_config(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    for path in paths {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// Where a new config should be created when nothing yet parses.
+///
+/// The first entry of `config_paths` is the highest-priority location, so
+/// a file created there is the one the next `load_config` will read.
+pub fn default_config_path() -> std::path::PathBuf {
+    config_paths()
+        .into_iter()
+        .next()
+        .expect("config_paths is never empty")
+}
+
 /// A setting, or the default when it is absent or the wrong shape.
 pub fn cfg_f64(cfg: &serde_json::Value, key: &str, fallback: f64) -> f64 {
     cfg.get(key).and_then(|v| v.as_f64()).unwrap_or(fallback)
@@ -1879,8 +1914,8 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: fourteen binaries that disagree about how to say their own version
-    // are fourteen answers to one question. netwatch used to answer this
+    // is: fifteen binaries that disagree about how to say their own version
+    // are fifteen answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {
@@ -2400,6 +2435,35 @@ mod tests {
             new_at < old_at,
             "the current name must win where both files exist"
         );
+    }
+
+    #[test]
+    fn first_readable_config_is_the_first_that_parses() {
+        // load_config returns from the first file that *parses*, even when
+        // that file has no such section. A writer that picks any later
+        // path is editing a file nobody will read.
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-config-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.json");
+        let first = dir.join("first.json");
+        let second = dir.join("second.json");
+        std::fs::write(&broken, "{").unwrap();
+        std::fs::write(&first, "{\"a\":1}").unwrap();
+        std::fs::write(&second, "{\"b\":2}").unwrap();
+        let missing = dir.join("missing.json");
+        assert_eq!(
+            first_readable_config(&[missing, broken.clone(), first.clone(), second]),
+            Some(first)
+        );
+        assert_eq!(first_readable_config(&[broken]), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
