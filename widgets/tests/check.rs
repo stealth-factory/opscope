@@ -653,14 +653,20 @@ fn widget_names_in_the_launcher_sample_are_current() {
         if !in_sample {
             continue;
         }
-        let trimmed = line.trim_start().trim_start_matches("▸ ").trim_start();
-        let stem = trimmed.split_whitespace().next().unwrap_or("");
-        if stem.is_empty()
+        // A menu row is a stem, then a column of spaces, then the summary.
+        // `needs \`ss\`` in the same listing has only one space after the
+        // word, and is not a widget.
+        let rest = line.trim_start().trim_start_matches("▸ ").trim_start();
+        let Some(at) = rest.find(|c: char| c.is_whitespace()) else {
+            continue;
+        };
+        let stem = &rest[..at];
+        let pad = rest[at..].chars().take_while(|c| c.is_whitespace()).count();
+        if pad < 2
+            || stem.is_empty()
             || stem.starts_with('╺')
             || stem == "…"
-            || !stem
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c == '-')
+            || !stem.chars().all(|c| c.is_ascii_lowercase() || c == '-')
         {
             continue;
         }
