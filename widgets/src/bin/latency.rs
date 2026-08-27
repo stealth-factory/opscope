@@ -54,16 +54,9 @@ const FADE: f64 = 0.60;
 
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use opscope_core as tc;
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 #[derive(Clone, Default)]
 struct Target {
@@ -179,7 +172,6 @@ fn fmt_ms(value: Option<f64>) -> String {
     }
 }
 
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// One target's recent history at one character per ping.
 ///
@@ -208,7 +200,7 @@ fn sparkline(samples: &[(f64, Option<f64>)], n: usize, p: &Palette) -> Vec<(Stri
                 } else {
                     &p.bad
                 };
-                (colour.clone(), SPARK[((frac * 7.99) as usize).min(7)])
+                (colour.clone(), tc::SPARK[((frac * 7.99) as usize).min(7)])
             }
         };
         match out.last_mut() {
@@ -352,7 +344,7 @@ fn watch(
             None => continue,
         };
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let stamp = now();
+            let stamp = tc::now();
             let mut guard = match shared.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -409,7 +401,7 @@ fn watch(
         if let Ok(mut guard) = shared.lock() {
             let target = &mut guard[index];
             if target.down_since.is_none() {
-                target.down_since = Some(now());
+                target.down_since = Some(tc::now());
                 drop(guard);
                 log(&events, &hue, &label, "DOWN", "ping exited, retrying".into());
             } else {
@@ -418,7 +410,7 @@ fn watch(
         }
         if let Ok(mut guard) = shared.lock() {
             guard[index].alive = false;
-            guard[index].record(now(), None, window);
+            guard[index].record(tc::now(), None, window);
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -470,7 +462,6 @@ fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
 
 /// A braille cell is two dots wide and four tall, so one character holds
 /// eight addressable points. The bit for each is fixed by the encoding.
-const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 /// Plot one series on a dot canvas eight times finer than the cells.
 ///
@@ -505,7 +496,7 @@ fn braille_canvas(
     };
     let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
         if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
-            grid[y as usize / 4][x as usize / 2] |= BRAILLE[y as usize % 4][x as usize % 2];
+            grid[y as usize / 4][x as usize / 2] |= tc::BRAILLE[y as usize % 4][x as usize % 2];
         }
     };
     // A single reading is a measurement and gets its dot: unlike netwatch's
@@ -546,54 +537,6 @@ fn braille_canvas(
     grid
 }
 
-/// Lay the canvases over one another, cell by cell.
-///
-/// A braille cell can hold the dots of two traces but only one colour, and
-/// there is no honest way to show both: whichever colour the cell takes, the
-/// other trace's samples are drawn in a hue that is not theirs. That is a
-/// number on screen that is not real, which is the one thing this collection
-/// does not do - and it is not hypothetical, it hid a target completely. Two
-/// hosts eleven milliseconds apart at 130ms sit 0.036 of a decade apart where
-/// a dot row is 0.065, so they contest nearly every cell they occupy, and
-/// merging painted the whole of one of them in the other's colour.
-///
-/// So a cell belongs to exactly one trace and shows only that trace's dots.
-/// Where several want it, ownership advances once per contested cell, which
-/// makes a contested stretch read as interleaved dashed lines - each dot its
-/// own colour - rather than one solid line belonging to nobody. Traces that
-/// never meet are unaffected and stay solid.
-///
-/// The turn is counted over contested cells and not taken from the column
-/// number, which is the same bug one level in. Indexing by `x` looks fair
-/// and is not: when the contested cells all share a parity - which happens
-/// as soon as one series has a gap in every other column, and the column
-/// width is free-form config - `x % 2` picks the same claimant every time
-/// and the other trace is absent from the whole stretch. That is the
-/// failure this function exists to prevent, in a narrower form.
-fn overlay(layers: &[(String, Vec<Vec<u8>>)], cols: usize, rows: usize) -> Vec<Vec<(String, u8)>> {
-    let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
-    for y in 0..rows {
-        // Counts contested cells along this row, so every claimant takes a
-        // turn no matter which columns the contention lands on.
-        let mut turn = 0usize;
-        for x in 0..cols {
-            let dots = |canvas: &Vec<Vec<u8>>| {
-                canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
-            };
-            let claims: Vec<&(String, Vec<Vec<u8>>)> =
-                layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
-            let Some((colour, canvas)) = claims.get(turn % claims.len().max(1)) else {
-                continue;
-            };
-            cells[y][x] = ((*colour).clone(), dots(canvas));
-            if claims.len() > 1 {
-                turn += 1;
-            }
-        }
-    }
-    cells
-}
-
 /// Log-scale plot of every target's round trip.
 ///
 /// Log because the targets on one screen can differ by two orders of
@@ -617,7 +560,7 @@ fn graph(
     // Two dot columns to a cell, so the chart holds twice the buckets it
     // did when each one had a whole character to itself.
     let slots = gw * 2;
-    let newest = (now() / bucket).floor();
+    let newest = (tc::now() / bucket).floor();
     let series: Vec<(usize, Vec<Option<f64>>)> = targets
         .iter()
         .enumerate()
@@ -684,7 +627,7 @@ fn graph(
             Some(_) => layers.push((p.faded[idx % p.faded.len()].clone(), canvas)),
         }
     }
-    let mut cells = overlay(&layers, gw, gh);
+    let mut cells = tc::overlay(&layers, gw, gh);
     // The focused trace takes its cells outright rather than being merged
     // into them.
     //
@@ -1427,7 +1370,7 @@ mod tests {
 
     /// Every dot bit in one column of a braille cell.
     fn column_mask(x: usize) -> u8 {
-        BRAILLE.iter().fold(0u8, |acc, row| acc | row[x])
+        tc::BRAILLE.iter().fold(0u8, |acc, row| acc | row[x])
     }
 
     #[test]
@@ -1471,7 +1414,7 @@ mod tests {
         let top = braille_canvas(&high, 0.0, 1.0, 4, 1);
         let bottom = braille_canvas(&low, 0.0, 1.0, 4, 1);
         assert!(top[0][0] != 0 && bottom[0][0] != 0, "both must contest");
-        let cells = overlay(
+        let cells = tc::overlay(
             &[
                 ("first".to_string(), top.clone()),
                 ("second".to_string(), bottom.clone()),
@@ -1510,7 +1453,7 @@ mod tests {
         // level in.
         let a = vec![vec![0b0000_0001u8, 0, 0b0000_0001, 0]];
         let b = vec![vec![0b0100_0000u8, 0, 0b0100_0000, 0]];
-        let cells = overlay(&[("first".to_string(), a), ("second".to_string(), b)], 4, 1);
+        let cells = tc::overlay(&[("first".to_string(), a), ("second".to_string(), b)], 4, 1);
         let owners: Vec<&str> = (0..4)
             .filter(|x| cells[0][*x].1 != 0)
             .map(|x| cells[0][x].0.as_str())

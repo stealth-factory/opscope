@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
 use opscope_core as tc;
@@ -38,13 +38,6 @@ const SETTLE_FRAMES: usize = 8;
 /// Tail of a cycle's history that counts as "lately".
 const CHURN_DAYS: usize = 6;
 const STATE_ORDER: &[&str] = &["triage", "backlog", "unstarted", "started"];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// A Linear personal API key, from config.json or the environment.
 fn token(cfg: &serde_json::Value) -> (String, &'static str) {
@@ -281,7 +274,7 @@ fn ago(t: f64) -> String {
     if t <= 0.0 {
         return "--".into();
     }
-    let s = (now() - t) as i64;
+    let s = (tc::now() - t) as i64;
     if s < 60 {
         format!("{}s", s)
     } else if s < 3600 {
@@ -807,7 +800,7 @@ fn one_pass(
         guard.window = days;
         guard.truncated = capped || cap2 || cap3 || cap4 || cap_teams;
         guard.cycles_capped = cycles_capped;
-        guard.fetched = now();
+        guard.fetched = tc::now();
         guard.err = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
         } else {
@@ -2027,14 +2020,14 @@ fn main() {
                 "c" | "C" if copy_url.is_some() => {
                     let (url, ident) = copy_url.clone().unwrap_or_default();
                     (note, note_at) = if url.is_empty() {
-                        ("that issue has no url".to_string(), now())
+                        ("that issue has no url".to_string(), tc::now())
                     } else if tc::clipboard(&url) {
-                        (format!("copied {}", ident), now())
+                        (format!("copied {}", ident), tc::now())
                     } else {
                         // Said out loud: a copy that silently did nothing
                         // is indistinguishable from one that worked until
                         // the paste comes up empty.
-                        ("could not reach the clipboard".to_string(), now())
+                        ("could not reach the clipboard".to_string(), tc::now())
                     };
                 }
                 "up" | "down" if detail.is_some() && deep.is_none() && list_len > 0 => {
@@ -2862,7 +2855,7 @@ fn main() {
                 let due = held
                     .lock()
                     .ok()
-                    .and_then(|g| g.get(&q.id).map(|(_, at)| now() - at > refresh))
+                    .and_then(|g| g.get(&q.id).map(|(_, at)| tc::now() - at > refresh))
                     .unwrap_or(true);
                 let mine = asking.lock().map(|g| !g.contains(&q.id)).unwrap_or(false);
                 if due && mine && !ui_tok.is_empty() {
@@ -2874,7 +2867,7 @@ fn main() {
                     std::thread::spawn(move || {
                         let got = fetch_project(&id, &tok, &quota);
                         if let Ok(mut g) = held.lock() {
-                            g.insert(id.clone(), (got, now()));
+                            g.insert(id.clone(), (got, tc::now()));
                         }
                         if let Ok(mut g) = asking.lock() {
                             g.remove(&id);
@@ -2950,7 +2943,7 @@ fn main() {
                 while out.len() < room {
                     out.push(String::new());
                 }
-                if !note.is_empty() && now() - note_at < 6.0 {
+                if !note.is_empty() && tc::now() - note_at < 6.0 {
                     if let Some(row) = out.last_mut() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }

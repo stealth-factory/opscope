@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{Duration as Days, NaiveDate, Utc};
 use opscope_core as tc;
@@ -56,18 +56,10 @@ const DAY_CHUNK: usize = 20;
 /// index lags a little behind a merge.
 const FRESH_DAYS: usize = 2;
 const SETTLE_FRAMES: usize = 8;
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const WEEKDAYS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const GHOST: (u8, u8, u8) = (96, 106, 124);
 const PR_RGB: (u8, u8, u8) = (180, 160, 255);
 const OK_RGB: (u8, u8, u8) = (90, 240, 160);
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// A GitHub token from config.json or the environment.
 ///
@@ -673,7 +665,7 @@ fn ago(t: f64) -> String {
     if t <= 0.0 {
         return "--".into();
     }
-    let s = now() - t;
+    let s = tc::now() - t;
     if s < 90.0 {
         format!("{}s", s as i64)
     } else if s < 5400.0 {
@@ -1095,7 +1087,7 @@ fn publish(
         if rate.is_some() {
             g.rate = rate;
         }
-        g.fetched = now();
+        g.fetched = tc::now();
     }
 }
 
@@ -1281,7 +1273,7 @@ fn main() {
                         } else {
                             format!("no clipboard: {}", url)
                         };
-                        note_at = now();
+                        note_at = tc::now();
                     }
                 }
                 "pgup" if detail => {
@@ -1848,7 +1840,7 @@ fn main() {
                     for d in &spark_days {
                         let v = s.hist.get(d).copied().unwrap_or(0);
                         marks.push(if v > 0 && top > 0 {
-                            SPARK[(((v as f64 / top as f64) * 7.99) as usize).min(7)]
+                            tc::SPARK[(((v as f64 / top as f64) * 7.99) as usize).min(7)]
                         } else {
                             ' '
                         });
@@ -1934,7 +1926,7 @@ fn main() {
                 while out.len() < room {
                     out.push(String::new());
                 }
-                if !note.is_empty() && now() - note_at < 6.0 {
+                if !note.is_empty() && tc::now() - note_at < 6.0 {
                     if let Some(row) = out.last_mut() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
