@@ -20,12 +20,11 @@ on:
   workflow_dispatch:
   # The three-platform pull-request build is a dress rehearsal: the first
   # time a release build runs should not be the tagged one. It is commented
-  # out for now because the standing release PR is opened by GITHUB_TOKEN,
-  # and GitHub holds those runs for a maintainer click — the same click
-  # this rehearsal was meant to avoid depending on. Restore the block when
-  # RELEASE_TOKEN opens that PR as a user, or when the rehearsal is worth
-  # the approval. Deliberately not every pull request: three full builds,
-  # and most changes here cannot affect it.
+  # out for now because a GITHUB_TOKEN PR sits awaiting a maintainer click —
+  # the same click this rehearsal was meant to avoid depending on. Restore
+  # the block when GH_TOKEN (or RELEASE_TOKEN) opens that PR as a user, or
+  # when the rehearsal is worth the approval. Deliberately not every pull
+  # request: three full builds, and most changes here cannot affect it.
   # pull_request:
   #   paths:
   #     - '.github/workflows/release.yml'
