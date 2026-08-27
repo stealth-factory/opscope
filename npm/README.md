@@ -24,3 +24,8 @@ downloads the Linux binaries.
 ## Source
 
 <https://github.com/stealth-factory/opscope>
+
+## License
+
+[GNU AGPL-3.0](LICENSE). Commercial licenses are available; write to
+[email@wiiiimm.codes](mailto:email@wiiiimm.codes).
