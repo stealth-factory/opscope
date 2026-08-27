@@ -3,6 +3,13 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.2.0] - 2026-08-27
+
+### Features
+
+- Rename the project, crates and launcher to opscope (#62) — **breaking**
+- Ship the widgets through npm (#59)
+
 ## [0.1.3] - 2026-08-26
 
 ### Bug Fixes
