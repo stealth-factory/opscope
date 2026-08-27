@@ -1440,6 +1440,27 @@ fn config_complaints(cfg: &Config) -> String {
 const LEGACY_SECTION_NOTE: &str =
     "config section is still called usage; rename it to agent_usage";
 
+/// The gripe as rows, wrapped so a narrow pane keeps the words that matter.
+///
+/// `seg` clips. The 65-character rename note ends at `rename it to age` in
+/// a 58-column pane, which is the documented width these are dragged to,
+/// and hides the section name the reader has to type. Continuation lines
+/// sit under the `!` rather than under the first word.
+fn gripe_lines(gripe: &str, w: usize) -> Vec<String> {
+    let budget = w.saturating_sub(4).max(8);
+    wrap_text(gripe, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                format!(" ! {}", part)
+            } else {
+                format!("   {}", part)
+            }
+        })
+        .collect()
+}
+
 fn tab_bar(
     active: &str,
     installed: &HashMap<String, Presence>,
@@ -1649,7 +1670,9 @@ fn main() {
             snapshot.err.clone()
         };
         if !gripe.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", gripe))], w - 1));
+            for line in gripe_lines(&gripe, w) {
+                rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
+            }
         }
         rows.push(tab_bar(&name, &snapshot.installed, &tabs, w, &p));
         rows.push(String::new());
@@ -1988,6 +2011,30 @@ mod tests {
         // Present-but-empty is still a hit: they created the new section.
         let blank = serde_json::json!({"agent_usage": {}});
         assert_eq!(pick_config_section(&blank), ("agent_usage", false));
+    }
+
+    #[test]
+    fn a_legacy_section_note_keeps_the_new_name_at_a_narrow_pane() {
+        // 58 is the documented width a pane is dragged to. The note is 65
+        // cells with its prefix; clipping there hid `agent_usage`.
+        let lines = gripe_lines(LEGACY_SECTION_NOTE, 58);
+        assert!(
+            lines.iter().any(|l| l.contains("agent_usage")),
+            "the section name was lost: {:?}",
+            lines
+        );
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= 57),
+            "a wrapped line still overflowed: {:?}",
+            lines
+        );
+        let tight = gripe_lines(LEGACY_SECTION_NOTE, 30);
+        assert!(
+            tight.iter().any(|l| l.contains("agent_usage")),
+            "the section name was lost at 30: {:?}",
+            tight
+        );
+        assert!(tight.len() > 1, "should have wrapped: {:?}", tight);
     }
 
     #[test]
