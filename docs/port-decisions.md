@@ -50,7 +50,7 @@ closes the overlay in four widgets while the footer beside it reads
 `[q]uit` — the key disagreeing with its own hint, and quietly, because the
 widget stays up.
 
-**`usage` is untouched.** Its `←` and `→` move between vendor tabs, which is
+**`agent-usage` is untouched.** Its `←` and `→` move between vendor tabs, which is
 lateral rather than into anything.
 
 **`pr` is a special case.** Inside its detail `↵` walks the stack, so `→`

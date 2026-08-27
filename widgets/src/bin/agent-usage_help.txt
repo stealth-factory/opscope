@@ -6,7 +6,7 @@ all outside their own session. A single table would need a shared schema that
 does not exist, so each tab shows that agent's own shape - and an agent that
 exposes nothing says so rather than showing a plausible zero.
 
-    usage [-n SECONDS]
+    agent-usage [-n SECONDS]
 
 Most of this is read from local state files. The exception is the remaining
 quota, which no agent writes to disk in a current form: Claude, Codex, Cursor

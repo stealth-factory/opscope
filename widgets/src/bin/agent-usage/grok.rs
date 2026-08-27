@@ -817,7 +817,7 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     out.push(tc::seg(
         &[(
             p.dim.as_str(),
-            "  Only your own Grok sessions update it. usage.grok_ping polls x.ai instead."
+            "  Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead."
                 .into(),
         )],
         w - 1,

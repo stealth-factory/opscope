@@ -16,7 +16,7 @@ serde_json = "1"
 # nothing at run time because LTO drops what no binary reaches.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
-# usage reads three of its six agent vendors out of SQLite files, which is
+# agent-usage reads three of its six agent vendors out of SQLite files, which is
 # what Cursor, Copilot and Antigravity each keep their history in. Python
 # has sqlite3 in its standard library; this is the equivalent, bundled so
 # that the binary still runs on a machine with no sqlite installed - the
@@ -78,5 +78,5 @@ name = "tailnet"
 path = "src/bin/tailnet.rs"
 
 [[bin]]
-name = "usage"
-path = "src/bin/usage.rs"
+name = "agent-usage"
+path = "src/bin/agent-usage.rs"

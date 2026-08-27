@@ -26,15 +26,19 @@
 //! `opscope`'s menu asserts that every `[[bin]]` in the manifest is on it, so
 //! a checker binary would have to be listed as a widget it is not.
 //!
-//! Two of check.py's five do not need porting and are recorded here rather
+//! One of check.py's five does not need porting and is recorded here rather
 //! than silently dropped:
 //!
 //! - **unbound names**: a compile error in Rust. The fault it was written
 //!   for - deployments.py losing an import and its poll thread dying for a
 //!   day - cannot reach a built binary.
-//! - **missing docs and README rows**: the docs are shared between the two
-//!   implementations and check.py already covers them. Re-checking here
-//!   would only duplicate it.
+//!
+//! Missing docs and README rows used to be left to check.py. That file went
+//! with the Python, and a rename is exactly when the gap bites: the help
+//! text and the doc page move with the source stem, but the README tables,
+//! the docs index, and a name in the launcher's sample listing do not.
+//! Those are checked here now. The launcher's own `WIDGETS` list is
+//! asserted from `opscope.rs` against every `[[bin]]` in the manifest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -221,11 +225,11 @@ fn widgets() -> BTreeMap<String, String> {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         // Each file's own tests are dropped before joining, not after. Split
         // on the first `#[cfg(test)]` of the joined blob and a widget with
-        // submodules is read only as far as its main file's tests - usage's
+        // submodules is read only as far as its main file's tests - agent-usage's
         // are two thirds of the way down, so its eight submodules, seven
         // thousand lines, were invisible to every check that did it that way.
         let mut src = without_tests(&std::fs::read_to_string(&path).unwrap_or_default());
-        // A widget split across a directory - usage - reads as one widget.
+        // A widget split across a directory - agent-usage - reads as one widget.
         let sub = dir.join(&stem);
         if sub.is_dir() {
             for part in std::fs::read_dir(&sub).expect("a widget directory").flatten() {
@@ -461,7 +465,7 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         //
         // The receiver matters: a bare `.get("` also matches every JSON
         // lookup in the file - clocks reading its own state file, link
-        // parsing `ss` output, usage reading token counts - none of which
+        // parsing `ss` output, agent-usage reading token counts - none of which
         // is config. That produced 24 false failures on the first run.
         for marker in ["cfg_f64(", "cfg_usize(", "cfg_str(", "cfg_strings(", "cfg.get("] {
             let mut from = 0;
@@ -647,6 +651,85 @@ fn every_config_read_falls_back_to_a_code_default() {
                     name, key
                 ));
             }
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn every_widget_has_a_readme_row() {
+    // check.py used to hold this, and the launcher's doc still says it does.
+    // A rename that updates the source stem and forgets the table is how a
+    // widget ships without a way to find it.
+    let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let cell = format!("**`{}`**", name);
+        if !readme.contains(&cell) {
+            wrong.push(format!("{}: no README.md table row", name));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn every_documented_widget_is_in_the_docs_index() {
+    let index = std::fs::read_to_string(root().join("docs/README.md")).expect("docs/README.md");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let doc = root().join("docs").join(format!("{}.md", name));
+        if !doc.exists() {
+            continue; // matrix is decorative and deliberately undocumented
+        }
+        let cell = format!("[`{}`]({}.md)", name, name);
+        if !index.contains(&cell) {
+            wrong.push(format!("{}: no docs/README.md row", name));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn widget_names_in_the_launcher_sample_are_current() {
+    // The sample listing is not every widget. It is the place a rename
+    // forgets: a left-column name that is not a widget is the old name.
+    let text = std::fs::read_to_string(root().join("docs/opscope.md")).expect("docs/opscope.md");
+    let widgets = widgets();
+    let mut wrong = Vec::new();
+    let mut in_sample = false;
+    for line in text.lines() {
+        if line.starts_with("```") {
+            if in_sample {
+                break; // only the opening listing, not later pictures
+            }
+            in_sample = true;
+            continue;
+        }
+        if !in_sample {
+            continue;
+        }
+        // A menu row is a stem, then a column of spaces, then the summary.
+        // `needs \`ss\`` in the same listing has only one space after the
+        // word, and is not a widget.
+        let rest = line.trim_start().trim_start_matches("▸ ").trim_start();
+        let Some(at) = rest.find(|c: char| c.is_whitespace()) else {
+            continue;
+        };
+        let stem = &rest[..at];
+        let pad = rest[at..].chars().take_while(|c| c.is_whitespace()).count();
+        if pad < 2
+            || stem.is_empty()
+            || stem.starts_with('╺')
+            || stem == "…"
+            || !stem.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        {
+            continue;
+        }
+        if !widgets.contains_key(stem) {
+            wrong.push(format!(
+                "docs/opscope.md lists {:?} in the sample and no widget is called that",
+                stem
+            ));
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
