@@ -502,6 +502,23 @@ test('release.yml reads a packed package.json as a file, not as a module', () =>
   }
 });
 
+test('release.yml publishes a local directory, not a github shorthand', () => {
+  // `npm publish npm-dist/opscope-darwin-arm64` is owner/repo, so npm
+  // tried to git-clone github.com/npm-dist/opscope-darwin-arm64.git and
+  // died 128. A leading ./ is a path. Taken from the workflow so a
+  // rewrite that drops the prefix fails here the same way it failed there.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  assert.match(yml, /npm publish "\.\/\$dir"/);
+  assert.equal(
+    (yml.match(/npm publish "\$dir"/) || []).length,
+    0,
+    'npm publish "$dir" is github shorthand for npm-dist/<name>',
+  );
+});
+
 test('nothing under npm/ still says the old project name', () => {
   // The leftover name is how npx would install a different package.
   // Built, not written, so this file is not itself a hit.
