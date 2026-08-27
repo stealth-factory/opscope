@@ -47,6 +47,61 @@ fn root() -> PathBuf {
         .expect("the repo root")
 }
 
+/// A moved helper declaration, after indent and an optional `pub`.
+///
+/// The first version of this check compared raw lines against prefixes
+/// beginning `fn` / `const`, so an indented copy or a `pub fn now(` sat
+/// unnoticed. Those are the two shapes a reintroduced helper actually
+/// takes — nested inside an `impl`/`mod`, or published from the widget.
+fn is_moved_helper(line: &str, definition: &str) -> bool {
+    let line = line.trim_start();
+    let line = line.strip_prefix("pub ").unwrap_or(line);
+    line.starts_with(definition)
+}
+
+#[test]
+fn moved_helper_matcher_sees_indent_and_pub() {
+    // The column-zero, private prefixes the first check used.
+    assert!(is_moved_helper("fn now() -> i64 {", "fn now("));
+    assert!(is_moved_helper("const SPARK: [&str; 8] = [", "const SPARK:"));
+    // The two shapes it missed: indent, and `pub`.
+    assert!(is_moved_helper("    fn now() -> i64 {", "fn now("));
+    assert!(is_moved_helper("pub fn now() -> i64 {", "fn now("));
+    assert!(is_moved_helper(
+        "    pub const SPARK: [&str; 8] = [",
+        "const SPARK:"
+    ));
+    // A call is not a definition.
+    assert!(!is_moved_helper("let now = tc::now();", "fn now("));
+    assert!(!is_moved_helper("tc::run_quiet(&cmd)", "fn run_quiet("));
+}
+
+#[test]
+fn shared_helpers_are_not_redefined_by_widgets() {
+    let moved = [
+        "fn now(",
+        "fn run(",
+        "fn run_quiet(",
+        "fn overlay(",
+        "const SPARK:",
+        "const BRAILLE:",
+        "const SPINNER:",
+    ];
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        for definition in moved {
+            if src.lines().any(|line| is_moved_helper(line, definition)) {
+                wrong.push(format!("{name}: still defines `{definition}`"));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "shared helpers copied back into widgets:\n{}",
+        wrong.join("\n")
+    );
+}
+
 /// Every selection tint a widget composes, and how it was reached.
 ///
 /// Returns `(tint, inline_colour)` - the colour named on the same line when

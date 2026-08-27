@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{Local, TimeZone};
 use opscope_core as tc;
@@ -35,17 +35,8 @@ const EVENT_LIMIT: usize = 200;
 /// running build's log grows while it is being read.
 const DETAIL_TTL: f64 = 60.0;
 const FILTERS: &[&str] = &["all", "failed", "production"];
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// The states that mean something is happening right now.
 const LIVE: &[&str] = &["BUILDING", "QUEUED", "INITIALIZING"];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// A Vercel token, and where it came from.
 ///
@@ -192,7 +183,7 @@ fn fetch_detail(uid: &str, team: &str, tok: &str) -> serde_json::Value {
     // which is the thing you would otherwise open a browser for.
     if let Some(map) = got.as_object_mut() {
         map.insert("_events".into(), fetch_events(uid, team, tok));
-        map.insert("_fetched_at".into(), serde_json::json!(now()));
+        map.insert("_fetched_at".into(), serde_json::json!(tc::now()));
     }
     got
 }
@@ -234,7 +225,7 @@ fn age(ms: Option<f64>) -> String {
     let Some(ms) = ms else {
         return "--".to_string();
     };
-    let s = (now() - ms / 1000.0).max(0.0);
+    let s = (tc::now() - ms / 1000.0).max(0.0);
     if s < 90.0 {
         format!("{}s", s as i64)
     } else if s < 5400.0 {
@@ -264,7 +255,7 @@ fn build_seconds(d: &serde_json::Value) -> Option<f64> {
         return Some((ready - building) / 1000.0);
     }
     if LIVE.contains(&text(d, "state").as_str()) {
-        return Some(now() - building / 1000.0);
+        return Some(tc::now() - building / 1000.0);
     }
     None
 }
@@ -357,7 +348,7 @@ fn columns(w: usize) -> Columns {
 /// Deployments per time bucket, coloured by the worst outcome in it.
 fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (String, usize) {
     let cols = w.saturating_sub(2).max(10);
-    let at = now() * 1000.0;
+    let at = tc::now() * 1000.0;
     let span = hours * 3_600_000.0;
     let mut buckets: Vec<Vec<&serde_json::Value>> = vec![Vec::new(); cols];
     for d in deps {
@@ -395,7 +386,7 @@ fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (S
             &p.ready
         };
         let level = ((bucket.len() as f64 / peak as f64) * 7.99) as usize;
-        parts.push((colour.as_str(), SPARK[level.min(7)].to_string()));
+        parts.push((colour.as_str(), tc::SPARK[level.min(7)].to_string()));
     }
     (tc::seg(&parts, w - 1), peak)
 }
@@ -940,7 +931,7 @@ fn main() {
                 // that was never complete is not a round that failed.
                 if !out.is_empty() || err.is_empty() {
                     guard.deployments = out;
-                    guard.fetched = now();
+                    guard.fetched = tc::now();
                 }
                 // A scope that was never complete is a caveat about which
                 // teams are being asked at all, so it goes in front of
@@ -1063,7 +1054,7 @@ fn main() {
                                     } else {
                                         "! no clipboard; select the text with the mouse".into()
                                     },
-                                    now() + 3.0,
+                                    tc::now() + 3.0,
                                 );
                             }
                         }
@@ -1116,7 +1107,7 @@ fn main() {
             Ok(g) => (g.deployments.clone(), g.err.clone(), g.fetched),
             Err(_) => return,
         };
-        if !note.0.is_empty() && now() > note.1 {
+        if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
         shown = deps.clone();
@@ -1144,7 +1135,7 @@ fn main() {
             // request a minute and keeps the rule simple.
             if held
                 .as_ref()
-                .map(|v| now() - v["_fetched_at"].as_f64().unwrap_or(0.0) > DETAIL_TTL)
+                .map(|v| tc::now() - v["_fetched_at"].as_f64().unwrap_or(0.0) > DETAIL_TTL)
                 .unwrap_or(false)
             {
                 if let Ok(mut g) = details.lock() {
@@ -1237,7 +1228,7 @@ fn main() {
         if live > 0 {
             head.push((
                 p.build.as_str(),
-                format!("  {} {} building", SPINNER[tick % SPINNER.len()], live),
+                format!("  {} {} building", tc::SPINNER[tick % tc::SPINNER.len()], live),
             ));
         }
         head.push((
@@ -1330,7 +1321,7 @@ fn main() {
                 let hi = recent.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
                 let spark: String = recent
                     .iter()
-                    .map(|x| SPARK[(((x / hi) * 7.99) as usize).min(7)])
+                    .map(|x| tc::SPARK[(((x / hi) * 7.99) as usize).min(7)])
                     .collect();
                 rows.push(tc::seg(&[(p.ready.as_str(), format!(" {}", spark))], w - 1));
             }
@@ -1370,7 +1361,7 @@ fn main() {
             let state = text(d, "state");
             let colour = state_colour(&state, &p);
             let mark = if LIVE.contains(&state.as_str()) {
-                SPINNER[tick % SPINNER.len()]
+                tc::SPINNER[tick % tc::SPINNER.len()]
             } else if state == "READY" {
                 '●'
             } else if state == "ERROR" {
