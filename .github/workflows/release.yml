@@ -363,11 +363,18 @@ jobs:
               # publishing the rest would mix two commits under one
               # version. Cut the next one.
               published_sha=$(npm view "${name}@${version}" gitHead 2>/dev/null || true)
-              if [ -n "$published_sha" ] && [ "$published_sha" != "$GITHUB_SHA" ]; then
+              published_sha=$(printf '%s' "$published_sha" | tr -d '[:space:]')
+              # Fail closed: an empty or non-SHA gitHead cannot prove this
+              # is the same commit, and skipping would mix versions.
+              if [[ ! "$published_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "${name}@${version} is already on npm but gitHead is missing or unreadable; cannot prove it is ${GITHUB_SHA}. Cut the next version." >&2
+                exit 1
+              fi
+              if [ "$published_sha" != "$GITHUB_SHA" ]; then
                 echo "${name}@${version} is already on npm from ${published_sha}; this run is ${GITHUB_SHA}. Cut the next version." >&2
                 exit 1
               fi
-              echo "${name}@${version} is already on npm"
+              echo "${name}@${version} is already on npm from this commit"
             else
               npm publish "$dir" --access public --provenance
             fi

@@ -135,7 +135,8 @@ leg in the same run.
 it after the fix is on main, or re-dispatch at that tag. If any of the
 four packages already landed on npm, that version is frozen — cut the
 next one. Re-dispatching the same tag after a different commit will
-refuse to skip a package whose `gitHead` is not this run.
+refuse to skip a package whose `gitHead` is not this run, and so will
+a package whose `gitHead` is missing or unreadable.
 
 **The release PR is not updating.** Check `release-pr.yml`'s last run. It
 exits quietly when nothing releasable has landed, which looks identical to
@@ -150,10 +151,12 @@ intended failure: trusted publishing is not configured and `NPM_TOKEN`
 is missing, and nothing was published on either side. Fix the
 publisher or the secret, then
 re-dispatch `release.yml` at that tag. A version already on npm from
-this same commit is skipped rather than republished, so a retry after
+this same commit — proven by a 40-hex `gitHead` that matches
+`GITHUB_SHA` — is skipped rather than republished, so a retry after
 npm succeeded and the GitHub step failed will finish the release. A
-package already on npm from a different commit is an error: npm cannot
-replace it, and skipping would mix two commits under one version.
+package already on npm from a different commit, or one whose
+`gitHead` cannot be read, is an error: npm cannot replace it, and
+skipping would mix two commits under one version.
 
 `gh release create` deletes its own leftover draft if the upload fails;
 if a draft is still there and blocks the retry, delete it and
