@@ -198,6 +198,12 @@ which the compiler now makes impossible. It went with the Python.
   `gh pr list --state open` and act on the number. `--jq '.[0].number'`
   needs `// empty` beside it, or jq prints the four characters `null`,
   which is a non-empty string that lands on the same wrong branch.
+- **`gh pr edit` and `gh pr create` ask GraphQL for the org's `login`,
+  `name` and `slug`.** A classic PAT with `repo` can force-push the
+  release branch and still die on those two commands, wanting `read:org`.
+  The job that first used `GH_TOKEN` pushed, then failed, leaving the
+  branch moved and the PR title untouched. `PATCH`/`POST` `/pulls` do
+  not ask for the org.
 - **Under squash merge a branch is permanently ahead of main.** The
   squashed commit is a different object, so comparing commits can never
   tell you a branch merged — a cleanup written that way refuses to delete

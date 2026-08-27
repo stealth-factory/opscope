@@ -89,9 +89,12 @@ binary no checkout can reproduce.
 
 **The release PR gets ordinary CI when it is opened by a user token.**
 `release-pr.yml` uses `GH_TOKEN` (or `RELEASE_TOKEN`) for the checkout and
-for `gh pr create`. That PAT has to belong to a collaborator with Contents
-and Pull requests read/write. Opened with `GITHUB_TOKEN` instead, the PR
-is `github-actions[bot]` and GitHub holds `ci` for a maintainer click.
+to open the PR. A classic PAT with `repo` is enough; a fine-grained one
+needs Contents and Pull requests read/write. The workflow talks to the
+pulls REST API rather than `gh pr create`, because that command's GraphQL
+asks for org fields that `repo` does not cover. Opened with
+`GITHUB_TOKEN` instead, the PR is `github-actions[bot]` and GitHub holds
+`ci` for a maintainer click.
 `release-pr.yml` still runs `cargo metadata --locked` on the bumped tree
 before offering it — the one thing that step can get wrong is leaving the
 lock disagreeing with the manifests. Editing an existing bot PR does not
