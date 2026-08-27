@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.2.1] - 2026-08-27
+
+### Bug Fixes
+
+- Read packed package.json as a file, not a module (#66)
+
 ## [0.2.0] - 2026-08-27
 
 ### Features
