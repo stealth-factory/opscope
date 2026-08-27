@@ -355,7 +355,11 @@ jobs:
           publish() {
             local dir="$1"
             local name published_sha
-            name=$(node -p 'require(process.argv[1]).name' "$dir/package.json")
+            # A relative path with no ./ is a package name to
+            # require(), so this used to look in node_modules and
+            # die with MODULE_NOT_FOUND before it reached npm.
+            # readFileSync is a file on disk.
+            name=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name' "$dir/package.json")
             if npm view "${name}@${version}" version >/dev/null 2>&1; then
               # Skip is for retrying the same commit. npm will not
               # replace a version, so a package already published
