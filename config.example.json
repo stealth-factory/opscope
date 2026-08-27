@@ -90,7 +90,9 @@
     "refresh": 120
   },
   "gha": {
-    "_comment": "Reuses github.token. Empty accounts inherits github.accounts. Empty repos means recently-pushed repos that have workflow files, capped at max_repos across those accounts — never every repo the token can see. The screen names the cap.",
+    "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts inherits github.accounts. Empty repos means recently-pushed repos that have workflow files, capped at max_repos across those accounts — never every repo the token can see. The screen names the cap.",
+    "token": "",
+    "token_env": "",
     "accounts": [],
     "repos": [],
     "window_hours": 48,

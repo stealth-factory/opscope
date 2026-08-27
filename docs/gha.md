@@ -83,6 +83,10 @@ board does not fan out over everything.
 - Otherwise: repos pushed in the last `pushed_days` that have
   `.github/workflows` files, newest first, capped at `max_repos` across
   every configured account. Empty `gha.accounts` inherits `github.accounts`.
+  Discovery pages each account forty repos at a time, newest first, until
+  the page is older than `pushed_days` or it has looked at 200. A look
+  that stops early is named on screen, so the eligible count is never
+  presented as complete when it is not.
 
 The heading always says which of those it is. `12 of 21 recently pushed
 repos with workflows` is a partial board, named as one. A repo whose
@@ -109,9 +113,11 @@ the page as the total.
 
 ## Credentials
 
-Reuses `github.token` in `config.json`, or `$GITHUB_TOKEN`. The same
-classic token `github` and `pr` already want — `repo` and `read:org`. This
-widget only reads: it does not re-run, cancel, or write anything.
+Reuses `github.token` in `config.json`, or `$GITHUB_TOKEN`. `gha.token`
+and `gha.token_env` override that when set, then fall back to the github
+section. The same classic token `github` and `pr` already want — `repo`
+and `read:org`. This widget only reads: it does not re-run, cancel, or
+write anything.
 
 A missing token is said on the widget's own screen. So is an account list
 that yielded no repos with workflows.
@@ -122,6 +128,8 @@ that yielded no repos with workflows.
 
 | Key | Default | |
 |---|---|---|
+| `token` | `github.token` | classic PAT. Empty falls back to the github section. |
+| `token_env` | `github.token_env` | environment variable to read when no config token is set. Empty falls back to github, then `$GITHUB_TOKEN`. |
 | `accounts` | `github.accounts` | org or user logins. Empty inherits the github list, then discovers. |
 | `repos` | `[]` | `owner/name` list. Empty means recently-pushed-with-workflows, capped. |
 | `window_hours` | `48` | the labelled window the counts and list cover. `w` cycles it live. |
@@ -129,7 +137,7 @@ that yielded no repos with workflows.
 | `max_repos` | `16` | cap on discovered repos. Named on screen when it cuts. |
 | `pushed_days` | `14` | how recently a repo must have been pushed to be considered. |
 
-Discovery is one GraphQL query per account. Runs are REST,
+Discovery pages each account's recently-pushed repos. Runs are REST,
 `GET /repos/{owner}/{repo}/actions/runs`, one request per repo. Jobs are
 REST too, and only for the run you open. GraphQL and REST have separate
 rate-limit buckets, so the run fetches do not compete with `github` and

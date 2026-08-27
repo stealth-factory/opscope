@@ -35,9 +35,11 @@ const WINDOWS: &[i64] = &[12, 24, 48, 168];
 const FILTERS: &[&str] = &["all", "failed", "running"];
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-/// How many recently-pushed repos to inspect per account before the cap.
-/// The cap is what is asked for runs; this is only how far discovery looks.
+/// How many recently-pushed repos to inspect per GraphQL page.
+/// The cap is what is asked for runs; this is only how far one page looks.
 const DISCOVER_EACH: usize = 40;
+/// Pages per account. 200 most recently pushed, then the screen says so.
+const DISCOVER_PAGES: usize = 5;
 /// One page of runs per repo. A repo with more in the window says so.
 const RUN_PAGE: usize = 30;
 const DETAIL_TTL: f64 = 60.0;
@@ -245,17 +247,30 @@ struct FoundRepo {
     has_workflows: bool,
 }
 
-/// Repos from one account's GraphQL answer.
+/// The repositories connection from one account's GraphQL answer.
 ///
 /// The widget asks for both `organization` and `user` in one query so a
 /// login that is either kind costs one request. The org side wins when
 /// both come back, which is the usual shape for a company login.
+fn repos_conn(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    let org = &data["organization"]["repositories"];
+    if org["nodes"].is_array() {
+        return Some(org);
+    }
+    let user = &data["user"]["repositories"];
+    if user["nodes"].is_array() {
+        return Some(user);
+    }
+    let viewer = &data["viewer"]["repositories"];
+    if viewer["nodes"].is_array() {
+        return Some(viewer);
+    }
+    None
+}
+
+/// Repos from one account's GraphQL answer.
 fn repos_from(data: &serde_json::Value) -> Vec<FoundRepo> {
-    let nodes = data["organization"]["repositories"]["nodes"]
-        .as_array()
-        .or_else(|| data["user"]["repositories"]["nodes"].as_array())
-        .or_else(|| data["viewer"]["repositories"]["nodes"].as_array());
-    let Some(nodes) = nodes else {
+    let Some(nodes) = repos_conn(data).and_then(|c| c["nodes"].as_array()) else {
         return Vec::new();
     };
     nodes
@@ -302,12 +317,21 @@ fn pick_repos(found: &[FoundRepo], pushed_since: f64, cap: usize) -> (Vec<String
     )
 }
 
-fn discover_query(login: &str) -> String {
+fn after_arg(after: Option<&str>) -> String {
+    match after {
+        Some(c) => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        None => String::new(),
+    }
+}
+
+fn discover_query(login: &str, after: Option<&str>) -> String {
     let q = serde_json::Value::String(login.to_string());
+    let at = after_arg(after);
     format!(
         r#"{{
   organization(login: {q}) {{
-    repositories(first: {n}, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false) {{
+    repositories(first: {n}, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false{at}) {{
+      pageInfo {{ hasNextPage endCursor }}
       nodes {{
         nameWithOwner isEmpty isFork pushedAt
         object(expression: "HEAD:.github/workflows") {{ ... on Tree {{ entries {{ name }} }} }}
@@ -315,7 +339,8 @@ fn discover_query(login: &str) -> String {
     }}
   }}
   user(login: {q}) {{
-    repositories(first: {n}, ownerAffiliations: OWNER, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false) {{
+    repositories(first: {n}, ownerAffiliations: OWNER, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false{at}) {{
+      pageInfo {{ hasNextPage endCursor }}
       nodes {{
         nameWithOwner isEmpty isFork pushedAt
         object(expression: "HEAD:.github/workflows") {{ ... on Tree {{ entries {{ name }} }} }}
@@ -324,16 +349,19 @@ fn discover_query(login: &str) -> String {
   }}
 }}"#,
         q = q,
-        n = DISCOVER_EACH
+        n = DISCOVER_EACH,
+        at = at
     )
 }
 
-fn viewer_repos_query() -> String {
+fn viewer_repos_query(after: Option<&str>) -> String {
+    let at = after_arg(after);
     format!(
         r#"{{
   viewer {{
     login
-    repositories(first: {n}, ownerAffiliations: OWNER, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false) {{
+    repositories(first: {n}, ownerAffiliations: OWNER, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false{at}) {{
+      pageInfo {{ hasNextPage endCursor }}
       nodes {{
         nameWithOwner isEmpty isFork pushedAt
         object(expression: "HEAD:.github/workflows") {{ ... on Tree {{ entries {{ name }} }} }}
@@ -341,7 +369,8 @@ fn viewer_repos_query() -> String {
     }}
   }}
 }}"#,
-        n = DISCOVER_EACH
+        n = DISCOVER_EACH,
+        at = at
     )
 }
 
@@ -573,6 +602,37 @@ struct State {
     window_hours: i64,
 }
 
+/// Fold a finished pass into the live state.
+///
+/// A result for a different window is dropped: `w` changes the label
+/// immediately, and keeping the old runs would put one window's numbers
+/// under another's name. The same-window empty-plus-error case still
+/// keeps whatever this window already showed, so a one-repo failure
+/// does not blank a board that had data.
+fn apply_pass(live: &mut State, got: State) {
+    if got.window_hours != live.window_hours {
+        return;
+    }
+    if !got.runs.is_empty() || got.err.is_empty() || live.runs.is_empty() {
+        live.runs = got.runs;
+        live.fetched = got.fetched;
+        live.scope = got.scope;
+    }
+    live.err = got.err;
+}
+
+/// Ask for a new window and drop figures that belonged to the old one.
+fn request_window(live: &mut State, hours: i64) {
+    if live.window_hours == hours {
+        return;
+    }
+    live.window_hours = hours;
+    live.runs.clear();
+    live.scope.clear();
+    live.fetched = 0.0;
+    live.err.clear();
+}
+
 fn created_filter(hours: i64) -> String {
     let start = Utc::now() - chrono::Duration::hours(hours);
     format!(">={}", start.format("%Y-%m-%dT%H:%M:%SZ"))
@@ -664,6 +724,61 @@ fn discover_accounts(tok: &str) -> Result<(String, Vec<String>), String> {
     Ok((viewer, accounts))
 }
 
+/// One account's recently-pushed repos, paged until they fall outside
+/// `since` or `DISCOVER_PAGES` is spent. A look that stops with more
+/// pages left is named so the eligible count is never drawn as complete.
+fn discover_account_pages(
+    tok: &str,
+    acc: &str,
+    since: f64,
+) -> Result<(Vec<FoundRepo>, Option<String>), String> {
+    let mut found = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut note = None;
+    for page in 0..DISCOVER_PAGES {
+        let query = if acc == "@me" {
+            viewer_repos_query(cursor.as_deref())
+        } else {
+            discover_query(acc, cursor.as_deref())
+        };
+        let data = match graphql(&query, tok) {
+            Ok(d) => d,
+            Err(said) => {
+                return Ok((found, Some(format!("{}: {}", acc, said))));
+            }
+        };
+        let batch = repos_from(&data);
+        let past = batch.iter().any(|r| {
+            iso_secs(&r.pushed_at).is_some_and(|at| at < since)
+        });
+        found.extend(batch);
+        if past {
+            break;
+        }
+        let Some(conn) = repos_conn(&data) else {
+            break;
+        };
+        let has_next = conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
+        let next = conn["pageInfo"]["endCursor"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if !has_next || next.is_empty() || Some(&next) == cursor.as_ref() {
+            break;
+        }
+        if page + 1 == DISCOVER_PAGES {
+            note = Some(format!(
+                "{}: looked at the {} most recently pushed",
+                acc,
+                DISCOVER_PAGES * DISCOVER_EACH
+            ));
+            break;
+        }
+        cursor = Some(next);
+    }
+    Ok((found, note))
+}
+
 fn discover_repos(
     tok: &str,
     accounts: &[String],
@@ -674,24 +789,15 @@ fn discover_repos(
     let mut found: Vec<FoundRepo> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for acc in accounts {
-        let data = if acc == "@me" {
-            match graphql(&viewer_repos_query(), tok) {
-                Ok(d) => d,
-                Err(said) => {
-                    notes.push(format!("@me: {}", said));
-                    continue;
+        match discover_account_pages(tok, acc, since) {
+            Ok((page, note)) => {
+                found.extend(page);
+                if let Some(said) = note {
+                    notes.push(said);
                 }
             }
-        } else {
-            match graphql(&discover_query(acc), tok) {
-                Ok(d) => d,
-                Err(said) => {
-                    notes.push(format!("{}: {}", acc, said));
-                    continue;
-                }
-            }
-        };
-        found.extend(repos_from(&data));
+            Err(said) => notes.push(format!("{}: {}", acc, said)),
+        }
     }
     found.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
     found.dedup_by(|a, b| a.name == b.name);
@@ -1139,12 +1245,7 @@ fn main() {
             match step {
                 Ok(Ok(got)) => {
                     if let Ok(mut g) = poller.lock() {
-                        if !got.runs.is_empty() || got.err.is_empty() || g.runs.is_empty() {
-                            g.runs = got.runs;
-                            g.fetched = got.fetched;
-                            g.scope = got.scope;
-                        }
-                        g.err = got.err;
+                        apply_pass(&mut g, got);
                     }
                 }
                 Ok(Err(said)) => {
@@ -1272,7 +1373,7 @@ fn main() {
                 }
                 "w" | "W" => {
                     if let Ok(mut g) = state.lock() {
-                        g.window_hours = tc::cycle(WINDOWS, g.window_hours);
+                        request_window(&mut g, tc::cycle(WINDOWS, g.window_hours));
                     }
                     let (lock, cond) = &*wake;
                     if let Ok(mut asked) = lock.lock() {
@@ -1895,5 +1996,99 @@ mod tests {
         assert_eq!(split_repo("acme"), None);
         assert_eq!(split_repo("acme/app/extra"), None);
         assert_eq!(split_repo("/app"), None);
+    }
+
+    fn sample_run(id: i64) -> serde_json::Value {
+        serde_json::json!({ "id": id, "status": "completed", "conclusion": "success" })
+    }
+
+    #[test]
+    fn a_result_for_another_window_does_not_relabel_the_board() {
+        let mut live = State {
+            runs: vec![sample_run(1)],
+            err: String::new(),
+            fetched: 10.0,
+            scope: "last 2d · 1 configured repo".into(),
+            window_hours: 24,
+        };
+        apply_pass(
+            &mut live,
+            State {
+                runs: vec![sample_run(2), sample_run(3)],
+                err: String::new(),
+                fetched: 20.0,
+                scope: "last 7d · 1 configured repo".into(),
+                window_hours: 168,
+            },
+        );
+        assert_eq!(live.runs.len(), 1);
+        assert_eq!(live.runs[0]["id"], 1);
+        assert_eq!(live.window_hours, 24);
+        assert_eq!(live.scope, "last 2d · 1 configured repo");
+        assert_eq!(live.fetched, 10.0);
+    }
+
+    #[test]
+    fn a_same_window_error_keeps_the_runs_this_window_already_showed() {
+        let mut live = State {
+            runs: vec![sample_run(1)],
+            err: String::new(),
+            fetched: 10.0,
+            scope: "last 2d · 1 configured repo".into(),
+            window_hours: 48,
+        };
+        apply_pass(
+            &mut live,
+            State {
+                runs: vec![],
+                err: "acme/app: 502".into(),
+                fetched: 20.0,
+                scope: "last 2d · 1 configured repo".into(),
+                window_hours: 48,
+            },
+        );
+        assert_eq!(live.runs.len(), 1);
+        assert_eq!(live.err, "acme/app: 502");
+        assert_eq!(live.fetched, 10.0);
+    }
+
+    #[test]
+    fn changing_window_drops_the_old_figures_instead_of_retinting_them() {
+        let mut live = State {
+            runs: vec![sample_run(1)],
+            err: "partial".into(),
+            fetched: 10.0,
+            scope: "last 2d · 1 configured repo".into(),
+            window_hours: 48,
+        };
+        request_window(&mut live, 12);
+        assert_eq!(live.window_hours, 12);
+        assert!(live.runs.is_empty());
+        assert!(live.scope.is_empty());
+        assert_eq!(live.fetched, 0.0);
+        assert!(live.err.is_empty());
+    }
+
+    #[test]
+    fn repos_conn_prefers_the_org_side_and_reads_page_info() {
+        let data = serde_json::json!({
+            "organization": {
+                "repositories": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
+                    "nodes": [
+                        {
+                            "nameWithOwner": "acme/app",
+                            "isEmpty": false,
+                            "pushedAt": "2026-08-26T00:00:00Z",
+                            "object": {"entries": [{"name": "ci.yml"}]}
+                        }
+                    ]
+                }
+            }
+        });
+        let conn = repos_conn(&data).expect("org connection");
+        assert!(conn["pageInfo"]["hasNextPage"].as_bool().unwrap());
+        assert_eq!(conn["pageInfo"]["endCursor"], "c1");
+        assert_eq!(repos_from(&data).len(), 1);
     }
 }
