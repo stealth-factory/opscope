@@ -63,7 +63,7 @@ npx opscope
 
 It installs the launcher and the fourteen binaries for this machine, and
 starts the menu. `npx opscope latency` skips the menu. Linux x86-64
-(glibc), macOS Apple Silicon and macOS Intel are published; anything else
+(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published; anything else
 fails at install with a sentence saying so.
 
 There is no Homebrew formula yet. You can also download three files, or

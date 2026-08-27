@@ -104,6 +104,39 @@ test('Windows, musl and 32-bit match nothing', () => {
   );
 });
 
+test('glibc older than the build baseline matches nothing', () => {
+  assert.equal(platform.glibcAtLeast('2.31', platform.MIN_GLIBC), false);
+  assert.equal(platform.glibcAtLeast('2.35', platform.MIN_GLIBC), true);
+  assert.equal(platform.glibcAtLeast('2.39', platform.MIN_GLIBC), true);
+  assert.equal(platform.glibcAtLeast('3.0', platform.MIN_GLIBC), true);
+  assert.equal(
+    platform.currentPlatform({
+      os: 'linux',
+      cpu: 'x64',
+      libc: 'glibc',
+      glibc: '2.31',
+    }),
+    null,
+  );
+  assert.equal(
+    platform.currentPlatform({
+      os: 'linux',
+      cpu: 'x64',
+      libc: 'glibc',
+      glibc: '2.35',
+    }).pkg,
+    'opscope-linux-x64',
+  );
+  const msg = platform.unsupportedMessage({
+    os: 'linux',
+    cpu: 'x64',
+    libc: 'glibc',
+    glibc: '2.31',
+  });
+  assert.match(msg, /glibc 2\.35/);
+  assert.match(msg, /2\.31/);
+});
+
 test('the unsupported sentence names every published platform', () => {
   const msg = platform.unsupportedMessage({ os: 'win32', cpu: 'x64' });
   assert.match(msg, /win32-x64/);

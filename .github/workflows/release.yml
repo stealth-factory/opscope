@@ -354,9 +354,19 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           publish() {
             local dir="$1"
-            local name
+            local name published_sha
             name=$(node -p 'require(process.argv[1]).name' "$dir/package.json")
             if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              # Skip is for retrying the same commit. npm will not
+              # replace a version, so a package already published
+              # from a different SHA is frozen — moving the tag and
+              # publishing the rest would mix two commits under one
+              # version. Cut the next one.
+              published_sha=$(npm view "${name}@${version}" gitHead 2>/dev/null || true)
+              if [ -n "$published_sha" ] && [ "$published_sha" != "$GITHUB_SHA" ]; then
+                echo "${name}@${version} is already on npm from ${published_sha}; this run is ${GITHUB_SHA}. Cut the next version." >&2
+                exit 1
+              fi
               echo "${name}@${version} is already on npm"
             else
               npm publish "$dir" --access public --provenance

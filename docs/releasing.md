@@ -131,8 +131,11 @@ leg in the same run.
 ## If something goes wrong
 
 **A tag exists but has no release.** The build failed after tagging. Read
-`release.yml`'s log, fix it on main, then delete the tag and re-push it —
-or re-run the dispatch at that tag once the fix is in.
+`release.yml`'s log. If npm published nothing, delete the tag and re-push
+it after the fix is on main, or re-dispatch at that tag. If any of the
+four packages already landed on npm, that version is frozen — cut the
+next one. Re-dispatching the same tag after a different commit will
+refuse to skip a package whose `gitHead` is not this run.
 
 **The release PR is not updating.** Check `release-pr.yml`'s last run. It
 exits quietly when nothing releasable has landed, which looks identical to
@@ -146,9 +149,13 @@ fetched trades a small mistake for a confusing one.
 intended failure: trusted publishing is not configured and `NPM_TOKEN`
 is missing, and nothing was published on either side. Fix the
 publisher or the secret, then
-re-dispatch `release.yml` at that tag. A version already on npm is
-skipped rather than republished, so a retry after npm succeeded and
-the GitHub step failed will finish the release. `gh release create`
-deletes its own leftover draft if the upload fails; if a draft is
-still there and blocks the retry, delete it and re-dispatch. If the
-release already exists and is published, it already shipped.
+re-dispatch `release.yml` at that tag. A version already on npm from
+this same commit is skipped rather than republished, so a retry after
+npm succeeded and the GitHub step failed will finish the release. A
+package already on npm from a different commit is an error: npm cannot
+replace it, and skipping would mix two commits under one version.
+
+`gh release create` deletes its own leftover draft if the upload fails;
+if a draft is still there and blocks the retry, delete it and
+re-dispatch. If the release already exists and is published, it already
+shipped.

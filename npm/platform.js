@@ -59,6 +59,31 @@ const PLATFORMS = [
   },
 ];
 
+// The Linux binary is built on Ubuntu 22.04. That is glibc 2.35, and
+// the oldest glibc it will load on — a 20.04 machine has 2.31, the
+// package would install, and then the linker would fail with a
+// missing GLIBC_* symbol. npm's `libc` selector cannot see the
+// version, so we compare it here and fail at install the same way
+// we fail for musl.
+const MIN_GLIBC = '2.35';
+
+function parseGlibc(version) {
+  const m = String(version).trim().match(/^(\d+)\.(\d+)/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2])];
+}
+
+function glibcAtLeast(have, need) {
+  const a = parseGlibc(have);
+  const b = parseGlibc(need);
+  if (!a || !b) return false;
+  return a[0] > b[0] || (a[0] === b[0] && a[1] >= b[1]);
+}
+
+function glibcTooOld(h) {
+  return Boolean(h && h.os === 'linux' && h.glibc && !glibcAtLeast(h.glibc, MIN_GLIBC));
+}
+
 // The fourteen binaries, read from the manifest rather than restated.
 // A restated list is how a fifteenth widget ships in the tarball and
 // not in the npm package, and the launcher then cannot launch it.
@@ -80,53 +105,65 @@ function binsFromManifest(repoRoot) {
   return bins;
 }
 
-function detectLibc() {
-  if (process.platform !== 'linux') return undefined;
-  // Node puts the glibc version on the diagnostic report when it was
-  // built against glibc. musl leaves the field absent. That is the
-  // same signal npm uses for the package.json `libc` selector, so a
-  // machine npm would skip the linux-x64 package is a machine we
-  // also refuse to exec a glibc binary on — the linker error that
-  // follows is indistinguishable from a missing widget.
+function linuxRuntime() {
+  let glibc;
   try {
     const report = process.report && process.report.getReport && process.report.getReport();
     if (report && report.header && report.header.glibcVersionRuntime) {
-      return 'glibc';
+      glibc = report.header.glibcVersionRuntime;
     }
   } catch (_) {
     // getReport can throw in some embeddings. Fall through.
+  }
+  if (glibc) {
+    return { libc: 'glibc', glibc };
   }
   try {
     if (
       fs.existsSync('/lib/ld-musl-x86_64.so.1') ||
       fs.existsSync('/lib/ld-musl-aarch64.so.1')
     ) {
-      return 'musl';
+      return { libc: 'musl' };
     }
   } catch (_) {
     // A filesystem we cannot read is not evidence of musl.
   }
   // Linux and nothing said musl: the release target is gnu, so this
-  // is the match that target is for.
-  return 'glibc';
+  // is the match that target is for. A missing version is not proof
+  // of an old one — refuse only when we can read it and it is old.
+  return { libc: 'glibc' };
+}
+
+function detectLibc() {
+  if (process.platform !== 'linux') return undefined;
+  return linuxRuntime().libc;
 }
 
 function host() {
+  if (process.platform !== 'linux') {
+    return { os: process.platform, cpu: process.arch };
+  }
+  const linux = linuxRuntime();
   return {
     os: process.platform,
     cpu: process.arch,
-    libc: detectLibc(),
+    libc: linux.libc,
+    glibc: linux.glibc,
   };
 }
 
 function describeHost(h) {
   const who = h || host();
+  if (glibcTooOld(who)) {
+    return `${who.os}-${who.cpu} (glibc ${who.glibc})`;
+  }
   const libc = who.libc ? ` (${who.libc})` : '';
   return `${who.os}-${who.cpu}${libc}`;
 }
 
 function currentPlatform(h) {
   const who = h || host();
+  if (glibcTooOld(who)) return null;
   return (
     PLATFORMS.find(
       (p) =>
@@ -143,6 +180,19 @@ function publishedPlatforms() {
 
 function unsupportedMessage(h) {
   const who = h || host();
+  if (glibcTooOld(who)) {
+    return [
+      `${LAUNCHER} needs glibc ${MIN_GLIBC} or newer; this machine has ${who.glibc}.`,
+      '',
+      'The Linux binaries are built against glibc 2.35. Build from source',
+      'on this machine, or run them where glibc is new enough.',
+      '',
+      'It publishes:',
+      publishedPlatforms(),
+      '',
+      'Build from source: https://github.com/stealth-factory/opscope',
+    ].join('\n');
+  }
   return [
     `${LAUNCHER} has no binaries for ${describeHost(who)}.`,
     '',
@@ -204,6 +254,8 @@ function requireInstalled(h) {
 module.exports = {
   LAUNCHER,
   PLATFORMS,
+  MIN_GLIBC,
+  glibcAtLeast,
   binsFromManifest,
   detectLibc,
   host,
