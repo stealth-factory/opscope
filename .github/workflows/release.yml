@@ -380,7 +380,11 @@ jobs:
               fi
               echo "${name}@${version} is already on npm from this commit"
             else
-              npm publish "$dir" --access public --provenance
+              # A path with a slash and no ./ is github shorthand
+              # (owner/repo). The first 0.2.1 publish then ran
+              # `git ls-remote ssh://git@github.com/npm-dist/opscope-darwin-arm64.git`
+              # and died 128 before it reached the registry.
+              npm publish "./$dir" --access public --provenance
             fi
           }
           # Platforms first. The launcher lists them as
