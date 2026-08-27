@@ -95,6 +95,9 @@ pub struct Data {
     db_missing: bool,
     /// GetCurrentPeriodUsage: the three lanes and the billing cycle.
     live: Option<serde_json::Value>,
+    /// Why there is no live reading, when there is none. Empty while the
+    /// endpoint is answering, or when nothing has been asked yet.
+    live_why: String,
     /// GetPlanInfo: the plan the percentages are percentages of.
     plan: Option<serde_json::Value>,
     /// The per-day summary folded out of GetFilteredUsageEvents.
@@ -178,8 +181,19 @@ fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Valu
 }
 
 /// Plan usage, from the endpoint cursor-agent's own Usage view calls.
+///
+/// The reason rides along in the cached value, so a missing token and a
+/// silent endpoint stay distinguishable for as long as the failure they
+/// describe rather than collapsing to None and leaving the summary with
+/// nothing to say.
 fn cursor_live() -> Option<serde_json::Value> {
-    cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({}))
+    if cursor_token().is_none() {
+        return Some(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
+    }
+    match cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({})) {
+        Some(u) => Some(serde_json::json!({"u": u})),
+        None => Some(serde_json::json!({"why": "Cursor's usage endpoint did not answer"})),
+    }
 }
 
 /// Which Cursor plan the percentages are percentages of.
@@ -426,7 +440,14 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
     // which is what usage.py's sqlite-error branch does.
-    d.live = cached(caches, "cursor", LIVE_TTL, cursor_live);
+    d.live = match cached(caches, "cursor", LIVE_TTL, cursor_live) {
+        Some(got) if !text(&got, "why").is_empty() => {
+            d.live_why = text(&got, "why");
+            None
+        }
+        Some(got) if got.get("u").is_some() => Some(got["u"].clone()),
+        other => other,
+    };
     d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
@@ -478,6 +499,24 @@ fn cycle_of(live: &serde_json::Value) -> (Option<f64>, Option<f64>) {
         (Some(s), Some(e)) if e > s => (Some((e - s) / 1000.0), Some(e / 1000.0)),
         _ => (None, None),
     }
+}
+
+/// Why Cursor publishes no bar on the summary, when it does not.
+///
+/// The tracking database is spend on this machine, not a live plan window,
+/// so a tab full of authorship counts and an empty `[+]` row are not the
+/// same fact.
+pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
+    }
+    if !d.live_why.is_empty() {
+        return format!("no quota · {}", d.live_why);
+    }
+    if d.live.is_some() {
+        return "no quota · Cursor answered, and published no plan percentages for this period.".into();
+    }
+    "no quota · no live reading from Cursor's usage endpoint on this machine.".into()
 }
 
 /// Every quota this agent publishes, for the summary screen.
@@ -922,6 +961,13 @@ fn cursor_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// counts from the tracking database.
 fn cursor_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = cursor_quota(d, w, p);
+    if rows.is_empty() {
+        let note = why_no_lane(d);
+        if !note.is_empty() {
+            rows.extend(no_local(&note, "", w, p));
+            rows.push(String::new());
+        }
+    }
     rows.extend(cursor_daily(d, w, p));
     rows.extend(cursor_spend_rows(d, w, p));
     if !d.ok {
@@ -1343,5 +1389,20 @@ mod tests {
         assert_eq!(commas(999), "999");
         assert_eq!(commas(1_000), "1,000");
         assert_eq!(commas(1_482_113), "1,482,113");
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let token = Data {
+            live_why: "no token - Cursor has not signed in here".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&token);
+        assert!(note.starts_with("no quota · "), "{note}");
+        assert!(note.contains("not signed in"), "{note}");
+
+        let empty = why_no_lane(&Data::default());
+        assert!(empty.contains("no live reading"), "{empty}");
+        assert!(lanes(&Data::default()).is_empty());
     }
 }

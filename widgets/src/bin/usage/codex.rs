@@ -757,6 +757,30 @@ fn codex_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     plan_rows(&plan, &pairs, w, "", None, "", p)
 }
 
+/// Why Codex publishes no bar on the summary, when it does not.
+///
+/// The tab still has the rollouts: those are tokens spent on this machine.
+/// `[+]` only ranks a live (or last-session) used_percent, so a busy tab
+/// and an empty summary row can both be true.
+pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
+    }
+    match (d.live.is_some(), d.limits.is_some()) {
+        (false, false) => {
+            "no quota · no live account window, and the last session left no used_percent on disk."
+                .into()
+        }
+        (false, true) => {
+            "no quota · ChatGPT's usage endpoint did not answer, and the last session left no used_percent."
+                .into()
+        }
+        (true, _) => {
+            "no quota · Codex answered, and published no used_percent for this period.".into()
+        }
+    }
+}
+
 /// Every quota Codex publishes, for the summary screen.
 ///
 /// The live account-wide windows only. The snapshot the tab falls back to is
@@ -829,6 +853,13 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// which subscription the percentages are percentages of.
 pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     let mut rows = codex_quota(d, w, p);
+    if rows.is_empty() {
+        let note = why_no_lane(d);
+        if !note.is_empty() {
+            rows.extend(no_local(&note, "", w, p));
+            rows.push(String::new());
+        }
+    }
     if !d.ok {
         // The quota above is the account's and is true whatever this machine
         // has on disk, so it stays; only the local half is missing.
@@ -1171,5 +1202,20 @@ mod tests {
         assert!(rows.contains("QUOTA"), "{}", rows);
         assert!(rows.contains("No session rollouts"), "{}", rows);
         assert!(!rows.contains("TOTALS"), "{}", rows);
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let empty = why_no_lane(&Data::default());
+        assert!(empty.contains("no live account window"), "{empty}");
+        assert!(empty.contains("used_percent"), "{empty}");
+        assert!(lanes(&Data::default()).is_empty());
+
+        let snapshot_only = Data {
+            limits: Some(serde_json::json!({"primary": {}})),
+            ..Data::default()
+        };
+        let note = why_no_lane(&snapshot_only);
+        assert!(note.contains("did not answer"), "{note}");
     }
 }

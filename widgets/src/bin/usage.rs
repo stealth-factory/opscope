@@ -1600,7 +1600,7 @@ fn main() {
         let body = if snapshot.fetched <= 0.0 {
             loading_rows(w, tick, &p)
         } else {
-            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p)
+            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
         };
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![
