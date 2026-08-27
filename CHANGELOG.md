@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.2.2] - 2026-08-27
+
+### Bug Fixes
+
+- Publish packed dirs as local paths, not github shorthand (#68)
+
 ## [0.2.1] - 2026-08-27
 
 ### Bug Fixes
