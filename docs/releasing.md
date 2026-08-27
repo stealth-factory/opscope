@@ -132,11 +132,12 @@ leg in the same run.
 
 **A tag exists but has no release.** The build failed after tagging. Read
 `release.yml`'s log. If npm published nothing, delete the tag and re-push
-it after the fix is on main, or re-dispatch at that tag. If any of the
-four packages already landed on npm, that version is frozen — cut the
-next one. Re-dispatching the same tag after a different commit will
-refuse to skip a package whose `gitHead` is not this run, and so will
-a package whose `gitHead` is missing or unreadable.
+it after the fix is on main. Re-dispatching the same tag checks out
+that tag's tree, so a fix that only exists on main will not run. If any
+of the four packages already landed on npm, that version is frozen —
+cut the next one. Re-dispatching a moved tag after a different commit
+will refuse to skip a package whose `gitHead` is not this run, and so
+will a package whose `gitHead` is missing or unreadable.
 
 **The release PR is not updating.** Check `release-pr.yml`'s last run. It
 exits quietly when nothing releasable has landed, which looks identical to

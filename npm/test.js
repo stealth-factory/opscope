@@ -468,6 +468,40 @@ test('postinstall fails on an unsupported platform with the sentence', () => {
   }
 });
 
+test('release.yml reads a packed package.json as a file, not as a module', () => {
+  // `node -p 'require(process.argv[1])'` with a relative path looks in
+  // node_modules. The first tagged npm publish died on that before it
+  // reached the registry: Cannot find module
+  // 'npm-dist/opscope-darwin-arm64/package.json'. The expression is
+  // taken from the workflow so a rewrite that goes back to require()
+  // fails here the same way it failed there.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const m = yml.match(
+    /name=\$\(node -p '([^']+)' "\$dir\/package\.json"\)/,
+  );
+  assert.ok(m, 'publish step no longer reads the package name with node -p');
+  const dir = scratch();
+  try {
+    const rel = 'npm-dist/opscope-darwin-arm64';
+    fs.mkdirSync(path.join(dir, rel), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, rel, 'package.json'),
+      JSON.stringify({ name: 'opscope-darwin-arm64', version: '0.0.0' }),
+    );
+    const run = spawnSync('node', ['-p', m[1], `${rel}/package.json`], {
+      cwd: dir,
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout.trim(), 'opscope-darwin-arm64');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('nothing under npm/ still says the old project name', () => {
   // The leftover name is how npx would install a different package.
   // Built, not written, so this file is not itself a hit.
