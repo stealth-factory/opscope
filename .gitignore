@@ -3,6 +3,7 @@ target/
 
 # What a release build leaves behind, if one is run by hand.
 dist/
+npm-dist/
 opscope-*.tar.gz
 opscope-*.tar.gz.sha256
 CHANGELOG-release.md

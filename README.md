@@ -55,9 +55,19 @@ reflows when you resize the pane.
 
 ## Getting them
 
-There is no installer and nothing to package-manage yet — no `npx`, no
-`brew`. You download three files, or you build fourteen. Both take about a
-minute.
+If you have Node, this is the whole thing:
+
+```sh
+npx opscope
+```
+
+It installs the launcher and the fourteen binaries for this machine, and
+starts the menu. `npx opscope latency` skips the menu. Linux x86-64
+(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published; anything else
+fails at install with a sentence saying so.
+
+There is no Homebrew formula yet. You can also download three files, or
+build fourteen. Both take about a minute.
 
 ### Download a release
 
@@ -179,8 +189,8 @@ configuration at all.
 ## Requirements
 
 - **Nothing to install to run them** — the binaries carry what they link
-  against, SQLite included. A Rust toolchain only if you build rather than
-  download
+  against, SQLite included. Node, if you use `npx`; a Rust toolchain only
+  if you build rather than download or install
 - Linux x86-64 or macOS, Apple Silicon or Intel. A Linux arm64 build is not
   produced yet; that machine builds from source
 - A terminal with 24-bit colour
@@ -195,7 +205,7 @@ Every widget has a page of its own — what it shows, where each number comes
 from, every key it answers to, and the settings it reads. They are linked
 from the table above, and listed together in [`docs/`](docs/README.md).
 
-Four pages are about the repository rather than a widget:
+Five pages are about the repository rather than a widget:
 
 | | |
 |---|---|

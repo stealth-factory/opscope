@@ -1,0 +1,46 @@
+{
+  "name": "opscope",
+  "version": "0.0.0-dev",
+  "description": "Sci-fi terminal widgets that show only real data.",
+  "bin": {
+    "opscope": "bin/opscope"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node --test test.js"
+  },
+  "optionalDependencies": {
+    "opscope-linux-x64": "0.0.0-dev",
+    "opscope-darwin-arm64": "0.0.0-dev",
+    "opscope-darwin-x64": "0.0.0-dev"
+  },
+  "files": [
+    "bin",
+    "platform.js",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stealth-factory/opscope.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stealth-factory/opscope/issues"
+  },
+  "homepage": "https://github.com/stealth-factory/opscope#readme",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "opscope",
+    "terminal",
+    "tui",
+    "widgets",
+    "dashboard"
+  ]
+}

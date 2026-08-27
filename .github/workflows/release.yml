@@ -272,6 +272,13 @@ jobs:
     # meant to cut. Dispatching at a tag is a real release, and is how
     # tag-release.yml gets here.
     if: startsWith(github.ref, 'refs/tags/v')
+    # Job-level permissions replace the workflow ones, so contents
+    # has to be restated. id-token is for npm trusted publishing —
+    # OIDC, no secret — which is the path that still works after
+    # classic automation tokens were revoked.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -296,6 +303,89 @@ jobs:
             exit 1
           fi
           cat CHANGELOG-release.md
+
+      # The four npm packages are generated from the tarballs this
+      # job just built, not maintained in git. That is what keeps
+      # `npx opscope@0.2.0` and `v0.2.0` the
+      # same binaries: there is no second copy to forget to bump.
+      #
+      # npm first, then the GitHub release. A missing
+      # trusted-publisher setup or a missing token then fails the
+      # job with nothing published on either side, which is
+      # agreement. The other order leaves a GitHub release whose
+      # version npm has never heard of, and `gh release create`
+      # will not run twice.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: npm that can do trusted publishing
+        run: |
+          # Node 22 ships npm 10.x. Trusted publishing's OIDC
+          # handshake needs 11.5.1 or later; without it the
+          # no-token path never attempts OIDC and 404s.
+          npm install -g npm@11.5.1
+          test "$(npm --version)" = "11.5.1"
+
+      - name: Pack the npm packages from those tarballs
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node npm/pack.js --version "$version" --artifacts artifacts --out npm-dist
+          ls -la npm-dist
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Trusted publishing is the path that does not need a
+          # secret: id-token: write plus --provenance. A granular
+          # access token in NPM_TOKEN is the fallback for when that
+          # is not configured yet. setup-node always writes
+          # _authToken=${NODE_AUTH_TOKEN}; an empty value is a 401,
+          # not a fallthrough to OIDC, so it is cleared when unset.
+          # Classic automation tokens were revoked in November 2025.
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            npm config delete '//registry.npmjs.org/:_authToken' || true
+            npm config delete always-auth || true
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          publish() {
+            local dir="$1"
+            local name published_sha
+            name=$(node -p 'require(process.argv[1]).name' "$dir/package.json")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              # Skip is for retrying the same commit. npm will not
+              # replace a version, so a package already published
+              # from a different SHA is frozen — moving the tag and
+              # publishing the rest would mix two commits under one
+              # version. Cut the next one.
+              published_sha=$(npm view "${name}@${version}" gitHead 2>/dev/null || true)
+              published_sha=$(printf '%s' "$published_sha" | tr -d '[:space:]')
+              # Fail closed: an empty or non-SHA gitHead cannot prove this
+              # is the same commit, and skipping would mix versions.
+              if [[ ! "$published_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "${name}@${version} is already on npm but gitHead is missing or unreadable; cannot prove it is ${GITHUB_SHA}. Cut the next version." >&2
+                exit 1
+              fi
+              if [ "$published_sha" != "$GITHUB_SHA" ]; then
+                echo "${name}@${version} is already on npm from ${published_sha}; this run is ${GITHUB_SHA}. Cut the next version." >&2
+                exit 1
+              fi
+              echo "${name}@${version} is already on npm from this commit"
+            else
+              npm publish "$dir" --access public --provenance
+            fi
+          }
+          # Platforms first. The launcher lists them as
+          # optionalDependencies at this same version, and npm will
+          # try to fetch them the moment the launcher is published.
+          for pkg in npm-dist/opscope-*; do
+            publish "$pkg"
+          done
+          publish npm-dist/opscope
 
       - name: Release
         env:

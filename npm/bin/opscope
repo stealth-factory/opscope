@@ -1,0 +1,61 @@
+#!/usr/bin/env node
+// opscope - small dependency-free terminal widgets
+// Copyright (C) 2026 William Li
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+'use strict';
+
+const { spawn } = require('child_process');
+const { constants } = require('os');
+const platform = require('../platform');
+
+// The native `opscope` binary, from the platform package npm installed
+// beside us. Exec-ing it — rather than reimplementing the menu in JS —
+// is what keeps `--version` answering with the same version, commit
+// and date as the GitHub release: it is the same binary.
+let start;
+try {
+  start = platform.resolveStart();
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
+
+const child = spawn(start, process.argv.slice(2), { stdio: 'inherit' });
+
+function forward(signal) {
+  if (!child.killed) child.kill(signal);
+}
+
+process.on('SIGINT', () => forward('SIGINT'));
+process.on('SIGTERM', () => forward('SIGTERM'));
+
+child.on('error', (err) => {
+  console.error(err.message);
+  process.exit(1);
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    // Re-raising the signal while this process still has a handler
+    // for it re-enters that handler, which then no-ops because the
+    // child is already gone, and this process can exit 0. 128+n is
+    // what a shell reports when a child dies of that signal.
+    const n = constants.signals[signal];
+    process.exit(typeof n === 'number' ? 128 + n : 1);
+    return;
+  }
+  process.exit(code ?? 1);
+});
