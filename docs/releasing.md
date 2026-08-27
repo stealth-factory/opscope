@@ -87,19 +87,22 @@ which is only a meaningful check because nothing in the pipeline edits the
 manifest on the way past. A build that rewrites its own source produces a
 binary no checkout can reproduce.
 
-**The release PR arrives with no CI, and that is expected.** It is opened by
-`GITHUB_TOKEN`, and GitHub holds workflow runs on such pull requests for
-manual approval. Rather than depend on someone approving them,
-`release-pr.yml` runs `cargo metadata --locked` on the bumped tree itself —
-the one thing that step can get wrong is leaving the lock disagreeing with
-the manifests, and that is checked before the PR is offered.
+**The release PR gets ordinary CI when it is opened by a user token.**
+`release-pr.yml` uses `GH_TOKEN` (or `RELEASE_TOKEN`) for the checkout and
+for `gh pr create`. That PAT has to belong to a collaborator with Contents
+and Pull requests read/write. Opened with `GITHUB_TOKEN` instead, the PR
+is `github-actions[bot]` and GitHub holds `ci` for a maintainer click.
+`release-pr.yml` still runs `cargo metadata --locked` on the bumped tree
+before offering it — the one thing that step can get wrong is leaving the
+lock disagreeing with the manifests. Editing an existing bot PR does not
+change its author: close it so the next run opens a new one.
 
-**`RELEASE_TOKEN` is optional.** If set to a fine-grained PAT with Contents
-and Pull requests read/write, the release PR is opened as that user and gets
-ordinary CI. Nothing else depends on it: a tag pushed with `GITHUB_TOKEN`
-triggers no workflow, so `tag-release.yml` starts the build with an explicit
-`workflow_dispatch` at the tag — the documented exception to that rule —
-rather than relying on the push to do it.
+**`GH_TOKEN` / `RELEASE_TOKEN` are optional.** Either is a user PAT; if
+neither is set, the workflow falls back to `GITHUB_TOKEN`. Nothing else
+depends on the PAT: a tag pushed with `GITHUB_TOKEN` triggers no workflow,
+so `tag-release.yml` starts the build with an explicit `workflow_dispatch`
+at the tag — the documented exception to that rule — rather than relying
+on the push to do it.
 
 **npm publish uses trusted publishing, with `NPM_TOKEN` as a fallback.**
 The four packages are unscoped (`opscope` and one optional dependency
