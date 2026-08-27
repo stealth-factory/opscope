@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use opscope_core as tc;
 
@@ -602,13 +602,6 @@ struct Row {
     orphan: bool,
 }
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
 /// Who can reach a socket bound to this address.
 fn bind_class(bind: &str) -> String {
     if bind == "0.0.0.0" || bind == "::" {
@@ -898,20 +891,14 @@ fn version_in(cmdline: &str) -> Option<String> {
 /// Seconds before an external command is given up on, from ports.py's longest, on the serve/funnel commands.
 const RUN_TIMEOUT: u64 = 30;
 
-fn run(args: &[&str]) -> String {
-    // Bounded: .output() waits forever, and a wedged child used to freeze
-    // the poll thread with the pane still showing its last frame.
-    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
-}
-
 /// Ports Tailscale is serving, and whether the world can see them.
 fn exposure() -> HashMap<u16, String> {
     let mut served = HashMap::new();
-    let text = run(&["tailscale", "serve", "status", "--json"]);
+    let text = tc::run_quiet(&["tailscale", "serve", "status", "--json"], RUN_TIMEOUT);
     for port in proxied_ports(&text) {
         served.insert(port, "tailnet".to_string());
     }
-    let funnel = run(&["tailscale", "funnel", "status"]);
+    let funnel = tc::run_quiet(&["tailscale", "funnel", "status"], RUN_TIMEOUT);
     if !funnel.contains("tailnet only") {
         for port in proxied_ports(&funnel) {
             served.insert(port, "public".to_string());
@@ -943,7 +930,7 @@ fn scan() -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let mut services: HashMap<(u16, Option<i32>, String), usize> = HashMap::new();
     let mut seen: Vec<u16> = Vec::new();
-    let stamp = now();
+    let stamp = tc::now();
 
     for sock in listening() {
         let pid = owners.get(&sock.inode).copied();
@@ -1029,7 +1016,7 @@ fn theirs(row: &Row) -> bool {
 fn interfaces() -> Vec<(String, String, bool)> {
     let mut found = Vec::new();
     let data: serde_json::Value =
-        serde_json::from_str(&run(&["ip", "-j", "addr"])).unwrap_or(serde_json::Value::Null);
+        serde_json::from_str(&tc::run_quiet(&["ip", "-j", "addr"], RUN_TIMEOUT)).unwrap_or(serde_json::Value::Null);
     for link in data.as_array().unwrap_or(&Vec::new()) {
         let name = link["ifname"].as_str().unwrap_or("?").to_string();
         for addr in link["addr_info"].as_array().unwrap_or(&Vec::new()) {
@@ -1063,7 +1050,7 @@ struct Net {
 /// key that only ever returns an error.
 fn tailnet_self() -> Net {
     let mut out = Net::default();
-    let data: serde_json::Value = serde_json::from_str(&run(&["tailscale", "status", "--json"]))
+    let data: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT))
         .unwrap_or(serde_json::Value::Null);
     let node = &data["Self"];
     out.name = node["DNSName"]
@@ -1085,7 +1072,7 @@ fn tailnet_self() -> Net {
     // Changing the serve config is a root operation unless this user has
     // been named the operator. Worth knowing before the key is pressed,
     // since the fix is a one-off command rather than anything this can do.
-    let prefs: serde_json::Value = serde_json::from_str(&run(&["tailscale", "debug", "prefs"]))
+    let prefs: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "debug", "prefs"], RUN_TIMEOUT))
         .unwrap_or(serde_json::Value::Null);
     let who = prefs["OperatorUser"].as_str().unwrap_or("");
     out.operator = unsafe { libc::getuid() } == 0 || (!who.is_empty() && who == username());
@@ -1199,7 +1186,7 @@ fn addresses(row: &Row, net: &Net, cfg: &serde_json::Value) -> Vec<(String, Stri
 /// needs to know which mounts are already taken. Both are structure the
 /// text output only implies.
 fn serve_config() -> serde_json::Value {
-    serde_json::from_str(&run(&["tailscale", "serve", "status", "--json"]))
+    serde_json::from_str(&tc::run_quiet(&["tailscale", "serve", "status", "--json"], RUN_TIMEOUT))
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -1349,9 +1336,9 @@ fn start_tunnel(port: u16, wait: f64) -> (String, String) {
         Err(e) => return (String::new(), e.to_string()),
     };
     let pid = child.id() as i32;
-    let deadline = now() + wait;
+    let deadline = tc::now() + wait;
     let mut found = String::new();
-    while now() < deadline && found.is_empty() {
+    while tc::now() < deadline && found.is_empty() {
         std::thread::sleep(Duration::from_millis(400));
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         found = quick_url(&text);
@@ -1970,26 +1957,26 @@ fn start_work(kind: &str, row: Row) -> Working {
                     (
                         format!("{} now serves :{}", what, port),
                         p.ok,
-                        now() + 6.0,
+                        tc::now() + 6.0,
                     )
                 } else {
-                    (failed, p.bad, now() + 8.0)
+                    (failed, p.bad, tc::now() + 8.0)
                 }
             }
             "unserve" | "unfunnel" => {
                 let failed = unserve_port(port, what == "unfunnel");
                 if failed.is_empty() {
-                    (format!("stopped serving :{}", port), p.ok, now() + 5.0)
+                    (format!("stopped serving :{}", port), p.ok, tc::now() + 5.0)
                 } else {
-                    (failed, p.bad, now() + 8.0)
+                    (failed, p.bad, tc::now() + 8.0)
                 }
             }
             "tunnel" => {
                 let (url, failed) = start_tunnel(port, 25.0);
                 if failed.is_empty() {
-                    (url, p.ok, now() + 20.0)
+                    (url, p.ok, tc::now() + 20.0)
                 } else {
-                    (failed, p.bad, now() + 10.0)
+                    (failed, p.bad, tc::now() + 10.0)
                 }
             }
             _ => {
@@ -2000,7 +1987,7 @@ fn start_work(kind: &str, row: Row) -> Working {
                 (
                     format!("closed the tunnel on :{}", port),
                     p.ok,
-                    now() + 5.0,
+                    tc::now() + 5.0,
                 )
             }
         };
@@ -2166,7 +2153,7 @@ fn main() {
         // caught - but catching it is only half of the rule. It used to end
         // in `unwrap_or_default()`, which handed the table an empty list and
         // drew a machine with nothing listening. The reason goes on screen
-        // and the thread stops, the way usage and herdr-panes do it.
+        // and the thread stops, the way agent-usage and herdr-panes do it.
         let found = match std::panic::catch_unwind(scan) {
             Ok(found) => found,
             Err(_) => {
@@ -2181,7 +2168,7 @@ fn main() {
         // a port that has just appeared is measured from its next sample
         // rather than never.
         let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-        let counters = match std::panic::catch_unwind(|| run(&["ss", "-tine"])) {
+        let counters = match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
             Ok(text) => text,
             Err(_) => {
                 let why = "traffic poller stopped - the table below is still current";
@@ -2197,7 +2184,7 @@ fn main() {
             *guard = found;
         }
         if let Ok(mut guard) = poller.traffic.lock() {
-            guard.sample(&counters, &listening, now());
+            guard.sample(&counters, &listening, tc::now());
         }
         let (lock, cond) = &poller.wake;
         let mut asked = match lock.lock() {
@@ -2235,12 +2222,12 @@ fn main() {
         // A SIGTERM is given a moment to work before the harder question is
         // asked, because most things do stop.
         if let Some(state) = watch.as_mut() {
-            if !state.asked && (!alive(state.pid) || now() >= state.deadline) {
+            if !state.asked && (!alive(state.pid) || tc::now() >= state.deadline) {
                 if !alive(state.pid) {
                     notice = Some((
                         format!("stopped {}", kill_label(&state.row, w - 12)),
                         ok.ok.clone(),
-                        now() + 4.0,
+                        tc::now() + 4.0,
                     ));
                     watch = None;
                     store.wake();
@@ -2269,7 +2256,7 @@ fn main() {
             // consent to signal something or publish it.
             if let Some((kind, row)) = confirm.take() {
                 if key != "y" && key != "Y" {
-                    notice = Some(("cancelled".into(), ok.dim.clone(), now() + 2.0));
+                    notice = Some(("cancelled".into(), ok.dim.clone(), tc::now() + 2.0));
                     continue;
                 }
                 if kind == "kill" {
@@ -2277,7 +2264,7 @@ fn main() {
                     let pid = match pid {
                         Some(p) => p,
                         None => {
-                            notice = Some((why, ok.bad.clone(), now() + 5.0));
+                            notice = Some((why, ok.bad.clone(), tc::now() + 5.0));
                             continue;
                         }
                     };
@@ -2287,7 +2274,7 @@ fn main() {
                             pid,
                             row,
                             asked: false,
-                            deadline: now() + 3.0,
+                            deadline: tc::now() + 3.0,
                         });
                     } else {
                         notice = Some((
@@ -2297,7 +2284,7 @@ fn main() {
                                 failed
                             ),
                             ok.bad.clone(),
-                            now() + 5.0,
+                            tc::now() + 5.0,
                         ));
                         store.wake();
                     }
@@ -2314,7 +2301,7 @@ fn main() {
                         (
                             format!("SIGKILL sent to {}", kill_label(&state.row, w - 19)),
                             ok.warn.clone(),
-                            now() + 5.0,
+                            tc::now() + 5.0,
                         )
                     } else {
                         (
@@ -2324,14 +2311,14 @@ fn main() {
                                 failed
                             ),
                             ok.bad.clone(),
-                            now() + 5.0,
+                            tc::now() + 5.0,
                         )
                     });
                 } else {
                     notice = Some((
                         format!("left running: {}", kill_label(&state.row, w - 17)),
                         ok.dim.clone(),
-                        now() + 3.0,
+                        tc::now() + 3.0,
                     ));
                 }
                 store.wake();
@@ -2370,7 +2357,7 @@ fn main() {
                                     url
                                 ),
                                 if copied { ok.ok.clone() } else { ok.warn.clone() },
-                                now() + 8.0,
+                                tc::now() + 8.0,
                             ));
                         }
                     }
@@ -2393,7 +2380,7 @@ fn main() {
                                  for the one-line install"
                                     .into(),
                                 ok.warn.clone(),
-                                now() + 8.0,
+                                tc::now() + 8.0,
                             ));
                             continue;
                         }
@@ -2441,7 +2428,7 @@ fn main() {
                                  another user's process"
                                     .into(),
                                 ok.dim.clone(),
-                                now() + 5.0,
+                                tc::now() + 5.0,
                             ));
                         }
                     }
@@ -2459,7 +2446,7 @@ fn main() {
                             if pid.is_some() {
                                 confirm = Some(("kill".into(), row.clone()));
                             } else {
-                                notice = Some((why, ok.bad.clone(), now() + 5.0));
+                                notice = Some((why, ok.bad.clone(), tc::now() + 5.0));
                             }
                         }
                     }
@@ -2478,7 +2465,7 @@ fn main() {
         if !shown.is_empty() && selected >= shown.len() {
             selected = shown.len() - 1;
         }
-        if notice.as_ref().is_some_and(|n| now() >= n.2) {
+        if notice.as_ref().is_some_and(|n| tc::now() >= n.2) {
             notice = None;
         }
 
@@ -2567,7 +2554,7 @@ fn main() {
         ));
         // A dead poller says so, right under the counts it has stopped
         // updating. Same line, same shape and same words as herdr-panes and
-        // usage, so it reads the same wherever you meet it.
+        // agent-usage, so it reads the same wherever you meet it.
         let err = store.err.lock().map(|g| g.clone()).unwrap_or_default();
         if !err.is_empty() {
             rows.push(tc::seg(&[(ok.bad.as_str(), format!(" ! {}", err))], w - 1));

@@ -34,6 +34,54 @@ pub const EL: &str = "\x1b[K";
 pub const RST: &str = "\x1b[0m";
 pub const NOBG: &str = "\x1b[49m";
 
+/// Eight levels used by compact bar charts across the widgets.
+pub const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The dot mask for each pixel in a two-by-four braille cell.
+pub const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+/// A consistent animation for work that has not finished yet.
+pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Seconds since the Unix epoch, for elapsed-time and cache timestamps.
+pub fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Lay coloured braille canvases over one another.
+///
+/// A cell can only have one foreground colour. Contested cells therefore
+/// alternate claimants along each row, rather than allowing the last layer
+/// to recolour an entire trace or using biased column parity.
+pub fn overlay(
+    layers: &[(String, Vec<Vec<u8>>)],
+    cols: usize,
+    rows: usize,
+) -> Vec<Vec<(String, u8)>> {
+    let mut cells = vec![vec![(String::new(), 0u8); cols]; rows];
+    for y in 0..rows {
+        let mut turn = 0usize;
+        for x in 0..cols {
+            let dots = |canvas: &Vec<Vec<u8>>| {
+                canvas.get(y).and_then(|line| line.get(x)).copied().unwrap_or(0)
+            };
+            let claims: Vec<&(String, Vec<Vec<u8>>)> =
+                layers.iter().filter(|(_, canvas)| dots(canvas) != 0).collect();
+            let Some((colour, canvas)) = claims.get(turn % claims.len().max(1)) else {
+                continue;
+            };
+            cells[y][x] = ((*colour).clone(), dots(canvas));
+            if claims.len() > 1 {
+                turn += 1;
+            }
+        }
+    }
+    cells
+}
+
 /// A foreground colour, as a truecolor escape.
 pub fn rgb(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[38;2;{};{};{}m", r, g, b)
@@ -1288,6 +1336,11 @@ pub fn run(args: &[&str], seconds: u64) -> Result<String, String> {
             why.chars().take(200).collect()
         })
     }
+}
+
+/// Run a bounded command for callers where absence is non-fatal.
+pub fn run_quiet(args: &[&str], seconds: u64) -> String {
+    run(args, seconds).unwrap_or_default()
 }
 
 /// Print the doc comment and leave, when asked for help.

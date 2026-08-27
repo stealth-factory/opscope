@@ -25,30 +25,16 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime, TimeZone};
 use opscope_core as tc;
 
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// Cycled at runtime with n, the same way the latency monitor's i key does.
 const REFRESH_CHOICES: &[f64] = &[1.0, 2.0, 5.0, 10.0, 30.0];
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
 /// Seconds before an external command is given up on, from tailnet.py's longest, on `tailscale status`.
 const RUN_TIMEOUT: u64 = 25;
-
-fn run(args: &[&str]) -> String {
-    // Bounded: .output() waits forever, and a wedged child used to freeze
-    // the poll thread with the pane still showing its last frame.
-    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
-}
 
 fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
@@ -188,7 +174,7 @@ fn lan_rank(ip: &str, routes: &[String]) -> u8 {
 /// so it fails instantly rather than prompting when sudo wants a password.
 fn endpoints_by_peer() -> HashMap<String, Vec<String>> {
     let mut found = HashMap::new();
-    let text_out = run(&["sudo", "-n", "tailscale", "debug", "netmap"]);
+    let text_out = tc::run_quiet(&["sudo", "-n", "tailscale", "debug", "netmap"], RUN_TIMEOUT);
     let data: serde_json::Value = match serde_json::from_str(&text_out) {
         Ok(d) => d,
         Err(_) => return found,
@@ -218,7 +204,7 @@ fn endpoints_by_peer() -> HashMap<String, Vec<String>> {
 /// location hint without sending anyone's address to a geolocation service.
 fn derp_regions() -> HashMap<String, String> {
     let mut out = HashMap::new();
-    let text_out = run(&["tailscale", "debug", "derp-map"]);
+    let text_out = tc::run_quiet(&["tailscale", "debug", "derp-map"], RUN_TIMEOUT);
     let data: serde_json::Value = match serde_json::from_str(&text_out) {
         Ok(d) => d,
         Err(_) => return out,
@@ -247,7 +233,7 @@ fn spark(values: &[f64], n: usize, peak: f64) -> String {
         return "·".repeat(vals.len());
     }
     vals.iter()
-        .map(|v| SPARK[(((v / hi) * 7.99) as usize).min(7)])
+        .map(|v| tc::SPARK[(((v / hi) * 7.99) as usize).min(7)])
         .collect()
 }
 
@@ -531,7 +517,7 @@ struct State {
 
 /// Turn cumulative byte counters into per-second rates.
 fn sample_rates(state: &mut State, data: &serde_json::Value, history: usize) {
-    let at = now();
+    let at = tc::now();
     for peer in data["Peer"].as_object().into_iter().flatten().map(|(_, v)| v) {
         let key = peer_name(peer);
         let (rx, tx) = (bytes_at(peer, "RxBytes"), bytes_at(peer, "TxBytes"));
@@ -688,13 +674,13 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_refresh = Arc::clone(&refresh_now);
     std::thread::spawn(move || loop {
-        let out = run(&["tailscale", "status", "--json"]);
+        let out = tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT);
         let parsed: Option<serde_json::Value> = serde_json::from_str(&out).ok();
         // The netmap needs sudo and changes slowly, so it is asked for far
         // less often than the status is.
         let want_eps = poller
             .lock()
-            .map(|g| now() - g.endpoints_at > 60.0)
+            .map(|g| tc::now() - g.endpoints_at > 60.0)
             .unwrap_or(false);
         let eps = if want_eps { Some(endpoints_by_peer()) } else { None };
         if let Ok(mut g) = poller.lock() {
@@ -704,14 +690,14 @@ fn main() {
                     g.err.clear();
                     sample_rates(&mut g, d, history);
                     g.data = Some(d.clone());
-                    g.data_at = now();
+                    g.data_at = tc::now();
                 }
             }
             if let Some(eps) = eps {
                 if !eps.is_empty() {
                     g.endpoints = eps;
                 }
-                g.endpoints_at = now();
+                g.endpoints_at = tc::now();
             }
         }
         let wait = tc::poll_secs(poller_refresh.lock().map(|g| *g).unwrap_or(2.0), 2.0);
@@ -810,7 +796,7 @@ fn main() {
                                 } else {
                                     "! no clipboard; select the text with the mouse".into()
                                 },
-                                now() + 3.0,
+                                tc::now() + 3.0,
                             );
                         }
                     }
@@ -865,7 +851,7 @@ fn main() {
 
         let (w, h) = tc::size();
         let interval = refresh_now.lock().map(|g| *g).unwrap_or(2.0);
-        if !note.0.is_empty() && now() > note.1 {
+        if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
         let mut rows = vec![tc::title("tailnet", w, &p.accent)];
@@ -893,7 +879,7 @@ fn main() {
         } else {
             format!(
                 "polling is failing, these rows are cached, {} old ({})",
-                brief(now() - data_at),
+                brief(tc::now() - data_at),
                 err
             )
         };
@@ -1499,7 +1485,7 @@ fn info_overlay(
                     None => marks.push((p.relay.as_str(), "×".into())),
                     Some(v) => marks.push((
                         p.online.as_str(),
-                        SPARK[((((v - lo) / span) * 7.99) as usize).min(7)].to_string(),
+                        tc::SPARK[((((v - lo) / span) * 7.99) as usize).min(7)].to_string(),
                     )),
                 }
             }

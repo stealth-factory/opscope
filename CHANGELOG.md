@@ -3,6 +3,28 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.3.0] - 2026-08-27
+
+### Bug Fixes
+
+- Explain missing live quota per agent on the usage summary (#74)
+
+### CI
+
+- Open the release PR with GH_TOKEN when it is set (#83)
+
+### Documentation
+
+- Offer commercial licenses alongside AGPL (#81)
+
+### Features
+
+- Rename the usage widget to agent-usage (#75) — **breaking**
+
+### Refactor
+
+- **core**: Centralize shared widget helpers (#71)
+
 ## [0.2.2] - 2026-08-27
 
 ### Bug Fixes

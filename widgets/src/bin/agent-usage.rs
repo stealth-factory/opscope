@@ -23,10 +23,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{Datelike, Duration as Days, NaiveDate, TimeZone, Utc};
 use opscope_core as tc;
+use opscope_core::now;
 
 /// The priced kinds, in the order every rate card lists them.
 const RATE_KINDS: &[&str] = &[
@@ -168,7 +169,6 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
     }
 }
 
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &["claude", "codex", "cursor", "grok", "copilot", "antigravity"];
 const MONTHS: &[&str] = &[
@@ -180,13 +180,6 @@ const PACE_FLOOR: f64 = 3.0;
 /// The five-hour session and the seven-day total, which the response names
 /// in its own top-level keys rather than in limits[].
 const CLAUDE_WINDOW_SECS: &[(&str, f64)] = &[("session", 5.0 * 3600.0), ("weekly", 7.0 * 86400.0)];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -895,7 +888,7 @@ fn metered_rows(
                 w - 1,
             )];
             rows.extend(no_local(
-                "Set usage.rates in config.json - US$ per million tokens, keyed by model.",
+                "Set agent_usage.rates in config.json - US$ per million tokens, keyed by model.",
                 "",
                 w,
                 p,
@@ -1217,10 +1210,14 @@ struct Config {
     /// of a live session is exactly the stale number this asks the server
     /// to avoid. One small GET twelve times an hour is not traffic.
     grok_ping_minutes: f64,
+    /// Set when the settings came from a leftover `usage` section rather
+    /// than `agent_usage`. The pane says so, because a silent fallback is
+    /// how a rename looks like nothing changed.
+    legacy_section: bool,
 }
 
 fn read_config() -> Config {
-    let raw = tc::load_config("usage");
+    let (raw, legacy_section) = load_agent_usage_config();
     let table = |key: &str| -> HashMap<String, Rate> {
         raw[key]
             .as_object()
@@ -1261,6 +1258,51 @@ fn read_config() -> Config {
             .get("antigravity_start")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        legacy_section,
+    }
+}
+
+/// `agent_usage` if that section is present, otherwise a leftover `usage`.
+///
+/// `load_config` returns `{}` for a missing section, so emptiness alone
+/// cannot tell "not set" from "set under the old name". Presence is what
+/// decides, and a leftover section is reported so the pane does not look
+/// like nothing changed.
+fn load_agent_usage_config() -> (serde_json::Value, bool) {
+    let parsed = first_readable_config().unwrap_or_else(|| serde_json::json!({}));
+    let (section, legacy) = pick_config_section(&parsed);
+    // Both names stay as string literals so check.rs sees the primary
+    // section and the fallback, not a variable it cannot read.
+    let raw = if section == "usage" {
+        tc::load_config("usage")
+    } else {
+        tc::load_config("agent_usage")
+    };
+    (raw, legacy)
+}
+
+fn first_readable_config() -> Option<serde_json::Value> {
+    for path in tc::config_paths() {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        match serde_json::from_str(&text) {
+            Ok(v) => return Some(v),
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Which section to read, and whether it is the pre-rename name.
+fn pick_config_section(parsed: &serde_json::Value) -> (&'static str, bool) {
+    if parsed.get("agent_usage").is_some() {
+        ("agent_usage", false)
+    } else if parsed.get("usage").is_some() {
+        ("usage", true)
+    } else {
+        ("agent_usage", false)
     }
 }
 
@@ -1364,6 +1406,10 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
 
 /// Names in the config that match no agent we know how to read.
 fn config_complaints(cfg: &Config) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if cfg.legacy_section {
+        parts.push(LEGACY_SECTION_NOTE.to_string());
+    }
     let mut bad: Vec<String> = cfg
         .agents
         .iter()
@@ -1371,16 +1417,41 @@ fn config_complaints(cfg: &Config) -> String {
         .filter(|n| !ORDER.contains(&n.as_str()))
         .cloned()
         .collect();
-    if bad.is_empty() {
-        return String::new();
+    if !bad.is_empty() {
+        bad.sort();
+        bad.dedup();
+        parts.push(format!(
+            "unknown agent in config: {} (known: {})",
+            bad.join(", "),
+            ORDER.join(", ")
+        ));
     }
-    bad.sort();
-    bad.dedup();
-    format!(
-        "unknown agent in config: {} (known: {})",
-        bad.join(", "),
-        ORDER.join(", ")
-    )
+    parts.join(" · ")
+}
+
+/// Shown when the settings came from a leftover `usage` section.
+const LEGACY_SECTION_NOTE: &str =
+    "config section is still called usage; rename it to agent_usage";
+
+/// The gripe as rows, wrapped so a narrow pane keeps the words that matter.
+///
+/// `seg` clips. The 65-character rename note ends at `rename it to age` in
+/// a 58-column pane, which is the documented width these are dragged to,
+/// and hides the section name the reader has to type. Continuation lines
+/// sit under the `!` rather than under the first word.
+fn gripe_lines(gripe: &str, w: usize) -> Vec<String> {
+    let budget = w.saturating_sub(4).max(8);
+    wrap_text(gripe, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                format!(" ! {}", part)
+            } else {
+                format!("   {}", part)
+            }
+        })
+        .collect()
 }
 
 fn tab_bar(
@@ -1444,7 +1515,7 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
-                (p.accent.as_str(), format!(" {}", SPINNER[tick % SPINNER.len()])),
+                (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
                 (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
@@ -1463,7 +1534,7 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
 }
 
 fn main() {
-    tc::maybe_help(include_str!("usage_help.txt"));
+    tc::maybe_help(include_str!("agent-usage_help.txt"));
     let cfg = read_config();
     let mut refresh = cfg.refresh;
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1592,7 +1663,9 @@ fn main() {
             snapshot.err.clone()
         };
         if !gripe.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", gripe))], w - 1));
+            for line in gripe_lines(&gripe, w) {
+                rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
+            }
         }
         rows.push(tab_bar(&name, &snapshot.installed, &tabs, w, &p));
         rows.push(String::new());
@@ -1600,7 +1673,7 @@ fn main() {
         let body = if snapshot.fetched <= 0.0 {
             loading_rows(w, tick, &p)
         } else {
-            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p)
+            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
         };
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![
@@ -1696,21 +1769,21 @@ fn main() {
 // module per agent, because they share only the shape the summary screen
 // compares them in - and because five readers being written at once should
 // not be five edits to the same file.
-#[path = "usage/shared.rs"]
+#[path = "agent-usage/shared.rs"]
 mod shared;
-#[path = "usage/antigravity.rs"]
+#[path = "agent-usage/antigravity.rs"]
 mod antigravity;
-#[path = "usage/claude.rs"]
+#[path = "agent-usage/claude.rs"]
 mod claude;
-#[path = "usage/codex.rs"]
+#[path = "agent-usage/codex.rs"]
 mod codex;
-#[path = "usage/copilot.rs"]
+#[path = "agent-usage/copilot.rs"]
 mod copilot;
-#[path = "usage/cursor.rs"]
+#[path = "agent-usage/cursor.rs"]
 mod cursor;
-#[path = "usage/grok.rs"]
+#[path = "agent-usage/grok.rs"]
 mod grok;
-#[path = "usage/vendors.rs"]
+#[path = "agent-usage/vendors.rs"]
 mod vendors;
 
 #[cfg(test)]
@@ -1918,6 +1991,55 @@ mod tests {
         assert_eq!(cal.best, Some(day("2026-08-01")));
         // Seven weekday rows plus the month strip.
         assert_eq!(cal.rows.len(), 8);
+    }
+
+    #[test]
+    fn the_new_config_section_wins_over_the_old_name() {
+        let both = serde_json::json!({"agent_usage": {}, "usage": {"grok_ping": true}});
+        assert_eq!(pick_config_section(&both), ("agent_usage", false));
+        let leftover = serde_json::json!({"usage": {"grok_ping": true}});
+        assert_eq!(pick_config_section(&leftover), ("usage", true));
+        let empty = serde_json::json!({});
+        assert_eq!(pick_config_section(&empty), ("agent_usage", false));
+        // Present-but-empty is still a hit: they created the new section.
+        let blank = serde_json::json!({"agent_usage": {}});
+        assert_eq!(pick_config_section(&blank), ("agent_usage", false));
+    }
+
+    #[test]
+    fn a_legacy_section_note_keeps_the_new_name_at_a_narrow_pane() {
+        // 58 is the documented width a pane is dragged to. The note is 65
+        // cells with its prefix; clipping there hid `agent_usage`.
+        let lines = gripe_lines(LEGACY_SECTION_NOTE, 58);
+        assert!(
+            lines.iter().any(|l| l.contains("agent_usage")),
+            "the section name was lost: {:?}",
+            lines
+        );
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= 57),
+            "a wrapped line still overflowed: {:?}",
+            lines
+        );
+        let tight = gripe_lines(LEGACY_SECTION_NOTE, 30);
+        assert!(
+            tight.iter().any(|l| l.contains("agent_usage")),
+            "the section name was lost at 30: {:?}",
+            tight
+        );
+        assert!(tight.len() > 1, "should have wrapped: {:?}", tight);
+    }
+
+    #[test]
+    fn a_leftover_section_is_named_on_screen() {
+        let mut cfg = Config::default();
+        assert!(config_complaints(&cfg).is_empty());
+        cfg.legacy_section = true;
+        assert_eq!(config_complaints(&cfg), LEGACY_SECTION_NOTE);
+        cfg.agents = vec!["nonsence".into()];
+        let got = config_complaints(&cfg);
+        assert!(got.contains(LEGACY_SECTION_NOTE), "{got}");
+        assert!(got.contains("unknown agent in config: nonsence"), "{got}");
     }
 
     #[test]

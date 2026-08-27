@@ -42,7 +42,7 @@ nothing at all — it just looks good, and it knows it.
 | **`gha`** | GitHub Actions across those same accounts: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](docs/gha.md) |
 | **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
-| **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
+| **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/agent-usage.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic | [read →](docs/ports.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
@@ -102,8 +102,8 @@ copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like — or put the binaries on your `PATH`:
 
 ```sh
-sudo cp opscope clocks deployments gha github herdr-panes latency linear link \
-        matrix netwatch ports pr tailnet usage /usr/local/bin/
+sudo cp opscope agent-usage clocks deployments gha github herdr-panes latency linear link \
+        matrix netwatch ports pr tailnet /usr/local/bin/
 ```
 
 **On macOS, download with `curl` rather than a browser.** These binaries are
@@ -180,12 +180,12 @@ This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
-**Three widgets need a token:** `deployments` wants a Vercel token from
-Account Settings → Tokens, `github` a *classic* GitHub PAT with `repo` and
-`read:org` (fine-grained tokens reach only one org each), and `linear` a
-personal API key from Settings → Security & access. `pr` and `gha` reuse the
-GitHub token rather than asking for their own. Every other widget runs with no
-configuration at all.
+**Three widgets define their own token settings:** `deployments` wants a
+Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
+PAT with `repo` and `read:org` (fine-grained tokens reach only one org
+each), and `linear` a personal API key from Settings → Security & access.
+`pr` and `gha` reuse that GitHub token; they are not credential-free.
+Every other widget runs with no configuration at all.
 
 ## Requirements
 
@@ -244,4 +244,5 @@ explains what each check is defending.
 
 [GNU AGPL-3.0](LICENSE). You may use, modify and share these widgets freely; if
 you distribute a modified version — or run one as a network service — you must
-make your source available under the same license.
+make your source available under the same license. Commercial licenses are
+available; write to [email@wiiiimm.codes](mailto:email@wiiiimm.codes).

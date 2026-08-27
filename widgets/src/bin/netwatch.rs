@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use opscope_core as tc;
 
@@ -30,7 +30,6 @@ const SERIES: usize = 240;
 
 /// A braille cell is two dots wide and four tall, so one character holds
 /// eight addressable points. The bit for each is fixed by the encoding.
-const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 /// Interfaces that are not the wire. A packet forwarded out of one of these
 /// leaves through a real interface as well, and counting both counts it
@@ -42,13 +41,6 @@ const VIRTUAL: &[&str] = &[
 
 /// Systemd names the slice, not the thing in it.
 const SLICES: &[&str] = &["system.slice", "user.slice", "init.scope", "-.slice", "app.slice"];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// Decimal units, as network equipment and ISPs quote them.
 fn units(n: f64) -> String {
@@ -82,12 +74,6 @@ fn elapsed(seconds: f64) -> String {
 /// Seconds before an external command is given up on, from netwatch.py.
 const RUN_TIMEOUT: u64 = 5;
 
-fn run(args: &[&str]) -> String {
-    // Bounded: .output() waits forever, and a wedged child used to freeze
-    // the poll thread with the pane still showing its last frame.
-    tc::run(args, RUN_TIMEOUT).unwrap_or_default()
-}
-
 /// Every address this machine answers to.
 ///
 /// A connection to one of them is turned around inside the kernel and never
@@ -95,7 +81,7 @@ fn run(args: &[&str]) -> String {
 /// address is not loopback.
 fn own_addresses() -> Vec<String> {
     let mut found = Vec::new();
-    for line in run(&["ip", "-o", "addr"]).lines() {
+    for line in tc::run_quiet(&["ip", "-o", "addr"], RUN_TIMEOUT).lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if let Some(at) = cols.iter().position(|c| *c == "inet" || *c == "inet6") {
             if let Some(addr) = cols.get(at + 1) {
@@ -163,7 +149,7 @@ struct Seen {
 /// honest way to reach the process: `ss -p` needs root to name anybody
 /// else's, while /proc/<pid>/fd needs nothing to name our own.
 fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
-    let text = run(&["ss", "-tine"]);
+    let text = tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT);
     if text.is_empty() {
         return (HashMap::new(), "ss would not run".into());
     }
@@ -539,7 +525,7 @@ struct State {
 }
 
 fn sample(state: &mut State, external: bool) {
-    let stamp = now();
+    let stamp = tc::now();
     let own = own_addresses();
     let counters = wire_bytes();
     let (found, err) = sockets(external, &own);
@@ -794,7 +780,7 @@ fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted:
     };
     let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
         if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
-            grid[y as usize / 4][x as usize / 2] |= BRAILLE[y as usize % 4][x as usize % 2];
+            grid[y as usize / 4][x as usize / 2] |= tc::BRAILLE[y as usize % 4][x as usize % 2];
         }
     };
     if vals.len() == 1 {
@@ -886,7 +872,7 @@ impl Resolver {
             // getent rather than a resolver library: it is glibc's own
             // lookup, so it honours /etc/hosts, nsswitch and the search
             // domains exactly as everything else on the machine does.
-            let answer = run(&["getent", "hosts", &ip]);
+            let answer = tc::run_quiet(&["getent", "hosts", &ip], RUN_TIMEOUT);
             let name = answer
                 .split_whitespace()
                 .nth(1)
@@ -1351,7 +1337,7 @@ fn file_rows(
             let here = focused && i == at;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let (grew, span) = match sizes.get(&item.path) {
-                Some((was, when)) => (item.size.saturating_sub(*was), now() - when),
+                Some((was, when)) => (item.size.saturating_sub(*was), tc::now() - when),
                 None => (0, 0.0),
             };
             let growth = if grew > 0 && span > 0.0 {
@@ -1590,7 +1576,7 @@ fn detail_rows(
 fn plain_line(rows: &[Proc], started: f64, live: bool, limit: usize) -> String {
     let mut lines = vec![format!(
         "--- {} elapsed · sorted by {} ---",
-        elapsed(now() - started),
+        elapsed(tc::now() - started),
         if live { "live" } else { "total" }
     )];
     for row in rows.iter().take(limit) {
@@ -1697,7 +1683,7 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(State {
-        started: now(),
+        started: tc::now(),
         ..Default::default()
     }));
     let poller = Arc::clone(&state);
@@ -1795,7 +1781,7 @@ fn main() {
                             guard.conns.clear();
                             guard.spots.clear();
                             guard.series.clear();
-                            guard.started = now();
+                            guard.started = tc::now();
                         }
                         detail = None;
                         sizes.clear();
@@ -1860,7 +1846,7 @@ fn main() {
                                     pending_copy
                                 ),
                                 if copied { p.ok.clone() } else { p.warn.clone() },
-                                now() + 8.0,
+                                tc::now() + 8.0,
                             ));
                         }
                     }
@@ -1898,7 +1884,7 @@ fn main() {
                         guard.conns.clear();
                         guard.spots.clear();
                         guard.series.clear();
-                        guard.started = now();
+                        guard.started = tc::now();
                     }
                     selected = 0;
                 }
@@ -1907,7 +1893,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        if notice.as_ref().is_some_and(|n| now() >= n.2) {
+        if notice.as_ref().is_some_and(|n| tc::now() >= n.2) {
             notice = None;
         }
 
@@ -1954,7 +1940,7 @@ fn main() {
             };
             let files = if running(pid) { open_files(pid) } else { Vec::new() };
             for file in &files {
-                sizes.entry(file.path.clone()).or_insert((file.size, now()));
+                sizes.entry(file.path.clone()).or_insert((file.size, tc::now()));
             }
             let counts = [spots.len(), conns.len(), files.len()];
             section_len = counts;
@@ -2094,7 +2080,7 @@ fn main() {
             &[
                 (p.dim.as_str(), format!(" {} moving", moving)),
                 (p.dim.as_str(), " · ".into()),
-                (p.accent.as_str(), elapsed(now() - guard.started)),
+                (p.accent.as_str(), elapsed(tc::now() - guard.started)),
                 (p.dim.as_str(), " · sorted by ".into()),
                 (
                     p.accent.as_str(),

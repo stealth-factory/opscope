@@ -710,6 +710,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// True when nothing is asking the server on the reader's behalf, so the
 /// figures move only when they use Grok on this machine. The summary says so
 /// under the row; once asking is on, the tab reports the interval instead.
+pub fn asks_nobody(d: &Data) -> bool {
+    d.quota_every <= 0.0
+}
+
 /// Why Grok publishes no bar, when it does not.
 ///
 /// "No quota published" covers two situations that want opposite things
@@ -717,19 +721,25 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// the ask is working and x.ai is the one with nothing to report, in which
 /// case there is nothing for them to do and a prompt to change a setting
 /// would be a wild goose chase.
-pub fn why_no_lane(d: &Data) -> &'static str {
-    if d.quota.is_none() {
-        return "";
+pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
     }
-    if d.quota_live {
-        "x.ai answered, and published no credit figure for this period.          Accounts on unified billing stopped carrying one; the window it          does state is on the GROK tab."
-    } else {
-        ""
+    if !d.quota_why.is_empty() {
+        return format!("no quota · {}", d.quota_why);
     }
-}
-
-pub fn asks_nobody(d: &Data) -> bool {
-    d.quota_every <= 0.0
+    if d.quota.is_some() && d.quota_live {
+        return "no quota · x.ai answered, and published no credit figure for this period. \
+                Accounts on unified billing stopped carrying one; the window it does \
+                state is on the GROK tab."
+            .into();
+    }
+    if d.quota_every <= 0.0 {
+        return "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
+                ~/.grok/logs/unified.jsonl has no creditUsagePercent."
+            .into();
+    }
+    "no quota · x.ai did not publish a credit figure, and the log has none either.".into()
 }
 
 /// Where the figure came from, in the two states it can be in.
@@ -817,7 +827,7 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     out.push(tc::seg(
         &[(
             p.dim.as_str(),
-            "  Only your own Grok sessions update it. usage.grok_ping polls x.ai instead."
+            "  Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead."
                 .into(),
         )],
         w - 1,
@@ -986,6 +996,12 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             ));
         }
         rows.push(String::new());
+    } else {
+        let note = why_no_lane(d);
+        if !note.is_empty() {
+            rows.extend(no_local(&note, "", w, p));
+            rows.push(String::new());
+        }
     }
 
     // Everything below counts what this machine recorded, so it stops here
@@ -1575,5 +1591,31 @@ mod tests {
             .expect("a fixed timestamp")
             .date_naive()
             .to_string()
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let off = why_no_lane(&Data::default());
+        assert!(off.contains("grok_ping"), "{off}");
+        assert!(off.contains("creditUsagePercent"), "{off}");
+
+        let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        let live_blank = Data {
+            quota: newest_quota([bare.as_str()].into_iter()),
+            quota_live: true,
+            quota_every: 300.0,
+            ..Data::default()
+        };
+        let note = why_no_lane(&live_blank);
+        assert!(note.contains("x.ai answered"), "{note}");
+        assert!(note.contains("no credit figure"), "{note}");
+
+        let lapsed = Data {
+            quota_why: "the token lapsed 3h ago - the Grok CLI refreshes it".into(),
+            quota_every: 300.0,
+            ..Data::default()
+        };
+        let note = why_no_lane(&lapsed);
+        assert!(note.contains("token lapsed"), "{note}");
     }
 }

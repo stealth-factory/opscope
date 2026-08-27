@@ -108,8 +108,8 @@
     "limit": 50,
     "refresh": 60
   },
-  "usage": {
-    "_comment": "Reads local agent state only - no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way.",
+  "agent_usage": {
+    "_comment": "Reads local agent state only - no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
     "agents": [],
     "exclude_agents": [],
     "refresh": 30,

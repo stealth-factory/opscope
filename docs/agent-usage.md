@@ -1,4 +1,4 @@
-# `usage`
+# `agent-usage`
 
 [← all docs](README.md)
 
@@ -85,8 +85,17 @@ says who owns what; the ordering keeps answering what to worry about. Dropping
 the agent column that a flat list needed also bought back enough width for the
 resets to survive a 58-column pane.
 
-An agent that publishes no quota is **named at the bottom**, not silently
-missing, so an empty row and an absent agent are different things.
+An agent that publishes no quota is **named at the bottom under its own heading**,
+with the reason the live bar is missing — not silently dropped, and not dumped
+into a `No quota published by: …` list. The agent's own tab can still be full:
+those numbers are **local spend** (stats cache, tracking database, session
+store, transcripts). `[+]` only ranks a live (or last-session) quota lane from
+the vendor, so a busy tab and an empty summary row can both be true. Claude
+needs a signed-in token and Anthropic's usage endpoint; Cursor needs
+`~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
+in `~/.copilot/config.json`; Grok needs either `creditUsagePercent` in
+`~/.grok/logs/unified.jsonl` or `agent_usage.grok_ping` to poll x.ai. Each of those
+is a different missing step, so each quiet agent says which one it is.
 
 A lane whose reading came from a cache rather than a live call says `cached`
 instead of a countdown. Claude's fallback can describe windows that have since
@@ -182,8 +191,13 @@ Authorization: Bearer <accessToken from ~/.config/cursor/auth.json>
 ```
 
 which is the credential the widget reuses. That endpoint is **undocumented**,
-discovered by reading the CLI bundle, and versioned only by it — so every
-failure is silent and the tab falls back to authorship alone.
+discovered by reading the CLI bundle, and versioned only by it — so a failure
+used to be silent and the tab fell back to authorship alone, leaving `[+]` to
+list Cursor in a roll-call. The reason now rides with the refusal: no token,
+or the endpoint did not answer, on both the tab and `[+]`. A missing token is
+a local fact and is held like a reading; a silent endpoint stays a refusal,
+so the backoff that stops a rate limit from being poked every two minutes
+still applies, and the sentence is written into that slot afterwards.
 
 **The percentages and the dollars have different denominators**, which is
 Cursor's own doing and worth stating. The three lanes are the server's
@@ -388,7 +402,7 @@ reader:
 ```
  no quota either: Antigravity's token expired 51m ago - it refreshes them
  itself, so open it or run `agy` once and sign in
- no quota either: asking Google is off - set usage.antigravity_remote to true
+ no quota either: asking Google is off - set agent_usage.antigravity_remote to true
  no quota either: Antigravity has not signed in on this machine - run `agy`
  once and sign in
  no quota either: Google refused the Antigravity token: …
@@ -416,10 +430,11 @@ nothing about why.
 **The roll-call is what is left over.** `No quota published by: …` once led
 this block and named every quiet agent, with the explanations below it. That
 reads backwards, and it said the same thing twice for any agent that had a
-reason, since each reason already opens by saying there is no quota. Now
-each agent that can explain itself leads with its own heading, and the
-roll-call lists only those with nothing to say — vanishing entirely when
-they all have.
+reason, since each reason already opens by saying there is no quota. Claude,
+Cursor, Grok and Copilot now explain themselves the same way Antigravity does,
+so the roll-call lists only a name we still have nothing to say about —
+vanishing entirely when they all have. An agent that is neither detected nor
+listed in `agent_usage.agents` is not on this screen at all.
 
 The tier comes from the endpoint the CLI authenticates against:
 
@@ -684,7 +699,7 @@ Cursor computes it from its own two figures. Everyone else needs one number
 that no machine here knows — what you actually pay — so it is configured:
 
 ```json
-"usage": {
+"agent_usage": {
   "plan_cost": { "claude": 200 }
 }
 ```
@@ -913,7 +928,11 @@ has a local cache anyway.
 
 Every one of them falls back rather than failing: Codex to the rollout
 snapshot, Claude to `cachedUsageUtilization`, Cursor to authorship alone. The
-header always says which you are looking at.
+header always says which you are looking at. When Codex has a snapshot
+without a usable `used_percent` and no live window, the reason is the
+live-fetch's own — a missing token, or an endpoint that did not answer —
+not a single sentence that blamed the service for a credential that was
+never sent.
 
 A reading is held for **two minutes** (`LIVE_TTL`). The pane redraws every 30
 seconds and these windows move over hours, so the earlier code was making six
@@ -1079,7 +1098,7 @@ The screen says which state it is in, in both places it appears:
 ```
 ── WEEKLY QUOTA ── resets in ~1.1 days
  not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
- Only your own Grok sessions update it. usage.grok_ping polls x.ai instead.
+ Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.
 ```
 
 ```
@@ -1284,7 +1303,7 @@ a CLI installed under another name would vanish, and an agent uninstalled last
 week still has history worth reading.
 
 ```json
-"usage": {
+"agent_usage": {
   "agents": [],
   "exclude_agents": [],
   "refresh": 30
@@ -1308,6 +1327,12 @@ called out — `unknown agent in config: nonsence (known: claude, codex, …)` �
 rather than silently ignored. If the settings would leave no tabs at all it
 shows everything instead, because an empty widget teaches nothing and the
 likeliest cause is a typo.
+
+The section used to be called `usage`, matching the old binary name. A
+leftover section under that name is still read, and the pane says so —
+`config section is still called usage; rename it to agent_usage` — so an
+existing `config.json` neither goes silent nor needs a note someone might
+miss.
 
 Adding support for a new agent is one entry in `AGENTS`, giving the binaries
 to look for and the paths that prove it has run.

@@ -14,7 +14,7 @@ machine.
    github       GitHub delivery metrics across every org…          set a GitHub token
    latency      Multi-target latency monitor.                      needs ping
    tailnet      Tailscale network: who is online…                  tailscale installed
-   usage        How much the coding agents have been used…         reads what is logged in
+   agent-usage  How much the coding agents have been used…         reads what is logged in
    …
 
  ── NETWATCH ── ./target/release/netwatch
@@ -84,7 +84,7 @@ nothing to keep in step.
 It also had side effects, and that is what settled it. Arrowing onto
 `latency` spawns `ping` and puts packets on the wire. Onto `github` or `pr`,
 GraphQL calls against a 5,000-an-hour quota. Onto `deployments` or `linear`,
-their APIs. Onto `usage`, a walk of the entire agent transcript tree, which
+their APIs. Onto `agent-usage`, a walk of the entire agent transcript tree, which
 on this machine is 541 MB. **Browsing a menu should cost nothing**, and a
 menu that quietly spends your API budget as you scroll past a row is a menu
 with a trap in it.
