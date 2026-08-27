@@ -223,11 +223,24 @@ jobs:
           # avoid.
           open=$(gh pr list --head "$branch" --base main --state open \
             --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          # REST, not `gh pr edit` / `gh pr create`. Those two go through
+          # GraphQL that asks for the org's login, name and slug, which a
+          # classic PAT with `repo` does not have (`read:org`). The token
+          # that opens this PR as a user is that PAT; git push already
+          # succeeded with it, then `gh pr edit` died, leaving the branch
+          # moved and the PR title stale. /pulls does not ask for the org.
+          repo="${GITHUB_REPOSITORY}"
+          title="release: v${NEXT}"
           if [ -n "$open" ]; then
             echo "updating #${open}"
-            gh pr edit "$open" --title "release: v${NEXT}" --body "$full"
+            jq -n --arg title "$title" --arg body "$full" \
+              '{title:$title, body:$body}' \
+              | gh api -X PATCH "repos/${repo}/pulls/${open}" --input - \
+              --jq .html_url
           else
             echo "opening a new release PR"
-            gh pr create --base main --head "$branch" \
-              --title "release: v${NEXT}" --body "$full"
+            jq -n --arg title "$title" --arg body "$full" --arg head "$branch" \
+              '{title:$title, body:$body, head:$head, base:"main"}' \
+              | gh api -X POST "repos/${repo}/pulls" --input - \
+              --jq .html_url
           fi
