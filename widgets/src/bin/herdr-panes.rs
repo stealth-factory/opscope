@@ -23,20 +23,12 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use opscope_core as tc;
 
 /// Worst first: the states that want a human are the reason to look.
 const RANK: &[&str] = &["blocked", "done", "working", "idle", "unknown"];
-const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 fn rank_of(state: &str) -> usize {
     RANK.iter().position(|s| *s == state).unwrap_or(9)
@@ -400,7 +392,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
         }
     };
 
-    let at = now();
+    let at = tc::now();
     let mut agents = Vec::new();
     for entry in listed["agents"].as_array().into_iter().flatten() {
         let pane_id = text_at(entry, "pane_id");
@@ -635,7 +627,7 @@ fn mark_of(state: &str, tick: usize) -> char {
     match state {
         "blocked" => '⚠',
         "done" => '✓',
-        "working" => SPINNER[tick % SPINNER.len()],
+        "working" => tc::SPINNER[tick % tc::SPINNER.len()],
         "idle" => '·',
         _ => '?',
     }
@@ -785,7 +777,7 @@ fn main() {
                                 format!("! could not focus {}", pane)
                             },
                             ok,
-                            now() + 3.0,
+                            tc::now() + 3.0,
                         ));
                     }
                 }
@@ -828,7 +820,7 @@ fn main() {
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
-        if note.as_ref().is_some_and(|(_, _, until)| now() >= *until) {
+        if note.as_ref().is_some_and(|(_, _, until)| tc::now() >= *until) {
             note = None;
         }
 

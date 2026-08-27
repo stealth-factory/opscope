@@ -23,10 +23,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{Datelike, Duration as Days, NaiveDate, TimeZone, Utc};
 use opscope_core as tc;
+use opscope_core::now;
 
 /// The priced kinds, in the order every rate card lists them.
 const RATE_KINDS: &[&str] = &[
@@ -168,7 +169,6 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
     }
 }
 
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &["claude", "codex", "cursor", "grok", "copilot", "antigravity"];
 const MONTHS: &[&str] = &[
@@ -180,13 +180,6 @@ const PACE_FLOOR: f64 = 3.0;
 /// The five-hour session and the seven-day total, which the response names
 /// in its own top-level keys rather than in limits[].
 const CLAUDE_WINDOW_SECS: &[(&str, f64)] = &[("session", 5.0 * 3600.0), ("weekly", 7.0 * 86400.0)];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -1522,7 +1515,7 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
-                (p.accent.as_str(), format!(" {}", SPINNER[tick % SPINNER.len()])),
+                (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
                 (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
