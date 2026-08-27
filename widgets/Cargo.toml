@@ -74,6 +74,10 @@ name = "github"
 path = "src/bin/github.rs"
 
 [[bin]]
+name = "gha"
+path = "src/bin/gha.rs"
+
+[[bin]]
 name = "tailnet"
 path = "src/bin/tailnet.rs"
 

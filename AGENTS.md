@@ -11,7 +11,7 @@ filed and already decided against.
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Fourteen Rust binaries sharing `opscope-core`, built with `cargo build
+Fifteen Rust binaries sharing `opscope-core`, built with `cargo build`
 --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is

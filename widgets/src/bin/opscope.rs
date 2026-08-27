@@ -47,6 +47,11 @@ const WIDGETS: &[Widget] = &[
         doc: include_str!("../../../docs/deployments.md"),
     },
     Widget {
+        stem: "gha",
+        help: include_str!("gha_help.txt"),
+        doc: include_str!("../../../docs/gha.md"),
+    },
+    Widget {
         stem: "github",
         help: include_str!("github_help.txt"),
         doc: include_str!("../../../docs/github.md"),

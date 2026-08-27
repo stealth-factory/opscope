@@ -6,7 +6,7 @@ Sci-fi terminal widgets that show only real data.
 npx opscope
 ```
 
-That is the launcher: a menu of the fourteen widgets, or name one and skip
+That is the launcher: a menu of the fifteen widgets, or name one and skip
 it (`npx opscope latency`). The binaries it starts are the ones attached
 to the GitHub release of the same version — `--version` on any of them
 answers with that version, commit and date.

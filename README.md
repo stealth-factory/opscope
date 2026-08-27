@@ -39,6 +39,7 @@ nothing at all — it just looks good, and it knows it.
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
+| **`gha`** | GitHub Actions across those same accounts: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](docs/gha.md) |
 | **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
 | **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
@@ -61,13 +62,13 @@ If you have Node, this is the whole thing:
 npx opscope
 ```
 
-It installs the launcher and the fourteen binaries for this machine, and
+It installs the launcher and the fifteen binaries for this machine, and
 starts the menu. `npx opscope latency` skips the menu. Linux x86-64
 (glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published; anything else
 fails at install with a sentence saying so.
 
 There is no Homebrew formula yet. You can also download three files, or
-build fourteen. Both take about a minute.
+build fifteen. Both take about a minute.
 
 ### Download a release
 
@@ -96,12 +97,12 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The fourteen binaries are right there, beside `config.example.json` and a
+The fifteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like — or put the binaries on your `PATH`:
 
 ```sh
-sudo cp opscope clocks deployments github herdr-panes latency linear link \
+sudo cp opscope clocks deployments gha github herdr-panes latency linear link \
         matrix netwatch ports pr tailnet usage /usr/local/bin/
 ```
 
@@ -122,12 +123,12 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # fourteen binaries in ./target/release
+cargo build --release   # fifteen binaries in ./target/release
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fourteen, with a live preview of
+`opscope` is the front door — a menu of the fifteen, with a live preview of
 whichever is highlighted:
 
 ```sh
@@ -152,7 +153,7 @@ like.
 
 ## Building the wall
 
-Fourteen widgets tile into whatever space you have. A layout that works on a
+Fifteen widgets tile into whatever space you have. A layout that works on a
 wide screen:
 
 ```
@@ -182,8 +183,8 @@ with `.env` files and anything else likely to hold a secret.
 **Three widgets need a token:** `deployments` wants a Vercel token from
 Account Settings → Tokens, `github` a *classic* GitHub PAT with `repo` and
 `read:org` (fine-grained tokens reach only one org each), and `linear` a
-personal API key from Settings → Security & access. `pr` reuses the GitHub
-token rather than asking for its own. Every other widget runs with no
+personal API key from Settings → Security & access. `pr` and `gha` reuse the
+GitHub token rather than asking for their own. Every other widget runs with no
 configuration at all.
 
 ## Requirements

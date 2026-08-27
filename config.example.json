@@ -89,6 +89,15 @@
     "window_days": 14,
     "refresh": 120
   },
+  "gha": {
+    "_comment": "Reuses github.token. Empty accounts inherits github.accounts. Empty repos means recently-pushed repos that have workflow files, capped at max_repos across those accounts — never every repo the token can see. The screen names the cap.",
+    "accounts": [],
+    "repos": [],
+    "window_hours": 48,
+    "refresh": 60,
+    "max_repos": 16,
+    "pushed_days": 14
+  },
   "pr": {
     "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
     "sources": {
