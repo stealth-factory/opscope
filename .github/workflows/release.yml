@@ -18,16 +18,20 @@ on:
   # starts this workflow: a tag it pushes with GITHUB_TOKEN triggers
   # nothing, and workflow_dispatch is the documented exception.
   workflow_dispatch:
-  # And on any change to the release machinery itself, because the first
-  # time a release build runs should not be the release. Deliberately not
-  # every pull request: this is three full builds and most changes here
-  # cannot affect it.
-  pull_request:
-    paths:
-      - '.github/workflows/release.yml'
-      - 'cliff.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  # The three-platform pull-request build is a dress rehearsal: the first
+  # time a release build runs should not be the tagged one. It is commented
+  # out for now because the standing release PR is opened by GITHUB_TOKEN,
+  # and GitHub holds those runs for a maintainer click — the same click
+  # this rehearsal was meant to avoid depending on. Restore the block when
+  # RELEASE_TOKEN opens that PR as a user, or when the rehearsal is worth
+  # the approval. Deliberately not every pull request: three full builds,
+  # and most changes here cannot affect it.
+  # pull_request:
+  #   paths:
+  #     - '.github/workflows/release.yml'
+  #     - 'cliff.toml'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
 
 permissions:
   contents: write

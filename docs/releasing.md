@@ -89,10 +89,14 @@ binary no checkout can reproduce.
 
 **The release PR arrives with no CI, and that is expected.** It is opened by
 `GITHUB_TOKEN`, and GitHub holds workflow runs on such pull requests for
-manual approval. Rather than depend on someone approving them,
-`release-pr.yml` runs `cargo metadata --locked` on the bumped tree itself —
-the one thing that step can get wrong is leaving the lock disagreeing with
-the manifests, and that is checked before the PR is offered.
+manual approval. The three-platform `release.yml` pull-request trigger is
+commented out for the same reason: approving it only rehearses the tagged
+build, at the cost of a click and a second set of binaries. Rather than
+depend on someone approving `ci`, `release-pr.yml` runs
+`cargo metadata --locked` on the bumped tree itself — the one thing that
+step can get wrong is leaving the lock disagreeing with the manifests, and
+that is checked before the PR is offered. Restore the trigger (or set
+`RELEASE_TOKEN`) before making those checks required.
 
 **`RELEASE_TOKEN` is optional.** If set to a fine-grained PAT with Contents
 and Pull requests read/write, the release PR is opened as that user and gets
