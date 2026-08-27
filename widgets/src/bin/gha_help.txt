@@ -17,5 +17,5 @@ Credentials: reuses `github.token` from config.json, or $GITHUB_TOKEN.
 
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
-repo, workflow, branch and event, w cycles the window, q quits. On a run,
+repo, workflow, branch, event and conclusion, w cycles the window, q quits. On a run,
 c copies its URL, esc closes.

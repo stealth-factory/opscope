@@ -1782,8 +1782,11 @@ mod tests {
         assert_eq!(token(&gha, &gh), ("from-gha".to_string(), "config"));
         let empty: serde_json::Value = serde_json::from_str(r#"{"token": ""}"#).unwrap();
         assert_eq!(token(&empty, &gh), ("from-github".to_string(), "config"));
-        let bare: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(token(&bare, &bare).1, "missing");
+        // Isolate from $GITHUB_TOKEN: a missing named env is the "no token"
+        // case, not whatever the process happens to carry.
+        let isolated: serde_json::Value =
+            serde_json::from_str(r#"{"token_env": "OPSCOPE_GHA_NO_SUCH_TOKEN"}"#).unwrap();
+        assert_eq!(token(&isolated, &isolated).1, "missing");
     }
 
     #[test]
