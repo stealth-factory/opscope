@@ -58,13 +58,17 @@ reflows when you resize the pane.
 If you have Node, this is the whole thing:
 
 ```sh
-npx opscope
+npx opscope                 # the menu
+npx opscope link            # skip the menu; any widget name works
+npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 ```
 
 It installs the launcher and the fourteen binaries for this machine, and
-starts the menu. `npx opscope latency` skips the menu. Linux x86-64
-(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published; anything else
-fails at install with a sentence saying so.
+starts whichever you named — or the menu, if you named none. Only
+`opscope` lands on your `PATH`; the widgets stay beside it, so `pr` and
+`link` never replace the coreutils commands of the same name. Linux x86-64
+(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published;
+anything else fails at install with a sentence saying so.
 
 There is no Homebrew formula yet. You can also download three files, or
 build fourteen. Both take about a minute.
@@ -98,11 +102,13 @@ Or take them by hand from the
 
 The fourteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
-live wherever you like — or put the binaries on your `PATH`:
+live wherever you like. Start them from it — do not copy `pr` or `link`
+onto your `PATH`, they shadow coreutils:
 
 ```sh
-sudo cp opscope agent-usage clocks deployments github herdr-panes latency linear link \
-        matrix netwatch ports pr tailnet /usr/local/bin/
+./opscope            # the menu
+./opscope link       # skip the menu
+./opscope clocks -h  # widget flags go through
 ```
 
 **On macOS, download with `curl` rather than a browser.** These binaries are
@@ -128,23 +134,25 @@ cargo build --release   # fourteen binaries in ./target/release
 ## Running them
 
 `opscope` is the front door — a menu of the fourteen, with a live preview of
-whichever is highlighted:
+whichever is highlighted. Name a widget to skip the menu. The same shape
+works from `npx`, from an unpacked tarball, and from a build tree:
 
 ```sh
-opscope          # pick one and it runs
-opscope latency  # or name one and skip the menu
+opscope              # pick one and it runs
+opscope link         # or name one and skip the menu
+opscope clocks -h    # flags after the name belong to the widget
+
+npx opscope
+npx opscope@latest link
+
+./opscope link                    # tarball, from the unpacked folder
+./target/release/opscope link     # after cargo build --release
 ```
 
-Each widget is also an ordinary program, if you would rather go direct:
-
-```sh
-latency        # each runs standalone
-clocks -h      # every widget documents itself
-```
-
-Those are the names as they sit on your `PATH`. From an unpacked tarball or
-a build tree, reach for them where they are — `./opscope`, or
-`./target/release/opscope`.
+The launcher looks for each widget beside itself, so the fourteen have to
+stay together. `npx` already keeps them that way. A folder on `PATH` that
+contains `pr` and `link` would shadow the real commands; leave those names
+off `PATH` and type `opscope <widget>`.
 
 They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
