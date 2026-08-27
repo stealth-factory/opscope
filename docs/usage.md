@@ -194,7 +194,10 @@ which is the credential the widget reuses. That endpoint is **undocumented**,
 discovered by reading the CLI bundle, and versioned only by it — so a failure
 used to be silent and the tab fell back to authorship alone, leaving `[+]` to
 list Cursor in a roll-call. The reason now rides with the refusal: no token,
-or the endpoint did not answer, on both the tab and `[+]`.
+or the endpoint did not answer, on both the tab and `[+]`. A missing token is
+a local fact and is held like a reading; a silent endpoint stays a refusal,
+so the backoff that stops a rate limit from being poked every two minutes
+still applies, and the sentence is written into that slot afterwards.
 
 **The percentages and the dollars have different denominators**, which is
 Cursor's own doing and worth stating. The three lanes are the server's
@@ -925,7 +928,11 @@ has a local cache anyway.
 
 Every one of them falls back rather than failing: Codex to the rollout
 snapshot, Claude to `cachedUsageUtilization`, Cursor to authorship alone. The
-header always says which you are looking at.
+header always says which you are looking at. When Codex has a snapshot
+without a usable `used_percent` and no live window, the reason is the
+live-fetch's own — a missing token, or an endpoint that did not answer —
+not a single sentence that blamed the service for a credential that was
+never sent.
 
 A reading is held for **two minutes** (`LIVE_TTL`). The pane redraws every 30
 seconds and these windows move over hours, so the earlier code was making six

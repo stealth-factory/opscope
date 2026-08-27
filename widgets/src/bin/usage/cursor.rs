@@ -182,18 +182,16 @@ fn cursor_rpc(method: &str, body: &serde_json::Value) -> Option<serde_json::Valu
 
 /// Plan usage, from the endpoint cursor-agent's own Usage view calls.
 ///
-/// The reason rides along in the cached value, so a missing token and a
-/// silent endpoint stay distinguishable for as long as the failure they
-/// describe rather than collapsing to None and leaving the summary with
-/// nothing to say.
+/// A missing token is a local fact and rides in the cached value, so the
+/// summary can name it for as long as the absence lasts. A silent endpoint
+/// is a refusal: it stays `None` so `cached` backs off rather than treating
+/// the diagnostic as a successful reading.
 fn cursor_live() -> Option<serde_json::Value> {
     if cursor_token().is_none() {
         return Some(serde_json::json!({"why": "no token - Cursor has not signed in here"}));
     }
-    match cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({})) {
-        Some(u) => Some(serde_json::json!({"u": u})),
-        None => Some(serde_json::json!({"why": "Cursor's usage endpoint did not answer"})),
-    }
+    cursor_rpc("GetCurrentPeriodUsage", &serde_json::json!({}))
+        .map(|u| serde_json::json!({"u": u}))
 }
 
 /// Which Cursor plan the percentages are percentages of.
@@ -440,7 +438,14 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // The published sections do not depend on the local database, so a
     // locked or missing file must not take the live quota down with it -
     // which is what usage.py's sqlite-error branch does.
-    d.live = match cached(caches, "cursor", LIVE_TTL, cursor_live) {
+    let mut refuse = String::new();
+    d.live = match cached(caches, "cursor", LIVE_TTL, || match cursor_live() {
+        None => {
+            refuse = "Cursor's usage endpoint did not answer".into();
+            None
+        }
+        other => other,
+    }) {
         Some(got) if !text(&got, "why").is_empty() => {
             d.live_why = text(&got, "why");
             None
@@ -448,6 +453,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         Some(got) if got.get("u").is_some() => Some(got["u"].clone()),
         other => other,
     };
+    if !refuse.is_empty() {
+        d.live_why = refuse.clone();
+        remember_refusal(caches, "cursor", &refuse);
+    }
     d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
@@ -1404,5 +1413,13 @@ mod tests {
         let empty = why_no_lane(&Data::default());
         assert!(empty.contains("no live reading"), "{empty}");
         assert!(lanes(&Data::default()).is_empty());
+
+        let refused = Data {
+            live_why: "Cursor's usage endpoint did not answer".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&refused);
+        assert!(note.contains("did not answer"), "{note}");
+        assert!(lanes(&refused).is_empty());
     }
 }

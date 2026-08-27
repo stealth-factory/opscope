@@ -104,19 +104,23 @@ fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
 /// fix. Token and setting failures warn; a server that published nothing
 /// does not.
 fn quiet_of(name: &str, s: &State) -> (String, bool) {
-    match name {
-        "claude" => (crate::claude::why_no_lane(&s.claude), true),
-        "codex" => (crate::codex::why_no_lane(&s.codex), false),
-        "cursor" => (crate::cursor::why_no_lane(&s.cursor), true),
-        "grok" => {
-            let note = crate::grok::why_no_lane(&s.grok);
-            let warn = !note.contains("x.ai answered");
-            (note, warn)
-        }
-        "copilot" => (crate::copilot::why_no_lane(&s.copilot), true),
-        "antigravity" => (crate::antigravity::why_no_lane(&s.antigravity), true),
-        _ => (String::new(), false),
-    }
+    let note = match name {
+        "claude" => crate::claude::why_no_lane(&s.claude),
+        "codex" => crate::codex::why_no_lane(&s.codex),
+        "cursor" => crate::cursor::why_no_lane(&s.cursor),
+        "grok" => crate::grok::why_no_lane(&s.grok),
+        "copilot" => crate::copilot::why_no_lane(&s.copilot),
+        "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
+        _ => String::new(),
+    };
+    let warn = quiet_is_actionable(&note);
+    (note, warn)
+}
+
+/// Token and setting failures are the reader's to fix; a server that
+/// answered and published no percentage is not.
+fn quiet_is_actionable(note: &str) -> bool {
+    !note.contains("answered, and published no")
 }
 
 fn quiet_from(quiet: &[&str], s: &State, w: usize, p: &Palette) -> Vec<String> {
@@ -553,6 +557,33 @@ mod tests {
             !rows.iter().any(|r| r.contains("No agent is publishing a quota")),
             "generic empty-screen line hid the per-agent reasons:\n{rows:#?}"
         );
+    }
+
+    #[test]
+    fn a_server_that_published_nothing_does_not_warn() {
+        // The tone is about who can act, not about who is quiet. A missing
+        // token is the reader's; a 200 with no percentage is the vendor's.
+        assert!(quiet_is_actionable(
+            "no quota · no token - Cursor has not signed in here"
+        ));
+        assert!(quiet_is_actionable(
+            "no quota · asking x.ai is off (set usage.grok_ping to poll)"
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Anthropic answered, and published no limit percentages."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Cursor answered, and published no plan percentages for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · GitHub answered, and published no metered pool for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Codex answered, and published no used_percent for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · x.ai answered, and published no credit figure for this period."
+        ));
     }
 
     #[test]
