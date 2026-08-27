@@ -243,4 +243,5 @@ explains what each check is defending.
 
 [GNU AGPL-3.0](LICENSE). You may use, modify and share these widgets freely; if
 you distribute a modified version — or run one as a network service — you must
-make your source available under the same license.
+make your source available under the same license. Commercial licenses are
+available; write to [email@wiiiimm.codes](mailto:email@wiiiimm.codes).
