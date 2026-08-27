@@ -801,6 +801,13 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
 
 pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = claude_quota(c, w, p);
+    if rows.is_empty() {
+        let note = why_no_lane(c);
+        if !note.is_empty() {
+            rows.extend(no_local(&note, "", w, p));
+            rows.push(String::new());
+        }
+    }
     if !c.ok {
         rows.extend(no_local(
             &format!("No stats cache yet ({}).", c.why),
@@ -1106,6 +1113,23 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
         rows.push(tc::seg(&legend, w - 1));
     }
     rows
+}
+
+/// Why Claude publishes no bar on the summary, when it does not.
+///
+/// The tab still has the stats cache: that is spend on this machine, not a
+/// live account window. The two used to look like the same empty pane.
+pub fn why_no_lane(c: &Data) -> String {
+    if !lanes(c).is_empty() {
+        return String::new();
+    }
+    if !c.quota_why.is_empty() {
+        return format!("no quota · {}", c.quota_why);
+    }
+    if c.quota.is_some() {
+        return "no quota · Anthropic answered, and published no limit percentages.".into();
+    }
+    "no quota · no live reading, and Claude Code has left no cached usage on this machine.".into()
 }
 
 /// Every quota Claude publishes, in the shape the summary screen compares.
@@ -1447,5 +1471,20 @@ mod tests {
         assert_eq!(fresher::<&str>(None, None), None);
         // A tie goes to ours - we know when and how it was taken.
         assert_eq!(fresher(Some(("ours", 42.0)), Some(("theirs", 42.0))), Some(("ours", 42.0)));
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let token = Data {
+            quota_why: "no token - Claude Code has not signed in here".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&token);
+        assert!(note.starts_with("no quota · "), "{note}");
+        assert!(note.contains("not signed in"), "{note}");
+
+        let empty = why_no_lane(&Data::default());
+        assert!(empty.contains("no live reading"), "{empty}");
+        assert!(lanes(&Data::default()).is_empty());
     }
 }

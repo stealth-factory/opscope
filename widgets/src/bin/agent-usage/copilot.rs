@@ -326,6 +326,24 @@ fn scan_store(con: &Connection, d: &mut Data) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Why Copilot publishes no bar on the summary, when it does not.
+///
+/// The session store is spend on this machine. Remaining allowance lives
+/// on the account, so a tab full of turns and an empty `[+]` row are not
+/// the same fact.
+pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
+    }
+    if !d.live_why.is_empty() {
+        return format!("no quota · {}", d.live_why);
+    }
+    if d.live.is_some() {
+        return "no quota · GitHub answered, and published no metered pool for this period.".into();
+    }
+    "no quota · no live reading from Copilot's quota endpoint on this machine.".into()
+}
+
 /// Every quota this agent publishes, for the summary screen.
 ///
 /// window_secs carries quota_window's refusal: None whenever the reset is
@@ -563,12 +581,12 @@ fn copilot_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             }
         }
         rows.push(String::new());
-    } else if !d.live_why.is_empty() {
-        rows.push(tc::seg(
-            &[(p.warn.as_str(), format!("  no quota: {}", d.live_why))],
-            w - 1,
-        ));
-        rows.push(String::new());
+    } else {
+        let note = why_no_lane(d);
+        if !note.is_empty() {
+            rows.push(tc::seg(&[(p.warn.as_str(), format!("  {}", note))], w - 1));
+            rows.push(String::new());
+        }
     }
 
     match d.usage.as_ref() {
@@ -941,5 +959,20 @@ mod tests {
         assert_eq!(commas(999), "999");
         assert_eq!(commas(1000), "1,000");
         assert_eq!(commas(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let token = Data {
+            live_why: "no token in ~/.copilot/config.json".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&token);
+        assert!(note.starts_with("no quota · "), "{note}");
+        assert!(note.contains("no token"), "{note}");
+
+        let empty = why_no_lane(&Data::default());
+        assert!(empty.contains("no live reading"), "{empty}");
+        assert!(lanes(&Data::default()).is_empty());
     }
 }

@@ -96,6 +96,26 @@ where
     value
 }
 
+/// Put a refusal's reason in the slot `cached` just stored as `None`.
+///
+/// A diagnostic wrapped in `Some` looks like a reading: the fail count
+/// clears and the next ask is two minutes later, forever. The reason still
+/// has to survive the frames inside the backoff, so it is written in after
+/// the hold and the tally have already been set. Later frames see the
+/// sentence; they do not see a success.
+pub fn remember_refusal(caches: &mut Caches, key: &str, why: &str) {
+    if why.is_empty() {
+        return;
+    }
+    let Some((when, _, held)) = caches.live.get(key).cloned() else {
+        return;
+    };
+    caches.live.insert(
+        key.to_string(),
+        (when, Some(serde_json::json!({"why": why})), held),
+    );
+}
+
 pub fn read_json(path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -349,6 +369,30 @@ mod tests {
             );
             assert!(*held <= BACKOFF_MAX, "ttl {}: held {}s", ttl, held);
         }
+    }
+
+    #[test]
+    fn a_remembered_refusal_does_not_clear_the_backoff() {
+        // The shape that used to cost the backoff: wrapping a silent
+        // endpoint in Some({"why": ...}) looks like a reading, so the fail
+        // count reset and the next ask was two minutes later forever.
+        let mut caches = Caches::default();
+        assert!(cached(&mut caches, "probe", 120.0, || None).is_none());
+        assert_eq!(caches.fails.get("probe"), Some(&1));
+        let held = caches.live.get("probe").map(|(_, _, h)| *h).unwrap();
+        remember_refusal(&mut caches, "probe", "the endpoint did not answer");
+        assert_eq!(caches.fails.get("probe"), Some(&1), "the tally must stand");
+        assert_eq!(
+            caches.live.get("probe").map(|(_, _, h)| *h),
+            Some(held),
+            "the hold must stand"
+        );
+
+        let again = cached(&mut caches, "probe", 120.0, || {
+            panic!("asked again inside the backoff")
+        });
+        assert_eq!(text(&again.unwrap(), "why"), "the endpoint did not answer");
+        assert_eq!(caches.fails.get("probe"), Some(&1));
     }
 
     #[test]
