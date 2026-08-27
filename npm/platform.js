@@ -84,7 +84,7 @@ function glibcTooOld(h) {
   return Boolean(h && h.os === 'linux' && h.glibc && !glibcAtLeast(h.glibc, MIN_GLIBC));
 }
 
-// The fourteen binaries, read from the manifest rather than restated.
+// Every binary, read from the manifest rather than restated.
 // A restated list is how a fifteenth widget ships in the tarball and
 // not in the npm package, and the launcher then cannot launch it.
 // `[[bin]]` is the same list `opscope` already asserts against.

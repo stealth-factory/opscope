@@ -521,6 +521,7 @@ struct Palette {
     ok: String,
     run: String,
     fail: String,
+    fail_lit: String,
     queue: String,
     cancel: String,
     dim: String,
@@ -537,6 +538,7 @@ fn palette() -> Palette {
         ok: tc::rgb(80, 235, 150),
         run: tc::rgb(255, 200, 90),
         fail: tc::rgb(255, 95, 105),
+        fail_lit: tc::rgb(255, 128, 136),
         queue: tc::rgb(150, 190, 255),
         cancel: tc::rgb(170, 175, 190),
         // 127,147,172 measures 3.81 on the selected-row tint; the lighter
@@ -1554,10 +1556,15 @@ fn main() {
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` is 3.81 and `fail` is 4.05
+                // against bg(38, 56, 76); the twins are what reach the row.
                 let colour = if tint.is_empty() {
                     colour
                 } else if colour == p.dim {
                     p.dim_lit.as_str()
+                } else if colour == p.fail {
+                    p.fail_lit.as_str()
                 } else {
                     colour
                 };
