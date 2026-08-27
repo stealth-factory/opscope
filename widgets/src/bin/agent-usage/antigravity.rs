@@ -579,7 +579,7 @@ fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
 /// and was never sent.
 fn remote_token(allowed: bool) -> Result<String, String> {
     if !allowed {
-        return Err("asking Google is off - set usage.antigravity_remote to true".into());
+        return Err("asking Google is off - set agent_usage.antigravity_remote to true".into());
     }
     let Some(file) = read_json(&token_path()) else {
         return Err(
@@ -1148,9 +1148,9 @@ mod tests {
 
         // Off by configuration is a reason too, and names the key.
         let note = why_no_lane(&with(
-            "asking Google is off - set usage.antigravity_remote to true",
+            "asking Google is off - set agent_usage.antigravity_remote to true",
         ));
-        assert!(note.contains("usage.antigravity_remote"), "{}", note);
+        assert!(note.contains("agent_usage.antigravity_remote"), "{}", note);
 
         // A tier that cannot be read still wins: it is the older problem and
         // opening the app is what fixes it.
@@ -1170,7 +1170,7 @@ mod tests {
         // Turned off, and there is no request to make - the reason names the
         // key rather than blaming the network.
         let off = remote_token(false).unwrap_err();
-        assert!(off.contains("usage.antigravity_remote"), "{}", off);
+        assert!(off.contains("agent_usage.antigravity_remote"), "{}", off);
         // It may name Google - that is where the request would have gone -
         // but it must not report a refusal or a silence that never happened.
         for blame in ["refused", "did not answer", "no quota groups"] {

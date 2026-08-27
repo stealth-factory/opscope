@@ -41,7 +41,7 @@ nothing at all — it just looks good, and it knows it.
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
 | **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
-| **`usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/usage.md) |
+| **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/agent-usage.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic | [read →](docs/ports.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
@@ -101,8 +101,8 @@ copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like — or put the binaries on your `PATH`:
 
 ```sh
-sudo cp opscope clocks deployments github herdr-panes latency linear link \
-        matrix netwatch ports pr tailnet usage /usr/local/bin/
+sudo cp opscope agent-usage clocks deployments github herdr-panes latency linear link \
+        matrix netwatch ports pr tailnet /usr/local/bin/
 ```
 
 **On macOS, download with `curl` rather than a browser.** These binaries are

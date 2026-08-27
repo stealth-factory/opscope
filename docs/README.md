@@ -17,7 +17,7 @@ each key it answers to, and the settings it reads.
 | [`github`](github.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |
 | [`pr`](pr.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
 | [`linear`](linear.md) | Linear across every team at once — what is outstanding, which cycles are running, and whether issues are being closed faster than they arrive. |
-| [`usage`](usage.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
+| [`agent-usage`](agent-usage.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
 | [`ports`](ports.md) | What is listening on this machine, what started it, and who can reach it. |
 | [`netwatch`](netwatch.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
 | [`link`](link.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |

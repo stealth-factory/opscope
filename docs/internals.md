@@ -13,8 +13,10 @@ compiler cannot. For the rules these implement, see
 dies without saying why, a footer or `--help` line naming a key nothing
 answers, a hint missing from the widget's doc, a config key read but never
 documented in `config.example.json` — or documented there and never read, or
-read with no fallback behind it — and a colour that draws text on the
-selected-row tint below WCAG AA.
+read with no fallback behind it — a colour that draws text on the
+selected-row tint below WCAG AA, a widget missing from the README table or
+the docs index, and a name in the launcher's sample listing that is not a
+widget.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".

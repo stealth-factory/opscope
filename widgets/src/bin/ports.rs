@@ -2153,7 +2153,7 @@ fn main() {
         // caught - but catching it is only half of the rule. It used to end
         // in `unwrap_or_default()`, which handed the table an empty list and
         // drew a machine with nothing listening. The reason goes on screen
-        // and the thread stops, the way usage and herdr-panes do it.
+        // and the thread stops, the way agent-usage and herdr-panes do it.
         let found = match std::panic::catch_unwind(scan) {
             Ok(found) => found,
             Err(_) => {
@@ -2554,7 +2554,7 @@ fn main() {
         ));
         // A dead poller says so, right under the counts it has stopped
         // updating. Same line, same shape and same words as herdr-panes and
-        // usage, so it reads the same wherever you meet it.
+        // agent-usage, so it reads the same wherever you meet it.
         let err = store.err.lock().map(|g| g.clone()).unwrap_or_default();
         if !err.is_empty() {
             rows.push(tc::seg(&[(ok.bad.as_str(), format!(" ! {}", err))], w - 1));

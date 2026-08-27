@@ -1,4 +1,4 @@
-# `usage`
+# `agent-usage`
 
 [← all docs](README.md)
 
@@ -402,7 +402,7 @@ reader:
 ```
  no quota either: Antigravity's token expired 51m ago - it refreshes them
  itself, so open it or run `agy` once and sign in
- no quota either: asking Google is off - set usage.antigravity_remote to true
+ no quota either: asking Google is off - set agent_usage.antigravity_remote to true
  no quota either: Antigravity has not signed in on this machine - run `agy`
  once and sign in
  no quota either: Google refused the Antigravity token: …
@@ -699,7 +699,7 @@ Cursor computes it from its own two figures. Everyone else needs one number
 that no machine here knows — what you actually pay — so it is configured:
 
 ```json
-"usage": {
+"agent_usage": {
   "plan_cost": { "claude": 200 }
 }
 ```
@@ -1098,7 +1098,7 @@ The screen says which state it is in, in both places it appears:
 ```
 ── WEEKLY QUOTA ── resets in ~1.1 days
  not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
- Only your own Grok sessions update it. usage.grok_ping polls x.ai instead.
+ Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.
 ```
 
 ```
@@ -1303,7 +1303,7 @@ a CLI installed under another name would vanish, and an agent uninstalled last
 week still has history worth reading.
 
 ```json
-"usage": {
+"agent_usage": {
   "agents": [],
   "exclude_agents": [],
   "refresh": 30
@@ -1327,6 +1327,12 @@ called out — `unknown agent in config: nonsence (known: claude, codex, …)` �
 rather than silently ignored. If the settings would leave no tabs at all it
 shows everything instead, because an empty widget teaches nothing and the
 likeliest cause is a typo.
+
+The section used to be called `usage`, matching the old binary name. A
+leftover section under that name is still read, and the pane says so —
+`config section is still called usage; rename it to agent_usage` — so an
+existing `config.json` neither goes silent nor needs a note someone might
+miss.
 
 Adding support for a new agent is one entry in `AGENTS`, giving the binaries
 to look for and the paths that prove it has run.
