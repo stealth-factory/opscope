@@ -3,13 +3,17 @@
 Sci-fi terminal widgets that show only real data.
 
 ```sh
-npx opscope
+npx opscope                 # the menu
+npx opscope link            # skip the menu; any widget name works
+npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 ```
 
 That is the launcher: a menu of the fifteen widgets, or name one and skip
-it (`npx opscope latency`). The binaries it starts are the ones attached
-to the GitHub release of the same version — `--version` on any of them
-answers with that version, commit and date.
+it. Only `opscope` is installed as a command; the other binaries stay beside
+it, so `pr` and `link` never replace the coreutils commands of the same
+name. The binaries it starts are the ones attached to the GitHub release of
+the same version — `--version` on any of them answers with that version,
+commit and date.
 
 ## Platforms
 
