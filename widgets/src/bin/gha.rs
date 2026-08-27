@@ -1373,7 +1373,8 @@ fn main() {
                 }
                 "w" | "W" => {
                     if let Ok(mut g) = state.lock() {
-                        request_window(&mut g, tc::cycle(WINDOWS, g.window_hours));
+                        let next = tc::cycle(WINDOWS, g.window_hours);
+                        request_window(&mut g, next);
                     }
                     let (lock, cond) = &*wake;
                     if let Ok(mut asked) = lock.lock() {
