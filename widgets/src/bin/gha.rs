@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::Utc;
 use opscope_core as tc;
@@ -33,8 +33,6 @@ const GQL: &str = "https://api.github.com/graphql";
 const REST: &str = "https://api.github.com";
 const WINDOWS: &[i64] = &[12, 24, 48, 168];
 const FILTERS: &[&str] = &["all", "failed", "running"];
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// How many recently-pushed repos to inspect per GraphQL page.
 /// The cap is what is asked for runs; this is only how far one page looks.
 const DISCOVER_EACH: usize = 40;
@@ -44,13 +42,6 @@ const DISCOVER_PAGES: usize = 5;
 const RUN_PAGE: usize = 30;
 const DETAIL_TTL: f64 = 60.0;
 const LIVE: &[&str] = &["in_progress", "queued", "waiting", "pending", "requested"];
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// The GitHub token, shared with `github` rather than duplicated.
 fn token(gha: &serde_json::Value, gh: &serde_json::Value) -> (String, &'static str) {
@@ -785,7 +776,7 @@ fn discover_repos(
     pushed_days: i64,
     cap: usize,
 ) -> Result<(Vec<String>, usize, Option<String>), String> {
-    let since = now() - (pushed_days as f64 * 86400.0);
+    let since = tc::now() - (pushed_days as f64 * 86400.0);
     let mut found: Vec<FoundRepo> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for acc in accounts {
@@ -924,7 +915,7 @@ fn one_pass(
     Ok(State {
         runs,
         err,
-        fetched: now(),
+        fetched: tc::now(),
         scope: scope_sentence(
             is_explicit,
             repos.len(),
@@ -949,10 +940,10 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
     let path = format!("/repos/{}/{}/actions/runs/{}/jobs?per_page=100", owner, name, id);
     match rest_get(&path, tok) {
         Ok(mut v) => {
-            v["_fetched_at"] = serde_json::json!(now());
+            v["_fetched_at"] = serde_json::json!(tc::now());
             v
         }
-        Err(e) => serde_json::json!({ "_error": e, "_fetched_at": now() }),
+        Err(e) => serde_json::json!({ "_error": e, "_fetched_at": tc::now() }),
     }
 }
 
@@ -990,7 +981,7 @@ fn sparkline(values: &[f64], width: usize) -> String {
     let hi = slice.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
     slice
         .iter()
-        .map(|x| SPARK[(((x / hi) * 7.99) as usize).min(7)])
+        .map(|x| tc::SPARK[(((x / hi) * 7.99) as usize).min(7)])
         .collect()
 }
 
@@ -1049,9 +1040,9 @@ fn info_overlay(
             (p.dim.as_str(), "  ".into()),
             (p.branch.as_str(), text(run, "branch")),
             (p.dim.as_str(), "  queued ".into()),
-            (p.txt.as_str(), dur_label(queue_secs(run, now()))),
+            (p.txt.as_str(), dur_label(queue_secs(run, tc::now()))),
             (p.dim.as_str(), "  ran ".into()),
-            (p.txt.as_str(), dur_label(run_secs(run, now()))),
+            (p.txt.as_str(), dur_label(run_secs(run, tc::now()))),
         ],
         w - 1,
     ));
@@ -1115,7 +1106,7 @@ fn info_overlay(
                         let ended = iso_secs(job["completed_at"].as_str().unwrap_or(""));
                         let took = match (started, ended) {
                             (Some(a), Some(b)) => Some((b - a).max(0.0)),
-                            (Some(a), None) if LIVE.contains(&status) => Some((now() - a).max(0.0)),
+                            (Some(a), None) if LIVE.contains(&status) => Some((tc::now() - a).max(0.0)),
                             _ => None,
                         };
                         rows.push(tc::seg(
@@ -1340,7 +1331,7 @@ fn main() {
                                     } else {
                                         "! no clipboard; select the URL with the mouse".into()
                                     },
-                                    now() + 3.0,
+                                    tc::now() + 3.0,
                                 );
                             }
                         }
@@ -1413,7 +1404,7 @@ fn main() {
             ),
             Err(_) => return,
         };
-        if !note.0.is_empty() && now() > note.1 {
+        if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
         shown = runs
@@ -1436,7 +1427,7 @@ fn main() {
             let mut held = details.lock().ok().and_then(|g| g.get(&id).cloned());
             if held
                 .as_ref()
-                .map(|v| now() - v["_fetched_at"].as_f64().unwrap_or(0.0) > DETAIL_TTL)
+                .map(|v| tc::now() - v["_fetched_at"].as_f64().unwrap_or(0.0) > DETAIL_TTL)
                 .unwrap_or(false)
             {
                 if let Ok(mut g) = details.lock() {
@@ -1505,7 +1496,7 @@ fn main() {
         let mut rows = vec![tc::title("github actions", w, &p.accent)];
         let (running, queued, failed, ok) = counts(&runs);
         let age = if fetched > 0.0 {
-            format!("{} ago", age_label(now() - fetched))
+            format!("{} ago", age_label(tc::now() - fetched))
         } else {
             "…".into()
         };
@@ -1580,9 +1571,9 @@ fn main() {
                 }
             }
 
-            let mut durs: Vec<f64> = runs.iter().filter_map(|r| run_secs(r, now())).collect();
+            let mut durs: Vec<f64> = runs.iter().filter_map(|r| run_secs(r, tc::now())).collect();
             durs.sort_by(f64::total_cmp);
-            let mut queues: Vec<f64> = runs.iter().filter_map(|r| queue_secs(r, now())).collect();
+            let mut queues: Vec<f64> = runs.iter().filter_map(|r| queue_secs(r, tc::now())).collect();
             queues.sort_by(f64::total_cmp);
             if !durs.is_empty() {
                 rows.push(String::new());
@@ -1601,7 +1592,7 @@ fn main() {
                 let recent: Vec<f64> = runs
                     .iter()
                     .rev()
-                    .filter_map(|r| run_secs(r, now()))
+                    .filter_map(|r| run_secs(r, tc::now()))
                     .collect::<Vec<_>>()
                     .into_iter()
                     .rev()
@@ -1675,7 +1666,7 @@ fn main() {
             let kind = outcome(run);
             let colour = outcome_colour(&kind, &p);
             let mark = if LIVE.contains(&text(run, "status").as_str()) {
-                SPINNER[tick % SPINNER.len()]
+                tc::SPINNER[tick % tc::SPINNER.len()]
             } else if is_failed(run) {
                 '✖'
             } else if kind == "success" {
@@ -1683,7 +1674,7 @@ fn main() {
             } else {
                 '○'
             };
-            let created = iso_secs(&text(run, "created_at")).unwrap_or(now());
+            let created = iso_secs(&text(run, "created_at")).unwrap_or(tc::now());
             let mut line = vec![
                 (
                     c(colour),
@@ -1703,11 +1694,11 @@ fn main() {
             if cols.event {
                 line.push((c(&p.dim), format!(" {}", tc::pad(&text(run, "event"), 12))));
             }
-            line.push((c(&p.dim), format!(" {}", dur_label(run_secs(run, now())))));
+            line.push((c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))));
             if cols.queued {
-                line.push((c(&p.dim), format!(" q{}", dur_label(queue_secs(run, now())).trim())));
+                line.push((c(&p.dim), format!(" q{}", dur_label(queue_secs(run, tc::now())).trim())));
             }
-            line.push((c(&p.dim), format!(" {:>4}", age_label((now() - created).max(0.0)))));
+            line.push((c(&p.dim), format!(" {:>4}", age_label((tc::now() - created).max(0.0)))));
             if cols.number {
                 line.push((
                     c(&p.dim),
