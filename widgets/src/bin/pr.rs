@@ -22,24 +22,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
 use opscope_core as tc;
 
 const API: &str = "https://api.github.com/graphql";
 const SORTS: &[&str] = &["updated", "created"];
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// Width of the opened-per-day chart.
 const OPENED_DAYS: i64 = 30;
-
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// The GitHub token, shared with github.py rather than duplicated.
 fn token(pr_cfg: &serde_json::Value, gh_cfg: &serde_json::Value) -> (String, &'static str) {
@@ -303,10 +294,10 @@ impl State {
     fn stage(&mut self, label: &str, done: bool) -> f64 {
         if let Some(st) = self.stages.iter_mut().find(|s| s.label == label) {
             st.done = done;
-            st.took = now() - st.t0;
+            st.took = tc::now() - st.t0;
             return st.t0;
         }
-        let t0 = now();
+        let t0 = tc::now();
         self.stages.push(Stage {
             label: label.to_string(),
             done,
@@ -571,7 +562,7 @@ fn fetch_list(
         g.total = total;
         g.capped = capped;
         g.prs = nodes;
-        g.fetched = now();
+        g.fetched = tc::now();
         g.err = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
         } else {
@@ -982,7 +973,7 @@ fn main() {
                             } else {
                                 format!("no clipboard: {}", url)
                             },
-                            now(),
+                            tc::now(),
                         );
                     }
                 }
@@ -1046,7 +1037,7 @@ fn main() {
                 format!(
                     "   updated {} ago",
                     if fetched > 0.0 {
-                        let s = now() - fetched;
+                        let s = tc::now() - fetched;
                         if s < 3600.0 {
                             format!("{}m", ((s / 60.0) as i64).max(1))
                         } else {
@@ -1061,7 +1052,7 @@ fn main() {
         if let Some(left) = rate.lock().map(|g| g.remaining).unwrap_or(None) {
             head.push((p.dim.as_str(), format!("   {} api", left)));
         }
-        if !copied.0.is_empty() && now() - copied.1 < 4.0 {
+        if !copied.0.is_empty() && tc::now() - copied.1 < 4.0 {
             head.push((p.ok.as_str(), "   copied ".into()));
             head.push((
                 p.dim.as_str(),
@@ -1442,7 +1433,7 @@ fn stats_view(
             let wide_bar = slot + usize::from(i < extra);
             let level = ((hours / hi) * 7.99) as usize;
             for _ in 0..wide_bar {
-                bars.push(SPARK[level.min(7)]);
+                bars.push(tc::SPARK[level.min(7)]);
             }
         }
         let count = bars.chars().count();
@@ -1718,7 +1709,7 @@ fn detail_view(
             w - 1,
         ));
         rows.push(String::new());
-        let spin = SPINNER[tick % SPINNER.len()];
+        let spin = tc::SPINNER[tick % tc::SPINNER.len()];
         for st in stages {
             rows.push(tc::seg(
                 &[

@@ -47,6 +47,32 @@ fn root() -> PathBuf {
         .expect("the repo root")
 }
 
+#[test]
+fn shared_helpers_are_not_redefined_by_widgets() {
+    let moved = [
+        "fn now(",
+        "fn run(",
+        "fn run_quiet(",
+        "fn overlay(",
+        "const SPARK:",
+        "const BRAILLE:",
+        "const SPINNER:",
+    ];
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        for definition in moved {
+            if src.lines().any(|line| line.starts_with(definition)) {
+                wrong.push(format!("{name}: still defines `{definition}`"));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "shared helpers copied back into widgets:\n{}",
+        wrong.join("\n")
+    );
+}
+
 /// Every selection tint a widget composes, and how it was reached.
 ///
 /// Returns `(tint, inline_colour)` - the colour named on the same line when
