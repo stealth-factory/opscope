@@ -67,6 +67,9 @@ pub struct Data {
     ok: bool,
     /// The live account-wide reading from the endpoint the CLI uses.
     live: Option<serde_json::Value>,
+    /// Why there is no live reading, when there is none. Empty while the
+    /// endpoint is answering, or when nothing has been asked yet.
+    live_why: String,
     /// The rate_limits the newest rollout recorded, for when the live call
     /// cannot run. A snapshot from whenever Codex last spoke to the server.
     limits: Option<serde_json::Value>,
@@ -90,14 +93,19 @@ pub struct Data {
 /// The token comes from ~/.codex/auth.json and goes to the same host Codex
 /// itself talks to; it is never printed. Any failure falls back to the
 /// snapshot, so an expired token costs freshness and nothing else.
+///
+/// A missing token is a local fact and rides in the cached value. A silent
+/// endpoint is a refusal: it stays `None` so `cached` backs off.
 fn codex_live() -> Option<serde_json::Value> {
-    let auth = read_json(&under_home(".codex/auth.json"))?;
+    let Some(auth) = read_json(&under_home(".codex/auth.json")) else {
+        return Some(serde_json::json!({"why": "no token - Codex has not signed in here"}));
+    };
     let tok = match text(&auth["tokens"], "access_token") {
         s if !s.is_empty() => s,
         _ => text(&auth, "access_token"),
     };
     if tok.is_empty() {
-        return None;
+        return Some(serde_json::json!({"why": "no token - Codex has not signed in here"}));
     }
     get_json(
         CODEX_USAGE_API,
@@ -107,6 +115,7 @@ fn codex_live() -> Option<serde_json::Value> {
         ],
         20,
     )
+    .map(|u| serde_json::json!({"u": u}))
 }
 
 /// Per-turn, per-model token counts from one rollout's text.
@@ -340,8 +349,29 @@ fn newest_limits(files: &[String]) -> Option<serde_json::Value> {
 }
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
+    let mut refuse = String::new();
+    let mut live_why = String::new();
+    let live = match cached(caches, "codex", LIVE_TTL, || match codex_live() {
+        None => {
+            refuse = "ChatGPT's usage endpoint did not answer".into();
+            None
+        }
+        other => other,
+    }) {
+        Some(got) if !text(&got, "why").is_empty() => {
+            live_why = text(&got, "why");
+            None
+        }
+        Some(got) if got.get("u").is_some() => Some(got["u"].clone()),
+        other => other,
+    };
+    if !refuse.is_empty() {
+        live_why = refuse.clone();
+        remember_refusal(caches, "codex", &refuse);
+    }
     let mut codex = Data {
-        live: cached(caches, "codex", LIVE_TTL, codex_live),
+        live,
+        live_why,
         ..Data::default()
     };
     let files = rollout_files();
@@ -757,6 +787,33 @@ fn codex_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     plan_rows(&plan, &pairs, w, "", None, "", p)
 }
 
+/// Why Codex publishes no bar on the summary, when it does not.
+///
+/// The tab still has the rollouts: those are tokens spent on this machine.
+/// `[+]` only ranks a live (or last-session) used_percent, so a busy tab
+/// and an empty summary row can both be true.
+pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
+    }
+    if !d.live_why.is_empty() {
+        return format!("no quota · {}", d.live_why);
+    }
+    match (d.live.is_some(), d.limits.is_some()) {
+        (false, false) => {
+            "no quota · no live account window, and the last session left no used_percent on disk."
+                .into()
+        }
+        (false, true) => {
+            "no quota · no live account window, and the last session left no used_percent."
+                .into()
+        }
+        (true, _) => {
+            "no quota · Codex answered, and published no used_percent for this period.".into()
+        }
+    }
+}
+
 /// Every quota Codex publishes, for the summary screen.
 ///
 /// The live account-wide windows only. The snapshot the tab falls back to is
@@ -829,6 +886,13 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// which subscription the percentages are percentages of.
 pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     let mut rows = codex_quota(d, w, p);
+    if rows.is_empty() {
+        let note = why_no_lane(d);
+        if !note.is_empty() {
+            rows.extend(no_local(&note, "", w, p));
+            rows.push(String::new());
+        }
+    }
     if !d.ok {
         // The quota above is the account's and is true whatever this machine
         // has on disk, so it stays; only the local half is missing.
@@ -1171,5 +1235,38 @@ mod tests {
         assert!(rows.contains("QUOTA"), "{}", rows);
         assert!(rows.contains("No session rollouts"), "{}", rows);
         assert!(!rows.contains("TOTALS"), "{}", rows);
+    }
+
+    #[test]
+    fn a_missing_quota_says_which_step_failed() {
+        let empty = why_no_lane(&Data::default());
+        assert!(empty.contains("no live account window"), "{empty}");
+        assert!(empty.contains("used_percent"), "{empty}");
+        assert!(lanes(&Data::default()).is_empty());
+
+        let snapshot_only = Data {
+            limits: Some(serde_json::json!({"primary": {}})),
+            ..Data::default()
+        };
+        let note = why_no_lane(&snapshot_only);
+        assert!(note.contains("no live account window"), "{note}");
+        assert!(!note.contains("did not answer"), "{note}");
+
+        let missing_token = Data {
+            limits: Some(serde_json::json!({"primary": {}})),
+            live_why: "no token - Codex has not signed in here".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&missing_token);
+        assert!(note.contains("not signed in"), "{note}");
+        assert!(!note.contains("did not answer"), "{note}");
+
+        let refused = Data {
+            limits: Some(serde_json::json!({"primary": {}})),
+            live_why: "ChatGPT's usage endpoint did not answer".into(),
+            ..Data::default()
+        };
+        let note = why_no_lane(&refused);
+        assert!(note.contains("did not answer"), "{note}");
     }
 }

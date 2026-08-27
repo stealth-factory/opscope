@@ -100,6 +100,40 @@ fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
 /// appear in it, and when every quiet agent has explained itself there is
 /// no such line at all.
 ///
+/// Why this agent has no lane, and whether that reason is the reader's to
+/// fix. Token and setting failures warn; a server that published nothing
+/// does not.
+fn quiet_of(name: &str, s: &State) -> (String, bool) {
+    let note = match name {
+        "claude" => crate::claude::why_no_lane(&s.claude),
+        "codex" => crate::codex::why_no_lane(&s.codex),
+        "cursor" => crate::cursor::why_no_lane(&s.cursor),
+        "grok" => crate::grok::why_no_lane(&s.grok),
+        "copilot" => crate::copilot::why_no_lane(&s.copilot),
+        "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
+        _ => String::new(),
+    };
+    let warn = quiet_is_actionable(&note);
+    (note, warn)
+}
+
+/// Token and setting failures are the reader's to fix; a server that
+/// answered and published no percentage is not.
+fn quiet_is_actionable(note: &str) -> bool {
+    !note.contains("answered, and published no")
+}
+
+fn quiet_from(quiet: &[&str], s: &State, w: usize, p: &Palette) -> Vec<String> {
+    let said: Vec<(&str, String, bool)> = quiet
+        .iter()
+        .map(|name| {
+            let (note, warn) = quiet_of(name, s);
+            (*name, note, warn)
+        })
+        .collect();
+    quiet_block(&said, w, p)
+}
+
 /// Split out from summary_tab because the State it needs cannot be built
 /// from another module - every agent's Data keeps its fields private - so
 /// this is the only shape the ordering is testable in.
@@ -134,10 +168,21 @@ fn quiet_block(said: &[(&str, String, bool)], w: usize, p: &Palette) -> Vec<Stri
     rows
 }
 
+#[cfg(test)]
 fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
+    summary_for(s, w, p, ORDER)
+}
+
+/// The summary, limited to the agents that have a tab on this machine.
+///
+/// Discovery and `agent_usage.agents` already decided who is worth showing; `[+]`
+/// used to walk every name in ORDER instead, so a quiet agent the reader
+/// never enabled still landed in a roll-call at the bottom, and a quiet
+/// agent they *did* enable got only that roll-call rather than a section.
+fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> {
     let mut groups: Vec<(&str, Vec<Lane>)> = Vec::new();
     let mut quiet: Vec<&str> = Vec::new();
-    for name in ORDER {
+    for &name in names {
         let got = lanes_of(name, s);
         if got.is_empty() {
             quiet.push(name);
@@ -146,7 +191,11 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
         }
     }
     if groups.is_empty() {
-        return no_local("No agent is publishing a quota right now.", "", w, p);
+        let rows = quiet_from(&quiet, s, w, p);
+        if rows.is_empty() {
+            return no_local("No agent is publishing a quota right now.", "", w, p);
+        }
+        return rows;
     }
     // Grouped by provider, but the groups are ordered by their worst lane:
     // the structure says who owns what, the ordering still answers which
@@ -347,19 +396,7 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
     }
     if !quiet.is_empty() {
         rows.push(String::new());
-        let mut said: Vec<(&str, String, bool)> = Vec::new();
-        for name in &quiet {
-            match *name {
-                "grok" => said.push((name, crate::grok::why_no_lane(&s.grok).to_string(), false)),
-                // Antigravity's can be a credential that has lapsed, which
-                // is the reader's to fix, so it keeps the warning tone.
-                "antigravity" => {
-                    said.push((name, crate::antigravity::why_no_lane(&s.antigravity), true))
-                }
-                _ => said.push((name, String::new(), false)),
-            }
-        }
-        rows.extend(quiet_block(&said, w, p));
+        rows.extend(quiet_from(&quiet, s, w, p));
     }
     rows
 }
@@ -371,9 +408,18 @@ pub fn tab_body(
     h: usize,
     cfg: &Config,
     p: &Palette,
+    tabs: &[String],
 ) -> Vec<String> {
     match name {
-        SUMMARY_TAB => summary_tab(s, w, p),
+        SUMMARY_TAB => {
+            let shown: Vec<&str> = ORDER
+                .iter()
+                .copied()
+                .filter(|n| tabs.iter().any(|t| t == *n))
+                .collect();
+            let names: &[&str] = if shown.is_empty() { ORDER } else { &shown };
+            summary_for(s, w, p, names)
+        }
         "claude" => crate::claude::tab(&s.claude, w, h, cfg, p),
         "codex" => crate::codex::tab(&s.codex, w, h, cfg, p),
         "cursor" => crate::cursor::tab(&s.cursor, w, h, cfg, p),
@@ -490,13 +536,68 @@ mod tests {
 
     #[test]
     fn an_agent_with_no_quota_is_named_rather_than_dropped() {
-        // Six agents, none publishing anything: the screen says so instead
-        // of rendering an empty box.
+        // Six agents, none publishing anything: each gets a heading and a
+        // reason, the way Antigravity always did. Dumping the names into
+        // one footer line was the other answer, and it taught nothing
+        // about why `[+]` was empty while the agent's own tab was not.
         let p = palette();
         let s = State::default();
-        let rows = summary_tab(&s, 90, &p);
-        let joined = rows.join(" ");
-        assert!(joined.contains("No agent is publishing a quota"));
+        let rows = plain(&summary_tab(&s, 90, &p));
+        for name in ["CLAUDE", "CODEX", "CURSOR", "GROK", "COPILOT", "ANTIGRAVITY"] {
+            assert!(
+                rows.iter().any(|r| r.contains(name)),
+                "quiet {name} had no section:\n{rows:#?}"
+            );
+        }
+        assert!(
+            !rows.iter().any(|r| r.contains("No quota published by")),
+            "explained agents still in the roll-call:\n{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("No agent is publishing a quota")),
+            "generic empty-screen line hid the per-agent reasons:\n{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_published_nothing_does_not_warn() {
+        // The tone is about who can act, not about who is quiet. A missing
+        // token is the reader's; a 200 with no percentage is the vendor's.
+        assert!(quiet_is_actionable(
+            "no quota · no token - Cursor has not signed in here"
+        ));
+        assert!(quiet_is_actionable(
+            "no quota · asking x.ai is off (set agent_usage.grok_ping to poll)"
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Anthropic answered, and published no limit percentages."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Cursor answered, and published no plan percentages for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · GitHub answered, and published no metered pool for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · Codex answered, and published no used_percent for this period."
+        ));
+        assert!(!quiet_is_actionable(
+            "no quota · x.ai answered, and published no credit figure for this period."
+        ));
+    }
+
+    #[test]
+    fn a_hidden_agent_is_not_on_the_summary() {
+        // Discovery already decided these two are the tabs; the others
+        // must not show up as quiet just because ORDER still lists them.
+        let p = palette();
+        let s = State::default();
+        let rows = plain(&summary_for(&s, 90, &p, &["claude", "cursor"]));
+        assert!(rows.iter().any(|r| r.contains("CLAUDE")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("CURSOR")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("GROK")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("COPILOT")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("ANTIGRAVITY")), "{rows:#?}");
     }
 
     #[test]

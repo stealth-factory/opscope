@@ -85,8 +85,17 @@ says who owns what; the ordering keeps answering what to worry about. Dropping
 the agent column that a flat list needed also bought back enough width for the
 resets to survive a 58-column pane.
 
-An agent that publishes no quota is **named at the bottom**, not silently
-missing, so an empty row and an absent agent are different things.
+An agent that publishes no quota is **named at the bottom under its own heading**,
+with the reason the live bar is missing — not silently dropped, and not dumped
+into a `No quota published by: …` list. The agent's own tab can still be full:
+those numbers are **local spend** (stats cache, tracking database, session
+store, transcripts). `[+]` only ranks a live (or last-session) quota lane from
+the vendor, so a busy tab and an empty summary row can both be true. Claude
+needs a signed-in token and Anthropic's usage endpoint; Cursor needs
+`~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
+in `~/.copilot/config.json`; Grok needs either `creditUsagePercent` in
+`~/.grok/logs/unified.jsonl` or `agent_usage.grok_ping` to poll x.ai. Each of those
+is a different missing step, so each quiet agent says which one it is.
 
 A lane whose reading came from a cache rather than a live call says `cached`
 instead of a countdown. Claude's fallback can describe windows that have since
@@ -182,8 +191,13 @@ Authorization: Bearer <accessToken from ~/.config/cursor/auth.json>
 ```
 
 which is the credential the widget reuses. That endpoint is **undocumented**,
-discovered by reading the CLI bundle, and versioned only by it — so every
-failure is silent and the tab falls back to authorship alone.
+discovered by reading the CLI bundle, and versioned only by it — so a failure
+used to be silent and the tab fell back to authorship alone, leaving `[+]` to
+list Cursor in a roll-call. The reason now rides with the refusal: no token,
+or the endpoint did not answer, on both the tab and `[+]`. A missing token is
+a local fact and is held like a reading; a silent endpoint stays a refusal,
+so the backoff that stops a rate limit from being poked every two minutes
+still applies, and the sentence is written into that slot afterwards.
 
 **The percentages and the dollars have different denominators**, which is
 Cursor's own doing and worth stating. The three lanes are the server's
@@ -416,10 +430,11 @@ nothing about why.
 **The roll-call is what is left over.** `No quota published by: …` once led
 this block and named every quiet agent, with the explanations below it. That
 reads backwards, and it said the same thing twice for any agent that had a
-reason, since each reason already opens by saying there is no quota. Now
-each agent that can explain itself leads with its own heading, and the
-roll-call lists only those with nothing to say — vanishing entirely when
-they all have.
+reason, since each reason already opens by saying there is no quota. Claude,
+Cursor, Grok and Copilot now explain themselves the same way Antigravity does,
+so the roll-call lists only a name we still have nothing to say about —
+vanishing entirely when they all have. An agent that is neither detected nor
+listed in `agent_usage.agents` is not on this screen at all.
 
 The tier comes from the endpoint the CLI authenticates against:
 
@@ -913,7 +928,11 @@ has a local cache anyway.
 
 Every one of them falls back rather than failing: Codex to the rollout
 snapshot, Claude to `cachedUsageUtilization`, Cursor to authorship alone. The
-header always says which you are looking at.
+header always says which you are looking at. When Codex has a snapshot
+without a usable `used_percent` and no live window, the reason is the
+live-fetch's own — a missing token, or an endpoint that did not answer —
+not a single sentence that blamed the service for a credential that was
+never sent.
 
 A reading is held for **two minutes** (`LIVE_TTL`). The pane redraws every 30
 seconds and these windows move over hours, so the earlier code was making six
