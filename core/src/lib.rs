@@ -1046,6 +1046,39 @@ pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)>
     out
 }
 
+/// A label that is visibly still working, for a source that has not answered.
+///
+/// Two rows: the label behind a Braille spinner, and one sweeping line under
+/// it. The movement is the whole point. A pane waiting on a slow API and a
+/// pane whose poller has died draw the same static sentence, and telling
+/// those apart is most of what `widgets/tests/check.rs` exists for - so the
+/// wait says "still going" the only way a terminal can.
+///
+/// It deliberately claims no progress. There is no bar creeping towards a
+/// total nobody counted: a widget that knows how far along it is should say
+/// so in words, and one that does not should not draw a number it invented.
+///
+/// `lit` colours the spinner, `dim` the label. Both are passed in rather
+/// than chosen here, because every palette in this repo is defined beside
+/// the widget that uses it and the contrast check reads those files.
+pub fn waiting(label: &str, w: usize, tick: usize, lit: &str, dim: &str) -> Vec<String> {
+    let head = seg(
+        &[
+            (lit, format!("  {} ", SPINNER[tick % SPINNER.len()])),
+            (dim, label.to_string()),
+        ],
+        w.saturating_sub(1),
+    );
+    // Twice the tick, so the sweep is quicker than the spinner and the two
+    // do not appear to be one mechanism running slow.
+    let mut line: Vec<(&str, String)> = vec![(RST, "  ".into())];
+    let shimmer = skeleton(w.saturating_sub(6).max(10), tick * 2, 7);
+    for (colour, txt) in &shimmer {
+        line.push((colour.as_str(), txt.clone()));
+    }
+    vec![head, seg(&line, w.saturating_sub(1))]
+}
+
 /// Cell widths for `count` bars that fill `room` columns exactly.
 ///
 /// The remainder goes to the leftmost bars rather than being dropped on the
@@ -1453,6 +1486,28 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wait_that_does_not_move_is_indistinguishable_from_a_dead_poller() {
+        // The point of the helper is the movement, so the test is that
+        // consecutive ticks differ. A static sentence would pass any
+        // assertion about the label alone, which is how this would rot.
+        let frames: Vec<Vec<String>> = (0..6)
+            .map(|t| super::waiting("waiting for GitHub…", 60, t, "", ""))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(pair[0], pair[1], "two ticks drew the same frame");
+        }
+        for f in &frames {
+            assert_eq!(f.len(), 2, "a label row and a sweep row");
+            assert!(f[0].contains("waiting for GitHub…"), "{}", f[0]);
+        }
+        // Narrow panes still get both rows rather than a panic on the
+        // saturating widths.
+        for w in [0usize, 1, 4, 12] {
+            assert_eq!(super::waiting("x", w, 3, "", "").len(), 2, "width {}", w);
+        }
+    }
+
     #[test]
     fn the_window_chases_a_cursor_it_cannot_see() {
         // Stated as what the reader sees rather than as the arithmetic:

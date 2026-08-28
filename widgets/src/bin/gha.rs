@@ -2050,14 +2050,25 @@ fn main() {
         }
 
         if shown.is_empty() && err.is_empty() {
-            let said = if runs.is_empty() && fetched == 0.0 {
-                "   waiting for GitHub…"
-            } else if !needle.is_empty() || FILTERS[filter] != "all" {
-                "   (nothing matches the current filter)"
+            // Only the first of these is a wait. The other two are answers -
+            // GitHub replied and there is nothing to show - and animating
+            // those would say a fetch was still running when none is.
+            if runs.is_empty() && fetched == 0.0 {
+                rows.extend(tc::waiting(
+                    "waiting for GitHub…",
+                    w,
+                    tick,
+                    &p.accent,
+                    &p.dim,
+                ));
             } else {
-                "   no runs in this window"
-            };
-            rows.push(tc::seg(&[(p.dim.as_str(), said.into())], w - 1));
+                let said = if !needle.is_empty() || FILTERS[filter] != "all" {
+                    "   (nothing matches the current filter)"
+                } else {
+                    "   no runs in this window"
+                };
+                rows.push(tc::seg(&[(p.dim.as_str(), said.into())], w - 1));
+            }
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
