@@ -1106,14 +1106,12 @@ fn one_pass(
     };
 
     if repos.is_empty() {
-        let said = if is_explicit {
-            "no repos: gha.repos is empty and no owner/repo was given".into()
-        } else {
-            format!(
-                "no repos with workflows among those pushed in the last {}d — set gha.repos to name them",
-                pushed_days
-            )
-        };
+        // Explicit non-empty input is already `repos`, so this branch is
+        // only the discovery miss: nothing recently pushed had workflows.
+        let said = format!(
+            "no repos with workflows among those pushed in the last {}d — set gha.repos to name them",
+            pushed_days
+        );
         return Ok(State {
             err: if err.is_empty() {
                 said

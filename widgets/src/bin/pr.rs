@@ -734,7 +734,7 @@ fn main() {
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
         tc::cannot_start(
-            "pr watch",
+            "github prs",
             &absent,
             &[
                 "Everything here comes from GitHub's GraphQL API, and curl is",

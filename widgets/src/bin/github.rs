@@ -1279,7 +1279,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want) = match state.lock() {
+        let (mut stats, rate, err, fetched, calendar, want, watched) = match state.lock() {
             Ok(g) => (
                 g.stats.clone(),
                 g.rate,
@@ -1287,6 +1287,7 @@ fn main() {
                 g.fetched,
                 g.calendar.clone(),
                 g.days,
+                g.accounts.len(),
             ),
             Err(_) => return,
         };
@@ -1313,8 +1314,8 @@ fn main() {
             p.dim.as_str(),
             format!(
                 " {} account{}",
-                stats.len(),
-                if stats.len() == 1 { "" } else { "s" }
+                watched,
+                if watched == 1 { "" } else { "s" }
             ),
         )];
         let tail = tc::polled(fetched, rate, &p.dim, &p.ok, &p.warn);
