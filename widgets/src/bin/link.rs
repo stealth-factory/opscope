@@ -29,12 +29,13 @@ use opscope_core as tc;
 
 const IDLE_AFTER: f64 = 300.0;
 
-/// The fewest rows the detail chart is worth drawing in.
+/// The fewest rows a chart is worth drawing in, on either screen.
 ///
-/// It used to take whatever the fields left over and be dropped silently
-/// when that came to less than five, so a short pane showed the numbers and
-/// no chart and said nothing about why - indistinguishable from a session
-/// with no history. It now takes its rows regardless and the screen scrolls.
+/// Both used to take whatever the rows above them left over and be dropped
+/// silently when that came to less than five, so a short pane showed the
+/// numbers and no chart and said nothing about why - indistinguishable from
+/// a session with no history. Both now take their rows regardless and the
+/// screen scrolls, which is also what gives the list somewhere to scroll to.
 const MIN_CHART: usize = 12;
 
 /// How the detail screen reports where you are in it, at a width that does
@@ -786,49 +787,42 @@ fn main() {
             cursor = selected.map(|at| rows.len() + 1 + at);
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
-            let room = h.saturating_sub(rows.len() + 4);
-            if room < 5 {
-                // Say so rather than leaving a gap: a chart that is missing
-                // for want of rows looks exactly like one missing for want
-                // of data, and only one of those is the reader's to fix.
-                if room >= 1 {
-                    rows.push(tc::seg(
-                        &[(
-                            p.dim.as_str(),
-                            format!("  chart needs {} more rows", 5 - room),
-                        )],
-                        w - 1,
-                    ));
-                }
-            } else {
-                rows.extend(graph(
-                    &shown,
-                    &guard.history,
-                    w,
-                    room,
-                    0,
-                    selected,
-                    window,
-                    refresh,
-                    &p,
-                ));
-                rows.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), " ".repeat(7)),
-                        (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
-                    ],
-                    w - 1,
-                ));
-                let covered = plotted_span(&shown, &guard.history, window, refresh, w);
-                rows.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
-                        (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
-                        (p.dim.as_str(), "now".into()),
-                    ],
-                    w - 1,
-                ));
-            }
+            // The chart takes MIN_CHART rows whatever the table has already
+            // spent, and the screen scrolls to reach what will not fit -
+            // which is the rule the detail screen has followed since it had
+            // the same bug. Sized to what the pane had left, the body came
+            // out exactly one pane tall however many sessions there were, so
+            // there was never anywhere for the wheel to scroll to; and past
+            // about a pane's worth of rows the chart was dropped entirely
+            // with nothing on screen saying why.
+            let room = h.saturating_sub(rows.len() + 4).max(MIN_CHART);
+            rows.extend(graph(
+                &shown,
+                &guard.history,
+                w,
+                room,
+                0,
+                selected,
+                window,
+                refresh,
+                &p,
+            ));
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), " ".repeat(7)),
+                    (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
+                ],
+                w - 1,
+            ));
+            let covered = plotted_span(&shown, &guard.history, window, refresh, w);
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
+                    (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
+                    (p.dim.as_str(), "now".into()),
+                ],
+                w - 1,
+            ));
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -965,13 +959,17 @@ fn table(
             Some(v) if v != 0.0 => format!("{:>width$}", ms(Some(v)), width = width),
             _ => format!("{:>width$}", "--", width = width),
         };
+        let mark_c = format!("{}{}", tint, if here { &p.accent } else { &p.dim });
         let mut line = vec![
             // A colour chip rather than a shape. Six shapes told six
             // sessions apart no better than six hues did, and a seventh
             // session repeated the first one's shape - so the chip carries
-            // the hue and the name carries the selection.
+            // the hue and the marker carries the selection.
             (name_c.as_str(), "▐".to_string()),
-            (label_c.as_str(), " ".to_string()),
+            // The same marker the rest of the collection uses. The tint and
+            // the brighter name said "selected" only next to a row that was
+            // not, so on a one-row list nothing said it at all.
+            (mark_c.as_str(), if here { "▸".to_string() } else { " ".to_string() }),
             (label_c.as_str(), tc::pad(&label, name_w)),
             (tone.as_str(), cell(row.rtt, 7)),
             (dim_c.as_str(), cell(row.floor, 8)),
