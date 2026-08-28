@@ -2442,7 +2442,14 @@ fn main() {
                 // is - selection is the arrows' job, here as everywhere.
                 "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
                 "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
-                "o" | "O" => hide_system = !hide_system,
+                // Hiding the system rows shortens the list under the
+                // cursor, so the window has to come back to it - otherwise
+                // the clamped cursor can end up above the window, invisible,
+                // with enter still opening whatever it sits on.
+                "o" | "O" => {
+                    hide_system = !hide_system;
+                    moved = true;
+                }
                 "r" | "R" => store.wake(),
                 "enter" | "right" => {
                     let all: Vec<Row> = store.rows.lock().map(|g| g.clone()).unwrap_or_default();

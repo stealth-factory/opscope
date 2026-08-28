@@ -877,6 +877,7 @@ fn main() {
                     other if other.chars().count() == 1 => needle.push_str(other),
                     _ => {}
                 }
+                moved = true;
                 continue;
             }
             match key.as_str() {
@@ -993,6 +994,7 @@ fn main() {
                         .position(|n| *n == source_filter)
                         .unwrap_or(0);
                     source_filter = filter_names[(at + 1) % filter_names.len()].clone();
+                    moved = true;
                 }
                 "s" | "S" => sort_at = (sort_at + 1) % SORTS.len(),
                 "o" | "O" => newest_first = !newest_first,

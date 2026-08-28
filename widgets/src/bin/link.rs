@@ -638,7 +638,12 @@ fn main() {
                 "home" if detail => scroll = 0,
                 // Clamped to the end of the body when the frame is drawn.
                 "end" if detail => scroll = usize::MAX,
-                "o" | "O" => hide_idle = !hide_idle,
+                // Hiding the idle sessions shortens the list under the
+                // cursor, so the window has to come back to it.
+                "o" | "O" => {
+                    hide_idle = !hide_idle;
+                    moved = true;
+                }
                 "w" | "W" => span_at = (span_at + 1) % windows.len(),
                 "r" | "R" => {
                     let (lock, cond) = &*wake;
