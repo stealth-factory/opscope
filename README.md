@@ -159,6 +159,32 @@ They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
 like.
 
+### Scrolling
+
+Every widget scrolls, and they all scroll the same way.
+
+| | |
+|---|---|
+| `wheel` | **full widget scroll** — the whole pane moves under a pinned title |
+| `Ctrl-Y` `Ctrl-E` | the same thing from the keyboard, a line at a time, as in vim |
+| `↑` `↓` | move the **selection**, and the view follows to keep it in sight |
+
+The split is the point: **the mouse moves the view, the keys move the
+selection.** Turning the wheel never changes which row is selected — not even
+when it scrolls that row off the screen — and never changes which section has
+focus. So scrolling to look at something cannot change what `↵` opens. Press
+an arrow and the window comes back to the cursor.
+
+Nothing is ever hidden because a pane is short. Each widget builds its frame
+at whatever height it needs and the pane shows a window onto it, so a section
+that will not fit is *below the fold* rather than dropped — a chart that is
+not drawn looks exactly like a chart with no data, and only one of those is
+your problem to fix.
+
+Mouse reporting is on by default and takes drag-to-select away from the
+terminal while it is. `"terminal": {"mouse": false}` in your config turns it
+off; the keys are unaffected. See [Configuration](#configuration).
+
 ## Building the wall
 
 Fifteen widgets tile into whatever space you have. A layout that works on a

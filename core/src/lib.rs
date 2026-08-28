@@ -1486,10 +1486,25 @@ impl Keyboard {
         }
     }
 
+    /// Give the terminal back what this widget took: its line settings, and
+    /// its mouse.
+    ///
+    /// The mouse belongs here rather than only in `restore_screen` because
+    /// this runs on the third exit path. A normal quit calls both; a signal
+    /// goes through `SCREEN_RESTORE`; a panic unwinds and reaches neither,
+    /// but it does drop the `Keyboard`. Tracking left on outlives the
+    /// process: every later click spits escape bytes at the shell prompt,
+    /// caused by something that has already exited, with nothing on screen
+    /// to explain it. Sending it twice on a normal quit costs nothing.
+    ///
+    /// Unlike the signal handler this may allocate and take the lock, since
+    /// unwinding has already released whatever `draw` was holding.
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
+            out(MOUSE_OFF);
+            flush();
         }
     }
 

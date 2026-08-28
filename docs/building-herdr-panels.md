@@ -48,6 +48,33 @@ a panel, request the full height and slice.
 alternate screen never enter Herdr's scrollback, so a larger `--lines` will not
 recover them.
 
+## The mouse
+
+**Wheel events reach a pane.** A panel that turns on SGR tracking
+(`ESC [ ? 1000 h` then `ESC [ ? 1006 h`) gets wheel-up and wheel-down inside a
+Herdr pane, in the same `ESC [ < b ; x ; y M` form a bare terminal sends. This
+was worth checking before building on it, and it is the reason every widget
+here scrolls under the mouse.
+
+**Turn tracking off on every way out, the panic included.** A pane left
+reporting outlives the process that asked for it: every later click spits
+escape bytes at the shell prompt, from something that has already exited, with
+nothing on screen to explain it. That is three exits, not one — the normal
+quit, the signal handler, and the `Drop` that runs while a panic unwinds. The
+signal handler's copy has to be a pre-built constant, because a handler that
+formats, allocates or takes the stdout lock can deadlock against a `draw`
+already in flight.
+
+**Tracking costs the reader drag-to-select.** While a program is reporting,
+dragging in its pane selects nothing, so copying a line off a panel with the
+mouse stops working. Worth a config key so it can be turned off, rather than a
+trade made on the reader's behalf.
+
+**`pane send-text` will not deliver an arrow; `pane send-keys` will.** Testing
+a panel's key handling from the CLI, `herdr pane send-keys <pane> Down` works
+and passing a raw `ESC [ B` through `send-text` does not. Plain characters go
+through `send-text` fine.
+
 ## Focus
 
 **Only agent panes can be focused by id.** `herdr agent focus <pane>` exists;
