@@ -624,12 +624,25 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     // Widest label decides the column, the way every other agent's lanes
     // already work - `agent-usage.rs` derives the same number from its own
     // pairs, which is why `premium reqs` and `gemini weekly` sit straight
-    // while these three were squeezed into a hardcoded nine. Grok Bot is
-    // in the reckoning because it draws a row of its own underneath.
+    // while these three were squeezed into a hardcoded nine.
+    //
+    // Only the lanes that will actually draw. A lane whose field is absent
+    // is skipped below, and counting it here would spend the column on a
+    // row nobody sees - a response carrying only `total` would pad five
+    // characters out to thirteen and take the other eight off the bar,
+    // which is the same clipping this width was added to stop. Grok Bot
+    // joins on the same terms: it is in the reckoning when its own row is
+    // going to be drawn, and not otherwise.
     let label_w = CURSOR_LANES
         .iter()
+        .filter(|(_, key, _)| loose(&plan[*key]).is_some())
         .map(|(name, _, _)| name.chars().count())
-        .chain(std::iter::once("grok bot".chars().count()))
+        .chain(
+            d.sand
+                .as_ref()
+                .and_then(sand_lane)
+                .map(|_| "grok bot".chars().count()),
+        )
         .max()
         .unwrap_or(9);
     for (name, key, stop) in CURSOR_LANES {
@@ -1433,6 +1446,55 @@ mod tests {
                 bars
             );
         }
+    }
+
+    #[test]
+    fn an_absent_lane_does_not_spend_the_column_it_would_have_used() {
+        // A response carrying only `total` is a supported shape - the lane
+        // beside this one proves it - and the column has to be five wide,
+        // not the thirteen `cursor models` would have wanted. Those eight
+        // cells come straight off the bar, which is the clipping the
+        // derived width exists to prevent rather than cause.
+        let p = palette();
+        let start = (now() - 5.0 * 86400.0) * 1000.0;
+        let end = (now() + 25.0 * 86400.0) * 1000.0;
+        let only_total = Data {
+            live: Some(serde_json::json!({
+                "planUsage": { "totalPercentUsed": 41.0 },
+                "billingCycleStart": start.to_string(),
+                "billingCycleEnd": end.to_string(),
+            })),
+            ..Data::default()
+        };
+        let all_three = Data {
+            live: Some(serde_json::json!({
+                "planUsage": {
+                    "totalPercentUsed": 41.0,
+                    "autoPercentUsed": 12.0,
+                    "apiPercentUsed": 59.0,
+                },
+                "billingCycleStart": start.to_string(),
+                "billingCycleEnd": end.to_string(),
+            })),
+            ..Data::default()
+        };
+        let bar_start = |d: &Data| -> usize {
+            let rows = cursor_quota(d, 80, &p);
+            let row = rows
+                .iter()
+                .map(|r| strip(r))
+                .find(|r| r.contains("total"))
+                .expect("a total lane");
+            row.find('█').or_else(|| row.find('░')).expect("a bar")
+        };
+        let lone = bar_start(&only_total);
+        let crowded = bar_start(&all_three);
+        assert!(
+            lone < crowded,
+            "the lone lane paid for labels that never drew: {} vs {}",
+            lone,
+            crowded
+        );
     }
 
     #[test]
