@@ -180,17 +180,39 @@ struct Agent {
 /// `from` is where the window sat last frame. It is honoured when it can be,
 /// so the view holds still while the cursor moves inside it, and moves by as
 /// little as it takes when the cursor would leave.
+///
+/// `chase` is false on a frame the wheel moved the view rather than a key
+/// moving the cursor. Then `from` stands as given and the cursor is allowed
+/// to scroll out of sight - it is still where enter will act, and the next
+/// arrow press brings the window back to it.
 fn window_over(
     heights: &[usize],
     at: usize,
     room: usize,
     from: usize,
+    chase: bool,
 ) -> std::ops::Range<usize> {
     let n = heights.len();
     if n == 0 || room == 0 {
         return 0..0;
     }
     let at = at.min(n - 1);
+    if !chase {
+        // The last start worth having is the one whose window still ends on
+        // the last entry; past it the view would scroll into blank space.
+        let (mut last, mut used) = (n, 0usize);
+        while last > 0 && used + heights[last - 1] <= room {
+            used += heights[last - 1];
+            last -= 1;
+        }
+        let first = from.min(last);
+        let (mut used, mut end) = (0usize, first);
+        while end < n && used + heights[end] <= room {
+            used += heights[end];
+            end += 1;
+        }
+        return first..end.max(first + 1).min(n);
+    }
     // Never start below the cursor: reaching up moves the window to it.
     let mut first = from.min(at);
     loop {
@@ -725,6 +747,10 @@ fn main() {
     // Kept across frames so the view holds still while the cursor moves
     // inside it, and only moves when the cursor would leave it.
     let mut scroll = 0usize;
+    // Set by whichever key moved the cursor, and cleared once the window has
+    // been asked to hold it. Without it the window chases the cursor every
+    // frame and drags itself straight back from wherever the wheel put it.
+    let mut moved = false;
     let mut note: Option<(String, bool, f64)> = None;
     let mut rows_now: Vec<Row> = Vec::new();
 
@@ -748,11 +774,28 @@ fn main() {
                 "i" | "I" => {
                     show_idle = !show_idle;
                     selected = 0;
+                    moved = true;
                 }
-                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "ctrl-e" | "wheel-down" => selected += 1,
-                "home" => selected = 0,
-                "end" => selected = rows_now.len().saturating_sub(1),
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the view and nothing else. Selection is
+                // the arrows' job, here as everywhere in the collection.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                "home" => {
+                    selected = 0;
+                    moved = true;
+                }
+                "end" => {
+                    selected = rows_now.len().saturating_sub(1);
+                    moved = true;
+                }
                 "enter" | "f" | "F" => {
                     if let Some(row) = rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
@@ -927,8 +970,9 @@ fn main() {
             .take(agents.len())
             .chain(std::iter::repeat(1).take(rows_now.len() - agents.len()))
             .collect();
-        let window = window_over(&heights, selected, room, scroll);
+        let window = window_over(&heights, selected, room, scroll, moved);
         scroll = window.start;
+        moved = false;
 
         rows.push(tc::seg(
             &[
@@ -1289,7 +1333,7 @@ mod tests {
         for room in [1usize, 4, 12, 30, 200] {
             for at in 0..heights.len() {
                 for from in [0usize, 5, 14, 30, 42] {
-                    let w = window_over(&heights, at, room, from);
+                    let w = window_over(&heights, at, room, from, true);
                     assert!(w.contains(&at), "room={} at={} from={} gave {:?}", room, at, from, w);
                     // And it fits, unless one entry alone is taller than the
                     // pane - in which case it is drawn anyway, because the
@@ -1309,15 +1353,30 @@ mod tests {
     fn the_window_holds_still_while_the_cursor_moves_inside_it() {
         let heights = vec![1usize; 40];
         // Already on screen: the view does not jump under the reader.
-        assert_eq!(window_over(&heights, 12, 10, 8), 8..18);
-        assert_eq!(window_over(&heights, 8, 10, 8), 8..18);
-        assert_eq!(window_over(&heights, 17, 10, 8), 8..18);
+        assert_eq!(window_over(&heights, 12, 10, 8, true), 8..18);
+        assert_eq!(window_over(&heights, 8, 10, 8, true), 8..18);
+        assert_eq!(window_over(&heights, 17, 10, 8, true), 8..18);
         // Off the bottom: it moves by exactly enough.
-        assert_eq!(window_over(&heights, 18, 10, 8), 9..19);
+        assert_eq!(window_over(&heights, 18, 10, 8, true), 9..19);
         // Off the top: it moves to the cursor rather than past it.
-        assert_eq!(window_over(&heights, 3, 10, 8), 3..13);
+        assert_eq!(window_over(&heights, 3, 10, 8, true), 3..13);
         // An empty list has no window at all.
-        assert_eq!(window_over(&[], 0, 10, 0), 0..0);
+        assert_eq!(window_over(&[], 0, 10, 0, true), 0..0);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_window_off_the_cursor_and_stops_at_the_end() {
+        let heights = vec![1usize; 40];
+        // Not chasing: the window sits where it was put, cursor or no cursor.
+        assert_eq!(window_over(&heights, 0, 10, 8, false), 8..18);
+        assert_eq!(window_over(&heights, 39, 10, 0, false), 0..10);
+        // And it stops once the last entry is on screen rather than
+        // scrolling into blank space below it.
+        assert_eq!(window_over(&heights, 0, 10, 100, false), 30..40);
+        // Two-row entries are counted in rows, not entries: ten rows holds
+        // five of them.
+        let tall = vec![2usize; 20];
+        assert_eq!(window_over(&tall, 0, 10, 100, false), 15..20);
     }
 
     #[test]
