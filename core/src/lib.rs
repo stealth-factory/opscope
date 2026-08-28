@@ -214,14 +214,34 @@ pub fn draw(rows: &[String], _w: usize, h: usize) {
 }
 
 /// Hide the cursor and clear, and put it all back on the way out.
+///
+/// Mouse reporting is asked for here unless the config turns it off. It
+/// costs something real: with the terminal reporting, a drag selects
+/// nothing, so copying a line off a panel with the mouse stops working.
+/// Anyone who copies more often than they scroll wants it off, and the
+/// keys are unaffected either way - ctrl-y and ctrl-e still scroll.
 pub fn setup() {
     unsafe {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
-    out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
+    let mouse = if mouse_wanted() { MOUSE_ON } else { "" };
+    out(&format!("{}{}{}{}", mouse, HIDE, CLEAR, HOME));
     flush();
+}
+
+/// Whether to ask the terminal for mouse reports.
+///
+/// Shared rather than per-widget: it is a property of how someone uses a
+/// terminal, not of any one panel, and having to turn it off in fourteen
+/// places is having to turn it off in thirteen and forget the fourteenth.
+/// On unless `"terminal": {"mouse": false}` says otherwise.
+fn mouse_wanted() -> bool {
+    load_config("terminal")
+        .get("mouse")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 /// The bytes `handle_signal` writes. Built as a constant so the handler

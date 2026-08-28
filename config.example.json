@@ -1,5 +1,10 @@
 {
   "_comment": "Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the tool's default.",
+  "_terminal_comment": "Shared by every widget rather than set per panel: it is a property of how you use a terminal, not of any one panel.",
+  "terminal": {
+    "_mouse_comment": "Whether the widgets ask the terminal for mouse reports, which is what makes the scroll wheel scroll them. It costs a real thing: while the terminal is reporting, dragging selects nothing, so copying a line off a panel with the mouse stops working. Turn it off if you copy more often than you scroll - ctrl-y and ctrl-e still scroll, and so do the arrows.",
+    "mouse": true
+  },
   "latency": {
     "hosts": [
       "1.1.1.1",

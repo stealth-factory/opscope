@@ -187,6 +187,19 @@ This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
 
+Most sections are named after the widget that reads them. `terminal` is the
+exception and applies to all of them:
+
+```json
+"terminal": { "mouse": false }
+```
+
+turns off mouse reporting, which is what makes the scroll wheel scroll a
+widget. It is on by default and costs a real thing while it is: with the
+terminal reporting, dragging selects nothing, so copying a line off a panel
+with the mouse stops working. Turn it off if you copy more often than you
+scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
+
 **Three widgets need a token:** `deployments` wants a Vercel token from
 Account Settings → Tokens, `github` a *classic* GitHub PAT with `repo` and
 `read:org` (fine-grained tokens reach only one org each), and `linear` a
