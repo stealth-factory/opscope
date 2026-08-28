@@ -86,14 +86,58 @@ fn graphql(
     Ok(data["data"].clone())
 }
 
+/// What a search can hand over at any depth.
+///
+/// Everything here is a plain field on the pull request. Measured against
+/// the live API: with these alone a search of 665 pages out in full, in
+/// fourteen rounds, and never refuses.
 const PR_FIELDS: &str = "
-      number title url isDraft createdAt updatedAt
+      id number title url isDraft createdAt updatedAt
       additions deletions changedFiles
       author { login }
       repository { nameWithOwner }
-      headRefName baseRefName reviewDecision mergeable
+      headRefName baseRefName reviewDecision mergeable";
+
+/// The two fields a search cannot page deeply with, fetched by node id.
+///
+/// `stackEntry` and the check rollup are subqueries per result, and asking
+/// for them inside a search is what stops GitHub serving it: measured,
+/// pages one to four answer and page five returns 502, whether the search
+/// is one query over ten owners or split into one query each. Dropping
+/// them removes the ceiling entirely, and asking for them afterwards by
+/// node id costs one request per fifty results and answers every time -
+/// tested at 25, 50 and 100 ids.
+const PR_HEAVY_FIELDS: &str = "
+      id
       stackEntry { position stack { number size } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+
+/// Fill in the fields a search would not serve, for results already held.
+///
+/// Fifty at a time, matching the page that produced them. A failure here
+/// is not fatal and is not reported: the rows are already on screen and
+/// correct, they simply show their checks as unknown, which is what an
+/// unknown check should look like. Inventing "passing" because a lookup
+/// failed is the one outcome that would be worse than a dash.
+fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String, String>, tok: &str) {
+    let ids: Vec<String> = by_id.keys().cloned().collect();
+    for chunk in ids.chunks(50) {
+        let query = format!(
+            "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
+            PR_HEAVY_FIELDS
+        );
+        let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
+            return;
+        };
+        for node in d["nodes"].as_array().into_iter().flatten() {
+            let id = text(node, "id");
+            let Some(url) = by_id.get(&id) else { continue };
+            let Some(entry) = pool.get_mut(url) else { continue };
+            entry["stackEntry"] = node["stackEntry"].clone();
+            entry["commits"] = node["commits"].clone();
+        }
+    }
+}
 
 /// One request, one aliased search per source.
 ///
@@ -597,6 +641,9 @@ fn fetch_list(
                 }
             }
         }
+        // Only this round's new results need enriching; the ones already
+        // pooled were filled in when their own round landed.
+        let mut fresh_ids: HashMap<String, String> = HashMap::new();
         let mut next_live: Vec<usize> = Vec::new();
         for (slot, src) in live.iter().enumerate() {
             let (name, _) = &pairs[*src];
@@ -611,6 +658,10 @@ fn fetch_list(
             counted[*src].1 += got.len();
             for n in got {
                 let url = text(n, "url");
+                let id = text(n, "id");
+                if !id.is_empty() {
+                    fresh_ids.insert(id, url.clone());
+                }
                 let entry = pool.entry(url.clone()).or_insert_with(|| {
                     order.push(url.clone());
                     let mut copy = n.clone();
@@ -639,6 +690,7 @@ fn fetch_list(
             }
         }
         live = next_live;
+        enrich(&mut pool, &fresh_ids, tok);
 
         // Publish what has landed before asking for the next page. The
         // board fills as the pages arrive rather than staying empty until
