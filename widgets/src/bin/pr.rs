@@ -100,14 +100,24 @@ const PR_FIELDS: &str = "
 /// The ceiling is on result nodes rather than field complexity: three
 /// searches of 100 return HTTP 502 with or without the check rollup, three
 /// of 50 do not. So the page size is per source and deliberately modest.
-fn list_query(queries: &[String], limit: usize) -> String {
+/// `cursors` carries one `after` per source, so a round asks each source
+/// only for the page it has not had yet. A source that is finished is left
+/// out of the round entirely rather than re-fetching its last page: the
+/// 502 ceiling above is on nodes per request, so dropping finished sources
+/// is what keeps a late round cheap.
+fn list_query(queries: &[String], limit: usize, cursors: &[Option<String>]) -> String {
     let mut parts = vec!["rateLimit { remaining limit }".to_string()];
     for (i, q) in queries.iter().enumerate() {
+        let after = match cursors.get(i).and_then(|c| c.clone()) {
+            Some(c) => format!(", after: {}", serde_json::Value::String(c)),
+            None => String::new(),
+        };
         parts.push(format!(
-            "s{}: search(query: {}, type: ISSUE, first: {}) {{ issueCount nodes {{ ... on PullRequest {{ {} }} }} }}",
+            "s{}: search(query: {}, type: ISSUE, first: {}{}) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {} }} }} }}",
             i,
             serde_json::Value::String(q.clone()),
             limit,
+            after,
             PR_FIELDS
         ));
     }
@@ -142,10 +152,18 @@ query($owner: String!, $name: String!, $number: Int!) {
 /// Every open PR in one repository, for reconstructing a stack that was not
 /// made with `gh stack` - the API's own stack field is authoritative when
 /// it is there, and null everywhere else.
+///
+/// Paged, and it has to be. A stack is inferred by matching each PR's base
+/// branch against the head branches of the others, so a PR whose parent did
+/// not arrive is read as the root of its own stack. That is not a short
+/// answer, it is a wrong one: the drawn tree is missing a level and nothing
+/// says so. A hundred was enough until a repo with dependabot on it wasn't,
+/// and this repo's own account has several over that.
 const REPO_PRS_QUERY: &str = r#"
-query($owner: String!, $name: String!) {
+query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 100) {
+    pullRequests(states: OPEN, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
       nodes { number title isDraft headRefName baseRefName
               additions deletions author { login }
               reviewDecision mergeable }
@@ -375,18 +393,43 @@ fn fetch_detail(
             if let Ok(mut g) = state.lock() {
                 g.stage("stack, from open branches", false);
             }
-            let repo = graphql(
-                REPO_PRS_QUERY,
-                tok,
-                serde_json::json!({ "owner": owner, "name": name }),
-            )?;
+            let mut others: Vec<serde_json::Value> = Vec::new();
+            let mut after: Option<String> = None;
+            loop {
+                let repo = graphql(
+                    REPO_PRS_QUERY,
+                    tok,
+                    serde_json::json!({ "owner": owner, "name": name, "after": after }),
+                )?;
+                let conn = &repo["repository"]["pullRequests"];
+                others.extend(
+                    conn["nodes"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                if let Ok(mut g) = state.lock() {
+                    g.stages.count("stack, from open branches", others.len(), None);
+                }
+                let next = conn["pageInfo"]["endCursor"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                // A cursor that stops advancing ends the loop rather than
+                // spinning it - the same guard the org walk already carries,
+                // and the reason it carries it is that this runs on the
+                // poller thread where a spin is invisible.
+                if !conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
+                    || next.is_empty()
+                    || Some(&next) == after.as_ref()
+                {
+                    break;
+                }
+                after = Some(next);
+            }
             if let Ok(mut g) = state.lock() {
                 g.stage("stack, from open branches", true);
             }
-            let others: Vec<serde_json::Value> = repo["repository"]["pullRequests"]["nodes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
             let (root, _parent, kids) = stack_of(*num, &others);
             if let Some(root) = root {
                 let by_num: HashMap<i64, &serde_json::Value> =
@@ -507,45 +550,116 @@ fn fetch_list(
         .unwrap_or_default();
     let pairs = searches(sources, &viewer, &orgs, extra);
     let queries: Vec<String> = pairs.iter().map(|(_, q)| q.clone()).collect();
-    let d = graphql(&list_query(&queries, limit), tok, serde_json::json!({}))?;
-    if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
-        if let Ok(mut g) = rate.lock() {
-            g.remaining = Some(left);
-            // Only when GitHub sent one. A ceiling remembered from an
-            // earlier pass is still true; a zero invented here is not.
-            if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
-                g.limit = Some(limit);
-            }
-        }
-    }
-    // Pool the sources, remembering which found each PR and noting when a
-    // source filled its page, so a truncated union is not read as a total.
+
+    // Pool the sources, remembering which found each PR. The sources
+    // overlap, so the union is deduplicated by url and cannot be added up
+    // from the per-source counts.
     let mut pool: HashMap<String, serde_json::Value> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    let mut counted: Vec<(i64, usize)> = Vec::new();
-    for (i, (name, _)) in pairs.iter().enumerate() {
-        let block = &d[format!("s{}", i)];
-        let got: Vec<&serde_json::Value> = block["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|n| !n.is_null())
-            .collect();
-        // What the search says it matched, beside what it handed over.
-        counted.push((block["issueCount"].as_i64().unwrap_or(0), got.len()));
-        for n in got {
-            let url = text(n, "url");
-            let entry = pool.entry(url.clone()).or_insert_with(|| {
-                order.push(url.clone());
-                let mut copy = n.clone();
-                copy["sources"] = serde_json::Value::Array(Vec::new());
-                copy
-            });
-            if let Some(list) = entry["sources"].as_array_mut() {
-                list.push(serde_json::Value::String(name.clone()));
+    // What each search says it matched, beside what it has handed over so
+    // far. `capped` falls out of these once every source is exhausted.
+    let mut counted: Vec<(i64, usize)> = vec![(0, 0); pairs.len()];
+    let mut cursors: Vec<Option<String>> = vec![None; pairs.len()];
+    let mut live: Vec<usize> = (0..pairs.len()).collect();
+    // Why paging stopped early, when it did. Kept apart from `err` so a
+    // partial list is not dressed up as a failed fetch.
+    let mut deepened: Option<String> = None;
+
+    while !live.is_empty() {
+        let round: Vec<String> = live.iter().map(|i| queries[*i].clone()).collect();
+        let round_cursors: Vec<Option<String>> =
+            live.iter().map(|i| cursors[*i].clone()).collect();
+        // A round that fails ends the paging; it does not lose the pass.
+        // GitHub's search stops serving these nodes somewhere past the
+        // fourth page - measured: pages 1-4 answer, page 5 returns 502,
+        // and it is the per-node subqueries that cost it, not the depth.
+        // Everything already pooled is real and stays on screen, and
+        // `capped` below already says the total is a lower bound.
+        let d = match graphql(
+            &list_query(&round, limit, &round_cursors),
+            tok,
+            serde_json::json!({}),
+        ) {
+            Ok(d) => d,
+            Err(said) if !order.is_empty() => {
+                deepened = Some(said);
+                break;
+            }
+            Err(said) => return Err(said),
+        };
+        if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
+            if let Ok(mut g) = rate.lock() {
+                g.remaining = Some(left);
+                // Only when GitHub sent one. A ceiling remembered from an
+                // earlier pass is still true; a zero invented here is not.
+                if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
+                    g.limit = Some(limit);
+                }
             }
         }
+        let mut next_live: Vec<usize> = Vec::new();
+        for (slot, src) in live.iter().enumerate() {
+            let (name, _) = &pairs[*src];
+            let block = &d[format!("s{}", slot)];
+            let got: Vec<&serde_json::Value> = block["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|n| !n.is_null())
+                .collect();
+            counted[*src].0 = block["issueCount"].as_i64().unwrap_or(0);
+            counted[*src].1 += got.len();
+            for n in got {
+                let url = text(n, "url");
+                let entry = pool.entry(url.clone()).or_insert_with(|| {
+                    order.push(url.clone());
+                    let mut copy = n.clone();
+                    copy["sources"] = serde_json::Value::Array(Vec::new());
+                    copy
+                });
+                if let Some(list) = entry["sources"].as_array_mut() {
+                    let already = list.iter().any(|s| s.as_str() == Some(name.as_str()));
+                    if !already {
+                        list.push(serde_json::Value::String(name.clone()));
+                    }
+                }
+            }
+            let next = block["pageInfo"]["endCursor"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // Same guard as the org walk: a cursor that stops advancing
+            // ends this source rather than spinning the poller thread.
+            if block["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
+                && !next.is_empty()
+                && Some(&next) != cursors[*src].as_ref()
+            {
+                cursors[*src] = Some(next);
+                next_live.push(*src);
+            }
+        }
+        live = next_live;
+
+        // Publish what has landed before asking for the next page. The
+        // board fills as the pages arrive rather than staying empty until
+        // the last source is exhausted, and the count in the header is the
+        // count on screen at every moment in between.
+        if let Ok(mut g) = state.lock() {
+            g.stages
+                .count("pull requests", order.len(), None);
+            let partial: Vec<serde_json::Value> = order
+                .iter()
+                .filter_map(|url| pool.get(url).cloned())
+                .collect();
+            let (total, capped) = union_total(&counted, partial.len());
+            g.total = total;
+            // Still fetching is still capped, whatever the counts say: the
+            // sources that remain live have more behind them.
+            g.capped = capped || !live.is_empty();
+            g.prs = partial;
+        }
     }
+
     let nodes: Vec<serde_json::Value> = order
         .into_iter()
         .filter_map(|url| pool.remove(&url))
@@ -558,14 +672,27 @@ fn fetch_list(
             .join(", ");
         let (total, capped) = union_total(&counted, nodes.len());
         g.total = total;
-        g.capped = capped;
+        // Paging that stopped short is capped whatever the arithmetic says.
+        g.capped = capped || deepened.is_some();
         g.prs = nodes;
         g.fetched = tc::now();
-        g.err = if source == "config" {
+        let mut said = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
         } else {
             String::new()
         };
+        if deepened.is_some() {
+            // Named as a ceiling rather than as the raw 502, because that
+            // is what it is: GitHub stops serving these pages, the list is
+            // as long as it can be, and nothing here is broken.
+            let note = "GitHub stopped paging this search; showing every result it served";
+            said = if said.is_empty() {
+                note.to_string()
+            } else {
+                format!("{} · {}", said, note)
+            };
+        }
+        g.err = said;
     }
     Ok(())
 }
@@ -2147,6 +2274,32 @@ fn detail_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_that_cannot_be_paged_is_a_search_capped_at_one_page() {
+        let qs = vec!["is:open is:pr".to_string(), "author:@me".to_string()];
+
+        // Without pageInfo the caller's hasNextPage is always false, so
+        // every source retires after its first page and the widget quietly
+        // goes back to showing 50 - the exact failure this pass removed,
+        // and one nothing else would notice.
+        let first = list_query(&qs, 50, &[None, None]);
+        assert!(first.contains("pageInfo"), "{}", first);
+        assert!(first.contains("hasNextPage"), "{}", first);
+        assert!(first.contains("endCursor"), "{}", first);
+        assert!(!first.contains("after:"), "no cursor yet: {}", first);
+        assert_eq!(first.matches("search(").count(), 2);
+
+        // A cursor reaches the source it belongs to, and only that one.
+        let next = list_query(&qs, 50, &[Some("Y3Vyc29yOjE=".into()), None]);
+        assert!(next.contains(r#"after: "Y3Vyc29yOjE=""#), "{}", next);
+        assert_eq!(next.matches("after:").count(), 1, "{}", next);
+
+        // The page size stays at 50. Three searches of 100 answer 502 -
+        // the ceiling is nodes per request, so more results come from more
+        // rounds, never from a bigger page.
+        assert!(next.contains("first: 50"), "{}", next);
+    }
 
     #[test]
     fn ready_means_nothing_is_left_to_do() {
