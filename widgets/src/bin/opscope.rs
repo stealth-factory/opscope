@@ -213,16 +213,28 @@ fn palette() -> Palette {
 ///
 /// Returns the first index shown, so the caller can say what it is
 /// showing rather than presenting a slice as the whole list.
-fn window_for(count: usize, selected: usize, room: usize) -> (usize, usize) {
+///
+/// `from` is where the window sat last frame. `chase` is true only on a
+/// frame a key moved the cursor: then the window moves by as little as it
+/// takes to hold it, because a list that jumps to centre the selection
+/// loses the reader's place. On a frame the wheel moved the view, `from`
+/// stands and the cursor is allowed to scroll out of sight - it is still
+/// what enter launches, and the next arrow press brings the window to it.
+fn window_for(
+    count: usize,
+    selected: usize,
+    room: usize,
+    from: usize,
+    chase: bool,
+) -> (usize, usize) {
     if count <= room || room == 0 {
         return (0, count);
     }
-    // Keep the cursor inside the window, scrolling only as far as it must:
-    // a list that jumps to centre the selection loses the reader's place.
-    let first = if selected < room {
-        0
+    let last = count - room;
+    let first = if chase {
+        tc::follow(from.min(last), selected, room)
     } else {
-        (selected + 1).saturating_sub(room)
+        from.min(last)
     };
     (first, room)
 }
@@ -363,6 +375,9 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // Where the list window sits, and whether a key has just moved the
+    // cursor. The wheel writes the first and never the second.
+    let (mut scroll, mut moved) = (0usize, false);
 
     loop {
         for key in keyboard.poll() {
@@ -372,8 +387,19 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => selected += 1,
+                "up" | "k" | "K" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" | "j" | "J" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the list under the cursor and leaves the
+                // selection where it is - the example panel below goes on
+                // showing whatever is picked.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }
@@ -387,35 +413,35 @@ fn main() {
         }
 
         let mut body = vec![tc::title("opscope", w, &p.accent)];
+        // What is left for the list once the title, the count line, the two
+        // blanks, the description heading and the footer have had theirs.
+        // Drawing all of them and letting the frame cut the tail is what put
+        // the cursor off the bottom of a short pane. Worked out once and used
+        // by both the count line and the list: the two had drifted two rows
+        // apart, so the header named a range that was not what was drawn.
+        let room = h.saturating_sub(8).max(1);
+        let (first, shown) = window_for(WIDGETS.len(), selected, room, scroll, moved);
+        scroll = first;
+        moved = false;
         body.push(tc::seg(
             &[(
                 p.dim.as_str(),
-                {
-                    let room = h.saturating_sub(6).max(1);
-                    let (first, shown) = window_for(WIDGETS.len(), selected, room);
-                    if shown < WIDGETS.len() {
-                        // A partial list says so, rather than reading as
-                        // the whole set with some widgets missing.
-                        format!(
-                            " {} widgets · showing {}-{}   ↵ or → starts one, q leaves",
-                            WIDGETS.len(),
-                            first + 1,
-                            first + shown
-                        )
-                    } else {
-                        format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len())
-                    }
+                if shown < WIDGETS.len() {
+                    // A partial list says so, rather than reading as the
+                    // whole set with some widgets missing.
+                    format!(
+                        " {} widgets · showing {}-{}   ↵ or → starts one, q leaves",
+                        WIDGETS.len(),
+                        first + 1,
+                        first + shown
+                    )
+                } else {
+                    format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len())
                 },
             )],
             w - 1,
         ));
         body.push(String::new());
-        // What is left for the list once the title, the two blanks, the
-        // description heading and the footer have had theirs. Drawing all
-        // thirteen and letting the frame cut the tail is what put the
-        // cursor off the bottom of a short pane.
-        let room = h.saturating_sub(body.len() + 5).max(1);
-        let (first, shown) = window_for(WIDGETS.len(), selected, room);
         body.extend(rows_for(w, selected, first, shown, &p));
         body.push(String::new());
 
@@ -500,7 +526,7 @@ mod tests {
         // starting whatever it was invisibly on.
         for room in 1usize..14 {
             for selected in 0..13 {
-                let (first, shown) = window_for(13, selected, room);
+                let (first, shown) = window_for(13, selected, room, 0, true);
                 assert!(
                     selected >= first && selected < first + shown,
                     "room {} cursor {} fell outside {}..{}",
@@ -518,18 +544,34 @@ mod tests {
     fn a_list_that_fits_is_not_windowed() {
         // No note, no scrolling, nothing changed for the pane sizes these
         // actually run at.
-        assert_eq!(window_for(13, 0, 13), (0, 13));
-        assert_eq!(window_for(13, 12, 20), (0, 13));
-        assert_eq!(window_for(0, 0, 5), (0, 0));
+        assert_eq!(window_for(13, 0, 13, 0, true), (0, 13));
+        assert_eq!(window_for(13, 12, 20, 0, true), (0, 13));
+        assert_eq!(window_for(0, 0, 5, 0, true), (0, 0));
     }
 
     #[test]
     fn the_window_moves_only_as_far_as_it_must() {
         // Scrolling by one when the cursor steps off the edge, rather than
         // recentring: a list that jumps loses the reader's place.
-        assert_eq!(window_for(13, 5, 6), (0, 6));
-        assert_eq!(window_for(13, 6, 6), (1, 6));
-        assert_eq!(window_for(13, 12, 6), (7, 6));
+        assert_eq!(window_for(13, 5, 6, 0, true), (0, 6));
+        assert_eq!(window_for(13, 6, 6, 0, true), (1, 6));
+        assert_eq!(window_for(13, 12, 6, 0, true), (7, 6));
+        // And it holds still while the cursor moves about inside it.
+        assert_eq!(window_for(13, 8, 6, 7, true), (7, 6));
+        assert_eq!(window_for(13, 12, 6, 7, true), (7, 6));
+    }
+
+    #[test]
+    fn the_wheel_moves_the_window_off_the_cursor_and_stops_at_the_end() {
+        // Not chasing: the window sits where the wheel put it, and the
+        // cursor is left behind rather than dragged along.
+        assert_eq!(window_for(13, 0, 6, 4, false), (4, 6));
+        assert_eq!(window_for(13, 12, 6, 0, false), (0, 6));
+        // It stops with the last row on screen rather than scrolling into
+        // blank space below it.
+        assert_eq!(window_for(13, 0, 6, 99, false), (7, 6));
+        // A list that fits is not windowed however far the wheel is turned.
+        assert_eq!(window_for(13, 0, 13, 99, false), (0, 13));
     }
 
 
