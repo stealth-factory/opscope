@@ -1197,6 +1197,16 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut tick) = (0usize, 0usize);
+    // The frame's own scroll, and whether the selection moved this tick.
+    //
+    // The two have to be separate. The window used to be a function of the
+    // selection - centred on it, `selected - room/2` - so the mouse could
+    // not move the view without moving what `↵` would open. Now the keys
+    // own the selection and the wheel owns the view, and the only time the
+    // view is dragged back to the cursor is the tick a key moved it. Chase
+    // it every tick instead and a scroll snaps back before it is seen.
+    let mut board = 0usize;
+    let mut moved = false;
     // One account on its own screen, and how far down it is scrolled.
     let (mut detail, mut dscroll) = (false, 0usize);
     // Which of the oldest PRs the cursor is on, and what [c] last said.
@@ -1286,8 +1296,19 @@ fn main() {
                 }
                 "home" if detail => dscroll = 0,
                 "end" if detail => dscroll = usize::MAX,
-                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "ctrl-e" | "wheel-down" => selected += 1,
+                // Keys move the selection; the wheel moves the view. Never
+                // the other way round: scrolling to look at something must
+                // not change what `↵` opens.
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                "ctrl-y" | "wheel-up" => board = board.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => board = board.saturating_add(1),
                 _ => {}
             }
         }
@@ -1701,14 +1722,15 @@ fn main() {
             rows.push(String::new());
         }
 
-        // Scroll rather than truncate: the selection has to stay on screen,
-        // or the arrows move something invisible.
-        let room = h.saturating_sub(5 + rows.len()).max(1);
-        let first = if stats.len() > room {
-            selected.saturating_sub(room / 2).min(stats.len() - room)
-        } else {
-            0
-        };
+        // Every account is drawn, and the frame is a window onto the lot -
+        // the shape `linear` uses. Windowing the list inside a frame that
+        // was itself being truncated meant two scrolls fighting over one
+        // pane, and neither could be driven by the wheel without moving
+        // the selection. `cursor` below records where the selected row
+        // landed so the window can be dragged back to it when a key moves
+        // it, and left alone when it does not.
+        let first = 0usize;
+        let room = stats.len();
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── BY ACCOUNT ──".into()),
@@ -1767,8 +1789,12 @@ fn main() {
             }
         }
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
+        let mut cursor: Option<usize> = None;
         for (i, s) in stats.iter().enumerate().skip(first).take(room) {
             let here = i == selected;
+            if here {
+                cursor = Some(rows.len());
+            }
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
@@ -1964,8 +1990,23 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        rows.truncate(h.saturating_sub(footer.len()));
-        while rows.len() < h.saturating_sub(footer.len()) {
+        // A window onto the frame, title pinned, rather than a cut of it.
+        // Truncating dropped every account past the fold with nothing
+        // saying so.
+        let room = h.saturating_sub(footer.len());
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
+        if moved {
+            if let Some(at) = cursor {
+                board = tc::follow(board, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
+        }
+        board = board.min(rest.len().saturating_sub(room_below));
+        let last = (board + room_below).min(rest.len());
+        let mut rows: Vec<String> = head.to_vec();
+        rows.extend_from_slice(&rest[board..last]);
+        while rows.len() < room {
             rows.push(String::new());
         }
         rows.extend(footer);
