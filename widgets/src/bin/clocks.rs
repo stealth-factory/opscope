@@ -831,8 +831,8 @@ fn main() {
                 "pgup" => scroll = scroll.saturating_sub(8),
                 "pgdn" => scroll += 8,
                 "home" => scroll = 0,
-                // Clamped where the frame is windowed, which is the only
-                // place that knows how tall the panel came out.
+                // Clamped to the last city further down, which is the only
+                // place that knows how many there are.
                 "end" => scroll = usize::MAX / 2,
                 "p" | "P" => pomo.toggle(seconds()),
                 // show_hints decides where this starts and [?] moves it,
@@ -972,20 +972,25 @@ fn main() {
         }
         rows.push(String::new());
 
-        // Every city, however many there are. The pane no longer keeps a
-        // window of its own: the whole panel scrolls under the title, so a
-        // list longer than the pane is reached the same way as anything
-        // else that runs off the bottom. The count still leads the section
-        // because it is the only place that says how many there are.
-        if !cities.is_empty() {
+        // The world clock takes whatever is left, and says which slice of
+        // the list it is showing rather than silently truncating.
+        let room = h.saturating_sub(rows.len() + 3);
+        if room >= 2 && !cities.is_empty() {
+            let shown = room.saturating_sub(1).min(cities.len());
+            if scroll + shown > cities.len() {
+                scroll = cities.len().saturating_sub(shown);
+            }
             rows.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
-                    (p.dim.as_str(), format!(" {} cities", cities.len())),
+                    (
+                        p.dim.as_str(),
+                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, cities.len()),
+                    ),
                 ],
                 w - 1,
             ));
-            for city in cities.iter() {
+            for city in cities.iter().skip(scroll).take(shown) {
                 let there = now.with_timezone(&city.zone);
                 // Sun or moon by the local hour, which is the fastest way
                 // to read "is it a reasonable time to message them".
@@ -1020,7 +1025,7 @@ fn main() {
         // no way back.
         let mut hints: Vec<Vec<(&str, String)>> = vec![vec![
             (p.accent.as_str(), "↑↓".into()),
-            (p.dim.as_str(), " scroll".into()),
+            (p.dim.as_str(), " cities".into()),
         ]];
         if pomo.shown && pomo.hints {
             hints.push(vec![
@@ -1076,23 +1081,14 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        // The title stays put and everything under it rides the scroll, so
-        // the panel's own name is still there once the big clock has gone
-        // off the top.
-        let room = h.saturating_sub(foot.len());
-        let (head, rest) = rows.split_at(1.min(rows.len()));
-        let room_below = room.saturating_sub(head.len()).max(1);
-        scroll = scroll.min(rest.len().saturating_sub(room_below));
-        let mut frame: Vec<String> = head.to_vec();
-        frame.extend(rest.iter().skip(scroll).take(room_below).cloned());
-        while frame.len() < room {
-            frame.push(String::new());
+        while rows.len() < h.saturating_sub(foot.len()) {
+            rows.push(String::new());
         }
-        frame.extend(foot);
+        rows.extend(foot);
         if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
-            tc::draw(&flash_frame(&frame, w, h, &flash_bg, &flash_fg), w, h);
+            tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
         } else {
-            tc::draw(&frame, w, h);
+            tc::draw(&rows, w, h);
         }
         // Forget a flash once its last blink has passed, so the check stops
         // costing anything for the rest of the session.
