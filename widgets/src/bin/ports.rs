@@ -2211,6 +2211,11 @@ fn main() {
     let mut working: Option<Working> = None;
     let mut notice: Option<Notice> = None;
     let mut detail: Option<Detail> = None;
+    // How far the detail screen has been scrolled. It had none: the body
+    // was built at whatever height it needed and then truncated to the
+    // pane, so everything past the bottom edge was dropped with nothing
+    // saying so - on a short pane that is most of the screen.
+    let mut dscroll = 0usize;
     // Tailscale is asked once per visit to the second screen rather than
     // once per frame: two subprocesses at 3Hz would cost more than the
     // whole rest of the widget. Any change made there clears them.
@@ -2339,8 +2344,15 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
-                    "up" | "ctrl-y" | "wheel-up" => view.at = view.at.saturating_sub(1),
-                    "down" | "ctrl-e" | "wheel-down" => view.at += 1,
+                    // The arrows pick an address, which is what the footer
+                    // beside them says. The wheel scrolls the screen they
+                    // are on - two different things, and conflating them
+                    // was why scrolling a detail did nothing but move the
+                    // copy target.
+                    "up" => view.at = view.at.saturating_sub(1),
+                    "down" => view.at += 1,
+                    "ctrl-y" | "wheel-up" => dscroll = dscroll.saturating_sub(1),
+                    "ctrl-e" | "wheel-down" => dscroll = dscroll.saturating_add(1),
                     "c" | "C" => {
                         if !view.links.is_empty() {
                             let url = &view.links[view.at.min(view.links.len() - 1)].0;
@@ -2493,7 +2505,7 @@ fn main() {
                 .lock()
                 .map(|t| t.series(view.port))
                 .unwrap_or_default();
-            let mut rows = detail_rows(
+            let rows = detail_rows(
                 &view.row,
                 self_node,
                 &view.tunnel,
@@ -2525,7 +2537,16 @@ fn main() {
                 &ok,
             );
             let room = h.saturating_sub(foot.len() + 1);
-            rows.truncate(room);
+            // A window onto the body rather than a cut of it. The title is
+            // pinned above it: on a detail screen it is the only row that
+            // says which port you opened, and scrolling it away leaves
+            // nothing identifying what is on screen.
+            let (head, rest) = rows.split_at(1.min(rows.len()));
+            let room_below = room.saturating_sub(head.len()).max(1);
+            dscroll = dscroll.min(rest.len().saturating_sub(room_below));
+            let last = (dscroll + room_below).min(rest.len());
+            let mut rows: Vec<String> = head.to_vec();
+            rows.extend_from_slice(&rest[dscroll..last]);
             while rows.len() < room {
                 rows.push(String::new());
             }
