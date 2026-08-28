@@ -806,16 +806,39 @@ fn fetch_runs_for(
 ) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
-    let path = format!(
-        "/repos/{}/{}/actions/runs?per_page={}&created={}",
-        owner,
-        name,
-        RUN_PAGE,
-        urlencoding_lite(&created)
-    );
-    let res = rest_get(&path, tok, rate)?;
-    let total = res["total_count"].as_i64().unwrap_or(0);
-    let raw = res["workflow_runs"].as_array().cloned().unwrap_or_default();
+    let mut raw: Vec<serde_json::Value> = Vec::new();
+    let mut total = 0i64;
+    let mut page = 1usize;
+    // REST pages by number rather than by cursor, and `total_count` says
+    // where to stop, so this walks until it has them all. One repo on this
+    // wall had 430 runs in a 48h window and showed a hundred of them - the
+    // widget said so on its own screen, which was honest and still not the
+    // answer somebody opened it for.
+    loop {
+        let path = format!(
+            "/repos/{}/{}/actions/runs?per_page={}&page={}&created={}",
+            owner,
+            name,
+            RUN_PAGE,
+            page,
+            urlencoding_lite(&created)
+        );
+        let res = rest_get(&path, tok, rate)?;
+        if page == 1 {
+            total = res["total_count"].as_i64().unwrap_or(0);
+        }
+        let got = res["workflow_runs"].as_array().cloned().unwrap_or_default();
+        let n = got.len();
+        raw.extend(got);
+        // Three ways to be finished, and the last two are the guards: a
+        // short page is the end, an empty one is the end even if the count
+        // disagreed, and the count itself stops a repo whose runs are being
+        // created faster than this walks them.
+        if n < RUN_PAGE || n == 0 || raw.len() as i64 >= total {
+            break;
+        }
+        page += 1;
+    }
     let fetched = raw.len();
     let mut out = Vec::new();
     for run in &raw {
@@ -823,7 +846,7 @@ fn fetch_runs_for(
     }
     let note = if total > fetched as i64 {
         Some(format!(
-            "{}: {} most recent of {} runs in the window",
+            "{}: {} of {} runs in the window",
             repo, fetched, total
         ))
     } else {
@@ -1197,14 +1220,42 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
     if id == 0 {
         return serde_json::json!({ "_error": "run has no id" });
     }
-    let path = format!("/repos/{}/{}/actions/runs/{}/jobs?per_page=100", owner, name, id);
-    match rest_get(&path, tok, &mut None) {
-        Ok(mut v) => {
-            v["_fetched_at"] = serde_json::json!(tc::now());
-            v
+    // Paged like the runs list. This one runs on a key press rather than on
+    // the poll loop, so the cost is a person waiting a moment for a run they
+    // asked to open, not every repo on every pass.
+    let mut jobs: Vec<serde_json::Value> = Vec::new();
+    let mut total = 0i64;
+    let mut page = 1usize;
+    loop {
+        let path = format!(
+            "/repos/{}/{}/actions/runs/{}/jobs?per_page=100&page={}",
+            owner, name, id, page
+        );
+        let res = match rest_get(&path, tok, &mut None) {
+            Ok(v) => v,
+            // Whatever arrived is real and worth drawing; only a failure on
+            // the first page leaves nothing to show.
+            Err(e) if page == 1 => {
+                return serde_json::json!({ "_error": e, "_fetched_at": tc::now() })
+            }
+            Err(_) => break,
+        };
+        if page == 1 {
+            total = res["total_count"].as_i64().unwrap_or(0);
         }
-        Err(e) => serde_json::json!({ "_error": e, "_fetched_at": tc::now() }),
+        let got = res["jobs"].as_array().cloned().unwrap_or_default();
+        let n = got.len();
+        jobs.extend(got);
+        if n < 100 || n == 0 || jobs.len() as i64 >= total {
+            break;
+        }
+        page += 1;
     }
+    serde_json::json!({
+        "total_count": total,
+        "jobs": jobs,
+        "_fetched_at": tc::now(),
+    })
 }
 
 /// GitHub's jobs list is one page of 100. A run that has more must say so
