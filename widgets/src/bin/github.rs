@@ -1913,16 +1913,27 @@ fn main() {
                 // The page follows the cursor into the oldest list, the way
                 // netwatch's detail follows one into a section. Without it
                 // the row being selected is often off the bottom.
+                // The title stays put while the rest scrolls under it. A
+                // detail screen is where it matters most: the board at
+                // least has its own name on every row, but scroll a detail
+                // view and there is nothing left saying whose account you
+                // opened. `cursor` indexes the whole body, so it shifts by
+                // the header before the window chases it - miss that and
+                // the selection lands a row off, only once you scroll.
+                let (head, rest) = body.split_at(1.min(body.len()));
+                let room_below = room.saturating_sub(head.len()).max(1);
                 if let Some(at) = cursor {
+                    let at = at.saturating_sub(head.len());
                     if at < dscroll {
                         dscroll = at;
-                    } else if at >= dscroll + room {
-                        dscroll = at + 1 - room;
+                    } else if at >= dscroll + room_below {
+                        dscroll = at + 1 - room_below;
                     }
                 }
-                dscroll = dscroll.min(body.len().saturating_sub(room));
-                let last = (dscroll + room).min(body.len());
-                let mut out: Vec<String> = body[dscroll..last].to_vec();
+                dscroll = dscroll.min(rest.len().saturating_sub(room_below));
+                let last = (dscroll + room_below).min(rest.len());
+                let mut out: Vec<String> = head.to_vec();
+                out.extend_from_slice(&rest[dscroll..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }

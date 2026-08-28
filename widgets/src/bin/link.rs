@@ -560,7 +560,7 @@ fn main() {
                 // Up and down mean "move through what is in front of you"
                 // in both views: in the list that is the selection, on the
                 // detail screen it is the screen itself.
-                "up" | "k" | "K" => {
+                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
                     if detail {
                         scroll = scroll.saturating_sub(1);
                     } else {
@@ -571,7 +571,7 @@ fn main() {
                         };
                     }
                 }
-                "down" | "j" | "J" => {
+                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
                     if detail {
                         scroll = scroll.saturating_add(1);
                     } else {
@@ -703,10 +703,15 @@ fn main() {
             // The body is as tall as it needs to be and the pane shows a
             // window onto it, rather than the body being cut to the pane
             // and the remainder going unmentioned.
-            let furthest = body.len().saturating_sub(room);
+            // Except the title, which stays: scrolled away, a detail view
+            // stops saying whose session it is describing.
+            let (head, rest) = body.split_at(1.min(body.len()));
+            let room_below = room.saturating_sub(head.len()).max(1);
+            let furthest = rest.len().saturating_sub(room_below);
             scroll = scroll.min(furthest);
-            let last = (scroll + room).min(body.len());
-            let mut shown_body: Vec<String> = body[scroll..last].to_vec();
+            let last = (scroll + room_below).min(rest.len());
+            let mut shown_body: Vec<String> = head.to_vec();
+            shown_body.extend_from_slice(&rest[scroll..last]);
             while shown_body.len() < room {
                 shown_body.push(String::new());
             }

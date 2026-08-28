@@ -1168,10 +1168,16 @@ fn main() {
                 let body = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
                 let foot = 2;
                 let room = h.saturating_sub(foot).max(1);
-                let furthest = body.len().saturating_sub(room);
+                // The title stays; the rest scrolls under it. Scroll an
+                // overlay far enough without this and nothing on screen
+                // says which deployment you opened.
+                let (head, rest) = body.split_at(1.min(body.len()));
+                let room_below = room.saturating_sub(head.len()).max(1);
+                let furthest = rest.len().saturating_sub(room_below);
                 oscroll = oscroll.min(furthest);
-                let last = (oscroll + room).min(body.len());
-                let mut out: Vec<String> = body[oscroll..last].to_vec();
+                let last = (oscroll + room_below).min(rest.len());
+                let mut out: Vec<String> = head.to_vec();
+                out.extend_from_slice(&rest[oscroll..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }

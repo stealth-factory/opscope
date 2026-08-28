@@ -372,8 +372,8 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" | "k" | "K" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" => selected += 1,
+                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => selected += 1,
                 "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }

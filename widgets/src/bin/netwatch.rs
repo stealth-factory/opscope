@@ -2011,7 +2011,14 @@ fn main() {
             let (body, cursor) = detail_rows(
                 &row, &spots, &conns, &files, &sizes, focus, &at, w, natural, interval, &names, &p,
             );
-            let furthest = body.len().saturating_sub(room);
+            // The title is pinned and everything below it is the window.
+            // `cursor` addresses the whole body, so its row shifts by the
+            // header before the follow below reads it - miss that and the
+            // span it reveals is a row out, but only once scrolled.
+            let (head, rest) = body.split_at(1.min(body.len()));
+            let room = room.saturating_sub(head.len()).max(1);
+            let cursor = cursor.map(|(at, tall)| (at.saturating_sub(head.len()), tall));
+            let furthest = rest.len().saturating_sub(room);
             // The screen follows the cursor into a section. It did not
             // before: the body is built at whatever height it needs and
             // scrolled to, but nothing tied the scroll to the selection, so
@@ -2030,8 +2037,9 @@ fn main() {
                 }
             }
             dscroll = dscroll.min(furthest);
-            let last = (dscroll + room).min(body.len());
-            let mut shown: Vec<String> = body[dscroll..last].to_vec();
+            let last = (dscroll + room).min(rest.len());
+            let mut shown: Vec<String> = head.to_vec();
+            shown.extend_from_slice(&rest[dscroll..last]);
             while shown.len() < room {
                 shown.push(String::new());
             }

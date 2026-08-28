@@ -779,14 +779,14 @@ fn main() {
                 // and walking off it again comes in at the other. Focus is
                 // then something you can leave the way you entered it,
                 // rather than a state with only one door.
-                "up" | "k" | "K" => {
+                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
                     selected = match selected {
                         None => count.checked_sub(1),
                         Some(0) => None,
                         Some(at) => Some(at - 1),
                     }
                 }
-                "down" | "j" | "J" => {
+                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
                     selected = match selected {
                         None if count > 0 => Some(0),
                         None => None,
