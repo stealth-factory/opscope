@@ -808,6 +808,10 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut tick, mut stack_sel) = (0usize, 0usize, 0usize);
+    // Where the list and the detail have been scrolled to, and whether a key
+    // has just moved the selection. The wheel writes a scroll and never the
+    // flag, so neither screen chases a cursor the moment it is turned.
+    let (mut board, mut dscroll, mut moved) = (0usize, 0usize, false);
     let mut sort_at = 0usize;
     let mut newest_first = true;
     let (mut needle, mut typing) = (String::new(), false);
@@ -895,6 +899,7 @@ fn main() {
                         g.stages.clear();
                     }
                     stack_sel = 0;
+                    dscroll = 0;
                 }
                 "esc" => {
                     if detail.is_some() || loading {
@@ -906,6 +911,7 @@ fn main() {
                             g.stages.clear();
                         }
                         stack_sel = 0;
+                        dscroll = 0;
                     } else {
                         needle.clear();
                     }
@@ -936,6 +942,7 @@ fn main() {
                                     g.stages.clear();
                                 }
                                 stack_sel = 0;
+                                dscroll = 0;
                                 nudge(&wake);
                             }
                         }
@@ -990,19 +997,32 @@ fn main() {
                 "s" | "S" => sort_at = (sort_at + 1) % SORTS.len(),
                 "o" | "O" => newest_first = !newest_first,
                 "t" | "T" => show_stats = !show_stats,
-                "up" | "ctrl-y" | "wheel-up" => {
+                "up" => {
                     if detail.is_some() {
                         stack_sel = stack_sel.saturating_sub(1);
                     } else {
                         selected = selected.saturating_sub(1);
+                        moved = true;
                     }
                 }
-                "down" | "ctrl-e" | "wheel-down" => {
+                "down" => {
                     if detail.is_some() {
                         stack_sel += 1;
                     } else {
                         selected += 1;
+                        moved = true;
                     }
+                }
+                // The wheel moves whichever screen is in front of you and
+                // never a selection - selection is the arrows' job, here as
+                // everywhere in the collection.
+                "ctrl-y" | "wheel-up" => {
+                    let at = if detail.is_some() { &mut dscroll } else { &mut board };
+                    *at = at.saturating_sub(1);
+                }
+                "ctrl-e" | "wheel-down" => {
+                    let at = if detail.is_some() { &mut dscroll } else { &mut board };
+                    *at = at.saturating_add(1);
                 }
                 _ => {}
             }
@@ -1118,7 +1138,7 @@ fn main() {
                 ));
             }
             let top = rows.len();
-            rows.extend(list_view(
+            let (list, first) = list_view(
                 &shown,
                 selected,
                 SORTS[sort_at],
@@ -1129,8 +1149,13 @@ fn main() {
                 fetched == 0.0,
                 &source_filter,
                 top,
+                board,
+                moved,
                 &p,
-            ));
+            );
+            board = first;
+            moved = false;
+            rows.extend(list);
             vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
                 vec![(p.dim.as_str(), "[↵] open".into())],
@@ -1163,12 +1188,26 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        rows.truncate(h.saturating_sub(footer.len()));
-        while rows.len() < h.saturating_sub(footer.len()) {
-            rows.push(String::new());
+        // A window onto the body rather than a cut of it, with the title
+        // pinned above: scrolled away, the detail screen stops saying which
+        // pull request it is describing. The list windows itself, so only
+        // the detail has anywhere to scroll to.
+        let room = h.saturating_sub(footer.len());
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
+        let off = if detail.is_some() || loading {
+            dscroll = dscroll.min(rest.len().saturating_sub(room_below));
+            dscroll
+        } else {
+            0
+        };
+        let mut frame: Vec<String> = head.to_vec();
+        frame.extend(rest.iter().skip(off).take(room_below).cloned());
+        while frame.len() < room {
+            frame.push(String::new());
         }
-        rows.extend(footer);
-        tc::draw(&rows, w, h);
+        frame.extend(footer);
+        tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -1511,8 +1550,10 @@ fn list_view(
     waiting: bool,
     source_filter: &str,
     top: usize,
+    from: usize,
+    chase: bool,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, usize) {
     let mut rows = vec![String::new()];
     let arrow = if newest_first { "↓" } else { "↑" };
     rows.push(tc::seg(
@@ -1551,7 +1592,7 @@ fn list_view(
             "  no open PRs".to_string()
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
-        return rows;
+        return (rows, 0);
     }
 
     // Columns are budgeted rather than guessed: the fixed ones are summed
@@ -1588,8 +1629,14 @@ fn list_view(
     // far more rows than are visible, the caller truncates the overflow, and
     // the selection scrolls off the bottom while `first` is still 0.
     let room = h.saturating_sub(top + rows.len() + 3).max(1);
-    let first = if prs.len() > room {
-        selected.saturating_sub(room / 2).min(prs.len() - room)
+    // Centred on the cursor on a frame a key moved it, and left exactly
+    // where it was on a frame the wheel did. Recentring every frame is what
+    // pulled the list straight back from wherever the wheel had put it.
+    let furthest = prs.len().saturating_sub(room);
+    let first = if !chase {
+        from.min(furthest)
+    } else if prs.len() > room {
+        selected.saturating_sub(room / 2).min(furthest)
     } else {
         0
     };
@@ -1678,7 +1725,7 @@ fn list_view(
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    rows
+    (rows, first)
 }
 
 #[allow(clippy::too_many_arguments)]
