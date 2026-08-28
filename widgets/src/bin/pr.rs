@@ -838,7 +838,7 @@ fn main() {
 
     loop {
         tick += 1;
-        let (prs, total, capped, detail, stack_rows, loading, err, fetched, stages, target) =
+        let (prs, total, capped, detail, stack_rows, loading, err, fetched, stages, target, owners) =
             match state.lock() {
                 Ok(g) => (
                     g.prs.clone(),
@@ -851,6 +851,12 @@ fn main() {
                     g.fetched,
                     g.stages.clone(),
                     g.target.clone(),
+                    // The same reckoning `github` and `gha` count: every org
+                    // the viewer belongs to, plus the viewer's own account.
+                    // `@mine` expands to exactly this list, so the number on
+                    // screen is the number searched rather than a config
+                    // entry that may name accounts no search reached.
+                    g.orgs.len() + usize::from(!g.viewer.is_empty()),
                 ),
                 Err(_) => return,
             };
@@ -1020,11 +1026,33 @@ fn main() {
 
         let (w, h) = tc::size();
         let mut rows = vec![tc::title("pr watch", w, &p.accent)];
-        let mut head = vec![
-            // "at least", because a source that filled its page has more
-            // behind it and the sources overlap, so the union cannot be
-            // added up - only bounded from below. docs/pr.md has promised
-            // the header would say so since before the port.
+        // Two rows, in the order the other GitHub widgets use them. The
+        // first is the chrome every polling widget draws and is meant to
+        // read identically across panes: who is being watched, when it last
+        // answered, what is left of the budget. The second is this widget's
+        // own count, which does not fit that shape and should not be bent
+        // into it - `gha` puts its runs/repos line in the same place.
+        let mut head = vec![(
+            p.dim.as_str(),
+            format!(" {} account{}", owners, if owners == 1 { "" } else { "s" }),
+        )];
+        let budget = rate
+            .lock()
+            .map(|g| match (g.remaining, g.limit) {
+                (Some(left), Some(limit)) => Some((left, limit)),
+                _ => None,
+            })
+            .unwrap_or(None);
+        let tail = tc::polled(fetched, budget, &p.dim, &p.ok, &p.warn);
+        for (colour, txt) in &tail {
+            head.push((colour.as_str(), txt.clone()));
+        }
+        rows.push(tc::seg(&head, w - 1));
+
+        // "at least", because a source that filled its page has more behind
+        // it and the sources overlap, so the union cannot be added up - only
+        // bounded from below.
+        let mut count = vec![
             (
                 p.dim.as_str(),
                 format!(
@@ -1043,25 +1071,14 @@ fn main() {
                 },
             ),
         ];
-        let budget = rate
-            .lock()
-            .map(|g| match (g.remaining, g.limit) {
-                (Some(left), Some(limit)) => Some((left, limit)),
-                _ => None,
-            })
-            .unwrap_or(None);
-        let tail = tc::polled(fetched, budget, &p.dim, &p.ok, &p.warn);
-        for (colour, txt) in &tail {
-            head.push((colour.as_str(), txt.clone()));
-        }
         if !copied.0.is_empty() && tc::now() - copied.1 < 4.0 {
-            head.push((p.ok.as_str(), "   copied ".into()));
-            head.push((
+            count.push((p.ok.as_str(), "   copied ".into()));
+            count.push((
                 p.dim.as_str(),
                 copied.0.chars().take(w.saturating_sub(46).max(10)).collect(),
             ));
         }
-        rows.push(tc::seg(&head, w - 1));
+        rows.push(tc::seg(&count, w - 1));
         if !err.is_empty() {
             rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
         }
