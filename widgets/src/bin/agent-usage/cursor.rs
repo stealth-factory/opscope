@@ -51,7 +51,7 @@ const CURSOR_RPC: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/";
 const CURSOR_LANES: &[(&str, &str, f64)] = &[
     ("total", "totalPercentUsed", 1.0),
     ("cursor models", "autoPercentUsed", 0.80),
-    ("3rd party models", "apiPercentUsed", 0.62),
+    ("other models", "apiPercentUsed", 0.62),
 ];
 
 /// Grok Bot's weekly included allowance, which Cursor's own API calls
@@ -621,6 +621,17 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         ));
     }
     let base = agent_hue("cursor").unwrap();
+    // Widest label decides the column, the way every other agent's lanes
+    // already work - `agent-usage.rs` derives the same number from its own
+    // pairs, which is why `premium reqs` and `gemini weekly` sit straight
+    // while these three were squeezed into a hardcoded nine. Grok Bot is
+    // in the reckoning because it draws a row of its own underneath.
+    let label_w = CURSOR_LANES
+        .iter()
+        .map(|(name, _, _)| name.chars().count())
+        .chain(std::iter::once("grok bot".chars().count()))
+        .max()
+        .unwrap_or(9);
     for (name, key, stop) in CURSOR_LANES {
         let Some(pct) = loose(&plan[*key]) else {
             continue;
@@ -634,11 +645,11 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         // dates - nothing new is fetched for it.
         let (pace_colour, pace_txt) = pace_cell(lead(pct, cycle_secs, reset_ts), p);
         let mut line: Vec<(String, String)> =
-            vec![(p.dim.clone(), format!(" {:<9}", name))];
+            vec![(p.dim.clone(), format!(" {}", tc::pad(name, label_w)))];
         line.extend(paced_bar(
             used,
             elapsed_of(cycle_secs, reset_ts),
-            w.saturating_sub(40).max(8),
+            w.saturating_sub(31 + label_w).max(8),
             Some(hue),
             p,
         ));
@@ -655,13 +666,13 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     //
     // Full hue rather than a fourth step down the ramp, for two measured
     // reasons. The ramp encodes narrowing scope - total, then cursor
-    // models, then 3rd party models - and this allowance is not narrower
+    // models, then other models - and this allowance is not narrower
     // than any of them, so a darker tint would state a relationship that
     // does not exist. And the ramp has no room left: the percentage is
-    // drawn in the bar's own colour, 3rd party models at 0.62 already
+    // drawn in the bar's own colour, other models at 0.62 already
     // measures 5.29 against the background, and the next step that reads
     // as distinct from it, 0.50, measures 4.10 - under AA. 0.56 clears at
-    // 4.66 and is indistinguishable from 3rd party models by eye. Full hue
+    // 4.66 and is indistinguishable from other models by eye. Full hue
     // is 10.74, and the gap above does the work the colour would have been
     // doing badly.
     if let Some((pct, secs, reset)) = d.sand.as_ref().and_then(sand_lane) {
@@ -675,13 +686,13 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             None => String::new(),
         };
         let mut line: Vec<(String, String)> =
-            vec![(p.dim.clone(), format!(" {:<9}", "grok bot"))];
+            vec![(p.dim.clone(), format!(" {}", tc::pad("grok bot", label_w)))];
         line.extend(paced_bar(
             used,
             elapsed_of(secs, reset),
             // Narrower than the plan lanes by the width of the reset cell,
             // so adding that column cannot push this row into a clip.
-            w.saturating_sub(50).max(8),
+            w.saturating_sub(41 + label_w).max(8),
             Some(hue),
             p,
         ));
@@ -1277,7 +1288,7 @@ mod tests {
         assert_eq!(got[0].window_secs, Some(2_592_000.0));
         assert_eq!(got[0].reset, Some(1_702_592_000.0));
         // A percentage that arrives as a string is still a percentage.
-        assert_eq!(got[1].label, "3rd party models");
+        assert_eq!(got[1].label, "other models");
         assert!((got[1].pct - 2.5).abs() < 1e-9);
         assert!(lanes(&Data::default()).is_empty());
     }
@@ -1348,11 +1359,79 @@ mod tests {
         };
         let joined = cursor_quota(&d, 100, &p).join("\n");
         for want in [
-            "total", "cursor models", "3rd party models",
+            "total", "cursor models", "other models",
             "$164.00", "$400.00", "$236.00",
             "of the cycle gone", "resets in",
         ] {
             assert!(joined.contains(want), "missing {}", want);
+        }
+    }
+
+    /// A drawn row without its colour escapes, so a column index means
+    /// cells on screen rather than bytes in the string.
+    fn strip(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_lane_starts_its_bar_in_the_same_column() {
+        // The labels are not the same length, so the column has to be as
+        // wide as the longest of them or the bars step raggedly to the
+        // right. It was a hardcoded nine, which fitted the old three-letter
+        // names and nothing since - `agent-usage.rs` has always derived
+        // this from its own pairs, which is why `premium reqs` and
+        // `gemini weekly` sit straight while these did not.
+        let p = palette();
+        let start = (now() - 5.0 * 86400.0) * 1000.0;
+        let end = (now() + 25.0 * 86400.0) * 1000.0;
+        let d = Data {
+            live: Some(serde_json::json!({
+                "planUsage": {
+                    "totalPercentUsed": 41.0,
+                    "autoPercentUsed": 12.0,
+                    "apiPercentUsed": 59.0,
+                },
+                "billingCycleStart": start.to_string(),
+                "billingCycleEnd": end.to_string(),
+            })),
+            ..Data::default()
+        };
+        // Narrow is where a mis-set width shows: the bar budget is taken
+        // from what the label left behind, so an over-long label eats the
+        // bar rather than the margin.
+        for width in [60usize, 80, 120] {
+            let rows = cursor_quota(&d, width, &p);
+            let bars: Vec<usize> = rows
+                .iter()
+                .filter_map(|row| {
+                    let plain = strip(row);
+                    CURSOR_LANES
+                        .iter()
+                        .any(|(name, _, _)| plain.contains(name))
+                        .then(|| plain.find('█').or_else(|| plain.find('░')))
+                        .flatten()
+                })
+                .collect();
+            assert_eq!(bars.len(), CURSOR_LANES.len(), "a lane went missing at {}", width);
+            assert!(
+                bars.windows(2).all(|w| w[0] == w[1]),
+                "bars start in different columns at width {}: {:?}",
+                width,
+                bars
+            );
         }
     }
 
