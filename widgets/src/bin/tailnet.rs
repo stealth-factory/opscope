@@ -722,6 +722,10 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut hide_offline, mut show_graph) = (false, true);
     let (mut selected, mut scroll, mut visible) = (0usize, 0usize, 1usize);
+    // Where the open sub-view has scrolled to, and whether a key has just
+    // moved the cursor. The wheel writes a scroll and never the flag, so
+    // the list stops chasing the selection the moment it is turned.
+    let (mut dscroll, mut moved) = (0usize, false);
     // None, "copy" or "info".
     let mut view: Option<&'static str> = None;
     // Where the copy list was opened from, so closing it puts you back
@@ -761,6 +765,7 @@ fn main() {
                     // it. `i` used to open this and no longer does.
                     "left" | "esc" => {
                         view = copy_from.take();
+                        dscroll = 0;
                     }
                     // q quits from here too. It used to close the view
                     // instead, which is its own kind of trap: the key
@@ -771,6 +776,8 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
+                    "ctrl-y" | "wheel-up" => dscroll = dscroll.saturating_sub(1),
+                    "ctrl-e" | "wheel-down" => dscroll = dscroll.saturating_add(1),
                     "c" | "C" => {
                         view = if view != Some("copy") {
                             copy_from = view;
@@ -814,6 +821,7 @@ fn main() {
                 "o" | "O" => {
                     hide_offline = !hide_offline;
                     selected = 0;
+                    moved = true;
                 }
                 "g" | "G" => show_graph = !show_graph,
                 // i, as latency names the same key. n was this widget's
@@ -826,16 +834,39 @@ fn main() {
                     }
                     nudge(&wake); // apply the new interval immediately
                 }
-                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "ctrl-e" | "wheel-down" => selected += 1,
-                "pgup" => selected = selected.saturating_sub(visible),
-                "pgdn" => selected += visible,
-                "home" => selected = 0,
-                "end" => selected = listed.len().saturating_sub(1),
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the list and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                "pgup" => {
+                    selected = selected.saturating_sub(visible);
+                    moved = true;
+                }
+                "pgdn" => {
+                    selected += visible;
+                    moved = true;
+                }
+                "home" => {
+                    selected = 0;
+                    moved = true;
+                }
+                "end" => {
+                    selected = listed.len().saturating_sub(1);
+                    moved = true;
+                }
                 "c" | "C" => {
                     if !listed.is_empty() {
                         view = Some("copy");
                         copy_from = None;
+                        dscroll = 0;
                         note = (String::new(), 0.0);
                     }
                 }
@@ -843,6 +874,7 @@ fn main() {
                     if !listed.is_empty() {
                         view = Some("info");
                         copy_from = None;
+                        dscroll = 0;
                     }
                 }
                 _ => {}
@@ -962,7 +994,7 @@ fn main() {
 
         if let (Some(which), false) = (view, listed.is_empty()) {
             let chosen = listed[selected.min(listed.len() - 1)].clone();
-            let body = if which == "info" {
+            let (body, at) = if which == "info" {
                 let users: HashMap<String, serde_json::Value> = data["User"]
                     .as_object()
                     .into_iter()
@@ -981,11 +1013,12 @@ fn main() {
                     .unwrap_or_default();
                 info_overlay(
                     &chosen, &eps_now, &users, w, h, &rates, &latency, &probe_err, &stale, &derp,
-                    &p,
+                    dscroll, &p,
                 )
             } else {
-                copy_overlay(&chosen, &eps_now, w, h, &note.0, &p)
+                copy_overlay(&chosen, &eps_now, w, h, &note.0, dscroll, &p)
             };
+            dscroll = at;
             tc::draw(&body, w, h);
             std::thread::sleep(Duration::from_millis(100));
             continue;
@@ -1077,10 +1110,12 @@ fn main() {
             selected = listed.len() - 1;
         }
         visible = h.saturating_sub(rows.len() + 2).max(1);
-        if selected < scroll {
-            scroll = selected;
-        } else if selected >= scroll + visible {
-            scroll = selected - visible + 1;
+        // Only on the frame a key moved the cursor. Chasing it every frame
+        // pulls the list back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = tc::follow(scroll, selected, visible);
+            moved = false;
         }
         scroll = scroll.min(listed.len().saturating_sub(visible));
 
@@ -1227,6 +1262,27 @@ fn main() {
 
 /// Everything known about one machine, including every address.
 #[allow(clippy::too_many_arguments)]
+/// A sub-view's frame: the title pinned, the body windowed under it by
+/// `scroll`, the footer last.
+///
+/// Neither view had a window of its own, so a machine with a long list of
+/// endpoints ran off the bottom of a short pane with nothing saying so.
+/// Hands back where the window actually sat, clamped, so the caller can
+/// keep it for the next frame.
+fn framed(rows: Vec<String>, h: usize, scroll: usize, foot: Vec<String>) -> (Vec<String>, usize) {
+    let room = h.saturating_sub(foot.len());
+    let (head, rest) = rows.split_at(1.min(rows.len()));
+    let room_below = room.saturating_sub(head.len()).max(1);
+    let at = scroll.min(rest.len().saturating_sub(room_below));
+    let mut out: Vec<String> = head.to_vec();
+    out.extend(rest.iter().skip(at).take(room_below).cloned());
+    while out.len() < room {
+        out.push(String::new());
+    }
+    out.extend(foot);
+    (out, at)
+}
+
 fn info_overlay(
     peer: &serde_json::Value,
     eps: &HashMap<String, Vec<String>>,
@@ -1238,8 +1294,9 @@ fn info_overlay(
     probe_err: &str,
     stale: &str,
     derp: &HashMap<String, String>,
+    scroll: usize,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, usize) {
     let mut rows = vec![tc::title("machine info", w, &p.accent)];
     // Every field below is out of the same cached status as the list behind
     // this view, so it carries the same warning.
@@ -1582,14 +1639,15 @@ fn info_overlay(
         ));
     }
 
-    while rows.len() < h.saturating_sub(1) {
-        rows.push(String::new());
-    }
-    rows.push(tc::seg(
-        &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close · [q]uit".into())],
-        w - 1,
-    ));
-    rows
+    framed(
+        rows,
+        h,
+        scroll,
+        vec![tc::seg(
+            &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close · [q]uit".into())],
+            w - 1,
+        )],
+    )
 }
 
 fn copy_overlay(
@@ -1598,8 +1656,9 @@ fn copy_overlay(
     w: usize,
     h: usize,
     note: &str,
+    scroll: usize,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, usize) {
     let pairs = addresses(peer, eps);
     let mut rows = vec![tc::title("copy address", w, &p.accent)];
     rows.push(tc::seg(
@@ -1629,25 +1688,28 @@ fn copy_overlay(
             w - 1,
         ));
     }
-    while rows.len() < h.saturating_sub(2) {
-        rows.push(String::new());
-    }
-    rows.push(tc::seg(
-        &[(
-            p.dim.as_str(),
-            format!(
-                " press 1-{} to copy · ← or esc to close · [q]uit",
-                pairs.len().max(1)
+    framed(
+        rows,
+        h,
+        scroll,
+        vec![
+            tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    format!(
+                        " press 1-{} to copy · ← or esc to close · [q]uit",
+                        pairs.len().max(1)
+                    ),
+                )],
+                w - 1,
             ),
-        )],
-        w - 1,
-    ));
-    rows.push(if note.is_empty() {
-        String::new()
-    } else {
-        tc::seg(&[(p.online.as_str(), format!(" {}", note))], w - 1)
-    });
-    rows
+            if note.is_empty() {
+                String::new()
+            } else {
+                tc::seg(&[(p.online.as_str(), format!(" {}", note))], w - 1)
+            },
+        ],
+    )
 }
 
 #[cfg(test)]
