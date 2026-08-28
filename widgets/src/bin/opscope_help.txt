@@ -1,6 +1,6 @@
 Every widget here, what it does, and whether it will work on this machine.
 
-Fourteen binaries on a PATH is a list you have to already know. This is the
+Sixteen binaries on a PATH is a list you have to already know. This is the
 front door: pick one and it runs, quit it and you are back here.
 
     opscope [WIDGET] [ARGS...]

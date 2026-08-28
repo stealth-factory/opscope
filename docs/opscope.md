@@ -7,7 +7,7 @@ machine.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 14 widgets · 2 need something first   ↵ launches one, q leaves
+ 15 widgets · 2 need something first   ↵ launches one, q leaves
 
  ▸ netwatch     Which processes are using the network, how much…   ss installed
    ports        What is listening on this machine, what started…   nothing to set up

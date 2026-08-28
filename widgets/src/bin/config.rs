@@ -511,8 +511,48 @@ fn summary(v: &Value, secret: bool, reveal: bool) -> String {
     }
 }
 
+/// Pre-rename section names the widgets still read when the new name is
+/// absent. The new name wins wherever it is present — same rule as the
+/// widgets themselves. The field list stays the example; this only
+/// decides which object in the live file a row reads and writes.
+fn leftover_section(canonical: &str) -> Option<&'static str> {
+    match canonical {
+        "agent_usage" => Some("usage"),
+        "github_prs" => Some("pr"),
+        "github_actions" => Some("gha"),
+        _ => None,
+    }
+}
+
+fn live_section<'a>(live: &Value, canonical: &'a str) -> &'a str {
+    if live.get(canonical).is_some() {
+        return canonical;
+    }
+    if let Some(old) = leftover_section(canonical) {
+        if live.get(old).is_some() {
+            return old;
+        }
+    }
+    canonical
+}
+
+fn leftover_notes(live: &Value) -> Vec<String> {
+    [
+        ("agent_usage", "usage", "agent-usage"),
+        ("github_prs", "pr", "github-prs"),
+        ("github_actions", "gha", "github-actions"),
+    ]
+    .into_iter()
+    .filter(|(canonical, old, _)| live.get(canonical).is_none() && live.get(old).is_some())
+    .map(|(_, old, widget)| {
+        format!(" this file still has `{old}` — {widget} reads that until the section is renamed")
+    })
+    .collect()
+}
+
 fn current_of<'a>(live: &'a Value, field: &Field) -> Option<&'a Value> {
-    live.get(&field.section).and_then(|s| s.get(&field.key))
+    live.get(live_section(live, &field.section))
+        .and_then(|s| s.get(&field.key))
 }
 
 struct Palette {
@@ -608,26 +648,37 @@ fn edit_seed(field: &Field, current: Option<&Value>) -> String {
 }
 
 fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> {
-    let field = app.fields.get(index).ok_or("no such field")?;
-    if !same_kind(&value, &field.default) {
-        return Err(format!(
-            "expected {}, got {}",
-            field.kind(),
-            kind_name(&value)
-        ));
-    }
-    let path = [field.section.as_str(), field.key.as_str()];
+    let (section, key, widget, schema_path, schema_section) = {
+        let field = app.fields.get(index).ok_or("no such field")?;
+        if !same_kind(&value, &field.default) {
+            return Err(format!(
+                "expected {}, got {}",
+                field.kind(),
+                kind_name(&value)
+            ));
+        }
+        (
+            live_section(&app.live, &field.section).to_string(),
+            field.key.clone(),
+            field.widget(),
+            field.path(),
+            field.section.clone(),
+        )
+    };
+    let path = [section.as_str(), key.as_str()];
     let next = set_json_path(&app.raw, &path, &value)?;
     serde_json::from_str::<Value>(&next).map_err(|e| format!("refusing to write: {e}"))?;
     atomic_write(&app.path, &next)?;
-    let widget = field.widget();
-    let name = field.path();
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
     app.exists = true;
-    app.status = Some(format!(
-        "wrote {name} · restart {widget} for the change to take effect"
-    ));
+    app.status = Some(if section != schema_section {
+        format!(
+            "wrote {section}.{key} · this file still uses `{section}` · restart {widget}"
+        )
+    } else {
+        format!("wrote {schema_path} · restart {widget} for the change to take effect")
+    });
     Ok(())
 }
 
@@ -835,6 +886,9 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     for note in app.skipped.iter().take(2) {
         body.push(tc::seg(&[(p.warn.as_str(), format!(" {note}"))], w.saturating_sub(1)));
     }
+    for note in leftover_notes(&app.live) {
+        body.push(tc::seg(&[(p.warn.as_str(), note)], w.saturating_sub(1)));
+    }
     if let Some(status) = &app.status {
         let colour = if status.starts_with("wrote ") || status.starts_with("copied ") {
             p.ok.as_str()
@@ -960,6 +1014,19 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                 &[(
                     p.dim.as_str(),
                     format!("  restart {} for a change to take effect", field.widget()),
+                )],
+                w.saturating_sub(1),
+            ));
+        }
+        let file_section = live_section(&app.live, &field.section);
+        if file_section != field.section {
+            body.push(tc::seg(
+                &[(
+                    p.warn.as_str(),
+                    format!(
+                        "  this file still uses `{file_section}` — {} reads that",
+                        field.widget()
+                    ),
                 )],
                 w.saturating_sub(1),
             ));
@@ -1305,5 +1372,112 @@ mod tests {
         };
         assert_eq!(field.widget(), "herdr-panes");
         assert_eq!(field.path(), "herdr_panes.refresh");
+        let actions = Field {
+            section: "github_actions".into(),
+            key: "max_repos".into(),
+            help: String::new(),
+            default: Value::from(16),
+        };
+        assert_eq!(actions.widget(), "github-actions");
+        let prs = Field {
+            section: "github_prs".into(),
+            key: "sources".into(),
+            help: String::new(),
+            default: serde_json::json!({}),
+        };
+        assert_eq!(prs.widget(), "github-prs");
+        let usage = Field {
+            section: "agent_usage".into(),
+            key: "grok_ping".into(),
+            help: String::new(),
+            default: Value::Bool(false),
+        };
+        assert_eq!(usage.widget(), "agent-usage");
+    }
+
+    #[test]
+    fn renamed_and_new_sections_are_fields() {
+        // The example is the schema. usage / pr / gha are leftovers the
+        // widgets still read; they are not fields here, or this pane
+        // would invent keys check.rs does not keep honest.
+        let fields = fields_from_example(EXAMPLE).unwrap();
+        assert!(fields
+            .iter()
+            .any(|f| f.section == "agent_usage" && f.key == "grok_ping"));
+        assert!(fields
+            .iter()
+            .any(|f| f.section == "github_prs" && f.key == "sources"));
+        assert!(fields
+            .iter()
+            .any(|f| f.section == "github_actions" && f.key == "max_repos"));
+        assert!(!fields
+            .iter()
+            .any(|f| f.section == "usage" || f.section == "pr" || f.section == "gha"));
+        let sources = fields
+            .iter()
+            .find(|f| f.section == "github_prs" && f.key == "sources")
+            .unwrap();
+        assert_eq!(sources.kind(), "object");
+        let parsed = parse_edit(r#"{"orgs":"is:open is:pr @mine"}"#, &sources.default).unwrap();
+        assert!(parsed.is_object());
+    }
+
+    #[test]
+    fn leftover_section_is_read_until_the_new_name_exists() {
+        let leftover = serde_json::json!({"usage": {"grok_ping": true}});
+        let field = Field {
+            section: "agent_usage".into(),
+            key: "grok_ping".into(),
+            help: String::new(),
+            default: Value::Bool(false),
+        };
+        assert_eq!(live_section(&leftover, "agent_usage"), "usage");
+        assert_eq!(current_of(&leftover, &field), Some(&Value::Bool(true)));
+        let notes = leftover_notes(&leftover);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("`usage`"));
+        assert!(notes[0].contains("agent-usage"));
+
+        let both = serde_json::json!({
+            "agent_usage": {"grok_ping": false},
+            "usage": {"grok_ping": true}
+        });
+        assert_eq!(live_section(&both, "agent_usage"), "agent_usage");
+        assert_eq!(current_of(&both, &field), Some(&Value::Bool(false)));
+        assert!(leftover_notes(&both).is_empty());
+
+        let prs = Field {
+            section: "github_prs".into(),
+            key: "limit".into(),
+            help: String::new(),
+            default: Value::from(50),
+        };
+        let old_pr = serde_json::json!({"pr": {"limit": 10}});
+        assert_eq!(live_section(&old_pr, "github_prs"), "pr");
+        assert_eq!(current_of(&old_pr, &prs), Some(&Value::from(10)));
+
+        let actions = Field {
+            section: "github_actions".into(),
+            key: "max_repos".into(),
+            help: String::new(),
+            default: Value::from(16),
+        };
+        let old_gha = serde_json::json!({"gha": {"max_repos": 8}});
+        assert_eq!(live_section(&old_gha, "github_actions"), "gha");
+        assert_eq!(current_of(&old_gha, &actions), Some(&Value::from(8)));
+    }
+
+    #[test]
+    fn leftover_write_stays_on_the_old_section() {
+        // Creating agent_usage beside a leftover usage would make
+        // agent-usage ignore the values it has been using.
+        let src = "{\n  \"usage\": {\n    \"grok_ping\": false\n  }\n}\n";
+        let live: Value = serde_json::from_str(src).unwrap();
+        let section = live_section(&live, "agent_usage");
+        assert_eq!(section, "usage");
+        let next = set_json_path(src, &[section, "grok_ping"], &Value::Bool(true)).unwrap();
+        let parsed: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(parsed["usage"]["grok_ping"], true);
+        assert!(parsed.get("agent_usage").is_none());
     }
 }
