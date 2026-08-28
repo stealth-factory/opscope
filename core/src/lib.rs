@@ -607,6 +607,69 @@ pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, 
     })
 }
 
+/// One HTTPS GET, returning the body and its headers.
+///
+/// Same reason as `post_json`: a rate limit is only knowable from the
+/// headers, and a widget that polls REST every minute should be able to
+/// say how much of its hour it has left. `get` keeps the body-only shape
+/// the other callers already use.
+pub fn get_with_headers(
+    url: &str,
+    headers: &[(&str, &str)],
+    seconds: u64,
+) -> Result<(String, Vec<(String, String)>), String> {
+    use std::io::Write;
+    let mut config = format!(
+        "--silent\n--show-error\n--request GET\n--location\n--dump-header -\n\
+         --max-time {}\n--url {}\n",
+        seconds,
+        quoted(url)
+    );
+    for (name, value) in headers {
+        config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
+    }
+    let mut child = std::process::Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl would not take its configuration")?
+        .write_all(config.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if said.is_empty() {
+            format!("curl exited {}", out.status.code().unwrap_or(-1))
+        } else {
+            said
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (head, body) = split_response(&text);
+    let status = head
+        .first()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let found: Vec<(String, String)> = head
+        .iter()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+        .collect();
+    if !(200..300).contains(&status) {
+        return Err(refused(status, &body));
+    }
+    Ok((body, found))
+}
+
 /// One HTTPS POST of a JSON body, returning the body and its headers.
 ///
 /// The headers come back because a rate limit is only knowable from them,
@@ -981,6 +1044,305 @@ pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)>
         }
     }
     out
+}
+
+/// Whether a section is actually present in the config being read.
+///
+/// `load_config` returns `{}` for a section that is missing, so emptiness
+/// alone cannot tell "not set" from "set under the name this widget used
+/// to have". Presence is what decides, and it has to be asked of the same
+/// file `load_config` would read - the first one on `config_paths` that
+/// parses, not merely the first that exists.
+///
+/// Callers keep both names as string literals at the call site rather than
+/// passing them through here as variables, because `widgets/tests/check.rs`
+/// reads `load_config("…")` literally and a name it cannot see is a name it
+/// cannot check.
+pub fn config_has_section(name: &str) -> bool {
+    for path in config_paths() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        // The first file that parses is the one that answers, matching
+        // load_config: a later file is never consulted, so a section in it
+        // is not the section this widget would read.
+        return parsed.get(name).is_some();
+    }
+    false
+}
+
+/// How long ago something happened, in the one form every widget uses.
+///
+/// Four tiers rather than three. `pr` grew its own copy of this with a
+/// floor of one minute, so a poll that had just landed read "updated 1m
+/// ago" - which is how a working widget describes itself as a minute
+/// stale, and it was visible on the wall. Seconds matter for a source
+/// polled every thirty of them; days matter for one that has not answered
+/// since Tuesday.
+///
+/// Zero or negative is "--", not "0s": a widget that has never fetched has
+/// no age, and printing one invents a poll that did not happen.
+pub fn ago(t: f64) -> String {
+    if t <= 0.0 {
+        return "--".into();
+    }
+    age((now() - t).max(0.0))
+}
+
+/// The same tiers, for a span already measured rather than a timestamp.
+///
+/// Both shapes are needed and both were written twice: `gha` had one for
+/// how long a run took and another for how stale the board was, differing
+/// only in whether they subtracted from now. Keeping the tiers in one
+/// place is the point - two ladders that agree today drift the first time
+/// one of them gains a tier.
+pub fn age(secs: f64) -> String {
+    let s = secs.max(0.0);
+    if s < 90.0 {
+        format!("{}s", s as i64)
+    } else if s < 5400.0 {
+        format!("{}m", (s / 60.0) as i64)
+    } else if s < 172_800.0 {
+        format!("{}h", (s / 3600.0) as i64)
+    } else {
+        format!("{}d", (s / 86400.0) as i64)
+    }
+}
+
+/// The tail of the status line under a polling widget's title.
+///
+/// Two facts, in the same words and the same order everywhere: when the
+/// source last answered, and how much of the API budget is left. The lead
+/// is the widget's own - "10 accounts", "51 of at least 665 open" - because
+/// that part genuinely differs and flattening it would cost `pr` a promise
+/// its doc page has made since before the port.
+///
+/// The budget goes amber under a thousand. That threshold was in `github`
+/// and `gha` already and in neither case written down; here it is once.
+/// A widget whose API reports no ceiling passes `None` and the segment is
+/// absent rather than showing a limit of zero.
+pub fn polled(
+    fetched: f64,
+    rate: Option<(i64, i64)>,
+    dim: &str,
+    ok: &str,
+    warn: &str,
+) -> Vec<(String, String)> {
+    let mut out = vec![(dim.to_string(), format!("   updated {} ago", ago(fetched)))];
+    if let Some((left, limit)) = rate {
+        let colour = if left > 1000 { ok } else { warn };
+        out.push((colour.to_string(), format!("   {}/{} api", left, limit)));
+    }
+    out
+}
+
+/// One step of a fetch that runs in more than one.
+///
+/// `at` and `of` are how a paginating step says where it has got to. `of`
+/// is an Option on purpose: plenty of sources hand over a page and a cursor
+/// without ever saying how many pages there are, and a total guessed from
+/// the first page is a number nobody measured. No total means the step
+/// counts up and says so; it does not draw a bar to an invented end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub label: String,
+    pub done: bool,
+    pub at: usize,
+    pub of: Option<usize>,
+    t0: f64,
+    pub took: f64,
+}
+
+/// What a poller is working through, for the pane to draw while it waits.
+///
+/// Lives behind the same mutex the rest of a widget's shared state does.
+/// The poller calls `begin`, `count` and `finish`; the drawing thread reads
+/// `steps`. Nothing here fails: a progress report that can return an error
+/// is a second failure path guarding a cosmetic feature.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    steps: Vec<Step>,
+}
+
+impl Progress {
+    pub fn new() -> Progress {
+        Progress { steps: Vec::new() }
+    }
+
+    /// Start a step, or reopen one already listed under the same label.
+    pub fn begin(&mut self, label: &str) {
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.done = false;
+            s.t0 = now();
+            return;
+        }
+        self.steps.push(Step {
+            label: label.to_string(),
+            done: false,
+            at: 0,
+            of: None,
+            t0: now(),
+            took: 0.0,
+        });
+    }
+
+    /// Move a step's counter on. Starts the step if it has not begun.
+    pub fn count(&mut self, label: &str, at: usize, of: Option<usize>) {
+        if self.steps.iter().all(|s| s.label != label) {
+            self.begin(label);
+        }
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.at = at;
+            // A total, once given, is not unlearned by a later page that
+            // omits it - but a source that revises it is believed.
+            if of.is_some() {
+                s.of = of;
+            }
+            s.took = now() - s.t0;
+        }
+    }
+
+    pub fn finish(&mut self, label: &str) {
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.done = true;
+            s.took = now() - s.t0;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.steps.clear();
+    }
+
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+/// How far a step has got, in words.
+///
+/// `12/40` when the source said how many there are, `12` when it did not.
+/// Never a percentage of an unknown total, and never `0/0`.
+pub fn step_count(at: usize, of: Option<usize>) -> String {
+    match of {
+        Some(total) if total > 0 => format!("{}/{}", at, total),
+        _ if at > 0 => format!("{}", at),
+        _ => String::new(),
+    }
+}
+
+/// The steps as rows: a spinner on the one in flight, a tick behind it.
+///
+/// Lifted out of `pr`, which had it first and put the reason in a comment
+/// worth keeping: a shimmer says "wait" and nothing else, but the fetch
+/// really does run in stages, so showing them reads like a machine doing
+/// something rather than a placeholder.
+pub fn progress_rows(
+    steps: &[Step],
+    w: usize,
+    tick: usize,
+    done_colour: &str,
+    live_colour: &str,
+    txt: &str,
+    dim: &str,
+) -> Vec<String> {
+    let spin = SPINNER[tick % SPINNER.len()];
+    steps
+        .iter()
+        .map(|s| {
+            let count = step_count(s.at, s.of);
+            seg(
+                &[
+                    (
+                        if s.done { done_colour } else { live_colour },
+                        format!("   {}  ", if s.done { '✓' } else { spin }),
+                    ),
+                    (
+                        if s.done { txt } else { dim },
+                        pad(&s.label, w.saturating_sub(30).max(16)),
+                    ),
+                    (dim, format!("{:>9}", count)),
+                    (
+                        dim,
+                        format!(
+                            "{:>7}",
+                            if s.took > 0.0 {
+                                format!("{:.1}s", s.took)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    ),
+                ],
+                w.saturating_sub(1),
+            )
+        })
+        .collect()
+}
+
+/// A label that is visibly still working, for a source that has not answered.
+///
+/// Two rows: the label behind a Braille spinner, and one sweeping line under
+/// it. The movement is the whole point. A pane waiting on a slow API and a
+/// pane whose poller has died draw the same static sentence, and telling
+/// those apart is most of what `widgets/tests/check.rs` exists for - so the
+/// wait says "still going" the only way a terminal can.
+///
+/// It deliberately claims no progress. There is no bar creeping towards a
+/// total nobody counted: a widget that knows how far along it is should say
+/// so in words, and one that does not should not draw a number it invented.
+///
+/// `lit` colours the spinner, `dim` the label. Both are passed in rather
+/// than chosen here, because every palette in this repo is defined beside
+/// the widget that uses it and the contrast check reads those files.
+pub fn waiting(label: &str, w: usize, tick: usize, lit: &str, dim: &str) -> Vec<String> {
+    waiting_with(label, &[], w, tick, lit, lit, dim, dim)
+}
+
+/// The same wait, showing what the poller is actually working through.
+///
+/// With steps it draws them and drops the sweep: the counter moving is a
+/// better "still alive" signal than a shimmer, and it is a true one. With
+/// no steps it is exactly `waiting` - which is the honest state for a
+/// poller that has not reported any, rather than an empty list implying
+/// nothing is happening.
+#[allow(clippy::too_many_arguments)]
+pub fn waiting_with(
+    label: &str,
+    steps: &[Step],
+    w: usize,
+    tick: usize,
+    lit: &str,
+    done_colour: &str,
+    txt: &str,
+    dim: &str,
+) -> Vec<String> {
+    let head = seg(
+        &[
+            (lit, format!("  {} ", SPINNER[tick % SPINNER.len()])),
+            (dim, label.to_string()),
+        ],
+        w.saturating_sub(1),
+    );
+    if !steps.is_empty() {
+        let mut rows = vec![head];
+        rows.extend(progress_rows(steps, w, tick, done_colour, lit, txt, dim));
+        return rows;
+    }
+    // Twice the tick, so the sweep is quicker than the spinner and the two
+    // do not appear to be one mechanism running slow.
+    let mut line: Vec<(&str, String)> = vec![(RST, "  ".into())];
+    let shimmer = skeleton(w.saturating_sub(6).max(10), tick * 2, 7);
+    for (colour, txt) in &shimmer {
+        line.push((colour.as_str(), txt.clone()));
+    }
+    vec![head, seg(&line, w.saturating_sub(1))]
 }
 
 /// Cell widths for `count` bars that fill `room` columns exactly.
@@ -1390,6 +1752,59 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_step_never_counts_towards_a_total_nobody_gave() {
+        // The whole reason `of` is an Option. A source that pages without
+        // saying how many pages there are gets a rising count, not a bar
+        // creeping towards a number this code made up.
+        assert_eq!(super::step_count(0, None), "");
+        assert_eq!(super::step_count(7, None), "7");
+        assert_eq!(super::step_count(7, Some(40)), "7/40");
+        // And nothing renders "0/0" for a step that has begun with an empty
+        // set, which reads as a stall rather than as nothing to do.
+        assert_eq!(super::step_count(0, Some(0)), "");
+    }
+
+    #[test]
+    fn a_total_once_given_survives_a_page_that_omits_it() {
+        let mut p = super::Progress::new();
+        p.begin("runs");
+        p.count("runs", 1, Some(40));
+        p.count("runs", 2, None);
+        assert_eq!(p.steps()[0].of, Some(40), "the ceiling was forgotten");
+        assert_eq!(p.steps()[0].at, 2);
+        // A source that revises its own total is believed, though.
+        p.count("runs", 3, Some(41));
+        assert_eq!(p.steps()[0].of, Some(41));
+        assert!(!p.steps()[0].done);
+        p.finish("runs");
+        assert!(p.steps()[0].done);
+        p.clear();
+        assert!(p.is_empty(), "a finished pass still claimed to be working");
+    }
+
+    #[test]
+    fn a_wait_that_does_not_move_is_indistinguishable_from_a_dead_poller() {
+        // The point of the helper is the movement, so the test is that
+        // consecutive ticks differ. A static sentence would pass any
+        // assertion about the label alone, which is how this would rot.
+        let frames: Vec<Vec<String>> = (0..6)
+            .map(|t| super::waiting("waiting for GitHub…", 60, t, "", ""))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(pair[0], pair[1], "two ticks drew the same frame");
+        }
+        for f in &frames {
+            assert_eq!(f.len(), 2, "a label row and a sweep row");
+            assert!(f[0].contains("waiting for GitHub…"), "{}", f[0]);
+        }
+        // Narrow panes still get both rows rather than a panic on the
+        // saturating widths.
+        for w in [0usize, 1, 4, 12] {
+            assert_eq!(super::waiting("x", w, 3, "", "").len(), 2, "width {}", w);
+        }
+    }
+
     #[test]
     fn the_window_chases_a_cursor_it_cannot_see() {
         // Stated as what the reader sees rather than as the arithmetic:

@@ -661,20 +661,6 @@ struct State {
     bust: bool,
 }
 
-fn ago(t: f64) -> String {
-    if t <= 0.0 {
-        return "--".into();
-    }
-    let s = tc::now() - t;
-    if s < 90.0 {
-        format!("{}s", s as i64)
-    } else if s < 5400.0 {
-        format!("{}m", (s / 60.0) as i64)
-    } else {
-        format!("{}h", (s / 3600.0) as i64)
-    }
-}
-
 /// Streaks and totals behind the contribution calendar.
 ///
 /// A streak is consecutive days carrying at least one contribution, counted
@@ -1293,7 +1279,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want) = match state.lock() {
+        let (mut stats, rate, err, fetched, calendar, want, watched) = match state.lock() {
             Ok(g) => (
                 g.stats.clone(),
                 g.rate,
@@ -1301,6 +1287,7 @@ fn main() {
                 g.fetched,
                 g.calendar.clone(),
                 g.days,
+                g.accounts.len(),
             ),
             Err(_) => return,
         };
@@ -1322,23 +1309,18 @@ fn main() {
             selected = stats.len() - 1;
         }
 
-        let mut rows = vec![tc::title("github ops", w, &p.pr)];
-        let mut head = vec![
-            (
-                p.dim.as_str(),
-                format!(
-                    " {} account{}",
-                    stats.len(),
-                    if stats.len() == 1 { "" } else { "s" }
-                ),
+        let mut rows = vec![tc::title("github ops", w, &p.accent)];
+        let mut head = vec![(
+            p.dim.as_str(),
+            format!(
+                " {} account{}",
+                watched,
+                if watched == 1 { "" } else { "s" }
             ),
-            (p.dim.as_str(), format!("   updated {} ago", ago(fetched))),
-        ];
-        if let Some((left, limit)) = rate {
-            head.push((
-                if left > 1000 { p.ok.as_str() } else { p.warn.as_str() },
-                format!("   {}/{} api", left, limit),
-            ));
+        )];
+        let tail = tc::polled(fetched, rate, &p.dim, &p.ok, &p.warn);
+        for (colour, txt) in &tail {
+            head.push((colour.as_str(), txt.clone()));
         }
         rows.push(tc::seg(&head, w - 1));
         if !err.is_empty() {

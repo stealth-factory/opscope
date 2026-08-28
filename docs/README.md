@@ -15,7 +15,8 @@ each key it answers to, and the settings it reads.
 | [`tailnet`](tailnet.md) | Tailscale peers, and — the part plain `tailscale status` buries — *how* you are reaching each one. |
 | [`herdr-panes`](herdr-panes.md) | Everything running under [Herdr](https://herdr.dev), across every workspace — and one keypress to get to any of it. |
 | [`github`](github.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |
-| [`pr`](pr.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
+| [`github-actions`](github-actions.md) | GitHub Actions across those same accounts — what is running, what is failing, and how long it sat in the queue. |
+| [`github-prs`](github-prs.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |
 | [`linear`](linear.md) | Linear across every team at once — what is outstanding, which cycles are running, and whether issues are being closed faster than they arrive. |
 | [`agent-usage`](agent-usage.md) | How much the coding agents on this machine have actually been used — one tab per agent, from each agent's own local state, plus a live quota reading for the four that publish one and a subscription for the five that do. |
 | [`ports`](ports.md) | What is listening on this machine, what started it, and who can reach it. |
