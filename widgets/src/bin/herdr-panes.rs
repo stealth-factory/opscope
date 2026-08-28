@@ -205,7 +205,11 @@ fn window_over(
             used += heights[last - 1];
             last -= 1;
         }
-        let first = from.min(last);
+        // An entry taller than the pane cannot join `last`, so `last`
+        // stays `n`. Without the clamp, a wheel that has already reached
+        // the end then produces `n..n` and the list vanishes while the
+        // hidden selection stays actionable.
+        let first = from.min(last.min(n - 1));
         let (mut used, mut end) = (0usize, first);
         while end < n && used + heights[end] <= room {
             used += heights[end];
@@ -1410,6 +1414,12 @@ mod tests {
         // five of them.
         let tall = vec![2usize; 20];
         assert_eq!(window_over(&tall, 0, 10, 100, false), 15..20);
+        // A last entry taller than the pane is still a legal start. The
+        // loop that finds `last` cannot include it, so without the clamp
+        // `from` at the end produced n..n and every row disappeared.
+        let last_tall = vec![1usize, 1, 2];
+        assert_eq!(window_over(&last_tall, 0, 1, 2, false), 2..3);
+        assert_eq!(window_over(&last_tall, 0, 1, 100, false), 2..3);
     }
 
     #[test]

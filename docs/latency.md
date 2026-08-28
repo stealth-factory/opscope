@@ -9,12 +9,12 @@ explain a bad connection.
 ╺━ NETWORK LATENCY MONITOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  4 targets · 0.5s interval · 19:05:21 · 1 ping/column
 
- HOST                     NOW     AVG  MEDIAN     MIN     MAX  JITTER   LOSS
-● studio               27.60ms 47.80ms 39.90ms 25.90ms 102.0ms 21.16ms   0.0%
+  HOST                    NOW     AVG  MEDIAN     MIN     MAX  JITTER   LOSS
+▐▸studio               27.60ms 47.80ms 39.90ms 25.90ms 102.0ms 21.16ms   0.0%
    ▁▂▁█▂▁▂▅▁▆▂██▁▁▃▄▄▇▂▂▁▁▄▆▂▂▁▂▆▁▁▂▁▂▆▂▂▂▁▁▁▂▁
-● build-mac            145.0ms 145.0ms 145.0ms 145.0ms 145.0ms     0µs   0.0%
+▐ build-mac            145.0ms 145.0ms 145.0ms 145.0ms 145.0ms     0µs   0.0%
    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
-● 1.1.1.1                3.98ms  3.96ms  4.01ms  3.69ms  4.28ms   173µs   0.0%
+▐ 1.1.1.1                3.98ms  3.96ms  4.01ms  3.69ms  4.28ms   173µs   0.0%
    ▅▂▂▅▄▂▅▆▇▄▆▃▆▃▆▁▅▃▆▆▅▂▅▁▆▃▇▅▂▆▆▅▅▁▃▂▅▆▅▃▂▂▄▅
 
  177.5ms│·           ·           ·           ·           ·

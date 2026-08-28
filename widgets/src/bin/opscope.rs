@@ -310,10 +310,13 @@ fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
         }
     }
     // The widget left the terminal however it left it, so take it back
-    // rather than assuming: cbreak again, cursor away again, screen clear.
+    // rather than assuming: cbreak again, cursor away again, screen
+    // clear, and mouse reporting on if the setting still wants it.
+    // restore_screen turned it off on the way out of the child, and
+    // without putting it back the menu's wheel does nothing after the
+    // first launch even though the config never changed.
     keyboard.reclaim();
-    tc::out(&format!("{}{}{}", tc::HIDE, tc::CLEAR, tc::HOME));
-    tc::flush();
+    tc::claim_screen();
 }
 
 /// The status a supervisor should see for a launched widget.

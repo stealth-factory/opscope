@@ -780,11 +780,14 @@ fn main() {
     // than the pane is tall. The rows were truncated to the body height
     // before, so a seventh host on a six-host pane simply was not drawn.
     //
-    // The arrows do not touch this. They walk a focus that deliberately
-    // wraps through "no selection" at either end, which is a fine thing
-    // for a key and a bad one for a wheel: scrolling up from no selection
-    // would jump to the last host and then go round for ever.
+    // The wheel writes this and never the flag below. The arrows walk a
+    // focus that deliberately wraps through "no selection" at either end,
+    // which is a fine thing for a key and a bad one for a wheel: scrolling
+    // up from no selection would jump to the last host and then go round
+    // for ever. A key that moved the focus sets the flag so the window
+    // can come back to that row once its height is known.
     let mut scroll = 0usize;
+    let mut moved = false;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -803,7 +806,8 @@ fn main() {
                         None => count.checked_sub(1),
                         Some(0) => None,
                         Some(at) => Some(at - 1),
-                    }
+                    };
+                    moved = true;
                 }
                 "down" | "j" | "J" => {
                     selected = match selected {
@@ -811,7 +815,8 @@ fn main() {
                         None => None,
                         Some(at) if at + 1 >= count => None,
                         Some(at) => Some(at + 1),
-                    }
+                    };
+                    moved = true;
                 }
                 // The widget, not the focus. Only does anything when there
                 // are more hosts than fit; on a list that already fits it
@@ -820,7 +825,10 @@ fn main() {
                 "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
                 "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 // Back to every target drawn alike.
-                "esc" => selected = None,
+                "esc" => {
+                    selected = None;
+                    moved = true;
+                }
                 "i" | "I" => {
                     if let Ok(mut s) = settings.lock() {
                         s.interval = cycle(INTERVAL_CHOICES, s.interval);
@@ -907,9 +915,13 @@ fn main() {
             )],
             w - 1,
         ));
+        let mut cursor: Option<usize> = None;
         for (i, t) in snapshot.iter().enumerate() {
             let st = t.stats();
             let here = selected == Some(i);
+            if here {
+                cursor = Some(rows.len());
+            }
             // The selected row is tinted rather than marked, so the thing
             // that says "this one" in the table is the same thing that says
             // it in the chart: one target at full strength, the rest behind.
@@ -1132,6 +1144,15 @@ fn main() {
         // targets and thinking you have six. The title is pinned above it.
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = body_h.saturating_sub(head.len()).max(1);
+        // Only on the frame a key moved the focus. Chasing it every frame
+        // pulls the list back to the selected host the instant the wheel
+        // moves it, which reads as the wheel doing nothing at all.
+        if moved {
+            if let Some(at) = cursor {
+                scroll = tc::follow(scroll, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
+        }
         scroll = scroll.min(rest.len().saturating_sub(room_below));
         let last = (scroll + room_below).min(rest.len());
         let mut rows: Vec<String> = head.to_vec();

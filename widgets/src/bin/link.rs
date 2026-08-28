@@ -742,7 +742,7 @@ fn main() {
             shown_body.extend(pack(&detail_hints(scroll_label(
                 scroll + 1,
                 last,
-                body.len(),
+                rest.len(),
             ))));
             tc::draw(&shown_body, w, h);
             std::thread::sleep(Duration::from_millis(200));

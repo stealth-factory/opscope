@@ -1815,6 +1815,7 @@ fn main() {
                                     at[sect] = row;
                                     sect
                                 });
+                            moved = true;
                         }
                         None => dscroll = dscroll.saturating_sub(1),
                     },
@@ -1825,6 +1826,7 @@ fn main() {
                                     at[sect] = row;
                                     sect
                                 });
+                            moved = true;
                         }
                         None => dscroll = dscroll.saturating_add(1),
                     },
@@ -1847,7 +1849,10 @@ fn main() {
                     // of its own - and no key at all for the middle one.
                     // Where it goes, and which sections it steps over, is
                     // opscope-core's rule rather than this widget's.
-                    "tab" => focus = tc::next_section(focus, &section_len),
+                    "tab" => {
+                        focus = tc::next_section(focus, &section_len);
+                        moved = true;
+                    }
                     "c" | "C" => {
                         if !pending_copy.is_empty() {
                             // The value goes in the message either way: OSC
@@ -2035,22 +2040,21 @@ fn main() {
             let room = room.saturating_sub(head.len()).max(1);
             let cursor = cursor.map(|(at, tall)| (at.saturating_sub(head.len()), tall));
             let furthest = rest.len().saturating_sub(room);
-            // The screen follows the cursor into a section. It did not
-            // before: the body is built at whatever height it needs and
-            // scrolled to, but nothing tied the scroll to the selection, so
-            // moving the cursor down a long list walked it off the bottom of
-            // the pane - with its chart, which is the thing you moved the
-            // cursor to see. On a short pane one press was enough.
-            //
-            // The chart is why this reveals a span rather than a row: pulling
-            // the selected line just into view would leave the four rows it
-            // was drawn for still below the edge.
-            if let Some((at_row, tall)) = cursor {
-                if at_row < dscroll {
-                    dscroll = at_row;
-                } else if at_row + tall > dscroll + room {
-                    dscroll = (at_row + tall).saturating_sub(room);
+            // Only on the frame a key moved the cursor. Chasing it every
+            // frame pulls the page back to the selection the instant the
+            // wheel moves it, which reads as the wheel doing nothing at
+            // all. The chart is why this reveals a span rather than a
+            // row: pulling the selected line just into view would leave
+            // the four rows it was drawn for still below the edge.
+            if moved {
+                if let Some((at_row, tall)) = cursor {
+                    if at_row < dscroll {
+                        dscroll = at_row;
+                    } else if at_row + tall > dscroll + room {
+                        dscroll = (at_row + tall).saturating_sub(room);
+                    }
                 }
+                moved = false;
             }
             dscroll = dscroll.min(furthest);
             let last = (dscroll + room).min(rest.len());
@@ -2074,7 +2078,7 @@ fn main() {
                 let mut with_pos = hints.clone();
                 with_pos.push(vec![(
                     p.dim.as_str(),
-                    scroll_label(dscroll + 1, last, body.len()),
+                    scroll_label(dscroll + 1, last, rest.len()),
                 )]);
                 foot = tc::pack_hints(&with_pos, w - 2, "  ")
                     .into_iter()

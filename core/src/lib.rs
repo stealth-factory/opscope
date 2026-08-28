@@ -226,6 +226,16 @@ pub fn setup() {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
+    claim_screen();
+}
+
+/// Hide the cursor, clear, and ask for mouse reports if they are wanted.
+///
+/// `setup` does this once at start. A launcher that handed the terminal to
+/// a child has to do it again: `restore_screen` (and the child's own exit)
+/// turn reporting off, and without this the menu comes back unable to
+/// scroll even though the setting never changed.
+pub fn claim_screen() {
     let mouse = if mouse_wanted() { MOUSE_ON } else { "" };
     out(&format!("{}{}{}{}", mouse, HIDE, CLEAR, HOME));
     flush();
@@ -1643,7 +1653,11 @@ fn mouse_report(s: &[char]) -> Option<(usize, Option<&'static str>)> {
     }
     match s.get(i) {
         Some('M') | Some('m') => {
-            let wheel = match button {
+            // SGR adds Shift (4), Meta (8) and Control (16) to the
+            // button. A modified wheel is still a wheel - 68 is
+            // shift-up, 81 is ctrl-down - and matching the bare 64/65
+            // only would consume those reports without scrolling.
+            let wheel = match button & !(4 | 8 | 16) {
                 64 => Some("wheel-up"),
                 65 => Some("wheel-down"),
                 _ => None,
@@ -2478,6 +2492,17 @@ mod tests {
         // The wheel, both ways: button 64 up, 65 down, in SGR.
         assert_eq!(keys("\x1b[<64;10;5M"), vec!["wheel-up"]);
         assert_eq!(keys("\x1b[<65;10;5M"), vec!["wheel-down"]);
+        // Modifiers sit in bits 2-4 and must not hide a wheel turn.
+        // 4 is Shift, 8 is Meta, 16 is Control; they add, so 64+4+16
+        // is a ctrl-shift wheel-up and still has to scroll.
+        assert_eq!(keys("\x1b[<68;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<72;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<80;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<84;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<69;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<73;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<81;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<85;10;5M"), vec!["wheel-down"]);
         // A click is consumed, not passed on and not leaked. Until it
         // means something it must still not reach a widget as text.
         assert_eq!(keys("\x1b[<0;12;34M"), Vec::<String>::new());

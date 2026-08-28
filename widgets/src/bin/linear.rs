@@ -1921,6 +1921,10 @@ fn main() {
     // it was last drawn - the keys run before the frame that answers them.
     let mut board = 0usize;
     let mut board_len = 0usize;
+    // Set by a key that moved a cursor, and cleared once the window has
+    // followed it. The wheel writes a scroll and never this, so a turn
+    // past the selected row is not pulled back on the next frame.
+    let mut moved = false;
     // Which project the board's own list has under its cursor.
     let mut board_project: Option<String> = None;
     let mut tick = 0usize;
@@ -1969,6 +1973,7 @@ fn main() {
                     // and the window stays where the cursor left it rather
                     // than jumping to the top.
                     pick = 0;
+                    moved = true;
                 }
                 // Enter opens whichever pane has the cursor. Without a
                 // focused pane there is nothing selected to open, which is
@@ -2036,6 +2041,7 @@ fn main() {
                     } else {
                         pick = pick.saturating_sub(1);
                     }
+                    moved = true;
                 }
                 "pgup" | "pgdn" if detail.is_some() && deep.is_none() && list_len > 0 => {
                     let page = tc::size().1.saturating_sub(3).max(1);
@@ -2044,6 +2050,7 @@ fn main() {
                     } else {
                         pick.saturating_sub(page)
                     };
+                    moved = true;
                 }
                 // Walking off either end of a pane leaves it. There is no
                 // screen scroll here to hand the arrows to - both panes
@@ -2106,6 +2113,7 @@ fn main() {
                                     sel[pane] = row;
                                     pane
                                 });
+                            moved = true;
                         }
                         // Nothing focused: the arrows move the board. The
                         // board is taller than the pane and every section
@@ -2137,6 +2145,7 @@ fn main() {
                         } else {
                             sel[here].saturating_sub(page)
                         };
+                        moved = true;
                     }
                 }
                 _ => {}
@@ -2969,10 +2978,15 @@ fn main() {
                 // header before the follow below reads it.
                 let (head, rest) = body.split_at(1.min(body.len()));
                 let room_below = room.saturating_sub(head.len()).max(1);
-                // The page follows the cursor into the project list, the
-                // way netwatch's detail follows one into a section.
-                if let Some(row) = cursor {
-                    *at = tc::follow(*at, row.saturating_sub(head.len()), room_below);
+                // Only on the frame a key moved the cursor. Chasing it
+                // every frame pulls the page back to the selection the
+                // instant the wheel moves it, which reads as the wheel
+                // doing nothing at all.
+                if moved {
+                    if let Some(row) = cursor {
+                        *at = tc::follow(*at, row.saturating_sub(head.len()), room_below);
+                    }
+                    moved = false;
                 }
                 *at = (*at).min(rest.len().saturating_sub(room_below));
                 let from = *at;
@@ -3049,8 +3063,11 @@ fn main() {
         // list, so it shifts by the header when it moves into the body.
         let (head, body) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
-        if let Some(at) = cursor {
-            board = tc::follow(board, at.saturating_sub(head.len()), room_below);
+        if moved {
+            if let Some(at) = cursor {
+                board = tc::follow(board, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
         }
         board = board.min(body.len().saturating_sub(room_below));
         board_len = rows.len();
