@@ -1263,6 +1263,15 @@ fn still_arriving(s: &[char]) -> bool {
         [] => false,
         ['\x1b'] => true,
         ['\x1b', 'O'] => true,
+        // A mouse report that has not reached its M or m yet. Without this
+        // arm the `<` fails the test below, the report is declared
+        // malformed, and the ESC is dropped one character at a time -
+        // which hands the widget `[`, `<`, digits and `;` as keystrokes.
+        // A wheel turn arriving across two reads is not unusual; it is
+        // what a poll landing mid-sequence looks like.
+        ['\x1b', '[', '<', rest @ ..] => rest
+            .iter()
+            .all(|c| c.is_ascii_digit() || *c == ';'),
         ['\x1b', '[', rest @ ..] => rest
             .iter()
             .all(|c| c.is_ascii_digit() || *c == ';'),
@@ -1357,6 +1366,17 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             '\r' | '\n' => keys.push("enter".to_string()),
             '\t' => keys.push("tab".to_string()),
             '\x7f' | '\x08' => keys.push("backspace".to_string()),
+            // vim's own pair for moving the view and leaving the cursor
+            // where it is, which is exactly what these do here. Named
+            // rather than passed through raw: a widget matching "\x05"
+            // reads as a typo, and a control byte in a match arm is
+            // invisible to anyone scanning the file for its keys.
+            //
+            // Safe to take. The terminal is in cbreak with ISIG still on,
+            // so the bytes it intercepts are the signal ones - these are
+            // not among them, and neither is flow control's ^S/^Q.
+            '\x19' => keys.push("ctrl-y".to_string()),
+            '\x05' => keys.push("ctrl-e".to_string()),
             c => keys.push(c.to_string()),
         }
     }
@@ -2001,6 +2021,44 @@ mod tests {
         }
         // And it does not swallow what follows it.
         assert_eq!(keys("\x1b[3~q"), vec!["q"]);
+    }
+
+    #[test]
+    fn a_mouse_report_becomes_a_wheel_key_or_nothing_at_all() {
+        // The wheel, both ways: button 64 up, 65 down, in SGR.
+        assert_eq!(keys("\x1b[<64;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<65;10;5M"), vec!["wheel-down"]);
+        // A click is consumed, not passed on and not leaked. Until it
+        // means something it must still not reach a widget as text.
+        assert_eq!(keys("\x1b[<0;12;34M"), Vec::<String>::new());
+        assert_eq!(keys("\x1b[<0;12;34m"), Vec::<String>::new());
+        // The leak this branch exists to stop. escape_len and
+        // still_arriving both walk only digits and `;` after ESC-[, so the
+        // `<` stopped them both and the report was torn up one character
+        // at a time. On a widget with a filter open, that is typing into
+        // it; on one without, `M` is whatever `M` does.
+        for report in ["\x1b[<64;1;1M", "\x1b[<0;200;90M"] {
+            let got = keys(report);
+            for leaked in ["[", "<", ";", "M", "m", "6", "4", "0"] {
+                assert!(
+                    !got.iter().any(|k| k == leaked),
+                    "{:?} leaked {:?} out of {:?}",
+                    report,
+                    leaked,
+                    got
+                );
+            }
+        }
+        // A column past 223, which the legacy encoding cannot express and
+        // which these panes reach - the dashboard here is 345 wide.
+        assert_eq!(keys("\x1b[<65;300;40M"), vec!["wheel-down"]);
+        // What follows a report is still read.
+        assert_eq!(keys("\x1b[<64;1;1Mq"), vec!["wheel-up", "q"]);
+        // A half-arrived report waits rather than being torn up.
+        assert_eq!(keys("\x1b[<64;1"), Vec::<String>::new());
+        // vim's own scroll pair, named rather than left as control bytes.
+        assert_eq!(keys("\x19"), vec!["ctrl-y"]);
+        assert_eq!(keys("\x05"), vec!["ctrl-e"]);
     }
 
     #[test]

@@ -2067,6 +2067,19 @@ fn main() {
                         at.saturating_sub(page)
                     };
                 }
+                // The board, whatever has the focus. `up`/`down` already do
+                // this when nothing is focused - the arm below says so -
+                // but once a section is picked they belong to the cursor,
+                // and there was no way back to the board without dropping
+                // the focus first. The wheel rides the same arm: scrolling
+                // to look at something must not change what `↵` opens.
+                "ctrl-y" | "ctrl-e" | "wheel-up" | "wheel-down" => {
+                    board = if key == "ctrl-e" || key == "wheel-down" {
+                        board.saturating_add(1)
+                    } else {
+                        board.saturating_sub(1)
+                    };
+                }
                 "up" | "down" => {
                     let down = key == "down";
                     pick = 0;
