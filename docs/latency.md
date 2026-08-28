@@ -87,6 +87,12 @@ leaving you to spot in a line: a host going `DOWN` and coming back `UP` with
 how long it was away, and a `SPIKE` when a single reading lands far above what
 that host normally does.
 
+It takes its rows on any pane. It used to stand down on a short one, on the
+reasoning that the graph was the thing worth keeping — but a log that is not
+drawn looks exactly like a log with nothing in it, and those are opposite
+readings of the same screen. On a pane too short for everything the widget
+scrolls instead.
+
 "Far above" is `spike_factor`, three times the median by default, and it needs
 at least ten samples before it will call anything — otherwise the first slow
 reading on a fresh host is a spike against a median of itself. Raise it on a

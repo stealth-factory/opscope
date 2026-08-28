@@ -52,6 +52,16 @@ const BACKDROP: (u8, u8, u8) = (16, 22, 30);
 /// the axis it is drawn over.
 const FADE: f64 = 0.60;
 
+/// The rows the event log takes, heading included.
+///
+/// It used to be dropped entirely on a pane with fewer than twenty spare
+/// rows, on the reasoning that the chart was the thing worth keeping. But a
+/// missing log looks exactly like a log with nothing in it, and the two are
+/// opposite readings of the same screen - one says nothing has gone wrong,
+/// the other says you cannot see whether anything has. It now takes its
+/// rows whatever the pane is, and the widget scrolls to reach them.
+const LOG_ROWS: usize = 7;
+
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -931,24 +941,26 @@ fn main() {
                 // the columns sit under their own headings, which the dot's
                 // uncounted cell prevented.
                 //
-                // The cell the header spends on a leading space is the marker
-                // column. A tint alone says "this row is not like the others"
-                // without saying which way, and it is gone entirely on a
-                // terminal that will not paint one - so the mark is a solid
-                // bar rather than a glyph, because the tint cannot be made
-                // louder: (28,44,62) is already as bright as it goes before
-                // `bad` red drops under AA on it, measured at 4.80 against a
-                // floor of 4.5.
+                // The chip carries the target's hue, which is what ties the
+                // row to its trace in the chart. It is on every row, so it
+                // says which target rather than which one is selected.
                 //
                 // ▐ is East Asian Neutral, so it is one cell wherever it
                 // renders. ▌ and █ read better but are Ambiguous, and this
                 // row is otherwise all ASCII - one Ambiguous cell would shift
                 // the selected row and nothing else.
                 (tinted(&raw_hue), "▐".to_string()),
-                // The chip is a colour, not a letter, and reads as part of
-                // the name when it touches it. The header spends the same
-                // cell so the columns still sit under their own headings.
-                (tint.clone(), " ".to_string()),
+                // And the cell after it is the marker, the same one the rest
+                // of the collection uses. A tint alone says "this row is not
+                // like the others" without saying which way, and it is gone
+                // entirely on a terminal that will not paint one - which left
+                // nothing at all saying what was selected. `head` measures
+                // 8.87 on the tint against a floor of 4.5. The header spends
+                // the same cell, so no column moves.
+                (
+                    tinted(if here { &p.head } else { &p.dim }),
+                    if here { "▸".to_string() } else { " ".to_string() },
+                ),
                 // Grey until this is the row being looked at, then white -
                 // which is how link tells its selected session apart, and
                 // the reason its list reads at a glance. The hue cannot do
@@ -1047,9 +1059,12 @@ fn main() {
             .collect();
         let body_h = h.saturating_sub(foot.len());
 
-        // The log only earns its space on a tall pane: on a short one the
-        // chart is the thing worth keeping.
-        let log_h = if body_h.saturating_sub(rows.len()) > 20 { 7 } else { 0 };
+        // The log is always drawn and the chart takes what is left, down to
+        // a floor of four rows. Past that the body is taller than the pane
+        // and the window below scrolls to the rest - which is also what
+        // gives the wheel somewhere to go. Sized to the pane, the body came
+        // out exactly one pane tall however many targets there were.
+        let log_h = LOG_ROWS;
         let gh = body_h.saturating_sub(rows.len() + log_h + 4).max(4);
         let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p);
         let drawn = chart.len();
@@ -1083,34 +1098,32 @@ fn main() {
         }
         rows.push(String::new());
 
-        if log_h > 0 {
-            rows.push(tc::seg(&[(p.dim.as_str(), " ── EVENTS ──".into())], w - 1));
-            let recent: Vec<Event> = match events.lock() {
-                Ok(g) => g.iter().rev().take(log_h - 1).rev().cloned().collect(),
-                Err(_) => Vec::new(),
+        rows.push(tc::seg(&[(p.dim.as_str(), " ── EVENTS ──".into())], w - 1));
+        let recent: Vec<Event> = match events.lock() {
+            Ok(g) => g.iter().rev().take(log_h - 1).rev().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        if recent.is_empty() {
+            rows.push(tc::seg(
+                &[(p.dim.as_str(), "   (no loss or spikes recorded)".into())],
+                w - 1,
+            ));
+        }
+        for event in &recent {
+            let kind_c = match event.kind {
+                "LOSS" | "DOWN" => &p.bad,
+                "SPIKE" => &p.warn,
+                _ => &p.ok,
             };
-            if recent.is_empty() {
-                rows.push(tc::seg(
-                    &[(p.dim.as_str(), "   (no loss or spikes recorded)".into())],
-                    w - 1,
-                ));
-            }
-            for event in &recent {
-                let kind_c = match event.kind {
-                    "LOSS" | "DOWN" => &p.bad,
-                    "SPIKE" => &p.warn,
-                    _ => &p.ok,
-                };
-                rows.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), format!(" {} ", event.at)),
-                        (kind_c.as_str(), format!("{:<6}", event.kind)),
-                        (event.hue.as_str(), tc::pad(&event.host, 22)),
-                        (p.dim.as_str(), event.detail.clone()),
-                    ],
-                    w - 1,
-                ));
-            }
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), format!(" {} ", event.at)),
+                    (kind_c.as_str(), format!("{:<6}", event.kind)),
+                    (event.hue.as_str(), tc::pad(&event.host, 22)),
+                    (p.dim.as_str(), event.detail.clone()),
+                ],
+                w - 1,
+            ));
         }
 
         // A window onto the rows rather than a cut of them. Truncating
