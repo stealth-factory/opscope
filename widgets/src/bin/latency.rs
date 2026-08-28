@@ -766,6 +766,15 @@ fn main() {
     // drawn rather than when the key is pressed, because targets are only
     // known to the poll threads.
     let mut selected: Option<usize> = None;
+    // How far the list has been scrolled, for when there are more targets
+    // than the pane is tall. The rows were truncated to the body height
+    // before, so a seventh host on a six-host pane simply was not drawn.
+    //
+    // The arrows do not touch this. They walk a focus that deliberately
+    // wraps through "no selection" at either end, which is a fine thing
+    // for a key and a bad one for a wheel: scrolling up from no selection
+    // would jump to the last host and then go round for ever.
+    let mut scroll = 0usize;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -779,14 +788,14 @@ fn main() {
                 // and walking off it again comes in at the other. Focus is
                 // then something you can leave the way you entered it,
                 // rather than a state with only one door.
-                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
+                "up" | "k" | "K" => {
                     selected = match selected {
                         None => count.checked_sub(1),
                         Some(0) => None,
                         Some(at) => Some(at - 1),
                     }
                 }
-                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
+                "down" | "j" | "J" => {
                     selected = match selected {
                         None if count > 0 => Some(0),
                         None => None,
@@ -794,6 +803,12 @@ fn main() {
                         Some(at) => Some(at + 1),
                     }
                 }
+                // The widget, not the focus. Only does anything when there
+                // are more hosts than fit; on a list that already fits it
+                // is clamped to zero below and the wheel is inert, which
+                // is the right amount of nothing to do.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 // Back to every target drawn alike.
                 "esc" => selected = None,
                 "i" | "I" => {
@@ -1098,10 +1113,19 @@ fn main() {
             }
         }
 
+        // A window onto the rows rather than a cut of them. Truncating
+        // dropped every host past the bottom edge with nothing saying so,
+        // which on a short pane is the difference between watching six
+        // targets and thinking you have six. The title is pinned above it.
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = body_h.saturating_sub(head.len()).max(1);
+        scroll = scroll.min(rest.len().saturating_sub(room_below));
+        let last = (scroll + room_below).min(rest.len());
+        let mut rows: Vec<String> = head.to_vec();
+        rows.extend_from_slice(&rest[scroll..last]);
         while rows.len() < body_h {
             rows.push(String::new());
         }
-        rows.truncate(body_h);
         rows.extend(foot);
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
