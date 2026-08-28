@@ -1254,8 +1254,14 @@ fn main() {
                     dscroll = 0;
                 }
                 "left" | "esc" if detail => detail = false,
-                "up" if detail => osel = osel.saturating_sub(1),
-                "down" if detail => osel = osel.saturating_add(1),
+                "up" if detail => {
+                    osel = osel.saturating_sub(1);
+                    moved = true;
+                }
+                "down" if detail => {
+                    osel = osel.saturating_add(1);
+                    moved = true;
+                }
                 "c" | "C" if detail => {
                     // The account under the cursor, read from the shared
                     // state rather than the render's copy - the keys are
@@ -1307,8 +1313,17 @@ fn main() {
                     selected += 1;
                     moved = true;
                 }
-                "ctrl-y" | "wheel-up" => board = board.saturating_sub(1),
-                "ctrl-e" | "wheel-down" => board = board.saturating_add(1),
+                // Whichever screen is on: the board and an account's own
+                // screen keep separate offsets, so a wheel bound to one
+                // does nothing on the other.
+                "ctrl-y" | "wheel-up" => {
+                    let at = if detail { &mut dscroll } else { &mut board };
+                    *at = at.saturating_sub(1);
+                }
+                "ctrl-e" | "wheel-down" => {
+                    let at = if detail { &mut dscroll } else { &mut board };
+                    *at = at.saturating_add(1);
+                }
                 _ => {}
             }
         }
@@ -1948,13 +1963,19 @@ fn main() {
                 // the selection lands a row off, only once you scroll.
                 let (head, rest) = body.split_at(1.min(body.len()));
                 let room_below = room.saturating_sub(head.len()).max(1);
-                if let Some(at) = cursor {
-                    let at = at.saturating_sub(head.len());
-                    if at < dscroll {
-                        dscroll = at;
-                    } else if at >= dscroll + room_below {
-                        dscroll = at + 1 - room_below;
+                // Only on the tick a key moved the selection. Chasing it
+                // every tick drags the view back to the cursor the instant
+                // the wheel moves it, which reads as the wheel not working.
+                if moved {
+                    if let Some(at) = cursor {
+                        let at = at.saturating_sub(head.len());
+                        if at < dscroll {
+                            dscroll = at;
+                        } else if at >= dscroll + room_below {
+                            dscroll = at + 1 - room_below;
+                        }
                     }
+                    moved = false;
                 }
                 dscroll = dscroll.min(rest.len().saturating_sub(room_below));
                 let last = (dscroll + room_below).min(rest.len());
