@@ -128,12 +128,20 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 /// are also feeding.
 ///
 /// No new request. The figures were fetched for the row.
+/// Built at whatever height it needs, and the caller windows it.
+///
+/// It used to take the pane's height and drop the state bar, the oldest
+/// list and the flow chart when what was left came to less than four rows,
+/// four rows and ten - so a short pane showed some of the account and said
+/// nothing about the rest. A section that is not drawn looks exactly like a
+/// section with nothing in it, which is the opposite reading. Every section
+/// is built now and the screen scrolls to reach them, which is also what
+/// gives the wheel somewhere to go.
 fn account_detail(
     a: &Account,
     oldest: Option<&serde_json::Value>,
     pick: usize,
     w: usize,
-    h: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
     // Where the cursor over the oldest list ended up, so the caller can
@@ -250,7 +258,7 @@ fn account_detail(
     // The same bar the board draws for everything at once, for this account
     // alone: a queue is a different shape depending on whether it is waiting
     // on reviewers or waiting on authors.
-    if a.open > 0 && h.saturating_sub(rows.len()) >= 4 {
+    if a.open > 0 {
         let ready = (a.open - a.draft - a.review).max(0);
         let legend: Vec<(&str, i64, &str)> = [
             ("awaiting review", a.review, p.warn.as_str()),
@@ -293,7 +301,7 @@ fn account_detail(
     }
 
     // The ones that have been open longest, which no count can name.
-    if h.saturating_sub(rows.len()) >= 4 {
+    {
         rows.push(String::new());
         match oldest {
             None => {
@@ -422,7 +430,7 @@ fn account_detail(
         .cloned()
         .fold(0.0f64, f64::max)
         .max(1.0);
-    if h.saturating_sub(rows.len()) >= 10 && !up.is_empty() {
+    if !up.is_empty() {
         rows.push(String::new());
         rows.push(tc::seg(
             &[
@@ -1632,9 +1640,12 @@ fn main() {
         ));
         rows.push(String::new());
 
-        // The account table earns the remaining height; the calendar keeps
-        // its place only where the pane is tall enough for both.
-        if let Some(cal) = calendar.as_ref().filter(|_| h > 38) {
+        // Drawn whatever the pane is. It used to stand down below 39 rows so
+        // the account table could have the height, but a contribution grid
+        // that is not there looks exactly like an account with no
+        // contributions, and the board scrolls now - so the pane costs it
+        // nothing that a turn of the wheel does not get back.
+        if let Some(cal) = calendar.as_ref() {
             let (grid, peak, total) = heatmap(&cal["weeks"], w);
             let total_c = cal["totalContributions"].as_i64().unwrap_or(total);
             rows.push(tc::seg(
@@ -1914,7 +1925,7 @@ fn main() {
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 osel = osel.min(nodes.len().saturating_sub(1));
-                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, h, &p);
+                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
