@@ -2073,11 +2073,27 @@ fn main() {
                 // and there was no way back to the board without dropping
                 // the focus first. The wheel rides the same arm: scrolling
                 // to look at something must not change what `↵` opens.
+                // Whichever screen is on, and whatever has the focus. Each
+                // screen keeps its own offset - the board's, a detail's,
+                // and a project reading's - so a wheel bound to `board`
+                // alone did nothing anywhere but the board, which is most
+                // of the screens this widget has.
                 "ctrl-y" | "ctrl-e" | "wheel-up" | "wheel-down" => {
-                    board = if key == "ctrl-e" || key == "wheel-down" {
-                        board.saturating_add(1)
+                    let down = key == "ctrl-e" || key == "wheel-down";
+                    // `deep` is what the render block turns into `reading`,
+                    // and it is the half that exists out here where the
+                    // keys are read.
+                    let at = if deep.is_some() {
+                        &mut pscroll
+                    } else if detail.is_some() {
+                        &mut dscroll
                     } else {
-                        board.saturating_sub(1)
+                        &mut board
+                    };
+                    *at = if down {
+                        at.saturating_add(1)
+                    } else {
+                        at.saturating_sub(1)
                     };
                 }
                 "up" | "down" => {
@@ -2944,15 +2960,25 @@ fn main() {
                     .collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
+                // The title is pinned here as it is on the board. A detail
+                // screen is where it matters most: the board repeats team
+                // and project names down its rows, but scroll a cycle or a
+                // project and nothing left on screen says which one it is.
+                //
+                // `cursor` addresses the whole body, so it shifts by the
+                // header before the follow below reads it.
+                let (head, rest) = body.split_at(1.min(body.len()));
+                let room_below = room.saturating_sub(head.len()).max(1);
                 // The page follows the cursor into the project list, the
                 // way netwatch's detail follows one into a section.
                 if let Some(row) = cursor {
-                    *at = tc::follow(*at, row, room);
+                    *at = tc::follow(*at, row.saturating_sub(head.len()), room_below);
                 }
-                *at = (*at).min(body.len().saturating_sub(room));
+                *at = (*at).min(rest.len().saturating_sub(room_below));
                 let from = *at;
-                let last = (from + room).min(body.len());
-                let mut out: Vec<String> = body[from..last].to_vec();
+                let last = (from + room_below).min(rest.len());
+                let mut out: Vec<String> = head.to_vec();
+                out.extend_from_slice(&rest[from..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }
