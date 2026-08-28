@@ -1,21 +1,22 @@
 GitHub Actions runs, failures and queue time.
 
 What is running right now, which workflows are failing repeatedly, which job
-and step broke, and how long the pipeline is taking — across the accounts
-already in config, using the same token github and pr already hold.
+and step broke, and how long the pipeline is taking — across your personal
+repos and every org you belong to, using the same token github and pr already
+hold.
 
     gha [-n SECONDS] [owner/repo ...]
 
 Polls every 60s by default (-n changes it, minimum 30s). Extra arguments are
 repos to watch; with none given it uses `gha.repos`, and failing that the
-most recently pushed repos that have workflow files, capped per the config.
-Empty `gha.accounts` inherits `github.accounts`.
+most recently pushed repos that have workflow files, capped per owner.
+Empty `gha.accounts` discovers your login and every org you belong to.
 
 Credentials: reuses `github.token` from config.json, or $GITHUB_TOKEN.
 `gha.token` / `gha.token_env` override that when set. A classic token with
 `repo` and `read:org`, the same one github uses. This widget only reads.
 
-Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
-the state filter (all / failed / running), / filters by text against the
-repo, workflow, branch and event, w cycles the window, q quits. On a run,
-c copies its URL, esc closes.
+Keys: up/down select a run, Enter opens its details, r refreshes now, s
+cycles the state filter (all / failed / running), / filters by text against
+the repo, workflow, branch, event and title, w cycles the window (12h / 24h
+/ 48h / 7d), q quits. On a run, c copies its URL, esc closes.

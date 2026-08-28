@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! GitHub Actions runs across the accounts already in config.
+//! GitHub Actions runs across the viewer's personal repos and every org
+//! they belong to, grouped the way `deployments` groups Vercel teams.
 //!
 //! `github` counts PRs and `pr` rolls up one PR's checks. Neither says
 //! what is queued rather than running, which workflow is failing
@@ -38,8 +39,9 @@ const FILTERS: &[&str] = &["all", "failed", "running"];
 const DISCOVER_EACH: usize = 40;
 /// Pages per account. 200 most recently pushed, then the screen says so.
 const DISCOVER_PAGES: usize = 5;
-/// One page of runs per repo. A repo with more in the window says so.
-const RUN_PAGE: usize = 30;
+/// One page of runs per repo. GitHub's max; a repo with more in the
+/// window says so rather than presenting the page as the 48h total.
+const RUN_PAGE: usize = 100;
 const DETAIL_TTL: f64 = 60.0;
 const LIVE: &[&str] = &["in_progress", "queued", "waiting", "pending", "requested"];
 
@@ -70,9 +72,13 @@ fn token(gha: &serde_json::Value, gh: &serde_json::Value) -> (String, &'static s
     }
 }
 
-fn graphql(query: &str, tok: &str) -> Result<serde_json::Value, String> {
+fn graphql(
+    query: &str,
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query }).to_string();
-    let (out, _headers) = tc::post_json(
+    let (out, headers) = tc::post_json(
         GQL,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -82,8 +88,22 @@ fn graphql(query: &str, tok: &str) -> Result<serde_json::Value, String> {
         &body,
         45,
     )?;
+    take_rate(rate, &headers);
     let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
-    if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
+    graphql_payload(&data)
+}
+
+/// GraphQL answers 200 with `data` and `errors` together. The discover
+/// query used to ask for both `organization` and `user` for one login;
+/// the missing side is `NOT_FOUND`, and treating that as a failed page
+/// dropped every org's repos. Use `data` when it is there. A null
+/// payload is the real failure.
+fn graphql_payload(body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let payload = body["data"].clone();
+    if !payload.is_null() {
+        return Ok(payload);
+    }
+    if let Some(first) = body["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
             .as_str()
             .unwrap_or("")
@@ -91,12 +111,16 @@ fn graphql(query: &str, tok: &str) -> Result<serde_json::Value, String> {
             .take(100)
             .collect());
     }
-    Ok(data["data"].clone())
+    Err("empty graphql response".into())
 }
 
-fn rest_get(path: &str, tok: &str) -> Result<serde_json::Value, String> {
+fn rest_get(
+    path: &str,
+    tok: &str,
+    rate: &mut Option<(i64, i64)>,
+) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", REST, path);
-    let body = tc::get(
+    let (body, headers) = tc::get_with_headers(
         &url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
@@ -106,7 +130,33 @@ fn rest_get(path: &str, tok: &str) -> Result<serde_json::Value, String> {
         ],
         30,
     )?;
+    take_rate(rate, &headers);
     serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// Remaining/limit from GitHub's rate-limit headers. GraphQL and REST
+/// have separate buckets; the last response wins, and a full poll ends
+/// on REST, which is what this widget spends.
+fn take_rate(rate: &mut Option<(i64, i64)>, headers: &[(String, String)]) {
+    if let Some(got) = rate_from_headers(headers) {
+        *rate = Some(got);
+    }
+}
+
+fn rate_from_headers(headers: &[(String, String)]) -> Option<(i64, i64)> {
+    let mut remaining = None;
+    let mut limit = None;
+    for (name, value) in headers {
+        match name.as_str() {
+            "x-ratelimit-remaining" => remaining = value.parse().ok(),
+            "x-ratelimit-limit" => limit = value.parse().ok(),
+            _ => {}
+        }
+    }
+    match (remaining, limit) {
+        (Some(left), Some(max)) if max > 0 => Some((left, max)),
+        _ => None,
+    }
 }
 
 fn text(value: &serde_json::Value, key: &str) -> String {
@@ -170,6 +220,14 @@ fn age_label(secs: f64) -> String {
     }
 }
 
+/// How long since the last successful poll, matching github's `updated`.
+fn updated_ago(fetched: f64) -> String {
+    if fetched <= 0.0 {
+        return "--".into();
+    }
+    age_label((tc::now() - fetched).max(0.0))
+}
+
 fn dur_label(seconds: Option<f64>) -> String {
     let Some(s) = seconds else {
         return "  --  ".to_string();
@@ -184,7 +242,9 @@ fn dur_label(seconds: Option<f64>) -> String {
 }
 
 fn window_label(hours: i64) -> String {
-    if hours >= 24 && hours % 24 == 0 {
+    // 48h stays 48h, matching deployments' "last 48h" — collapsing it to
+    // 2d made the default window look like a different thing.
+    if hours >= 168 && hours % 24 == 0 {
         format!("{}d", hours / 24)
     } else {
         format!("{}h", hours)
@@ -207,10 +267,10 @@ fn outcome(run: &serde_json::Value) -> String {
 
 fn outcome_label(kind: &str) -> &'static str {
     match kind {
-        "in_progress" => "run",
-        "queued" | "waiting" | "pending" | "requested" => "queue",
-        "success" => "ok",
-        "failure" | "startup_failure" => "fail",
+        "in_progress" => "running",
+        "queued" | "waiting" | "pending" | "requested" => "queued",
+        "success" => "success",
+        "failure" | "startup_failure" => "failure",
         "timed_out" => "timeout",
         "cancelled" => "cancel",
         "skipped" => "skip",
@@ -240,21 +300,14 @@ struct FoundRepo {
 
 /// The repositories connection from one account's GraphQL answer.
 ///
-/// The widget asks for both `organization` and `user` in one query so a
-/// login that is either kind costs one request. The org side wins when
-/// both come back, which is the usual shape for a company login.
+/// Discovery asks `repositoryOwner`, which is a user or an org. Tests and
+/// the viewer query still arrive as `organization` / `user` / `viewer`.
 fn repos_conn(data: &serde_json::Value) -> Option<&serde_json::Value> {
-    let org = &data["organization"]["repositories"];
-    if org["nodes"].is_array() {
-        return Some(org);
-    }
-    let user = &data["user"]["repositories"];
-    if user["nodes"].is_array() {
-        return Some(user);
-    }
-    let viewer = &data["viewer"]["repositories"];
-    if viewer["nodes"].is_array() {
-        return Some(viewer);
+    for key in ["repositoryOwner", "organization", "user", "viewer"] {
+        let conn = &data[key]["repositories"];
+        if conn["nodes"].is_array() {
+            return Some(conn);
+        }
     }
     None
 }
@@ -282,30 +335,112 @@ fn repos_from(data: &serde_json::Value) -> Vec<FoundRepo> {
         .collect()
 }
 
-/// The recently-pushed repos that actually have workflows, capped.
+fn repo_owner(name: &str) -> String {
+    name.split_once('/')
+        .map(|(o, _)| o.to_string())
+        .unwrap_or_default()
+}
+
+fn is_personal(owner: &str, viewer: &str) -> bool {
+    !viewer.is_empty() && owner.eq_ignore_ascii_case(viewer)
+}
+
+/// How many eligible repos were kept, split so a cap on one org cannot
+/// be drawn as the whole board.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct PickStats {
+    personal: usize,
+    personal_found: usize,
+    org: usize,
+    org_found: usize,
+}
+
+/// The recently-pushed repos that actually have workflows, capped per owner.
 ///
-/// Sorted newest first. The cap is applied after the filter, and what
-/// comes back beside the list is how many passed the filter — so a board
-/// that shows 16 of 40 can say so, rather than presenting 16 as the set.
-fn pick_repos(found: &[FoundRepo], pushed_since: f64, cap: usize) -> (Vec<String>, usize) {
-    let mut eligible: Vec<&FoundRepo> = found
-        .iter()
-        .filter(|r| {
-            if !r.has_workflows {
-                return false;
-            }
-            match iso_secs(&r.pushed_at) {
-                Some(at) => at >= pushed_since,
-                None => true,
-            }
-        })
-        .collect();
-    eligible.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
-    let total = eligible.len();
-    (
-        eligible.into_iter().take(cap).map(|r| r.name.clone()).collect(),
-        total,
-    )
+/// A global cap lets one busy org eat every slot and hide personal repos.
+/// The cap is applied inside each owner after the filter, personal first,
+/// then orgs alphabetically. What comes back beside the list is how many
+/// passed the filter in each scope — so a board that shows 16 of 40 in
+/// one org can say so, rather than presenting 16 as the set.
+fn pick_repos(
+    found: &[FoundRepo],
+    pushed_since: f64,
+    cap: usize,
+    viewer: &str,
+) -> (Vec<String>, PickStats) {
+    let mut groups: HashMap<String, Vec<&FoundRepo>> = HashMap::new();
+    for repo in found {
+        if !repo.has_workflows {
+            continue;
+        }
+        match iso_secs(&repo.pushed_at) {
+            Some(at) if at < pushed_since => continue,
+            _ => {}
+        }
+        groups.entry(repo_owner(&repo.name)).or_default().push(repo);
+    }
+    for list in groups.values_mut() {
+        list.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+    }
+    let mut owners: Vec<String> = groups.keys().cloned().collect();
+    owners.sort_by(|a, b| {
+        match (is_personal(a, viewer), is_personal(b, viewer)) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()),
+        }
+    });
+    let mut picked = Vec::new();
+    let mut stats = PickStats::default();
+    for owner in owners {
+        let list = groups.get(&owner).map(|v| v.as_slice()).unwrap_or(&[]);
+        let take: Vec<String> = list.iter().take(cap).map(|r| r.name.clone()).collect();
+        if is_personal(&owner, viewer) {
+            stats.personal = take.len();
+            stats.personal_found = list.len();
+        } else {
+            stats.org += take.len();
+            stats.org_found += list.len();
+        }
+        picked.extend(take);
+    }
+    (picked, stats)
+}
+
+fn sort_runs_by_scope(runs: &mut [serde_json::Value], viewer: &str) {
+    runs.sort_by(|a, b| {
+        let oa = repo_owner(&text(a, "repo"));
+        let ob = repo_owner(&text(b, "repo"));
+        match (is_personal(&oa, viewer), is_personal(&ob, viewer)) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => oa
+                .to_ascii_lowercase()
+                .cmp(&ob.to_ascii_lowercase())
+                .then_with(|| text(b, "created_at").cmp(&text(a, "created_at"))),
+        }
+    });
+}
+
+fn scope_heading(owner: &str, viewer: &str) -> String {
+    if is_personal(owner, viewer) {
+        format!(" ── PERSONAL · {} ── ", owner)
+    } else {
+        format!(" ── {} ── ", owner.to_ascii_uppercase())
+    }
+}
+
+/// How long ago the run was created. A missing stamp is `--`, not `0s`.
+fn run_age(run: &serde_json::Value, at: f64) -> String {
+    match iso_secs(&text(run, "created_at")) {
+        Some(created) => age_label((at - created).max(0.0)),
+        None => "--".into(),
+    }
+}
+
+/// Run durations oldest-first so a sparkline suffix is the recent end.
+fn recent_run_secs(runs: &[serde_json::Value], at: f64) -> Vec<f64> {
+    runs.iter().rev().filter_map(|r| run_secs(r, at)).collect()
 }
 
 fn after_arg(after: Option<&str>) -> String {
@@ -320,16 +455,7 @@ fn discover_query(login: &str, after: Option<&str>) -> String {
     let at = after_arg(after);
     format!(
         r#"{{
-  organization(login: {q}) {{
-    repositories(first: {n}, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false{at}) {{
-      pageInfo {{ hasNextPage endCursor }}
-      nodes {{
-        nameWithOwner isEmpty isFork pushedAt
-        object(expression: "HEAD:.github/workflows") {{ ... on Tree {{ entries {{ name }} }} }}
-      }}
-    }}
-  }}
-  user(login: {q}) {{
+  repositoryOwner(login: {q}) {{
     repositories(first: {n}, ownerAffiliations: OWNER, orderBy: {{field: PUSHED_AT, direction: DESC}}, isArchived: false{at}) {{
       pageInfo {{ hasNextPage endCursor }}
       nodes {{
@@ -461,65 +587,70 @@ fn matches_needle(run: &serde_json::Value, needle: &str) -> bool {
     .any(|s| s.to_ascii_lowercase().contains(&n))
 }
 
-/// What the board is looking at, in the widget's own words.
-///
-/// A cap that is not named is a total. The sentence always says which
-/// window, and whether the repo list was given or discovered and cut.
+fn counted(picked: usize, found: usize, noun: &str) -> String {
+    if found > picked {
+        format!("{} of {} {}", picked, found, noun)
+    } else {
+        format!("{} {}", picked, noun)
+    }
+}
+
+/// What the board is looking at, when that is not already on the activity
+/// line. The window itself is `runs/hour, last 48h`, like deployments.
+/// This sentence is only the cap, because a cap that is not named is a total.
 fn scope_sentence(
     explicit: bool,
     repos: usize,
-    found: usize,
-    accounts: usize,
-    window_hours: i64,
+    stats: &PickStats,
+    orgs: usize,
+    _window_hours: i64,
     pushed_days: i64,
 ) -> String {
-    let window = window_label(window_hours);
     if explicit {
         return format!(
-            "last {} · {} configured repo{}",
-            window,
+            "{} configured repo{}",
             repos,
             if repos == 1 { "" } else { "s" }
         );
     }
-    let who = match accounts {
-        0 => "no accounts".into(),
-        1 => "1 account".into(),
-        n => format!("{} accounts", n),
-    };
-    if found > repos {
-        format!(
-            "last {} · {} of {} recently pushed repos with workflows ({}, pushed in {}d)",
-            window, repos, found, who, pushed_days
-        )
-    } else {
-        format!(
-            "last {} · {} recently pushed repo{} with workflows ({}, pushed in {}d)",
-            window,
-            repos,
-            if repos == 1 { "" } else { "s" },
-            who,
-            pushed_days
-        )
+    let cut = stats.personal_found > stats.personal || stats.org_found > stats.org;
+    let none = stats.personal + stats.org == 0;
+    if !cut && !none {
+        return String::new();
     }
+    let orgs_said = match orgs {
+        0 => "no orgs".to_string(),
+        1 => "1 org".to_string(),
+        n => format!("{} orgs", n),
+    };
+    format!(
+        "{} · {} ({}, pushed in {}d)",
+        counted(stats.personal, stats.personal_found, "personal"),
+        counted(stats.org, stats.org_found, "org"),
+        orgs_said,
+        pushed_days
+    )
 }
 
 /// Progressive disclosure: extra width buys extra columns, never padding.
+///
+/// `single` is the deployments shape: wide enough that the commit title
+/// fits on the same row as the metadata, so the list is one line per run.
 struct Columns {
-    branch: bool,
+    single: bool,
+    detail: bool,
     event: bool,
     queued: bool,
-    number: bool,
     repo: usize,
     workflow: usize,
 }
 
 fn columns(w: usize) -> Columns {
     Columns {
-        branch: w >= 72,
-        event: w >= 92,
-        queued: w >= 104,
-        number: w >= 124,
+        detail: w >= 72,
+        single: w >= 110,
+        event: w >= 100,
+        queued: w >= 114,
         repo: if w < 70 {
             10
         } else if w < 100 {
@@ -546,11 +677,14 @@ struct Palette {
     cancel: String,
     dim: String,
     dim_lit: String,
+    grid: String,
+    msg: String,
     hint: String,
     txt: String,
     lbl: String,
     accent: String,
     branch: String,
+    sha: String,
 }
 
 fn palette() -> Palette {
@@ -565,12 +699,71 @@ fn palette() -> Palette {
         // twin is what the tint closure reaches for.
         dim: tc::rgb(127, 147, 172),
         dim_lit: tc::rgb(140, 170, 195),
+        grid: tc::rgb(71, 91, 116),
+        msg: tc::rgb(158, 174, 196),
         hint: tc::rgb(126, 148, 173),
         txt: tc::rgb(225, 235, 245),
         lbl: tc::rgb(130, 165, 200),
         accent: tc::rgb(150, 210, 255),
         branch: tc::rgb(150, 210, 255),
+        sha: tc::rgb(190, 170, 255),
     }
+}
+
+/// Runs per time bucket, coloured by the worst outcome in it — the same
+/// chart `deployments` draws for deploys/hour.
+fn activity(
+    runs: &[serde_json::Value],
+    w: usize,
+    hours: f64,
+    p: &Palette,
+) -> (String, usize) {
+    let cols = w.saturating_sub(2).max(10);
+    let at = tc::now();
+    let span = hours * 3_600.0;
+    let mut buckets: Vec<Vec<&serde_json::Value>> = vec![Vec::new(); cols];
+    for run in runs {
+        let Some(created) = iso_secs(&text(run, "created_at")) else {
+            continue;
+        };
+        let off = at - created;
+        if (0.0..span).contains(&off) {
+            let slot = cols - 1 - (off / span * cols as f64) as usize;
+            buckets[slot.min(cols - 1)].push(run);
+        }
+    }
+    let peak = buckets.iter().map(|b| b.len()).max().unwrap_or(0);
+    if peak == 0 {
+        return (
+            tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    format!(" no runs in the last {}h", hours as i64),
+                )],
+                w - 1,
+            ),
+            0,
+        );
+    }
+    let mut parts: Vec<(&str, String)> = vec![(p.dim.as_str(), " ".into())];
+    for bucket in &buckets {
+        if bucket.is_empty() {
+            parts.push((p.grid.as_str(), "·".into()));
+            continue;
+        }
+        let colour = if bucket.iter().any(|r| is_failed(r)) {
+            &p.fail
+        } else if bucket.iter().any(|r| text(r, "status") == "in_progress") {
+            &p.run
+        } else if bucket.iter().any(|r| is_running(r)) {
+            &p.queue
+        } else {
+            &p.ok
+        };
+        let level = ((bucket.len() as f64 / peak as f64) * 7.99) as usize;
+        parts.push((colour.as_str(), tc::SPARK[level.min(7)].to_string()));
+    }
+    (tc::seg(&parts, w - 1), peak)
 }
 
 fn outcome_colour<'a>(kind: &str, p: &'a Palette) -> &'a str {
@@ -591,6 +784,9 @@ struct State {
     fetched: f64,
     scope: String,
     window_hours: i64,
+    viewer: String,
+    accounts: usize,
+    rate: Option<(i64, i64)>,
 }
 
 /// Fold a finished pass into the live state.
@@ -608,6 +804,11 @@ fn apply_pass(live: &mut State, got: State) {
         live.runs = got.runs;
         live.fetched = got.fetched;
         live.scope = got.scope;
+        live.viewer = got.viewer;
+        live.accounts = got.accounts;
+    }
+    if got.rate.is_some() {
+        live.rate = got.rate;
     }
     live.err = got.err;
 }
@@ -633,6 +834,7 @@ fn fetch_runs_for(
     repo: &str,
     tok: &str,
     hours: i64,
+    rate: &mut Option<(i64, i64)>,
 ) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
     let (owner, name) = split_repo(repo).ok_or_else(|| format!("not owner/name: {}", repo))?;
     let created = created_filter(hours);
@@ -643,7 +845,7 @@ fn fetch_runs_for(
         RUN_PAGE,
         urlencoding_lite(&created)
     );
-    let res = rest_get(&path, tok)?;
+    let res = rest_get(&path, tok, rate)?;
     let total = res["total_count"].as_i64().unwrap_or(0);
     let raw = res["workflow_runs"].as_array().cloned().unwrap_or_default();
     let fetched = raw.len();
@@ -676,12 +878,12 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-fn discover_accounts(tok: &str) -> Result<(String, Vec<String>), String> {
+fn discover_accounts(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<(String, Vec<String>), String> {
     let mut viewer = String::new();
     let mut accounts = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let data = graphql(&orgs_query(cursor.as_deref()), tok)?;
+        let data = graphql(&orgs_query(cursor.as_deref()), tok, rate)?;
         if viewer.is_empty() {
             viewer = data["viewer"]["login"].as_str().unwrap_or("").to_string();
             if viewer.is_empty() {
@@ -722,6 +924,7 @@ fn discover_account_pages(
     tok: &str,
     acc: &str,
     since: f64,
+    rate: &mut Option<(i64, i64)>,
 ) -> Result<(Vec<FoundRepo>, Option<String>), String> {
     let mut found = Vec::new();
     let mut cursor: Option<String> = None;
@@ -732,7 +935,7 @@ fn discover_account_pages(
         } else {
             discover_query(acc, cursor.as_deref())
         };
-        let data = match graphql(&query, tok) {
+        let data = match graphql(&query, tok, rate) {
             Ok(d) => d,
             Err(said) => {
                 return Ok((found, Some(format!("{}: {}", acc, said))));
@@ -775,12 +978,14 @@ fn discover_repos(
     accounts: &[String],
     pushed_days: i64,
     cap: usize,
-) -> Result<(Vec<String>, usize, Option<String>), String> {
+    viewer: &str,
+    rate: &mut Option<(i64, i64)>,
+) -> Result<(Vec<String>, PickStats, Option<String>), String> {
     let since = tc::now() - (pushed_days as f64 * 86400.0);
     let mut found: Vec<FoundRepo> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for acc in accounts {
-        match discover_account_pages(tok, acc, since) {
+        match discover_account_pages(tok, acc, since, rate) {
             Ok((page, note)) => {
                 found.extend(page);
                 if let Some(said) = note {
@@ -790,15 +995,31 @@ fn discover_repos(
             Err(said) => notes.push(format!("{}: {}", acc, said)),
         }
     }
-    found.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+    // Same-name rows have to be adjacent before dedup_by can collapse them.
+    // Newest push wins, then the per-owner cap in pick_repos.
+    found.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| b.pushed_at.cmp(&a.pushed_at))
+    });
     found.dedup_by(|a, b| a.name == b.name);
-    let (picked, eligible) = pick_repos(&found, since, cap);
+    let (picked, stats) = pick_repos(&found, since, cap, viewer);
     let note = if notes.is_empty() {
         None
     } else {
         Some(notes.join(" · "))
     };
-    Ok((picked, eligible, note))
+    Ok((picked, stats, note))
+}
+
+fn viewer_login(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<String, String> {
+    let data = graphql("{ viewer { login } }", tok, rate)?;
+    let login = data["viewer"]["login"].as_str().unwrap_or("").to_string();
+    if login.is_empty() {
+        Err("no viewer login in the response".into())
+    } else {
+        Ok(login)
+    }
 }
 
 fn one_pass(
@@ -815,32 +1036,50 @@ fn one_pass(
     } else {
         String::new()
     };
-    let (repos, found, discovered_accounts, is_explicit) = if !explicit.is_empty() {
-        (explicit.to_vec(), explicit.len(), accounts.len(), true)
+    let mut rate = None;
+    let empty_stats = PickStats::default();
+    let (repos, stats, viewer, orgs, n_accounts, is_explicit) = if !explicit.is_empty() {
+        let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+        let n = explicit
+            .iter()
+            .map(|r| repo_owner(r))
+            .filter(|o| !o.is_empty())
+            .collect::<HashSet<_>>()
+            .len();
+        (explicit.to_vec(), empty_stats, viewer, 0usize, n, true)
     } else {
-        let want = if accounts.is_empty() {
-            match discover_accounts(tok) {
-                Ok((_viewer, found)) => found,
+        let (viewer, want) = if accounts.is_empty() {
+            match discover_accounts(tok, &mut rate) {
+                Ok(got) => got,
                 Err(said) => {
                     return Ok(State {
                         err: format!("could not list accounts: {}", said),
+                        rate,
                         window_hours: hours,
                         ..Default::default()
                     });
                 }
             }
         } else {
-            accounts.to_vec()
+            let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
+            (viewer, accounts.to_vec())
         };
         if want.is_empty() {
             return Ok(State {
-                err: "no accounts: set gha.accounts or github.accounts in config.json".into(),
+                err: "no accounts: leave gha.accounts empty to discover your login and orgs, or name them".into(),
+                viewer,
+                rate,
                 window_hours: hours,
                 ..Default::default()
             });
         }
-        match discover_repos(tok, &want, pushed_days, cap) {
-            Ok((repos, found, note)) => {
+        let n_accounts = want.len();
+        let orgs = want
+            .iter()
+            .filter(|a| !is_personal(a, &viewer))
+            .count();
+        match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate) {
+            Ok((repos, stats, note)) => {
                 if let Some(said) = note {
                     err = if err.is_empty() {
                         said
@@ -848,11 +1087,14 @@ fn one_pass(
                         format!("{} · {}", err, said)
                     };
                 }
-                (repos, found, want.len(), false)
+                (repos, stats, viewer, orgs, n_accounts, false)
             }
             Err(said) => {
                 return Ok(State {
                     err: format!("could not list repos: {}", said),
+                    viewer,
+                    accounts: n_accounts,
+                    rate,
                     window_hours: hours,
                     ..Default::default()
                 });
@@ -861,16 +1103,24 @@ fn one_pass(
     };
 
     if repos.is_empty() {
+        let said = if is_explicit {
+            "no repos: gha.repos is empty and no owner/repo was given".into()
+        } else {
+            format!(
+                "no repos with workflows among those pushed in the last {}d — set gha.repos to name them",
+                pushed_days
+            )
+        };
         return Ok(State {
-            err: if is_explicit {
-                "no repos: gha.repos is empty and no owner/repo was given".into()
+            err: if err.is_empty() {
+                said
             } else {
-                format!(
-                    "no repos with workflows among those pushed in the last {}d — set gha.repos to name them",
-                    pushed_days
-                )
+                format!("{} · {}", err, said)
             },
-            scope: scope_sentence(is_explicit, 0, found, discovered_accounts, hours, pushed_days),
+            scope: scope_sentence(is_explicit, 0, &stats, orgs, hours, pushed_days),
+            viewer,
+            accounts: n_accounts,
+            rate,
             window_hours: hours,
             ..Default::default()
         });
@@ -879,7 +1129,7 @@ fn one_pass(
     let mut runs = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     for repo in &repos {
-        match fetch_runs_for(repo, tok, hours) {
+        match fetch_runs_for(repo, tok, hours, &mut rate) {
             Ok((got, note)) => {
                 runs.extend(got);
                 if let Some(said) = note {
@@ -919,11 +1169,14 @@ fn one_pass(
         scope: scope_sentence(
             is_explicit,
             repos.len(),
-            found,
-            discovered_accounts,
+            &stats,
+            orgs,
             hours,
             pushed_days,
         ),
+        viewer,
+        accounts: n_accounts,
+        rate,
         window_hours: hours,
     })
 }
@@ -938,7 +1191,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
         return serde_json::json!({ "_error": "run has no id" });
     }
     let path = format!("/repos/{}/{}/actions/runs/{}/jobs?per_page=100", owner, name, id);
-    match rest_get(&path, tok) {
+    match rest_get(&path, tok, &mut None) {
         Ok(mut v) => {
             v["_fetched_at"] = serde_json::json!(tc::now());
             v
@@ -1140,10 +1393,7 @@ fn main() {
     let cfg = tc::load_config("gha");
     let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0).max(30.0);
-    let mut accounts = tc::cfg_strings(&cfg, "accounts", &[]);
-    if accounts.is_empty() {
-        accounts = tc::cfg_strings(&gh, "accounts", &[]);
-    }
+    let accounts = tc::cfg_strings(&cfg, "accounts", &[]);
     let configured = tc::cfg_strings(&cfg, "repos", &[]);
     let start_window = (tc::cfg_f64(&cfg, "window_hours", 48.0) as i64).max(1);
     let max_repos = tc::cfg_usize(&cfg, "max_repos", 16).max(1);
@@ -1273,6 +1523,7 @@ fn main() {
     let mut filter = 0usize;
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
+    let mut overlay_id: i64 = 0;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
     let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
@@ -1300,7 +1551,10 @@ fn main() {
             }
             if overlay {
                 match key.as_str() {
-                    "left" | "esc" => overlay = false,
+                    "left" | "esc" => {
+                        overlay = false;
+                        overlay_id = 0;
+                    },
                     "up" | "k" | "K" => oscroll = oscroll.saturating_sub(1),
                     "down" | "j" | "J" => oscroll = oscroll.saturating_add(1),
                     "pgup" => {
@@ -1387,6 +1641,10 @@ fn main() {
                         overlay = true;
                         oscroll = 0;
                         note = (String::new(), 0.0);
+                        overlay_id = shown
+                            .get(selected)
+                            .and_then(|r| r["id"].as_i64())
+                            .unwrap_or(0);
                     }
                 }
                 _ => {}
@@ -1394,13 +1652,16 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (runs, err, fetched, scope, hours) = match state.lock() {
+        let (runs, err, fetched, scope, hours, viewer, n_accounts, rate) = match state.lock() {
             Ok(g) => (
                 g.runs.clone(),
                 g.err.clone(),
                 g.fetched,
                 g.scope.clone(),
                 g.window_hours,
+                g.viewer.clone(),
+                g.accounts,
+                g.rate,
             ),
             Err(_) => return,
         };
@@ -1416,6 +1677,23 @@ fn main() {
             "failed" => shown.retain(is_failed),
             "running" => shown.retain(is_running),
             _ => {}
+        }
+        sort_runs_by_scope(&mut shown, &viewer);
+        if overlay {
+            if shown.is_empty() {
+                overlay = false;
+                overlay_id = 0;
+            } else if overlay_id != 0 {
+                if let Some(i) = shown
+                    .iter()
+                    .position(|r| r["id"].as_i64() == Some(overlay_id))
+                {
+                    selected = i;
+                } else {
+                    overlay = false;
+                    overlay_id = 0;
+                }
+            }
         }
         if !shown.is_empty() && selected >= shown.len() {
             selected = shown.len() - 1;
@@ -1494,62 +1772,128 @@ fn main() {
         }
 
         let mut rows = vec![tc::title("github actions", w, &p.accent)];
+        let mut meta = vec![
+            (
+                p.dim.as_str(),
+                format!(
+                    " {} account{}",
+                    n_accounts,
+                    if n_accounts == 1 { "" } else { "s" }
+                ),
+            ),
+            (
+                p.dim.as_str(),
+                format!("   updated {} ago", updated_ago(fetched)),
+            ),
+        ];
+        if let Some((left, limit)) = rate {
+            meta.push((
+                if left > 1000 { p.ok.as_str() } else { p.run.as_str() },
+                format!("   {}/{} api", left, limit),
+            ));
+        }
+        rows.push(tc::seg(&meta, w - 1));
         let (running, queued, failed, ok) = counts(&runs);
-        let age = if fetched > 0.0 {
-            format!("{} ago", age_label(tc::now() - fetched))
-        } else {
-            "…".into()
-        };
+        let repo_names: HashSet<String> = runs.iter().map(|r| text(r, "repo")).collect();
+        let mut head = vec![
+            (p.dim.as_str(), format!(" {} runs", runs.len())),
+            (p.dim.as_str(), format!(" · {} repos", repo_names.len())),
+        ];
+        if ok > 0 || !runs.is_empty() {
+            head.push((p.ok.as_str(), format!("  {} success", ok)));
+        }
+        if failed > 0 {
+            head.push((p.fail.as_str(), format!("  {} failed", failed)));
+        }
+        if queued > 0 {
+            head.push((p.queue.as_str(), format!("  {} queued", queued)));
+        }
+        if running > 0 {
+            head.push((
+                p.run.as_str(),
+                format!("  {} {} running", tc::SPINNER[tick % tc::SPINNER.len()], running),
+            ));
+        }
+        rows.push(tc::seg(&head, w - 1));
+        if !scope.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", scope))], w - 1));
+        }
+        if !err.is_empty() {
+            rows.push(tc::seg(&[(p.fail.as_str(), format!(" ! {}", err))], w - 1));
+        }
+        let mut bits: Vec<String> = Vec::new();
+        if FILTERS[filter] != "all" {
+            bits.push(FILTERS[filter].to_string());
+        }
+        if !needle.is_empty() {
+            bits.push(format!("/{}", needle));
+        }
+        if !bits.is_empty() || typing {
+            rows.push(tc::seg(
+                &[
+                    (p.run.as_str(), format!(" filter: {}", bits.join(" + "))),
+                    (p.run.as_str(), if typing { "▏".into() } else { String::new() }),
+                    (
+                        p.dim.as_str(),
+                        if typing {
+                            "  enter to keep · esc to clear".into()
+                        } else {
+                            String::new()
+                        },
+                    ),
+                ],
+                w - 1,
+            ));
+        }
+
+        rows.push(String::new());
         rows.push(tc::seg(
             &[
-                (p.dim.as_str(), format!(" {}", if scope.is_empty() { format!("last {}", window_label(hours)) } else { scope })),
-                (p.dim.as_str(), format!("   {}", age)),
+                (p.lbl.as_str(), " ── ACTIVITY ── ".into()),
+                (p.dim.as_str(), format!("runs/hour, last {}h", hours)),
             ],
             w - 1,
         ));
-        if !runs.is_empty() {
+        let (chart, peak) = activity(&runs, w, hours as f64, &p);
+        rows.push(chart);
+        if peak > 0 {
             rows.push(tc::seg(
                 &[
-                    (p.run.as_str(), format!(" {} running", running)),
-                    (p.queue.as_str(), format!("  {} queued", queued)),
-                    (p.fail.as_str(), format!("  {} failed", failed)),
-                    (p.ok.as_str(), format!("  {} ok", ok)),
-                    (
-                        p.dim.as_str(),
-                        format!("   {} in {}", runs.len(), window_label(hours)),
-                    ),
+                    (p.dim.as_str(), format!(" {}h ago", hours)),
+                    (p.dim.as_str(), " ".repeat(w.saturating_sub(22).max(1))),
+                    (p.dim.as_str(), format!("peak {}/h", peak)),
                 ],
                 w - 1,
             ));
-        }
-        if !err.is_empty() {
-            rows.push(tc::seg(&[(p.fail.as_str(), format!(" {}", err))], w - 1));
         }
 
         if !runs.is_empty() {
-            let total = (running + queued + failed + ok).max(1) as f64;
-            rows.push(String::new());
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── STATE ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!("{} runs in {}", runs.len(), window_label(hours)),
-                    ),
-                ],
-                w - 1,
-            ));
-            let bar = tc::stacked_bar(
-                &[
-                    (failed as f64 / total, p.fail.clone()),
-                    (running as f64 / total, p.run.clone()),
-                    (queued as f64 / total, p.queue.clone()),
-                    (ok as f64 / total, p.ok.clone()),
-                ],
-                w.saturating_sub(2).max(8),
-            );
-            let refs: Vec<(&str, String)> = bar.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-            rows.push(tc::seg(&refs, w - 1));
+            let mut durs: Vec<f64> = runs.iter().filter_map(|r| run_secs(r, tc::now())).collect();
+            durs.sort_by(f64::total_cmp);
+            let mut queues: Vec<f64> = runs.iter().filter_map(|r| queue_secs(r, tc::now())).collect();
+            queues.sort_by(f64::total_cmp);
+            if !durs.is_empty() {
+                rows.push(String::new());
+                rows.push(tc::seg(
+                    &[
+                        (p.lbl.as_str(), " ── DURATION ── ".into()),
+                        (p.dim.as_str(), "median ".into()),
+                        (p.txt.as_str(), dur_label(durs.get(durs.len() / 2).copied())),
+                        (p.dim.as_str(), "  p95 ".into()),
+                        (p.txt.as_str(), dur_label(percentile(&durs, 0.95))),
+                        (p.dim.as_str(), "  max ".into()),
+                        (p.txt.as_str(), dur_label(durs.last().copied())),
+                        (p.dim.as_str(), "  queue ".into()),
+                        (p.txt.as_str(), dur_label(queues.get(queues.len() / 2).copied())),
+                    ],
+                    w - 1,
+                ));
+                let recent = recent_run_secs(&runs, tc::now());
+                let spark = sparkline(&recent, w.saturating_sub(2).max(10));
+                if !spark.is_empty() {
+                    rows.push(tc::seg(&[(p.ok.as_str(), format!(" {}", spark))], w - 1));
+                }
+            }
 
             let repeats = repeat_failures(&runs);
             if !repeats.is_empty() {
@@ -1570,63 +1914,18 @@ fn main() {
                     ));
                 }
             }
-
-            let mut durs: Vec<f64> = runs.iter().filter_map(|r| run_secs(r, tc::now())).collect();
-            durs.sort_by(f64::total_cmp);
-            let mut queues: Vec<f64> = runs.iter().filter_map(|r| queue_secs(r, tc::now())).collect();
-            queues.sort_by(f64::total_cmp);
-            if !durs.is_empty() {
-                rows.push(String::new());
-                rows.push(tc::seg(
-                    &[
-                        (p.lbl.as_str(), " ── DURATION ── ".into()),
-                        (p.dim.as_str(), "median ".into()),
-                        (p.txt.as_str(), dur_label(durs.get(durs.len() / 2).copied())),
-                        (p.dim.as_str(), "  p95 ".into()),
-                        (p.txt.as_str(), dur_label(percentile(&durs, 0.95))),
-                        (p.dim.as_str(), "  queue median ".into()),
-                        (p.txt.as_str(), dur_label(queues.get(queues.len() / 2).copied())),
-                    ],
-                    w - 1,
-                ));
-                let recent: Vec<f64> = runs
-                    .iter()
-                    .rev()
-                    .filter_map(|r| run_secs(r, tc::now()))
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                let spark = sparkline(&recent, w.saturating_sub(2).max(10));
-                if !spark.is_empty() {
-                    rows.push(tc::seg(&[(p.ok.as_str(), format!(" {}", spark))], w - 1));
-                }
-            }
         }
 
         rows.push(String::new());
         rows.push(tc::seg(
             &[
-                (p.lbl.as_str(), " ── RUNS ── ".into()),
+                (p.lbl.as_str(), " ── RECENT ── ".into()),
                 (
                     p.dim.as_str(),
                     if shown.is_empty() {
-                        if typing {
-                            format!("filter /{}", needle)
-                        } else {
-                            String::new()
-                        }
+                        String::new()
                     } else {
-                        format!(
-                            "{} of {}{}",
-                            selected + 1,
-                            shown.len(),
-                            if typing {
-                                format!("  /{}", needle)
-                            } else {
-                                String::new()
-                            }
-                        )
+                        format!("{} of {}", selected + 1, shown.len())
                     },
                 ),
             ],
@@ -1634,7 +1933,8 @@ fn main() {
         ));
 
         let cols = columns(w);
-        visible = h.saturating_sub(rows.len() + 2).max(1);
+        let per_item = if cols.single { 1 } else { 2 };
+        visible = (h.saturating_sub(rows.len() + 2) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
         if selected < scroll {
             scroll = selected;
@@ -1642,9 +1942,21 @@ fn main() {
             scroll = selected + 1 - visible;
         }
 
-        for (i, run) in shown.iter().enumerate().skip(scroll).take(visible) {
+        let mut prev_owner = String::new();
+        for (i, run) in shown.iter().enumerate().skip(scroll) {
             if rows.len() >= h.saturating_sub(1) {
                 break;
+            }
+            let owner = repo_owner(&text(run, "repo"));
+            if owner != prev_owner {
+                rows.push(tc::seg(
+                    &[(p.lbl.as_str(), scope_heading(&owner, &viewer))],
+                    w - 1,
+                ));
+                prev_owner = owner;
+                if rows.len() >= h.saturating_sub(1) {
+                    break;
+                }
             }
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
@@ -1674,12 +1986,14 @@ fn main() {
             } else {
                 '○'
             };
-            let created = iso_secs(&text(run, "created_at")).unwrap_or(tc::now());
+            let subject = text(run, "display_title");
+            let subject = subject.lines().next().unwrap_or("").to_string();
+            let sha = text(run, "head_sha");
             let mut line = vec![
                 (
                     c(colour),
                     format!(
-                        "{}{} {:<7}",
+                        "{}{} {:<9}",
                         if here { "▸" } else { " " },
                         mark,
                         outcome_label(&kind)
@@ -1687,22 +2001,32 @@ fn main() {
                 ),
                 (c(&p.txt), tc::pad(&repo_short(&text(run, "repo")), cols.repo)),
                 (c(&p.txt), tc::pad(&text(run, "workflow"), cols.workflow)),
+                (c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))),
+                (c(&p.dim), format!(" {:>4}", run_age(run, tc::now()))),
             ];
-            if cols.branch {
-                line.push((c(&p.branch), format!(" {}", tc::pad(&text(run, "branch"), 14))));
+            if cols.detail {
+                line.push((
+                    c(&p.sha),
+                    format!("  {}", &sha[..sha.len().min(7)]),
+                ));
+                line.push((
+                    c(&p.branch),
+                    format!(" {}", tc::pad(&text(run, "branch"), 14)),
+                ));
             }
             if cols.event {
                 line.push((c(&p.dim), format!(" {}", tc::pad(&text(run, "event"), 12))));
             }
-            line.push((c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))));
             if cols.queued {
-                line.push((c(&p.dim), format!(" q{}", dur_label(queue_secs(run, tc::now())).trim())));
-            }
-            line.push((c(&p.dim), format!(" {:>4}", age_label((tc::now() - created).max(0.0)))));
-            if cols.number {
                 line.push((
                     c(&p.dim),
-                    format!(" #{}", run["run_number"].as_i64().unwrap_or(0)),
+                    format!(" q{}", dur_label(queue_secs(run, tc::now())).trim()),
+                ));
+            }
+            if cols.single {
+                line.push((
+                    c(if here { &p.txt } else { &p.msg }),
+                    format!(" {}", subject),
                 ));
             }
             if here {
@@ -1710,6 +2034,19 @@ fn main() {
             }
             let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            if !cols.single && rows.len() < h.saturating_sub(1) {
+                rows.push(tc::seg(
+                    &[
+                        (
+                            &c(if here { &p.txt } else { &p.msg }),
+                            format!("   {}", subject),
+                        ),
+                        (&tint, if here { " ".repeat(w) } else { String::new() }),
+                    ],
+                    w - 1,
+                ));
+            }
+            visible = i.saturating_sub(scroll) + 1;
         }
 
         if shown.is_empty() && err.is_empty() {
@@ -1727,7 +2064,7 @@ fn main() {
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " jobs".into()),
+                (p.dim.as_str(), " details".into()),
             ],
             vec![(p.dim.as_str(), format!("[s]tate {}", FILTERS[filter]))],
             vec![(p.dim.as_str(), "[/]filter".into())],
@@ -1782,8 +2119,11 @@ mod tests {
         assert_eq!(token(&gha, &gh), ("from-gha".to_string(), "config"));
         let empty: serde_json::Value = serde_json::from_str(r#"{"token": ""}"#).unwrap();
         assert_eq!(token(&empty, &gh), ("from-github".to_string(), "config"));
-        let bare: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(token(&bare, &bare).1, "missing");
+        // A dummy env name, not GITHUB_TOKEN: CI often has that set, and
+        // the last-resort read would then look like a found token.
+        let nope: serde_json::Value =
+            serde_json::from_str(r#"{"token_env": "NOPE_TOKEN"}"#).unwrap();
+        assert_eq!(token(&nope, &nope).1, "missing");
     }
 
     #[test]
@@ -1815,7 +2155,7 @@ mod tests {
     }
 
     #[test]
-    fn repos_with_workflows_are_picked_newest_first_and_the_cap_is_named() {
+    fn repos_with_workflows_are_picked_newest_first_and_the_cap_is_per_owner() {
         let found = vec![
             FoundRepo {
                 name: "acme/old".into(),
@@ -1837,15 +2177,63 @@ mod tests {
                 pushed_at: "2026-08-25T00:00:00Z".into(),
                 has_workflows: true,
             },
+            FoundRepo {
+                name: "alice/toy".into(),
+                pushed_at: "2026-08-10T00:00:00Z".into(),
+                has_workflows: true,
+            },
         ];
         let since = iso_secs("2026-08-20T00:00:00Z").unwrap();
-        let (picked, total) = pick_repos(&found, since, 1);
+        let (picked, stats) = pick_repos(&found, since, 1, "alice");
+        // alice/toy is outside the push window; acme keeps its newest.
         assert_eq!(picked, vec!["acme/app".to_string()]);
-        assert_eq!(total, 2, "the cap is not the set");
-        // A repo pushed before the window is not counted, even with workflows.
-        let (none, total) = pick_repos(&found, iso_secs("2026-08-27T12:00:00Z").unwrap(), 8);
+        assert_eq!(stats.org, 1);
+        assert_eq!(stats.org_found, 2, "the cap is not the set");
+        assert_eq!(stats.personal, 0);
+
+        let since = iso_secs("2026-08-01T00:00:00Z").unwrap();
+        let (picked, stats) = pick_repos(&found, since, 1, "alice");
+        assert_eq!(picked, vec!["alice/toy".to_string(), "acme/app".to_string()]);
+        assert_eq!(stats.personal, 1);
+        assert_eq!(stats.personal_found, 1);
+        assert_eq!(stats.org, 1);
+        assert_eq!(stats.org_found, 3, "acme had three eligible, kept one");
+
+        let (none, stats) = pick_repos(&found, iso_secs("2026-08-27T12:00:00Z").unwrap(), 8, "alice");
         assert!(none.is_empty());
-        assert_eq!(total, 0);
+        assert_eq!(stats.personal_found + stats.org_found, 0);
+    }
+
+    #[test]
+    fn personal_runs_sort_ahead_of_orgs_and_keep_newest_inside_a_scope() {
+        let mut runs = vec![
+            serde_json::json!({
+                "repo": "acme/app", "created_at": "2026-08-27T12:00:00Z"
+            }),
+            serde_json::json!({
+                "repo": "alice/toy", "created_at": "2026-08-27T10:00:00Z"
+            }),
+            serde_json::json!({
+                "repo": "alice/toy", "created_at": "2026-08-27T11:00:00Z"
+            }),
+            serde_json::json!({
+                "repo": "beta/lib", "created_at": "2026-08-27T13:00:00Z"
+            }),
+        ];
+        sort_runs_by_scope(&mut runs, "alice");
+        let names: Vec<String> = runs.iter().map(|r| text(r, "repo")).collect();
+        assert_eq!(
+            names,
+            vec![
+                "alice/toy".to_string(),
+                "alice/toy".to_string(),
+                "acme/app".to_string(),
+                "beta/lib".to_string()
+            ]
+        );
+        assert_eq!(runs[0]["created_at"], "2026-08-27T11:00:00Z");
+        assert_eq!(scope_heading("alice", "alice"), " ── PERSONAL · alice ── ");
+        assert_eq!(scope_heading("acme", "alice"), " ── ACME ── ");
     }
 
     #[test]
@@ -1944,29 +2332,111 @@ mod tests {
     }
 
     #[test]
-    fn the_scope_sentence_names_a_cap_instead_of_calling_it_a_total() {
-        let cut = scope_sentence(false, 8, 21, 3, 48, 14);
-        assert!(cut.contains("8 of 21"), "{cut}");
-        assert!(cut.contains("2d"), "{cut}");
-        assert!(cut.contains("3 accounts"), "{cut}");
-        let exact = scope_sentence(false, 4, 4, 1, 24, 14);
-        assert!(!exact.contains(" of "), "{exact}");
-        assert!(exact.contains("1 account"), "{exact}");
-        let named = scope_sentence(true, 2, 2, 0, 12, 14);
+    fn the_scope_sentence_names_a_cap_per_scope_instead_of_calling_it_a_total() {
+        let cut = scope_sentence(
+            false,
+            17,
+            &PickStats {
+                personal: 3,
+                personal_found: 3,
+                org: 16,
+                org_found: 40,
+            },
+            2,
+            48,
+            14,
+        );
+        assert!(cut.contains("3 personal"), "{cut}");
+        assert!(cut.contains("16 of 40 org"), "{cut}");
+        assert!(cut.contains("2 orgs"), "{cut}");
+        assert!(!cut.contains("last "), "{cut}");
+        assert!(!cut.contains("17 of"), "{cut}");
+        let exact = scope_sentence(
+            false,
+            4,
+            &PickStats {
+                personal: 1,
+                personal_found: 1,
+                org: 3,
+                org_found: 3,
+            },
+            1,
+            24,
+            14,
+        );
+        assert!(
+            exact.is_empty(),
+            "uncapped look is named on the activity line, not twice: {exact}"
+        );
+        let named = scope_sentence(true, 2, &PickStats::default(), 0, 12, 14);
         assert!(named.contains("configured"), "{named}");
         assert!(!named.contains("recently pushed"), "{named}");
+        assert!(!named.contains("last "), "{named}");
+    }
+
+    #[test]
+    fn a_missing_created_stamp_is_not_drawn_as_zero() {
+        let at = iso_secs("2026-08-27T10:00:00Z").unwrap();
+        let stamped = serde_json::json!({ "created_at": "2026-08-27T09:59:00Z" });
+        assert_eq!(run_age(&stamped, at), "60s");
+        let blank = serde_json::json!({ "created_at": "" });
+        assert_eq!(run_age(&blank, at), "--");
+    }
+
+    #[test]
+    fn duration_spark_is_oldest_first_so_the_suffix_is_recent() {
+        let runs = vec![
+            run_json(
+                "completed",
+                "success",
+                "2026-08-27T10:03:00Z",
+                "2026-08-27T10:03:00Z",
+                "2026-08-27T10:03:10Z",
+            ),
+            run_json(
+                "completed",
+                "success",
+                "2026-08-27T10:02:00Z",
+                "2026-08-27T10:02:00Z",
+                "2026-08-27T10:02:20Z",
+            ),
+            run_json(
+                "completed",
+                "success",
+                "2026-08-27T10:01:00Z",
+                "2026-08-27T10:01:00Z",
+                "2026-08-27T10:01:30Z",
+            ),
+        ];
+        let secs = recent_run_secs(&runs, 0.0);
+        assert_eq!(secs, vec![30.0, 20.0, 10.0]);
+    }
+
+    #[test]
+    fn activity_skips_a_run_with_no_created_stamp() {
+        let p = palette();
+        let runs = vec![
+            serde_json::json!({
+                "created_at": "",
+                "status": "completed",
+                "conclusion": "success"
+            }),
+        ];
+        let (line, peak) = activity(&runs, 40, 48.0, &p);
+        assert_eq!(peak, 0);
+        assert!(line.contains("no runs"), "{line}");
     }
 
     #[test]
     fn width_buys_columns_rather_than_padding() {
-        assert!(!columns(60).branch);
-        assert!(columns(72).branch);
+        assert!(!columns(60).detail);
+        assert!(columns(72).detail);
+        assert!(!columns(100).single);
+        assert!(columns(110).single);
         assert!(!columns(90).event);
-        assert!(columns(92).event);
+        assert!(columns(100).event);
         assert!(!columns(100).queued);
-        assert!(columns(104).queued);
-        assert!(!columns(120).number);
-        assert!(columns(124).number);
+        assert!(columns(114).queued);
         assert_eq!(columns(60).repo, 10);
         assert_eq!(columns(200).repo, 18);
     }
@@ -1974,8 +2444,8 @@ mod tests {
     #[test]
     fn a_window_label_says_days_when_it_is_a_whole_number_of_them() {
         assert_eq!(window_label(12), "12h");
-        assert_eq!(window_label(24), "1d");
-        assert_eq!(window_label(48), "2d");
+        assert_eq!(window_label(24), "24h");
+        assert_eq!(window_label(48), "48h");
         assert_eq!(window_label(168), "7d");
     }
 
@@ -1990,6 +2460,27 @@ mod tests {
         assert_eq!(split_repo("/app"), None);
     }
 
+    #[test]
+    fn github_rate_headers_become_remaining_over_limit() {
+        let headers = vec![
+            ("x-ratelimit-remaining".into(), "4840".into()),
+            ("x-ratelimit-limit".into(), "5000".into()),
+            ("x-ratelimit-resource".into(), "core".into()),
+        ];
+        assert_eq!(rate_from_headers(&headers), Some((4840, 5000)));
+        assert_eq!(rate_from_headers(&[]), None);
+        assert_eq!(
+            rate_from_headers(&[("x-ratelimit-remaining".into(), "10".into())]),
+            None,
+            "a remaining without a limit is not a reading"
+        );
+    }
+
+    #[test]
+    fn a_missing_poll_stamp_is_not_drawn_as_zero_seconds_ago() {
+        assert_eq!(updated_ago(0.0), "--");
+    }
+
     fn sample_run(id: i64) -> serde_json::Value {
         serde_json::json!({ "id": id, "status": "completed", "conclusion": "success" })
     }
@@ -2002,6 +2493,7 @@ mod tests {
             fetched: 10.0,
             scope: "last 2d · 1 configured repo".into(),
             window_hours: 24,
+            ..Default::default()
         };
         apply_pass(
             &mut live,
@@ -2011,6 +2503,7 @@ mod tests {
                 fetched: 20.0,
                 scope: "last 7d · 1 configured repo".into(),
                 window_hours: 168,
+                ..Default::default()
             },
         );
         assert_eq!(live.runs.len(), 1);
@@ -2028,6 +2521,7 @@ mod tests {
             fetched: 10.0,
             scope: "last 2d · 1 configured repo".into(),
             window_hours: 48,
+            ..Default::default()
         };
         apply_pass(
             &mut live,
@@ -2037,6 +2531,7 @@ mod tests {
                 fetched: 20.0,
                 scope: "last 2d · 1 configured repo".into(),
                 window_hours: 48,
+                ..Default::default()
             },
         );
         assert_eq!(live.runs.len(), 1);
@@ -2052,6 +2547,7 @@ mod tests {
             fetched: 10.0,
             scope: "last 2d · 1 configured repo".into(),
             window_hours: 48,
+            ..Default::default()
         };
         request_window(&mut live, 12);
         assert_eq!(live.window_hours, 12);
@@ -2082,5 +2578,62 @@ mod tests {
         assert!(conn["pageInfo"]["hasNextPage"].as_bool().unwrap());
         assert_eq!(conn["pageInfo"]["endCursor"], "c1");
         assert_eq!(repos_from(&data).len(), 1);
+    }
+
+    #[test]
+    fn a_not_found_side_does_not_drop_the_repos_that_did_arrive() {
+        let body = serde_json::json!({
+            "data": {
+                "organization": {
+                    "repositories": {
+                        "nodes": [{
+                            "nameWithOwner": "acme/app",
+                            "isEmpty": false,
+                            "pushedAt": "2026-08-26T00:00:00Z",
+                            "object": {"entries": [{"name": "ci.yml"}]}
+                        }]
+                    }
+                },
+                "user": null
+            },
+            "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["user"],
+                "message": "Could not resolve to a User with the login of 'acme'."
+            }]
+        });
+        let data = graphql_payload(&body).expect("data is present");
+        assert_eq!(repos_from(&data).len(), 1);
+        assert!(repos_from(&data)[0].has_workflows);
+    }
+
+    #[test]
+    fn a_null_payload_is_the_graphql_failure() {
+        let body = serde_json::json!({
+            "data": null,
+            "errors": [{"message": "Something went wrong while executing your query"}]
+        });
+        let err = graphql_payload(&body).unwrap_err();
+        assert!(err.contains("Something went wrong"), "{err}");
+    }
+
+    #[test]
+    fn repository_owner_is_the_discover_shape() {
+        let data = serde_json::json!({
+            "repositoryOwner": {
+                "repositories": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": "c1" },
+                    "nodes": [{
+                        "nameWithOwner": "acme/app",
+                        "isEmpty": false,
+                        "pushedAt": "2026-08-26T00:00:00Z",
+                        "object": {"entries": [{"name": "ci.yml"}]}
+                    }]
+                }
+            }
+        });
+        let conn = repos_conn(&data).expect("owner connection");
+        assert_eq!(conn["pageInfo"]["endCursor"], "c1");
+        assert_eq!(repos_from(&data)[0].name, "acme/app");
     }
 }

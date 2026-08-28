@@ -607,6 +607,69 @@ pub fn get(url: &str, headers: &[(&str, &str)], seconds: u64) -> Result<String, 
     })
 }
 
+/// One HTTPS GET, returning the body and its headers.
+///
+/// Same reason as `post_json`: a rate limit is only knowable from the
+/// headers, and a widget that polls REST every minute should be able to
+/// say how much of its hour it has left. `get` keeps the body-only shape
+/// the other callers already use.
+pub fn get_with_headers(
+    url: &str,
+    headers: &[(&str, &str)],
+    seconds: u64,
+) -> Result<(String, Vec<(String, String)>), String> {
+    use std::io::Write;
+    let mut config = format!(
+        "--silent\n--show-error\n--request GET\n--location\n--dump-header -\n\
+         --max-time {}\n--url {}\n",
+        seconds,
+        quoted(url)
+    );
+    for (name, value) in headers {
+        config.push_str(&format!("--header {}\n", quoted(&format!("{}: {}", name, value))));
+    }
+    let mut child = std::process::Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl would not take its configuration")?
+        .write_all(config.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if said.is_empty() {
+            format!("curl exited {}", out.status.code().unwrap_or(-1))
+        } else {
+            said
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (head, body) = split_response(&text);
+    let status = head
+        .first()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let found: Vec<(String, String)> = head
+        .iter()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+        .collect();
+    if !(200..300).contains(&status) {
+        return Err(refused(status, &body));
+    }
+    Ok((body, found))
+}
+
 /// One HTTPS POST of a JSON body, returning the body and its headers.
 ///
 /// The headers come back because a rate limit is only knowable from them,
