@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.5.0] - 2026-08-28
+
+### Bug Fixes
+
+- **agent-usage**: Name Cursor lanes for what they show, not for its API fields (#93)
+
+### Features
+
+- The mouse wheel scrolls every widget, and the keys keep the selection (#95)
+
 ## [0.4.0] - 2026-08-28
 
 ### CI
