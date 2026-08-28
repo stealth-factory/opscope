@@ -44,7 +44,13 @@
     "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
     "show_hints": true,
     "_work_days_comment": "Which days count as working days, as names (sun, mon, ...) or numbers. Drives the working-day shading.",
-    "work_days": ["mon", "tue", "wed", "thu", "fri"],
+    "work_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
     "pomodoro_enabled": false,
     "pomodoro_focus_minutes": 25,
     "pomodoro_short_break_minutes": 5,
@@ -94,7 +100,18 @@
     "window_days": 14,
     "refresh": 120
   },
-  "pr": {
+  "github_actions": {
+    "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal \u2014 never every repo the token can see. The screen names the cap.",
+    "token": "",
+    "token_env": "",
+    "accounts": [],
+    "repos": [],
+    "window_hours": 48,
+    "refresh": 60,
+    "max_repos": 16,
+    "pushed_days": 14
+  },
+  "github_prs": {
     "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
     "sources": {
       "orgs": "is:open is:pr @mine",

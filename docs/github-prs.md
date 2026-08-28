@@ -1,4 +1,4 @@
-# `pr`
+# `github-prs`
 
 [← all docs](README.md)
 
@@ -6,8 +6,9 @@ The pull requests you have to follow up on, and a dashboard for whichever one
 you open.
 
 ```
-╺━ PR WATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 33 of 33 open   updated 1m ago   4567 api
+╺━ GITHUB PRS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 4 accounts   updated 12s ago   4567/5000 api
+ 33 of 33 open
  ── STATE ── 34 open · 10 draft · 9 conflicting · 1 ready to merge
  ████████████████████████████████████████████████████████████████████████████████████████████████
  ▇ approved 2   ▇ CHANGES REQ 1   ▇ needs review 27   · checks pass 24   · checks FAIL 6
@@ -101,7 +102,7 @@ with a log scale; this chart has not adopted one yet.
 ## Which PRs, and why it takes three searches
 
 GitHub search has **no `OR`**, so anything that is a union of conditions has to
-be several searches pooled. Each entry in `pr.sources` is one search; results
+be several searches pooled. Each entry in `github_prs.sources` is one search; results
 are merged and de-duplicated by URL, and every PR remembers which sources found
 it.
 
@@ -132,11 +133,23 @@ it to code you have a stake in.
 `f` cycles which source is shown — `all`, then each by name. It is instant and
 costs no request, because the pooling already recorded the answer.
 
-**Page size is 50 per source, deliberately.** Three searches of 100 return HTTP
-502; three of 50 do not. The ceiling is on result *nodes*, not field
-complexity — dropping the check rollup does not help, halving the page does.
-When a source fills its page the header says so rather than presenting a
-truncated union as a total.
+**Page size is 50 per source, and every source is paged to exhaustion.**
+Three searches of 100 return HTTP 502; three of 50 do not, so more results
+come from more rounds and never from a bigger page. Each source carries its
+own cursor and drops out of the round once GitHub says it has no next page.
+Rows are published as each round lands, so the board fills while it works
+rather than staying empty until the last source is done, and the count in
+the header is the count on screen throughout.
+
+**What a search will not serve at depth is fetched afterwards.** A search
+carrying `stackEntry` and the check rollup stops being served after four
+pages — measured: page five is a 502, whether it is one query over ten
+owners or one query per owner, and splitting does not help. Without those
+two subqueries the same search pages out in full: 665 of 665 in fourteen
+rounds. So the search asks for plain fields only, and those two are fetched
+by node id, fifty at a time, which answers every time. A lookup that fails
+leaves the checks unknown rather than reporting a state nobody read — a
+dash is honest, a green tick would not be.
 
 ## The list
 
@@ -286,13 +299,13 @@ one you open — so the view paints a loading shimmer and fills in.
 
 **Reuses `github.token`** from `config.json`, or `$GITHUB_TOKEN`. No second
 credential: it is the same classic token with `repo` and `read:org` that
-`github` uses. Set `pr.token` only to point this widget at a different
+`github` uses. Set `github_prs.token` only to point this widget at a different
 account.
 
 ## Configuration
 
 ```json
-"pr": {
+"github_prs": {
   "sources": {
     "orgs":     "is:open is:pr @mine",
     "authored": "is:open is:pr author:@me",
@@ -303,12 +316,15 @@ account.
 }
 ```
 
+A leftover `"pr"` section is still read when `"github_prs"` is absent, and
+the pane says so. Rename it when you next edit the file.
+
 Add, remove or rename sources freely — `review-requested:@me` and
 `is:open is:pr org:acme` are both reasonable entries, and the names are what
 `f` cycles through. Anything on the command line is appended to *every* source,
-so `./target/release/pr org:acme` narrows the lot without editing config.
+so `./target/release/github-prs org:acme` narrows the lot without editing config.
 
 ```sh
-./target/release/pr                          # everything you are involved in
-./target/release/pr -n 120 review-requested:@me   # only what is waiting on your review
+./target/release/github-prs                          # everything you are involved in
+./target/release/github-prs -n 120 review-requested:@me   # only what is waiting on your review
 ```

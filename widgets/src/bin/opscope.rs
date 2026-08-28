@@ -57,6 +57,16 @@ const WIDGETS: &[Widget] = &[
         doc: include_str!("../../../docs/github.md"),
     },
     Widget {
+        stem: "github-actions",
+        help: include_str!("github-actions_help.txt"),
+        doc: include_str!("../../../docs/github-actions.md"),
+    },
+    Widget {
+        stem: "github-prs",
+        help: include_str!("github-prs_help.txt"),
+        doc: include_str!("../../../docs/github-prs.md"),
+    },
+    Widget {
         stem: "herdr-panes",
         help: include_str!("herdr-panes_help.txt"),
         doc: include_str!("../../../docs/herdr-panes.md"),
@@ -92,11 +102,6 @@ const WIDGETS: &[Widget] = &[
         stem: "ports",
         help: include_str!("ports_help.txt"),
         doc: include_str!("../../../docs/ports.md"),
-    },
-    Widget {
-        stem: "pr",
-        help: include_str!("pr_help.txt"),
-        doc: include_str!("../../../docs/pr.md"),
     },
     Widget {
         stem: "tailnet",

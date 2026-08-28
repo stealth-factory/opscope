@@ -224,8 +224,8 @@ jobs:
           done
           # And a count, because a glob that matches nothing would otherwise
           # let this step pass having tested nothing at all.
-          if [ "$n" -lt 14 ]; then
-            echo "only $n binaries ran; expected all 14" >&2
+          if [ "$n" -lt 15 ]; then
+            echo "only $n binaries ran; expected all 15" >&2
             exit 1
           fi
           echo "$n binaries ran and reported themselves"
