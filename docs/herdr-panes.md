@@ -116,6 +116,8 @@ behind it.
 | Key | Action |
 |---|---|
 | `↑` `↓` `Home` `End` | select, across all three sections; the window follows |
+| `Tab` | jump to the head of the next section, wrapping past the last |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
 | `i` | show/hide the idle section — `o` in the Python, which is being retired |
 | `l` | workspace labels vs pane ids |

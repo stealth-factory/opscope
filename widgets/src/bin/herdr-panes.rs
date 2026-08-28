@@ -753,6 +753,11 @@ fn main() {
     let mut moved = false;
     let mut note: Option<(String, bool, f64)> = None;
     let mut rows_now: Vec<Row> = Vec::new();
+    // Where each section starts in `rows_now`, read as one flat list, with
+    // the empty ones left out. Written by the frame, because that is where
+    // the three lists are split, and read by tab on the frame after - which
+    // is the same one-frame lag `rows_now` itself already has.
+    let mut sections: Vec<usize> = Vec::new();
 
     loop {
         tick += 1;
@@ -788,6 +793,19 @@ fn main() {
                 // the arrows' job, here as everywhere in the collection.
                 "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
                 "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                // Tab walks the section heads rather than the rows: on a
+                // Herdr with twenty idle panes, reaching PROCESSES with the
+                // arrows is thirty presses. Wraps, so it never dead-ends.
+                "tab" => {
+                    if let Some(next) = sections
+                        .iter()
+                        .find(|&&at| at > selected)
+                        .or_else(|| sections.first())
+                    {
+                        selected = *next;
+                        moved = true;
+                    }
+                }
                 "home" => {
                     selected = 0;
                     moved = true;
@@ -927,6 +945,10 @@ fn main() {
                 (p.accent.as_str(), "↵".into()),
                 (p.dim.as_str(), " switch to this pane".into()),
             ],
+            vec![
+                (p.accent.as_str(), "tab".into()),
+                (p.dim.as_str(), " section".into()),
+            ],
             vec![(p.dim.as_str(), "[i]dle".into())],
             vec![(p.dim.as_str(), "[l]abels".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
@@ -944,6 +966,17 @@ fn main() {
         // cursor walked past the last drawn row and vanished - and enter
         // still acted on whatever it was invisibly sitting on.
         let idle_listed = show_idle && !resting.is_empty();
+        // In the order `rows_now` is in: agents, then the panes that are
+        // doing something, then the ones at a prompt. A section with no
+        // rows is not somewhere tab can land, so it is left out.
+        sections = [
+            (0, !agents.is_empty()),
+            (agents.len(), !busy.is_empty()),
+            (agents.len() + busy.len(), idle_listed),
+        ]
+        .into_iter()
+        .filter_map(|(at, live)| live.then_some(at))
+        .collect();
         // Every heading is drawn, always: AGENTS and its column head, a
         // blank and PROCESSES, and the same again for IDLE when there is an
         // idle section at all. TOY-34's rule survives that way rather than
