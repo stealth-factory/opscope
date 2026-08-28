@@ -180,10 +180,10 @@ only when it is enabled.
 **Cursor** — both quota and authorship.
 
 The quota is the same three lanes `cursor-agent`'s own in-session Usage view
-shows — included, auto, api — plus spend against the plan limit and the billing
-cycle reset. It is **not** the documented `cursor.com/api/usage-summary`: that
-one wants a browser cookie and returns 401 to everything this machine holds.
-The CLI instead speaks Connect to
+shows — total, cursor models, other models — plus spend against the plan
+limit and the billing cycle reset. It is **not** the documented
+`cursor.com/api/usage-summary`: that one wants a browser cookie and returns
+401 to everything this machine holds. The CLI instead speaks Connect to
 
 ```
 POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
@@ -1007,9 +1007,9 @@ Three settings, all off or hourly by default:
 ### Grok Bot (Cursor's weekly allowance)
 
 Cursor grants a weekly included allowance for its Grok Bot, separate from
-the monthly plan. It is not part of `included` / `auto` / `api` and does not
-share their reset, so it draws as a fourth bar carrying its own countdown,
-and appears on `[+]` as its own lane.
+the monthly plan. It is not part of `total` / `cursor models` / `other
+models` and does not share their reset, so it draws as a fourth bar carrying
+its own countdown, and appears on `[+]` as its own lane.
 
 It needs no configuration: `DashboardService/GetSandUsageStatus` is reached
 with the same bearer token, on the same RPC service, as the three plan lanes.
@@ -1186,10 +1186,10 @@ No mark is drawn when the window is unknown, or when a reading is **cached**
 and its window may already have closed: a pace computed from a window that has
 ended is arithmetic about nothing.
 
-Cursor is the exception. Its three lanes are coloured as *categories* —
-included, auto, api, in the palette `cursor-agent` uses for the same three —
-and a heat-coloured fill would overwrite that distinction to say something its
-own dollar line already says.
+Cursor is the exception. Its three lanes are coloured as *categories* — total,
+cursor models, other models, in the palette `cursor-agent` uses for the
+same three — and a heat-coloured fill would overwrite that distinction to say
+something its own dollar line already says.
 
 ## On colour
 
