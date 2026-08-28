@@ -3,6 +3,20 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.4.0] - 2026-08-28
+
+### CI
+
+- Open the release PR over REST so a repo-scoped token works (#85)
+
+### Documentation
+
+- Teach opscope <widget> instead of PATH-installing every binary (#86)
+
+### Features
+
+- Add github-actions, and standardise the three GitHub widgets (#78) — **breaking**
+
 ## [0.3.0] - 2026-08-27
 
 ### Bug Fixes
