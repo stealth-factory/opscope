@@ -1798,7 +1798,10 @@ fn detail_rows(
     gap: f64,
     w: usize,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, Option<usize>) {
+    // Which row the selected address came out on, so the caller can keep it
+    // in view. Nothing when there are no addresses to pick between.
+    let mut cursor = None;
     let mut rows = vec![tc::title(&format!(":{}", row.port), w, &p.port)];
     let mut head = if !row.kind.is_empty() {
         row.kind.clone()
@@ -1886,6 +1889,9 @@ fn detail_rows(
     }
     for (i, (url, note)) in links.iter().enumerate() {
         let here = i == sel;
+        if here {
+            cursor = Some(rows.len());
+        }
         rows.push(tc::seg(
             &[
                 (
@@ -1913,7 +1919,7 @@ fn detail_rows(
             w - 1,
         ));
     }
-    rows
+    (rows, cursor)
 }
 
 /// Something to say at the bottom of the screen until a moment passes.
@@ -2216,6 +2222,10 @@ fn main() {
     // pane, so everything past the bottom edge was dropped with nothing
     // saying so - on a short pane that is most of the screen.
     let mut dscroll = 0usize;
+    // Whether a key has just moved a cursor - the address cursor on the
+    // detail, the row cursor on the list. The wheel never sets either, so
+    // neither view chases a selection the moment it is turned.
+    let (mut dmoved, mut moved) = (false, false);
     // Tailscale is asked once per visit to the second screen rather than
     // once per frame: two subprocesses at 3Hz would cost more than the
     // whole rest of the widget. Any change made there clears them.
@@ -2349,8 +2359,14 @@ fn main() {
                     // are on - two different things, and conflating them
                     // was why scrolling a detail did nothing but move the
                     // copy target.
-                    "up" => view.at = view.at.saturating_sub(1),
-                    "down" => view.at += 1,
+                    "up" => {
+                        view.at = view.at.saturating_sub(1);
+                        dmoved = true;
+                    }
+                    "down" => {
+                        view.at += 1;
+                        dmoved = true;
+                    }
                     "ctrl-y" | "wheel-up" => dscroll = dscroll.saturating_sub(1),
                     "ctrl-e" | "wheel-down" => dscroll = dscroll.saturating_add(1),
                     "c" | "C" => {
@@ -2414,8 +2430,18 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "ctrl-e" | "wheel-down" => selected += 1,
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the list and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 "o" | "O" => hide_system = !hide_system,
                 "r" | "R" => store.wake(),
                 "enter" | "right" => {
@@ -2426,6 +2452,7 @@ fn main() {
                         .collect();
                     if let Some(row) = shown.get(selected.min(shown.len().saturating_sub(1))) {
                         if has_detail(row) {
+                            dmoved = true;
                             detail = Some(Detail {
                                 port: row.port,
                                 row: row.clone(),
@@ -2505,7 +2532,7 @@ fn main() {
                 .lock()
                 .map(|t| t.series(view.port))
                 .unwrap_or_default();
-            let rows = detail_rows(
+            let (rows, cursor) = detail_rows(
                 &view.row,
                 self_node,
                 &view.tunnel,
@@ -2543,6 +2570,17 @@ fn main() {
             // nothing identifying what is on screen.
             let (head, rest) = rows.split_at(1.min(rows.len()));
             let room_below = room.saturating_sub(head.len()).max(1);
+            // Only on the frame a key moved the address cursor: chasing it
+            // every frame would drag the view back from wherever the wheel
+            // put it. Before this the cursor was never chased at all, so
+            // walking the addresses on a short pane moved the copy target
+            // off the bottom with nothing on screen saying where it went.
+            if dmoved {
+                if let Some(at) = cursor {
+                    dscroll = tc::follow(dscroll, at.saturating_sub(head.len()), room_below);
+                }
+                dmoved = false;
+            }
             dscroll = dscroll.min(rest.len().saturating_sub(room_below));
             let last = (dscroll + room_below).min(rest.len());
             let mut rows: Vec<String> = head.to_vec();
@@ -2695,10 +2733,12 @@ fn main() {
         ));
 
         let visible = std::cmp::max(1, h.saturating_sub(rows.len() + 3));
-        if selected < scroll {
-            scroll = selected;
-        } else if selected >= scroll + visible {
-            scroll = selected - visible + 1;
+        // Only on the frame a key moved the cursor. Chasing it every frame
+        // pulls the list back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = tc::follow(scroll, selected, visible);
+            moved = false;
         }
         scroll = std::cmp::min(scroll, shown.len().saturating_sub(visible));
 
