@@ -39,8 +39,8 @@ nothing at all — it just looks good, and it knows it.
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
-| **`gha`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](docs/gha.md) |
-| **`pr`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/pr.md) |
+| **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](docs/github-actions.md) |
+| **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/github-prs.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/agent-usage.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic | [read →](docs/ports.md) |
@@ -66,8 +66,8 @@ npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 
 It installs the launcher and the fifteen binaries for this machine, and
 starts whichever you named — or the menu, if you named none. Only
-`opscope` lands on your `PATH`; the widgets stay beside it, so `pr` and
-`link` never replace the coreutils commands of the same name. Linux x86-64
+`opscope` lands on your `PATH`; the widgets stay beside it, so `link` never
+replaces the coreutils command of the same name. Linux x86-64
 (glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published;
 anything else fails at install with a sentence saying so.
 
@@ -103,8 +103,8 @@ Or take them by hand from the
 
 The fifteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
-live wherever you like. Start them from it — do not copy `pr` or `link`
-onto your `PATH`, they shadow coreutils:
+live wherever you like. Start them from it — do not copy `link` onto your
+`PATH`, it shadows the coreutils command of that name:
 
 ```sh
 ./opscope            # the menu
@@ -152,8 +152,8 @@ npx opscope@latest link
 
 The launcher looks for each widget beside itself, so the fifteen have to
 stay together. `npx` already keeps them that way. A folder on `PATH` that
-contains `pr` and `link` would shadow the real commands; leave those names
-off `PATH` and type `opscope <widget>`.
+contains `link` would shadow the real command; leave that name off `PATH`
+and type `opscope <widget>`.
 
 They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
@@ -192,7 +192,8 @@ with `.env` files and anything else likely to hold a secret.
 Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org
 each), and `linear` a personal API key from Settings → Security & access.
-`pr` and `gha` reuse that GitHub token; they are not credential-free.
+`github-prs` and `github-actions` reuse that GitHub token; they are not
+credential-free.
 Every other widget runs with no configuration at all.
 
 ## Requirements

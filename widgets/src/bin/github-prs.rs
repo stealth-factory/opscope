@@ -862,8 +862,8 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 }
 
 fn main() {
-    tc::maybe_help(include_str!("pr_help.txt"));
-    let cfg = tc::load_config("pr");
+    tc::maybe_help(include_str!("github-prs_help.txt"));
+    let cfg = tc::load_config("github_prs");
     let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 50);

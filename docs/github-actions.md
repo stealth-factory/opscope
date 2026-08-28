@@ -1,4 +1,4 @@
-# `gha`
+# `github-actions`
 
 [← all docs](README.md)
 
@@ -22,16 +22,16 @@ to, drawn the way `deployments` draws Vercel.
   3×  CI   opscope
 
  ── RECENT ── 1 of 48
- ── PERSONAL · alice ──
-▸● success  toy         CI        3m12s   17m  abc1234 main
-   fix: the thing
- ── ACME ──
- ✖ failure  app         CI        1m02s    2m  def5678 feat/x
-   the build that broke
+▸● success   3m12s   2m  acme/app
+   CI · the build that came good
+ ✖ failure   1m02s   9m  acme/deploy-tools
+   Nightly release · the build that broke
+ ● success      8s  17m  alice/toy
+   CI · fix: the thing
  ↑↓ select  →/↵ details  [s]tate all  [/]filter  [w]indow 48h  [r]efresh  [q]uit
 ```
 
-`github` counts PRs. `pr` rolls up one PR's checks as a letter. Neither
+`github` counts PRs. `github-prs` rolls up one PR's checks as a letter. Neither
 answers the questions a stalled release actually raises: what is running
 right now and how long it has been queued, which workflow is failing
 repeatedly rather than once, which job and step broke, and whether the
@@ -46,8 +46,7 @@ budget (`4840/5000 api`). GraphQL and REST are separate buckets; this
 widget's run fetches spend REST, so that is the number. Then run count and
 repo count, then success / failed / running, the same placement as
 `deployments`' ready / error / building. A missing poll stamp is `--`, not
-a fake now. Personal vs org is the grouping in Recent, not a second total
-up here.
+a fake now.
 
 **Activity** — runs per hour over the last 48h (the default window; `w`
 cycles 12h / 24h / 48h / 7d), coloured by the worst outcome in each
@@ -64,12 +63,20 @@ say.
 window. A flake fails once; this is the other thing. Omitted when nothing
 repeats.
 
-**Recent** — grouped by scope, personal first, then each org. Two lines
-per run when the pane is not wide enough for the commit title on the
-metadata row: conclusion, repo, workflow, duration, age, and as the pane
-widens, sha, branch, event, queued-for. The line below is
-`display_title`. Extra width buys those columns; nothing is truncated to
-keep a layout. A missing `created_at` is `--`, not `0s`.
+**Recent** — one list, newest first, whoever owns the repo. It was banded
+under scope headings once; that reads well for a directory and badly for a
+feed, because a failure a minute old sat screens down under an org whose
+name starts with a later letter. The owner moved onto the row instead,
+where it is read per run rather than inferred from which band the eye is
+in.
+
+Two lines per run when the pane is not wide enough for the commit title on
+the metadata row. The first carries only fields whose own values cannot
+outgrow them — conclusion, duration, age, and as the pane widens sha,
+branch, event, queued-for — then `owner/repo`, last, taking whatever is
+left. The second is the workflow and `display_title`. Nothing is padded
+into a budget it can overflow, because a name cut to fit tells a reader
+nothing they can act on. A missing `created_at` is `--`, not `0s`.
 
 `→` or `↵` opens the selected run. The list can only say `failure`; the
 detail fetches the jobs and, for a failed job, the step that failed:
@@ -99,10 +106,10 @@ Ten accounts is hundreds of repos, most of which have no workflows. The
 board does not fan out over everything, and it does not let one busy org
 eat every slot.
 
-- An explicit `gha.repos` list, or `owner/repo` arguments, is the set.
-- Otherwise: empty `gha.accounts` discovers the viewer login and every
+- An explicit `github_actions.repos` list, or `owner/repo` arguments, is the set.
+- Otherwise: empty `github_actions.accounts` discovers the viewer login and every
   org they belong to — the same empty-means-all that `deployments` uses
-  for Vercel teams. Naming `gha.accounts` instead fixes the set.
+  for Vercel teams. Naming `github_actions.accounts` instead fixes the set.
 - Repos pushed in the last `pushed_days` that have `.github/workflows`
   files, newest first, capped at `max_repos` *per owner*. Personal and
   each org keep their own newest sixteen (by default). Discovery pages
@@ -113,9 +120,10 @@ eat every slot.
 
 A cap that cuts is named under the headline (`16 of 40 org`), never drawn
 as the set. The 48 in `last 48h` is the window, not a run limit: GitHub is
-asked for runs `created` in that window, up to 100 per repo (the API's
-max page). A repo with more says so rather than presenting the page as
-the 48h total.
+asked for runs `created` in that window, and the request pages until it
+has them all. A hundred a repo was the ceiling once, and one repo here
+reported `100 most recent of 430` on its own screen — honest, and still
+not what somebody opened the pane for.
 
 ## Keys
 
@@ -137,9 +145,9 @@ the 48h total.
 
 ## Credentials
 
-Reuses `github.token` in `config.json`, or `$GITHUB_TOKEN`. `gha.token`
-and `gha.token_env` override that when set, then fall back to the github
-section. The same classic token `github` and `pr` already want — `repo`
+Reuses `github.token` in `config.json`, or `$GITHUB_TOKEN`. `github_actions.token`
+and `github_actions.token_env` override that when set, then fall back to the github
+section. The same classic token `github` and `github-prs` already want — `repo`
 and `read:org`. This widget only reads: it does not re-run, cancel, or
 write anything.
 
@@ -148,7 +156,7 @@ that yielded no repos with workflows.
 
 ## Settings
 
-`gha` in `config.json`:
+`github_actions` in `config.json`:
 
 | Key | Default | |
 |---|---|---|
@@ -165,4 +173,4 @@ Discovery pages each account's recently-pushed repos. Runs are REST,
 `GET /repos/{owner}/{repo}/actions/runs`, one request per repo. Jobs are
 REST too, and only for the run you open. GraphQL and REST have separate
 rate-limit buckets, so the run fetches do not compete with `github` and
-`pr`, which already spend the GraphQL budget all day.
+`github-prs`, which already spend the GraphQL budget all day.

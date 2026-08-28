@@ -82,8 +82,8 @@ and showed its actual frames, which was accurate by construction and cost
 nothing to keep in step.
 
 It also had side effects, and that is what settled it. Arrowing onto
-`latency` spawns `ping` and puts packets on the wire. Onto `github` or `pr`,
-GraphQL calls against a 5,000-an-hour quota. Onto `deployments` or `linear`,
+`latency` spawns `ping` and puts packets on the wire. Onto `github` or
+`github-prs`, GraphQL calls against a 5,000-an-hour quota. Onto `deployments` or `linear`,
 their APIs. Onto `agent-usage`, a walk of the entire agent transcript tree, which
 on this machine is 541 MB. **Browsing a menu should cost nothing**, and a
 menu that quietly spends your API budget as you scroll past a row is a menu

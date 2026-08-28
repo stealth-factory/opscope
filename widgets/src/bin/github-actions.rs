@@ -1463,8 +1463,8 @@ fn info_overlay(
 }
 
 fn main() {
-    tc::maybe_help(include_str!("gha_help.txt"));
-    let cfg = tc::load_config("gha");
+    tc::maybe_help(include_str!("github-actions_help.txt"));
+    let cfg = tc::load_config("github_actions");
     let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0).max(30.0);
     let accounts = tc::cfg_strings(&cfg, "accounts", &[]);
