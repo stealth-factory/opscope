@@ -159,6 +159,32 @@ They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
 like.
 
+### Scrolling
+
+Every widget scrolls, and they all scroll the same way.
+
+| | |
+|---|---|
+| `wheel` | **full widget scroll** — the whole pane moves under a pinned title |
+| `Ctrl-Y` `Ctrl-E` | the same thing from the keyboard, a line at a time, as in vim |
+| `↑` `↓` | move the **selection**, and the view follows to keep it in sight |
+
+The split is the point: **the mouse moves the view, the keys move the
+selection.** Turning the wheel never changes which row is selected — not even
+when it scrolls that row off the screen — and never changes which section has
+focus. So scrolling to look at something cannot change what `↵` opens. Press
+an arrow and the window comes back to the cursor.
+
+Nothing is ever hidden because a pane is short. Each widget builds its frame
+at whatever height it needs and the pane shows a window onto it, so a section
+that will not fit is *below the fold* rather than dropped — a chart that is
+not drawn looks exactly like a chart with no data, and only one of those is
+your problem to fix.
+
+Mouse reporting is on by default and takes drag-to-select away from the
+terminal while it is. `"terminal": {"mouse": false}` in your config turns it
+off; the keys are unaffected. See [Configuration](#configuration).
+
 ## Building the wall
 
 Fifteen widgets tile into whatever space you have. A layout that works on a
@@ -187,6 +213,19 @@ the working directory, and `config.json` beside the binary. Copy
 This keeps hostnames, ping targets, city lists and tokens out of the source
 tree: the repo ships generic defaults, and `config.json` is git-ignored along
 with `.env` files and anything else likely to hold a secret.
+
+Most sections are named after the widget that reads them. `terminal` is the
+exception and applies to all of them:
+
+```json
+"terminal": { "mouse": false }
+```
+
+turns off mouse reporting, which is what makes the scroll wheel scroll a
+widget. It is on by default and costs a real thing while it is: with the
+terminal reporting, dragging selects nothing, so copying a line off a panel
+with the mouse stops working. Turn it off if you copy more often than you
+scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
 **Three widgets define their own token settings:** `deployments` wants a
 Vercel token from Account Settings → Tokens, `github` a *classic* GitHub

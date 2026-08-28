@@ -122,6 +122,7 @@ on the way out rather than on the way in.
 | `/` | filter by text — `enter` keeps it, `esc` clears it |
 | `c` | copy the selected PR's… (in the detail view, the copy page) |
 | `r` | refresh now, and in the detail view fetch it again |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit, from either screen |
 | `f` `p` | the state filter and the project cycle — **`deployments` only**; the Rust build has `s` and `/` instead |
 

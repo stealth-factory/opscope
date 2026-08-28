@@ -1733,6 +1733,10 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // Where the process table is scrolled to, and whether a key has just
+    // moved the cursor. The wheel writes the first and never the second, so
+    // the table stops re-centring on the selection the moment it is turned.
+    let (mut scroll, mut moved) = (0usize, false);
     // The second screen: which process, which of its three lists is taking
     // the keys, and where each list is scrolled to.
     let mut detail: Option<(i32, String)> = None;
@@ -1792,6 +1796,18 @@ fn main() {
                     // above. Only the two far ends let go. Unfocused, they
                     // move the screen. Whichever is in front of you is what
                     // they act on, which is the rule the list screen follows.
+                    // The view, whatever has the focus - the same arm linear
+                    // carries, for the same reason. The arrows below already
+                    // do this when nothing is focused; once a section is
+                    // picked they belong to the cursor, and scrolling to
+                    // look at something must not move what enter opens.
+                    "ctrl-y" | "ctrl-e" | "wheel-up" | "wheel-down" => {
+                        dscroll = if key == "ctrl-e" || key == "wheel-down" {
+                            dscroll.saturating_add(1)
+                        } else {
+                            dscroll.saturating_sub(1)
+                        };
+                    }
                     "up" | "k" | "K" => match focus {
                         Some(here) => {
                             focus = tc::step_across_sections(here, at[here], &section_len, false)
@@ -1799,6 +1815,7 @@ fn main() {
                                     at[sect] = row;
                                     sect
                                 });
+                            moved = true;
                         }
                         None => dscroll = dscroll.saturating_sub(1),
                     },
@@ -1809,6 +1826,7 @@ fn main() {
                                     at[sect] = row;
                                     sect
                                 });
+                            moved = true;
                         }
                         None => dscroll = dscroll.saturating_add(1),
                     },
@@ -1831,7 +1849,10 @@ fn main() {
                     // of its own - and no key at all for the middle one.
                     // Where it goes, and which sections it steps over, is
                     // opscope-core's rule rather than this widget's.
-                    "tab" => focus = tc::next_section(focus, &section_len),
+                    "tab" => {
+                        focus = tc::next_section(focus, &section_len);
+                        moved = true;
+                    }
                     "c" | "C" => {
                         if !pending_copy.is_empty() {
                             // The value goes in the message either way: OSC
@@ -1866,9 +1887,20 @@ fn main() {
                 "o" | "O" => {
                     mine = !mine;
                     selected = 0;
+                    moved = true;
                 }
-                "up" | "k" | "K" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" => selected += 1,
+                "up" | "k" | "K" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" | "j" | "J" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the table and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 "enter" | "right" => {
                     if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
                         detail = Some((pick.pid, pick.name.clone()));
@@ -1887,6 +1919,7 @@ fn main() {
                         guard.started = tc::now();
                     }
                     selected = 0;
+                    moved = true;
                 }
                 _ => {}
             }
@@ -1999,27 +2032,34 @@ fn main() {
             let (body, cursor) = detail_rows(
                 &row, &spots, &conns, &files, &sizes, focus, &at, w, natural, interval, &names, &p,
             );
-            let furthest = body.len().saturating_sub(room);
-            // The screen follows the cursor into a section. It did not
-            // before: the body is built at whatever height it needs and
-            // scrolled to, but nothing tied the scroll to the selection, so
-            // moving the cursor down a long list walked it off the bottom of
-            // the pane - with its chart, which is the thing you moved the
-            // cursor to see. On a short pane one press was enough.
-            //
-            // The chart is why this reveals a span rather than a row: pulling
-            // the selected line just into view would leave the four rows it
-            // was drawn for still below the edge.
-            if let Some((at_row, tall)) = cursor {
-                if at_row < dscroll {
-                    dscroll = at_row;
-                } else if at_row + tall > dscroll + room {
-                    dscroll = (at_row + tall).saturating_sub(room);
+            // The title is pinned and everything below it is the window.
+            // `cursor` addresses the whole body, so its row shifts by the
+            // header before the follow below reads it - miss that and the
+            // span it reveals is a row out, but only once scrolled.
+            let (head, rest) = body.split_at(1.min(body.len()));
+            let room = room.saturating_sub(head.len()).max(1);
+            let cursor = cursor.map(|(at, tall)| (at.saturating_sub(head.len()), tall));
+            let furthest = rest.len().saturating_sub(room);
+            // Only on the frame a key moved the cursor. Chasing it every
+            // frame pulls the page back to the selection the instant the
+            // wheel moves it, which reads as the wheel doing nothing at
+            // all. The chart is why this reveals a span rather than a
+            // row: pulling the selected line just into view would leave
+            // the four rows it was drawn for still below the edge.
+            if moved {
+                if let Some((at_row, tall)) = cursor {
+                    if at_row < dscroll {
+                        dscroll = at_row;
+                    } else if at_row + tall > dscroll + room {
+                        dscroll = (at_row + tall).saturating_sub(room);
+                    }
                 }
+                moved = false;
             }
             dscroll = dscroll.min(furthest);
-            let last = (dscroll + room).min(body.len());
-            let mut shown: Vec<String> = body[dscroll..last].to_vec();
+            let last = (dscroll + room).min(rest.len());
+            let mut shown: Vec<String> = head.to_vec();
+            shown.extend_from_slice(&rest[dscroll..last]);
             while shown.len() < room {
                 shown.push(String::new());
             }
@@ -2038,7 +2078,7 @@ fn main() {
                 let mut with_pos = hints.clone();
                 with_pos.push(vec![(
                     p.dim.as_str(),
-                    scroll_label(dscroll + 1, last, body.len()),
+                    scroll_label(dscroll + 1, last, rest.len()),
                 )]);
                 foot = tc::pack_hints(&with_pos, w - 2, "  ")
                     .into_iter()
@@ -2192,11 +2232,14 @@ fn main() {
         // list, so on any pane too short for every process the cursor left
         // the screen and there was nothing to say where it had gone - and
         // enter still opened whatever it was sitting on, unseen.
-        let first = if rows.len() > show {
-            selected.saturating_sub(show / 2).min(rows.len() - show)
-        } else {
-            0
-        };
+        // Only on the frame a key moved the cursor. Re-centring every frame
+        // pulls the table back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = window_at(selected, show, rows.len());
+            moved = false;
+        }
+        let first = scroll.min(rows.len().saturating_sub(show));
         // And the count says so. "27 processes" above a table of 15 is a
         // partial result presented as a total, which is the one thing a
         // number here must never be.
@@ -2340,6 +2383,22 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
 }
 
 /// The process table, dropping columns rather than clipping them.
+/// Where the process table starts so the cursor is on it.
+///
+/// Centred rather than nudged: the list is re-sorted by rate every couple of
+/// seconds, so a row under the cursor moves on its own and a window that
+/// only scrolled far enough to admit it would jump about at the edges.
+///
+/// It used to be copied into the test file below, under a comment saying it
+/// had been extracted so the two could not disagree. They could.
+fn window_at(selected: usize, show: usize, total: usize) -> usize {
+    if total > show {
+        selected.saturating_sub(show / 2).min(total - show)
+    } else {
+        0
+    }
+}
+
 fn table(
     rows: &[Proc],
     w: usize,
@@ -2540,12 +2599,6 @@ mod tests {
     // The headings are found by looking at where the rendered row put its
     // columns, not by repeating the arithmetic the row used. A test that
     // recomputes the widths would agree with a heading that had slipped.
-
-    /// The window the main list draws, extracted so the test and the widget
-    /// cannot disagree about it.
-    fn window_at(selected: usize, show: usize, total: usize) -> usize {
-        if total > show { selected.saturating_sub(show / 2).min(total - show) } else { 0 }
-    }
 
     #[test]
     fn the_process_cursor_is_always_on_the_screen() {

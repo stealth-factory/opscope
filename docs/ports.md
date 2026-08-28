@@ -399,6 +399,7 @@ are on this screen rather than an IP.
 | `f` | escalate to SIGKILL, only when offered |
 | `o` | show or hide what is the machine's rather than yours |
 | `r` | rescan now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 ## Cost

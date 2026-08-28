@@ -41,6 +41,26 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   internal hostnames, no LAN addresses — in code, docs or commit messages.
 - **Spend extra width on more content, not padding.** Add columns as a pane
   grows; drop them as it shrinks. Never truncate.
+- **The mouse moves the view. Keys move the selection.** The wheel does a
+  full-widget scroll and nothing else: the viewport slides, `selected` stays
+  exactly where it is even when that takes it off screen, and a widget with
+  sections does not change focus either. Scrolling to look at something must
+  never change what `↵` opens. `Ctrl-Y` and `Ctrl-E` do the same from the
+  keyboard, as in vim, so the feature is reachable without a mouse. Keys move
+  the cursor and the window follows it — but only on the frame a key moved it,
+  or the follow drags the view straight back from wherever the wheel put it.
+  `every_widget_answers_the_wheel` in `check.rs` fails when a widget does not,
+  and it reads match arms rather than the file, so a comment saying it scrolls
+  will not satisfy it.
+- **A pane too short is a pane you scroll, not a pane that hides things.**
+  Every frame is a window onto a body built at whatever height it needs, with
+  the title pinned above it. Nothing stands down for want of rows: a section
+  that is not drawn looks exactly like a section with nothing in it, and those
+  are opposite readings of the same screen — *nothing has gone wrong* against
+  *you cannot see whether anything has*. Four widgets sized a chart to
+  whatever the pane had left, which hid `latency`'s event log, `link`'s chart
+  and four of `github`'s sections, and left the body exactly one pane tall so
+  there was nothing for the wheel to reach.
 - **Never truncate a key hint.** `pack_hints()` wraps footers across lines
   without splitting a hint, because `[±]25` teaches a key that does not exist.
 - **Measure contrast, do not eyeball it.** Every text colour must clear WCAG AA

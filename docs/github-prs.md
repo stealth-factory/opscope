@@ -177,6 +177,7 @@ two disagreed by years on the same PR.
 | `↵` | in a PR view, open the stack row under the cursor |
 | `c` | copy the PR's URL |
 | `r` | refetch now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 Sorting is done locally on the fetched set, so both keys are instant and cost

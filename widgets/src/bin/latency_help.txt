@@ -32,3 +32,7 @@ where two traces cross, the colour goes to the one being looked at rather
 than to whichever sits lower in the table. The others stay drawn rather than
 hidden, because a chart that showed one target at a time would answer a
 different question. The per-target sparkline is still one character per ping.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.

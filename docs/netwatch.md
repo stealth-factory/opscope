@@ -433,6 +433,7 @@ the number is never a mystery, and the **totals** are untouched by it.
 | `1` | sort by total data used |
 | `2` | sort by current rate |
 | `r` | rezero every total |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 ## Options

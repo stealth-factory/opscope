@@ -997,6 +997,96 @@ fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
     assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));
 }
 
+/// Widgets that answer neither wheel event, deliberately.
+///
+/// `matrix` computes nothing and has no list, so there is nothing under a
+/// viewport to move. It is a list rather than a heuristic on purpose: a new
+/// widget that genuinely does not scroll has to be written down here, which
+/// is a decision someone makes in a review, not a gap nobody notices.
+const NO_SCROLL: &[&str] = &["matrix"];
+
+#[test]
+fn every_widget_answers_the_wheel() {
+    // The rule this enforces: the mouse moves the view, keys move the
+    // selection. It is written into AGENTS.md and docs/design.md, and it is
+    // prose in both - which is exactly what the contrast rule was for as
+    // long as there were four widgets to break it. This is the half that
+    // fails a build.
+    //
+    // Every widget, not "every widget that looks like it scrolls". The
+    // obvious marker is a call to `follow(`, which the issue proposed and
+    // which six of the fifteen scrolling widgets do not use - latency,
+    // netwatch, herdr-panes, clocks, agent-usage and github-prs all keep
+    // their offset by hand. A check built on it would have passed all six
+    // while they answered nothing.
+    // Not `src.contains("wheel-up")`: that passes on the word appearing in
+    // a comment, and a comment saying the wheel scrolls is the thing this
+    // check exists to disbelieve. `handled_keys` cannot be reused as it
+    // stands - it keeps single characters and all-alphabetic words, so a
+    // hyphenated event name is dropped before it is ever compared - so this
+    // reads arm heads and comparisons in the same shape, keeping the
+    // literal it is looking for.
+    fn answers(src: &str, event: &str) -> bool {
+        let quoted = format!("\"{}\"", event);
+        src.lines().any(|line| {
+            if line.trim_start().starts_with("//") {
+                return false;
+            }
+            let head = match line.find("=>") {
+                Some(at) => &line[..at],
+                None if line.contains("key ==") || line.contains("key !=") => line,
+                None => return false,
+            };
+            head.contains(&quoted)
+        })
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    for (name, src) in widgets() {
+        if NO_SCROLL.contains(&name.as_str()) {
+            continue;
+        }
+        for event in ["wheel-up", "wheel-down"] {
+            if !answers(&src, event) {
+                missing.push(format!("{}: never answers {}", name, event));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the wheel scrolls every widget, or it is not a rule:\n  {}\n\
+         Add the event to the widget's key match beside ctrl-y and ctrl-e, \
+         moving its viewport offset and nothing else. If the widget really \
+         has nothing to scroll, name it in NO_SCROLL above and say why.",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn the_wheel_is_turned_off_on_every_way_out() {
+    // Three exits, and tracking left on outlives the process: every later
+    // click spits escape bytes at the shell prompt, caused by something
+    // that has already exited, with nothing on screen to explain it.
+    //
+    // The signal handler's constant is asserted in core's own tests, where
+    // the constant lives. These two are the paths a reader forgets: the
+    // normal quit, and the Drop that runs when a widget panics.
+    let src = std::fs::read_to_string(root().join("core/src/lib.rs")).expect("core");
+    for (what, from) in [
+        ("restore_screen", "pub fn restore_screen()"),
+        ("Keyboard::restore", "pub fn restore(&mut self)"),
+    ] {
+        let at = src.find(from).unwrap_or_else(|| panic!("{} moved or was renamed", what));
+        let body = &src[at..src.len().min(at + 900)];
+        assert!(
+            body.contains("MOUSE_OFF"),
+            "{} does not send MOUSE_OFF. A widget leaving by that path hands \
+             back a terminal that is still reporting.",
+            what
+        );
+    }
+}
+
 #[test]
 fn a_poller_that_dies_records_why() {
     // CLAUDE.md's central gotcha: a thread that stops takes its

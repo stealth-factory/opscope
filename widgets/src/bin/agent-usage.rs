@@ -1620,8 +1620,8 @@ fn main() {
                 }
                 "right" | "tab" | "l" => active += 1,
                 "left" | "h" => active -= 1,
-                "up" | "k" => moves.push(-1),
-                "down" | "j" => moves.push(1),
+                "up" | "k" | "ctrl-y" | "wheel-up" => moves.push(-1),
+                "down" | "j" | "ctrl-e" | "wheel-down" => moves.push(1),
                 "pgup" => pages.push(-1),
                 "pgdn" => pages.push(1),
                 "home" => to_top = true,

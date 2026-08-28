@@ -9,12 +9,12 @@ explain a bad connection.
 ╺━ NETWORK LATENCY MONITOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  4 targets · 0.5s interval · 19:05:21 · 1 ping/column
 
- HOST                     NOW     AVG  MEDIAN     MIN     MAX  JITTER   LOSS
-● studio               27.60ms 47.80ms 39.90ms 25.90ms 102.0ms 21.16ms   0.0%
+  HOST                    NOW     AVG  MEDIAN     MIN     MAX  JITTER   LOSS
+▐▸studio               27.60ms 47.80ms 39.90ms 25.90ms 102.0ms 21.16ms   0.0%
    ▁▂▁█▂▁▂▅▁▆▂██▁▁▃▄▄▇▂▂▁▁▄▆▂▂▁▂▆▁▁▂▁▂▆▂▂▂▁▁▁▂▁
-● build-mac            145.0ms 145.0ms 145.0ms 145.0ms 145.0ms     0µs   0.0%
+▐ build-mac            145.0ms 145.0ms 145.0ms 145.0ms 145.0ms     0µs   0.0%
    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
-● 1.1.1.1                3.98ms  3.96ms  4.01ms  3.69ms  4.28ms   173µs   0.0%
+▐ 1.1.1.1                3.98ms  3.96ms  4.01ms  3.69ms  4.28ms   173µs   0.0%
    ▅▂▂▅▄▂▅▆▇▄▆▃▆▃▆▁▅▃▆▆▅▂▅▁▆▃▇▅▂▆▆▅▅▁▃▂▅▆▅▃▂▂▄▅
 
  177.5ms│·           ·           ·           ·           ·
@@ -73,6 +73,7 @@ pressing `i` as the network changing.
 | `i` | ping interval — 0.2 / 0.5 / 1 / 2 / 5s, applied to running pings immediately |
 | `g` | how samples sharing a column combine — median / mean / min / max / p95 |
 | `c` | seconds per graph column — 1 ping/col / 2 / 5 / 10s |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 Changing the interval kills and relaunches each `ping`, since `-i` is fixed at
@@ -85,6 +86,12 @@ Beneath the graph is a running log of the things worth naming rather than
 leaving you to spot in a line: a host going `DOWN` and coming back `UP` with
 how long it was away, and a `SPIKE` when a single reading lands far above what
 that host normally does.
+
+It takes its rows on any pane. It used to stand down on a short one, on the
+reasoning that the graph was the thing worth keeping — but a log that is not
+drawn looks exactly like a log with nothing in it, and those are opposite
+readings of the same screen. On a pane too short for everything the widget
+scrolls instead.
 
 "Far above" is `spike_factor`, three times the median by default, and it needs
 at least ten samples before it will call anything — otherwise the first slow

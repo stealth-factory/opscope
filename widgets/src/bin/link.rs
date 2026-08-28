@@ -29,12 +29,13 @@ use opscope_core as tc;
 
 const IDLE_AFTER: f64 = 300.0;
 
-/// The fewest rows the detail chart is worth drawing in.
+/// The fewest rows a chart is worth drawing in, on either screen.
 ///
-/// It used to take whatever the fields left over and be dropped silently
-/// when that came to less than five, so a short pane showed the numbers and
-/// no chart and said nothing about why - indistinguishable from a session
-/// with no history. It now takes its rows regardless and the screen scrolls.
+/// Both used to take whatever the rows above them left over and be dropped
+/// silently when that came to less than five, so a short pane showed the
+/// numbers and no chart and said nothing about why - indistinguishable from
+/// a session with no history. Both now take their rows regardless and the
+/// screen scrolls, which is also what gives the list somewhere to scroll to.
 const MIN_CHART: usize = 12;
 
 /// How the detail screen reports where you are in it, at a width that does
@@ -544,6 +545,10 @@ fn main() {
     // frame rather than when the key is pressed, because the body's length
     // depends on the pane, which can change under us between frames.
     let mut scroll = 0usize;
+    // The list screen's own window, and whether a key has just moved the
+    // selection. The wheel writes the window and never the flag, so the
+    // list stops chasing the cursor the moment it is turned.
+    let (mut lscroll, mut moved) = (0usize, false);
 
     loop {
         // Read before the keys rather than after them, so a page key knows
@@ -569,6 +574,7 @@ fn main() {
                             Some(0) => None,
                             Some(at) => Some(at - 1),
                         };
+                        moved = true;
                     }
                 }
                 "down" | "j" | "J" => {
@@ -581,7 +587,20 @@ fn main() {
                             Some(at) if at + 1 >= count => None,
                             Some(at) => Some(at + 1),
                         };
+                        moved = true;
                     }
+                }
+                // The wheel moves whichever screen is in front of you and
+                // never the selection - which here wraps through "nothing
+                // selected", so a wheel bound to it would turn the chart's
+                // highlight on and off as it passed.
+                "ctrl-y" | "wheel-up" => {
+                    let at = if detail { &mut scroll } else { &mut lscroll };
+                    *at = at.saturating_sub(1);
+                }
+                "ctrl-e" | "wheel-down" => {
+                    let at = if detail { &mut scroll } else { &mut lscroll };
+                    *at = at.saturating_add(1);
                 }
                 // Right goes in and left comes back out, the way a column
                 // of panes works, so the hand does not have to learn a key
@@ -620,7 +639,12 @@ fn main() {
                 "home" if detail => scroll = 0,
                 // Clamped to the end of the body when the frame is drawn.
                 "end" if detail => scroll = usize::MAX,
-                "o" | "O" => hide_idle = !hide_idle,
+                // Hiding the idle sessions shortens the list under the
+                // cursor, so the window has to come back to it.
+                "o" | "O" => {
+                    hide_idle = !hide_idle;
+                    moved = true;
+                }
                 "w" | "W" => span_at = (span_at + 1) % windows.len(),
                 "r" | "R" => {
                     let (lock, cond) = &*wake;
@@ -703,17 +727,22 @@ fn main() {
             // The body is as tall as it needs to be and the pane shows a
             // window onto it, rather than the body being cut to the pane
             // and the remainder going unmentioned.
-            let furthest = body.len().saturating_sub(room);
+            // Except the title, which stays: scrolled away, a detail view
+            // stops saying whose session it is describing.
+            let (head, rest) = body.split_at(1.min(body.len()));
+            let room_below = room.saturating_sub(head.len()).max(1);
+            let furthest = rest.len().saturating_sub(room_below);
             scroll = scroll.min(furthest);
-            let last = (scroll + room).min(body.len());
-            let mut shown_body: Vec<String> = body[scroll..last].to_vec();
+            let last = (scroll + room_below).min(rest.len());
+            let mut shown_body: Vec<String> = head.to_vec();
+            shown_body.extend_from_slice(&rest[scroll..last]);
             while shown_body.len() < room {
                 shown_body.push(String::new());
             }
             shown_body.extend(pack(&detail_hints(scroll_label(
                 scroll + 1,
                 last,
-                body.len(),
+                rest.len(),
             ))));
             tc::draw(&shown_body, w, h);
             std::thread::sleep(Duration::from_millis(200));
@@ -721,6 +750,7 @@ fn main() {
         }
 
         let mut rows = vec![tc::title("connections", w, &p.link)];
+        let mut cursor: Option<usize> = None;
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
@@ -753,51 +783,46 @@ fn main() {
                 w - 1,
             ));
         } else {
+            // Where the selected row lands: one heading, then a row each.
+            cursor = selected.map(|at| rows.len() + 1 + at);
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
-            let room = h.saturating_sub(rows.len() + 4);
-            if room < 5 {
-                // Say so rather than leaving a gap: a chart that is missing
-                // for want of rows looks exactly like one missing for want
-                // of data, and only one of those is the reader's to fix.
-                if room >= 1 {
-                    rows.push(tc::seg(
-                        &[(
-                            p.dim.as_str(),
-                            format!("  chart needs {} more rows", 5 - room),
-                        )],
-                        w - 1,
-                    ));
-                }
-            } else {
-                rows.extend(graph(
-                    &shown,
-                    &guard.history,
-                    w,
-                    room,
-                    0,
-                    selected,
-                    window,
-                    refresh,
-                    &p,
-                ));
-                rows.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), " ".repeat(7)),
-                        (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
-                    ],
-                    w - 1,
-                ));
-                let covered = plotted_span(&shown, &guard.history, window, refresh, w);
-                rows.push(tc::seg(
-                    &[
-                        (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
-                        (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
-                        (p.dim.as_str(), "now".into()),
-                    ],
-                    w - 1,
-                ));
-            }
+            // The chart takes MIN_CHART rows whatever the table has already
+            // spent, and the screen scrolls to reach what will not fit -
+            // which is the rule the detail screen has followed since it had
+            // the same bug. Sized to what the pane had left, the body came
+            // out exactly one pane tall however many sessions there were, so
+            // there was never anywhere for the wheel to scroll to; and past
+            // about a pane's worth of rows the chart was dropped entirely
+            // with nothing on screen saying why.
+            let room = h.saturating_sub(rows.len() + 4).max(MIN_CHART);
+            rows.extend(graph(
+                &shown,
+                &guard.history,
+                w,
+                room,
+                0,
+                selected,
+                window,
+                refresh,
+                &p,
+            ));
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), " ".repeat(7)),
+                    (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
+                ],
+                w - 1,
+            ));
+            let covered = plotted_span(&shown, &guard.history, window, refresh, w);
+            rows.push(tc::seg(
+                &[
+                    (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
+                    (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
+                    (p.dim.as_str(), "now".into()),
+                ],
+                w - 1,
+            ));
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -822,11 +847,29 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
+        // A window onto the body rather than a cut of it, and the title
+        // stays put above it: on a pane too short for every session the
+        // table and the chart under it used to run off the bottom with
+        // nothing on screen saying there was more.
+        let room = h.saturating_sub(foot.len());
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
+        // Only on the frame a key moved the selection: chasing it every
+        // frame drags the view back from wherever the wheel put it.
+        if moved {
+            if let Some(at) = cursor {
+                lscroll = tc::follow(lscroll, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
         }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
+        lscroll = lscroll.min(rest.len().saturating_sub(room_below));
+        let mut frame: Vec<String> = head.to_vec();
+        frame.extend(rest.iter().skip(lscroll).take(room_below).cloned());
+        while frame.len() < room {
+            frame.push(String::new());
+        }
+        frame.extend(foot);
+        tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -916,13 +959,17 @@ fn table(
             Some(v) if v != 0.0 => format!("{:>width$}", ms(Some(v)), width = width),
             _ => format!("{:>width$}", "--", width = width),
         };
+        let mark_c = format!("{}{}", tint, if here { &p.accent } else { &p.dim });
         let mut line = vec![
             // A colour chip rather than a shape. Six shapes told six
             // sessions apart no better than six hues did, and a seventh
             // session repeated the first one's shape - so the chip carries
-            // the hue and the name carries the selection.
+            // the hue and the marker carries the selection.
             (name_c.as_str(), "▐".to_string()),
-            (label_c.as_str(), " ".to_string()),
+            // The same marker the rest of the collection uses. The tint and
+            // the brighter name said "selected" only next to a row that was
+            // not, so on a one-row list nothing said it at all.
+            (mark_c.as_str(), if here { "▸".to_string() } else { " ".to_string() }),
             (label_c.as_str(), tc::pad(&label, name_w)),
             (tone.as_str(), cell(row.rtt, 7)),
             (dim_c.as_str(), cell(row.floor, 8)),

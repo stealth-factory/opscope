@@ -34,6 +34,24 @@ pub const EL: &str = "\x1b[K";
 pub const RST: &str = "\x1b[0m";
 pub const NOBG: &str = "\x1b[49m";
 
+/// Ask the terminal to report the wheel, in the encoding that can count
+/// past column 223.
+///
+/// 1000 is button events, 1006 is the SGR extension. The legacy encoding
+/// packs the column into a single byte and cannot express one past 223,
+/// and the panes here are routinely wider than that - the dashboard tab on
+/// this machine measures 345 columns. Nothing reads the column yet; it is
+/// SGR from the start so the decoder does not have to be written twice.
+///
+/// Deliberately *not* 1002 or 1003: those add motion reporting, which is a
+/// stream of events nobody here consumes and a cost the terminal pays on
+/// every mouse move.
+pub const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
+
+/// And give it back. In the reverse order, which costs nothing and means a
+/// terminal that only understood one of them is left as it was found.
+pub const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+
 /// Eight levels used by compact bar charts across the widgets.
 pub const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -196,20 +214,62 @@ pub fn draw(rows: &[String], _w: usize, h: usize) {
 }
 
 /// Hide the cursor and clear, and put it all back on the way out.
+///
+/// Mouse reporting is asked for here unless the config turns it off. It
+/// costs something real: with the terminal reporting, a drag selects
+/// nothing, so copying a line off a panel with the mouse stops working.
+/// Anyone who copies more often than they scroll wants it off, and the
+/// keys are unaffected either way - ctrl-y and ctrl-e still scroll.
 pub fn setup() {
     unsafe {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
-    out(&format!("{}{}{}", HIDE, CLEAR, HOME));
+    claim_screen();
+}
+
+/// Hide the cursor, clear, and ask for mouse reports if they are wanted.
+///
+/// `setup` does this once at start. A launcher that handed the terminal to
+/// a child has to do it again: `restore_screen` (and the child's own exit)
+/// turn reporting off, and without this the menu comes back unable to
+/// scroll even though the setting never changed.
+pub fn claim_screen() {
+    let mouse = if mouse_wanted() { MOUSE_ON } else { "" };
+    out(&format!("{}{}{}{}", mouse, HIDE, CLEAR, HOME));
     flush();
+}
+
+/// Whether to ask the terminal for mouse reports.
+///
+/// Shared rather than per-widget: it is a property of how someone uses a
+/// terminal, not of any one panel, and having to turn it off in fourteen
+/// places is having to turn it off in thirteen and forget the fourteenth.
+/// On unless `"terminal": {"mouse": false}` says otherwise.
+fn mouse_wanted() -> bool {
+    load_config("terminal")
+        .get("mouse")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 /// The bytes `handle_signal` writes. Built as a constant so the handler
 /// never formats, allocates, or takes the stdout lock - any of which can
 /// deadlock if the signal arrives while `draw` is already writing.
-const SCREEN_RESTORE: &str = concat!("\x1b[?25h", "\x1b[0m", "\x1b[2J", "\x1b[H");
+/// Mouse-off leads, because it is the one whose absence outlives the
+/// process. A terminal left reporting spits escape bytes at the shell on
+/// every later click, caused by something that already exited, with
+/// nothing on screen to explain it. The cursor and the clear are only
+/// cosmetic by comparison.
+const SCREEN_RESTORE: &str = concat!(
+    "\x1b[?1006l",
+    "\x1b[?1000l",
+    "\x1b[?25h",
+    "\x1b[0m",
+    "\x1b[2J",
+    "\x1b[H"
+);
 
 /// Saved cbreak settings, written by `Keyboard` and read by the handler.
 ///
@@ -259,7 +319,7 @@ extern "C" fn handle_signal(sig: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
-    out(&format!("{}{}{}{}", SHOW, RST, CLEAR, HOME));
+    out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
 
@@ -1436,10 +1496,25 @@ impl Keyboard {
         }
     }
 
+    /// Give the terminal back what this widget took: its line settings, and
+    /// its mouse.
+    ///
+    /// The mouse belongs here rather than only in `restore_screen` because
+    /// this runs on the third exit path. A normal quit calls both; a signal
+    /// goes through `SCREEN_RESTORE`; a panic unwinds and reaches neither,
+    /// but it does drop the `Keyboard`. Tracking left on outlives the
+    /// process: every later click spits escape bytes at the shell prompt,
+    /// caused by something that has already exited, with nothing on screen
+    /// to explain it. Sending it twice on a normal quit costs nothing.
+    ///
+    /// Unlike the signal handler this may allocate and take the lock, since
+    /// unwinding has already released whatever `draw` was holding.
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
+            out(MOUSE_OFF);
+            flush();
         }
     }
 
@@ -1537,11 +1612,77 @@ fn escape_len(s: &[char]) -> Option<usize> {
 /// completes the sequence or makes it a malformed escape - and it is the
 /// difference between a torn arrow key being an arrow and it being three
 /// characters that other keys are bound to.
+/// An SGR mouse report: how many characters it took, and the wheel key it
+/// means if it is one.
+///
+/// `ESC [ < button ; column ; row M` for a press, `m` for a release. The
+/// wheel is button 64 up and 65 down, and it only ever presses - there is
+/// no release to pair with, which is why a wheel `m` is not a thing to
+/// wait for.
+///
+/// Returns `Some((len, None))` for a report that is well-formed but not a
+/// wheel - a click, a release, a drag. Those are consumed rather than
+/// passed on, because a report nobody handles must still not arrive as
+/// keystrokes. Clicks become keys in OPS-55; until then they are eaten
+/// here deliberately rather than by accident.
+///
+/// A report still arriving returns `None` and is left in the buffer for
+/// the next poll, which is what the caller does with every other partial
+/// sequence.
+fn mouse_report(s: &[char]) -> Option<(usize, Option<&'static str>)> {
+    if s.first() != Some(&'\x1b') || s.get(1) != Some(&'[') || s.get(2) != Some(&'<') {
+        return None;
+    }
+    let mut i = 3;
+    let mut button = 0u32;
+    let mut digits = 0;
+    while let Some(c) = s.get(i).filter(|c| c.is_ascii_digit()) {
+        // Saturating, so a terminal sending a preposterous button number
+        // cannot wrap it round into one that means something else.
+        button = button.saturating_mul(10).saturating_add(*c as u32 - '0' as u32);
+        digits += 1;
+        i += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    // The column and row are read past but not kept: nothing scrolls
+    // differently for being scrolled over. OPS-55 wants them.
+    while matches!(s.get(i), Some(c) if c.is_ascii_digit() || *c == ';') {
+        i += 1;
+    }
+    match s.get(i) {
+        Some('M') | Some('m') => {
+            // SGR adds Shift (4), Meta (8) and Control (16) to the
+            // button. A modified wheel is still a wheel - 68 is
+            // shift-up, 81 is ctrl-down - and matching the bare 64/65
+            // only would consume those reports without scrolling.
+            let wheel = match button & !(4 | 8 | 16) {
+                64 => Some("wheel-up"),
+                65 => Some("wheel-down"),
+                _ => None,
+            };
+            Some((i + 1, wheel))
+        }
+        // Nothing yet, or something that is not a terminator: incomplete.
+        _ => None,
+    }
+}
+
 fn still_arriving(s: &[char]) -> bool {
     match s {
         [] => false,
         ['\x1b'] => true,
         ['\x1b', 'O'] => true,
+        // A mouse report that has not reached its M or m yet. Without this
+        // arm the `<` fails the test below, the report is declared
+        // malformed, and the ESC is dropped one character at a time -
+        // which hands the widget `[`, `<`, digits and `;` as keystrokes.
+        // A wheel turn arriving across two reads is not unusual; it is
+        // what a poll landing mid-sequence looks like.
+        ['\x1b', '[', '<', rest @ ..] => rest
+            .iter()
+            .all(|c| c.is_ascii_digit() || *c == ';'),
         ['\x1b', '[', rest @ ..] => rest
             .iter()
             .all(|c| c.is_ascii_digit() || *c == ';'),
@@ -1593,6 +1734,20 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
                 at += seq.chars().count();
                 continue;
             }
+            // Mouse first, because nothing below can see it. An SGR report
+            // is `ESC [ < b ; x ; y M`, and the `<` stops `escape_len` and
+            // `still_arriving` alike - both only walk digits and `;` after
+            // `ESC [`. Without this branch the ESC is dropped one character
+            // at a time and the rest of the report arrives as keystrokes:
+            // `[`, `<`, digits, `;`, `M`. On a widget with a filter that is
+            // typing into it; on one without, `M` is whatever `M` does.
+            if let Some((len, wheel)) = mouse_report(&chars[at..]) {
+                at += len;
+                if let Some(name) = wheel {
+                    keys.push(name.to_string());
+                }
+                continue;
+            }
             if let Some(len) = escape_len(&chars[at..]) {
                 at += len; // a sequence this program does not map; drop it
                 continue;
@@ -1622,6 +1777,17 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             '\r' | '\n' => keys.push("enter".to_string()),
             '\t' => keys.push("tab".to_string()),
             '\x7f' | '\x08' => keys.push("backspace".to_string()),
+            // vim's own pair for moving the view and leaving the cursor
+            // where it is, which is exactly what these do here. Named
+            // rather than passed through raw: a widget matching "\x05"
+            // reads as a typo, and a control byte in a match arm is
+            // invisible to anyone scanning the file for its keys.
+            //
+            // Safe to take. The terminal is in cbreak with ISIG still on,
+            // so the bytes it intercepts are the signal ones - these are
+            // not among them, and neither is flow control's ^S/^Q.
+            '\x19' => keys.push("ctrl-y".to_string()),
+            '\x05' => keys.push("ctrl-e".to_string()),
             c => keys.push(c.to_string()),
         }
     }
@@ -2322,6 +2488,55 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_report_becomes_a_wheel_key_or_nothing_at_all() {
+        // The wheel, both ways: button 64 up, 65 down, in SGR.
+        assert_eq!(keys("\x1b[<64;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<65;10;5M"), vec!["wheel-down"]);
+        // Modifiers sit in bits 2-4 and must not hide a wheel turn.
+        // 4 is Shift, 8 is Meta, 16 is Control; they add, so 64+4+16
+        // is a ctrl-shift wheel-up and still has to scroll.
+        assert_eq!(keys("\x1b[<68;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<72;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<80;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<84;10;5M"), vec!["wheel-up"]);
+        assert_eq!(keys("\x1b[<69;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<73;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<81;10;5M"), vec!["wheel-down"]);
+        assert_eq!(keys("\x1b[<85;10;5M"), vec!["wheel-down"]);
+        // A click is consumed, not passed on and not leaked. Until it
+        // means something it must still not reach a widget as text.
+        assert_eq!(keys("\x1b[<0;12;34M"), Vec::<String>::new());
+        assert_eq!(keys("\x1b[<0;12;34m"), Vec::<String>::new());
+        // The leak this branch exists to stop. escape_len and
+        // still_arriving both walk only digits and `;` after ESC-[, so the
+        // `<` stopped them both and the report was torn up one character
+        // at a time. On a widget with a filter open, that is typing into
+        // it; on one without, `M` is whatever `M` does.
+        for report in ["\x1b[<64;1;1M", "\x1b[<0;200;90M"] {
+            let got = keys(report);
+            for leaked in ["[", "<", ";", "M", "m", "6", "4", "0"] {
+                assert!(
+                    !got.iter().any(|k| k == leaked),
+                    "{:?} leaked {:?} out of {:?}",
+                    report,
+                    leaked,
+                    got
+                );
+            }
+        }
+        // A column past 223, which the legacy encoding cannot express and
+        // which these panes reach - the dashboard here is 345 wide.
+        assert_eq!(keys("\x1b[<65;300;40M"), vec!["wheel-down"]);
+        // What follows a report is still read.
+        assert_eq!(keys("\x1b[<64;1;1Mq"), vec!["wheel-up", "q"]);
+        // A half-arrived report waits rather than being torn up.
+        assert_eq!(keys("\x1b[<64;1"), Vec::<String>::new());
+        // vim's own scroll pair, named rather than left as control bytes.
+        assert_eq!(keys("\x19"), vec!["ctrl-y"]);
+        assert_eq!(keys("\x05"), vec!["ctrl-e"]);
+    }
+
+    #[test]
     fn a_bare_escape_waits_one_poll_before_it_counts() {
         // ESC alone is indistinguishable from the first byte of a sequence
         // still arriving, so it is held. Two polls with nothing following
@@ -2429,12 +2644,19 @@ mod tests {
         assert_eq!(poll_secs(15.0, 120.0), 15.0);
         // A broken fallback still has to be a duration.
         assert_eq!(poll_secs(-1.0, f64::NAN), 1.0);
-        // And the bytes the handler writes are the same four sequences
+        // And the bytes the handler writes are the same sequences
         // restore_screen formats - so a drift here is a drift on Ctrl-C.
+        //
+        // Mouse-off is in both and leads both. It is the one whose absence
+        // outlives the process: a terminal left reporting answers every
+        // later click with escape bytes at the shell prompt, caused by
+        // something that already exited. This assertion is what stops the
+        // handler and the normal exit disagreeing about that.
         assert_eq!(
-            format!("{}{}{}{}", SHOW, RST, CLEAR, HOME),
+            format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME),
             SCREEN_RESTORE
         );
+        assert!(SCREEN_RESTORE.starts_with(MOUSE_OFF), "mouse-off must lead");
     }
 
     /// The status names that a request was refused; only the body names

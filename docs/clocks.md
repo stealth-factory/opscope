@@ -101,6 +101,7 @@ shown — are not tied to the day and survive.
 | `+` `-` | one minute on or off **whichever block is running** — focus, short break or long break — clamped to 1–180. The finish line moves by however much the block actually changed, so a minute added twenty minutes into a twenty-five minute block leaves six, not twenty-six. `=` works as `+`, so it needs no shift, and the footer writes the pair as `[±]` |
 | `0` `c` | zero today's completed tally |
 | `?` `h` | hide/show the pomodoro controls |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `q` | quit |
 
 ## Configuration

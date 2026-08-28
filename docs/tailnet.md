@@ -102,6 +102,7 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | `o` | hide offline peers |
 | `i` | poll interval — 1 / 2 / 5 / 10 / 30s |
 | `r` | refresh now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 ## Throughput graphs

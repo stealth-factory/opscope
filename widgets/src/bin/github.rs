@@ -128,12 +128,20 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 /// are also feeding.
 ///
 /// No new request. The figures were fetched for the row.
+/// Built at whatever height it needs, and the caller windows it.
+///
+/// It used to take the pane's height and drop the state bar, the oldest
+/// list and the flow chart when what was left came to less than four rows,
+/// four rows and ten - so a short pane showed some of the account and said
+/// nothing about the rest. A section that is not drawn looks exactly like a
+/// section with nothing in it, which is the opposite reading. Every section
+/// is built now and the screen scrolls to reach them, which is also what
+/// gives the wheel somewhere to go.
 fn account_detail(
     a: &Account,
     oldest: Option<&serde_json::Value>,
     pick: usize,
     w: usize,
-    h: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
     // Where the cursor over the oldest list ended up, so the caller can
@@ -250,7 +258,7 @@ fn account_detail(
     // The same bar the board draws for everything at once, for this account
     // alone: a queue is a different shape depending on whether it is waiting
     // on reviewers or waiting on authors.
-    if a.open > 0 && h.saturating_sub(rows.len()) >= 4 {
+    if a.open > 0 {
         let ready = (a.open - a.draft - a.review).max(0);
         let legend: Vec<(&str, i64, &str)> = [
             ("awaiting review", a.review, p.warn.as_str()),
@@ -293,7 +301,7 @@ fn account_detail(
     }
 
     // The ones that have been open longest, which no count can name.
-    if h.saturating_sub(rows.len()) >= 4 {
+    {
         rows.push(String::new());
         match oldest {
             None => {
@@ -422,7 +430,7 @@ fn account_detail(
         .cloned()
         .fold(0.0f64, f64::max)
         .max(1.0);
-    if h.saturating_sub(rows.len()) >= 10 && !up.is_empty() {
+    if !up.is_empty() {
         rows.push(String::new());
         rows.push(tc::seg(
             &[
@@ -1183,6 +1191,16 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut tick) = (0usize, 0usize);
+    // The frame's own scroll, and whether the selection moved this tick.
+    //
+    // The two have to be separate. The window used to be a function of the
+    // selection - centred on it, `selected - room/2` - so the mouse could
+    // not move the view without moving what `↵` would open. Now the keys
+    // own the selection and the wheel owns the view, and the only time the
+    // view is dragged back to the cursor is the tick a key moved it. Chase
+    // it every tick instead and a scroll snaps back before it is seen.
+    let mut board = 0usize;
+    let mut moved = false;
     // One account on its own screen, and how far down it is scrolled.
     let (mut detail, mut dscroll) = (false, 0usize);
     // Which of the oldest PRs the cursor is on, and what [c] last said.
@@ -1230,8 +1248,14 @@ fn main() {
                     dscroll = 0;
                 }
                 "left" | "esc" if detail => detail = false,
-                "up" if detail => osel = osel.saturating_sub(1),
-                "down" if detail => osel = osel.saturating_add(1),
+                "up" if detail => {
+                    osel = osel.saturating_sub(1);
+                    moved = true;
+                }
+                "down" if detail => {
+                    osel = osel.saturating_add(1);
+                    moved = true;
+                }
                 "c" | "C" if detail => {
                     // The account under the cursor, read from the shared
                     // state rather than the render's copy - the keys are
@@ -1272,8 +1296,28 @@ fn main() {
                 }
                 "home" if detail => dscroll = 0,
                 "end" if detail => dscroll = usize::MAX,
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
+                // Keys move the selection; the wheel moves the view. Never
+                // the other way round: scrolling to look at something must
+                // not change what `↵` opens.
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // Whichever screen is on: the board and an account's own
+                // screen keep separate offsets, so a wheel bound to one
+                // does nothing on the other.
+                "ctrl-y" | "wheel-up" => {
+                    let at = if detail { &mut dscroll } else { &mut board };
+                    *at = at.saturating_sub(1);
+                }
+                "ctrl-e" | "wheel-down" => {
+                    let at = if detail { &mut dscroll } else { &mut board };
+                    *at = at.saturating_add(1);
+                }
                 _ => {}
             }
         }
@@ -1596,9 +1640,12 @@ fn main() {
         ));
         rows.push(String::new());
 
-        // The account table earns the remaining height; the calendar keeps
-        // its place only where the pane is tall enough for both.
-        if let Some(cal) = calendar.as_ref().filter(|_| h > 38) {
+        // Drawn whatever the pane is. It used to stand down below 39 rows so
+        // the account table could have the height, but a contribution grid
+        // that is not there looks exactly like an account with no
+        // contributions, and the board scrolls now - so the pane costs it
+        // nothing that a turn of the wheel does not get back.
+        if let Some(cal) = calendar.as_ref() {
             let (grid, peak, total) = heatmap(&cal["weeks"], w);
             let total_c = cal["totalContributions"].as_i64().unwrap_or(total);
             rows.push(tc::seg(
@@ -1683,14 +1730,15 @@ fn main() {
             rows.push(String::new());
         }
 
-        // Scroll rather than truncate: the selection has to stay on screen,
-        // or the arrows move something invisible.
-        let room = h.saturating_sub(5 + rows.len()).max(1);
-        let first = if stats.len() > room {
-            selected.saturating_sub(room / 2).min(stats.len() - room)
-        } else {
-            0
-        };
+        // Every account is drawn, and the frame is a window onto the lot -
+        // the shape `linear` uses. Windowing the list inside a frame that
+        // was itself being truncated meant two scrolls fighting over one
+        // pane, and neither could be driven by the wheel without moving
+        // the selection. `cursor` below records where the selected row
+        // landed so the window can be dragged back to it when a key moves
+        // it, and left alone when it does not.
+        let first = 0usize;
+        let room = stats.len();
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── BY ACCOUNT ──".into()),
@@ -1749,8 +1797,12 @@ fn main() {
             }
         }
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
+        let mut cursor: Option<usize> = None;
         for (i, s) in stats.iter().enumerate().skip(first).take(room) {
             let here = i == selected;
+            if here {
+                cursor = Some(rows.len());
+            }
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
@@ -1873,7 +1925,7 @@ fn main() {
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 osel = osel.min(nodes.len().saturating_sub(1));
-                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, h, &p);
+                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -1895,16 +1947,33 @@ fn main() {
                 // The page follows the cursor into the oldest list, the way
                 // netwatch's detail follows one into a section. Without it
                 // the row being selected is often off the bottom.
-                if let Some(at) = cursor {
-                    if at < dscroll {
-                        dscroll = at;
-                    } else if at >= dscroll + room {
-                        dscroll = at + 1 - room;
+                // The title stays put while the rest scrolls under it. A
+                // detail screen is where it matters most: the board at
+                // least has its own name on every row, but scroll a detail
+                // view and there is nothing left saying whose account you
+                // opened. `cursor` indexes the whole body, so it shifts by
+                // the header before the window chases it - miss that and
+                // the selection lands a row off, only once you scroll.
+                let (head, rest) = body.split_at(1.min(body.len()));
+                let room_below = room.saturating_sub(head.len()).max(1);
+                // Only on the tick a key moved the selection. Chasing it
+                // every tick drags the view back to the cursor the instant
+                // the wheel moves it, which reads as the wheel not working.
+                if moved {
+                    if let Some(at) = cursor {
+                        let at = at.saturating_sub(head.len());
+                        if at < dscroll {
+                            dscroll = at;
+                        } else if at >= dscroll + room_below {
+                            dscroll = at + 1 - room_below;
+                        }
                     }
+                    moved = false;
                 }
-                dscroll = dscroll.min(body.len().saturating_sub(room));
-                let last = (dscroll + room).min(body.len());
-                let mut out: Vec<String> = body[dscroll..last].to_vec();
+                dscroll = dscroll.min(rest.len().saturating_sub(room_below));
+                let last = (dscroll + room_below).min(rest.len());
+                let mut out: Vec<String> = head.to_vec();
+                out.extend_from_slice(&rest[dscroll..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }
@@ -1935,8 +2004,23 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        rows.truncate(h.saturating_sub(footer.len()));
-        while rows.len() < h.saturating_sub(footer.len()) {
+        // A window onto the frame, title pinned, rather than a cut of it.
+        // Truncating dropped every account past the fold with nothing
+        // saying so.
+        let room = h.saturating_sub(footer.len());
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
+        if moved {
+            if let Some(at) = cursor {
+                board = tc::follow(board, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
+        }
+        board = board.min(rest.len().saturating_sub(room_below));
+        let last = (board + room_below).min(rest.len());
+        let mut rows: Vec<String> = head.to_vec();
+        rows.extend_from_slice(&rest[board..last]);
+        while rows.len() < room {
             rows.push(String::new());
         }
         rows.extend(footer);

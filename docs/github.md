@@ -205,6 +205,7 @@ into a single request returned HTTP 502 on the complexity limit.
 | `PgUp` `PgDn` `Home` `End` | scroll an account's screen by the page, or to either end |
 | `w` | cycle the window — 7 / 14 / 30 / 60 / 90 days |
 | `r` | refresh now, ignoring the day cache |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit, from either screen |
 
 ## One account on its own screen

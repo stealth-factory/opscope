@@ -138,6 +138,7 @@ not what somebody opened the pane for.
 | `w` | cycle the window — 12h / 24h / 48h / 7d |
 | `PgUp` `PgDn` `Home` `End` | move the selection by the page, or to either end |
 | `r` | refresh now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit, from either screen |
 
 `j` and `k` move the selection the same way `↓` and `↑` do, as they do on
