@@ -1201,6 +1201,16 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
     }
 }
 
+/// GitHub's jobs list is one page of 100. A run that has more must say so
+/// rather than drawing the page as every job.
+fn jobs_page_note(fetched: usize, total: i64) -> Option<String> {
+    if total > fetched as i64 {
+        Some(format!("{} most recent of {} jobs", fetched, total))
+    } else {
+        None
+    }
+}
+
 fn counts(runs: &[serde_json::Value]) -> (usize, usize, usize, usize) {
     let mut running = 0;
     let mut queued = 0;
@@ -1378,6 +1388,12 @@ fn info_overlay(
                                 w - 1,
                             ));
                         }
+                    }
+                    if let Some(said) = jobs_page_note(
+                        list.len(),
+                        j["total_count"].as_i64().unwrap_or(list.len() as i64),
+                    ) {
+                        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", said))], w - 1));
                     }
             }
         }
@@ -2335,6 +2351,16 @@ mod tests {
         assert_eq!(got["repo_fetched"], 30);
         assert_eq!(got["attempt"], 2);
         assert!(is_failed(&got));
+    }
+
+    #[test]
+    fn a_jobs_page_that_is_short_of_the_total_says_so() {
+        assert_eq!(
+            jobs_page_note(100, 140).as_deref(),
+            Some("100 most recent of 140 jobs")
+        );
+        assert_eq!(jobs_page_note(3, 3), None);
+        assert_eq!(jobs_page_note(0, 0), None);
     }
 
     #[test]
