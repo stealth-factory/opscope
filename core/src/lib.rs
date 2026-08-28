@@ -1111,6 +1111,153 @@ pub fn polled(
     out
 }
 
+/// One step of a fetch that runs in more than one.
+///
+/// `at` and `of` are how a paginating step says where it has got to. `of`
+/// is an Option on purpose: plenty of sources hand over a page and a cursor
+/// without ever saying how many pages there are, and a total guessed from
+/// the first page is a number nobody measured. No total means the step
+/// counts up and says so; it does not draw a bar to an invented end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub label: String,
+    pub done: bool,
+    pub at: usize,
+    pub of: Option<usize>,
+    t0: f64,
+    pub took: f64,
+}
+
+/// What a poller is working through, for the pane to draw while it waits.
+///
+/// Lives behind the same mutex the rest of a widget's shared state does.
+/// The poller calls `begin`, `count` and `finish`; the drawing thread reads
+/// `steps`. Nothing here fails: a progress report that can return an error
+/// is a second failure path guarding a cosmetic feature.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    steps: Vec<Step>,
+}
+
+impl Progress {
+    pub fn new() -> Progress {
+        Progress { steps: Vec::new() }
+    }
+
+    /// Start a step, or reopen one already listed under the same label.
+    pub fn begin(&mut self, label: &str) {
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.done = false;
+            s.t0 = now();
+            return;
+        }
+        self.steps.push(Step {
+            label: label.to_string(),
+            done: false,
+            at: 0,
+            of: None,
+            t0: now(),
+            took: 0.0,
+        });
+    }
+
+    /// Move a step's counter on. Starts the step if it has not begun.
+    pub fn count(&mut self, label: &str, at: usize, of: Option<usize>) {
+        if self.steps.iter().all(|s| s.label != label) {
+            self.begin(label);
+        }
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.at = at;
+            // A total, once given, is not unlearned by a later page that
+            // omits it - but a source that revises it is believed.
+            if of.is_some() {
+                s.of = of;
+            }
+            s.took = now() - s.t0;
+        }
+    }
+
+    pub fn finish(&mut self, label: &str) {
+        if let Some(s) = self.steps.iter_mut().find(|s| s.label == label) {
+            s.done = true;
+            s.took = now() - s.t0;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.steps.clear();
+    }
+
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+/// How far a step has got, in words.
+///
+/// `12/40` when the source said how many there are, `12` when it did not.
+/// Never a percentage of an unknown total, and never `0/0`.
+pub fn step_count(at: usize, of: Option<usize>) -> String {
+    match of {
+        Some(total) if total > 0 => format!("{}/{}", at, total),
+        _ if at > 0 => format!("{}", at),
+        _ => String::new(),
+    }
+}
+
+/// The steps as rows: a spinner on the one in flight, a tick behind it.
+///
+/// Lifted out of `pr`, which had it first and put the reason in a comment
+/// worth keeping: a shimmer says "wait" and nothing else, but the fetch
+/// really does run in stages, so showing them reads like a machine doing
+/// something rather than a placeholder.
+pub fn progress_rows(
+    steps: &[Step],
+    w: usize,
+    tick: usize,
+    done_colour: &str,
+    live_colour: &str,
+    txt: &str,
+    dim: &str,
+) -> Vec<String> {
+    let spin = SPINNER[tick % SPINNER.len()];
+    steps
+        .iter()
+        .map(|s| {
+            let count = step_count(s.at, s.of);
+            seg(
+                &[
+                    (
+                        if s.done { done_colour } else { live_colour },
+                        format!("   {}  ", if s.done { '✓' } else { spin }),
+                    ),
+                    (
+                        if s.done { txt } else { dim },
+                        pad(&s.label, w.saturating_sub(30).max(16)),
+                    ),
+                    (dim, format!("{:>9}", count)),
+                    (
+                        dim,
+                        format!(
+                            "{:>7}",
+                            if s.took > 0.0 {
+                                format!("{:.1}s", s.took)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    ),
+                ],
+                w.saturating_sub(1),
+            )
+        })
+        .collect()
+}
+
 /// A label that is visibly still working, for a source that has not answered.
 ///
 /// Two rows: the label behind a Braille spinner, and one sweeping line under
@@ -1127,6 +1274,27 @@ pub fn polled(
 /// than chosen here, because every palette in this repo is defined beside
 /// the widget that uses it and the contrast check reads those files.
 pub fn waiting(label: &str, w: usize, tick: usize, lit: &str, dim: &str) -> Vec<String> {
+    waiting_with(label, &[], w, tick, lit, lit, dim, dim)
+}
+
+/// The same wait, showing what the poller is actually working through.
+///
+/// With steps it draws them and drops the sweep: the counter moving is a
+/// better "still alive" signal than a shimmer, and it is a true one. With
+/// no steps it is exactly `waiting` - which is the honest state for a
+/// poller that has not reported any, rather than an empty list implying
+/// nothing is happening.
+#[allow(clippy::too_many_arguments)]
+pub fn waiting_with(
+    label: &str,
+    steps: &[Step],
+    w: usize,
+    tick: usize,
+    lit: &str,
+    done_colour: &str,
+    txt: &str,
+    dim: &str,
+) -> Vec<String> {
     let head = seg(
         &[
             (lit, format!("  {} ", SPINNER[tick % SPINNER.len()])),
@@ -1134,6 +1302,11 @@ pub fn waiting(label: &str, w: usize, tick: usize, lit: &str, dim: &str) -> Vec<
         ],
         w.saturating_sub(1),
     );
+    if !steps.is_empty() {
+        let mut rows = vec![head];
+        rows.extend(progress_rows(steps, w, tick, done_colour, lit, txt, dim));
+        return rows;
+    }
     // Twice the tick, so the sweep is quicker than the spinner and the two
     // do not appear to be one mechanism running slow.
     let mut line: Vec<(&str, String)> = vec![(RST, "  ".into())];
@@ -1551,6 +1724,37 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_step_never_counts_towards_a_total_nobody_gave() {
+        // The whole reason `of` is an Option. A source that pages without
+        // saying how many pages there are gets a rising count, not a bar
+        // creeping towards a number this code made up.
+        assert_eq!(super::step_count(0, None), "");
+        assert_eq!(super::step_count(7, None), "7");
+        assert_eq!(super::step_count(7, Some(40)), "7/40");
+        // And nothing renders "0/0" for a step that has begun with an empty
+        // set, which reads as a stall rather than as nothing to do.
+        assert_eq!(super::step_count(0, Some(0)), "");
+    }
+
+    #[test]
+    fn a_total_once_given_survives_a_page_that_omits_it() {
+        let mut p = super::Progress::new();
+        p.begin("runs");
+        p.count("runs", 1, Some(40));
+        p.count("runs", 2, None);
+        assert_eq!(p.steps()[0].of, Some(40), "the ceiling was forgotten");
+        assert_eq!(p.steps()[0].at, 2);
+        // A source that revises its own total is believed, though.
+        p.count("runs", 3, Some(41));
+        assert_eq!(p.steps()[0].of, Some(41));
+        assert!(!p.steps()[0].done);
+        p.finish("runs");
+        assert!(p.steps()[0].done);
+        p.clear();
+        assert!(p.is_empty(), "a finished pass still claimed to be working");
+    }
+
     #[test]
     fn a_wait_that_does_not_move_is_indistinguishable_from_a_dead_poller() {
         // The point of the helper is the movement, so the test is that

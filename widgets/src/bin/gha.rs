@@ -790,6 +790,12 @@ struct State {
     viewer: String,
     accounts: usize,
     rate: Option<(i64, i64)>,
+    /// What the poller is working through right now.
+    ///
+    /// Not folded in by `apply_pass`: it belongs to the pass in flight, not
+    /// to the last one that finished, and a completed pass leaves it empty
+    /// so the pane stops claiming work is under way.
+    progress: tc::Progress,
 }
 
 /// Fold a finished pass into the live state.
@@ -1025,6 +1031,18 @@ fn viewer_login(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<String, Stri
     }
 }
 
+/// Report a step to the pane, if the lock is free.
+///
+/// Deliberately lossy. A progress line is not worth blocking a fetch for,
+/// and a poisoned mutex here must not take the poller down with it - the
+/// pass carries on and the pane simply shows one fewer step.
+fn note(live: &Arc<Mutex<State>>, f: impl FnOnce(&mut tc::Progress)) {
+    if let Ok(mut g) = live.lock() {
+        f(&mut g.progress);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn one_pass(
     tok: &str,
     source: &str,
@@ -1033,6 +1051,7 @@ fn one_pass(
     pushed_days: i64,
     cap: usize,
     hours: i64,
+    live: &Arc<Mutex<State>>,
 ) -> Result<State, String> {
     let mut err = if source == "config" {
         tc::config_token_warning().unwrap_or_default()
@@ -1041,6 +1060,10 @@ fn one_pass(
     };
     let mut rate = None;
     let empty_stats = PickStats::default();
+    note(live, |p| {
+        p.clear();
+        p.begin("accounts");
+    });
     let (repos, stats, viewer, orgs, n_accounts, is_explicit) = if !explicit.is_empty() {
         let viewer = viewer_login(tok, &mut rate).unwrap_or_default();
         let n = explicit
@@ -1081,6 +1104,11 @@ fn one_pass(
             .iter()
             .filter(|a| !is_personal(a, &viewer))
             .count();
+        note(live, |p| {
+            p.count("accounts", n_accounts, Some(n_accounts));
+            p.finish("accounts");
+            p.begin("repos");
+        });
         match discover_repos(tok, &want, pushed_days, cap, &viewer, &mut rate) {
             Ok((repos, stats, note)) => {
                 if let Some(said) = note {
@@ -1129,9 +1157,21 @@ fn one_pass(
         });
     }
 
+    note(live, |p| {
+        p.count("repos", repos.len(), Some(repos.len()));
+        p.finish("repos");
+        // The denominator here is repos, not runs: how many runs there are
+        // is not known until every repo has answered, and counting up to a
+        // total nobody has said yet is the kind of invented number this
+        // codebase spends its checks avoiding.
+        p.begin("runs");
+    });
     let mut runs = Vec::new();
     let mut partial: Vec<String> = Vec::new();
-    for repo in &repos {
+    for (done, repo) in repos.iter().enumerate() {
+        note(live, |p| {
+            p.count("runs", done, Some(repos.len()));
+        });
         match fetch_runs_for(repo, tok, hours, &mut rate) {
             Ok((got, note)) => {
                 runs.extend(got);
@@ -1148,6 +1188,10 @@ fn one_pass(
             }
         }
     }
+    note(live, |p| {
+        p.count("runs", repos.len(), Some(repos.len()));
+        p.finish("runs");
+    });
     runs.sort_by(|a, b| text(b, "created_at").cmp(&text(a, "created_at")));
     if !partial.is_empty() {
         let extra = if partial.len() == 1 {
@@ -1181,6 +1225,9 @@ fn one_pass(
         accounts: n_accounts,
         rate,
         window_hours: hours,
+        // The finished pass carries no progress; the live one owns it and
+        // the poller clears it either way.
+        progress: tc::Progress::new(),
     })
 }
 
@@ -1484,8 +1531,14 @@ fn main() {
                     pushed_days,
                     max_repos,
                     hours,
+                    &poller,
                 )
             }));
+            // However the pass ended - answer, error or panic - it is no
+            // longer running, and a step list left on screen would say it
+            // was. A panic especially: that is the case the poller guard
+            // exists for, and it must not leave a spinner turning forever.
+            note(&poller, |p| p.clear());
             match step {
                 Ok(Ok(got)) => {
                     if let Ok(mut g) = poller.lock() {
@@ -1655,19 +1708,21 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (runs, err, fetched, scope, hours, viewer, n_accounts, rate) = match state.lock() {
-            Ok(g) => (
-                g.runs.clone(),
-                g.err.clone(),
-                g.fetched,
-                g.scope.clone(),
-                g.window_hours,
-                g.viewer.clone(),
-                g.accounts,
-                g.rate,
-            ),
-            Err(_) => return,
-        };
+        let (runs, err, fetched, scope, hours, viewer, n_accounts, rate, progress) =
+            match state.lock() {
+                Ok(g) => (
+                    g.runs.clone(),
+                    g.err.clone(),
+                    g.fetched,
+                    g.scope.clone(),
+                    g.window_hours,
+                    g.viewer.clone(),
+                    g.accounts,
+                    g.rate,
+                    g.progress.steps().to_vec(),
+                ),
+                Err(_) => return,
+            };
         if !note.0.is_empty() && tc::now() > note.1 {
             note = (String::new(), 0.0);
         }
@@ -2048,11 +2103,14 @@ fn main() {
             // GitHub replied and there is nothing to show - and animating
             // those would say a fetch was still running when none is.
             if runs.is_empty() && fetched == 0.0 {
-                rows.extend(tc::waiting(
+                rows.extend(tc::waiting_with(
                     "waiting for GitHub…",
+                    &progress,
                     w,
                     tick,
                     &p.accent,
+                    &p.ok,
+                    &p.txt,
                     &p.dim,
                 ));
             } else {
