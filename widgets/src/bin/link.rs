@@ -544,6 +544,10 @@ fn main() {
     // frame rather than when the key is pressed, because the body's length
     // depends on the pane, which can change under us between frames.
     let mut scroll = 0usize;
+    // The list screen's own window, and whether a key has just moved the
+    // selection. The wheel writes the window and never the flag, so the
+    // list stops chasing the cursor the moment it is turned.
+    let (mut lscroll, mut moved) = (0usize, false);
 
     loop {
         // Read before the keys rather than after them, so a page key knows
@@ -560,7 +564,7 @@ fn main() {
                 // Up and down mean "move through what is in front of you"
                 // in both views: in the list that is the selection, on the
                 // detail screen it is the screen itself.
-                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
+                "up" | "k" | "K" => {
                     if detail {
                         scroll = scroll.saturating_sub(1);
                     } else {
@@ -569,9 +573,10 @@ fn main() {
                             Some(0) => None,
                             Some(at) => Some(at - 1),
                         };
+                        moved = true;
                     }
                 }
-                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
+                "down" | "j" | "J" => {
                     if detail {
                         scroll = scroll.saturating_add(1);
                     } else {
@@ -581,7 +586,20 @@ fn main() {
                             Some(at) if at + 1 >= count => None,
                             Some(at) => Some(at + 1),
                         };
+                        moved = true;
                     }
+                }
+                // The wheel moves whichever screen is in front of you and
+                // never the selection - which here wraps through "nothing
+                // selected", so a wheel bound to it would turn the chart's
+                // highlight on and off as it passed.
+                "ctrl-y" | "wheel-up" => {
+                    let at = if detail { &mut scroll } else { &mut lscroll };
+                    *at = at.saturating_sub(1);
+                }
+                "ctrl-e" | "wheel-down" => {
+                    let at = if detail { &mut scroll } else { &mut lscroll };
+                    *at = at.saturating_add(1);
                 }
                 // Right goes in and left comes back out, the way a column
                 // of panes works, so the hand does not have to learn a key
@@ -726,6 +744,7 @@ fn main() {
         }
 
         let mut rows = vec![tc::title("connections", w, &p.link)];
+        let mut cursor: Option<usize> = None;
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
@@ -758,6 +777,8 @@ fn main() {
                 w - 1,
             ));
         } else {
+            // Where the selected row lands: one heading, then a row each.
+            cursor = selected.map(|at| rows.len() + 1 + at);
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
             let room = h.saturating_sub(rows.len() + 4);
@@ -827,11 +848,29 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
+        // A window onto the body rather than a cut of it, and the title
+        // stays put above it: on a pane too short for every session the
+        // table and the chart under it used to run off the bottom with
+        // nothing on screen saying there was more.
+        let room = h.saturating_sub(foot.len());
+        let (head, rest) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
+        // Only on the frame a key moved the selection: chasing it every
+        // frame drags the view back from wherever the wheel put it.
+        if moved {
+            if let Some(at) = cursor {
+                lscroll = tc::follow(lscroll, at.saturating_sub(head.len()), room_below);
+            }
+            moved = false;
         }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
+        lscroll = lscroll.min(rest.len().saturating_sub(room_below));
+        let mut frame: Vec<String> = head.to_vec();
+        frame.extend(rest.iter().skip(lscroll).take(room_below).cloned());
+        while frame.len() < room {
+            frame.push(String::new());
+        }
+        frame.extend(foot);
+        tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
