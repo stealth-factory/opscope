@@ -408,19 +408,6 @@ fn sort_runs_by_time(runs: &mut [serde_json::Value]) {
     });
 }
 
-/// The owner as it appears in a run's scope column.
-///
-/// Your own account is named rather than shown as a login, because on a
-/// list mixing ten owners "personal" is the distinction that matters and
-/// the login is already in the repo path beside it.
-fn scope_label(owner: &str, viewer: &str) -> String {
-    if is_personal(owner, viewer) {
-        "personal".to_string()
-    } else {
-        owner.to_string()
-    }
-}
-
 /// How long ago the run was created. A missing stamp is `--`, not `0s`.
 fn run_age(run: &serde_json::Value, at: f64) -> String {
     match iso_secs(&text(run, "created_at")) {
@@ -632,9 +619,6 @@ struct Columns {
     detail: bool,
     event: bool,
     queued: bool,
-    scope: usize,
-    repo: usize,
-    workflow: usize,
 }
 
 fn columns(w: usize) -> Columns {
@@ -643,31 +627,6 @@ fn columns(w: usize) -> Columns {
         single: w >= 110,
         event: w >= 100,
         queued: w >= 114,
-        // The scope had a heading row per band before the list went flat.
-        // A column costs less than that did - one band cost a whole row and
-        // repeated every time the owner changed, which on a list sorted by
-        // time is most rows.
-        scope: if w < 70 {
-            9
-        } else if w < 100 {
-            12
-        } else {
-            16
-        },
-        repo: if w < 70 {
-            10
-        } else if w < 100 {
-            14
-        } else {
-            18
-        },
-        workflow: if w < 80 {
-            10
-        } else if w < 110 {
-            14
-        } else {
-            18
-        },
     }
 }
 
@@ -1708,7 +1667,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (runs, err, fetched, scope, hours, viewer, n_accounts, rate, progress) =
+        let (runs, err, fetched, scope, hours, _viewer, n_accounts, rate, progress) =
             match state.lock() {
                 Ok(g) => (
                     g.runs.clone(),
@@ -2037,19 +1996,6 @@ fn main() {
                         outcome_label(&kind)
                     ),
                 ),
-                // A column's budget includes the gap after it. Padding to
-                // the full width put three fields end to end with nothing
-                // between them - "stealth-funiteasia-Scheduled" is a scope,
-                // a repo and a workflow, and no reader could tell.
-                (
-                    c(&p.lbl),
-                    gap(
-                        &scope_label(&repo_owner(&text(run, "repo")), &viewer),
-                        cols.scope,
-                    ),
-                ),
-                (c(&p.txt), gap(&repo_short(&text(run, "repo")), cols.repo)),
-                (c(&p.txt), gap(&text(run, "workflow"), cols.workflow)),
                 (c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))),
                 (c(&p.dim), format!(" {:>4}", run_age(run, tc::now()))),
             ];
@@ -2072,10 +2018,19 @@ fn main() {
                     format!(" q{}", dur_label(queue_secs(run, tc::now())).trim()),
                 ));
             }
+            // Everything above this point is a fixed width that its own
+            // values cannot exceed, so nothing above can be cut. The repo
+            // is the first field whose length is somebody else's decision,
+            // which is why it goes last and takes whatever is left rather
+            // than being padded into a budget - CLAUDE.md asks for columns
+            // to be dropped as a pane narrows, never truncated, and
+            // "stealth-f" told a reader nothing they could act on. The
+            // owner stays in the path, so the scope is still on the row.
+            line.push((c(&p.txt), format!("  {}", text(run, "repo"))));
             if cols.single {
                 line.push((
                     c(if here { &p.txt } else { &p.msg }),
-                    format!(" {}", subject),
+                    format!("  {} · {}", text(run, "workflow"), subject),
                 ));
             }
             if here {
@@ -2084,11 +2039,16 @@ fn main() {
             let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
             if !cols.single && rows.len() < h.saturating_sub(1) {
+                // The workflow joins the subject here rather than fighting
+                // the repo for room on the row above. Both are as long as
+                // whoever named them made them, and this line carries only
+                // those two.
                 rows.push(tc::seg(
                     &[
+                        (&c(&p.lbl), format!("   {}", text(run, "workflow"))),
                         (
                             &c(if here { &p.txt } else { &p.msg }),
-                            format!("   {}", subject),
+                            format!(" · {}", subject),
                         ),
                         (&tint, if here { " ".repeat(w) } else { String::new() }),
                     ],
@@ -2149,18 +2109,6 @@ fn main() {
     }
 }
 
-fn repo_short(full: &str) -> String {
-    full.rsplit('/').next().unwrap_or(full).to_string()
-}
-
-/// A column of `n` cells, the last of which is always the gap.
-///
-/// `tc::pad` fills to exactly the width it is given, so two padded fields
-/// side by side touch. Spending one cell of every column on the separator
-/// keeps the row the same total width and keeps the fields apart.
-fn gap(s: &str, n: usize) -> String {
-    format!("{} ", tc::pad(s, n.saturating_sub(1)))
-}
 
 #[cfg(test)]
 mod tests {
@@ -2330,9 +2278,14 @@ mod tests {
     }
 
     #[test]
-    fn a_run_names_its_scope_on_the_row() {
-        assert_eq!(scope_label("alice", "alice"), "personal");
-        assert_eq!(scope_label("acme", "alice"), "acme");
+    fn the_row_carries_the_owner_so_the_scope_is_still_on_it() {
+        // The scope column went away when the repo stopped being padded
+        // into a budget: the owner is the first half of the path, so a row
+        // still says whose run it is - and says it without cutting either
+        // half of the name to fit.
+        assert_eq!(repo_owner("stealth-factory/opscope"), "stealth-factory");
+        assert!(is_personal("alice", "alice"));
+        assert!(!is_personal("acme", "alice"));
     }
 
     #[test]
@@ -2536,8 +2489,10 @@ mod tests {
         assert!(columns(100).event);
         assert!(!columns(100).queued);
         assert!(columns(114).queued);
-        assert_eq!(columns(60).repo, 10);
-        assert_eq!(columns(200).repo, 18);
+        // No name has a width budget any more. Every remaining field on the
+        // first row is a fixed shape its own values cannot outgrow, so the
+        // only thing width decides is which optional columns appear - which
+        // is what the assertions above check.
     }
 
     #[test]
