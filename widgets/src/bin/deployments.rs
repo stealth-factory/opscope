@@ -1217,7 +1217,7 @@ fn main() {
                                 " ↑↓ scroll {}-{} of {} · [c]opy · [r]efresh · ← esc · [q]uit",
                                 oscroll + 1,
                                 last,
-                                body.len()
+                                rest.len()
                             )
                         } else {
                             " [c]opy · [r]efresh · ← or esc to close · [q]uit".to_string()
