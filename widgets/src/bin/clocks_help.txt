@@ -17,8 +17,8 @@ every minute it keeps running: BEL plus OSC 9 and OSC 777 desktop notifications,
 channels that survive SSH. Under Herdr it additionally raises a native toast
 with a sound — additive, never required, and skipped entirely elsewhere.
 
-Keys: up/down (and PgUp/PgDn, Home/End) scroll the city list while the clock,
-countdowns and footer stay pinned. p shows or hides the pomodoro and suspends
+Keys: up/down (and PgUp/PgDn, Home/End) scroll the whole panel under its
+title, as do ctrl-y and ctrl-e and the mouse wheel; the footer stays put. p shows or hides the pomodoro and suspends
 it with them, space pauses or
 resumes, r restarts the phase, s starts a break during focus and ends one during
 a break - b and e do the same, and the footer names whichever applies - +/-

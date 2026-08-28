@@ -25,7 +25,7 @@ timezones.
  End of Day             02:51:31
  ████████████████████████████████░░░░░░░░░░░░░░
 
- ── WORLD CLOCK ──  1-12 of 19  ↑↓
+ ── WORLD CLOCK ──  19 cities
  ☾ San Francisco   06:11  Thu  UTC-7
  ☀ London          11:11  Thu  UTC+1
  ☾ Taipei          18:11  Thu  UTC+8
@@ -93,7 +93,8 @@ shown — are not tied to the day and survive.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `PgUp` `PgDn` `Home` `End` | scroll the city list; everything else stays pinned |
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | scroll the panel — the title stays pinned, everything under it moves |
+| `Ctrl-Y` `Ctrl-E` `wheel` | the same scroll, a line at a time |
 | `p` | show/hide the pomodoro — **and suspend it with them**, so a hidden timer never keeps counting |
 | `space` | pause / resume |
 | `s` `b` `e` | start a break during focus, end one during a break — the footer names whichever applies |
