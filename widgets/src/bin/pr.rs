@@ -1025,7 +1025,10 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let mut rows = vec![tc::title("pr watch", w, &p.accent)];
+        // "github" in the name, like the two beside it on the wall. Three
+        // panes headed GITHUB OPS, GITHUB PRS and GITHUB ACTIONS say what
+        // they have in common; PR WATCH read as a fourth unrelated thing.
+        let mut rows = vec![tc::title("github prs", w, &p.accent)];
         // Two rows, in the order the other GitHub widgets use them. The
         // first is the chrome every polling widget draws and is meant to
         // read identically across panes: who is being watched, when it last

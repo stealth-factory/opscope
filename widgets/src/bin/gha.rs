@@ -387,26 +387,37 @@ fn pick_repos(
     (picked, stats)
 }
 
-fn sort_runs_by_scope(runs: &mut [serde_json::Value], viewer: &str) {
+/// Newest first, across every account at once.
+///
+/// This used to sort by owner and band the list under scope headings, the
+/// way `deployments` groups Vercel teams. It reads well for a directory and
+/// badly for a feed: what broke most recently is the question this widget
+/// is open to answer, and grouping buried a failure that landed a minute
+/// ago three screens down under an org whose name starts with a later
+/// letter. The scope did not stop mattering - it moved into a column on
+/// the row, where it is read per run rather than inferred from which band
+/// the eye is in.
+fn sort_runs_by_time(runs: &mut [serde_json::Value]) {
     runs.sort_by(|a, b| {
-        let oa = repo_owner(&text(a, "repo"));
-        let ob = repo_owner(&text(b, "repo"));
-        match (is_personal(&oa, viewer), is_personal(&ob, viewer)) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => oa
-                .to_ascii_lowercase()
-                .cmp(&ob.to_ascii_lowercase())
-                .then_with(|| text(b, "created_at").cmp(&text(a, "created_at"))),
-        }
+        text(b, "created_at")
+            .cmp(&text(a, "created_at"))
+            // A tie inside the same second still has to be a total order,
+            // or the list reshuffles under the cursor between frames.
+            .then_with(|| text(a, "repo").cmp(&text(b, "repo")))
+            .then_with(|| text(a, "id").cmp(&text(b, "id")))
     });
 }
 
-fn scope_heading(owner: &str, viewer: &str) -> String {
+/// The owner as it appears in a run's scope column.
+///
+/// Your own account is named rather than shown as a login, because on a
+/// list mixing ten owners "personal" is the distinction that matters and
+/// the login is already in the repo path beside it.
+fn scope_label(owner: &str, viewer: &str) -> String {
     if is_personal(owner, viewer) {
-        format!(" ── PERSONAL · {} ── ", owner)
+        "personal".to_string()
     } else {
-        format!(" ── {} ── ", owner.to_ascii_uppercase())
+        owner.to_string()
     }
 }
 
@@ -621,6 +632,7 @@ struct Columns {
     detail: bool,
     event: bool,
     queued: bool,
+    scope: usize,
     repo: usize,
     workflow: usize,
 }
@@ -631,6 +643,17 @@ fn columns(w: usize) -> Columns {
         single: w >= 110,
         event: w >= 100,
         queued: w >= 114,
+        // The scope had a heading row per band before the list went flat.
+        // A column costs less than that did - one band cost a whole row and
+        // repeated every time the owner changed, which on a list sorted by
+        // time is most rows.
+        scope: if w < 70 {
+            9
+        } else if w < 100 {
+            12
+        } else {
+            16
+        },
         repo: if w < 70 {
             10
         } else if w < 100 {
@@ -1658,7 +1681,7 @@ fn main() {
             "running" => shown.retain(is_running),
             _ => {}
         }
-        sort_runs_by_scope(&mut shown, &viewer);
+        sort_runs_by_time(&mut shown);
         if overlay {
             if shown.is_empty() {
                 overlay = false;
@@ -1914,21 +1937,9 @@ fn main() {
             scroll = selected + 1 - visible;
         }
 
-        let mut prev_owner = String::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
             if rows.len() >= h.saturating_sub(1) {
                 break;
-            }
-            let owner = repo_owner(&text(run, "repo"));
-            if owner != prev_owner {
-                rows.push(tc::seg(
-                    &[(p.lbl.as_str(), scope_heading(&owner, &viewer))],
-                    w - 1,
-                ));
-                prev_owner = owner;
-                if rows.len() >= h.saturating_sub(1) {
-                    break;
-                }
             }
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
@@ -1971,8 +1982,19 @@ fn main() {
                         outcome_label(&kind)
                     ),
                 ),
-                (c(&p.txt), tc::pad(&repo_short(&text(run, "repo")), cols.repo)),
-                (c(&p.txt), tc::pad(&text(run, "workflow"), cols.workflow)),
+                // A column's budget includes the gap after it. Padding to
+                // the full width put three fields end to end with nothing
+                // between them - "stealth-funiteasia-Scheduled" is a scope,
+                // a repo and a workflow, and no reader could tell.
+                (
+                    c(&p.lbl),
+                    gap(
+                        &scope_label(&repo_owner(&text(run, "repo")), &viewer),
+                        cols.scope,
+                    ),
+                ),
+                (c(&p.txt), gap(&repo_short(&text(run, "repo")), cols.repo)),
+                (c(&p.txt), gap(&text(run, "workflow"), cols.workflow)),
                 (c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))),
                 (c(&p.dim), format!(" {:>4}", run_age(run, tc::now()))),
             ];
@@ -2071,6 +2093,15 @@ fn main() {
 
 fn repo_short(full: &str) -> String {
     full.rsplit('/').next().unwrap_or(full).to_string()
+}
+
+/// A column of `n` cells, the last of which is always the gap.
+///
+/// `tc::pad` fills to exactly the width it is given, so two padded fields
+/// side by side touch. Spending one cell of every column on the separator
+/// keeps the row the same total width and keeps the fields apart.
+fn gap(s: &str, n: usize) -> String {
+    format!("{} ", tc::pad(s, n.saturating_sub(1)))
 }
 
 #[cfg(test)]
@@ -2190,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_runs_sort_ahead_of_orgs_and_keep_newest_inside_a_scope() {
+    fn runs_are_newest_first_no_matter_whose_account_they_are_in() {
         let mut runs = vec![
             serde_json::json!({
                 "repo": "acme/app", "created_at": "2026-08-27T12:00:00Z"
@@ -2205,20 +2236,45 @@ mod tests {
                 "repo": "beta/lib", "created_at": "2026-08-27T13:00:00Z"
             }),
         ];
-        sort_runs_by_scope(&mut runs, "alice");
-        let names: Vec<String> = runs.iter().map(|r| text(r, "repo")).collect();
+        sort_runs_by_time(&mut runs);
+        let stamps: Vec<String> = runs.iter().map(|r| text(r, "created_at")).collect();
         assert_eq!(
-            names,
+            stamps,
             vec![
-                "alice/toy".to_string(),
-                "alice/toy".to_string(),
-                "acme/app".to_string(),
-                "beta/lib".to_string()
-            ]
+                "2026-08-27T13:00:00Z".to_string(),
+                "2026-08-27T12:00:00Z".to_string(),
+                "2026-08-27T11:00:00Z".to_string(),
+                "2026-08-27T10:00:00Z".to_string(),
+            ],
+            "the newest run is the first row whoever owns it"
         );
-        assert_eq!(runs[0]["created_at"], "2026-08-27T11:00:00Z");
-        assert_eq!(scope_heading("alice", "alice"), " ── PERSONAL · alice ── ");
-        assert_eq!(scope_heading("acme", "alice"), " ── ACME ── ");
+        // The personal account no longer sorts ahead of anyone: alice's
+        // 11:00 run sits below beta's 13:00 one, which is the whole point.
+        assert_eq!(text(&runs[0], "repo"), "beta/lib");
+    }
+
+    #[test]
+    fn a_tie_on_the_second_still_gives_a_stable_order() {
+        // Two runs created in the same second must not swap places between
+        // frames, or the cursor lands on a different run than the one that
+        // was under it.
+        let mut runs = vec![
+            serde_json::json!({ "repo": "b/two", "created_at": "2026-08-27T12:00:00Z", "id": "2" }),
+            serde_json::json!({ "repo": "a/one", "created_at": "2026-08-27T12:00:00Z", "id": "1" }),
+        ];
+        sort_runs_by_time(&mut runs);
+        let first = text(&runs[0], "repo");
+        for _ in 0..5 {
+            sort_runs_by_time(&mut runs);
+            assert_eq!(text(&runs[0], "repo"), first, "order moved under the cursor");
+        }
+        assert_eq!(first, "a/one");
+    }
+
+    #[test]
+    fn a_run_names_its_scope_on_the_row() {
+        assert_eq!(scope_label("alice", "alice"), "personal");
+        assert_eq!(scope_label("acme", "alice"), "acme");
     }
 
     #[test]
