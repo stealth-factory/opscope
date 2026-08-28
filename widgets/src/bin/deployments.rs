@@ -973,6 +973,10 @@ fn main() {
     let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut visible = 1usize;
+    // Set by whichever key moved the cursor, and cleared once the list has
+    // been asked to hold it. Without it the window chases the selection
+    // every frame and drags itself back from wherever the wheel put it.
+    let mut moved = false;
     let mut shown: Vec<serde_json::Value> = Vec::new();
 
     loop {
@@ -994,6 +998,7 @@ fn main() {
                     _ => {}
                 }
                 selected = 0;
+                moved = true;
                 continue;
             }
             if overlay {
@@ -1082,14 +1087,37 @@ fn main() {
                 "s" | "S" => {
                     filter = (filter + 1) % FILTERS.len();
                     selected = 0;
+                    moved = true;
                 }
                 "/" => typing = true,
-                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "ctrl-e" | "wheel-down" => selected += 1,
-                "pgup" => selected = selected.saturating_sub(visible),
-                "pgdn" => selected += visible,
-                "home" => selected = 0,
-                "end" => selected = shown.len().saturating_sub(1),
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the list and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                "pgup" => {
+                    selected = selected.saturating_sub(visible);
+                    moved = true;
+                }
+                "pgdn" => {
+                    selected += visible;
+                    moved = true;
+                }
+                "home" => {
+                    selected = 0;
+                    moved = true;
+                }
+                "end" => {
+                    selected = shown.len().saturating_sub(1);
+                    moved = true;
+                }
                 "right" | "enter" => {
                     if !shown.is_empty() {
                         overlay = true;
@@ -1352,10 +1380,12 @@ fn main() {
         let per_item = if cols.single { 1 } else { 2 };
         visible = (h.saturating_sub(rows.len() + 1) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
-        if selected < scroll {
-            scroll = selected;
-        } else if selected >= scroll + visible {
-            scroll = selected - visible + 1;
+        // Only on the frame a key moved the cursor. Chasing it every frame
+        // pulls the list back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = tc::follow(scroll, selected, visible);
+            moved = false;
         }
         for (i, d) in shown.iter().enumerate().skip(scroll).take(visible) {
             if rows.len() >= h.saturating_sub(1) {
