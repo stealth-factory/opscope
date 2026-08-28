@@ -1046,6 +1046,34 @@ pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)>
     out
 }
 
+/// Whether a section is actually present in the config being read.
+///
+/// `load_config` returns `{}` for a section that is missing, so emptiness
+/// alone cannot tell "not set" from "set under the name this widget used
+/// to have". Presence is what decides, and it has to be asked of the same
+/// file `load_config` would read - the first one on `config_paths` that
+/// parses, not merely the first that exists.
+///
+/// Callers keep both names as string literals at the call site rather than
+/// passing them through here as variables, because `widgets/tests/check.rs`
+/// reads `load_config("…")` literally and a name it cannot see is a name it
+/// cannot check.
+pub fn config_has_section(name: &str) -> bool {
+    for path in config_paths() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        // The first file that parses is the one that answers, matching
+        // load_config: a later file is never consulted, so a section in it
+        // is not the section this widget would read.
+        return parsed.get(name).is_some();
+    }
+    false
+}
+
 /// How long ago something happened, in the one form every widget uses.
 ///
 /// Four tiers rather than three. `pr` grew its own copy of this with a

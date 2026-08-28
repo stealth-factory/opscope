@@ -215,6 +215,25 @@ query($owner: String!, $name: String!, $after: String) {
   }
 }"#;
 
+/// Whether this run is reading the pre-rename `pr` section.
+///
+/// The new name wins wherever it is set, so a config that has been updated
+/// is never second-guessed by an old section somebody forgot to delete. A
+/// config that has *not* been updated is read anyway rather than falling
+/// through to code defaults, which on screen is indistinguishable from a
+/// widget nobody configured.
+fn on_legacy_section() -> bool {
+    !tc::config_has_section("github_prs") && tc::config_has_section("pr")
+}
+
+/// And said out loud, because a silent fallback is how a rename becomes
+/// permanent: nothing ever tells anyone the old name is still doing the
+/// work.
+fn legacy_section_note() -> Option<String> {
+    on_legacy_section()
+        .then(|| "config: reading the old `pr` section — rename it to `github_prs`".into())
+}
+
 fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
@@ -733,6 +752,13 @@ fn fetch_list(
         } else {
             String::new()
         };
+        if let Some(note) = legacy_section_note() {
+            said = if said.is_empty() {
+                note
+            } else {
+                format!("{} · {}", said, note)
+            };
+        }
         if deepened.is_some() {
             // Named as a ceiling rather than as the raw 502, because that
             // is what it is: GitHub stops serving these pages, the list is
@@ -863,7 +889,11 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 fn main() {
     tc::maybe_help(include_str!("github-prs_help.txt"));
-    let cfg = tc::load_config("github_prs");
+    let cfg = if on_legacy_section() {
+        tc::load_config("pr")
+    } else {
+        tc::load_config("github_prs")
+    };
     let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 50);

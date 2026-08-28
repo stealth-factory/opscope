@@ -1013,6 +1013,25 @@ fn viewer_login(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<String, Stri
     }
 }
 
+/// Whether this run is reading the pre-rename `gha` section.
+///
+/// The new name wins wherever it is set, so a config that has been updated
+/// is never second-guessed by an old section somebody forgot to delete. A
+/// config that has *not* been updated is read anyway rather than falling
+/// through to code defaults, which on screen is indistinguishable from a
+/// widget nobody configured.
+fn on_legacy_section() -> bool {
+    !tc::config_has_section("github_actions") && tc::config_has_section("gha")
+}
+
+/// And said out loud, because a silent fallback is how a rename becomes
+/// permanent: nothing ever tells anyone the old name is still doing the
+/// work.
+fn legacy_section_note() -> Option<String> {
+    on_legacy_section()
+        .then(|| "config: reading the old `gha` section — rename it to `github_actions`".into())
+}
+
 /// Report a step to the pane, if the lock is free.
 ///
 /// Deliberately lossy. A progress line is not worth blocking a fetch for,
@@ -1040,6 +1059,13 @@ fn one_pass(
     } else {
         String::new()
     };
+    if let Some(said) = legacy_section_note() {
+        err = if err.is_empty() {
+            said
+        } else {
+            format!("{} · {}", err, said)
+        };
+    }
     let mut rate = None;
     let empty_stats = PickStats::default();
     note(live, |p| {
@@ -1464,7 +1490,11 @@ fn info_overlay(
 
 fn main() {
     tc::maybe_help(include_str!("github-actions_help.txt"));
-    let cfg = tc::load_config("github_actions");
+    let cfg = if on_legacy_section() {
+        tc::load_config("gha")
+    } else {
+        tc::load_config("github_actions")
+    };
     let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0).max(30.0);
     let accounts = tc::cfg_strings(&cfg, "accounts", &[]);
