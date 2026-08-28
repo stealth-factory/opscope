@@ -267,12 +267,6 @@ type StackRow = (String, serde_json::Value, bool, Option<i64>);
 
 /// What the open is actually doing, so the wait can show real work.
 #[derive(Clone)]
-struct Stage {
-    label: String,
-    done: bool,
-    t0: f64,
-    took: f64,
-}
 
 #[derive(Default)]
 struct State {
@@ -290,26 +284,22 @@ struct State {
     want: Option<(String, String, i64)>,
     loading: bool,
     target: String,
-    stages: Vec<Stage>,
+    stages: tc::Progress,
     err: String,
     fetched: f64,
 }
 
 impl State {
-    fn stage(&mut self, label: &str, done: bool) -> f64 {
-        if let Some(st) = self.stages.iter_mut().find(|s| s.label == label) {
-            st.done = done;
-            st.took = tc::now() - st.t0;
-            return st.t0;
+    /// Kept as a two-argument call so the twenty-odd sites that use it did
+    /// not all have to change; the model underneath is now the shared one,
+    /// which `gha` also reports through and which can carry counts when a
+    /// stage learns how many things it is working over.
+    fn stage(&mut self, label: &str, done: bool) {
+        if done {
+            self.stages.finish(label);
+        } else {
+            self.stages.begin(label);
         }
-        let t0 = tc::now();
-        self.stages.push(Stage {
-            label: label.to_string(),
-            done,
-            t0,
-            took: 0.0,
-        });
-        t0
     }
 }
 
@@ -345,10 +335,9 @@ fn fetch_detail(
     state: &Arc<Mutex<State>>,
 ) -> Result<(), String> {
     let (owner, name, num) = want;
-    let t0 = state
-        .lock()
-        .map(|mut g| g.stage("pull request, checks, reviews", false))
-        .unwrap_or(0.0);
+    if let Ok(mut g) = state.lock() {
+        g.stage("pull request, checks, reviews", false);
+    }
     let d = graphql(
         DETAIL_QUERY,
         tok,
@@ -356,7 +345,6 @@ fn fetch_detail(
     )?;
     if let Ok(mut g) = state.lock() {
         g.stage("pull request, checks, reviews", true);
-        let _ = t0;
     }
     let pr = d["repository"]["pullRequest"].clone();
     let mut rows: Vec<StackRow> = Vec::new();
@@ -1101,7 +1089,7 @@ fn main() {
                 w,
                 h,
                 tick,
-                &stages,
+                stages.steps(),
                 &target,
                 top,
                 &p,
@@ -1712,7 +1700,7 @@ fn detail_view(
     w: usize,
     h: usize,
     tick: usize,
-    stages: &[Stage],
+    stages: &[tc::Step],
     target: &str,
     top: usize,
     p: &Palette,
@@ -1723,6 +1711,10 @@ fn detail_view(
         // in stages, so show them: a spinner on the one in flight, a tick
         // and a duration on the ones behind it. Honest, and it reads like a
         // machine doing something rather than a placeholder.
+        //
+        // The drawing moved to core so `gha` could report the same way; the
+        // reasoning above is why it exists at all and stays here with the
+        // widget that found it.
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── OPENING ── ".into()),
@@ -1731,37 +1723,16 @@ fn detail_view(
             w - 1,
         ));
         rows.push(String::new());
-        let spin = tc::SPINNER[tick % tc::SPINNER.len()];
-        for st in stages {
-            rows.push(tc::seg(
-                &[
-                    (
-                        if st.done { p.ok.as_str() } else { p.accent.as_str() },
-                        format!("   {}  ", if st.done { '✓' } else { spin }),
-                    ),
-                    (
-                        if st.done { p.txt.as_str() } else { p.dim.as_str() },
-                        tc::pad(&st.label, w.saturating_sub(22).max(20)),
-                    ),
-                    (
-                        p.dim.as_str(),
-                        format!(
-                            "{:>6}",
-                            if st.took > 0.0 {
-                                format!("{:.1}s", st.took)
-                            } else {
-                                String::new()
-                            }
-                        ),
-                    ),
-                ],
-                w - 1,
-            ));
-        }
+        rows.extend(tc::progress_rows(
+            stages, w, tick, &p.ok, &p.accent, &p.txt, &p.dim,
+        ));
         if stages.is_empty() {
             rows.push(tc::seg(
                 &[
-                    (p.accent.as_str(), format!("   {}  ", spin)),
+                    (
+                        p.accent.as_str(),
+                        format!("   {}  ", tc::SPINNER[tick % tc::SPINNER.len()]),
+                    ),
                     (p.dim.as_str(), "connecting".into()),
                 ],
                 w - 1,
