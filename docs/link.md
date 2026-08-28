@@ -127,6 +127,7 @@ are still true about the path, just not about the terminal.
 | `w` | cycle the chart's span: 1m, 5m, 15m, 1h |
 | `o` | hide or show sessions idle over five minutes |
 | `r` | re-read now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 ## Two screens

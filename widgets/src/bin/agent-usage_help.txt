@@ -16,3 +16,6 @@ inferred from a number that was not published.
 
 Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
 the page, home/end to either edge, r refreshes now, q quits.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same - which is what up and down do here too.

@@ -170,6 +170,7 @@ The suffix is stripped and the binary of the same stem runs.
 |---|---|
 | `↑` `↓` / `j` `k` | select a widget |
 | `↵` / `→` | launch it, and come back here when it quits |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 ## Cost

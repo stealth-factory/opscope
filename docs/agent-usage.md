@@ -1277,6 +1277,7 @@ refresh makes a tab a row longer.
 | `pgup` `pgdn` | scroll a page |
 | `home` `end` | jump to the top or bottom |
 | `r` | re-read the files now |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, which is what `↑` and `↓` do here too |
 | `q` | quit |
 
 ## Cost

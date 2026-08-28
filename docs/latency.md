@@ -73,6 +73,7 @@ pressing `i` as the network changing.
 | `i` | ping interval — 0.2 / 0.5 / 1 / 2 / 5s, applied to running pings immediately |
 | `g` | how samples sharing a column combine — median / mean / min / max / p95 |
 | `c` | seconds per graph column — 1 ping/col / 2 / 5 / 10s |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
 | `q` | quit |
 
 Changing the interval kills and relaunches each `ping`, since `-i` is fixed at
