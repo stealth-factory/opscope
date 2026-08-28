@@ -749,8 +749,8 @@ fn main() {
                     show_idle = !show_idle;
                     selected = 0;
                 }
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
+                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "ctrl-e" | "wheel-down" => selected += 1,
                 "home" => selected = 0,
                 "end" => selected = rows_now.len().saturating_sub(1),
                 "enter" | "f" | "F" => {

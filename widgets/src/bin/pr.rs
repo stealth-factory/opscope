@@ -990,14 +990,14 @@ fn main() {
                 "s" | "S" => sort_at = (sort_at + 1) % SORTS.len(),
                 "o" | "O" => newest_first = !newest_first,
                 "t" | "T" => show_stats = !show_stats,
-                "up" => {
+                "up" | "ctrl-y" | "wheel-up" => {
                     if detail.is_some() {
                         stack_sel = stack_sel.saturating_sub(1);
                     } else {
                         selected = selected.saturating_sub(1);
                     }
                 }
-                "down" => {
+                "down" | "ctrl-e" | "wheel-down" => {
                     if detail.is_some() {
                         stack_sel += 1;
                     } else {

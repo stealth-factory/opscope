@@ -1010,8 +1010,8 @@ fn main() {
                         }
                     }
                     "c" | "C" if !copying => copying = true,
-                    "up" | "k" | "K" if !copying => oscroll = oscroll.saturating_sub(1),
-                    "down" | "j" | "J" if !copying => oscroll = oscroll.saturating_add(1),
+                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" if !copying => oscroll = oscroll.saturating_sub(1),
+                    "down" | "j" | "J" | "ctrl-e" | "wheel-down" if !copying => oscroll = oscroll.saturating_add(1),
                     "pgup" if !copying => {
                         let page = tc::size().1.saturating_sub(3).max(1);
                         oscroll = oscroll.saturating_sub(page);
@@ -1084,8 +1084,8 @@ fn main() {
                     selected = 0;
                 }
                 "/" => typing = true,
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
+                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "ctrl-e" | "wheel-down" => selected += 1,
                 "pgup" => selected = selected.saturating_sub(visible),
                 "pgdn" => selected += visible,
                 "home" => selected = 0,

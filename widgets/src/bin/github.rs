@@ -1286,8 +1286,8 @@ fn main() {
                 }
                 "home" if detail => dscroll = 0,
                 "end" if detail => dscroll = usize::MAX,
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
+                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "ctrl-e" | "wheel-down" => selected += 1,
                 _ => {}
             }
         }

@@ -826,8 +826,8 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" | "k" | "K" => scroll = scroll.saturating_sub(1),
-                "down" | "j" | "J" => scroll += 1,
+                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => scroll += 1,
                 "pgup" => scroll = scroll.saturating_sub(8),
                 "pgdn" => scroll += 8,
                 "home" => scroll = 0,

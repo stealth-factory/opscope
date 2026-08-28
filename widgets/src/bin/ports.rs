@@ -2339,8 +2339,8 @@ fn main() {
                         tc::restore_screen();
                         return;
                     }
-                    "up" => view.at = view.at.saturating_sub(1),
-                    "down" => view.at += 1,
+                    "up" | "ctrl-y" | "wheel-up" => view.at = view.at.saturating_sub(1),
+                    "down" | "ctrl-e" | "wheel-down" => view.at += 1,
                     "c" | "C" => {
                         if !view.links.is_empty() {
                             let url = &view.links[view.at.min(view.links.len() - 1)].0;
@@ -2402,8 +2402,8 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
+                "up" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "ctrl-e" | "wheel-down" => selected += 1,
                 "o" | "O" => hide_system = !hide_system,
                 "r" | "R" => store.wake(),
                 "enter" | "right" => {

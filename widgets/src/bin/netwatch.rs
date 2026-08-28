@@ -1792,6 +1792,18 @@ fn main() {
                     // above. Only the two far ends let go. Unfocused, they
                     // move the screen. Whichever is in front of you is what
                     // they act on, which is the rule the list screen follows.
+                    // The view, whatever has the focus - the same arm linear
+                    // carries, for the same reason. The arrows below already
+                    // do this when nothing is focused; once a section is
+                    // picked they belong to the cursor, and scrolling to
+                    // look at something must not move what enter opens.
+                    "ctrl-y" | "ctrl-e" | "wheel-up" | "wheel-down" => {
+                        dscroll = if key == "ctrl-e" || key == "wheel-down" {
+                            dscroll.saturating_add(1)
+                        } else {
+                            dscroll.saturating_sub(1)
+                        };
+                    }
                     "up" | "k" | "K" => match focus {
                         Some(here) => {
                             focus = tc::step_across_sections(here, at[here], &section_len, false)
@@ -1867,8 +1879,8 @@ fn main() {
                     mine = !mine;
                     selected = 0;
                 }
-                "up" | "k" | "K" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" => selected += 1,
+                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
+                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => selected += 1,
                 "enter" | "right" => {
                     if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
                         detail = Some((pick.pid, pick.name.clone()));
