@@ -1686,6 +1686,10 @@ fn main() {
     let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut visible = 1usize;
+    // Set by whichever key moved the cursor, and cleared once the list has
+    // been asked to hold it. Without it the window chases the selection
+    // every frame and drags itself back from wherever the wheel put it.
+    let mut moved = false;
     let mut shown: Vec<serde_json::Value> = Vec::new();
 
     loop {
@@ -1705,6 +1709,7 @@ fn main() {
                     _ => {}
                 }
                 selected = 0;
+                moved = true;
                 continue;
             }
             if overlay {
@@ -1713,8 +1718,12 @@ fn main() {
                         overlay = false;
                         overlay_id = 0;
                     },
-                    "up" | "k" | "K" => oscroll = oscroll.saturating_sub(1),
-                    "down" | "j" | "J" => oscroll = oscroll.saturating_add(1),
+                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
+                        oscroll = oscroll.saturating_sub(1)
+                    }
+                    "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
+                        oscroll = oscroll.saturating_add(1)
+                    }
                     "pgup" => {
                         let page = tc::size().1.saturating_sub(3).max(1);
                         oscroll = oscroll.saturating_sub(page);
@@ -1773,6 +1782,7 @@ fn main() {
                 "s" | "S" => {
                     filter = (filter + 1) % FILTERS.len();
                     selected = 0;
+                    moved = true;
                 }
                 "w" | "W" => {
                     if let Ok(mut g) = state.lock() {
@@ -1786,14 +1796,42 @@ fn main() {
                     }
                 }
                 "/" => typing = true,
-                "up" => selected = selected.saturating_sub(1),
-                "down" => selected += 1,
-                "j" | "J" => selected += 1,
-                "k" | "K" => selected = selected.saturating_sub(1),
-                "pgup" => selected = selected.saturating_sub(visible),
-                "pgdn" => selected += visible,
-                "home" => selected = 0,
-                "end" => selected = shown.len().saturating_sub(1),
+                "up" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" => {
+                    selected += 1;
+                    moved = true;
+                }
+                "j" | "J" => {
+                    selected += 1;
+                    moved = true;
+                }
+                "k" | "K" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                // The wheel moves the list and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                "pgup" => {
+                    selected = selected.saturating_sub(visible);
+                    moved = true;
+                }
+                "pgdn" => {
+                    selected += visible;
+                    moved = true;
+                }
+                "home" => {
+                    selected = 0;
+                    moved = true;
+                }
+                "end" => {
+                    selected = shown.len().saturating_sub(1);
+                    moved = true;
+                }
                 "right" | "enter" => {
                     if !shown.is_empty() {
                         overlay = true;
@@ -1850,6 +1888,7 @@ fn main() {
                     .position(|r| r["id"].as_i64() == Some(overlay_id))
                 {
                     selected = i;
+                    moved = true;
                 } else {
                     overlay = false;
                     overlay_id = 0;
@@ -1904,10 +1943,15 @@ fn main() {
             let body = info_overlay(&chosen, held.as_ref(), w, repeats, &note.0, &p);
             let foot = 2;
             let room = h.saturating_sub(foot).max(1);
-            let furthest = body.len().saturating_sub(room);
+            // The title stays put: scrolled away, a run's screen stops
+            // saying which run it is describing.
+            let (head, rest) = body.split_at(1.min(body.len()));
+            let room_below = room.saturating_sub(head.len()).max(1);
+            let furthest = rest.len().saturating_sub(room_below);
             oscroll = oscroll.min(furthest);
-            let last = (oscroll + room).min(body.len());
-            let mut out: Vec<String> = body[oscroll..last].to_vec();
+            let last = (oscroll + room_below).min(rest.len());
+            let mut out: Vec<String> = head.to_vec();
+            out.extend_from_slice(&rest[oscroll..last]);
             while out.len() < room {
                 out.push(String::new());
             }
@@ -2088,10 +2132,12 @@ fn main() {
         let per_item = if cols.single { 1 } else { 2 };
         visible = (h.saturating_sub(rows.len() + 2) / per_item).max(1);
         scroll = scroll.min(shown.len().saturating_sub(visible));
-        if selected < scroll {
-            scroll = selected;
-        } else if selected >= scroll + visible {
-            scroll = selected + 1 - visible;
+        // Only on the frame a key moved the cursor. Chasing it every frame
+        // pulls the list back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = tc::follow(scroll, selected, visible);
+            moved = false;
         }
 
         for (i, run) in shown.iter().enumerate().skip(scroll) {
