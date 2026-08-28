@@ -3013,13 +3013,24 @@ fn main() {
         // section focused the window chases its cursor; with none, the
         // arrows move the window itself.
         let room = h.saturating_sub(footer.len()).max(1);
+        // The title stays put. It is the only row that says which widget
+        // this pane is, and on a wall of them a scrolled-away name leaves
+        // you counting panes to work out what you are looking at. The
+        // footer is already pinned at the other end for the same reason;
+        // this is the top half of that.
+        //
+        // Everything below it is the window. `cursor` indexes the whole
+        // list, so it shifts by the header when it moves into the body.
+        let (head, body) = rows.split_at(1.min(rows.len()));
+        let room_below = room.saturating_sub(head.len()).max(1);
         if let Some(at) = cursor {
-            board = tc::follow(board, at, room);
+            board = tc::follow(board, at.saturating_sub(head.len()), room_below);
         }
-        board = board.min(rows.len().saturating_sub(room));
+        board = board.min(body.len().saturating_sub(room_below));
         board_len = rows.len();
-        let last = (board + room).min(rows.len());
-        let mut out: Vec<String> = rows[board..last].to_vec();
+        let last = (board + room_below).min(body.len());
+        let mut out: Vec<String> = head.to_vec();
+        out.extend_from_slice(&body[board..last]);
         while out.len() < room {
             out.push(String::new());
         }
