@@ -1046,6 +1046,71 @@ pub fn skeleton(width: usize, tick: usize, span: usize) -> Vec<(String, String)>
     out
 }
 
+/// How long ago something happened, in the one form every widget uses.
+///
+/// Four tiers rather than three. `pr` grew its own copy of this with a
+/// floor of one minute, so a poll that had just landed read "updated 1m
+/// ago" - which is how a working widget describes itself as a minute
+/// stale, and it was visible on the wall. Seconds matter for a source
+/// polled every thirty of them; days matter for one that has not answered
+/// since Tuesday.
+///
+/// Zero or negative is "--", not "0s": a widget that has never fetched has
+/// no age, and printing one invents a poll that did not happen.
+pub fn ago(t: f64) -> String {
+    if t <= 0.0 {
+        return "--".into();
+    }
+    age((now() - t).max(0.0))
+}
+
+/// The same tiers, for a span already measured rather than a timestamp.
+///
+/// Both shapes are needed and both were written twice: `gha` had one for
+/// how long a run took and another for how stale the board was, differing
+/// only in whether they subtracted from now. Keeping the tiers in one
+/// place is the point - two ladders that agree today drift the first time
+/// one of them gains a tier.
+pub fn age(secs: f64) -> String {
+    let s = secs.max(0.0);
+    if s < 90.0 {
+        format!("{}s", s as i64)
+    } else if s < 5400.0 {
+        format!("{}m", (s / 60.0) as i64)
+    } else if s < 172_800.0 {
+        format!("{}h", (s / 3600.0) as i64)
+    } else {
+        format!("{}d", (s / 86400.0) as i64)
+    }
+}
+
+/// The tail of the status line under a polling widget's title.
+///
+/// Two facts, in the same words and the same order everywhere: when the
+/// source last answered, and how much of the API budget is left. The lead
+/// is the widget's own - "10 accounts", "51 of at least 665 open" - because
+/// that part genuinely differs and flattening it would cost `pr` a promise
+/// its doc page has made since before the port.
+///
+/// The budget goes amber under a thousand. That threshold was in `github`
+/// and `gha` already and in neither case written down; here it is once.
+/// A widget whose API reports no ceiling passes `None` and the segment is
+/// absent rather than showing a limit of zero.
+pub fn polled(
+    fetched: f64,
+    rate: Option<(i64, i64)>,
+    dim: &str,
+    ok: &str,
+    warn: &str,
+) -> Vec<(String, String)> {
+    let mut out = vec![(dim.to_string(), format!("   updated {} ago", ago(fetched)))];
+    if let Some((left, limit)) = rate {
+        let colour = if left > 1000 { ok } else { warn };
+        out.push((colour.to_string(), format!("   {}/{} api", left, limit)));
+    }
+    out
+}
+
 /// A label that is visibly still working, for a source that has not answered.
 ///
 /// Two rows: the label behind a Braille spinner, and one sweeping line under

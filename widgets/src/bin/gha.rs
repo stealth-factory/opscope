@@ -208,26 +208,6 @@ fn run_secs(run: &serde_json::Value, at: f64) -> Option<f64> {
     None
 }
 
-fn age_label(secs: f64) -> String {
-    if secs < 90.0 {
-        format!("{}s", secs as i64)
-    } else if secs < 5400.0 {
-        format!("{}m", (secs / 60.0) as i64)
-    } else if secs < 172_800.0 {
-        format!("{}h", (secs / 3600.0) as i64)
-    } else {
-        format!("{}d", (secs / 86400.0) as i64)
-    }
-}
-
-/// How long since the last successful poll, matching github's `updated`.
-fn updated_ago(fetched: f64) -> String {
-    if fetched <= 0.0 {
-        return "--".into();
-    }
-    age_label((tc::now() - fetched).max(0.0))
-}
-
 fn dur_label(seconds: Option<f64>) -> String {
     let Some(s) = seconds else {
         return "  --  ".to_string();
@@ -433,7 +413,7 @@ fn scope_heading(owner: &str, viewer: &str) -> String {
 /// How long ago the run was created. A missing stamp is `--`, not `0s`.
 fn run_age(run: &serde_json::Value, at: f64) -> String {
     match iso_secs(&text(run, "created_at")) {
-        Some(created) => age_label((at - created).max(0.0)),
+        Some(created) => tc::age((at - created).max(0.0)),
         None => "--".into(),
     }
 }
@@ -1772,25 +1752,17 @@ fn main() {
         }
 
         let mut rows = vec![tc::title("github actions", w, &p.accent)];
-        let mut meta = vec![
-            (
-                p.dim.as_str(),
-                format!(
-                    " {} account{}",
-                    n_accounts,
-                    if n_accounts == 1 { "" } else { "s" }
-                ),
+        let mut meta = vec![(
+            p.dim.as_str(),
+            format!(
+                " {} account{}",
+                n_accounts,
+                if n_accounts == 1 { "" } else { "s" }
             ),
-            (
-                p.dim.as_str(),
-                format!("   updated {} ago", updated_ago(fetched)),
-            ),
-        ];
-        if let Some((left, limit)) = rate {
-            meta.push((
-                if left > 1000 { p.ok.as_str() } else { p.run.as_str() },
-                format!("   {}/{} api", left, limit),
-            ));
+        )];
+        let tail = tc::polled(fetched, rate, &p.dim, &p.ok, &p.run);
+        for (colour, txt) in &tail {
+            meta.push((colour.as_str(), txt.clone()));
         }
         rows.push(tc::seg(&meta, w - 1));
         let (running, queued, failed, ok) = counts(&runs);
@@ -2491,7 +2463,11 @@ mod tests {
 
     #[test]
     fn a_missing_poll_stamp_is_not_drawn_as_zero_seconds_ago() {
-        assert_eq!(updated_ago(0.0), "--");
+        assert_eq!(tc::ago(0.0), "--");
+        assert_eq!(tc::ago(-1.0), "--");
+        // A poll that has just landed says seconds, not the "1m" a floor
+        // of one minute used to report on a board that was current.
+        assert_eq!(tc::ago(tc::now() - 4.0), "4s");
     }
 
     fn sample_run(id: i64) -> serde_json::Value {

@@ -50,7 +50,12 @@ fn token(pr_cfg: &serde_json::Value, gh_cfg: &serde_json::Value) -> (String, &'s
 
 #[derive(Clone, Copy, Default)]
 struct Rate {
+    /// Remaining and the ceiling it is measured against. A bare remaining
+    /// is not a reading: 4737 is reassuring against 5000 and alarming
+    /// against 5000000, and the header showed the first number without the
+    /// second while `github` and `gha` beside it showed both.
     remaining: Option<i64>,
+    limit: Option<i64>,
 }
 
 fn graphql(
@@ -96,7 +101,7 @@ const PR_FIELDS: &str = "
 /// searches of 100 return HTTP 502 with or without the check rollup, three
 /// of 50 do not. So the page size is per source and deliberately modest.
 fn list_query(queries: &[String], limit: usize) -> String {
-    let mut parts = vec!["rateLimit { remaining }".to_string()];
+    let mut parts = vec!["rateLimit { remaining limit }".to_string()];
     for (i, q) in queries.iter().enumerate() {
         parts.push(format!(
             "s{}: search(query: {}, type: ISSUE, first: {}) {{ issueCount nodes {{ ... on PullRequest {{ {} }} }} }}",
@@ -518,6 +523,11 @@ fn fetch_list(
     if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
         if let Ok(mut g) = rate.lock() {
             g.remaining = Some(left);
+            // Only when GitHub sent one. A ceiling remembered from an
+            // earlier pass is still true; a zero invented here is not.
+            if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
+                g.limit = Some(limit);
+            }
         }
     }
     // Pool the sources, remembering which found each PR and noting when a
@@ -1009,7 +1019,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let mut rows = vec![tc::title("pr watch", w, &p.pr)];
+        let mut rows = vec![tc::title("pr watch", w, &p.accent)];
         let mut head = vec![
             // "at least", because a source that filled its page has more
             // behind it and the sources overlap, so the union cannot be
@@ -1032,25 +1042,17 @@ fn main() {
                     " open".to_string()
                 },
             ),
-            (
-                p.dim.as_str(),
-                format!(
-                    "   updated {} ago",
-                    if fetched > 0.0 {
-                        let s = tc::now() - fetched;
-                        if s < 3600.0 {
-                            format!("{}m", ((s / 60.0) as i64).max(1))
-                        } else {
-                            format!("{}h", (s / 3600.0) as i64)
-                        }
-                    } else {
-                        "--".into()
-                    }
-                ),
-            ),
         ];
-        if let Some(left) = rate.lock().map(|g| g.remaining).unwrap_or(None) {
-            head.push((p.dim.as_str(), format!("   {} api", left)));
+        let budget = rate
+            .lock()
+            .map(|g| match (g.remaining, g.limit) {
+                (Some(left), Some(limit)) => Some((left, limit)),
+                _ => None,
+            })
+            .unwrap_or(None);
+        let tail = tc::polled(fetched, budget, &p.dim, &p.ok, &p.warn);
+        for (colour, txt) in &tail {
+            head.push((colour.as_str(), txt.clone()));
         }
         if !copied.0.is_empty() && tc::now() - copied.1 < 4.0 {
             head.push((p.ok.as_str(), "   copied ".into()));
