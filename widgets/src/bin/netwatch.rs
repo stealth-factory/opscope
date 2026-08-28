@@ -1733,6 +1733,10 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // Where the process table is scrolled to, and whether a key has just
+    // moved the cursor. The wheel writes the first and never the second, so
+    // the table stops re-centring on the selection the moment it is turned.
+    let (mut scroll, mut moved) = (0usize, false);
     // The second screen: which process, which of its three lists is taking
     // the keys, and where each list is scrolled to.
     let mut detail: Option<(i32, String)> = None;
@@ -1878,9 +1882,20 @@ fn main() {
                 "o" | "O" => {
                     mine = !mine;
                     selected = 0;
+                    moved = true;
                 }
-                "up" | "k" | "K" | "ctrl-y" | "wheel-up" => selected = selected.saturating_sub(1),
-                "down" | "j" | "J" | "ctrl-e" | "wheel-down" => selected += 1,
+                "up" | "k" | "K" => {
+                    selected = selected.saturating_sub(1);
+                    moved = true;
+                }
+                "down" | "j" | "J" => {
+                    selected += 1;
+                    moved = true;
+                }
+                // The wheel moves the table and leaves the cursor where it
+                // is - selection is the arrows' job, here as everywhere.
+                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
+                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
                 "enter" | "right" => {
                     if let Some(pick) = ordered(&state, mine, sort_live).get(selected) {
                         detail = Some((pick.pid, pick.name.clone()));
@@ -1899,6 +1914,7 @@ fn main() {
                         guard.started = tc::now();
                     }
                     selected = 0;
+                    moved = true;
                 }
                 _ => {}
             }
@@ -2212,11 +2228,14 @@ fn main() {
         // list, so on any pane too short for every process the cursor left
         // the screen and there was nothing to say where it had gone - and
         // enter still opened whatever it was sitting on, unseen.
-        let first = if rows.len() > show {
-            selected.saturating_sub(show / 2).min(rows.len() - show)
-        } else {
-            0
-        };
+        // Only on the frame a key moved the cursor. Re-centring every frame
+        // pulls the table back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            scroll = window_at(selected, show, rows.len());
+            moved = false;
+        }
+        let first = scroll.min(rows.len().saturating_sub(show));
         // And the count says so. "27 processes" above a table of 15 is a
         // partial result presented as a total, which is the one thing a
         // number here must never be.
@@ -2360,6 +2379,22 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
 }
 
 /// The process table, dropping columns rather than clipping them.
+/// Where the process table starts so the cursor is on it.
+///
+/// Centred rather than nudged: the list is re-sorted by rate every couple of
+/// seconds, so a row under the cursor moves on its own and a window that
+/// only scrolled far enough to admit it would jump about at the edges.
+///
+/// It used to be copied into the test file below, under a comment saying it
+/// had been extracted so the two could not disagree. They could.
+fn window_at(selected: usize, show: usize, total: usize) -> usize {
+    if total > show {
+        selected.saturating_sub(show / 2).min(total - show)
+    } else {
+        0
+    }
+}
+
 fn table(
     rows: &[Proc],
     w: usize,
@@ -2560,12 +2595,6 @@ mod tests {
     // The headings are found by looking at where the rendered row put its
     // columns, not by repeating the arithmetic the row used. A test that
     // recomputes the widths would agree with a heading that had slipped.
-
-    /// The window the main list draws, extracted so the test and the widget
-    /// cannot disagree about it.
-    fn window_at(selected: usize, show: usize, total: usize) -> usize {
-        if total > show { selected.saturating_sub(show / 2).min(total - show) } else { 0 }
-    }
 
     #[test]
     fn the_process_cursor_is_always_on_the_screen() {
