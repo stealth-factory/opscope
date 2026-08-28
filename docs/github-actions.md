@@ -44,9 +44,9 @@ already holds.
 covers, when the last poll finished, and remaining/limit on GitHub's REST
 budget (`4840/5000 api`). GraphQL and REST are separate buckets; this
 widget's run fetches spend REST, so that is the number. Then run count and
-repo count, then success / failed / running, the same placement as
-`deployments`' ready / error / building. A missing poll stamp is `--`, not
-a fake now.
+repo count (how many were asked for runs, including a quiet window), then
+success / failed / running, the same placement as `deployments`' ready /
+error / building. A missing poll stamp is `--`, not a fake now.
 
 **Activity** — runs per hour over the last 48h (the default window; `w`
 cycles 12h / 24h / 48h / 7d), coloured by the worst outcome in each
@@ -161,7 +161,7 @@ that yielded no repos with workflows.
 | Key | Default | |
 |---|---|---|
 | `token` | `github.token` | classic PAT. Empty falls back to the github section. |
-| `token_env` | `github.token_env` | environment variable to read when no config token is set. Empty falls back to github, then `$GITHUB_TOKEN`. |
+| `token_env` | `github.token_env` | environment variable to read when no `github_actions.token` is set. If that variable is set it overrides `github.token`. Empty or unset falls back to github, then `$GITHUB_TOKEN`. |
 | `accounts` | discovered | org or user logins. Empty discovers the viewer and every org they belong to. |
 | `repos` | `[]` | `owner/name` list. Empty means recently-pushed-with-workflows, capped per owner. |
 | `window_hours` | `48` | the labelled window the counts and list cover. `w` cycles it live. |

@@ -45,26 +45,36 @@ const RUN_PAGE: usize = 100;
 const DETAIL_TTL: f64 = 60.0;
 const LIVE: &[&str] = &["in_progress", "queued", "waiting", "pending", "requested"];
 
-/// The GitHub token, shared with `github` rather than duplicated.
+/// `github_actions.token`, then `github_actions.token_env` when that
+/// variable is set, then `github.token`, then `github.token_env` /
+/// `GITHUB_TOKEN`. A named widget `token_env` that is unset falls
+/// through to the shared GitHub credential — it does not report missing
+/// while `github.token` is still there. Empty strings are treated as
+/// unset.
 fn token(gha: &serde_json::Value, gh: &serde_json::Value) -> (String, &'static str) {
-    for cfg in [gha, gh] {
-        let value = tc::cfg_str(cfg, "token", "");
-        if !value.is_empty() {
-            return (value, "config");
+    let own = tc::cfg_str(gha, "token", "");
+    if !own.is_empty() {
+        return (own, "config");
+    }
+    let own_env = tc::cfg_str(gha, "token_env", "");
+    if !own_env.is_empty() {
+        if let Ok(value) = std::env::var(&own_env) {
+            if !value.is_empty() {
+                return (value, "env");
+            }
         }
     }
+    let shared = tc::cfg_str(gh, "token", "");
+    if !shared.is_empty() {
+        return (shared, "config");
+    }
     let name = {
-        let own = tc::cfg_str(gha, "token_env", "");
-        if !own.is_empty() {
-            own
+        let shared_env = tc::cfg_str(gh, "token_env", "GITHUB_TOKEN");
+        if shared_env.is_empty() {
+            "GITHUB_TOKEN".into()
         } else {
-            tc::cfg_str(gh, "token_env", "GITHUB_TOKEN")
+            shared_env
         }
-    };
-    let name = if name.is_empty() {
-        "GITHUB_TOKEN".into()
-    } else {
-        name
     };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
@@ -96,20 +106,29 @@ fn graphql(
 /// GraphQL answers 200 with `data` and `errors` together. The discover
 /// query used to ask for both `organization` and `user` for one login;
 /// the missing side is `NOT_FOUND`, and treating that as a failed page
-/// dropped every org's repos. Use `data` when it is there. A null
-/// payload is the real failure.
+/// dropped every org's repos. Use `data` when it holds a usable
+/// connection (`repos` or `viewer.login`). A misspelled
+/// `repositoryOwner` is `{repositoryOwner: null}` plus `NOT_FOUND`,
+/// which used to succeed and look like an account with no workflows.
 fn graphql_payload(body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let payload = body["data"].clone();
+    let usable = !payload.is_null()
+        && (repos_conn(&payload).is_some()
+            || payload["viewer"]["login"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()));
+    if !usable {
+        if let Some(first) = body["errors"].as_array().and_then(|a| a.first()) {
+            return Err(first["message"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(100)
+                .collect());
+        }
+    }
     if !payload.is_null() {
         return Ok(payload);
-    }
-    if let Some(first) = body["errors"].as_array().and_then(|a| a.first()) {
-        return Err(first["message"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(100)
-            .collect());
     }
     Err("empty graphql response".into())
 }
@@ -319,6 +338,23 @@ fn repo_owner(name: &str) -> String {
     name.split_once('/')
         .map(|(o, _)| o.to_string())
         .unwrap_or_default()
+}
+
+/// First occurrence wins. An explicit list is a set, and fetching the
+/// same `owner/repo` twice would count every run twice.
+fn unique_repos(list: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for raw in list {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 fn is_personal(owner: &str, viewer: &str) -> bool {
@@ -748,6 +784,11 @@ struct State {
     window_hours: i64,
     viewer: String,
     accounts: usize,
+    /// Repositories this pass asked for runs, including those that had
+    /// none in the window. The headline uses this, not "repos that
+    /// produced a row", so one configured repo with a quiet window is
+    /// still one repo.
+    repos: usize,
     rate: Option<(i64, i64)>,
     /// What the poller is working through right now.
     ///
@@ -774,6 +815,7 @@ fn apply_pass(live: &mut State, got: State) {
         live.scope = got.scope;
         live.viewer = got.viewer;
         live.accounts = got.accounts;
+        live.repos = got.repos;
     }
     if got.rate.is_some() {
         live.rate = got.rate;
@@ -791,6 +833,7 @@ fn request_window(live: &mut State, hours: i64) {
     live.scope.clear();
     live.fetched = 0.0;
     live.err.clear();
+    live.repos = 0;
 }
 
 fn created_filter(hours: i64) -> String {
@@ -1080,7 +1123,7 @@ fn one_pass(
             .filter(|o| !o.is_empty())
             .collect::<HashSet<_>>()
             .len();
-        (explicit.to_vec(), empty_stats, viewer, 0usize, n, true)
+        (unique_repos(explicit), empty_stats, viewer, 0usize, n, true)
     } else {
         let (viewer, want) = if accounts.is_empty() {
             match discover_accounts(tok, &mut rate) {
@@ -1100,7 +1143,7 @@ fn one_pass(
         };
         if want.is_empty() {
             return Ok(State {
-                err: "no accounts: leave gha.accounts empty to discover your login and orgs, or name them".into(),
+                err: "no accounts: leave github_actions.accounts empty to discover your login and orgs, or name them".into(),
                 viewer,
                 rate,
                 window_hours: hours,
@@ -1145,7 +1188,7 @@ fn one_pass(
         // Explicit non-empty input is already `repos`, so this branch is
         // only the discovery miss: nothing recently pushed had workflows.
         let said = format!(
-            "no repos with workflows among those pushed in the last {}d — set gha.repos to name them",
+            "no repos with workflows among those pushed in the last {}d — set github_actions.repos to name them",
             pushed_days
         );
         return Ok(State {
@@ -1231,6 +1274,7 @@ fn one_pass(
         accounts: n_accounts,
         rate,
         window_hours: hours,
+        repos: repos.len(),
         // The finished pass carries no progress; the live one owns it and
         // the poller clears it either way.
         progress: tc::Progress::new(),
@@ -1519,7 +1563,11 @@ fn main() {
             _ => i += 1,
         }
     }
-    let explicit: Vec<String> = if named.is_empty() { configured } else { named };
+    let explicit: Vec<String> = unique_repos(if named.is_empty() {
+        &configured
+    } else {
+        &named
+    });
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
@@ -1528,7 +1576,7 @@ fn main() {
             &absent,
             &[
                 "Everything here comes from GitHub's API, and curl is how",
-                "this reaches it - the same way github and pr do.",
+                "this reaches it - the same way github and github-prs do.",
                 "",
                 "The token is passed to curl on its standard input rather than",
                 "in its arguments, because /proc/<pid>/cmdline is readable by",
@@ -1762,7 +1810,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (runs, err, fetched, scope, hours, _viewer, n_accounts, rate, progress) =
+        let (runs, err, fetched, scope, hours, _viewer, n_accounts, n_repos, rate, progress) =
             match state.lock() {
                 Ok(g) => (
                     g.runs.clone(),
@@ -1772,6 +1820,7 @@ fn main() {
                     g.window_hours,
                     g.viewer.clone(),
                     g.accounts,
+                    g.repos,
                     g.rate,
                     g.progress.steps().to_vec(),
                 ),
@@ -1898,10 +1947,9 @@ fn main() {
         }
         rows.push(tc::seg(&meta, w - 1));
         let (running, queued, failed, ok) = counts(&runs);
-        let repo_names: HashSet<String> = runs.iter().map(|r| text(r, "repo")).collect();
         let mut head = vec![
             (p.dim.as_str(), format!(" {} runs", runs.len())),
-            (p.dim.as_str(), format!(" · {} repos", repo_names.len())),
+            (p.dim.as_str(), format!(" · {} repos", n_repos)),
         ];
         if ok > 0 || !runs.is_empty() {
             head.push((p.ok.as_str(), format!("  {} success", ok)));
@@ -2241,6 +2289,28 @@ mod tests {
         let isolated: serde_json::Value =
             serde_json::from_str(r#"{"token_env": "OPSCOPE_GHA_NO_SUCH_TOKEN"}"#).unwrap();
         assert_eq!(token(&isolated, &isolated).1, "missing");
+        // A named widget token_env that is unset must fall through to
+        // github.token, not report missing while the shared credential
+        // is still there.
+        assert_eq!(token(&isolated, &gh), ("from-github".to_string(), "config"));
+        // A named widget token_env that is actually set beats github.token.
+        // PATH is always present; the value is compared, not hardcoded.
+        let via_env: serde_json::Value =
+            serde_json::from_str(r#"{"token_env": "PATH"}"#).unwrap();
+        let expected = std::env::var("PATH").ok().filter(|s| !s.is_empty());
+        assert!(
+            expected.is_some(),
+            "PATH must be set for this precedence check"
+        );
+        assert_eq!(token(&via_env, &gh), (expected.unwrap(), "env"));
+    }
+
+    #[test]
+    fn an_explicit_repo_list_is_a_set() {
+        assert_eq!(
+            unique_repos(&["acme/app".into(), " acme/app ".into(), "alice/toy".into()]),
+            vec!["acme/app".to_string(), "alice/toy".to_string()]
+        );
     }
 
     #[test]
@@ -2718,6 +2788,7 @@ mod tests {
         assert!(live.scope.is_empty());
         assert_eq!(live.fetched, 0.0);
         assert!(live.err.is_empty());
+        assert_eq!(live.repos, 0);
     }
 
     #[test]
@@ -2778,6 +2849,22 @@ mod tests {
         });
         let err = graphql_payload(&body).unwrap_err();
         assert!(err.contains("Something went wrong"), "{err}");
+    }
+
+    #[test]
+    fn a_null_repository_owner_with_errors_is_the_graphql_failure() {
+        // Discover queries repositoryOwner(login:). A misspelled or
+        // inaccessible login is data.repositoryOwner = null plus
+        // NOT_FOUND — usable is false, so the error must surface.
+        let body = serde_json::json!({
+            "data": {"repositoryOwner": null},
+            "errors": [{
+                "type": "NOT_FOUND",
+                "message": "Could not resolve to a User with the login of 'nope'."
+            }]
+        });
+        let err = graphql_payload(&body).unwrap_err();
+        assert!(err.contains("Could not resolve"), "{err}");
     }
 
     #[test]

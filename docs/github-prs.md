@@ -304,7 +304,7 @@ account.
 ## Configuration
 
 ```json
-"pr": {
+"github_prs": {
   "sources": {
     "orgs":     "is:open is:pr @mine",
     "authored": "is:open is:pr author:@me",
@@ -315,12 +315,15 @@ account.
 }
 ```
 
+A leftover `"pr"` section is still read when `"github_prs"` is absent, and
+the pane says so. Rename it when you next edit the file.
+
 Add, remove or rename sources freely — `review-requested:@me` and
 `is:open is:pr org:acme` are both reasonable entries, and the names are what
 `f` cycles through. Anything on the command line is appended to *every* source,
-so `./target/release/pr org:acme` narrows the lot without editing config.
+so `./target/release/github-prs org:acme` narrows the lot without editing config.
 
 ```sh
-./target/release/pr                          # everything you are involved in
-./target/release/pr -n 120 review-requested:@me   # only what is waiting on your review
+./target/release/github-prs                          # everything you are involved in
+./target/release/github-prs -n 120 review-requested:@me   # only what is waiting on your review
 ```

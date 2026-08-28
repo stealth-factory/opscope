@@ -127,7 +127,16 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
             PR_HEAVY_FIELDS
         );
         let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
-            return;
+            // A failed chunk must not look like "no CI". ready_to_merge
+            // treats a missing rollup as a repo with nothing to wait for,
+            // and that would count approved PRs as ready while their
+            // checks were never read.
+            for id in chunk {
+                let Some(url) = by_id.get(id) else { continue };
+                let Some(entry) = pool.get_mut(url) else { continue };
+                entry["checksUnknown"] = serde_json::json!(true);
+            }
+            continue;
         };
         for node in d["nodes"].as_array().into_iter().flatten() {
             let id = text(node, "id");
@@ -298,6 +307,9 @@ fn rollup(pr: &serde_json::Value) -> String {
 /// Everything else on this board describes work in flight; this is the one
 /// number that says something can be done right now.
 fn ready_to_merge(pr: &serde_json::Value) -> bool {
+    if pr["checksUnknown"].as_bool().unwrap_or(false) {
+        return false;
+    }
     let checks = rollup(pr);
     text(pr, "reviewDecision") == "APPROVED"
         && (checks == "SUCCESS" || checks.is_empty())
@@ -2407,6 +2419,10 @@ mod tests {
         assert!(!ready_to_merge(&pr(
             r#"{"reviewDecision": "APPROVED",
                 "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}}"#
+        )));
+        // Enrich failed: the rollup was never read. That is not "no CI".
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "checksUnknown": true}"#
         )));
     }
 
