@@ -654,7 +654,21 @@ fn main() {
 
     let absent = tc::missing(&["tailscale"]);
     if !absent.is_empty() {
-        hold(&absent);
+        tc::cannot_start_with_settings(
+            "tailnet",
+            &absent,
+            &[
+                "Everything here comes from the local tailscaled through its",
+                "own CLI: who is online, whether each peer is direct or",
+                "relayed, and the byte counters the WireGuard engine keeps.",
+                "",
+                "There is no other source for any of it, and nothing here is",
+                "sent anywhere - the DERP region names come from the local",
+                "map rather than from a geolocation service.",
+            ],
+            "see https://tailscale.com/download",
+            SETTINGS,
+        );
         return;
     }
 
@@ -1268,74 +1282,6 @@ fn main() {
         }
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-/// Draw the missing-tool fallback and keep settings reachable from it.
-fn hold(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("tailnet", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from the local tailscaled through its",
-            "own CLI: who is online, whether each peer is direct or",
-            "relayed, and the byte counters the WireGuard engine keeps.",
-            "",
-            "There is no other source for any of it, and nothing here is",
-            "sent anywhere - the DERP region names come from the local",
-            "map rather than from a geolocation service.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "see https://tailscale.com/download".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![
-            vec![(dim.as_str(), "[,] settings".into())],
-            vec![(dim.as_str(), "[q]uit".into())],
-        ];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
     }
 }
 

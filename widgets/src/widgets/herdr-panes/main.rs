@@ -696,7 +696,20 @@ fn main() {
 
     let absent = tc::missing(&["herdr"]);
     if !absent.is_empty() {
-        hold(&absent);
+        tc::cannot_start_with_settings(
+            "herdr panes",
+            &absent,
+            &[
+                "This reads a running Herdr session through its own CLI: the",
+                "workspaces, the panes in them, and which agent is in which.",
+                "There is no other source for any of it.",
+                "",
+                "If Herdr is installed but not on PATH, this widget will find",
+                "it as soon as the shell can.",
+            ],
+            "see https://herdr.dev",
+            SETTINGS,
+        );
         return;
     }
 
@@ -1350,73 +1363,6 @@ fn plural(n: usize) -> &'static str {
         ""
     } else {
         "s"
-    }
-}
-
-/// Draw the missing-tool fallback and keep settings reachable from it.
-fn hold(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("herdr panes", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "This reads a running Herdr session through its own CLI: the",
-            "workspaces, the panes in them, and which agent is in which.",
-            "There is no other source for any of it.",
-            "",
-            "If Herdr is installed but not on PATH, this widget will find",
-            "it as soon as the shell can.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "see https://herdr.dev".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![
-            vec![(dim.as_str(), "[,] settings".into())],
-            vec![(dim.as_str(), "[q]uit".into())],
-        ];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
     }
 }
 

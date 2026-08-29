@@ -262,7 +262,7 @@ PAT with `repo` and `read:org` (fine-grained tokens reach only one org
 each), and `linear` a personal API key from Settings → Security & access.
 `github-prs` and `github-actions` reuse that GitHub token; they are not
 credential-free.
-Every other widget runs with no configuration at all.
+Every other widget requires no configuration to start.
 
 ## Requirements
 
