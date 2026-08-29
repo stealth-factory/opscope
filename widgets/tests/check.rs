@@ -345,6 +345,72 @@ fn every_widget_owns_its_complete_folder() {
 }
 
 #[test]
+fn only_core_draws_the_settings_screen() {
+    // The division this whole feature rests on: a widget declares what it
+    // has to configure, and core decides what that looks like and how it
+    // behaves. Fifteen widgets each with their own idea of what enter does
+    // to a boolean is the thing being prevented, and it is the kind of drift
+    // that arrives one reasonable-looking exception at a time.
+    //
+    // Convention held it until now. Convention is what the contrast rule was
+    // for as long as there were four widgets to break it.
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        let dir = root().join("widgets/src/widgets").join(&name);
+        let declares = dir.join("settings.json").exists();
+
+        // Ships settings data, so it must hand them to the shared screen.
+        // A widget with a settings.json and no run_settings either has no
+        // way in, or has built one.
+        if declares {
+            if !src.contains("SettingsSpec") {
+                wrong.push(format!("{name}: has settings.json but declares no SettingsSpec"));
+            }
+            if !src.contains("run_settings") {
+                wrong.push(format!("{name}: has settings.json but never calls tc::run_settings"));
+            }
+        }
+
+        // And must not have grown a screen of its own. Named shapes only -
+        // a function or module that says settings in its name - because a
+        // check that guessed from the drawing calls would flag every widget
+        // that draws anything.
+        for line in src.lines() {
+            let line = line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+            let own_module = line.starts_with("mod settings") || line.starts_with("pub mod settings");
+            let own_fn = line
+                .split_once("fn ")
+                .map(|(before, after)| {
+                    !before.ends_with('.')
+                        && after
+                            .split(['(', '<', ' '])
+                            .next()
+                            .is_some_and(|n| n.contains("settings"))
+                })
+                .unwrap_or(false);
+            if own_module || own_fn {
+                wrong.push(format!(
+                    "{name}: defines its own settings code - {}",
+                    line.chars().take(60).collect::<String>()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "settings belong to core, not to a widget:\n  {}\n\
+         A widget declares its settings in settings.json - defaults, a _schema \
+         of rules, and a _<key>_comment for each - and calls tc::run_settings. \
+         Anything the screen cannot already do is a change to core/src/settings.rs \
+         so every widget gets it, not a screen of this one's own.",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
 fn generated_config_example_matches_widget_settings() {
     let status = std::process::Command::new("python3")
         .args(["tools/config-example.py", "--check"])
