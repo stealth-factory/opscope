@@ -13,22 +13,19 @@ waiting on you.
 
 *Eight widgets running at once — every figure live. [Watch the 1m54s demo →](docs/demo.mp4)*
 
-## How it started
+## Run it
 
-Literally: *"split 10 panels that make my computer look like some sci-fi hacker
-terminal from the movies."*
+**`npx opscope` is the official way to use this.** Nothing to install, no
+`PATH` to manage, no version to pick — it fetches the launcher and the
+binaries and starts whichever widget you name.
 
-So there were ten. A radar sweep, a rotating globe, a spectrum analyser, a
-cipher cracker, a memory scanner, a packet intercept — all beautiful, all
-fabricated. They looked exactly right and told you nothing.
+```sh
+npx opscope              # the menu
+npx opscope clocks       # or name one and skip it
+```
 
-Then one got wired to `/proc` and became genuinely useful, and the contrast was
-impossible to unsee. One by one the fakes came down, each replaced by something
-that answers a real question. What survived is the aesthetic with the lying
-removed.
-
-Some of the theatre is still here, unapologetically. `matrix` computes
-nothing at all — it just looks good, and it knows it.
+`clocks` needs no configuration at all, so it is the one to try first.
+[Other ways to get them →](#getting-them)
 
 ## The widgets
 
@@ -60,22 +57,41 @@ in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
 alongside it. 24-bit colour, and a full redraw each frame so everything
 reflows when you resize the pane.
 
+## How it started
+
+Literally: *"split 10 panels that make my computer look like some sci-fi hacker
+terminal from the movies."*
+
+So there were ten. A radar sweep, a rotating globe, a spectrum analyser, a
+cipher cracker, a memory scanner, a packet intercept — all beautiful, all
+fabricated. They looked exactly right and told you nothing.
+
+Then one got wired to `/proc` and became genuinely useful, and the contrast was
+impossible to unsee. One by one the fakes came down, each replaced by something
+that answers a real question. What survived is the aesthetic with the lying
+removed.
+
+Some of the theatre is still here, unapologetically. `matrix` computes
+nothing at all — it just looks good, and it knows it.
+
 ## Getting them
 
-If you have Node, this is the whole thing:
+**The official route is `npx`.** If you have Node, this is the whole thing:
 
 ```sh
 npx opscope                 # the menu
-npx opscope link            # skip the menu; any widget name works
-npx opscope@latest link     # pin to latest, or @0.3.0, etc.
+npx opscope clocks          # skip the menu; any widget name works
+npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
-It installs the launcher and the fifteen binaries for this machine, and
-starts whichever you named — or the menu, if you named none. Only
-`opscope` lands on your `PATH`; the widgets stay beside it, so `link` never
-replaces the coreutils command of the same name. Linux x86-64
-(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published;
-anything else fails at install with a sentence saying so.
+It fetches the launcher and the binaries for this machine into npm's cache and
+runs whichever you named — or the menu, if you named none. **Your `PATH` is
+not touched.** Only `opscope` is a command at all; the fifteen widgets sit
+inside the package beside it, which is why `link` never shadows the coreutils
+command of that name.
+
+Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
+macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
 build fifteen. Both take about a minute.
@@ -135,31 +151,25 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # fifteen binaries in ./target/release
+cargo build --release            # fifteen binaries in ./target/release
+./target/release/opscope         # the menu, from the build tree
 ```
 
 ## Running them
 
 `opscope` is the front door — a menu of the fifteen, with a live preview of
-whichever is highlighted. Name a widget to skip the menu. The same shape
-works from `npx`, from an unpacked tarball, and from a build tree:
+whichever is highlighted. Name a widget to skip the menu.
 
 ```sh
-opscope              # pick one and it runs
-opscope link         # or name one and skip the menu
-opscope clocks -h    # flags after the name belong to the widget
-
-npx opscope
-npx opscope@latest link
-
-./opscope link                    # tarball, from the unpacked folder
-./target/release/opscope link     # after cargo build --release
+npx opscope              # pick one and it runs
+npx opscope clocks       # or name one and skip the menu
+npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the fifteen have to
-stay together. `npx` already keeps them that way. A folder on `PATH` that
-contains `link` would shadow the real command; leave that name off `PATH`
-and type `opscope <widget>`.
+The launcher looks for each widget beside itself, so the fifteen have to stay
+together — `npx` keeps them that way for you. An unpacked tarball or a build tree
+is a setup method, not the way to run them, and lives under
+[Getting them](#getting-them).
 
 They are built to sit side by side, but nothing assumes a multiplexer — each
 is an ordinary terminal program. Tile them however you like, and they degrade
