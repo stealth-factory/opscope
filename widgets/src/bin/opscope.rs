@@ -94,6 +94,11 @@ const WIDGETS: &[Widget] = &[
         doc: "",
     },
     Widget {
+        stem: "months",
+        help: include_str!("months_help.txt"),
+        doc: include_str!("../../../docs/months.md"),
+    },
+    Widget {
         stem: "netwatch",
         help: include_str!("netwatch_help.txt"),
         doc: include_str!("../../../docs/netwatch.md"),

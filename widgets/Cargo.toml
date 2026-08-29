@@ -47,6 +47,13 @@ path = "src/bin/link.rs"
 name = "clocks"
 path = "src/bin/clocks.rs"
 
+# Dates, where clocks has the time of day. Not `cal` or `calendar`: both are
+# real commands on a normal machine, and neither being installed on this one
+# is not evidence about anybody else's.
+[[bin]]
+name = "months"
+path = "src/bin/months.rs"
+
 [[bin]]
 name = "herdr-panes"
 path = "src/bin/herdr-panes.rs"

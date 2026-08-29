@@ -47,6 +47,7 @@ nothing at all — it just looks good, and it knows it.
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` | [read →](docs/netwatch.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` | [read →](docs/link.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
+| **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](docs/months.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
 Each is a single self-contained binary — every library it needs is compiled
@@ -64,7 +65,7 @@ npx opscope link            # skip the menu; any widget name works
 npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 ```
 
-It installs the launcher and the fifteen binaries for this machine, and
+It installs the launcher and the sixteen binaries for this machine, and
 starts whichever you named — or the menu, if you named none. Only
 `opscope` lands on your `PATH`; the widgets stay beside it, so `link` never
 replaces the coreutils command of the same name. Linux x86-64
@@ -72,7 +73,7 @@ replaces the coreutils command of the same name. Linux x86-64
 anything else fails at install with a sentence saying so.
 
 There is no Homebrew formula yet. You can also download three files, or
-build fifteen. Both take about a minute.
+build sixteen. Both take about a minute.
 
 ### Download a release
 
@@ -101,7 +102,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The fifteen binaries are right there, beside `config.example.json` and a
+The sixteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -129,12 +130,12 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # fifteen binaries in ./target/release
+cargo build --release   # sixteen binaries in ./target/release
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fifteen, with a live preview of
+`opscope` is the front door — a menu of the fifteen widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -150,7 +151,7 @@ npx opscope@latest link
 ./target/release/opscope link     # after cargo build --release
 ```
 
-The launcher looks for each widget beside itself, so the fifteen have to
+The launcher looks for each widget beside itself, so the sixteen have to
 stay together. `npx` already keeps them that way. A folder on `PATH` that
 contains `link` would shadow the real command; leave that name off `PATH`
 and type `opscope <widget>`.

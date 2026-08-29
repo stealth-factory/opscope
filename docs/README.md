@@ -23,6 +23,7 @@ each key it answers to, and the settings it reads.
 | [`netwatch`](netwatch.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
 | [`link`](link.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
 | [`clocks`](clocks.md) | This server's clock, the clocks counting down, a pomodoro, and everyone else's clock — the four things you need to know about time while working across timezones. |
+| [`months`](months.md) | A month grid you can page through, with today in context — and every square computed from the clock and the timezone database rather than fetched from anywhere. |
 
 `matrix` has no page. It computes nothing on purpose, and a document
 saying so at length would be the joke explained.

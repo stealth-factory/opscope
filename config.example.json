@@ -67,6 +67,13 @@
       252
     ]
   },
+  "months": {
+    "_comment": "A month grid and nothing else - no network, no credential. Both settings change how the same computed dates are read, never which dates they are.",
+    "_week_start_comment": "Which day a week begins on: sunday or monday. Sunday by default. It moves where the row breaks and nothing else - week numbers stay ISO 8601, which is Monday-reckoned whatever the grid does and says so on screen, and the weekend stays Saturday and Sunday.",
+    "week_start": "sunday",
+    "_timezone_comment": "Which zone today is reckoned in, as an IANA name (Asia/Tokyo). Empty means this machine's own, which is what clocks shows. It matters because for several hours a day it is a different date in two places, and the grid names whichever zone it used. A name the database does not know falls back to this machine and says so on the pane rather than quietly marking somebody else's today.",
+    "timezone": ""
+  },
   "deployments": {
     "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
     "token": "",

@@ -7,13 +7,14 @@ machine.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 14 widgets · 2 need something first   ↵ launches one, q leaves
+ 15 widgets · 2 need something first   ↵ launches one, q leaves
 
  ▸ netwatch     Which processes are using the network, how much…   ss installed
    ports        What is listening on this machine, what started…   nothing to set up
    github       GitHub delivery metrics across every org…          set a GitHub token
    latency      Multi-target latency monitor.                      needs ping
    tailnet      Tailscale network: who is online…                  tailscale installed
+   months       A month grid you can page through…                 nothing to set up
    agent-usage  How much the coding agents have been used…         reads what is logged in
    …
 
@@ -23,7 +24,7 @@ machine.
  ↑↓ select  ↵ launch  [r]echeck  [q]uit
 ```
 
-Fourteen scripts in a directory is a list you have to already know. Pick one
+Fifteen widgets in a directory is a list you have to already know. Pick one
 and it runs; quit it and you are back here.
 
 ## Nothing is described twice

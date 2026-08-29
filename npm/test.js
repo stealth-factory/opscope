@@ -70,7 +70,7 @@ test('every release target has an npm platform, and no extra ones', () => {
 test('the packer takes every [[bin]], including opscope', () => {
   const bins = platform.binsFromManifest(repoRoot);
   assert.ok(bins.includes('opscope'));
-  assert.equal(bins.length, 15);
+  assert.equal(bins.length, 16);
   assert.deepEqual(bins, [...bins].sort());
 });
 
