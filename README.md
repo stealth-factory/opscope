@@ -35,7 +35,7 @@ nothing at all — it just looks good, and it knows it.
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
 | **`opscope`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/opscope.md) |
-| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/99)) | [read →](docs/latency.md) |
+| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** — [macOS in progress](https://github.com/stealth-factory/opscope/issues/99) | [read →](docs/latency.md) |
 | **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](docs/deployments.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
@@ -44,16 +44,16 @@ nothing at all — it just looks good, and it knows it.
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/github-prs.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/agent-usage.md) |
-| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/97)) | [read →](docs/ports.md) |
-| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/100)) | [read →](docs/netwatch.md) |
-| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](docs/link.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic · **Linux only** — [macOS in progress](https://github.com/stealth-factory/opscope/issues/97) | [read →](docs/ports.md) |
+| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** — [macOS in progress](https://github.com/stealth-factory/opscope/issues/100) | [read →](docs/netwatch.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** — [macOS in progress](https://github.com/stealth-factory/opscope/issues/101) | [read →](docs/link.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
 
 **Four are Linux-only today.** `latency`, `ports`, `netwatch` and `link` read
 the kernel through `/proc` and through `ss`, neither of which exists on macOS;
-each links the issue tracking its port above. The other eleven run on Linux and
-macOS alike.
+macOS support is being added for each and the table links its issue. The other
+eleven run on Linux and macOS alike.
 
 Each is a single self-contained binary — every library it needs is compiled
 in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
