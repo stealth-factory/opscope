@@ -245,6 +245,24 @@ That in turn requires the *reader* to merge per key rather than take the
 configured object wholesale — `agent-usage` did the latter, so overriding one
 price silently deleted the other four and those tokens metered as free.
 
+Two things follow from membership meaning nothing, and both have to be built
+deliberately:
+
+- **An empty entry must be invisible to the reader.** Otherwise it answers
+  "configured" for a row of shipped defaults, and hands a key nobody has
+  filled in an empty rate — which prices at zero rather than reporting as
+  unpriced. Both are the pane stating something untrue.
+- **A widget that refuses to guess must keep refusing.** `agent-usage` names
+  models with no published price so prefix matching cannot hand them a
+  family's rate. Merging reopened that door: naming the model in config let
+  the lookup run, and the substring match found the family behind it. The
+  merge has to skip the card entirely for those, not just skip the guard.
+
+A row whose widget has no figure to offer takes a `null` default, and
+validation has to read that as "no type declared" rather than "null is the
+type wanted" — otherwise the one case config exists for is the one case that
+cannot be configured.
+
 ## Config
 
 **Config, never hardcoded.** Hostnames, cities, tokens and account lists live

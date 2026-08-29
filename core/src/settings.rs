@@ -185,7 +185,11 @@ fn validate_value(
     expected: &Value,
     rule: Option<&Value>,
 ) -> Result<(), String> {
-    if !same_kind(value, expected) {
+    // A null default means the widget has no figure to offer, not that null
+    // is the type it wants - a model the rate card does not carry has every
+    // kind and a price for none of them. Demanding null back made those rows
+    // unwritable, so the one case config exists for could not be configured.
+    if !expected.is_null() && !same_kind(value, expected) {
         return Err(format!(
             "expected {}, got {}",
             kind_name(expected),
@@ -1019,9 +1023,17 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
     Ok(())
 }
 
+/// Take an override back out, wherever it sits.
+///
+/// This walked `[section, key]` while the writer walked `steps()`, so one
+/// screen down it looked for `agent_usage.input` rather than
+/// `agent_usage.rates.gpt-5.6-sol.input`, found nothing, and said the field
+/// already used its default - which was false, and left the override in
+/// place. Un-setting one number is most of what `d` is for on a screen of
+/// numbers, so it has to follow the same path the write took.
 fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
     let field = app.fields.get(index).ok_or("no such field")?;
-    let key = field.key.clone();
+    let steps: Vec<String> = field.steps().iter().map(|s| s.to_string()).collect();
     let schema_path = field.path();
     let schema_section = field.section.clone();
     let shown_default = summary(&field.default, false);
@@ -1032,24 +1044,29 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         app.legacy_section,
     )
     .to_string();
-    if fresh_live
-        .get(&section)
-        .and_then(|body| body.get(&key))
-        .is_none()
-    {
+    // section, then every key the field sits under, then the field itself.
+    let mut full: Vec<&str> = vec![section.as_str()];
+    full.extend(steps.iter().map(String::as_str));
+    let held = |doc: &Value| -> bool {
+        let mut here = doc;
+        for step in &full {
+            match here.get(step) {
+                Some(next) => here = next,
+                None => return false,
+            }
+        }
+        true
+    };
+    if !held(&fresh_live) {
         app.status = Some(format!("{schema_path} already uses its default"));
         return Ok(());
     }
     let mut next = fresh_raw.clone();
     loop {
-        next = remove_json_path(&next, &[section.as_str(), key.as_str()])?;
+        next = remove_json_path(&next, &full)?;
         let parsed: Value = serde_json::from_str(&next)
             .map_err(|e| format!("refusing to reset {schema_path}: {e}"))?;
-        if parsed
-            .get(&section)
-            .and_then(|body| body.get(&key))
-            .is_none()
-        {
+        if !held(&parsed) {
             break;
         }
     }
@@ -1057,7 +1074,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
     app.status = Some(format!(
-        "removed {section}.{key} · default {shown_default} · restart {}",
+        "removed {schema_path} · default {shown_default} · restart {}",
         app.widget
     ));
     Ok(())
@@ -1162,8 +1179,11 @@ enum PickKind {
 impl PickKind {
     /// Whether an empty query means "show me only what I have chosen".
     ///
-    /// True only for the catalogue. A checklist that hid its unticked half
-    /// until you searched would be hiding the choice it exists to offer.
+    /// True only for the timezone database, where the unticked half is five
+    /// hundred and ninety-seven rows and nobody is browsing it. A short
+    /// checklist that hid its unticked half until you searched would be
+    /// hiding the choice it exists to offer, and a rate card would make you
+    /// search for a model you have not chosen yet.
     fn opens_on_chosen(&self) -> bool {
         matches!(self, PickKind::Timezone)
     }
@@ -1288,7 +1308,10 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
 /// them getting the correction when it moves.
 fn catalogue_fields(app: &App, field: &Field) -> Option<Vec<Field>> {
     let table = catalogue_for(app, &field.key)?;
-    let configured = find_object(&app.live, &[app.section, &field.key]);
+    let configured = current_of(&app.live, field, app.legacy_section)
+        .and_then(Value::as_object)
+        .map(|o| o.keys().cloned().collect::<Vec<String>>())
+        .unwrap_or_default();
     let mut rows = Vec::new();
     for name in configured {
         let listed = table.iter().find(|(m, _)| *m == name).map(|(_, r)| *r);
@@ -1354,19 +1377,6 @@ fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
     app.catalogues.iter().find(|(f, _)| *f == key).map(|(_, t)| *t)
 }
 
-/// The keys a reader has already put in an object, in file order.
-fn find_object(live: &Value, path: &[&str]) -> Vec<String> {
-    let mut here = live;
-    for step in path {
-        match here.get(step) {
-            Some(next) => here = next,
-            None => return Vec::new(),
-        }
-    }
-    here.as_object()
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default()
-}
 
 fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     // A field the widget handed a table for needs no `picker` declaration:
@@ -2146,7 +2156,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                 w.saturating_sub(1),
             ));
         }
-        let constraints = constraint_summary(app.constraints.get(&field.key));
+        let constraints = constraint_summary(constraint_for(app, field));
         if !constraints.is_empty() {
             for line in wrap_help(&constraints, w.saturating_sub(4), 2) {
                 body.push(crate::seg(
@@ -2377,8 +2387,8 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // Said here rather than only in the file's comment: someone arranging
     // this list is exactly the person who would otherwise assume the order
     // they choose is the order they get.
-    let catalogue = matches!(kind, PickKind::Timezone);
-    let heading = match (catalogue, query.is_empty()) {
+    let zones = matches!(kind, PickKind::Timezone);
+    let heading = match (zones, query.is_empty()) {
         (true, true) => format!(
             "  {} configured · type to search {} zones and add more",
             chosen,
@@ -2399,15 +2409,19 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // rather than only in the file's comment: whoever is arranging a list is
     // exactly the person who would otherwise assume the order they choose is
     // the order they get. Which for one of these is true and the other not.
-    let ordering = if catalogue {
-        "  drawn west to east by each zone's offset, not in the order added"
-    } else {
-        "  shown in the order picked here"
+    // A lookup keyed by name has no order to explain, so it says nothing
+    // rather than something true of a list and meaningless here.
+    let ordering = match &kind {
+        PickKind::Timezone => Some("  drawn west to east by each zone's offset, not in the order added"),
+        PickKind::Choices(_) => Some("  shown in the order picked here"),
+        PickKind::Catalogue(_) => None,
     };
-    body.push(crate::seg(
-        &[(p.dim.as_str(), ordering.to_string())],
-        w.saturating_sub(1),
-    ));
+    if let Some(ordering) = ordering {
+        body.push(crate::seg(
+            &[(p.dim.as_str(), ordering.to_string())],
+            w.saturating_sub(1),
+        ));
+    }
     if let Some(why) = inactive_because(app, &field.key) {
         body.push(crate::seg(
             &[(p.warn.as_str(), format!("  {why}"))],
@@ -2415,7 +2429,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    let hint = if catalogue {
+    let hint = if zones {
         "type a city or a zone"
     } else {
         "type to filter"
@@ -2433,7 +2447,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         (*scroll).min(choices.len().saturating_sub(room))
     };
     if choices.is_empty() {
-        let why = match (catalogue, query.is_empty()) {
+        let why = match (zones, query.is_empty()) {
             (true, true) => "  no cities yet - type to search and add one".to_string(),
             (false, true) => "  nothing to choose from".to_string(),
             (_, false) => format!("  nothing matches /{query}"),
@@ -2468,7 +2482,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                         // Only where it says something the first column
                         // does not. For a named set the label is the value,
                         // and printing it twice is furniture.
-                        (None, true) if catalogue => picked_label(app, *index, zone)
+                        (None, true) if zones => picked_label(app, *index, zone)
                             .unwrap_or_else(|| zone_label(zone)),
                         (None, _) => String::new(),
                     },
@@ -2479,7 +2493,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if !catalogue {
+    let hints: Vec<Vec<(&str, String)>> = if !zones {
         // Everything is on screen, ticked or not, so one verb covers it.
         let mut h = vec![vec![
             (p.accent.as_str(), "↵".into()),
@@ -2680,6 +2694,20 @@ mod tests {
         assert_eq!(offered.len(), 2);
         assert_eq!(offered[0], ("model-a".to_string(), true));
         assert_eq!(offered[1], ("model-b".to_string(), false));
+    }
+
+    /// A row whose widget offers no figure must still accept one.
+    ///
+    /// A model the rate card does not carry has every kind and a price for
+    /// none of them, so its default is null - and validation read that as
+    /// "null is the type wanted" and refused every number. The one case
+    /// config exists for was the one case that could not be configured.
+    #[test]
+    fn a_row_with_no_default_still_takes_a_value() {
+        assert!(validate_value(&serde_json::json!(3.5), &Value::Null, None).is_ok());
+        assert!(validate_value(&serde_json::json!("x"), &Value::Null, None).is_ok());
+        // A declared type is still enforced where there is one.
+        assert!(validate_value(&serde_json::json!("x"), &serde_json::json!(1.0), None).is_err());
     }
 
     /// A field the widget handed no table for keeps the box it always had.

@@ -789,9 +789,6 @@ type Rate = HashMap<String, f64>;
 /// stops getting corrections when a vendor moves a price - which is the
 /// failure this table has already had once.
 fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &'static str) {
-    if NO_PUBLISHED_PRICE.contains(&model) && !configured.contains_key(model) {
-        return (None, "");
-    }
     // Longest match wins on each side independently, so a specific config
     // key can refine a model the list only knows by its family, and a "*"
     // catch-all still loses to anything that named the model.
@@ -811,14 +808,33 @@ fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &
         best.map(|(_, rate)| rate)
     };
 
-    let mut named = configured.iter().filter(|(k, _)| *k != "*").map(|(k, v)| (k.as_str(), v.clone()));
-    let from_config = longest(&mut named).or_else(|| configured.get("*").cloned());
+    // An entry holding no numbers is membership, not a price: the settings
+    // screen writes `"model": {}` when a model is ticked so its kinds can
+    // show as unset. Skipping it here is what makes that claim true - left
+    // in, it would answer "config" for a row of published prices, and hand
+    // a model nobody has priced an empty rate, which costs zero.
+    let mut named = configured
+        .iter()
+        .filter(|(k, rate)| *k != "*" && !rate.is_empty())
+        .map(|(k, v)| (k.as_str(), v.clone()));
+    let from_config = longest(&mut named)
+        .or_else(|| configured.get("*").filter(|r| !r.is_empty()).cloned());
 
-    let to_rate = |entries: &[(&str, f64)]| -> Rate {
-        entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    // A model with no published price never inherits its family's. Naming it
+    // in config used to be enough to let one in: the guard let the lookup
+    // proceed and the substring match found `gpt-5.3-codex` behind
+    // `gpt-5.3-codex-spark`, so setting one price silently priced the other
+    // four at a rate nobody published - which is the whole reason this list
+    // exists. Config still prices it; the card never does.
+    let from_list = if NO_PUBLISHED_PRICE.contains(&model) {
+        None
+    } else {
+        let to_rate = |entries: &[(&str, f64)]| -> Rate {
+            entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        };
+        let mut listed = LIST_RATES.iter().map(|(k, e)| (*k, to_rate(e)));
+        longest(&mut listed)
     };
-    let mut listed = LIST_RATES.iter().map(|(k, e)| (*k, to_rate(e)));
-    let from_list = longest(&mut listed);
 
     match (from_config, from_list) {
         (Some(mine), Some(mut merged)) => {
@@ -1986,6 +2002,54 @@ mod tests {
             [("input".to_string(), 1.0)].into_iter().collect(),
         );
         assert!(rate_for("gpt-5.3-codex-spark", &mine).0.is_some());
+    }
+
+    /// Naming an unpriced model in config must not let its family in.
+    ///
+    /// The merge nearly undid the list this table keeps: the guard let the
+    /// lookup run once config named the model, and `gpt-5.3-codex-spark`
+    /// contains `gpt-5.3-codex`, so setting `input` yourself would have
+    /// priced output at the family's 14 - a number nobody published, on a
+    /// model explicitly not on the API. That is the one thing this widget
+    /// must never show.
+    #[test]
+    fn an_unpriced_model_named_in_config_still_inherits_nothing() {
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(
+            "gpt-5.3-codex-spark".into(),
+            [("input".to_string(), 2.0)].into_iter().collect(),
+        );
+        let (rate, origin) = rate_for("gpt-5.3-codex-spark", &mine);
+        let rate = rate.expect("config priced it");
+        assert_eq!(origin, "config");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), None, "the family rate must not reach it");
+        // And what is not priced costs nothing rather than something invented.
+        let tokens: Tokens = [("output".to_string(), 1_000_000.0)].into_iter().collect();
+        assert_eq!(cost_of(&tokens, &rate), 0.0);
+    }
+
+    /// Ticking a model in the settings screen writes `"model": {}`. That is
+    /// membership so its kinds can show as unset - it is not a price, and
+    /// must not be read as one.
+    #[test]
+    fn an_entry_with_no_numbers_prices_nothing_and_claims_nothing() {
+        // A known model keeps its published rate, and says so.
+        let mut ticked: HashMap<String, Rate> = HashMap::new();
+        ticked.insert("gpt-5.6-sol".into(), HashMap::new());
+        let (rate, origin) = rate_for("gpt-5.6-sol", &ticked);
+        assert_eq!(origin, "list", "nothing was configured, so nothing is");
+        assert_eq!(rate.unwrap().get("input"), Some(&4.0));
+
+        // A model the card has never heard of is unpriced, not free. An
+        // empty rate would have metered every token at zero and called it
+        // configured, which reads as "this cost nothing" rather than "we do
+        // not know what this cost".
+        let mut unknown: HashMap<String, Rate> = HashMap::new();
+        unknown.insert("some-local-model".into(), HashMap::new());
+        let (rate, origin) = rate_for("some-local-model", &unknown);
+        assert!(rate.is_none(), "an empty entry is not a rate");
+        assert_eq!(origin, "");
     }
 
     /// Overriding one number must not delete the other four.

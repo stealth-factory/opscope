@@ -1351,3 +1351,54 @@ fn a_poller_that_dies_records_why() {
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+
+/// A catalogue is wired to a field by name, and nothing else ties them.
+///
+/// `catalogues: &[("rates", LIST_RATES)]` says "offer this table on the field
+/// called rates". Write `"rate"` and it compiles, every test passes, and the
+/// settings screen quietly goes on showing a JSON box - the exact failure
+/// this file exists for, since the only symptom is a feature that is simply
+/// not there.
+#[test]
+fn every_catalogue_names_a_field_its_widget_actually_declares() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
+        let Some(rest) = source.split("catalogues: &[").nth(1) else {
+            continue;
+        };
+        let Some(list) = rest.split("],").next() else {
+            continue;
+        };
+        // Each entry opens ("field-name", TABLE.
+        let declared: Vec<String> = list
+            .match_indices("(\"")
+            .filter_map(|(at, _)| {
+                let after = &list[at + 2..];
+                after.find('"').map(|end| after[..end].to_string())
+            })
+            .collect();
+        if declared.is_empty() {
+            continue;
+        }
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let parsed: serde_json::Value = match serde_json::from_str(&settings) {
+            Ok(v) => v,
+            Err(_) => {
+                wrong.push(format!("{name}: declares a catalogue and has no settings.json"));
+                continue;
+            }
+        };
+        for field in declared {
+            if !parsed.as_object().is_some_and(|o| o.contains_key(&field)) {
+                wrong.push(format!(
+                    "{name}: catalogue names {field:?}, which is not a key in its settings.json"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}

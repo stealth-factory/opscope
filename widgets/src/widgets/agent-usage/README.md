@@ -598,6 +598,17 @@ correction. It used to replace the whole rate, which meant setting one number
 deleted the other four — and a missing kind costs zero, so output metered as
 free and the total was quietly a fraction of the real one.
 
+A model ticked with nothing set under it is priced entirely from the card and
+reports as `list`, not as configured — membership is not a price. `*` works
+the same way: it overrides those kinds for any model no other key names,
+rather than replacing the card's rate for them.
+
+The one thing this does not reach is a model with **no published price** —
+`gpt-5.3-codex-spark` and the retired models. Those never inherit a family
+rate however they are configured; set their kinds yourself and only those
+kinds are priced, because the alternative is showing a number nobody
+published.
+
 Unticking a model removes the entry and any numbers under it, because that is
 what removing a model has to mean.
 
