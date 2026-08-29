@@ -1062,6 +1062,22 @@ fn delete_before(buffer: &mut String, cursor: &mut usize) {
     *cursor = at;
 }
 
+/// Why a field is currently doing nothing, if it is.
+///
+/// A setting that is read only when another one says so is the quietest kind
+/// of trap: it accepts what you type, saves it, shows it back, and changes
+/// nothing. `"inactive_when": {"key": "detect_agents", "is": true}` lets the
+/// field say so, and the screen says it before you edit rather than after.
+fn inactive_because(app: &App, key: &str) -> Option<String> {
+    let rule = app.constraints.get(key)?.as_object()?.get("inactive_when")?;
+    let rule = rule.as_object()?;
+    let other = rule.get("key")?.as_str()?;
+    let when = rule.get("is")?;
+    let field = app.fields.iter().find(|f| f.key == other)?;
+    let live = current_of(&app.live, field, app.legacy_section).unwrap_or(&field.default);
+    (live == when).then(|| format!("not in use while {other} is {}", compact(when)))
+}
+
 /// Where a picker's candidates come from.
 ///
 /// Two shapes, and they want opposite defaults. A closed set - the six agents
@@ -1964,6 +1980,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(p.dim.as_str(), ordering.to_string())],
         w.saturating_sub(1),
     ));
+    if let Some(why) = inactive_because(app, &field.key) {
+        body.push(crate::seg(
+            &[(p.warn.as_str(), format!("  {why}"))],
+            w.saturating_sub(1),
+        ));
+    }
     body.push(String::new());
     // A field you can see the edges of. A bare caret on a bare line reads as
     // output rather than as somewhere to type, and the one thing this screen

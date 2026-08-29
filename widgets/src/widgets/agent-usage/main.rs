@@ -1172,6 +1172,18 @@ fn day_calendar(
 struct Config {
     agents: Vec<String>,
     exclude_agents: Vec<String>,
+    /// Whether to show whatever agents this machine turns out to have.
+    ///
+    /// On, which is what the widget has always done when nothing named a
+    /// set - it was just spelt "the list is empty", which is a mode nothing
+    /// on screen could name and nothing in the file admitted to. A reader
+    /// unticking their last agent changed what the widget does and was told
+    /// only that a list had become empty.
+    ///
+    /// `None` when the key is absent, and then the old rule decides: a named
+    /// list wins, an empty one discovers. Set it either way and it is the
+    /// answer, so an existing config keeps behaving exactly as it did.
+    detect_agents: Option<bool>,
     rates: HashMap<String, Rate>,
     plan_cost: HashMap<String, f64>,
     refresh: f64,
@@ -1244,6 +1256,7 @@ fn read_config() -> Config {
     Config {
         agents: tc::cfg_strings(&raw, "agents", &[]),
         exclude_agents: tc::cfg_strings(&raw, "exclude_agents", &[]),
+        detect_agents: raw.get("detect_agents").and_then(|v| v.as_bool()),
         rates: table("rates"),
         plan_cost: raw["plan_cost"]
             .as_object()
@@ -1387,7 +1400,11 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
         .filter(|n| known.contains(&n.as_str()))
         .cloned()
         .collect();
-    let chosen: Vec<String> = if named.is_empty() {
+    // The key decides when it is set. When it is not, the rule that shipped
+    // before it decides, so a config written against the old behaviour keeps
+    // the behaviour it was written for.
+    let detect = cfg.detect_agents.unwrap_or_else(|| named.is_empty());
+    let chosen: Vec<String> = if detect {
         ORDER
             .iter()
             .filter(|n| found.get(**n).is_some_and(|x| x.present))
