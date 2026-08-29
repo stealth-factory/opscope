@@ -53,7 +53,7 @@ nothing at all — it just looks good, and it knows it.
 **Four are Linux-only today.** `latency`, `ports`, `netwatch` and `link` read
 the kernel through `/proc` and through `ss`, neither of which exists on macOS;
 each links the issue tracking its port above. The other eleven run on Linux and
-macOS alike. Nothing here works on Windows.
+macOS alike.
 
 Each is a single self-contained binary — every library it needs is compiled
 in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
