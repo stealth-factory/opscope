@@ -1,0 +1,24 @@
+{
+  "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
+  "_schema": {
+    "teams": {
+      "items": "string"
+    },
+    "projects": {
+      "items": "string"
+    },
+    "refresh": {
+      "minimum": 5
+    },
+    "limit": {
+      "minimum": 1,
+      "maximum": 100
+    }
+  },
+  "token": "",
+  "token_env": "VERCEL_TOKEN",
+  "refresh": 15.0,
+  "limit": 100,
+  "teams": [],
+  "projects": []
+}

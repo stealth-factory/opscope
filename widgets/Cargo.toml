@@ -25,66 +25,62 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "ports"
-path = "src/bin/ports.rs"
+path = "src/widgets/ports/main.rs"
 
 [[bin]]
 name = "netwatch"
-path = "src/bin/netwatch.rs"
+path = "src/widgets/netwatch/main.rs"
 
 [[bin]]
 name = "latency"
-path = "src/bin/latency.rs"
+path = "src/widgets/latency/main.rs"
 
 [[bin]]
 name = "matrix"
-path = "src/bin/matrix.rs"
+path = "src/widgets/matrix/main.rs"
 
 [[bin]]
 name = "link"
-path = "src/bin/link.rs"
+path = "src/widgets/link/main.rs"
 
 [[bin]]
 name = "clocks"
-path = "src/bin/clocks.rs"
-
-[[bin]]
-name = "config"
-path = "src/bin/config.rs"
+path = "src/widgets/clocks/main.rs"
 
 [[bin]]
 name = "herdr-panes"
-path = "src/bin/herdr-panes.rs"
+path = "src/widgets/herdr-panes/main.rs"
 
 [[bin]]
 name = "deployments"
-path = "src/bin/deployments.rs"
+path = "src/widgets/deployments/main.rs"
 
 # The launcher, and the command the project is named after. One word, like
 # htop and btop, because that is what somebody types first.
 [[bin]]
 name = "opscope"
-path = "src/bin/opscope.rs"
+path = "src/launcher/main.rs"
 
 [[bin]]
 name = "linear"
-path = "src/bin/linear.rs"
+path = "src/widgets/linear/main.rs"
 
 [[bin]]
 name = "github-prs"
-path = "src/bin/github-prs.rs"
+path = "src/widgets/github-prs/main.rs"
 
 [[bin]]
 name = "github"
-path = "src/bin/github.rs"
+path = "src/widgets/github/main.rs"
 
 [[bin]]
 name = "github-actions"
-path = "src/bin/github-actions.rs"
+path = "src/widgets/github-actions/main.rs"
 
 [[bin]]
 name = "tailnet"
-path = "src/bin/tailnet.rs"
+path = "src/widgets/tailnet/main.rs"
 
 [[bin]]
 name = "agent-usage"
-path = "src/bin/agent-usage.rs"
+path = "src/widgets/agent-usage/main.rs"

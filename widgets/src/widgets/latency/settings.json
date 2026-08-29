@@ -1,0 +1,38 @@
+{
+  "_schema": {
+    "interval": {
+      "minimum": 0.01
+    },
+    "seconds_per_column": {
+      "minimum": 0
+    },
+    "window": {
+      "minimum": 1
+    },
+    "spike_factor": {
+      "minimum": 0
+    },
+    "aggregate": {
+      "choices": [
+        "median",
+        "mean",
+        "min",
+        "max",
+        "p95"
+      ]
+    }
+  },
+  "hosts": [
+    "1.1.1.1",
+    "8.8.8.8",
+    "example.internal"
+  ],
+  "interval": 0.5,
+  "seconds_per_column": 0.0,
+  "window": 600,
+  "spike_factor": 3.0,
+  "aggregate": "median",
+  "strip_suffixes": [
+    ".example.internal"
+  ]
+}

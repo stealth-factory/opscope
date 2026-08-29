@@ -1,0 +1,29 @@
+GitHub delivery metrics across every org and account you can see.
+
+Open pull requests, how many are actually merging, review backlog and issue
+counts - for one org, several, or your personal account alongside them.
+
+    github [-n SECONDS] [account ...]
+
+Accounts are org logins, or @me for your own. With none given it uses
+`github.accounts` from config, and failing that every org you belong to plus
+your personal account.
+
+Open counts - PRs, issues, drafts, review backlog - are point-in-time totals of
+whatever is open right now, at any age. Everything else - the merge rate, the
+per-day charts and the per-account merged/rate columns - covers the merge
+window, which is the N days ending today.
+
+Credentials: `github.token` in config.json, or $GITHUB_TOKEN. It must be a
+*classic* token: a fine-grained one is limited to a single resource owner, so
+it cannot span the orgs this board exists to compare. Two scopes - `repo` so search sees private
+repositories, and `read:org` to enumerate your orgs. Missing either one does
+not fail, it silently undercounts, so the granted scopes are checked and named.
+The API is called directly, so the `gh` CLI is not required.
+
+Keys: up/down select an account, r refreshes now, w cycles the window
+(7/14/30/60/90 days), , opens settings, q quits.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.

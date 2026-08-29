@@ -1,0 +1,8 @@
+{
+  "_schema": {
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "refresh": 4.0
+}

@@ -1,0 +1,31 @@
+{
+  "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
+  "_schema": {
+    "accounts": {
+      "items": "string"
+    },
+    "repos": {
+      "items": "string"
+    },
+    "window_hours": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 30
+    },
+    "max_repos": {
+      "minimum": 1
+    },
+    "pushed_days": {
+      "minimum": 1
+    }
+  },
+  "token": "",
+  "token_env": "",
+  "accounts": [],
+  "repos": [],
+  "window_hours": 48.0,
+  "refresh": 60.0,
+  "max_repos": 16,
+  "pushed_days": 14.0
+}

@@ -1,0 +1,24 @@
+{
+  "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+  "_schema": {
+    "ports": {
+      "items": "integer"
+    },
+    "refresh": {
+      "minimum": 0.5
+    },
+    "history": {
+      "minimum": 1
+    }
+  },
+  "ports": [],
+  "refresh": 2.0,
+  "history": 120,
+  "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor - retention follows the longest window on its own.",
+  "windows": [
+    60,
+    300,
+    900,
+    3600
+  ]
+}

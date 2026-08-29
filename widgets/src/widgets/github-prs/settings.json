@@ -1,0 +1,18 @@
+{
+  "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+  "_schema": {
+    "limit": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "sources": {
+    "orgs": "is:open is:pr @mine",
+    "authored": "is:open is:pr author:@me",
+    "assigned": "is:open is:pr assignee:@me"
+  },
+  "limit": 50,
+  "refresh": 60.0
+}

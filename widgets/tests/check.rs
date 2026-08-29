@@ -215,35 +215,110 @@ fn without_tests(src: &str) -> String {
 
 /// Every widget binary, by stem, with its source.
 fn widgets() -> BTreeMap<String, String> {
-    let dir = root().join("widgets/src/bin");
+    let dir = root().join("widgets/src/widgets");
     let mut found = BTreeMap::new();
     for entry in std::fs::read_dir(&dir).expect("the bin directory").flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        if !path.is_dir() {
             continue;
         }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let main = path.join("main.rs");
+        if !main.exists() {
+            continue;
+        }
         // Each file's own tests are dropped before joining, not after. Split
         // on the first `#[cfg(test)]` of the joined blob and a widget with
-        // submodules is read only as far as its main file's tests - agent-usage's
-        // are two thirds of the way down, so its eight submodules, seven
-        // thousand lines, were invisible to every check that did it that way.
-        let mut src = without_tests(&std::fs::read_to_string(&path).unwrap_or_default());
-        // A widget split across a directory - agent-usage - reads as one widget.
-        let sub = dir.join(&stem);
-        if sub.is_dir() {
-            for part in std::fs::read_dir(&sub).expect("a widget directory").flatten() {
-                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-                    src.push('\n');
-                    src.push_str(&without_tests(
-                        &std::fs::read_to_string(part.path()).unwrap_or_default(),
-                    ));
-                }
+        // submodules is read only as far as its main file's tests.
+        let mut src = String::new();
+        for part in std::fs::read_dir(&path).expect("a widget directory").flatten() {
+            if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                src.push('\n');
+                src.push_str(&without_tests(
+                    &std::fs::read_to_string(part.path()).unwrap_or_default(),
+                ));
             }
         }
         found.insert(stem, src);
     }
     found
+}
+
+#[test]
+fn every_widget_owns_its_complete_folder() {
+    let dir = root().join("widgets/src/widgets");
+    let manifest =
+        std::fs::read_to_string(root().join("widgets/Cargo.toml")).expect("widget manifest");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let folder = dir.join(name);
+        for required in ["main.rs", "help.txt", "README.md", "CONFIGURE.md"] {
+            if !folder.join(required).is_file() {
+                wrong.push(format!("{name}: missing {required}"));
+            }
+        }
+        let path = format!("path = \"src/widgets/{name}/main.rs\"");
+        if !manifest.contains(&path) {
+            wrong.push(format!("{name}: Cargo.toml does not point at its folder"));
+        }
+        let source = std::fs::read_to_string(folder.join("main.rs")).unwrap_or_default();
+        if !source.contains("include_str!(\"CONFIGURE.md\")")
+            || !source.contains("maybe_widget_help")
+        {
+            wrong.push(format!("{name}: binary does not carry its CONFIGURE.md"));
+        }
+        let settings = folder.join("settings.json");
+        if settings.exists() {
+            let text = std::fs::read_to_string(&settings).unwrap_or_default();
+            if serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_none()
+            {
+                wrong.push(format!("{name}: settings.json is not a JSON object"));
+            }
+            if !source.contains("tc::run_settings") {
+                wrong.push(format!("{name}: declares settings but never opens them"));
+            }
+            let readme = std::fs::read_to_string(folder.join("README.md")).unwrap_or_default();
+            if !readme.contains("`,`") {
+                wrong.push(format!("{name}: README does not document the settings key"));
+            }
+        } else if source.contains("tc::run_settings") {
+            wrong.push(format!("{name}: opens a settings screen with no declaration"));
+        }
+    }
+    let launcher = root().join("widgets/src/launcher");
+    for required in [
+        "main.rs",
+        "help.txt",
+        "README.md",
+        "CONFIGURE.md",
+        "settings.json",
+    ] {
+        if !launcher.join(required).is_file() {
+            wrong.push(format!("launcher: missing {required}"));
+        }
+    }
+    let launcher_source =
+        std::fs::read_to_string(launcher.join("main.rs")).unwrap_or_default();
+    if !launcher_source.contains("tc::run_settings") {
+        wrong.push("launcher: does not expose shared terminal settings".into());
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn generated_config_example_matches_widget_settings() {
+    let status = std::process::Command::new("python3")
+        .args(["tools/config-example.py", "--check"])
+        .current_dir(root())
+        .status()
+        .expect("python3 runs the config example generator");
+    assert!(
+        status.success(),
+        "config.example.json is not generated from widget settings"
+    );
 }
 
 /// Text inside double-quoted string literals, where hints live.
@@ -530,7 +605,10 @@ fn every_footer_hint_is_in_the_widgets_doc() {
     // exist teaches a lie, and so does an undocumented one that works.
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
-        let doc = root().join("docs").join(format!("{}.md", name));
+        let doc = root()
+            .join("widgets/src/widgets")
+            .join(&name)
+            .join("README.md");
         let Ok(text) = std::fs::read_to_string(&doc) else {
             continue; // matrix is decorative and deliberately undocumented
         };
@@ -545,7 +623,7 @@ fn every_footer_hint_is_in_the_widgets_doc() {
             let documented = text.contains(&format!("`{}`", key))
                 || glyph.is_some_and(|g| text.contains(&g));
             if !documented {
-                wrong.push(format!("{}: [{}] in the footer, not in docs/{}.md", name, key, name));
+                wrong.push(format!("{}: [{}] in the footer, not in its README.md", name, key));
             }
         }
     }
@@ -677,11 +755,15 @@ fn every_documented_widget_is_in_the_docs_index() {
     let index = std::fs::read_to_string(root().join("docs/README.md")).expect("docs/README.md");
     let mut wrong = Vec::new();
     for name in widgets().keys() {
-        let doc = root().join("docs").join(format!("{}.md", name));
-        if !doc.exists() {
-            continue; // matrix is decorative and deliberately undocumented
-        }
-        let cell = format!("[`{}`]({}.md)", name, name);
+        let doc = root()
+            .join("widgets/src/widgets")
+            .join(name)
+            .join("README.md");
+        assert!(doc.exists(), "{} has no owned README.md", name);
+        let cell = format!(
+            "[`{}`](../widgets/src/widgets/{}/README.md)",
+            name, name
+        );
         if !index.contains(&cell) {
             wrong.push(format!("{}: no docs/README.md row", name));
         }
@@ -693,7 +775,8 @@ fn every_documented_widget_is_in_the_docs_index() {
 fn widget_names_in_the_launcher_sample_are_current() {
     // The sample listing is not every widget. It is the place a rename
     // forgets: a left-column name that is not a widget is the old name.
-    let text = std::fs::read_to_string(root().join("docs/opscope.md")).expect("docs/opscope.md");
+    let text = std::fs::read_to_string(root().join("widgets/src/launcher/README.md"))
+        .expect("launcher README.md");
     let widgets = widgets();
     let mut wrong = Vec::new();
     let mut in_sample = false;
@@ -727,7 +810,7 @@ fn widget_names_in_the_launcher_sample_are_current() {
         }
         if !widgets.contains_key(stem) {
             wrong.push(format!(
-                "docs/opscope.md lists {:?} in the sample and no widget is called that",
+                "the launcher README lists {:?} in the sample and no widget is called that",
                 stem
             ));
         }
@@ -783,10 +866,10 @@ fn every_key_the_help_text_names_is_answered() {
     const VERBS: &[&str] = &[
         "opens", "cycles", "toggles", "quits", "refreshes", "closes", "copies",
     ];
-    let dir = root().join("widgets/src/bin");
+    let dir = root().join("widgets/src/widgets");
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
-        let help = dir.join(format!("{}_help.txt", name));
+        let help = dir.join(&name).join("help.txt");
         let Ok(text) = std::fs::read_to_string(&help) else {
             continue;
         };
@@ -807,8 +890,8 @@ fn every_key_the_help_text_names_is_answered() {
                     .is_some_and(|next| VERBS.contains(next));
                 if (after_press || before_verb) && !handled.contains(*word) {
                     wrong.push(format!(
-                        "{}_help.txt names {:?} and {}.rs does not answer it",
-                        name, word, name
+                        "{}/help.txt names {:?} and its main.rs does not answer it",
+                        name, word
                     ));
                 }
             }

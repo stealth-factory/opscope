@@ -1,0 +1,19 @@
+{
+  "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
+  "_schema": {
+    "exclude_teams": {
+      "items": "string"
+    },
+    "window_days": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "token": "",
+  "token_env": "LINEAR_API_KEY",
+  "exclude_teams": [],
+  "window_days": 14.0,
+  "refresh": 120.0
+}

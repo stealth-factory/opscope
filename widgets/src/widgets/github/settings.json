@@ -1,0 +1,19 @@
+{
+  "_comment": "token: a CLASSIC PAT with repo + read:org - fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+  "_schema": {
+    "accounts": {
+      "items": "string"
+    },
+    "window_days": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "token": "",
+  "token_env": "GITHUB_TOKEN",
+  "accounts": [],
+  "window_days": 14.0,
+  "refresh": 120.0
+}

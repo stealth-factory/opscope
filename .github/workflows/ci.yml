@@ -62,7 +62,7 @@ jobs:
 
       - name: It builds
         # --all-targets above builds the test harnesses but not necessarily
-        # every binary as a binary. Sixteen of them ship; all sixteen
+        # every binary as a binary. Fifteen of them ship; all fifteen
         # should compile before a change is merged.
         run: cargo build --workspace --bins
 

@@ -1,0 +1,75 @@
+{
+  "_schema": {
+    "work_start_hour": {
+      "minimum": 0,
+      "maximum": 23
+    },
+    "work_end_hour": {
+      "minimum": 0,
+      "maximum": 23
+    },
+    "pomodoro_focus_minutes": {
+      "minimum": 0.1
+    },
+    "pomodoro_short_break_minutes": {
+      "minimum": 0.1
+    },
+    "pomodoro_long_break_minutes": {
+      "minimum": 0.1
+    },
+    "pomodoro_sessions_before_long_break": {
+      "minimum": 1
+    },
+    "pomodoro_flash_count": {
+      "minimum": 1
+    },
+    "pomodoro_flash_gap": {
+      "minimum": 0
+    }
+  },
+  "cities": [
+    [
+      "San Francisco",
+      "America/Los_Angeles"
+    ],
+    [
+      "London",
+      "Europe/London"
+    ],
+    [
+      "Singapore",
+      "Asia/Singapore"
+    ],
+    [
+      "Tokyo",
+      "Asia/Tokyo"
+    ]
+  ],
+  "work_start_hour": 9,
+  "work_end_hour": 18,
+  "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
+  "show_hints": true,
+  "_work_days_comment": "Which days count as working days, as names (sun, mon, ...) or numbers. Drives the working-day shading.",
+  "work_days": [
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri"
+  ],
+  "pomodoro_enabled": false,
+  "pomodoro_focus_minutes": 25.0,
+  "pomodoro_short_break_minutes": 5.0,
+  "pomodoro_long_break_minutes": 15.0,
+  "pomodoro_sessions_before_long_break": 4,
+  "pomodoro_bell": true,
+  "pomodoro_notify": true,
+  "pomodoro_flash": true,
+  "pomodoro_flash_count": 2,
+  "pomodoro_flash_gap": 1.0,
+  "pomodoro_flash_rgb": [
+    246,
+    248,
+    252
+  ]
+}

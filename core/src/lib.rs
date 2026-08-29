@@ -21,6 +21,10 @@
 //! side and agree on screen, so where a choice existed this keeps the
 //! Python behaviour rather than the more idiomatic Rust one.
 
+mod settings;
+
+pub use settings::{run_settings, SettingsSpec};
+
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -1922,6 +1926,30 @@ pub fn maybe_help(doc: &str) {
         println!("{}", version());
         std::process::exit(0);
     }
+}
+
+/// Widget help plus the plain-Markdown guide an AI can use to configure it.
+///
+/// The guide is embedded in the binary, so npm and release-tarball users
+/// carry the same instructions as a source checkout.
+pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--configure-help") {
+        println!("{}", configure.trim());
+        std::process::exit(0);
+    }
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{}", doc.trim());
+        println!();
+        if has_settings {
+            println!("Settings: press , in the widget");
+        } else {
+            println!("Settings: none");
+        }
+        println!("AI configuration guide: --configure-help");
+        std::process::exit(0);
+    }
+    maybe_help(doc);
 }
 
 /// What this binary is, in one line.
