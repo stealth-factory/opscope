@@ -16,7 +16,7 @@ waiting on you.
 
 **`npx opscope` is the official way to use this.** Nothing to install, no
 `PATH` to manage, no version to pick — it fetches the launcher and the
-binaries for your machine and starts whichever widget you name.
+binaries and starts whichever widget you name.
 
 ```sh
 npx opscope              # the menu
@@ -74,8 +74,8 @@ nothing at all — it just looks good, and it knows it.
 
 ```sh
 npx opscope                 # the menu
-npx opscope link            # skip the menu; any widget name works
-npx opscope@latest link     # pin to latest, or @0.3.0, etc.
+npx opscope clocks          # skip the menu; any widget name works
+npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
 It fetches the launcher and the binaries for this machine into npm's cache and
@@ -145,7 +145,8 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # fifteen binaries in ./target/release
+cargo build --release            # fifteen binaries in ./target/release
+./target/release/opscope         # the menu, from the build tree
 ```
 
 ## Running them
@@ -160,9 +161,9 @@ npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
 The launcher looks for each widget beside itself, so the fifteen have to stay
-together — `npx` keeps them that way for you. Running them from an unpacked
-tarball or a build tree is setup rather than running, and lives with the rest
-of the setup under [Getting them](#getting-them).
+together — `npx` keeps them that way for you. An unpacked tarball or a build tree
+is a setup method, not the way to run them, and lives under
+[Getting them](#getting-them).
 
 They are built to sit side by side and fill a wall, but nothing assumes a
 multiplexer — each is an ordinary terminal program. Tile them however you
