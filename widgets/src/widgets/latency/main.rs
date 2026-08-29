@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn losses_are_recognised_but_not_timed() {
         assert!(is_loss(
-            "From 10.0.0.1 icmp_seq=2 Destination Net Unreachable"
+            "From 192.0.2.1 icmp_seq=2 Destination Net Unreachable"
         ));
         assert!(is_loss("no answer yet for icmp_seq=3"));
         assert!(!is_loss("64 bytes from 1.1.1.1: time=1 ms"));
