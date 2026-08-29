@@ -8,9 +8,9 @@ readouts. The difference is that every number on them is real: actual network
 latency, actual deployments, actual machines on your tailnet, actual agents
 waiting on you.
 
-[![opscope — click to watch the 26-second demo](docs/demo-poster.jpg)](docs/demo.mp4)
+[![opscope — click to watch the 1m54s demo](docs/demo-poster.jpg)](docs/demo.mp4)
 
-*Seven widgets running at once — every figure live. [Watch the 26s demo →](docs/demo.mp4)*
+*Eight widgets running at once — every figure live. [Watch the 1m54s demo →](docs/demo.mp4)*
 
 ## How it started
 
