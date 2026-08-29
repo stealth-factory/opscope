@@ -78,12 +78,14 @@ npx opscope link            # skip the menu; any widget name works
 npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 ```
 
-It installs the launcher and the fifteen binaries for this machine, and
-starts whichever you named — or the menu, if you named none. Only
-`opscope` lands on your `PATH`; the widgets stay beside it, so `link` never
-replaces the coreutils command of the same name. Linux x86-64
-(glibc 2.35 or newer), macOS Apple Silicon and macOS Intel are published;
-anything else fails at install with a sentence saying so.
+It fetches the launcher and the binaries for this machine into npm's cache and
+runs whichever you named — or the menu, if you named none. **Your `PATH` is
+not touched.** Only `opscope` is a command at all; the fifteen widgets sit
+inside the package beside it, which is why `link` never shadows the coreutils
+command of that name.
+
+Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
+macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
 build fifteen. Both take about a minute.
