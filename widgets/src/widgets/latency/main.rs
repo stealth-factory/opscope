@@ -155,7 +155,10 @@ impl Target {
         // means on a link: how much the round trip moves from ping to ping,
         // not how far it sits from its own average.
         let jit = if got.len() > 1 {
-            Some(got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (got.len() - 1) as f64)
+            Some(
+                got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>()
+                    / (got.len() - 1) as f64,
+            )
         } else {
             Some(0.0)
         };
@@ -185,6 +188,7 @@ fn fmt_ms(value: Option<f64>) -> String {
         Some(v) => format!("{:>5.1}ms", v),
     }
 }
+
 
 /// One target's recent history at one character per ping.
 ///
@@ -376,27 +380,14 @@ fn watch(
                 let st = target.stats();
                 if let Some(med) = st.med {
                     if st.n > 10 && rtt > med * spike_factor {
-                        log(
-                            &events,
-                            &hue,
-                            &label,
-                            "SPIKE",
-                            format!(
-                                "{} (median {})",
-                                fmt_ms(Some(rtt)).trim(),
-                                fmt_ms(Some(med)).trim()
-                            ),
-                        );
+                        log(&events, &hue, &label, "SPIKE",
+                            format!("{} (median {})", fmt_ms(Some(rtt)).trim(),
+                                    fmt_ms(Some(med)).trim()));
                     }
                 }
                 if let Some(since) = target.down_since.take() {
-                    log(
-                        &events,
-                        &hue,
-                        &label,
-                        "UP",
-                        format!("recovered after {:.0}s", stamp - since),
-                    );
+                    log(&events, &hue, &label, "UP",
+                        format!("recovered after {:.0}s", stamp - since));
                 }
                 target.alive = true;
                 target.record(stamp, Some(rtt), window);
@@ -429,13 +420,7 @@ fn watch(
             if target.down_since.is_none() {
                 target.down_since = Some(tc::now());
                 drop(guard);
-                log(
-                    &events,
-                    &hue,
-                    &label,
-                    "DOWN",
-                    "ping exited, retrying".into(),
-                );
+                log(&events, &hue, &label, "DOWN", "ping exited, retrying".into());
             } else {
                 drop(guard);
             }
@@ -608,13 +593,7 @@ fn graph(
             }
             let values = columns
                 .into_iter()
-                .map(|c| {
-                    if c.is_empty() {
-                        None
-                    } else {
-                        Some(aggregate(&c, how))
-                    }
-                })
+                .map(|c| if c.is_empty() { None } else { Some(aggregate(&c, how)) })
                 .collect();
             (i, values)
         })
@@ -709,9 +688,7 @@ fn graph(
                 0 => (p.grid.as_str(), " ".into()),
                 m => (
                     colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32)
-                        .unwrap_or(' ')
-                        .to_string(),
+                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string(),
                 ),
             });
         }
@@ -765,7 +742,17 @@ fn main() {
 
     let absent = tc::missing(&["ping"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "latency",
+            &absent,
+            &[
+                "Every figure here comes from ping: this widget times replies,",
+                "it does not send packets itself. With no ping there is nothing",
+                "to time and nothing to draw.",
+            ],
+            "apt install iputils-ping",
+            SETTINGS,
+        );
         return;
     }
 
@@ -904,11 +891,7 @@ fn main() {
         };
         // Zero means one bucket per ping, which is the finest motion the
         // grid allows; anything larger trades that for a longer history.
-        let bucket = if per_column > 0.0 {
-            per_column
-        } else {
-            interval
-        };
+        let bucket = if per_column > 0.0 { per_column } else { interval };
 
         let mut rows = vec![tc::title("network latency monitor", w, &p.head)];
         rows.push(tc::seg(
@@ -963,11 +946,7 @@ fn main() {
             // The selected row is tinted rather than marked, so the thing
             // that says "this one" in the table is the same thing that says
             // it in the chart: one target at full strength, the rest behind.
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let raw_hue = p.hues[i % p.hues.len()].clone();
             let loss_c = if st.loss == 0.0 {
                 &p.ok
@@ -1013,11 +992,7 @@ fn main() {
                 // the same cell, so no column moves.
                 (
                     tinted(if here { &p.head } else { &p.dim }),
-                    if here {
-                        "▸".to_string()
-                    } else {
-                        " ".to_string()
-                    },
+                    if here { "▸".to_string() } else { " ".to_string() },
                 ),
                 // Grey until this is the row being looked at, then white -
                 // which is how link tells its selected session apart, and
@@ -1225,71 +1200,6 @@ fn label_for(host: &str, strip: &[String]) -> String {
     label
 }
 
-/// Draw the reason and wait, rather than exiting.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("latency", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Every figure here comes from ping: this widget times replies,",
-            "it does not send packets itself. With no ping there is nothing",
-            "to time and nothing to draw.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install iputils-ping".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 struct Palette {
     ok: String,
     warn: String,
@@ -1345,12 +1255,7 @@ mod tests {
         let mut t = Target::default();
         for i in 0..500 {
             t.record(i as f64, None, window);
-            assert!(
-                t.samples.len() <= window,
-                "grew to {} at {}",
-                t.samples.len(),
-                i
-            );
+            assert!(t.samples.len() <= window, "grew to {} at {}", t.samples.len(), i);
         }
         assert_eq!(t.samples.len(), window);
         // What is kept is the newest, not the oldest.
@@ -1375,9 +1280,7 @@ mod tests {
 
     #[test]
     fn losses_are_recognised_but_not_timed() {
-        assert!(is_loss(
-            "From 192.0.2.1 icmp_seq=2 Destination Net Unreachable"
-        ));
+        assert!(is_loss("From 192.0.2.1 icmp_seq=2 Destination Net Unreachable"));
         assert!(is_loss("no answer yet for icmp_seq=3"));
         assert!(!is_loss("64 bytes from 1.1.1.1: time=1 ms"));
     }
@@ -1554,11 +1457,7 @@ mod tests {
             let (whose, mask) = &cells[0][x];
             // Never the union: a cell shows one trace's samples, so no dot
             // is ever painted in a colour that is not its own.
-            let mine = if whose == "first" {
-                top[0][x]
-            } else {
-                bottom[0][x]
-            };
+            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
             assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
             assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
         }
@@ -1596,4 +1495,5 @@ mod tests {
         assert!(owners.contains(&"first"), "{:?}", owners);
         assert!(owners.contains(&"second"), "{:?}", owners);
     }
+
 }

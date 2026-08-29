@@ -10,7 +10,7 @@ GitHub search and pull-request APIs using the shared GitHub credential.
 
 The owned section is `github_prs`. A legacy `pr` section is used only when `github_prs` is absent.
 
-Declared fields: `sources`, `limit`, `refresh`
+Declared fields: `token`, `token_env`, `sources`, `limit`, `refresh`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

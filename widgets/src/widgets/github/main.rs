@@ -79,11 +79,7 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
         return (from_config, "config");
     }
     let name = tc::cfg_str(cfg, "token_env", "GITHUB_TOKEN");
-    let name = if name.is_empty() {
-        "GITHUB_TOKEN".into()
-    } else {
-        name
-    };
+    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -101,12 +97,7 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 /// So this asks for nodes, and only when an account's own screen is opened -
 /// five of them, oldest first. One request, on demand, for the question the
 /// aggregates cannot answer.
-fn fetch_oldest(
-    acc: &str,
-    viewer: &str,
-    tok: &str,
-    scopes: &Arc<Mutex<Scopes>>,
-) -> serde_json::Value {
+fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>) -> serde_json::Value {
     let q = scope_of(acc, viewer);
     let query = format!(
         r#"{{
@@ -190,12 +181,7 @@ fn account_detail(
         },
         p.pr.as_str(),
     );
-    field(
-        "issues",
-        a.issues.to_string(),
-        String::new(),
-        p.txt.as_str(),
-    );
+    field("issues", a.issues.to_string(), String::new(), p.txt.as_str());
 
     // Opened against merged over the same window is the question the row
     // cannot answer: a queue of six hundred is a different thing depending
@@ -230,11 +216,7 @@ fn account_detail(
                 n if n > 0 => format!("the queue grew by {}", n),
                 n => format!("the queue shrank by {}", -n),
             },
-            if net > 0 {
-                p.warn.as_str()
-            } else {
-                p.ok.as_str()
-            },
+            if net > 0 { p.warn.as_str() } else { p.ok.as_str() },
         );
     }
     if merged_total > 0 {
@@ -271,10 +253,7 @@ fn account_detail(
         let bar = tc::meter(rate / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24));
         rows.push(tc::seg(
             &[
-                (
-                    p.dim.as_str(),
-                    format!("  {}", tc::pad("merge rate", label_w)),
-                ),
+                (p.dim.as_str(), format!("  {}", tc::pad("merge rate", label_w))),
                 (p.ok.as_str(), format!("{:>6.0}%", rate)),
                 (p.dim.as_str(), "   ".into()),
                 (p.ok.as_str(), bar),
@@ -321,11 +300,7 @@ fn account_detail(
                 key.push((p.txt.as_str(), (*label).into()));
                 key.push((
                     p.dim.as_str(),
-                    format!(
-                        " {} ({:.0}%)   ",
-                        count,
-                        100.0 * *count as f64 / a.open as f64
-                    ),
+                    format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / a.open as f64),
                 ));
             }
             rows.push(tc::seg(&key, w - 1));
@@ -349,10 +324,7 @@ fn account_detail(
                     w - 1,
                 ));
                 rows.push(tc::seg(
-                    &[(
-                        p.dim.as_str(),
-                        format!("  {}", v["_error"].as_str().unwrap_or("")),
-                    )],
+                    &[(p.dim.as_str(), format!("  {}", v["_error"].as_str().unwrap_or("")))],
                     w - 1,
                 ));
             }
@@ -378,64 +350,39 @@ fn account_detail(
                         cursor = Some(rows.len());
                     }
                     let age = age_since(node["createdAt"].as_str().unwrap_or(""));
-                    let repo = node["repository"]["name"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
+                    let repo = node["repository"]["name"].as_str().unwrap_or("").to_string();
                     let num = node["number"].as_i64().unwrap_or(0);
                     let draft = node["isDraft"].as_bool().unwrap_or(false);
                     let head = format!("  {:>5}  #{:<6}", age, num);
                     let room = w.saturating_sub(head.chars().count() + repo.chars().count() + 6);
                     let title = node["title"].as_str().unwrap_or("").to_string();
                     let title: String = if title.chars().count() > room {
-                        format!(
-                            "{}…",
-                            title
-                                .chars()
-                                .take(room.saturating_sub(1))
-                                .collect::<String>()
-                        )
+                        format!("{}…", title.chars().take(room.saturating_sub(1)).collect::<String>())
                     } else {
                         title
                     };
-                    let tint = if here {
-                        tc::bg(38, 56, 76)
-                    } else {
-                        String::new()
-                    };
+                    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                     let c = |colour: &str| {
-                        // Same shape as the other widgets that do this, so one rule
-                        // reads them all: a guard per colour, each reaching its own
-                        // lighter twin.
-                        let colour = if tint.is_empty() {
-                            colour
-                        } else if colour == p.dim {
-                            p.dim_lit.as_str()
-                        } else {
-                            colour
-                        };
-                        format!("{}{}", tint, colour)
-                    };
+                // Same shape as the other widgets that do this, so one rule
+                // reads them all: a guard per colour, each reaching its own
+                // lighter twin.
+                let colour = if tint.is_empty() {
+                    colour
+                } else if colour == p.dim {
+                    p.dim_lit.as_str()
+                } else {
+                    colour
+                };
+                format!("{}{}", tint, colour)
+            };
                     rows.push(tc::seg(
                         &[
                             (
-                                &c(if here {
-                                    p.accent.as_str()
-                                } else {
-                                    p.dim.as_str()
-                                }),
-                                if here {
-                                    " ▸".into()
-                                } else {
-                                    "  ".to_string()
-                                },
+                                &c(if here { p.accent.as_str() } else { p.dim.as_str() }),
+                                if here { " ▸".into() } else { "  ".to_string() },
                             ),
                             (
-                                &c(if draft {
-                                    p.dim.as_str()
-                                } else {
-                                    p.warn.as_str()
-                                }),
+                                &c(if draft { p.dim.as_str() } else { p.warn.as_str() }),
                                 head.trim_start().to_string(),
                             ),
                             (&c(p.dim.as_str()), format!("  {}  ", repo)),
@@ -496,24 +443,14 @@ fn account_detail(
             &[
                 (p.lbl.as_str(), " ── PR FLOW ── ".into()),
                 (p.dim.as_str(), format!("{}d · ", days.len())),
-                (
-                    p.pr.as_str(),
-                    format!("▲ {} opened", opened.iter().sum::<f64>() as i64),
-                ),
+                (p.pr.as_str(), format!("▲ {} opened", opened.iter().sum::<f64>() as i64)),
                 (p.dim.as_str(), " · ".into()),
-                (
-                    p.ok.as_str(),
-                    format!("▼ {} merged", merged.iter().sum::<f64>() as i64),
-                ),
+                (p.ok.as_str(), format!("▼ {} merged", merged.iter().sum::<f64>() as i64)),
                 (p.dim.as_str(), format!("   peak {}/day", hi as i64)),
             ],
             w - 1,
         ));
-        for line in tc::vbars(
-            &up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(),
-            3,
-            hi,
-        ) {
+        for line in tc::vbars(&up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(), 3, hi) {
             let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, ch) in &line {
                 parts.push((colour.as_str(), ch.clone()));
@@ -521,17 +458,12 @@ fn account_detail(
             rows.push(tc::seg(&parts, w - 1));
         }
         rows.push(tc::seg(
-            &[
-                (tc::RST, " ".into()),
-                (p.grid.as_str(), "─".repeat(up.len())),
-            ],
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(up.len()))],
             w - 1,
         ));
-        for line in tc::vbars_down(
-            &down.iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(),
-            3,
-            hi,
-        ) {
+        for line in
+            tc::vbars_down(&down.iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(), 3, hi)
+        {
             let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, ch) in &line {
                 parts.push((colour.as_str(), ch.clone()));
@@ -602,12 +534,7 @@ fn graphql(
     // retried and the chart shows a quiet week that never happened. linear
     // and pr both refuse this in the same place; github did not.
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
-        return Err(first["message"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect());
+        return Err(first["message"].as_str().unwrap_or("").chars().take(80).collect());
     }
     Ok(data)
 }
@@ -671,9 +598,7 @@ fn build_query(acc: &str, days: i64, viewer: &str) -> String {
     // N days *ending today*, so this spans exactly the dates the per-day
     // charts plot - `days` rather than `days - 1` would cover one day more
     // and quietly disagree with the chart drawn directly beneath it.
-    let since = (today() - Days::days(days - 1))
-        .format("%Y-%m-%d")
-        .to_string();
+    let since = (today() - Days::days(days - 1)).format("%Y-%m-%d").to_string();
     let q = scope_of(acc, viewer);
     format!(
         r#"{{
@@ -839,10 +764,7 @@ fn calendar_stats(weeks: &serde_json::Value) -> Option<CalendarStats> {
 /// The calendar as seven rows of one cell per week.
 fn heatmap(weeks: &serde_json::Value, w: usize) -> (Vec<String>, i64, i64) {
     const LEVELS: &[char] = &[' ', '░', '▒', '▓', '█'];
-    let all: Vec<&serde_json::Value> = weeks
-        .as_array()
-        .map(|a| a.iter().collect())
-        .unwrap_or_default();
+    let all: Vec<&serde_json::Value> = weeks.as_array().map(|a| a.iter().collect()).unwrap_or_default();
     let counts: Vec<i64> = all
         .iter()
         .flat_map(|wk| wk["contributionDays"].as_array().into_iter().flatten())
@@ -850,11 +772,7 @@ fn heatmap(weeks: &serde_json::Value, w: usize) -> (Vec<String>, i64, i64) {
         .collect();
     let peak = counts.iter().copied().max().unwrap_or(0);
     let total: i64 = counts.iter().sum();
-    let cols = all
-        .len()
-        .min(w.saturating_sub(8))
-        .max(4)
-        .min(all.len().max(4));
+    let cols = all.len().min(w.saturating_sub(8)).max(4).min(all.len().max(4));
     let shown = &all[all.len().saturating_sub(cols)..];
     let mut grid = vec![vec![' '; shown.len()]; 7];
     for (x, wk) in shown.iter().enumerate() {
@@ -870,9 +788,7 @@ fn heatmap(weeks: &serde_json::Value, w: usize) -> (Vec<String>, i64, i64) {
         }
     }
     (
-        grid.into_iter()
-            .map(|row| row.into_iter().collect())
-            .collect(),
+        grid.into_iter().map(|row| row.into_iter().collect()).collect(),
         peak,
         total,
     )
@@ -1013,8 +929,7 @@ fn one_pass(
     // The calendar is best-effort: it is decoration beside the counts, and a
     // fine-grained token that cannot read it should not blank the board.
     if let Ok(cal) = graphql(&contribution_query(CONTRIB_WEEKS), tok, scopes) {
-        let found =
-            cal["data"]["viewer"]["contributionsCollection"]["contributionCalendar"].clone();
+        let found = cal["data"]["viewer"]["contributionsCollection"]["contributionCalendar"].clone();
         if !found.is_null() {
             if let Ok(mut g) = state.lock() {
                 g.calendar = Some(found);
@@ -1059,11 +974,7 @@ fn one_pass(
                 // Fifty characters, which is what the branch below used to
                 // take before `graphql` started refusing an errors payload
                 // itself and made that branch unreachable.
-                failed.push(format!(
-                    "{} ({})",
-                    acc,
-                    e.chars().take(50).collect::<String>()
-                ));
+                failed.push(format!("{} ({})", acc, e.chars().take(50).collect::<String>()));
                 continue;
             }
         };
@@ -1073,30 +984,29 @@ fn one_pass(
         }
         let (merged, dropped) = (count_at(d, "o0_merged"), count_at(d, "o0_dropped"));
         let prev = by_acc.get(acc).cloned().unwrap_or_default();
-        by_acc.insert(acc.clone(), Account {
-            key: acc.clone(),
-            account: if acc == "@me" {
-                viewer.clone()
-            } else {
-                acc.clone()
+        by_acc.insert(
+            acc.clone(),
+            Account {
+                key: acc.clone(),
+                account: if acc == "@me" { viewer.clone() } else { acc.clone() },
+                is_me: acc == "@me",
+                window: days_now,
+                open: count_at(d, "o0_open"),
+                draft: count_at(d, "o0_draft"),
+                review: count_at(d, "o0_review"),
+                issues: count_at(d, "o0_issues"),
+                merged,
+                dropped,
+                rate: if merged + dropped > 0 {
+                    Some(100.0 * merged as f64 / (merged + dropped) as f64)
+                } else {
+                    None
+                },
+                hist: prev.hist,
+                opened_hist: prev.opened_hist,
+                hist_window: prev.hist_window,
             },
-            is_me: acc == "@me",
-            window: days_now,
-            open: count_at(d, "o0_open"),
-            draft: count_at(d, "o0_draft"),
-            review: count_at(d, "o0_review"),
-            issues: count_at(d, "o0_issues"),
-            merged,
-            dropped,
-            rate: if merged + dropped > 0 {
-                Some(100.0 * merged as f64 / (merged + dropped) as f64)
-            } else {
-                None
-            },
-            hist: prev.hist,
-            opened_hist: prev.opened_hist,
-            hist_window: prev.hist_window,
-        });
+        );
         publish(state, &accounts, &by_acc, rate);
     }
 
@@ -1182,75 +1092,6 @@ fn publish(
     }
 }
 
-/// Draw the missing-tool screen and keep settings reachable from it.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("github ops", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from GitHub's GraphQL API, and curl is",
-            "how this reaches it - the same way the other widgets reach",
-            "ss, ping and tailscale.",
-            "",
-            "The token is passed to curl on its standard input rather than",
-            "in its arguments, because /proc/<pid>/cmdline is readable by",
-            "every user on the machine.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install curl".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     let cfg = tc::load_config("github");
@@ -1278,7 +1119,21 @@ fn main() {
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "github ops",
+            &absent,
+            &[
+                "Everything here comes from GitHub's GraphQL API, and curl is",
+                "how this reaches it - the same way the other widgets reach",
+                "ss, ping and tailscale.",
+                "",
+                "The token is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+            SETTINGS,
+        );
         return;
     }
 
@@ -1297,11 +1152,7 @@ fn main() {
     let ui_scopes = Arc::clone(&scopes);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "GITHUB_TOKEN");
-        if name.is_empty() {
-            "GITHUB_TOKEN".to_string()
-        } else {
-            name
-        }
+        if name.is_empty() { "GITHUB_TOKEN".to_string() } else { name }
     };
 
     let poller = Arc::clone(&state);
@@ -1365,8 +1216,7 @@ fn main() {
     let (mut note, mut note_at) = (String::new(), 0.0f64);
     // The longest-open PRs per account, fetched when that account's screen
     // is opened and kept after.
-    let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
@@ -1604,11 +1454,7 @@ fn main() {
                 key.push((p.txt.as_str(), (*label).into()));
                 key.push((
                     p.dim.as_str(),
-                    format!(
-                        " {} ({:.0}%)   ",
-                        count,
-                        100.0 * *count as f64 / open as f64
-                    ),
+                    format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
                 ));
             }
             rows.push(tc::seg(&key, w - 1));
@@ -1640,15 +1486,15 @@ fn main() {
                 &[
                     (
                         hot.as_str(),
-                        format!(" {:<5}", match rate_pct {
-                            Some(v) => format!("{:.0}%", v),
-                            None => "--".into(),
-                        }),
+                        format!(
+                            " {:<5}",
+                            match rate_pct {
+                                Some(v) => format!("{:.0}%", v),
+                                None => "--".into(),
+                            }
+                        ),
                     ),
-                    (
-                        hot.as_str(),
-                        tc::meter(rate_pct.unwrap_or(0.0) / 100.0, bar_w),
-                    ),
+                    (hot.as_str(), tc::meter(rate_pct.unwrap_or(0.0) / 100.0, bar_w)),
                     (p.ok.as_str(), format!("  {} merged", merged)),
                     (p.dim.as_str(), " / ".into()),
                     (p.bad.as_str(), format!("{} dropped", dropped)),
@@ -1775,14 +1621,8 @@ fn main() {
                     let q = settle_t as f64 / SETTLE_FRAMES as f64;
                     let q = q * q * (3.0 - 2.0 * q); // ease in and out
                     (
-                        fu.iter()
-                            .zip(&real_u)
-                            .map(|(a, b)| a + (b - a) * q)
-                            .collect(),
-                        fd.iter()
-                            .zip(&real_d)
-                            .map(|(a, b)| a + (b - a) * q)
-                            .collect(),
+                        fu.iter().zip(&real_u).map(|(a, b)| a + (b - a) * q).collect(),
+                        fd.iter().zip(&real_d).map(|(a, b)| a + (b - a) * q).collect(),
                         tc::mix(GHOST, PR_RGB, 0.45 + 0.55 * q),
                         tc::mix(GHOST, OK_RGB, 0.45 + 0.55 * q),
                     )
@@ -1790,11 +1630,7 @@ fn main() {
                 _ => (real_u, real_d, p.pr.clone(), p.ok.clone()),
             }
         };
-        for line in tc::vbars(
-            &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(),
-            3,
-            1.0,
-        ) {
+        for line in tc::vbars(&hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0) {
             let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, ch) in &line {
                 parts.push((colour.as_str(), ch.clone()));
@@ -1804,17 +1640,11 @@ fn main() {
         // An explicit baseline: without it the two series abut and the eye
         // cannot tell which row the bars grow from.
         rows.push(tc::seg(
-            &[
-                (tc::RST, " ".into()),
-                (p.grid.as_str(), "─".repeat(chart_cols)),
-            ],
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(chart_cols))],
             w - 1,
         ));
-        for line in tc::vbars_down(
-            &hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(),
-            3,
-            1.0,
-        ) {
+        for line in tc::vbars_down(&hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0)
+        {
             let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, ch) in &line {
                 parts.push((colour.as_str(), ch.clone()));
@@ -1858,11 +1688,7 @@ fn main() {
                 // the labels come off the same constant rather than a
                 // hand-written tuple. Written Monday-first they sat one row
                 // early and put today under yesterday's name.
-                let label = if r == 1 || r == 3 || r == 5 {
-                    WEEKDAYS[r]
-                } else {
-                    ""
-                };
+                let label = if r == 1 || r == 3 || r == 5 { WEEKDAYS[r] } else { "" };
                 rows.push(tc::seg(
                     &[
                         (p.dim.as_str(), format!(" {:<4}", label)),
@@ -1876,25 +1702,13 @@ fn main() {
                     (
                         "current streak".into(),
                         format!("{} days", cs.current),
-                        if cs.current > 0 {
-                            p.ok.as_str()
-                        } else {
-                            p.dim.as_str()
-                        },
+                        if cs.current > 0 { p.ok.as_str() } else { p.dim.as_str() },
                     ),
-                    (
-                        "longest streak".into(),
-                        format!("{} days", cs.longest),
-                        p.txt.as_str(),
-                    ),
+                    ("longest streak".into(), format!("{} days", cs.longest), p.txt.as_str()),
                     (
                         "today".into(),
                         format!("{}", cs.today),
-                        if cs.today > 0 {
-                            p.ok.as_str()
-                        } else {
-                            p.dim.as_str()
-                        },
+                        if cs.today > 0 { p.ok.as_str() } else { p.dim.as_str() },
                     ),
                     (
                         "active days".into(),
@@ -2014,11 +1828,7 @@ fn main() {
             if here {
                 cursor = Some(rows.len());
             }
-            let tint = if here {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Same shape as the other widgets that do this, so one rule
                 // reads them all: a guard per colour, each reaching its own
@@ -2059,14 +1869,7 @@ fn main() {
                 ),
                 (
                     c(if old { &p.dim } else { &p.ok }),
-                    format!(
-                        "{:>7}",
-                        if old {
-                            "···".to_string()
-                        } else {
-                            s.merged.to_string()
-                        }
-                    ),
+                    format!("{:>7}", if old { "···".to_string() } else { s.merged.to_string() }),
                 ),
                 (
                     c(&hot),
@@ -2129,12 +1932,8 @@ fn main() {
                         let (oldest, asking) = (Arc::clone(&oldest), Arc::clone(&asking));
                         // key is "@me" or the org; account is the bare
                         // login, which is what scope_of wants for "@me".
-                        let (acc, viewer, tok, scopes) = (
-                            a.key.clone(),
-                            a.account.clone(),
-                            ui_tok.clone(),
-                            Arc::clone(&ui_scopes),
-                        );
+                        let (acc, viewer, tok, scopes) =
+                            (a.key.clone(), a.account.clone(), ui_tok.clone(), Arc::clone(&ui_scopes));
                         std::thread::spawn(move || {
                             let got = fetch_oldest(&acc, &viewer, &tok, &scopes);
                             if let Ok(mut g) = oldest.lock() {
@@ -2155,15 +1954,7 @@ fn main() {
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
-                        (
-                            p.dim.as_str(),
-                            if nodes.is_empty() {
-                                " scroll"
-                            } else {
-                                " oldest"
-                            }
-                            .into(),
-                        ),
+                        (p.dim.as_str(), if nodes.is_empty() { " scroll" } else { " oldest" }.into()),
                     ],
                     vec![(p.dim.as_str(), "[c]opy url".into())],
                     vec![(p.dim.as_str(), "pgup/pgdn page".into())],
@@ -2226,10 +2017,7 @@ fn main() {
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " account".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " account".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " account".into()),

@@ -215,15 +215,18 @@ fn socket_counters(text: &str) -> HashMap<String, Counters> {
             continue;
         }
         let Some(id) = inode.take() else { continue };
-        found.insert(id, Counters {
-            port,
-            sent: counter_field(line, "bytes_sent:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            recv: counter_field(line, "bytes_received:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-        });
+        found.insert(
+            id,
+            Counters {
+                port,
+                sent: counter_field(line, "bytes_sent:")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                recv: counter_field(line, "bytes_received:")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            },
+        );
     }
     found
 }
@@ -297,11 +300,7 @@ fn extra_columns(
 
 /// The widest name in the table, which is what the WHAT column has to be.
 fn longest_kind(rows: &[&Row]) -> usize {
-    rows.iter()
-        .map(|r| r.kind.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(4)
+    rows.iter().map(|r| r.kind.chars().count()).max().unwrap_or(0).max(4)
 }
 
 /// A rate in as few cells as it can be read in, for a table column.
@@ -367,13 +366,7 @@ fn spark(series: &[(f64, f64, f64)], cells: usize, p: &Palette) -> Vec<(String, 
     if cells == 0 {
         return Vec::new();
     }
-    let window: Vec<f64> = series
-        .iter()
-        .rev()
-        .take(cells)
-        .rev()
-        .map(|s| s.0 + s.1)
-        .collect();
+    let window: Vec<f64> = series.iter().rev().take(cells).rev().map(|s| s.0 + s.1).collect();
     let peak = window.iter().copied().fold(0.0f64, f64::max);
     let mut out = Vec::new();
     if window.len() < cells {
@@ -451,11 +444,7 @@ fn traffic_chart(
                 if window.is_empty() {
                     String::new()
                 } else {
-                    format!(
-                        "  · {} of history, sampled every {}",
-                        over(reach),
-                        over(gap)
-                    )
+                    format!("  · {} of history, sampled every {}", over(reach), over(gap))
                 },
             ),
         ],
@@ -482,10 +471,7 @@ fn traffic_chart(
                 text: &str,
                 down: bool|
      -> Vec<String> {
-        let cols: Vec<(f64, String)> = window
-            .iter()
-            .map(|s| (pick(s), colour.to_string()))
-            .collect();
+        let cols: Vec<(f64, String)> = window.iter().map(|s| (pick(s), colour.to_string())).collect();
         let bars = if down {
             tc::vbars_down(&cols, rows, peak)
         } else {
@@ -494,11 +480,7 @@ fn traffic_chart(
         // The label sits on the row nearest the divider, which is the row a
         // full-height bar reaches: the top for the upward half, the first
         // drawn row for the downward one.
-        let on = if down {
-            0
-        } else {
-            bars.len().saturating_sub(1)
-        };
+        let on = if down { 0 } else { bars.len().saturating_sub(1) };
         bars.into_iter()
             .enumerate()
             .map(|(i, row)| {
@@ -533,13 +515,7 @@ fn traffic_chart(
         ],
         w - 1,
     ));
-    out.extend(half(
-        |s| s.1,
-        p.local.as_str(),
-        down_peak,
-        &down_label,
-        true,
-    ));
+    out.extend(half(|s| s.1, p.local.as_str(), down_peak, &down_label, true));
     out
 }
 
@@ -1047,8 +1023,7 @@ fn theirs(row: &Row) -> bool {
 fn interfaces() -> Vec<(String, String, bool)> {
     let mut found = Vec::new();
     let data: serde_json::Value =
-        serde_json::from_str(&tc::run_quiet(&["ip", "-j", "addr"], RUN_TIMEOUT))
-            .unwrap_or(serde_json::Value::Null);
+        serde_json::from_str(&tc::run_quiet(&["ip", "-j", "addr"], RUN_TIMEOUT)).unwrap_or(serde_json::Value::Null);
     for link in data.as_array().unwrap_or(&Vec::new()) {
         let name = link["ifname"].as_str().unwrap_or("?").to_string();
         for addr in link["addr_info"].as_array().unwrap_or(&Vec::new()) {
@@ -1082,11 +1057,8 @@ struct Net {
 /// key that only ever returns an error.
 fn tailnet_self() -> Net {
     let mut out = Net::default();
-    let data: serde_json::Value = serde_json::from_str(&tc::run_quiet(
-        &["tailscale", "status", "--json"],
-        RUN_TIMEOUT,
-    ))
-    .unwrap_or(serde_json::Value::Null);
+    let data: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT))
+        .unwrap_or(serde_json::Value::Null);
     let node = &data["Self"];
     out.name = node["DNSName"]
         .as_str()
@@ -1107,11 +1079,8 @@ fn tailnet_self() -> Net {
     // Changing the serve config is a root operation unless this user has
     // been named the operator. Worth knowing before the key is pressed,
     // since the fix is a one-off command rather than anything this can do.
-    let prefs: serde_json::Value = serde_json::from_str(&tc::run_quiet(
-        &["tailscale", "debug", "prefs"],
-        RUN_TIMEOUT,
-    ))
-    .unwrap_or(serde_json::Value::Null);
+    let prefs: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "debug", "prefs"], RUN_TIMEOUT))
+        .unwrap_or(serde_json::Value::Null);
     let who = prefs["OperatorUser"].as_str().unwrap_or("");
     out.operator = unsafe { libc::getuid() } == 0 || (!who.is_empty() && who == username());
     out
@@ -1224,11 +1193,8 @@ fn addresses(row: &Row, net: &Net, cfg: &serde_json::Value) -> Vec<(String, Stri
 /// needs to know which mounts are already taken. Both are structure the
 /// text output only implies.
 fn serve_config() -> serde_json::Value {
-    serde_json::from_str(&tc::run_quiet(
-        &["tailscale", "serve", "status", "--json"],
-        RUN_TIMEOUT,
-    ))
-    .unwrap_or(serde_json::Value::Null)
+    serde_json::from_str(&tc::run_quiet(&["tailscale", "serve", "status", "--json"], RUN_TIMEOUT))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Whether a proxy target names this port - `:3000` or `:3000/`, not
@@ -1332,11 +1298,7 @@ fn quick_url(text: &str) -> String {
         None => return String::new(),
     };
     let name = &head[start + 8..];
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return String::new();
     }
     format!("https://{}{}", name, TAIL)
@@ -1413,9 +1375,7 @@ fn alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    if unsafe { libc::kill(pid, 0) } != 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    {
+    if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         return false;
     }
     match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
@@ -1436,7 +1396,12 @@ fn alive(pid: i32) -> bool {
 fn killable(row: &Row) -> (Option<i32>, String) {
     let pid = match row.pid {
         Some(p) => p,
-        None => return (None, "not yours - no owner for this socket in /proc".into()),
+        None => {
+            return (
+                None,
+                "not yours - no owner for this socket in /proc".into(),
+            )
+        }
     };
     if pid <= 1 {
         return (None, format!("refusing to signal pid {}", pid));
@@ -1568,12 +1533,7 @@ fn serve_port(port: u16, public: bool) -> String {
 /// Which tailnet-side port a local port is currently published on.
 fn listen_for(cfg: &serde_json::Value, port: u16) -> u16 {
     for (mount, entry) in cfg["Web"].as_object().into_iter().flatten() {
-        for handler in entry["Handlers"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(_, v)| v)
-        {
+        for handler in entry["Handlers"].as_object().into_iter().flatten().map(|(_, v)| v) {
             if proxies_port(handler["Proxy"].as_str().unwrap_or(""), port) {
                 return mount
                     .rsplit_once(':')
@@ -1676,8 +1636,10 @@ fn prompt(
         vec![key.clone(), (dim.to_string(), text.to_string())]
     };
     let line = |parts: &[(String, String)]| -> String {
-        let refs: Vec<(&str, String)> =
-            parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        let refs: Vec<(&str, String)> = parts
+            .iter()
+            .map(|(c, t)| (c.as_str(), t.clone()))
+            .collect();
         tc::seg(&refs, w - 1)
     };
     // The bare last form - "[y] yes", with no word on what anything else
@@ -1740,11 +1702,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             .filter(|c| *c > width / 2)
             .unwrap_or(width);
         lines.push(rest[..cut].iter().collect());
-        rest = rest[cut..]
-            .iter()
-            .skip_while(|c| **c == ' ')
-            .copied()
-            .collect();
+        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
     }
     if lines.is_empty() {
         vec![String::new()]
@@ -1865,25 +1823,21 @@ fn detail_rows(
     rows.push(tc::seg(
         &[
             (p.txt.as_str(), format!(" {}", head.trim())),
-            (p.dim.as_str(), match row.up {
-                Some(_) => format!("  ·  up {}", span(row.up)),
-                None => String::new(),
-            }),
+            (
+                p.dim.as_str(),
+                match row.up {
+                    Some(_) => format!("  ·  up {}", span(row.up)),
+                    None => String::new(),
+                },
+            ),
         ],
         w - 1,
     ));
     rows.push(String::new());
 
     if let Some(pid) = row.pid {
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), " ── PROCESS ── ".into())],
-            w - 1,
-        ));
-        let cmd = if row.cmdline.is_empty() {
-            "?"
-        } else {
-            &row.cmdline
-        };
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── PROCESS ── ".into())], w - 1));
+        let cmd = if row.cmdline.is_empty() { "?" } else { &row.cmdline };
         rows.extend(field("command", cmd, w, &p.txt, p));
         let cwd = if row.cwd.is_empty() { "?" } else { &row.cwd };
         let cwd_c = if row.gone { &p.warn } else { &p.txt };
@@ -1948,11 +1902,7 @@ fn detail_rows(
         rows.push(tc::seg(
             &[
                 (
-                    if here {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
+                    if here { p.accent.as_str() } else { p.dim.as_str() },
                     if here { " ▸ ".into() } else { "   ".into() },
                 ),
                 (
@@ -2144,7 +2094,12 @@ fn footer(
     }
     let refs: Vec<Vec<(&str, String)>> = hints
         .iter()
-        .map(|group| group.iter().map(|(c, t)| (c.as_str(), t.clone())).collect())
+        .map(|group| {
+            group
+                .iter()
+                .map(|(c, t)| (c.as_str(), t.clone()))
+                .collect()
+        })
         .collect();
     tc::pack_hints(&refs, w - 2, "  ")
         .into_iter()
@@ -2206,59 +2161,56 @@ fn main() {
         wake: (Mutex::new(false), Condvar::new()),
     });
     let poller = Arc::clone(&store);
-    std::thread::spawn(move || {
-        loop {
-            // A thread that dies takes its explanation with it, so the scan is
-            // caught - but catching it is only half of the rule. It used to end
-            // in `unwrap_or_default()`, which handed the table an empty list and
-            // drew a machine with nothing listening. The reason goes on screen
-            // and the thread stops, the way agent-usage and herdr-panes do it.
-            let found = match std::panic::catch_unwind(scan) {
-                Ok(found) => found,
-                Err(_) => {
-                    let why = "poller stopped - see the pane it was started from";
-                    if let Ok(mut guard) = poller.err.lock() {
-                        *guard = why.into();
-                    }
-                    return;
+    std::thread::spawn(move || loop {
+        // A thread that dies takes its explanation with it, so the scan is
+        // caught - but catching it is only half of the rule. It used to end
+        // in `unwrap_or_default()`, which handed the table an empty list and
+        // drew a machine with nothing listening. The reason goes on screen
+        // and the thread stops, the way agent-usage and herdr-panes do it.
+        let found = match std::panic::catch_unwind(scan) {
+            Ok(found) => found,
+            Err(_) => {
+                let why = "poller stopped - see the pane it was started from";
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why.into();
                 }
-            };
-            // The ports to tally against, taken from the scan that just ran, so
-            // a port that has just appeared is measured from its next sample
-            // rather than never.
-            let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-            let counters =
-                match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        let why = "traffic poller stopped - the table below is still current";
-                        if let Ok(mut guard) = poller.err.lock() {
-                            *guard = why.into();
-                        }
-                        // Traffic is one column of many; the ports themselves are
-                        // still being found, so this one says so and carries on.
-                        String::new()
-                    }
-                };
-            if let Ok(mut guard) = poller.rows.lock() {
-                *guard = found;
+                return;
             }
-            if let Ok(mut guard) = poller.traffic.lock() {
-                guard.sample(&counters, &listening, tc::now());
+        };
+        // The ports to tally against, taken from the scan that just ran, so
+        // a port that has just appeared is measured from its next sample
+        // rather than never.
+        let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
+        let counters = match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
+            Ok(text) => text,
+            Err(_) => {
+                let why = "traffic poller stopped - the table below is still current";
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why.into();
+                }
+                // Traffic is one column of many; the ports themselves are
+                // still being found, so this one says so and carries on.
+                String::new()
             }
-            let (lock, cond) = &poller.wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+        };
+        if let Ok(mut guard) = poller.rows.lock() {
+            *guard = found;
+        }
+        if let Ok(mut guard) = poller.traffic.lock() {
+            guard.sample(&counters, &listening, tc::now());
+        }
+        let (lock, cond) = &poller.wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     tc::setup();
@@ -2439,11 +2391,7 @@ fn main() {
                                     if copied { "copied  " } else { "no clipboard  " },
                                     url
                                 ),
-                                if copied {
-                                    ok.ok.clone()
-                                } else {
-                                    ok.warn.clone()
-                                },
+                                if copied { ok.ok.clone() } else { ok.warn.clone() },
                                 tc::now() + 8.0,
                             ));
                         }
@@ -2489,7 +2437,7 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "," if watch.is_none() && working.is_none() && notice.is_none() => {
+                "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
@@ -2567,7 +2515,10 @@ fn main() {
         // Rebuilt after the keys rather than before them, so that a press of
         // o is answered in the frame it was made in and not the next one.
         let all: Vec<Row> = store.rows.lock().map(|g| g.clone()).unwrap_or_default();
-        let shown: Vec<&Row> = all.iter().filter(|r| !(hide_system && theirs(r))).collect();
+        let shown: Vec<&Row> = all
+            .iter()
+            .filter(|r| !(hide_system && theirs(r)))
+            .collect();
         if !shown.is_empty() && selected >= shown.len() {
             selected = shown.len() - 1;
         }
@@ -2617,10 +2568,7 @@ fn main() {
                 &notice,
                 w,
                 &[
-                    vec![
-                        (ok.accent.clone(), "↑↓".into()),
-                        (ok.dim.clone(), " address".into()),
-                    ],
+                    vec![(ok.accent.clone(), "↑↓".into()), (ok.dim.clone(), " address".into())],
                     vec![(ok.dim.clone(), "[c]opy".into())],
                     vec![(ok.dim.clone(), "[s]erve".into())],
                     vec![(ok.dim.clone(), "[t]unnel".into())],
@@ -2733,13 +2681,7 @@ fn main() {
         let widest_project = shown
             .iter()
             .map(|r| {
-                if r.project.is_empty() {
-                    &r.user
-                } else {
-                    &r.project
-                }
-                .chars()
-                .count()
+                if r.project.is_empty() { &r.user } else { &r.project }.chars().count()
             })
             .max()
             .unwrap_or(8)
@@ -2764,7 +2706,9 @@ fn main() {
                 let deepest = shown
                     .iter()
                     .map(|r| t.series(r.port))
-                    .map(|s| s.iter().rev().take(spark_cells).map(|x| x.2).sum::<f64>())
+                    .map(|s| {
+                        s.iter().rev().take(spark_cells).map(|x| x.2).sum::<f64>()
+                    })
                     .fold(0.0f64, f64::max);
                 if deepest > 0.0 {
                     format!("LAST {}", over(deepest))
@@ -2784,11 +2728,7 @@ fn main() {
                 (ok.dim.as_str(), tc::pad("PROJECT", name_w)),
                 (
                     ok.dim.as_str(),
-                    if busy {
-                        tc::pad("TRAFFIC", traffic_w)
-                    } else {
-                        String::new()
-                    },
+                    if busy { tc::pad("TRAFFIC", traffic_w) } else { String::new() },
                 ),
                 // The window the shapes cover, named rather than left to be
                 // guessed at - a sparkline without one is a shape.
@@ -2804,11 +2744,7 @@ fn main() {
                 ),
                 (
                     ok.dim.as_str(),
-                    if wide {
-                        "UP    EXPOSED".into()
-                    } else {
-                        String::new()
-                    },
+                    if wide { "UP    EXPOSED".into() } else { String::new() },
                 ),
             ],
             w - 1,
@@ -2826,11 +2762,7 @@ fn main() {
 
         for (i, row) in shown.iter().enumerate().skip(scroll).take(visible) {
             let here = i == selected;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let (note, note_colour) = bind_note(row, &ok);
             // Another user's row names its owner rather than its project,
             // which it has none of that we can read. That is the whole of
@@ -2892,10 +2824,7 @@ fn main() {
             // outlive the borrows the row is assembled from.
             let shape: Vec<(String, String)> = if sparks {
                 let mut out = vec![(format!("{}{}", tint, ok.dim), "  ".to_string())];
-                let seen = rates
-                    .as_ref()
-                    .map(|t| t.series(row.port))
-                    .unwrap_or_default();
+                let seen = rates.as_ref().map(|t| t.series(row.port)).unwrap_or_default();
                 for (colour, text) in spark(&seen, spark_cells, &ok) {
                     out.push((format!("{}{}", tint, colour), text));
                 }
@@ -2920,11 +2849,15 @@ fn main() {
                 line.push((colour.as_str(), text.clone()));
             }
             let up_c = format!("{}{}", tint, ok.dim);
-            let exp_c = format!("{}{}", tint, match row.exposed.as_str() {
-                "tailnet" => &ok.ok,
-                "public" => &ok.bad,
-                _ => &ok.grid,
-            });
+            let exp_c = format!(
+                "{}{}",
+                tint,
+                match row.exposed.as_str() {
+                    "tailnet" => &ok.ok,
+                    "public" => &ok.bad,
+                    _ => &ok.grid,
+                }
+            );
             if wide {
                 line.push((up_c.as_str(), format!("{:<6}", span(row.up))));
                 line.push((
@@ -2949,10 +2882,7 @@ fn main() {
             &notice,
             w,
             &[
-                vec![
-                    (ok.accent.clone(), "↑↓".into()),
-                    (ok.dim.clone(), " select".into()),
-                ],
+                vec![(ok.accent.clone(), "↑↓".into()), (ok.dim.clone(), " select".into())],
                 vec![
                     (ok.accent.clone(), "→/↵".into()),
                     (ok.dim.clone(), " details".into()),
@@ -3046,16 +2976,8 @@ mod tests {
         let got = socket_counters(&ss_dump(1000, 2000, "222"));
         assert_eq!(got.len(), 2);
         // The *local* port, because that is the one a listener is on.
-        assert_eq!(got["111"], Counters {
-            port: 3000,
-            sent: 1000,
-            recv: 40
-        });
-        assert_eq!(got["222"], Counters {
-            port: 9999,
-            sent: 2000,
-            recv: 70
-        });
+        assert_eq!(got["111"], Counters { port: 3000, sent: 1000, recv: 40 });
+        assert_eq!(got["222"], Counters { port: 9999, sent: 2000, recv: 70 });
     }
 
     #[test]
@@ -3072,11 +2994,10 @@ mod tests {
         // busy port is when this actually happens - and because asserting
         // it on an empty result would pass whether or not it were true.
         let mut fresh = after.clone();
-        fresh.insert("333".into(), Counters {
-            port: 3000,
-            sent: 8_000_000,
-            recv: 8_000_000,
-        });
+        fresh.insert(
+            "333".into(),
+            Counters { port: 3000, sent: 8_000_000, recv: 8_000_000 },
+        );
         let moved_now = moved(&before, &fresh, &[3000, 9999]);
         assert_eq!(
             moved_now.get(&3000),
@@ -3153,9 +3074,7 @@ mod tests {
             assert!(
                 now.0 >= had.0 && now.1 >= had.1,
                 "w={} lost a column the narrower pane had: {:?} then {:?}",
-                w,
-                had,
-                now
+                w, had, now
             );
             // The shapes are the more decorative of the two and never
             // arrive on their own.
@@ -3163,14 +3082,8 @@ mod tests {
             had = now;
         }
         // Both ends: nothing in a narrow pane, both in a wide one.
-        assert_eq!(
-            extra_columns(60, kind_w, project_w, traffic_w, spark_w),
-            (false, false)
-        );
-        assert_eq!(
-            extra_columns(210, kind_w, project_w, traffic_w, spark_w),
-            (true, true)
-        );
+        assert_eq!(extra_columns(60, kind_w, project_w, traffic_w, spark_w), (false, false));
+        assert_eq!(extra_columns(210, kind_w, project_w, traffic_w, spark_w), (true, true));
     }
 
     #[test]
@@ -3194,11 +3107,7 @@ mod tests {
         // Bounded like the per-port rings, or a chart that keeps one column
         // per sample grows for as long as the widget is up.
         for i in 0..(TRAFFIC_KEPT + 20) {
-            t.sample(
-                &ss_dump(2000 + i as u64, 0, "222"),
-                &[3000],
-                200.0 + i as f64,
-            );
+            t.sample(&ss_dump(2000 + i as u64, 0, "222"), &[3000], 200.0 + i as f64);
         }
         assert_eq!(t.totals().len(), TRAFFIC_KEPT);
     }
@@ -3221,20 +3130,14 @@ mod tests {
 
         // Partly sampled: dots for what is missing, then the rest.
         let some: Vec<(f64, f64, f64)> = (0..2).map(|_| (0.0, 0.0, 1.0)).collect();
-        assert_eq!(
-            plain(spark(&some, 6, &p)),
-            "········".chars().take(4).collect::<String>() + "──"
-        );
+        assert_eq!(plain(spark(&some, 6, &p)), "········".chars().take(4).collect::<String>() + "──");
 
         // Scaled to its own peak, not to some other row's: the biggest
         // sample here is full height whatever its absolute size.
         let small: Vec<(f64, f64, f64)> = vec![(1.0, 0.0, 1.0), (8.0, 0.0, 1.0)];
         let big: Vec<(f64, f64, f64)> = vec![(1e6, 0.0, 1.0), (8e6, 0.0, 1.0)];
         assert_eq!(plain(spark(&small, 2, &p)), plain(spark(&big, 2, &p)));
-        assert!(
-            plain(spark(&small, 2, &p)).ends_with('█'),
-            "the peak is full height"
-        );
+        assert!(plain(spark(&small, 2, &p)).ends_with('█'), "the peak is full height");
     }
 
     #[test]
@@ -3262,10 +3165,7 @@ mod tests {
         // the widget said "Node".
         let under = "/home/u/.nvm/versions/node/v24.18.0/lib/node_modules/agent-browser/bin/agent-browser-linux-x64";
         assert_eq!(kind_of(under, 37397).0, "agent-browser-linux-x64");
-        assert_eq!(
-            kind_of("/srv/python-tools/bin/collector", 9000).0,
-            "collector"
-        );
+        assert_eq!(kind_of("/srv/python-tools/bin/collector", 9000).0, "collector");
 
         // The runtimes themselves still answer to their names.
         assert_eq!(kind_of("/usr/bin/node server.js", 3000).0, "Node");
@@ -3288,10 +3188,7 @@ mod tests {
         // whole bug: a standalone binary installed under node_modules was
         // listed as "Node", the runtime it is not written in.
         assert!(!runs_command("/usr/lib/node_modules/x/bin/mytool", "node"));
-        assert!(!runs_command(
-            "/home/u/.nvm/versions/node/v24/bin/agent-browser-linux-x64",
-            "node"
-        ));
+        assert!(!runs_command("/home/u/.nvm/versions/node/v24/bin/agent-browser-linux-x64", "node"));
         assert!(!runs_command("/srv/python-tools/bin/collector", "python"));
         // And a name that merely starts the same way is a different name.
         assert!(!runs_command("/usr/bin/nodemon app.js", "node"));

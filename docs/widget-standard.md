@@ -32,11 +32,14 @@ shared screen shows only that widget's section:
 - the resolved config path that `load_config` reads
 - a warning when the widget is using an explicitly declared legacy section
 
-Arrow keys, `j`/`k`, Ctrl-Y/Ctrl-E, and the mouse wheel move through fields.
-`Enter` edits (or toggles a boolean), `d` removes an override and returns to
+Arrow keys and `j`/`k` move the selected field. Ctrl-Y/Ctrl-E and the mouse
+wheel move the viewport without changing what `Enter` will edit. `Enter`
+edits (or toggles a boolean), `d` removes an override and returns to
 the default, `s` reveals declared secrets, `r` reloads, `c` copies non-secret
 values, and `Esc`, `q`, or `,` returns to the widget. A running widget keeps
-the values it started with; the screen says to restart after a write.
+the values it started with; the screen says to restart after a write. While
+editing text, `Esc` cancels and `Enter` writes; letter and punctuation keys
+belong to the value.
 
 The writer re-reads immediately before each mutation, changes only the
 selected effective JSON value, validates the result, writes a private
@@ -52,6 +55,11 @@ tools/config-example.py --check
 ```
 
 The second form is part of `cargo test`.
+
+An optional `_schema` object beside the defaults carries UI-only constraints
+such as choices, integer/list element types, and numeric bounds. The
+generator omits `_schema` from `config.example.json`; it exists to stop the
+settings screen accepting a value the widget would silently ignore.
 
 ## AI configuration guide
 

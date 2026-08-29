@@ -148,19 +148,9 @@ fn in_network(ip: &str, cidr: &str) -> bool {
         if parts.len() != 4 || parts.iter().any(|o| *o > 255) {
             return None;
         }
-        Some(
-            parts
-                .iter()
-                .enumerate()
-                .map(|(i, o)| o << (24 - 8 * i))
-                .sum(),
-        )
+        Some(parts.iter().enumerate().map(|(i, o)| o << (24 - 8 * i)).sum())
     };
-    let mask = if bits == 0 {
-        0
-    } else {
-        u32::MAX << (32 - bits)
-    };
+    let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
     match (to_int(ip), to_int(net)) {
         (Some(a), Some(b)) => (a & mask) == (b & mask),
         _ => false,
@@ -226,12 +216,7 @@ fn derp_regions() -> HashMap<String, String> {
         Ok(d) => d,
         Err(_) => return out,
     };
-    for region in data["Regions"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(_, v)| v)
-    {
+    for region in data["Regions"].as_object().into_iter().flatten().map(|(_, v)| v) {
         let code = text(region, "RegionCode");
         if !code.is_empty() {
             let city = text(region, "RegionName");
@@ -319,11 +304,7 @@ fn seen(iso: &str) -> String {
         return "  -".into();
     };
     let s = (chrono::Utc::now().naive_utc() - at).num_seconds().max(0);
-    if s < 90 {
-        "now".into()
-    } else {
-        brief(s as f64)
-    }
+    if s < 90 { "now".into() } else { brief(s as f64) }
 }
 
 /// ISO-8601 to a readable local time, or nothing when unset.
@@ -331,20 +312,13 @@ fn stamp(iso: &str) -> String {
     let Some(at) = parse_iso(iso) else {
         return String::new();
     };
-    match Local
-        .from_utc_datetime(&at)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
-    {
+    match Local.from_utc_datetime(&at).format("%Y-%m-%d %H:%M").to_string() {
         s => s,
     }
 }
 
 /// The addresses worth copying for a peer, as (label, value) pairs.
-fn addresses(
-    peer: &serde_json::Value,
-    eps: &HashMap<String, Vec<String>>,
-) -> Vec<(String, String)> {
+fn addresses(peer: &serde_json::Value, eps: &HashMap<String, Vec<String>>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let ips: Vec<String> = peer["TailscaleIPs"]
         .as_array()
@@ -364,11 +338,7 @@ fn addresses(
 
     let (mut pub_ips, mut priv_ips): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     let cur = text(peer, "CurAddr");
-    let cur = cur
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(&cur)
-        .to_string();
+    let cur = cur.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cur).to_string();
     if !cur.is_empty() && classify(&cur) == "public" {
         pub_ips.push(cur);
     }
@@ -555,12 +525,7 @@ struct State {
 /// Turn cumulative byte counters into per-second rates.
 fn sample_rates(state: &mut State, data: &serde_json::Value, history: usize) {
     let at = tc::now();
-    for peer in data["Peer"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(_, v)| v)
-    {
+    for peer in data["Peer"].as_object().into_iter().flatten().map(|(_, v)| v) {
         let key = peer_name(peer);
         let (rx, tx) = (bytes_at(peer, "RxBytes"), bytes_at(peer, "TxBytes"));
         let prev = state.counters.insert(key.clone(), (rx, tx, at));
@@ -639,10 +604,7 @@ fn activity_rows(
     active.sort_by(|a, b| b.0.total_cmp(&a.0));
     if active.is_empty() {
         return vec![tc::seg(
-            &[(
-                p.dim.as_str(),
-                " no peer traffic in the last few minutes".into(),
-            )],
+            &[(p.dim.as_str(), " no peer traffic in the last few minutes".into())],
             w - 1,
         )];
     }
@@ -705,52 +667,46 @@ fn main() {
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_refresh = Arc::clone(&refresh_now);
-    std::thread::spawn(move || {
-        loop {
-            let out = tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT);
-            let parsed: Option<serde_json::Value> = serde_json::from_str(&out).ok();
-            // The netmap needs sudo and changes slowly, so it is asked for far
-            // less often than the status is.
-            let want_eps = poller
-                .lock()
-                .map(|g| tc::now() - g.endpoints_at > 60.0)
-                .unwrap_or(false);
-            let eps = if want_eps {
-                Some(endpoints_by_peer())
-            } else {
-                None
-            };
-            if let Ok(mut g) = poller.lock() {
-                match &parsed {
-                    None => g.err = "tailscale CLI unavailable or not logged in".into(),
-                    Some(d) => {
-                        g.err.clear();
-                        sample_rates(&mut g, d, history);
-                        g.data = Some(d.clone());
-                        g.data_at = tc::now();
-                    }
-                }
-                if let Some(eps) = eps {
-                    if !eps.is_empty() {
-                        g.endpoints = eps;
-                    }
-                    g.endpoints_at = tc::now();
+    std::thread::spawn(move || loop {
+        let out = tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT);
+        let parsed: Option<serde_json::Value> = serde_json::from_str(&out).ok();
+        // The netmap needs sudo and changes slowly, so it is asked for far
+        // less often than the status is.
+        let want_eps = poller
+            .lock()
+            .map(|g| tc::now() - g.endpoints_at > 60.0)
+            .unwrap_or(false);
+        let eps = if want_eps { Some(endpoints_by_peer()) } else { None };
+        if let Ok(mut g) = poller.lock() {
+            match &parsed {
+                None => g.err = "tailscale CLI unavailable or not logged in".into(),
+                Some(d) => {
+                    g.err.clear();
+                    sample_rates(&mut g, d, history);
+                    g.data = Some(d.clone());
+                    g.data_at = tc::now();
                 }
             }
-            let wait = tc::poll_secs(poller_refresh.lock().map(|g| *g).unwrap_or(2.0), 2.0);
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+            if let Some(eps) = eps {
+                if !eps.is_empty() {
+                    g.endpoints = eps;
+                }
+                g.endpoints_at = tc::now();
+            }
+        }
+        let wait = tc::poll_secs(poller_refresh.lock().map(|g| *g).unwrap_or(2.0), 2.0);
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(wait)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(wait)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     let probing = Arc::clone(&prober);
@@ -830,7 +786,8 @@ fn main() {
                             && digit.chars().all(|c| c.is_ascii_digit())
                             && !listed.is_empty() =>
                     {
-                        let pairs = addresses(&listed[selected.min(listed.len() - 1)], &eps_now);
+                        let pairs =
+                            addresses(&listed[selected.min(listed.len() - 1)], &eps_now);
                         let at = digit.parse::<usize>().unwrap_or(0);
                         if at >= 1 && at <= pairs.len() {
                             let (label, value) = &pairs[at - 1];
@@ -932,21 +889,14 @@ fn main() {
             rows.push(tc::seg(
                 &[(
                     p.relay.as_str(),
-                    format!(
-                        " {}",
-                        if err.is_empty() {
-                            "connecting…"
-                        } else {
-                            &err
-                        }
-                    ),
+                    format!(" {}", if err.is_empty() { "connecting…" } else { &err }),
                 )],
                 w - 1,
             ));
-            let hints = vec![vec![(p.dim.as_str(), "[,] settings".into())], vec![(
-                p.dim.as_str(),
-                "[q]uit".into(),
-            )]];
+            let hints = vec![
+                vec![(p.dim.as_str(), "[,] settings".into())],
+                vec![(p.dim.as_str(), "[q]uit".into())],
+            ];
             let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
                 .into_iter()
                 .map(|line| format!(" {}", line))
@@ -976,10 +926,7 @@ fn main() {
             )
         };
         if !stale.is_empty() {
-            rows.push(tc::seg(
-                &[(p.relay.as_str(), format!(" ! {}", stale))],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.relay.as_str(), format!(" ! {}", stale))], w - 1));
         }
 
         let me = data["Self"].clone();
@@ -993,10 +940,7 @@ fn main() {
             .iter()
             .filter(|x| x["Online"].as_bool().unwrap_or(false))
             .collect();
-        let direct = online
-            .iter()
-            .filter(|x| !text(x, "CurAddr").is_empty())
-            .count();
+        let direct = online.iter().filter(|x| !text(x, "CurAddr").is_empty()).count();
         let routers: Vec<&serde_json::Value> = peers
             .iter()
             .filter(|x| !primary_routes(x).is_empty())
@@ -1013,21 +957,17 @@ fn main() {
                     p.txt.as_str(),
                     format!(
                         " {}",
-                        my_name
-                            .trim_end_matches('.')
-                            .split('.')
-                            .next()
-                            .unwrap_or("")
+                        my_name.trim_end_matches('.').split('.').next().unwrap_or("")
                     ),
                 ),
                 (
                     p.dim.as_str(),
-                    format!("  {}", me["TailscaleIPs"][0].as_str().unwrap_or("?")),
+                    format!(
+                        "  {}",
+                        me["TailscaleIPs"][0].as_str().unwrap_or("?")
+                    ),
                 ),
-                (
-                    p.dim.as_str(),
-                    format!("  {}", text(&data, "MagicDNSSuffix")),
-                ),
+                (p.dim.as_str(), format!("  {}", text(&data, "MagicDNSSuffix"))),
             ],
             w - 1,
         ));
@@ -1046,16 +986,16 @@ fn main() {
         ));
         rows.push(tc::seg(
             &[
-                (
-                    p.route.as_str(),
-                    format!(" {} advertising routes", routers.len()),
-                ),
+                (p.route.as_str(), format!(" {} advertising routes", routers.len())),
                 (
                     p.exit.as_str(),
-                    format!("   exit node: {}", match exits.first() {
-                        Some(x) => peer_name(x),
-                        None => "none".into(),
-                    }),
+                    format!(
+                        "   exit node: {}",
+                        match exits.first() {
+                            Some(x) => peer_name(x),
+                            None => "none".into(),
+                        }
+                    ),
                 ),
             ],
             w - 1,
@@ -1076,10 +1016,7 @@ fn main() {
                     .ok()
                     .map(|g| {
                         (
-                            g.samples
-                                .get(&peer_name(&chosen))
-                                .cloned()
-                                .unwrap_or_default(),
+                            g.samples.get(&peer_name(&chosen)).cloned().unwrap_or_default(),
                             g.err.clone(),
                         )
                     })
@@ -1116,12 +1053,7 @@ fn main() {
         } else {
             w.saturating_sub(22).max(12)
         };
-        let mut head = format!(
-            " {} {:<8} {:<7}",
-            tc::pad("MACHINE", namew + 1),
-            "OS",
-            "PATH"
-        );
+        let mut head = format!(" {} {:<8} {:<7}", tc::pad("MACHINE", namew + 1), "OS", "PATH");
         if wide {
             head += &format!(" {:>5} {:>5} {:>5}", "RX", "TX", "SEEN");
         }
@@ -1155,7 +1087,11 @@ fn main() {
             // would read as a suspiciously good link.
             let live = sel_peer["Online"].as_bool().unwrap_or(false)
                 && !sel_peer["_self"].as_bool().unwrap_or(false);
-            watch(&prober, &peer_name(sel_peer), if live { ip4 } else { None });
+            watch(
+                &prober,
+                &peer_name(sel_peer),
+                if live { ip4 } else { None },
+            );
         }
 
         let mut sorted = peers.clone();
@@ -1200,11 +1136,7 @@ fn main() {
             let mine = peer["_self"].as_bool().unwrap_or(false);
             let up = mine || peer["Online"].as_bool().unwrap_or(false);
             let here = idx == selected;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let c = |colour: &str| {
                 // offline is what a peer that is not up is drawn in, and it
                 // measured 3.67 on this tint - the worst in the widget.
@@ -1242,13 +1174,7 @@ fn main() {
                     format!(
                         "{}{} ",
                         if here { "▸" } else { " " },
-                        if mine {
-                            '◆'
-                        } else if up {
-                            '●'
-                        } else {
-                            '○'
-                        }
+                        if mine { '◆' } else if up { '●' } else { '○' }
                     ),
                 ),
                 (
@@ -1257,10 +1183,7 @@ fn main() {
                 ),
                 (
                     c(&p.dim),
-                    format!(
-                        "{:<8}",
-                        text(peer, "OS").chars().take(8).collect::<String>()
-                    ),
+                    format!("{:<8}", text(peer, "OS").chars().take(8).collect::<String>()),
                 ),
                 (
                     c(if mine {
@@ -1286,11 +1209,7 @@ fn main() {
                     c(&p.dim),
                     format!(
                         " {:>5}",
-                        if up {
-                            "now".to_string()
-                        } else {
-                            seen(&text(peer, "LastSeen"))
-                        }
+                        if up { "now".to_string() } else { seen(&text(peer, "LastSeen")) }
                     ),
                 ));
             }
@@ -1313,14 +1232,8 @@ fn main() {
             rows.push(tc::seg(
                 &[
                     (p.route.as_str(), " ⇄ ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!("{} routes ", text(first, "HostName")),
-                    ),
-                    (
-                        p.txt.as_str(),
-                        rts.iter().take(2).cloned().collect::<Vec<_>>().join(", "),
-                    ),
+                    (p.dim.as_str(), format!("{} routes ", text(first, "HostName"))),
+                    (p.txt.as_str(), rts.iter().take(2).cloned().collect::<Vec<_>>().join(", ")),
                     (
                         p.dim.as_str(),
                         if rts.len() > 2 {
@@ -1334,10 +1247,7 @@ fn main() {
             ));
         }
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→".into()),
                 (p.dim.as_str(), "/↵ info".into()),
@@ -1412,10 +1322,10 @@ fn hold(needed: &[String]) {
             ],
             w - 1,
         ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
+        let hints = vec![
+            vec![(dim.as_str(), "[,] settings".into())],
+            vec![(dim.as_str(), "[q]uit".into())],
+        ];
         let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
             .into_iter()
             .map(|line| format!(" {}", line))
@@ -1429,6 +1339,8 @@ fn hold(needed: &[String]) {
     }
 }
 
+/// Everything known about one machine, including every address.
+#[allow(clippy::too_many_arguments)]
 /// A sub-view's frame: the title pinned, the body windowed under it by
 /// `scroll`, the footer last.
 ///
@@ -1450,8 +1362,6 @@ fn framed(rows: Vec<String>, h: usize, scroll: usize, foot: Vec<String>) -> (Vec
     (out, at)
 }
 
-/// Everything known about one machine, including every address.
-#[allow(clippy::too_many_arguments)]
 fn info_overlay(
     peer: &serde_json::Value,
     eps: &HashMap<String, Vec<String>>,
@@ -1470,10 +1380,7 @@ fn info_overlay(
     // Every field below is out of the same cached status as the list behind
     // this view, so it carries the same warning.
     if !stale.is_empty() {
-        rows.push(tc::seg(
-            &[(p.relay.as_str(), format!(" ! {}", stale))],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.relay.as_str(), format!(" ! {}", stale))], w - 1));
     }
     let dns = text(peer, "DNSName").trim_end_matches('.').to_string();
     let owner = users
@@ -1536,11 +1443,7 @@ fn info_overlay(
     field!(
         "status",
         if up { "online" } else { "offline" }.to_string(),
-        if up {
-            p.online.as_str()
-        } else {
-            p.offline.as_str()
-        }
+        if up { p.online.as_str() } else { p.offline.as_str() }
     );
     let cur = text(peer, "CurAddr");
     if !cur.is_empty() {
@@ -1556,11 +1459,7 @@ fn info_overlay(
             format!(
                 "relayed through DERP {}{}",
                 relay,
-                if city.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", city)
-                }
+                if city.is_empty() { String::new() } else { format!(" ({})", city) }
             ),
             p.relay.as_str()
         );
@@ -1574,20 +1473,12 @@ fn info_overlay(
         ),
         p.txt.as_str()
     );
-    field!(
-        "handshake",
-        stamp(&text(peer, "LastHandshake")),
-        p.txt.as_str()
-    );
+    field!("handshake", stamp(&text(peer, "LastHandshake")), p.txt.as_str());
     let last = stamp(&text(peer, "LastSeen"));
     field!(
         "last seen",
         if last.is_empty() {
-            if up {
-                "connected".to_string()
-            } else {
-                "-".to_string()
-            }
+            if up { "connected".to_string() } else { "-".to_string() }
         } else {
             last
         },
@@ -1605,11 +1496,7 @@ fn info_overlay(
         );
     }
     let (mut pub_ips, mut priv_ips, mut other) = (Vec::new(), Vec::new(), Vec::new());
-    let cur_host = cur
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(&cur)
-        .to_string();
+    let cur_host = cur.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cur).to_string();
     if !cur_host.is_empty() {
         pub_ips.push(cur_host);
     }
@@ -1700,10 +1587,7 @@ fn info_overlay(
                         format!("{:>7.2}ms", pings.iter().sum::<f64>() / pings.len() as f64),
                     ),
                     (p.dim.as_str(), "  med ".into()),
-                    (
-                        p.txt.as_str(),
-                        format!("{:>7.2}ms", ordered[ordered.len() / 2]),
-                    ),
+                    (p.txt.as_str(), format!("{:>7.2}ms", ordered[ordered.len() / 2])),
                 ],
                 w - 1,
             ));
@@ -1712,10 +1596,7 @@ fn info_overlay(
                     (p.dim.as_str(), "   min ".into()),
                     (p.txt.as_str(), format!("{:>7.2}ms", ordered[0])),
                     (p.dim.as_str(), "  max ".into()),
-                    (
-                        p.txt.as_str(),
-                        format!("{:>7.2}ms", ordered[ordered.len() - 1]),
-                    ),
+                    (p.txt.as_str(), format!("{:>7.2}ms", ordered[ordered.len() - 1])),
                     (p.dim.as_str(), "  jit ".into()),
                     (p.txt.as_str(), format!("{:>7.2}ms", jit)),
                 ],
@@ -1725,11 +1606,7 @@ fn info_overlay(
                 &[
                     (p.dim.as_str(), "   loss".into()),
                     (
-                        if loss == 0.0 {
-                            p.online.as_str()
-                        } else {
-                            p.relay.as_str()
-                        },
+                        if loss == 0.0 { p.online.as_str() } else { p.relay.as_str() },
                         format!("{:>7.1}%", loss),
                     ),
                 ],
@@ -1815,10 +1692,7 @@ fn info_overlay(
             &[
                 (p.dim.as_str(), "   down ".into()),
                 (p.online.as_str(), spark(&rx, sw, peak)),
-                (
-                    p.dim.as_str(),
-                    format!(" {}", rate(*rx.last().unwrap_or(&0.0))),
-                ),
+                (p.dim.as_str(), format!(" {}", rate(*rx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
         ));
@@ -1826,10 +1700,7 @@ fn info_overlay(
             &[
                 (p.dim.as_str(), "   up   ".into()),
                 (p.relay.as_str(), spark(&tx, sw, peak)),
-                (
-                    p.dim.as_str(),
-                    format!(" {}", rate(*tx.last().unwrap_or(&0.0))),
-                ),
+                (p.dim.as_str(), format!(" {}", rate(*tx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
         ));
@@ -1847,13 +1718,15 @@ fn info_overlay(
         ));
     }
 
-    framed(rows, h, scroll, vec![tc::seg(
-        &[(
-            p.dim.as_str(),
-            " [c]opy addresses · ← or esc to close · [q]uit".into(),
+    framed(
+        rows,
+        h,
+        scroll,
+        vec![tc::seg(
+            &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close · [q]uit".into())],
+            w - 1,
         )],
-        w - 1,
-    )])
+    )
 }
 
 fn copy_overlay(
@@ -1880,10 +1753,7 @@ fn copy_overlay(
     rows.push(String::new());
     if pairs.is_empty() {
         rows.push(tc::seg(
-            &[(
-                p.dim.as_str(),
-                "  no addresses known for this machine".into(),
-            )],
+            &[(p.dim.as_str(), "  no addresses known for this machine".into())],
             w - 1,
         ));
     }
@@ -1897,23 +1767,28 @@ fn copy_overlay(
             w - 1,
         ));
     }
-    framed(rows, h, scroll, vec![
-        tc::seg(
-            &[(
-                p.dim.as_str(),
-                format!(
-                    " press 1-{} to copy · ← or esc to close · [q]uit",
-                    pairs.len().max(1)
-                ),
-            )],
-            w - 1,
-        ),
-        if note.is_empty() {
-            String::new()
-        } else {
-            tc::seg(&[(p.online.as_str(), format!(" {}", note))], w - 1)
-        },
-    ])
+    framed(
+        rows,
+        h,
+        scroll,
+        vec![
+            tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    format!(
+                        " press 1-{} to copy · ← or esc to close · [q]uit",
+                        pairs.len().max(1)
+                    ),
+                )],
+                w - 1,
+            ),
+            if note.is_empty() {
+                String::new()
+            } else {
+                tc::seg(&[(p.online.as_str(), format!(" {}", note))], w - 1)
+            },
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -1924,14 +1799,12 @@ mod tests {
     fn a_name_comes_from_magicdns_not_the_device() {
         // Two iPads both call themselves "localhost"; the MagicDNS label is
         // unique across the tailnet and matches the admin console.
-        let peer: serde_json::Value = serde_json::from_str(
-            r#"{"DNSName": "garden-sensor.example.ts.net.", "HostName": "localhost"}"#,
-        )
-        .unwrap();
+        let peer: serde_json::Value =
+            serde_json::from_str(r#"{"DNSName": "garden-sensor.example.ts.net.", "HostName": "localhost"}"#)
+                .unwrap();
         assert_eq!(peer_name(&peer), "garden-sensor");
         // Only when there is no DNS name does the device get to say.
-        let bare: serde_json::Value =
-            serde_json::from_str(r#"{"HostName": "kitchen-pi"}"#).unwrap();
+        let bare: serde_json::Value = serde_json::from_str(r#"{"HostName": "kitchen-pi"}"#).unwrap();
         assert_eq!(peer_name(&bare), "kitchen-pi");
         assert_eq!(peer_name(&serde_json::json!({})), "?");
     }
@@ -1990,16 +1863,7 @@ mod tests {
         // Up to petabytes, which is well past anything a WireGuard counter
         // reaches before tailscaled restarts. Beyond that the number itself
         // is wider than the column, and so is the Python's.
-        for n in [
-            0u64,
-            9,
-            10,
-            1023,
-            1024,
-            15_000,
-            3_000_000_000,
-            900_000_000_000_000,
-        ] {
+        for n in [0u64, 9, 10, 1023, 1024, 15_000, 3_000_000_000, 900_000_000_000_000] {
             assert_eq!(human(n).chars().count(), 5, "{}", n);
         }
         assert_eq!(human(0), "   0B");

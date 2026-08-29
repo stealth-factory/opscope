@@ -42,28 +42,12 @@ const SERIES: usize = 240;
 /// leaves through a real interface as well, and counting both counts it
 /// twice.
 const VIRTUAL: &[&str] = &[
-    "lo",
-    "tailscale0",
-    "docker",
-    "veth",
-    "br-",
-    "virbr",
-    "wg",
-    "tun",
-    "tap",
-    "cni",
-    "flannel",
+    "lo", "tailscale0", "docker", "veth", "br-", "virbr", "wg", "tun", "tap", "cni", "flannel",
     "kube",
 ];
 
 /// Systemd names the slice, not the thing in it.
-const SLICES: &[&str] = &[
-    "system.slice",
-    "user.slice",
-    "init.scope",
-    "-.slice",
-    "app.slice",
-];
+const SLICES: &[&str] = &["system.slice", "user.slice", "init.scope", "-.slice", "app.slice"];
 
 /// Decimal units, as network equipment and ISPs quote them.
 fn units(n: f64) -> String {
@@ -214,18 +198,21 @@ fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
         if local_peer(&peer, own) || (external && !off_box(&peer, own)) {
             continue;
         }
-        found.insert(id, Seen {
-            sent: field(line, "bytes_sent:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            recv: field(line, "bytes_received:")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            peer: peer.clone(),
-            port,
-            mine,
-            cgroup: cgroup.clone(),
-        });
+        found.insert(
+            id,
+            Seen {
+                sent: field(line, "bytes_sent:")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                recv: field(line, "bytes_received:")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                peer: peer.clone(),
+                port,
+                mine,
+                cgroup: cgroup.clone(),
+            },
+        );
     }
     (found, String::new())
 }
@@ -313,18 +300,8 @@ fn process_name(pid: i32) -> String {
         return comm;
     }
     const GENERIC: &[&str] = &[
-        "versions",
-        "bin",
-        "sbin",
-        "libexec",
-        "node_modules",
-        "dist",
-        "build",
-        "lib",
-        "share",
-        "local",
-        "current",
-        "releases",
+        "versions", "bin", "sbin", "libexec", "node_modules", "dist", "build", "lib", "share",
+        "local", "current", "releases",
     ];
     let argv0 = std::fs::read(format!("/proc/{}/cmdline", pid))
         .map(|raw| {
@@ -342,7 +319,11 @@ fn process_name(pid: i32) -> String {
             return part.to_string();
         }
     }
-    if comm.is_empty() { "?".into() } else { comm }
+    if comm.is_empty() {
+        "?".into()
+    } else {
+        comm
+    }
 }
 
 /// Bytes in and out of this machine's real interfaces.
@@ -758,10 +739,7 @@ fn absorb(
         state.wire_names = names;
     }
 
-    state.last = found
-        .iter()
-        .map(|(k, v)| (k.clone(), (v.sent, v.recv)))
-        .collect();
+    state.last = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
     state.stamp = stamp;
 
     // A closed connection is worth keeping - it may be the one that did the
@@ -786,13 +764,7 @@ fn absorb(
 ///
 /// Two dots per column and four per row, which is the difference between a
 /// line that steps between character rows and one that reads as a curve.
-fn braille_canvas(
-    values: &[f64],
-    peak: f64,
-    cols: usize,
-    rows: usize,
-    inverted: bool,
-) -> Vec<Vec<u8>> {
+fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted: bool) -> Vec<Vec<u8>> {
     let (px_w, px_h) = (cols * 2, rows * 4);
     let mut grid = vec![vec![0u8; cols]; rows];
     let vals: Vec<f64> = values.iter().rev().take(px_w).rev().copied().collect();
@@ -811,14 +783,7 @@ fn braille_canvas(
             0.0
         };
         let magnitude = (scaled * (px_h as f64 - 1.0)).round() as i64;
-        (
-            x,
-            if inverted {
-                magnitude
-            } else {
-                px_h as i64 - 1 - magnitude
-            },
-        )
+        (x, if inverted { magnitude } else { px_h as i64 - 1 - magnitude })
     };
     let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
         if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
@@ -872,9 +837,7 @@ fn braille_row(masks: &[u8], colour: &str) -> Vec<(String, String)> {
                 if *m == 0 {
                     " ".to_string()
                 } else {
-                    char::from_u32(0x2800 + *m as u32)
-                        .unwrap_or(' ')
-                        .to_string()
+                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string()
                 },
             )
         })
@@ -904,24 +867,26 @@ impl Resolver {
         let known: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let wanted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (k, q) = (Arc::clone(&known), Arc::clone(&wanted));
-        std::thread::spawn(move || {
-            loop {
-                let next = q.lock().ok().and_then(|mut g| g.pop());
-                let ip = match next {
-                    Some(ip) => ip,
-                    None => {
-                        std::thread::sleep(Duration::from_millis(300));
-                        continue;
-                    }
-                };
-                // getent rather than a resolver library: it is glibc's own
-                // lookup, so it honours /etc/hosts, nsswitch and the search
-                // domains exactly as everything else on the machine does.
-                let answer = tc::run_quiet(&["getent", "hosts", &ip], RUN_TIMEOUT);
-                let name = answer.split_whitespace().nth(1).unwrap_or("").to_string();
-                if let Ok(mut guard) = k.lock() {
-                    guard.insert(ip, name);
+        std::thread::spawn(move || loop {
+            let next = q.lock().ok().and_then(|mut g| g.pop());
+            let ip = match next {
+                Some(ip) => ip,
+                None => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
                 }
+            };
+            // getent rather than a resolver library: it is glibc's own
+            // lookup, so it honours /etc/hosts, nsswitch and the search
+            // domains exactly as everything else on the machine does.
+            let answer = tc::run_quiet(&["getent", "hosts", &ip], RUN_TIMEOUT);
+            let name = answer
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            if let Ok(mut guard) = k.lock() {
+                guard.insert(ip, name);
             }
         });
         Resolver { known, wanted }
@@ -1065,10 +1030,7 @@ fn short(path: &str, room: usize) -> String {
     if chars.len() <= room || room < 2 {
         return path;
     }
-    format!(
-        "…{}",
-        chars[chars.len() - (room - 1)..].iter().collect::<String>()
-    )
+    format!("…{}", chars[chars.len() - (room - 1)..].iter().collect::<String>())
 }
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -1085,11 +1047,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             .filter(|c| *c > width / 2)
             .unwrap_or(width);
         lines.push(rest[..cut].iter().collect());
-        rest = rest[cut..]
-            .iter()
-            .skip_while(|c| **c == ' ')
-            .copied()
-            .collect();
+        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
     }
     if lines.is_empty() {
         vec![String::new()]
@@ -1130,11 +1088,7 @@ fn section_head(
     tc::seg(
         &[
             (
-                if focused {
-                    p.accent.as_str()
-                } else {
-                    p.lbl.as_str()
-                },
+                if focused { p.accent.as_str() } else { p.lbl.as_str() },
                 format!("{}── {} ── ", if focused { " ▏" } else { " " }, name),
             ),
             (
@@ -1150,11 +1104,7 @@ fn section_head(
             // sections that one press reaches.
             (
                 p.accent.as_str(),
-                if next {
-                    "   [tab] to focus".to_string()
-                } else {
-                    String::new()
-                },
+                if next { "   [tab] to focus".to_string() } else { String::new() },
             ),
         ],
         w - 1,
@@ -1274,18 +1224,10 @@ fn endpoint_rows(
         .enumerate()
         .map(|(i, spot)| {
             let here = focused && i == at;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let name = {
                 let found = names.name(&spot.peer);
-                if found.is_empty() {
-                    spot.peer.clone()
-                } else {
-                    found
-                }
+                if found.is_empty() { spot.peer.clone() } else { found }
             };
             let ports: Vec<String> = spot
                 .ports
@@ -1293,11 +1235,7 @@ fn endpoint_rows(
                 .take(2)
                 .map(|port| {
                     let named = service(*port);
-                    if named.is_empty() {
-                        port.to_string()
-                    } else {
-                        named
-                    }
+                    if named.is_empty() { port.to_string() } else { named }
                 })
                 .collect();
             let moving = spot.down_rate + spot.up_rate;
@@ -1346,11 +1284,7 @@ fn connection_rows(
         .enumerate()
         .map(|(i, conn)| {
             let here = focused && i == at;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let where_ = format!("{}:{}", conn.peer, conn.port);
             let c = |colour: &str| format!("{}{}", tint, colour);
             tc::seg(
@@ -1361,7 +1295,10 @@ fn connection_rows(
                     ),
                     (
                         &c(if conn.alive { &p.txt } else { &p.dim }),
-                        tc::pad(&where_.chars().take(host_w - 1).collect::<String>(), host_w),
+                        tc::pad(
+                            &where_.chars().take(host_w - 1).collect::<String>(),
+                            host_w,
+                        ),
                     ),
                     // The local port, which ss and netstat both call Local.
                     // Without it five rows to one CDN are five identical
@@ -1371,11 +1308,7 @@ fn connection_rows(
                         &c(&p.dim),
                         format!(
                             "{:<6}",
-                            if conn.mine > 0 {
-                                conn.mine.to_string()
-                            } else {
-                                "-".into()
-                            }
+                            if conn.mine > 0 { conn.mine.to_string() } else { "-".into() }
                         ),
                     ),
                     (
@@ -1409,11 +1342,7 @@ fn file_rows(
         .enumerate()
         .map(|(i, item)| {
             let here = focused && i == at;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let (grew, span) = match sizes.get(&item.path) {
                 Some((was, when)) => (item.size.saturating_sub(*was), tc::now() - when),
                 None => (0, 0.0),
@@ -1532,15 +1461,8 @@ fn detail_rows(
     }
 
     if h.saturating_sub(out.len()) >= 12 {
-        out.push(tc::seg(
-            &[(p.lbl.as_str(), " ── PROCESS ── ".into())],
-            w - 1,
-        ));
-        let cmd = if facts.cmdline.is_empty() {
-            "?"
-        } else {
-            &facts.cmdline
-        };
+        out.push(tc::seg(&[(p.lbl.as_str(), " ── PROCESS ── ".into())], w - 1));
+        let cmd = if facts.cmdline.is_empty() { "?" } else { &facts.cmdline };
         out.extend(field_rows("command", cmd, w, &p.txt, p));
         if !facts.cwd.is_empty() {
             let cwd = short(&facts.cwd, w.saturating_sub(14));
@@ -1772,26 +1694,24 @@ fn main() {
         ..Default::default()
     }));
     let poller = Arc::clone(&state);
-    std::thread::spawn(move || {
-        loop {
-            // A poller that dies takes its explanation with it, and an empty
-            // table looks exactly like a machine with no sockets on it.
+    std::thread::spawn(move || loop {
+        // A poller that dies takes its explanation with it, and an empty
+        // table looks exactly like a machine with no sockets on it.
+        {
+            let mut guard = match poller.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sample(&mut guard, external);
+            }))
+            .is_err()
             {
-                let mut guard = match poller.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sample(&mut guard, external);
-                }))
-                .is_err()
-                {
-                    guard.err = "poller stopped - see the pane it was started from".into();
-                    return;
-                }
+                guard.err = "poller stopped - see the pane it was started from".into();
+                return;
             }
-            std::thread::sleep(Duration::from_secs_f64(interval));
         }
+        std::thread::sleep(Duration::from_secs_f64(interval));
     });
 
     // One block per interval, for a log or a pipe. Nothing here touches
@@ -2062,15 +1982,9 @@ fn main() {
                     continue;
                 }
             };
-            let files = if running(pid) {
-                open_files(pid)
-            } else {
-                Vec::new()
-            };
+            let files = if running(pid) { open_files(pid) } else { Vec::new() };
             for file in &files {
-                sizes
-                    .entry(file.path.clone())
-                    .or_insert((file.size, tc::now()));
+                sizes.entry(file.path.clone()).or_insert((file.size, tc::now()));
             }
             let counts = [spots.len(), conns.len(), files.len()];
             section_len = counts;
@@ -2096,24 +2010,14 @@ fn main() {
                     (p.accent.as_str(), "↑↓".into()),
                     (
                         p.dim.as_str(),
-                        if focus.is_some() {
-                            " select"
-                        } else {
-                            " scroll"
-                        }
-                        .to_string(),
+                        if focus.is_some() { " select" } else { " scroll" }.to_string(),
                     ),
                 ],
                 vec![
                     (p.accent.as_str(), "tab".into()),
                     (
                         p.dim.as_str(),
-                        if focus.is_some() {
-                            " next section"
-                        } else {
-                            " into a section"
-                        }
-                        .to_string(),
+                        if focus.is_some() { " next section" } else { " into a section" }.to_string(),
                     ),
                 ],
                 vec![(p.dim.as_str(), "[c]opy".into())],
@@ -2212,10 +2116,7 @@ fn main() {
         if !rows.is_empty() && selected >= rows.len() {
             selected = rows.len() - 1;
         }
-        let moving = rows
-            .iter()
-            .filter(|r| r.up_rate + r.down_rate > 0.0)
-            .count();
+        let moving = rows.iter().filter(|r| r.up_rate + r.down_rate > 0.0).count();
         let down: f64 = rows.iter().map(|r| r.down_rate).sum();
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
@@ -2234,18 +2135,11 @@ fn main() {
                 (p.dim.as_str(), " · sorted by ".into()),
                 (
                     p.accent.as_str(),
-                    if sort_live {
-                        "live".into()
-                    } else {
-                        "total".into()
-                    },
+                    if sort_live { "live".into() } else { "total".into() },
                 ),
                 (
                     p.dim.as_str(),
-                    format!(
-                        "   every {}s · rates over {}s",
-                        interval, RATE_WINDOW as i64
-                    ),
+                    format!("   every {}s · rates over {}s", interval, RATE_WINDOW as i64),
                 ),
             ],
             w - 1,
@@ -2301,10 +2195,7 @@ fn main() {
             out.push(tc::seg(&said, w - 1));
         }
         if !guard.err.is_empty() {
-            out.push(tc::seg(
-                &[(p.bad.as_str(), format!(" ! {}", guard.err))],
-                w - 1,
-            ));
+            out.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", guard.err))], w - 1));
         }
         out.push(String::new());
 
@@ -2375,11 +2266,7 @@ fn main() {
                     ),
                 ),
                 (
-                    if rows.len() > show {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
+                    if rows.len() > show { p.accent.as_str() } else { p.dim.as_str() },
                     if rows.len() > show {
                         format!(" · showing {}-{}", first + 1, last)
                     } else {
@@ -2402,10 +2289,7 @@ fn main() {
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
@@ -2539,13 +2423,7 @@ fn table(
     let wide = avail >= 10 + 11 + 22;
     let mid = avail >= 10 + 11;
     let name_w = avail
-        .saturating_sub(if wide {
-            33
-        } else if mid {
-            11
-        } else {
-            0
-        })
+        .saturating_sub(if wide { 33 } else if mid { 11 } else { 0 })
         .clamp(8, 26);
 
     let mut head = vec![
@@ -2566,11 +2444,7 @@ fn table(
         let live = row.up_rate + row.down_rate;
         let total = (row.up + row.down) as f64;
         let here = first + i == selected;
-        let tint = if here {
-            tc::bg(28, 44, 62)
-        } else {
-            String::new()
-        };
+        let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
         let name_c = format!(
             "{}{}",
             tint,
@@ -2585,32 +2459,17 @@ fn table(
         let pid_c = format!("{}{}", tint, p.dim);
         let total_c = format!("{}{}", tint, if total > 0.0 { &p.txt } else { &p.dim });
         let live_c = format!("{}{}", tint, if live > 0.0 { &p.ok } else { &p.dim });
-        let down_c = format!(
-            "{}{}",
-            tint,
-            if row.down_rate > 0.0 { &p.down } else { &p.dim }
-        );
+        let down_c = format!("{}{}", tint, if row.down_rate > 0.0 { &p.down } else { &p.dim });
         let up_c = format!("{}{}", tint, if row.up_rate > 0.0 { &p.up } else { &p.dim });
         let name: String = row.name.chars().take(name_w.saturating_sub(2)).collect();
         let mut line = vec![
             (
                 name_c.as_str(),
-                format!(
-                    "{} {}",
-                    if here { "▸" } else { " " },
-                    tc::pad(&name, name_w - 1)
-                ),
+                format!("{} {}", if here { "▸" } else { " " }, tc::pad(&name, name_w - 1)),
             ),
             (
                 pid_c.as_str(),
-                format!(
-                    "{:<8}",
-                    if row.pid > 0 {
-                        row.pid.to_string()
-                    } else {
-                        "-".into()
-                    }
-                ),
+                format!("{:<8}", if row.pid > 0 { row.pid.to_string() } else { "-".into() }),
             ),
             (total_c.as_str(), format!("{:>11}", units(total))),
         ];
@@ -2667,14 +2526,17 @@ mod tests {
         // climb. `ss` answers, fails, then answers again.
         let socket = |sent, recv| {
             let mut one = HashMap::new();
-            one.insert("42".to_string(), Seen {
-                sent,
-                recv,
-                peer: "192.0.2.1".into(),
-                port: 443,
-                mine: 51000,
-                cgroup: String::new(),
-            });
+            one.insert(
+                "42".to_string(),
+                Seen {
+                    sent,
+                    recv,
+                    peer: "192.0.2.1".into(),
+                    port: 443,
+                    mine: 51000,
+                    cgroup: String::new(),
+                },
+            );
             one
         };
         let owners = HashMap::new();
@@ -2682,65 +2544,29 @@ mod tests {
 
         // The first reading is a baseline: a socket already open when we
         // started did its megabytes before we were watching.
-        absorb(
-            &mut state,
-            1000.0,
-            &socket(1_000_000, 2_000_000),
-            &owners,
-            None,
-            String::new(),
-        );
+        absorb(&mut state, 1000.0, &socket(1_000_000, 2_000_000), &owners, None, String::new());
         assert_eq!(state.stamp, 1000.0);
         assert_eq!(state.last.get("42"), Some(&(1_000_000, 2_000_000)));
 
         // `ss` wedges or will not run. It must say so and leave the
         // baseline alone - both halves of it, the counters and the clock
         // they were read at.
-        absorb(
-            &mut state,
-            1001.0,
-            &HashMap::new(),
-            &owners,
-            None,
-            "ss would not run".into(),
-        );
+        absorb(&mut state, 1001.0, &HashMap::new(), &owners, None, "ss would not run".into());
         assert_eq!(state.err, "ss would not run");
-        assert_eq!(
-            state.last.get("42"),
-            Some(&(1_000_000, 2_000_000)),
-            "baseline cleared"
-        );
-        assert_eq!(
-            state.stamp, 1000.0,
-            "clock advanced without the counters it pairs with"
-        );
+        assert_eq!(state.last.get("42"), Some(&(1_000_000, 2_000_000)), "baseline cleared");
+        assert_eq!(state.stamp, 1000.0, "clock advanced without the counters it pairs with");
 
         // Two seconds after the last good reading, half a kilobyte up and a
         // kilobyte down. Before the fix this socket had no baseline left,
         // so the whole megabyte of its lifetime counted as traffic in the
         // one second since the failed poll.
-        absorb(
-            &mut state,
-            1002.0,
-            &socket(1_000_500, 2_001_000),
-            &owners,
-            None,
-            String::new(),
-        );
-        assert!(
-            state.err.is_empty(),
-            "a good reading must clear the error: {}",
-            state.err
-        );
+        absorb(&mut state, 1002.0, &socket(1_000_500, 2_001_000), &owners, None, String::new());
+        assert!(state.err.is_empty(), "a good reading must clear the error: {}", state.err);
         let row = state
             .totals
             .get(&(0, "(unattributed)".to_string()))
             .expect("the socket has a row");
-        assert_eq!(
-            (row.up, row.down),
-            (500, 1000),
-            "counted a lifetime as one interval"
-        );
+        assert_eq!((row.up, row.down), (500, 1000), "counted a lifetime as one interval");
         // 500 bytes and 1000 bytes over the two seconds since the last
         // reading that had numbers in it.
         assert!((row.up_rate - 250.0).abs() < 1.0, "{}", row.up_rate);
@@ -2822,10 +2648,7 @@ mod tests {
                     assert!(
                         on.contains(&format!("proc-{} ", selected)),
                         "total={} show={} selected={}: cursor sat on {:?}",
-                        total,
-                        show,
-                        selected,
-                        on.trim()
+                        total, show, selected, on.trim()
                     );
                 }
             }
@@ -2952,11 +2775,7 @@ mod tests {
             fold!(row, 0.0, 1.0, 0, 400_000);
         }
         fold!(row, 1.0, 1.0, 0, 0);
-        assert!(
-            (row.down_rate - 3_000_000.0).abs() < 1.0,
-            "got {}",
-            row.down_rate
-        );
+        assert!((row.down_rate - 3_000_000.0).abs() < 1.0, "got {}", row.down_rate);
     }
 
     #[test]
@@ -2971,11 +2790,7 @@ mod tests {
         // which is what was actually sent. This asserted 2500 before - a
         // quarter too high on every row, with the overcount written into
         // the comment as though it were the intent.
-        assert!(
-            (row.down_rate - 2000.0).abs() < 1.0,
-            "got {}",
-            row.down_rate
-        );
+        assert!((row.down_rate - 2000.0).abs() < 1.0, "got {}", row.down_rate);
     }
 
     #[test]
@@ -3034,8 +2849,7 @@ mod tests {
 
     #[test]
     fn ss_fields_are_read_off_the_line() {
-        let line =
-            "\t ts sack cubic bytes_sent:1669 bytes_acked:1670 bytes_received:11469 segs_out:272";
+        let line = "\t ts sack cubic bytes_sent:1669 bytes_acked:1670 bytes_received:11469 segs_out:272";
         assert_eq!(field(line, "bytes_sent:"), Some("1669".into()));
         assert_eq!(field(line, "bytes_received:"), Some("11469".into()));
         assert_eq!(field(line, "nothing:"), None);

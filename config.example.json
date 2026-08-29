@@ -98,7 +98,9 @@
     "pushed_days": 14.0
   },
   "github_prs": {
-    "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "_comment": "Reuses github.token by default. token and token_env override it for this widget. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "token": "",
+    "token_env": "GITHUB_TOKEN",
     "sources": {
       "orgs": "is:open is:pr @mine",
       "authored": "is:open is:pr author:@me",

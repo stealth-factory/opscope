@@ -675,21 +675,26 @@ fn parse_edit(
     rule: Option<&Value>,
 ) -> Result<Value, String> {
     let trimmed = raw.trim();
+    if expected.is_string() {
+        let value = if trimmed.starts_with('"') {
+            serde_json::from_str::<Value>(trimmed)
+                .map_err(|_| "expected a JSON string or unquoted text".to_string())?
+        } else {
+            Value::String(raw.to_string())
+        };
+        validate_value(&value, expected, rule)?;
+        return Ok(value);
+    }
     if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
         validate_value(&v, expected, rule)?;
         return Ok(v);
     }
-    if expected.is_string() {
-        let value = Value::String(raw.to_string());
-        validate_value(&value, expected, rule)?;
-        return Ok(value);
-    }
     if expected.is_boolean() {
         let value = match trimmed.to_ascii_lowercase().as_str() {
-            "true" | "yes" | "on" | "1" => Ok(Value::Bool(true)),
-            "false" | "no" | "off" | "0" => Ok(Value::Bool(false)),
-            _ => Err("expected bool".into()),
-        }?;
+            "true" | "yes" | "on" | "1" => Value::Bool(true),
+            "false" | "no" | "off" | "0" => Value::Bool(false),
+            _ => return Err("expected bool".into()),
+        };
         validate_value(&value, expected, rule)?;
         return Ok(value);
     }
@@ -795,6 +800,7 @@ struct App {
     skipped: Vec<String>,
     selected: usize,
     scroll: usize,
+    chase: bool,
     reveal: bool,
     mode: Mode,
     status: Option<String>,
@@ -843,6 +849,7 @@ fn load(spec: SettingsSpec) -> App {
         skipped,
         selected: 0,
         scroll: 0,
+        chase: true,
         reveal: false,
         mode: Mode::List,
         status: None,
@@ -997,6 +1004,7 @@ fn move_sel(app: &mut App, delta: isize) {
     let next = (app.selected as isize + delta)
         .clamp(0, app.fields.len() as isize - 1) as usize;
     app.selected = next;
+    app.chase = true;
 }
 
 fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
@@ -1049,12 +1057,26 @@ fn delete_before(buffer: &mut String, cursor: &mut usize) {
 fn handle_list_key(app: &mut App, key: &str) -> bool {
     match key {
         "q" | "Q" | "esc" | "," => return true,
-        "up" | "k" | "K" | "ctrl-y" | "wheel-up" => move_sel(app, -1),
-        "down" | "j" | "J" | "ctrl-e" | "wheel-down" => move_sel(app, 1),
+        "up" | "k" | "K" => move_sel(app, -1),
+        "down" | "j" | "J" => move_sel(app, 1),
+        "ctrl-y" | "wheel-up" => {
+            app.scroll = app.scroll.saturating_sub(1);
+            app.chase = false;
+        }
+        "ctrl-e" | "wheel-down" => {
+            app.scroll = app.scroll.saturating_add(1);
+            app.chase = false;
+        }
         "pgup" => move_sel(app, -10),
         "pgdn" => move_sel(app, 10),
-        "home" => app.selected = 0,
-        "end" => app.selected = app.fields.len().saturating_sub(1),
+        "home" => {
+            app.selected = 0;
+            app.chase = true;
+        }
+        "end" => {
+            app.selected = app.fields.len().saturating_sub(1);
+            app.chase = true;
+        }
         "s" | "S" => app.reveal = !app.reveal,
         "r" | "R" => {
             let keep = (app.selected, app.reveal);
@@ -1225,7 +1247,13 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let room = h.saturating_sub(body.len() + foot.len() + aside).max(1);
     if !app.fields.is_empty() {
         app.selected = app.selected.min(app.fields.len() - 1);
-        app.scroll = crate::follow(app.scroll, app.selected, room);
+        app.scroll = if app.chase {
+            crate::follow(app.scroll, app.selected, room)
+        } else {
+            app.scroll
+                .min(app.fields.len().saturating_sub(room))
+        };
+        app.chase = false;
     }
     let key_w = app
         .fields
@@ -1648,6 +1676,10 @@ mod tests {
         assert_eq!(
             parse_edit("\"hello\"", &Value::String(String::new()), None).unwrap(),
             Value::String("hello".into())
+        );
+        assert_eq!(
+            parse_edit("true", &Value::String(String::new()), None).unwrap(),
+            Value::String("true".into())
         );
         assert!(parse_edit("[1]", &Value::from(3), None).is_err());
         assert_eq!(

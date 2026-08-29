@@ -369,6 +369,7 @@ fn colour_for<'a>(ratio: Option<f64>, loss: Option<f64>, p: &'a Palette) -> &'a 
     }
 }
 
+
 /// Fit samples to the columns available, by median.
 ///
 /// A fifteen-minute window at a two-second poll is 450 readings and a pane
@@ -471,68 +472,68 @@ fn main() {
         };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
-            let mut found = match sessions() {
-                Ok(rows) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = String::new();
-                    }
-                    rows
+        let mut found = match sessions() {
+            Ok(rows) => {
+                if let Ok(mut guard) = poller.lock() {
+                    guard.err = String::new();
                 }
-                // Not fatal: ss can fail for a moment. Reported and retried
-                // rather than ending the thread, but never silently - an empty
-                // list and a failed read look identical on screen otherwise.
-                Err(why) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = why;
-                    }
-                    Vec::new()
-                }
-            };
-            let names = who();
-            for row in &mut found {
-                // Retransmits since the last look, rather than since the
-                // connection opened: a session hours old has long since
-                // forgiven whatever went wrong at breakfast.
-                if let Some((sent, retrans)) = last.get(&row.peer) {
-                    let moved = row.sent - sent;
-                    row.recent_loss = Some(if moved > 0.0 {
-                        100.0 * (row.retrans_bytes - retrans) / moved
-                    } else {
-                        0.0
-                    });
-                }
-                last.insert(row.peer.clone(), (row.sent, row.retrans_bytes));
+                rows
             }
-            {
-                let mut guard = match poller.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                for row in &found {
-                    if let Some(rtt) = row.rtt {
-                        let series = guard.history.entry(row.peer.clone()).or_default();
-                        series.push(rtt);
-                        if series.len() > history_len {
-                            let drop = series.len() - history_len;
-                            series.drain(..drop);
-                        }
-                    }
+            // Not fatal: ss can fail for a moment. Reported and retried
+            // rather than ending the thread, but never silently - an empty
+            // list and a failed read look identical on screen otherwise.
+            Err(why) => {
+                if let Ok(mut guard) = poller.lock() {
+                    guard.err = why;
                 }
-                guard.rows = found;
-                guard.names = names;
+                Vec::new()
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
+        };
+        let names = who();
+        for row in &mut found {
+            // Retransmits since the last look, rather than since the
+            // connection opened: a session hours old has long since
+            // forgiven whatever went wrong at breakfast.
+            if let Some((sent, retrans)) = last.get(&row.peer) {
+                let moved = row.sent - sent;
+                row.recent_loss = Some(if moved > 0.0 {
+                    100.0 * (row.retrans_bytes - retrans) / moved
+                } else {
+                    0.0
+                });
+            }
+            last.insert(row.peer.clone(), (row.sent, row.retrans_bytes));
+        }
+        {
+            let mut guard = match poller.lock() {
                 Ok(g) => g,
-                Err(_) => return stopped("the wake lock was poisoned"),
+                Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return stopped("the wake lock was poisoned while waiting"),
-                };
+            for row in &found {
+                if let Some(rtt) = row.rtt {
+                    let series = guard.history.entry(row.peer.clone()).or_default();
+                    series.push(rtt);
+                    if series.len() > history_len {
+                        let drop = series.len() - history_len;
+                        series.drain(..drop);
+                    }
+                }
             }
-            *asked = false;
+            guard.rows = found;
+            guard.names = names;
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return stopped("the wake lock was poisoned"),
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
+                Err(_) => return stopped("the wake lock was poisoned while waiting"),
+            };
+        }
+        *asked = false;
         }
     });
 
@@ -543,7 +544,8 @@ fn main() {
     // lands there and walking off it again comes in at the other. The chart
     // then opens showing every session at equal weight, and focus is
     // something you leave the way you entered it.
-    let (mut selected, mut hide_idle, mut span_at) = (None::<usize>, false, 0usize);
+    let (mut selected, mut hide_idle, mut span_at) =
+        (None::<usize>, false, 0usize);
     let mut count = 0usize;
     let mut detail = false;
     // How far down the detail screen we are. Clamped against the body every
@@ -567,7 +569,7 @@ fn main() {
                     tc::restore_screen();
                     return;
                 }
-                "," if !detail => {
+                "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
                     continue;
                 }
@@ -772,10 +774,7 @@ fn main() {
             w - 1,
         ));
         if !guard.err.is_empty() {
-            rows.push(tc::seg(
-                &[(p.bad.as_str(), format!(" ! {}", guard.err))],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", guard.err))], w - 1));
         }
         rows.push(String::new());
 
@@ -822,20 +821,14 @@ fn main() {
             rows.push(tc::seg(
                 &[
                     (p.dim.as_str(), " ".repeat(7)),
-                    (
-                        p.grid.as_str(),
-                        format!("└{}", "─".repeat(w.saturating_sub(9).max(10))),
-                    ),
+                    (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
                 ],
                 w - 1,
             ));
             let covered = plotted_span(&shown, &guard.history, window, refresh, w);
             rows.push(tc::seg(
                 &[
-                    (
-                        p.dim.as_str(),
-                        format!("        {} ago", span(Some(covered * 1000.0))),
-                    ),
+                    (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
                     (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
                     (p.dim.as_str(), "now".into()),
                 ],
@@ -844,10 +837,7 @@ fn main() {
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→".into()),
                 (p.dim.as_str(), "/[↵] open".into()),
@@ -938,32 +928,14 @@ fn table(
             (p.dim.as_str(), "  PEER".into()),
             (p.dim.as_str(), " ".repeat(name_w - 4)),
             (p.dim.as_str(), "    NOW   FLOOR  JITTER    LOSS".into()),
-            (
-                p.dim.as_str(),
-                if wide {
-                    "  ACHIEVED".into()
-                } else {
-                    String::new()
-                },
-            ),
-            (
-                p.dim.as_str(),
-                if wide {
-                    "   IDLE".into()
-                } else {
-                    String::new()
-                },
-            ),
+            (p.dim.as_str(), if wide { "  ACHIEVED".into() } else { String::new() }),
+            (p.dim.as_str(), if wide { "   IDLE".into() } else { String::new() }),
         ],
         w - 1,
     )];
     for (i, row) in rows.iter().enumerate() {
         let here = selected == Some(i);
-        let tint = if here {
-            tc::bg(28, 44, 62)
-        } else {
-            String::new()
-        };
+        let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
         let hue = &p.hues[i % p.hues.len()];
 
         // One login, and only where there is room for it: the address is
@@ -987,18 +959,12 @@ fn table(
         let loss_c = format!(
             "{}{}",
             tint,
-            if loss.unwrap_or(0.0) >= 0.5 {
-                &p.bad
-            } else {
-                &p.dim
-            }
+            if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.dim }
         );
         let idle = [row.lastsnd, row.lastrcv]
             .into_iter()
             .flatten()
-            .fold(None, |acc: Option<f64>, v| {
-                Some(acc.map_or(v, |a| a.min(v)))
-            });
+            .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
         // A missing reading is a dash of the column's own width, not a
         // narrower cell - anything else shifts every number to its right.
         let cell = |value: Option<f64>, width: usize| match value {
@@ -1015,14 +981,7 @@ fn table(
             // The same marker the rest of the collection uses. The tint and
             // the brighter name said "selected" only next to a row that was
             // not, so on a one-row list nothing said it at all.
-            (
-                mark_c.as_str(),
-                if here {
-                    "▸".to_string()
-                } else {
-                    " ".to_string()
-                },
-            ),
+            (mark_c.as_str(), if here { "▸".to_string() } else { " ".to_string() }),
             (label_c.as_str(), tc::pad(&label, name_w)),
             (tone.as_str(), cell(row.rtt, 7)),
             (dim_c.as_str(), cell(row.floor, 8)),
@@ -1079,9 +1038,7 @@ fn detail_view(
             (p.dim.as_str(), format!("  · to port {}", row.port)),
             (
                 p.dim.as_str(),
-                users
-                    .first()
-                    .map_or(String::new(), |(u, _)| format!("  {}", u)),
+                users.first().map_or(String::new(), |(u, _)| format!("  {}", u)),
             ),
         ],
         w - 1,
@@ -1150,12 +1107,7 @@ fn detail_view(
         &p.dim,
         "the floor; the gap above it is congestion",
     );
-    field!(
-        "jitter",
-        live(row.jitter),
-        &p.dim,
-        "variation in the round trip"
-    );
+    field!("jitter", live(row.jitter), &p.dim, "variation in the round trip");
     field!(
         "timeout",
         num(&row.raw, "rto").map(|v| ms(Some(v))),
@@ -1176,11 +1128,7 @@ fn detail_view(
     field!(
         "loss just now",
         loss.map(|v| format!("{:.2}%", v)),
-        if loss.unwrap_or(0.0) >= 0.5 {
-            &p.bad
-        } else {
-            &p.txt
-        },
+        if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.txt },
         "resent since the last look",
     );
     field!(
@@ -1230,9 +1178,7 @@ fn detail_view(
     let idle = [row.lastsnd, row.lastrcv]
         .into_iter()
         .flatten()
-        .fold(None, |acc: Option<f64>, v| {
-            Some(acc.map_or(v, |a| a.min(v)))
-        });
+        .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
     field!(
         "idle",
         Some(span(idle)),
@@ -1273,10 +1219,7 @@ fn detail_view(
         let covered = plotted_span(&one, &state.history, window, refresh, w);
         rows.push(tc::seg(
             &[
-                (
-                    p.dim.as_str(),
-                    format!("        {} ago", span(Some(covered * 1000.0))),
-                ),
+                (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
                 (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
                 (p.dim.as_str(), "now".into()),
             ],
@@ -1467,9 +1410,7 @@ fn graph(
                 0 => (p.grid.as_str(), " ".into()),
                 m => (
                     colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32)
-                        .unwrap_or(' ')
-                        .to_string(),
+                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string(),
                 ),
             });
         }
@@ -1525,10 +1466,10 @@ fn hold(needed: &[String]) {
             ],
             w - 1,
         ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
+        let hints = vec![
+            vec![(dim.as_str(), "[,] settings".into())],
+            vec![(dim.as_str(), "[q]uit".into())],
+        ];
         let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
             .into_iter()
             .map(|line| format!(" {}", line))
@@ -1690,7 +1631,8 @@ mod tests {
         // nothing inside this file can catch a drift between them - only
         // the other implementation can. This port had three cells of it,
         // and every half looked plausible on its own.
-        let want = "▐ 203.0.113.221:22 williamli   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
+        let want =
+            "▐ 203.0.113.221:22 williamli   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
         let row = Session {
             peer: "203.0.113.221:22".into(),
             ip: "203.0.113.221".into(),
@@ -1706,10 +1648,10 @@ mod tests {
         };
         let state = State {
             rows: vec![row.clone()],
-            names: HashMap::from([("203.0.113.221".to_string(), vec![(
-                "williamli".to_string(),
-                "pts/0".to_string(),
-            )])]),
+            names: HashMap::from([(
+                "203.0.113.221".to_string(),
+                vec![("williamli".to_string(), "pts/0".to_string())],
+            )]),
             history: HashMap::new(),
             err: String::new(),
         };
@@ -1824,11 +1766,7 @@ mod tests {
         );
         for x in 0..4 {
             let (whose, mask) = &cells[0][x];
-            let mine = if whose == "first" {
-                top[0][x]
-            } else {
-                bottom[0][x]
-            };
+            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
             assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
             assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
         }
@@ -1868,11 +1806,7 @@ mod tests {
         // which is too long to spend in a test.
         let began = std::time::Instant::now();
         let why = tc::run(&["sleep", "30"], 1).expect_err("a wedged child must not wait for ever");
-        assert!(
-            began.elapsed() < Duration::from_secs(20),
-            "{:?}",
-            began.elapsed()
-        );
+        assert!(began.elapsed() < Duration::from_secs(20), "{:?}", began.elapsed());
         assert!(why.contains("did not answer"), "{}", why);
     }
 
@@ -1883,16 +1817,8 @@ mod tests {
         // looked at what was asked for. Nothing on screen could say so.
         let cfg = serde_json::json!({"ports": [22, 70000, 65535, 4_294_967_296u64]});
         let got = configured_ports(&cfg);
-        assert!(
-            !got.contains(&4464),
-            "70000 wrapped into a different port: {:?}",
-            got
-        );
-        assert!(
-            !got.contains(&0),
-            "a multiple of 65536 wrapped to port 0: {:?}",
-            got
-        );
+        assert!(!got.contains(&4464), "70000 wrapped into a different port: {:?}", got);
+        assert!(!got.contains(&0), "a multiple of 65536 wrapped to port 0: {:?}", got);
         // The two that are ports survive, including the top of the range.
         assert_eq!(got, vec![22, 65535]);
         // A key that is absent or the wrong shape is simply no ports.
@@ -1923,4 +1849,5 @@ mod tests {
         assert!(owners.contains(&"first"), "{:?}", owners);
         assert!(owners.contains(&"second"), "{:?}", owners);
     }
+
 }

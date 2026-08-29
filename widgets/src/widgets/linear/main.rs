@@ -53,11 +53,7 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
         return (from_config, "config");
     }
     let name = tc::cfg_str(cfg, "token_env", "LINEAR_API_KEY");
-    let name = if name.is_empty() {
-        "LINEAR_API_KEY".into()
-    } else {
-        name
-    };
+    let name = if name.is_empty() { "LINEAR_API_KEY".into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -407,20 +403,13 @@ fn project_columns(w: usize, base: usize, label_w: usize, aside: usize) -> (usiz
     // wider and says less.
     let need_aside = if aside > 0 { 2 + aside } else { 0 };
     let need_label = 2 + label_w;
-    let room = if base + need_aside <= budget {
-        aside
-    } else {
-        0
-    };
-    let label_cost = if base + need_aside + need_label <= budget {
-        need_label
-    } else {
-        0
-    };
+    let room = if base + need_aside <= budget { aside } else { 0 };
+    let label_cost = if base + need_aside + need_label <= budget { need_label } else { 0 };
     let bar = budget.saturating_sub(base + need_aside + need_label + 2);
     let bar = if bar >= 6 { bar.min(30) } else { 0 };
     (label_cost, bar, room)
 }
+
 
 /// Break text to a width without breaking a word, and without dropping one.
 fn wrap(t: &str, width: usize) -> Vec<String> {
@@ -608,13 +597,7 @@ fn one_pass(
     }
 
     // What is outstanding right now, at any age.
-    let (rows, capped) = pages(
-        tok,
-        &open_query(),
-        &["issues"],
-        &serde_json::json!({}),
-        quota,
-    )?;
+    let (rows, capped) = pages(tok, &open_query(), &["issues"], &serde_json::json!({}), quota)?;
     let mut states: HashMap<String, usize> = HashMap::new();
     let mut by_team: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut proj_open: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -651,9 +634,7 @@ fn one_pass(
                 .entry(st.clone())
                 .or_insert(0) += 1;
             if let Some(age) = hours_since(parse(&text(it, "createdAt")), Some(at)) {
-                let seat = proj_oldest
-                    .entry(in_project)
-                    .or_insert((0.0, String::new()));
+                let seat = proj_oldest.entry(in_project).or_insert((0.0, String::new()));
                 if age > seat.0 {
                     *seat = (age, text(it, "identifier"));
                 }
@@ -696,13 +677,8 @@ fn one_pass(
     }
 
     // The running cycles, each already carrying its own burndown.
-    let (cycle_nodes, cycles_capped) = pages(
-        tok,
-        CYCLES_QUERY,
-        &["cycles"],
-        &serde_json::json!({}),
-        quota,
-    )?;
+    let (cycle_nodes, cycles_capped) =
+        pages(tok, CYCLES_QUERY, &["cycles"], &serde_json::json!({}), quota)?;
     let cycles: Vec<serde_json::Value> = cycle_nodes
         .into_iter()
         .filter(|c| keys.contains(&text(&c["team"], "key")))
@@ -948,11 +924,7 @@ fn cycle_detail(
         n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
         n => n,
     };
-    let title = if team.is_empty() {
-        named
-    } else {
-        format!("{} · {}", named, team)
-    };
+    let title = if team.is_empty() { named } else { format!("{} · {}", named, team) };
     let mut rows = vec![tc::title(&title, w, &p.accent)];
     let label_w = 18usize;
     let mut field = |name: &str, value: String, aside: String, colour: &str| {
@@ -989,20 +961,12 @@ fn cycle_detail(
         "progress",
         format!("{:.0}%", pct),
         tc::meter(pct / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24)),
-        if pct >= 80.0 {
-            p.ok.as_str()
-        } else {
-            p.txt.as_str()
-        },
+        if pct >= 80.0 { p.ok.as_str() } else { p.txt.as_str() },
     );
     field(
         "scope",
         format!("{:.0}", at(&scope)),
-        format!(
-            "{:.0} done, {:.0} left",
-            at(&done),
-            (at(&scope) - at(&done)).max(0.0)
-        ),
+        format!("{:.0} done, {:.0} left", at(&done), (at(&scope) - at(&done)).max(0.0)),
         p.txt.as_str(),
     );
     if !issue_count.is_empty() {
@@ -1021,21 +985,13 @@ fn cycle_detail(
             "scope added",
             format!("{:+.0}", added),
             "since it opened".into(),
-            if added > 0.0 {
-                p.warn.as_str()
-            } else {
-                p.ok.as_str()
-            },
+            if added > 0.0 { p.warn.as_str() } else { p.ok.as_str() },
         );
     }
     let (moved, left) = churn(c);
     field(
         "ends in",
-        if left >= 999 {
-            "—".into()
-        } else {
-            format!("{}d", left)
-        },
+        if left >= 999 { "—".into() } else { format!("{}d", left) },
         text(c, "endsAt").chars().take(10).collect::<String>(),
         p.dim.as_str(),
     );
@@ -1071,11 +1027,7 @@ fn cycle_detail(
 
     // Scope above the line, completed below it, on one scale.
     if h.saturating_sub(rows.len()) >= 10 && scope.len() > 1 {
-        let hi = scope
-            .iter()
-            .chain(done.iter())
-            .cloned()
-            .fold(1.0f64, f64::max);
+        let hi = scope.iter().chain(done.iter()).cloned().fold(1.0f64, f64::max);
         rows.push(String::new());
         rows.push(tc::seg(
             &[
@@ -1096,10 +1048,7 @@ fn cycle_detail(
             }
         };
         for line in tc::vbars(
-            &fit(&scope)
-                .iter()
-                .map(|v| (*v, p.txt.clone()))
-                .collect::<Vec<_>>(),
+            &fit(&scope).iter().map(|v| (*v, p.txt.clone())).collect::<Vec<_>>(),
             3,
             hi,
         ) {
@@ -1110,17 +1059,11 @@ fn cycle_detail(
             rows.push(tc::seg(&parts, w - 1));
         }
         rows.push(tc::seg(
-            &[
-                (tc::RST, " ".into()),
-                (p.grid.as_str(), "─".repeat(fit(&scope).len())),
-            ],
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(fit(&scope).len()))],
             w - 1,
         ));
         for line in tc::vbars_down(
-            &fit(&done)
-                .iter()
-                .map(|v| (*v, p.ok.clone()))
-                .collect::<Vec<_>>(),
+            &fit(&done).iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(),
             3,
             hi,
         ) {
@@ -1137,13 +1080,7 @@ fn cycle_detail(
     if open > 0 {
         let legend: Vec<(&str, usize, &str)> = STATE_ORDER
             .iter()
-            .map(|st| {
-                (
-                    state_label(st),
-                    states.get(*st).copied().unwrap_or(0),
-                    state_colour(st, p),
-                )
-            })
+            .map(|st| (state_label(st), states.get(*st).copied().unwrap_or(0), state_colour(st, p)))
             .filter(|x| x.1 > 0)
             .collect();
         rows.push(String::new());
@@ -1170,11 +1107,7 @@ fn cycle_detail(
             legend_row.push((p.txt.as_str(), (*label).into()));
             legend_row.push((
                 p.dim.as_str(),
-                format!(
-                    " {} ({:.0}%)   ",
-                    count,
-                    100.0 * *count as f64 / open as f64
-                ),
+                format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
             ));
         }
         rows.push(tc::seg(&legend_row, w - 1));
@@ -1233,53 +1166,37 @@ fn cycle_detail(
         // Ferry Services · Peng Chau" and one cut to the same forty
         // characters are two different issues on screen.
         let lines = wrap(&it.title, title_w);
-        let (first, rest) = lines
-            .split_first()
-            .map(|(a, b)| (a.clone(), b))
-            .unwrap_or_default();
+        let (first, rest) = lines.split_first().map(|(a, b)| (a.clone(), b)).unwrap_or_default();
         rows.push(tc::seg(
             &[
                 (
-                    if here {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
-                    format!(
-                        "{} {}",
-                        if here { "▸" } else { " " },
-                        tc::pad(&it.ident, ident_w)
-                    ),
+                    if here { p.accent.as_str() } else { p.dim.as_str() },
+                    format!("{} {}", if here { "▸" } else { " " }, tc::pad(&it.ident, ident_w)),
                 ),
                 (
                     state_colour(&it.state, p),
                     format!("  {}", tc::pad(state_label(&it.state), state_w)),
                 ),
                 (
-                    if here {
-                        p.accent.as_str()
-                    } else {
-                        p.txt.as_str()
-                    },
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
                     format!("  {}", tc::pad(&first, title_w)),
                 ),
                 (p.dim.as_str(), format!("  {:>6}", dur(Some(it.age)))),
                 // Nothing rather than "0 pts" when nobody has pointed it.
-                (p.dim.as_str(), match it.points {
-                    Some(n) if n > 0.0 => format!(" {:>4}", format!("{}p", tidy(n))),
-                    _ => "     ".to_string(),
-                }),
+                (
+                    p.dim.as_str(),
+                    match it.points {
+                        Some(n) if n > 0.0 => format!(" {:>4}", format!("{}p", tidy(n))),
+                        _ => "     ".to_string(),
+                    },
+                ),
             ],
             w - 1,
         ));
         for line in rest {
             rows.push(tc::seg(
                 &[(
-                    if here {
-                        p.accent.as_str()
-                    } else {
-                        p.txt.as_str()
-                    },
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
                     format!("{}{}", " ".repeat(2 + ident_w + 2 + state_w + 2), line),
                 )],
                 w - 1,
@@ -1317,12 +1234,7 @@ fn team_detail(
             w - 1,
         ));
     };
-    field(
-        "open",
-        open.to_string(),
-        "issues not closed".into(),
-        p.txt.as_str(),
-    );
+    field("open", open.to_string(), "issues not closed".into(), p.txt.as_str());
     field(
         "done",
         get("done").to_string(),
@@ -1337,22 +1249,14 @@ fn team_detail(
             "in triage",
             triage.to_string(),
             if open > 0 {
-                format!(
-                    "{:.0}% of open, unlooked at",
-                    100.0 * triage as f64 / open as f64
-                )
+                format!("{:.0}% of open, unlooked at", 100.0 * triage as f64 / open as f64)
             } else {
                 String::new()
             },
             p.bad.as_str(),
         );
     }
-    field(
-        "in progress",
-        get("started").to_string(),
-        String::new(),
-        p.warn.as_str(),
-    );
+    field("in progress", get("started").to_string(), String::new(), p.warn.as_str());
 
     if open > 0 && h.saturating_sub(rows.len()) >= 4 {
         let legend: Vec<(&str, usize, &str)> = [
@@ -1389,11 +1293,7 @@ fn team_detail(
                 legend_row.push((p.txt.as_str(), (*label).into()));
                 legend_row.push((
                     p.dim.as_str(),
-                    format!(
-                        " {} ({:.0}%)   ",
-                        count,
-                        100.0 * *count as f64 / open as f64
-                    ),
+                    format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
                 ));
             }
             rows.push(tc::seg(&legend_row, w - 1));
@@ -1487,16 +1387,8 @@ fn team_detail(
         rows.push(tc::seg(
             &[
                 (
-                    if here {
-                        p.accent.as_str()
-                    } else {
-                        p.txt.as_str()
-                    },
-                    format!(
-                        "{} {}",
-                        if here { "▸" } else { " " },
-                        tc::pad(&q.name, name_w)
-                    ),
+                    if here { p.accent.as_str() } else { p.txt.as_str() },
+                    format!("{} {}", if here { "▸" } else { " " }, tc::pad(&q.name, name_w)),
                 ),
                 (colour, format!("  {}", tc::pad(&q.label, label_w))),
                 (colour, format!("  {}", tc::meter(q.progress, bar_w))),
@@ -1554,21 +1446,17 @@ fn project_detail(
         "progress",
         format!("{:.0}%", 100.0 * q.progress),
         tc::meter(q.progress, w.saturating_sub(label_w + 22).clamp(6, 24)),
-        if q.progress >= 0.8 {
-            p.ok.as_str()
-        } else {
-            p.txt.as_str()
-        },
+        if q.progress >= 0.8 { p.ok.as_str() } else { p.txt.as_str() },
     );
-    field("status", String::new(), q.label.clone(), p.txt.as_str());
+    field(
+        "status",
+        String::new(),
+        q.label.clone(),
+        p.txt.as_str(),
+    );
 
     let series = |v: &serde_json::Value, key: &str| -> Vec<f64> {
-        v[key]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|x| x.as_f64())
-            .collect()
+        v[key].as_array().into_iter().flatten().filter_map(|x| x.as_f64()).collect()
     };
     let at = |v: &[f64]| v.last().copied().unwrap_or(0.0);
     if let Some(v) = held.filter(|v| v["_error"].is_null() && !v.is_null()) {
@@ -1584,11 +1472,7 @@ fn project_detail(
             field(
                 "scope in points",
                 format!("{:.0}", at(&scope)),
-                format!(
-                    "{:.0} done, {:.0} left",
-                    at(&done),
-                    (at(&scope) - at(&done)).max(0.0)
-                ),
+                format!("{:.0} done, {:.0} left", at(&done), (at(&scope) - at(&done)).max(0.0)),
                 p.txt.as_str(),
             );
         }
@@ -1608,11 +1492,7 @@ fn project_detail(
                 "scope added",
                 format!("{:+.0}", added),
                 "since it started".into(),
-                if added > 0.0 {
-                    p.warn.as_str()
-                } else {
-                    p.ok.as_str()
-                },
+                if added > 0.0 { p.warn.as_str() } else { p.ok.as_str() },
             );
         }
     }
@@ -1631,12 +1511,7 @@ fn project_detail(
     // whether the work had since landed.
     let done_with = !finished.is_empty() || q.kind == "completed" || q.kind == "canceled";
     if !q.target.is_empty() && done_with {
-        field(
-            "target was",
-            String::new(),
-            q.target.clone(),
-            p.dim.as_str(),
-        );
+        field("target was", String::new(), q.target.clone(), p.dim.as_str());
     } else if !q.target.is_empty() {
         // Whether the date is still ahead, said in days rather than left to
         // the reader to work out from today's.
@@ -1669,22 +1544,12 @@ fn project_detail(
         // settle a question that is almost always already settled. So the
         // connection says whether there are more and the row carries it:
         // "21+" is honest where "21" would be wrong.
-        let more = v["members"]["pageInfo"]["hasNextPage"]
-            .as_bool()
-            .unwrap_or(false);
+        let more = v["members"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
         if !names.is_empty() {
             field(
                 "members",
-                if more {
-                    format!("{}+", names.len())
-                } else {
-                    names.len().to_string()
-                },
-                if more {
-                    format!("{}, …", names.join(", "))
-                } else {
-                    names.join(", ")
-                },
+                if more { format!("{}+", names.len()) } else { names.len().to_string() },
+                if more { format!("{}, …", names.join(", ")) } else { names.join(", ") },
                 p.dim.as_str(),
             );
         }
@@ -1718,12 +1583,7 @@ fn project_detail(
         }
     }
     if let Some((age, ident)) = oldest {
-        field(
-            "oldest open",
-            dur(Some(*age)),
-            ident.clone(),
-            p.warn.as_str(),
-        );
+        field("oldest open", dur(Some(*age)), ident.clone(), p.warn.as_str());
     }
 
     // What is open in it, by state, across every team that shares it.
@@ -1731,13 +1591,7 @@ fn project_detail(
     if open > 0 {
         let legend: Vec<(&str, usize, &str)> = STATE_ORDER
             .iter()
-            .map(|st| {
-                (
-                    state_label(st),
-                    states.get(*st).copied().unwrap_or(0),
-                    state_colour(st, p),
-                )
-            })
+            .map(|st| (state_label(st), states.get(*st).copied().unwrap_or(0), state_colour(st, p)))
             .filter(|x| x.1 > 0)
             .collect();
         rows.push(String::new());
@@ -1764,11 +1618,7 @@ fn project_detail(
             legend_row.push((p.txt.as_str(), (*label).into()));
             legend_row.push((
                 p.dim.as_str(),
-                format!(
-                    " {} ({:.0}%)   ",
-                    count,
-                    100.0 * *count as f64 / open as f64
-                ),
+                format!(" {} ({:.0}%)   ", count, 100.0 * *count as f64 / open as f64),
             ));
         }
         rows.push(tc::seg(&legend_row, w - 1));
@@ -1777,10 +1627,7 @@ fn project_detail(
     match held {
         None => {
             rows.push(String::new());
-            rows.push(tc::seg(
-                &[(p.dim.as_str(), "  asking Linear for the rest...".into())],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.dim.as_str(), "  asking Linear for the rest...".into())], w - 1));
             return rows;
         }
         Some(v) if !v["_error"].is_null() => {
@@ -1796,10 +1643,7 @@ fn project_detail(
         }
         Some(v) if v.is_null() => {
             rows.push(String::new());
-            rows.push(tc::seg(
-                &[(p.bad.as_str(), "  Linear returned no such project".into())],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.bad.as_str(), "  Linear returned no such project".into())], w - 1));
             return rows;
         }
         _ => {}
@@ -1828,10 +1672,7 @@ fn project_detail(
         .collect();
     // Undated last: they have no place in a sequence of dates.
     stones.sort_by(|a, b| {
-        a.1.is_empty()
-            .cmp(&b.1.is_empty())
-            .then(a.1.cmp(&b.1))
-            .then(a.0.cmp(&b.0))
+        a.1.is_empty().cmp(&b.1.is_empty()).then(a.1.cmp(&b.1)).then(a.0.cmp(&b.0))
     });
     if !stones.is_empty() {
         rows.push(String::new());
@@ -1851,21 +1692,10 @@ fn project_detail(
             ],
             w - 1,
         ));
-        let name_w = stones
-            .iter()
-            .map(|(n, _, _)| n.chars().count())
-            .max()
-            .unwrap_or(8)
-            .max(8);
-        let bar_w = (w - 1)
-            .saturating_sub(2 + name_w + 2 + 5 + 2 + 10)
-            .clamp(6, 30);
+        let name_w = stones.iter().map(|(n, _, _)| n.chars().count()).max().unwrap_or(8).max(8);
+        let bar_w = (w - 1).saturating_sub(2 + name_w + 2 + 5 + 2 + 10).clamp(6, 30);
         for (name, date, frac) in &stones {
-            let colour = if *frac >= 1.0 {
-                p.ok.as_str()
-            } else {
-                p.txt.as_str()
-            };
+            let colour = if *frac >= 1.0 { p.ok.as_str() } else { p.txt.as_str() };
             rows.push(tc::seg(
                 &[
                     (p.txt.as_str(), format!("  {}", tc::pad(name, name_w))),
@@ -1881,10 +1711,7 @@ fn project_detail(
     let about = text(v, "description");
     if !about.trim().is_empty() {
         rows.push(String::new());
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), " ── WHAT IT IS FOR ── ".into())],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── WHAT IT IS FOR ── ".into())], w - 1));
         // Wrapped whole, never cut: this screen scrolls, so there is no
         // width to buy by dropping the end of a sentence.
         for line in wrap(&about, w.saturating_sub(4)) {
@@ -1945,75 +1772,6 @@ fn tidy(v: f64) -> String {
     }
 }
 
-/// Draw the missing-tool screen and keep settings reachable from it.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("linear ops", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from Linear's GraphQL API, and curl is",
-            "how this reaches it - the same way the other widgets reach",
-            "ss, ping and tailscale.",
-            "",
-            "The key is passed to curl on its standard input rather than",
-            "in its arguments, because /proc/<pid>/cmdline is readable by",
-            "every user on the machine.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install curl".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     let cfg = tc::load_config("linear");
@@ -2041,7 +1799,21 @@ fn main() {
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "linear ops",
+            &absent,
+            &[
+                "Everything here comes from Linear's GraphQL API, and curl is",
+                "how this reaches it - the same way the other widgets reach",
+                "ss, ping and tailscale.",
+                "",
+                "The key is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+            SETTINGS,
+        );
         return;
     }
 
@@ -2060,45 +1832,48 @@ fn main() {
     let ui_token = tok.clone();
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "LINEAR_API_KEY");
-        if name.is_empty() {
-            "LINEAR_API_KEY".to_string()
-        } else {
-            name
-        }
+        if name.is_empty() { "LINEAR_API_KEY".to_string() } else { name }
     };
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_days = Arc::clone(&days);
     let poller_quota = Arc::clone(&quota);
-    std::thread::spawn(move || {
-        loop {
-            if tok.is_empty() {
+    std::thread::spawn(move || loop {
+        if tok.is_empty() {
+            if let Ok(mut guard) = poller.lock() {
+                guard.err = format!(
+                    "no key: set linear.token in config.json or ${}",
+                    env_name
+                );
+            }
+        } else {
+            let want = poller_days.lock().map(|g| *g).unwrap_or(14);
+            if let Err(said) = one_pass(
+                &tok,
+                source,
+                want,
+                &keep,
+                &exclude,
+                &poller,
+                &poller_quota,
+            ) {
                 if let Ok(mut guard) = poller.lock() {
-                    guard.err = format!("no key: set linear.token in config.json or ${}", env_name);
-                }
-            } else {
-                let want = poller_days.lock().map(|g| *g).unwrap_or(14);
-                if let Err(said) =
-                    one_pass(&tok, source, want, &keep, &exclude, &poller, &poller_quota)
-                {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = said;
-                    }
+                    guard.err = said;
                 }
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     tc::setup();
@@ -2295,11 +2070,7 @@ fn main() {
                 // step back in at the near end, the same ring latency and
                 // link use.
                 "up" | "down" if detail.is_some() => {
-                    let at = if deep.is_some() {
-                        &mut pscroll
-                    } else {
-                        &mut dscroll
-                    };
+                    let at = if deep.is_some() { &mut pscroll } else { &mut dscroll };
                     if key == "down" {
                         *at = at.saturating_add(1);
                     } else {
@@ -2308,11 +2079,7 @@ fn main() {
                 }
                 "pgup" | "pgdn" if detail.is_some() => {
                     let page = tc::size().1.saturating_sub(3).max(1);
-                    let at = if deep.is_some() {
-                        &mut pscroll
-                    } else {
-                        &mut dscroll
-                    };
+                    let at = if deep.is_some() { &mut pscroll } else { &mut dscroll };
                     *at = if key == "pgdn" {
                         at.saturating_add(page)
                     } else {
@@ -2353,12 +2120,11 @@ fn main() {
                     pick = 0;
                     match focus {
                         Some(here) => {
-                            focus = tc::step_across_sections(here, sel[here], &pane_len, down).map(
-                                |(pane, row)| {
+                            focus = tc::step_across_sections(here, sel[here], &pane_len, down)
+                                .map(|(pane, row)| {
                                     sel[pane] = row;
                                     pane
-                                },
-                            );
+                                });
                             moved = true;
                         }
                         // Nothing focused: the arrows move the board. The
@@ -2387,9 +2153,7 @@ fn main() {
                         // crossing out of a section is what the single
                         // arrows are for.
                         sel[here] = if key == "pgdn" {
-                            sel[here]
-                                .saturating_add(page)
-                                .min(pane_len[here].saturating_sub(1))
+                            sel[here].saturating_add(page).min(pane_len[here].saturating_sub(1))
                         } else {
                             sel[here].saturating_sub(page)
                         };
@@ -2418,21 +2182,13 @@ fn main() {
         let mut head = vec![
             (
                 p.dim.as_str(),
-                format!(
-                    " {} team{}",
-                    s.teams.len(),
-                    if s.teams.len() == 1 { "" } else { "s" }
-                ),
+                format!(" {} team{}", s.teams.len(), if s.teams.len() == 1 { "" } else { "s" }),
             ),
             (p.dim.as_str(), format!("   updated {} ago", ago(s.fetched))),
         ];
         if let Some(left) = left {
             head.push((
-                if left > 500 {
-                    p.ok.as_str()
-                } else {
-                    p.warn.as_str()
-                },
+                if left > 500 { p.ok.as_str() } else { p.warn.as_str() },
                 format!("   {} req left/hr", left),
             ));
         }
@@ -2489,11 +2245,7 @@ fn main() {
                 None => (label.into(), "--".into(), p.dim.clone()),
                 Some((hours, ident)) => (
                     label.into(),
-                    format!(
-                        "{} {}",
-                        if ident.is_empty() { "?" } else { ident },
-                        dur(Some(*hours))
-                    ),
+                    format!("{} {}", if ident.is_empty() { "?" } else { ident }, dur(Some(*hours))),
                     colour.to_string(),
                 ),
             }
@@ -2519,11 +2271,7 @@ fn main() {
         // Two columns only when a value still gets room for the longest
         // thing it holds - an identifier and a duration. Cells are a fixed
         // width so a long value cannot push the next column out of line.
-        let ncols = if (w - 2) / 2 >= label_w + 3 + 15 {
-            2
-        } else {
-            1
-        };
+        let ncols = if (w - 2) / 2 >= label_w + 3 + 15 { 2 } else { 1 };
         let cw = (w - 2) / ncols;
         let val_w = cw.saturating_sub(label_w + 3).max(6);
         for chunk in cells.chunks(ncols) {
@@ -2548,11 +2296,7 @@ fn main() {
                 (p.dim.as_str(), "   (any age)".into()),
                 (
                     p.warn.as_str(),
-                    if s.truncated {
-                        "   truncated".into()
-                    } else {
-                        String::new()
-                    },
+                    if s.truncated { "   truncated".into() } else { String::new() },
                 ),
             ],
             w - 1,
@@ -2565,10 +2309,7 @@ fn main() {
                     if n == 0 {
                         return None;
                     }
-                    Some((
-                        n as f64 / total_open as f64,
-                        state_colour(st, &p).to_string(),
-                    ))
+                    Some((n as f64 / total_open as f64, state_colour(st, &p).to_string()))
                 })
                 .collect();
             let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
@@ -2608,23 +2349,12 @@ fn main() {
         rows.push(tc::seg(
             &[
                 (
-                    if here_now {
-                        p.accent.as_str()
-                    } else {
-                        p.lbl.as_str()
-                    },
+                    if here_now { p.accent.as_str() } else { p.lbl.as_str() },
                     " ── ACTIVE CYCLES ── ".into(),
                 ),
+                (p.dim.as_str(), running_label(s.cycles.len(), s.cycles_capped)),
                 (
-                    p.dim.as_str(),
-                    running_label(s.cycles.len(), s.cycles_capped),
-                ),
-                (
-                    if here_now {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
+                    if here_now { p.accent.as_str() } else { p.dim.as_str() },
                     heading_keys(cycles_pane, focus, &pane_len).to_string(),
                 ),
             ],
@@ -2643,8 +2373,8 @@ fn main() {
             let scope = last_of(c, "scopeHistory");
             let done = last_of(c, "completedScopeHistory");
             let opened_at = first_of(c, "scopeHistory");
-            let left_days =
-                parse(&text(c, "endsAt")).map(|ends| (ends - Utc::now().naive_utc()).num_days());
+            let left_days = parse(&text(c, "endsAt"))
+                .map(|ends| (ends - Utc::now().naive_utc()).num_days());
             let frac = if scope > 0.0 { done / scope } else { 0.0 };
             let name = format!(
                 "{} {}",
@@ -2653,17 +2383,12 @@ fn main() {
                     k => k,
                 },
                 match text(c, "name") {
-                    n if n.is_empty() =>
-                        format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
+                    n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
                     n => n,
                 }
             );
             let on = focus == Some(cycles_pane) && ci == sel[cycles_pane];
-            let tint = if on {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if on { tc::bg(38, 56, 76) } else { String::new() };
             let c_of = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2719,10 +2444,7 @@ fn main() {
             // Scope added after the cycle opened is the number that explains
             // a cycle working hard and still slipping.
             if scope > opened_at {
-                line.push((
-                    c_of(&p.bad),
-                    format!("  +{} added", tidy(scope - opened_at)),
-                ));
+                line.push((c_of(&p.bad), format!("  +{} added", tidy(scope - opened_at))));
             }
             if on {
                 line.push((tint.clone(), " ".repeat(w)));
@@ -2736,11 +2458,7 @@ fn main() {
         let today = Utc::now().date_naive();
         let mut days_list: Vec<String> = (0..want)
             .rev()
-            .map(|n| {
-                (today - chrono::Duration::days(n))
-                    .format("%Y-%m-%d")
-                    .to_string()
-            })
+            .map(|n| (today - chrono::Duration::days(n)).format("%Y-%m-%d").to_string())
             .collect();
         let avail = w.saturating_sub(3).max(10);
         if days_list.len() > avail {
@@ -2831,14 +2549,8 @@ fn main() {
                     let q = settle_t as f64 / SETTLE_FRAMES as f64;
                     let q = q * q * (3.0 - 2.0 * q);
                     (
-                        fu.iter()
-                            .zip(&real_u)
-                            .map(|(a, b)| a + (b - a) * q)
-                            .collect(),
-                        fd.iter()
-                            .zip(&real_d)
-                            .map(|(a, b)| a + (b - a) * q)
-                            .collect(),
+                        fu.iter().zip(&real_u).map(|(a, b)| a + (b - a) * q).collect(),
+                        fd.iter().zip(&real_d).map(|(a, b)| a + (b - a) * q).collect(),
                         tc::mix(GHOST, NEW_RGB, 0.45 + 0.55 * q),
                         tc::mix(GHOST, OK_RGB, 0.45 + 0.55 * q),
                     )
@@ -2858,10 +2570,7 @@ fn main() {
             rows.push(tc::seg(&parts, w - 1));
         }
         rows.push(tc::seg(
-            &[
-                (tc::RST, " ".into()),
-                (p.grid.as_str(), "─".repeat(chart_cols)),
-            ],
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(chart_cols))],
             w - 1,
         ));
         for line in tc::vbars_down(
@@ -2881,11 +2590,7 @@ fn main() {
                 (p.dim.as_str(), format!(" {}", left_lbl)),
                 (
                     p.dim.as_str(),
-                    " ".repeat(
-                        chart_cols
-                            .saturating_sub(left_lbl.chars().count() + 5)
-                            .max(1),
-                    ),
+                    " ".repeat(chart_cols.saturating_sub(left_lbl.chars().count() + 5).max(1)),
                 ),
                 (p.dim.as_str(), "today".into()),
             ],
@@ -2912,19 +2617,11 @@ fn main() {
         rows.push(tc::seg(
             &[
                 (
-                    if on_teams {
-                        p.accent.as_str()
-                    } else {
-                        p.lbl.as_str()
-                    },
+                    if on_teams { p.accent.as_str() } else { p.lbl.as_str() },
                     " ── BY TEAM ──".into(),
                 ),
                 (
-                    if on_teams {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
+                    if on_teams { p.accent.as_str() } else { p.dim.as_str() },
                     heading_keys(teams_pane, focus, &pane_len).to_string(),
                 ),
             ],
@@ -2955,11 +2652,7 @@ fn main() {
             let c = s.by_team.get(key).unwrap_or(&empty);
             let count = |k: &str| c.get(k).copied().unwrap_or(0);
             let here = on_teams && i == sel[teams_pane];
-            let tint = if here {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c_of = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2991,11 +2684,7 @@ fn main() {
                     format!("{:>7}", count("triage")),
                 ),
                 (
-                    c_of(if count("started") > 0 {
-                        &p.warn
-                    } else {
-                        &p.dim
-                    }),
+                    c_of(if count("started") > 0 { &p.warn } else { &p.dim }),
                     format!("{:>8}", count("started")),
                 ),
                 (
@@ -3030,11 +2719,7 @@ fn main() {
         rows.push(tc::seg(
             &[
                 (
-                    if on_projects {
-                        p.accent.as_str()
-                    } else {
-                        p.lbl.as_str()
-                    },
+                    if on_projects { p.accent.as_str() } else { p.lbl.as_str() },
                     " ── PROJECTS ── ".into(),
                 ),
                 // What is not in the list, because a count of the running
@@ -3048,11 +2733,7 @@ fn main() {
                     },
                 ),
                 (
-                    if on_projects {
-                        p.accent.as_str()
-                    } else {
-                        p.dim.as_str()
-                    },
+                    if on_projects { p.accent.as_str() } else { p.dim.as_str() },
                     heading_keys(projects_pane, focus, &pane_len).to_string(),
                 ),
             ],
@@ -3071,11 +2752,8 @@ fn main() {
             let asides: Vec<String> = live
                 .iter()
                 .map(|q| {
-                    let open: usize = s
-                        .proj_state
-                        .get(&q.id)
-                        .map(|m| m.values().sum())
-                        .unwrap_or(0);
+                    let open: usize =
+                        s.proj_state.get(&q.id).map(|m| m.values().sum()).unwrap_or(0);
                     if open > 0 {
                         format!("{} open", open)
                     } else {
@@ -3098,41 +2776,30 @@ fn main() {
                 if here {
                     cursor = Some(rows.len());
                 }
-                let tint = if here {
-                    tc::bg(38, 56, 76)
-                } else {
-                    String::new()
-                };
+                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c_of = |colour: &str| {
-                    // Any colour that would not clear AA on this tint is swapped
-                    // for its lighter twin. `dim` was measured first; a review
-                    // found the others after the first fix shipped saying it was
-                    // done, so they are here by measurement rather than by guess.
-                    let colour = if tint.is_empty() {
-                        colour
-                    } else if colour == p.dim {
-                        p.dim_lit.as_str()
-                    } else if colour == p.bad {
-                        p.bad_lit.as_str()
-                    } else {
-                        colour
-                    };
-                    format!("{}{}", tint, colour)
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
+                    colour
+                } else if colour == p.dim {
+                    p.dim_lit.as_str()
+                } else if colour == p.bad {
+                    p.bad_lit.as_str()
+                } else {
+                    colour
                 };
+                format!("{}{}", tint, colour)
+            };
                 let colour = match q.kind.as_str() {
                     "started" => p.warn.as_str(),
                     _ => p.txt.as_str(),
                 };
-                let aside = if aside.chars().count() <= room {
-                    aside.as_str()
-                } else {
-                    ""
-                };
-                let aside = if aside.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", aside)
-                };
+                let aside = if aside.chars().count() <= room { aside.as_str() } else { "" };
+                let aside =
+                    if aside.is_empty() { String::new() } else { format!("  {}", aside) };
                 let line: Vec<(String, String)> = vec![
                     (
                         c_of(if here { &p.accent } else { &p.dim }),
@@ -3201,10 +2868,7 @@ fn main() {
                 let empty = HashMap::new();
                 let states = s.proj_state.get(&q.id).unwrap_or(&empty);
                 let oldest = s.proj_oldest.get(&q.id).cloned();
-                let record = held
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.get(&q.id).map(|(v, _)| v.clone()));
+                let record = held.lock().ok().and_then(|g| g.get(&q.id).map(|(v, _)| v.clone()));
                 (
                     project_detail(
                         q,
@@ -3227,8 +2891,7 @@ fn main() {
                         let states = s.cycle_state.get(&id).unwrap_or(&empty);
                         let issues = s.cycle_issues.get(&id).unwrap_or(&none);
                         list_len = issues.len();
-                        copy_url = issues
-                            .get(pick.min(issues.len().saturating_sub(1)))
+                        copy_url = issues.get(pick.min(issues.len().saturating_sub(1)))
                             .map(|i| (i.url.clone(), i.ident.clone()));
                         cycle_detail(c, states, issues, pick, w, h, &p)
                     })
@@ -3239,9 +2902,7 @@ fn main() {
                         let empty = HashMap::new();
                         let counts = s.by_team.get(key).unwrap_or(&empty);
                         let opens = s.proj_open.get(key).unwrap_or(&empty);
-                        team_detail(
-                            key, name, counts, &projects, opens, pick, s.window, w, h, &p,
-                        )
+                        team_detail(key, name, counts, &projects, opens, pick, s.window, w, h, &p)
                     })
                     .unwrap_or_default()
             };
@@ -3330,11 +2991,7 @@ fn main() {
                     .map(|l| format!(" {}", l))
                     .collect();
                 let room = h.saturating_sub(foot.len()).max(1);
-                let at = if reading.is_some() {
-                    &mut pscroll
-                } else {
-                    &mut dscroll
-                };
+                let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
                 // The title is pinned here as it is on the board. A detail
                 // screen is where it matters most: the board repeats team
                 // and project names down its rows, but scroll a cycle or a
@@ -3389,24 +3046,14 @@ fn main() {
                 (p.accent.as_str(), "↑↓".into()),
                 (
                     p.dim.as_str(),
-                    if focus.is_some() {
-                        " select"
-                    } else {
-                        " scroll"
-                    }
-                    .to_string(),
+                    if focus.is_some() { " select" } else { " scroll" }.to_string(),
                 ),
             ],
             vec![
                 (p.accent.as_str(), "tab".into()),
                 (
                     p.dim.as_str(),
-                    if focus.is_some() {
-                        " next section"
-                    } else {
-                        " into a section"
-                    }
-                    .to_string(),
+                    if focus.is_some() { " next section" } else { " into a section" }.to_string(),
                 ),
             ],
         ];
@@ -3481,9 +3128,7 @@ mod tests {
     /// for one column - so two rows that line up on screen came back two
     /// apart and failed a test about alignment.
     fn col(line: &str, needle: &str) -> usize {
-        let at = line
-            .find(needle)
-            .unwrap_or_else(|| panic!("{:?} not in {:?}", needle, line));
+        let at = line.find(needle).unwrap_or_else(|| panic!("{:?} not in {:?}", needle, line));
         line[..at].chars().count()
     }
 
@@ -3495,18 +3140,8 @@ mod tests {
         opens: &HashMap<String, usize>,
         w: usize,
     ) -> String {
-        let (rows, _) = team_detail(
-            "ABC",
-            "A Team",
-            counts,
-            projects,
-            opens,
-            0,
-            14,
-            w,
-            40,
-            &palette(),
-        );
+        let (rows, _) =
+            team_detail("ABC", "A Team", counts, projects, opens, 0, 14, w, 40, &palette());
         plain(&rows)
     }
 
@@ -3556,8 +3191,7 @@ mod tests {
         // eight with seven closed has one row - and without saying so, a
         // heading reading "1" under "issues 8" reads as a bug.
         let issues = vec![an_issue("ABC-1", "a thing", "started", 30.0, Some(3.0))];
-        let states: HashMap<String, usize> =
-            [("started".to_string(), 1usize)].into_iter().collect();
+        let states: HashMap<String, usize> = [("started".to_string(), 1usize)].into_iter().collect();
         let (rows, at) = cycle_detail(&a_cycle(8.0, 7.0), &states, &issues, 0, 110, 40, &palette());
         let out = plain(&rows);
         assert!(out.contains("OPEN IN THIS CYCLE"), "{}", out);
@@ -3574,15 +3208,8 @@ mod tests {
 
     #[test]
     fn a_cycle_with_nothing_open_says_so_and_offers_no_cursor() {
-        let (rows, at) = cycle_detail(
-            &a_cycle(4.0, 4.0),
-            &HashMap::new(),
-            &[],
-            0,
-            110,
-            40,
-            &palette(),
-        );
+        let (rows, at) =
+            cycle_detail(&a_cycle(4.0, 4.0), &HashMap::new(), &[], 0, 110, 40, &palette());
         let out = plain(&rows);
         assert!(out.contains("nothing open in it"), "{}", out);
         // No cursor means the arrows go back to scrolling the screen, and
@@ -3597,8 +3224,7 @@ mod tests {
         let long = "Check every published rate · northern route · via the interchange \
                     stop · against the operator's own timetable";
         let issues = vec![an_issue("ABC-1", long, "started", 30.0, None)];
-        let states: HashMap<String, usize> =
-            [("started".to_string(), 1usize)].into_iter().collect();
+        let states: HashMap<String, usize> = [("started".to_string(), 1usize)].into_iter().collect();
         let (rows, _) = cycle_detail(&a_cycle(1.0, 0.0), &states, &issues, 0, 100, 40, &palette());
         let out = plain(&rows);
         // Every word of it is on screen, even though no single row is wide
@@ -3640,9 +3266,7 @@ mod tests {
     #[test]
     fn a_team_screen_lists_its_projects_with_their_own_progress() {
         let counts: HashMap<String, usize> =
-            [("open".to_string(), 9usize), ("started".to_string(), 4)]
-                .into_iter()
-                .collect();
+            [("open".to_string(), 9usize), ("started".to_string(), 4)].into_iter().collect();
         let projects = vec![
             a_project("p1", "hallway-lights", "In Progress", "started", 0.5),
             a_project("p2", "old-thing", "Done", "completed", 1.0),
@@ -3667,16 +3291,9 @@ mod tests {
         // without saying so the column below does not reconcile with the
         // team's own open count three lines above it.
         let counts: HashMap<String, usize> = [("open".to_string(), 9usize)].into_iter().collect();
-        let projects = vec![a_project(
-            "p1",
-            "hallway-lights",
-            "In Progress",
-            "started",
-            0.5,
-        )];
-        let opens: HashMap<String, usize> = [("p1".to_string(), 4usize), (String::new(), 5)]
-            .into_iter()
-            .collect();
+        let projects = vec![a_project("p1", "hallway-lights", "In Progress", "started", 0.5)];
+        let opens: HashMap<String, usize> =
+            [("p1".to_string(), 4usize), (String::new(), 5)].into_iter().collect();
         let out = team_rows(&counts, &projects, &opens, 100);
         assert!(out.contains("5 open in no project"), "{}", out);
 
@@ -3697,7 +3314,8 @@ mod tests {
             a_project("p1", long, "Completed", "completed", 0.87),
             a_project("p2", "short", "In Progress", "started", 0.1),
         ];
-        let out = team_rows(&counts, &projects, &HashMap::new(), 130);
+        let out =
+            team_rows(&counts, &projects, &HashMap::new(), 130);
         assert!(out.contains(long), "{}", out);
         // And the short one still lines up under it.
         let row = out.lines().find(|l| l.contains("short")).unwrap();
@@ -3720,11 +3338,7 @@ mod tests {
         let opens: HashMap<String, usize> = [("p1".to_string(), 2usize)].into_iter().collect();
         let wide = team_rows(&counts, &[q.clone()], &opens, 130);
         let row = wide.lines().find(|l| l.contains("a-project")).unwrap();
-        assert!(
-            row.contains("2 open · due 2024-07-26 · Wilhelmina"),
-            "{}",
-            row
-        );
+        assert!(row.contains("2 open · due 2024-07-26 · Wilhelmina"), "{}", row);
 
         // Squeezed, the last fact leaves whole. What is left is still true,
         // and no half-written name is on screen claiming to be someone.
@@ -3733,13 +3347,8 @@ mod tests {
             let row = out.lines().find(|l| l.contains("a-project")).unwrap();
             let aside = row.split("50%").nth(1).unwrap().trim();
             assert!(
-                [
-                    "",
-                    "2 open",
-                    "2 open · due 2024-07-26",
-                    "2 open · due 2024-07-26 · Wilhelmina"
-                ]
-                .contains(&aside),
+                ["", "2 open", "2 open · due 2024-07-26", "2 open · due 2024-07-26 · Wilhelmina"]
+                    .contains(&aside),
                 "w={} left a part cut in half: {:?}",
                 w,
                 aside
@@ -3755,24 +3364,10 @@ mod tests {
             a_project("p2", "second", "In Progress", "started", 0.2),
             a_project("p3", "third", "In Progress", "started", 0.3),
         ];
-        let (rows, at) = team_detail(
-            "ABC",
-            "A",
-            &counts,
-            &projects,
-            &HashMap::new(),
-            1,
-            14,
-            100,
-            40,
-            &palette(),
-        );
+        let (rows, at) =
+            team_detail("ABC", "A", &counts, &projects, &HashMap::new(), 1, 14, 100, 40, &palette());
         let at = at.expect("a project list has a cursor");
-        assert!(
-            plain(&[rows[at].clone()]).contains("second"),
-            "{}",
-            plain(&[rows[at].clone()])
-        );
+        assert!(plain(&[rows[at].clone()]).contains("second"), "{}", plain(&[rows[at].clone()]));
         // Exactly one marker, so the reader is never asked which of two is
         // the one enter would open.
         assert_eq!(plain(&rows).matches('▸').count(), 1);
@@ -3780,18 +3375,8 @@ mod tests {
         // A cursor past the end lands on the last project rather than
         // falling off it - the list shortens under the cursor whenever a
         // poll lands.
-        let (rows, at) = team_detail(
-            "ABC",
-            "A",
-            &counts,
-            &projects,
-            &HashMap::new(),
-            99,
-            14,
-            100,
-            40,
-            &palette(),
-        );
+        let (rows, at) =
+            team_detail("ABC", "A", &counts, &projects, &HashMap::new(), 99, 14, 100, 40, &palette());
         assert!(plain(&[rows[at.unwrap()].clone()]).contains("third"));
     }
 
@@ -3818,21 +3403,11 @@ mod tests {
     fn a_project_screen_shows_what_it_has_before_the_rest_arrives() {
         let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
         let states: HashMap<String, usize> =
-            [("started".to_string(), 2usize), ("triage".to_string(), 1)]
-                .into_iter()
-                .collect();
+            [("started".to_string(), 2usize), ("triage".to_string(), 1)].into_iter().collect();
         // Nothing fetched yet: the name, status and progress the list
         // already knew are on the first frame, and the screen says a
         // request is out rather than looking empty.
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            None,
-            &states,
-            None,
-            100,
-            &palette(),
-        ));
+        let out = plain(&project_detail(&q, "ABC", None, &states, None, 100, &palette()));
         assert!(out.contains("HALLWAY-LIGHTS · ABC"), "{}", out);
         assert!(out.contains(" 50%"), "{}", out);
         assert!(out.contains("In Progress"), "{}", out);
@@ -3847,15 +3422,8 @@ mod tests {
         let mut q = a_project("p1", "old-thing", "Completed", "completed", 1.0);
         q.target = "2024-07-26".into();
         let record = serde_json::json!({ "completedAt": "2024-08-01T00:00:00.000Z" });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&record),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
         assert!(!out.contains("overdue"), "{}", out);
         assert!(out.contains("2024-08-01"), "{}", out);
         assert!(out.contains("target was"), "{}", out);
@@ -3863,15 +3431,8 @@ mod tests {
         // Still running and past its date, it is late and says so.
         let mut q = a_project("p2", "live-thing", "In Progress", "started", 0.4);
         q.target = "2024-07-26".into();
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&serde_json::json!({})),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&serde_json::json!({})), &HashMap::new(), None, 100, &palette()));
         assert!(out.contains("overdue by"), "{}", out);
     }
 
@@ -3881,15 +3442,8 @@ mod tests {
         // failure nobody records is indistinguishable from a slow answer.
         let q = a_project("p1", "hallway-lights", "In Progress", "started", 0.5);
         let bad = serde_json::json!({ "_error": "HTTP 502 from Linear" });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&bad),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&bad), &HashMap::new(), None, 100, &palette()));
         assert!(out.contains("could not read the project"), "{}", out);
         assert!(out.contains("HTTP 502"), "{}", out);
         assert!(!out.contains("asking Linear"), "{}", out);
@@ -3913,29 +3467,13 @@ mod tests {
             })
         };
         let shown = |v: &serde_json::Value| {
-            plain(&project_detail(
-                &q,
-                "ABC",
-                Some(v),
-                &HashMap::new(),
-                None,
-                100,
-                &palette(),
-            ))
+            plain(&project_detail(&q, "ABC", Some(v), &HashMap::new(), None, 100, &palette()))
         };
         let out = shown(&stones(true));
-        assert!(
-            out.contains("MILESTONES ── 2+"),
-            "a page that did not end is a floor:\n{}",
-            out
-        );
+        assert!(out.contains("MILESTONES ── 2+"), "a page that did not end is a floor:\n{}", out);
         let out = shown(&stones(false));
         assert!(out.contains("MILESTONES ── 2"), "{}", out);
-        assert!(
-            !out.contains("2+"),
-            "nothing is missing, so nothing is marked:\n{}",
-            out
-        );
+        assert!(!out.contains("2+"), "nothing is missing, so nothing is marked:\n{}", out);
 
         // A record from before the flag was asked for reads as a plain total
         // rather than as suspect - the same allowance the members row makes.
@@ -3944,10 +3482,7 @@ mod tests {
                 { "name": "kick-off", "targetDate": "2026-09-03", "progress": 100.0 },
             ]},
         });
-        assert!(
-            !shown(&old).contains("1+"),
-            "no flag is not the same as a flag saying more"
-        );
+        assert!(!shown(&old).contains("1+"), "no flag is not the same as a flag saying more");
     }
 
     #[test]
@@ -3963,25 +3498,10 @@ mod tests {
                 "pageInfo": { "hasNextPage": true },
             },
         });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&record),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
-        assert!(
-            out.contains("2+"),
-            "a page that did not end is a floor:\n{}",
-            out
-        );
-        assert!(
-            out.contains("ada, grace, …"),
-            "and the list says so too:\n{}",
-            out
-        );
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(out.contains("2+"), "a page that did not end is a floor:\n{}", out);
+        assert!(out.contains("ada, grace, …"), "and the list says so too:\n{}", out);
 
         // The connection ended, so the count is the count.
         let record = serde_json::json!({
@@ -3990,35 +3510,17 @@ mod tests {
                 "pageInfo": { "hasNextPage": false },
             },
         });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&record),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
-        assert!(
-            !out.contains("2+"),
-            "nothing is missing, so nothing is marked:\n{}",
-            out
-        );
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
+        assert!(!out.contains("2+"), "nothing is missing, so nothing is marked:\n{}", out);
         assert!(out.contains("ada, grace"), "{}", out);
         assert!(!out.contains('…'), "{}", out);
 
         // A record with no pageInfo at all - an older shape, or a fixture -
         // reads as complete rather than as suspect.
         let record = serde_json::json!({ "members": { "nodes": [ { "name": "ada" } ] } });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&record),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
         assert!(!out.contains("1+"), "{}", out);
     }
 
@@ -4045,24 +3547,9 @@ mod tests {
             ("done", done_query()),
         ];
         for (name, q) in &walked {
-            assert!(
-                q.contains("$after: String"),
-                "{} declares no cursor:\n{}",
-                name,
-                q
-            );
-            assert!(
-                q.contains("after: $after"),
-                "{} never passes its cursor:\n{}",
-                name,
-                q
-            );
-            assert!(
-                q.contains("endCursor"),
-                "{} asks for no endCursor:\n{}",
-                name,
-                q
-            );
+            assert!(q.contains("$after: String"), "{} declares no cursor:\n{}", name, q);
+            assert!(q.contains("after: $after"), "{} never passes its cursor:\n{}", name, q);
+            assert!(q.contains("endCursor"), "{} asks for no endCursor:\n{}", name, q);
         }
     }
 
@@ -4078,23 +3565,12 @@ mod tests {
                 { "name": "sooner", "targetDate": "2026-09-03", "progress": 67.86 },
             ]},
         });
-        let out = plain(&project_detail(
-            &q,
-            "ABC",
-            Some(&record),
-            &HashMap::new(),
-            None,
-            100,
-            &palette(),
-        ));
+        let out =
+            plain(&project_detail(&q, "ABC", Some(&record), &HashMap::new(), None, 100, &palette()));
         let rows: Vec<&str> = out.lines().collect();
         let seat = |name: &str| rows.iter().position(|l| l.contains(name)).unwrap();
         assert!(seat("sooner") < seat("later"), "{}", out);
-        assert!(
-            seat("later") < seat("undated"),
-            "dated milestones come first:\n{}",
-            out
-        );
+        assert!(seat("later") < seat("undated"), "dated milestones come first:\n{}", out);
         // 67.86 out of a hundred, not 6786%.
         let row = rows[seat("sooner")];
         assert!(row.contains(" 68%"), "{}", row);
@@ -4174,11 +3650,7 @@ mod tests {
                 assert!(
                     base + label_cost + bar_cost + aside_cost <= w - 1,
                     "w={} overflows: base {} label {} bar {} aside {}",
-                    w,
-                    base,
-                    label_cost,
-                    bar_cost,
-                    aside_cost
+                    w, base, label_cost, bar_cost, aside_cost
                 );
             } else {
                 // Too narrow even for the name: nothing optional is added
@@ -4191,9 +3663,7 @@ mod tests {
                 assert!(
                     now.0 >= before.0 && now.1 >= before.1 && now.2 >= before.2,
                     "w={} lost a column the narrower pane had: {:?} then {:?}",
-                    w,
-                    before,
-                    now
+                    w, before, now
                 );
             }
             had = Some(now);
@@ -4205,10 +3675,12 @@ mod tests {
         assert!(label_cost > 0 && bar == 30 && room >= aside);
     }
 
+
     #[test]
     fn a_team_with_no_projects_says_so_rather_than_showing_an_empty_heading() {
         let counts: HashMap<String, usize> = [("open".to_string(), 3usize)].into_iter().collect();
-        let out = team_rows(&counts, &[], &HashMap::new(), 100);
+        let out =
+            team_rows(&counts, &[], &HashMap::new(), 100);
         assert!(out.contains("owns no projects"), "{}", out);
     }
 
@@ -4243,6 +3715,7 @@ mod tests {
         // And a real one still reads.
         assert!(parse("2026-08-24T10:00:00.000Z").is_some());
     }
+
 
     #[test]
     fn a_span_changes_unit_before_it_stops_meaning_anything() {

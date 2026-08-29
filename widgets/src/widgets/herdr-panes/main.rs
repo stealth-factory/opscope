@@ -96,10 +96,7 @@ fn tail_path(path: &str, n: usize) -> String {
     if chars.len() <= n || n < 2 {
         return path.to_string();
     }
-    format!(
-        "…{}",
-        chars[chars.len() - (n - 1)..].iter().collect::<String>()
-    )
+    format!("…{}", chars[chars.len() - (n - 1)..].iter().collect::<String>())
 }
 
 fn base_name(path: &str) -> String {
@@ -115,11 +112,7 @@ fn command_label(argv: &[String], name: &str) -> String {
         "python", "python3", "node", "ruby", "perl", "bun", "deno", "sh", "bash", "zsh",
     ];
     let Some(first) = argv.first() else {
-        return if name.is_empty() {
-            "?".into()
-        } else {
-            name.into()
-        };
+        return if name.is_empty() { "?".into() } else { name.into() };
     };
     let head = base_name(first);
     let stem = head.split('.').next().unwrap_or(&head);
@@ -157,7 +150,11 @@ fn proc_stats(pid: i32) -> Option<(u64, u64)> {
 
 fn clock_ticks() -> f64 {
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if hz > 0 { hz as f64 } else { 100.0 }
+    if hz > 0 {
+        hz as f64
+    } else {
+        100.0
+    }
 }
 
 /// A recognised coding agent, and what its process is costing.
@@ -487,11 +484,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 Front::Running(_, argv, name, cwd) => (
                     Doing::Running,
                     command_label(&argv, &name),
-                    if cwd.is_empty() {
-                        text_at(pane, "cwd")
-                    } else {
-                        cwd
-                    },
+                    if cwd.is_empty() { text_at(pane, "cwd") } else { cwd },
                     String::new(),
                 ),
                 Front::Prompt => (
@@ -503,7 +496,12 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 // The pane's own directory still comes from `pane list`, so
                 // an unread pane is not a blank row - it is a row that says
                 // where it is and that nobody could see into it.
-                Front::Unknown(why) => (Doing::Unknown, String::new(), text_at(pane, "cwd"), why),
+                Front::Unknown(why) => (
+                    Doing::Unknown,
+                    String::new(),
+                    text_at(pane, "cwd"),
+                    why,
+                ),
             };
             panels.push(Panel {
                 tab_id: text_at(pane, "tab_id"),
@@ -886,10 +884,7 @@ fn main() {
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
-        if note
-            .as_ref()
-            .is_some_and(|(_, _, until)| tc::now() >= *until)
-        {
+        if note.as_ref().is_some_and(|(_, _, until)| tc::now() >= *until) {
             note = None;
         }
 
@@ -913,22 +908,16 @@ fn main() {
         ];
         for state_name in ["blocked", "done", "working", "idle"] {
             if let Some(n) = counts.get(state_name) {
-                summary.push((
-                    colour_of(state_name, &p),
-                    format!("   {} {}", n, state_name),
-                ));
+                summary.push((colour_of(state_name, &p), format!("   {} {}", n, state_name)));
             }
         }
         rows.push(tc::seg(&summary, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(
-                &[(p.blocked.as_str(), format!(" ! {}", err))],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.blocked.as_str(), format!(" ! {}", err))], w - 1));
         }
 
-        let wants =
-            counts.get("blocked").copied().unwrap_or(0) + counts.get("done").copied().unwrap_or(0);
+        let wants = counts.get("blocked").copied().unwrap_or(0)
+            + counts.get("done").copied().unwrap_or(0);
         rows.push(if wants > 0 {
             tc::seg(
                 &[(
@@ -954,10 +943,7 @@ fn main() {
         // budget until that is settled. Each section budgeting for itself is
         // what drifted before, and left the footer written past the bottom.
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "↵".into()),
                 (p.dim.as_str(), " switch to this pane".into()),
@@ -1013,7 +999,7 @@ fn main() {
             + usize::from(busy.is_empty())
             + if idle_listed { 2 } else { 0 }         // blank, IDLE
             + footer.len()
-            + 1; // the note line
+            + 1;                                      // the note line
         let room = h.saturating_sub(chrome).max(1);
         // An agent takes two rows and a pane takes one, in the order the
         // keys walk them.
@@ -1102,21 +1088,14 @@ fn main() {
                 (c(colour), format!(" {:<8}", state_cell)),
                 (
                     c(&p.dim),
-                    format!(
-                        " {:<6}",
-                        format!("{}{}", if a.exact { "" } else { "≥" }, ago(a.since))
-                    ),
+                    format!(" {:<6}", format!("{}{}", if a.exact { "" } else { "≥" }, ago(a.since))),
                 ),
                 (c(&heat), percent(a.cpu)),
             ];
             if wide {
                 let place = if show_labels {
                     let label = labels.get(&a.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() {
-                        a.workspace_id.clone()
-                    } else {
-                        label
-                    }
+                    if label.is_empty() { a.workspace_id.clone() } else { label }
                 } else {
                     a.pane_id.clone()
                 };
@@ -1137,11 +1116,7 @@ fn main() {
                         (&c(body), a.title.trim().to_string()),
                         (
                             &tint,
-                            if loud || here {
-                                " ".repeat(w)
-                            } else {
-                                String::new()
-                            },
+                            if loud || here { " ".repeat(w) } else { String::new() },
                         ),
                     ],
                     w - 1,
@@ -1149,10 +1124,7 @@ fn main() {
             }
         }
         if agents.is_empty() && err.is_empty() {
-            rows.push(tc::seg(
-                &[(p.dim.as_str(), "   no agents running".into())],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.dim.as_str(), "   no agents running".into())], w - 1));
         }
 
         rows.push(String::new());
@@ -1176,10 +1148,7 @@ fn main() {
                 &[(
                     p.dim.as_str(),
                     tc::pad(
-                        &format!(
-                            " {:<20} {:<5} {:<5} {:<18}",
-                            "COMMAND", "CPU", "MEM", "WORKSPACE"
-                        ),
+                        &format!(" {:<20} {:<5} {:<5} {:<18}", "COMMAND", "CPU", "MEM", "WORKSPACE"),
                         w - 1,
                     ),
                 )],
@@ -1193,11 +1162,7 @@ fn main() {
         // going away between the listing and the probe - so the first one
         // speaks for all of them.
         if let Some(n) = unread.first() {
-            let why = if n.why.is_empty() {
-                "no reason given"
-            } else {
-                &n.why
-            };
+            let why = if n.why.is_empty() { "no reason given" } else { &n.why };
             rows.push(tc::seg(
                 &[(p.unknown.as_str(), format!("   ⚠ {}", why))],
                 w - 1,
@@ -1208,11 +1173,7 @@ fn main() {
                 continue;
             }
             let here = agents.len() + j == selected;
-            let tint = if here {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -1270,11 +1231,7 @@ fn main() {
             if wide {
                 let place = if show_labels {
                     let label = labels.get(&n.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() {
-                        n.workspace_id.clone()
-                    } else {
-                        label
-                    }
+                    if label.is_empty() { n.workspace_id.clone() } else { label }
                 } else {
                     n.pane_id.clone()
                 };
@@ -1292,10 +1249,7 @@ fn main() {
         // pane the probe failed on is not a Herdr where everything rests.
         if busy.is_empty() {
             rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    "   every other pane is idle at a prompt".into(),
-                )],
+                &[(p.dim.as_str(), "   every other pane is idle at a prompt".into())],
                 w - 1,
             ));
         }
@@ -1313,11 +1267,7 @@ fn main() {
                     (p.lbl.as_str(), " ── IDLE ── ".into()),
                     (
                         p.dim.as_str(),
-                        format!(
-                            "{} pane{} at a prompt",
-                            resting.len(),
-                            plural(resting.len())
-                        ),
+                        format!("{} pane{} at a prompt", resting.len(), plural(resting.len())),
                     ),
                     (
                         p.dim.as_str(),
@@ -1331,40 +1281,32 @@ fn main() {
                     continue;
                 }
                 let here = agents.len() + busy.len() + j == selected;
-                let tint = if here {
-                    tc::bg(38, 56, 76)
-                } else {
-                    String::new()
-                };
+                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c = |colour: &str| {
-                    // Any colour that would not clear AA on this tint is swapped
-                    // for its lighter twin. `dim` was measured first; a review
-                    // found the others after the first fix shipped saying it was
-                    // done, so they are here by measurement rather than by guess.
-                    let colour = if tint.is_empty() {
-                        colour
-                    } else if colour == p.dim {
-                        p.dim_lit.as_str()
-                    } else if colour == p.idle {
-                        p.idle_lit.as_str()
-                    } else if colour == p.unknown {
-                        p.unknown_lit.as_str()
-                    } else if colour == p.blocked {
-                        p.blocked_lit.as_str()
-                    } else if colour == p.idle_c {
-                        p.idle_c_lit.as_str()
-                    } else {
-                        colour
-                    };
-                    format!("{}{}", tint, colour)
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
+                    colour
+                } else if colour == p.dim {
+                    p.dim_lit.as_str()
+                } else if colour == p.idle {
+                    p.idle_lit.as_str()
+                } else if colour == p.unknown {
+                    p.unknown_lit.as_str()
+                } else if colour == p.blocked {
+                    p.blocked_lit.as_str()
+                } else if colour == p.idle_c {
+                    p.idle_c_lit.as_str()
+                } else {
+                    colour
                 };
+                format!("{}{}", tint, colour)
+            };
                 let place = if show_labels {
                     let label = labels.get(&n.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() {
-                        n.workspace_id.clone()
-                    } else {
-                        label
-                    }
+                    if label.is_empty() { n.workspace_id.clone() } else { label }
                 } else {
                     n.pane_id.clone()
                 };
@@ -1390,11 +1332,7 @@ fn main() {
         rows.push(match note.as_ref() {
             Some((text, ok, _)) => tc::seg(
                 &[(
-                    if *ok {
-                        p.done.as_str()
-                    } else {
-                        p.blocked.as_str()
-                    },
+                    if *ok { p.done.as_str() } else { p.blocked.as_str() },
                     format!(" {}", text),
                 )],
                 w - 1,
@@ -1408,7 +1346,11 @@ fn main() {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Draw the missing-tool fallback and keep settings reachable from it.
@@ -1461,10 +1403,10 @@ fn hold(needed: &[String]) {
             ],
             w - 1,
         ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
+        let hints = vec![
+            vec![(dim.as_str(), "[,] settings".into())],
+            vec![(dim.as_str(), "[q]uit".into())],
+        ];
         let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
             .into_iter()
             .map(|line| format!(" {}", line))
@@ -1496,14 +1438,7 @@ mod tests {
             for at in 0..heights.len() {
                 for from in [0usize, 5, 14, 30, 42] {
                     let w = window_over(&heights, at, room, from, true);
-                    assert!(
-                        w.contains(&at),
-                        "room={} at={} from={} gave {:?}",
-                        room,
-                        at,
-                        from,
-                        w
-                    );
+                    assert!(w.contains(&at), "room={} at={} from={} gave {:?}", room, at, from, w);
                     // And it fits, unless one entry alone is taller than the
                     // pane - in which case it is drawn anyway, because the
                     // alternative is drawing nothing.
@@ -1511,11 +1446,7 @@ mod tests {
                     assert!(
                         used <= room || w.len() == 1,
                         "room={} at={} from={} drew {} rows in {:?}",
-                        room,
-                        at,
-                        from,
-                        used,
-                        w
+                        room, at, from, used, w
                     );
                 }
             }
@@ -1612,10 +1543,13 @@ mod tests {
         }
     }
 
+
     #[test]
     fn a_runner_gives_way_to_the_script_it_was_handed() {
         // "python3" and "node" say nothing about what a pane is doing.
-        let argv = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+        let argv = |s: &str| -> Vec<String> {
+            s.split_whitespace().map(String::from).collect()
+        };
         assert_eq!(
             command_label(&argv("/usr/bin/python3 /home/w/toys/netwatch.py"), ""),
             "netwatch.py"
@@ -1636,10 +1570,7 @@ mod tests {
 
     #[test]
     fn a_cut_path_says_that_it_was_cut() {
-        assert_eq!(
-            tail_path("/home/w/projects/toys", 40),
-            "/home/w/projects/toys"
-        );
+        assert_eq!(tail_path("/home/w/projects/toys", 40), "/home/w/projects/toys");
         // The end is kept, because that is the part that names the thing.
         assert_eq!(tail_path("/home/w/projects/toys", 10), "…ects/toys");
         assert_eq!(tail_path("/home/w/projects/toys", 10).chars().count(), 10);
@@ -1704,11 +1635,9 @@ mod tests {
         let failed = r#"{"error":{"code":"pane_not_found","message":"pane not found"},"id":"p"}"#;
         assert_eq!(result_of(failed).unwrap_err(), "pane not found");
         // An error with no message still has to say something.
-        assert!(
-            !result_of(r#"{"error":{"code":"busy"}}"#)
-                .unwrap_err()
-                .is_empty()
-        );
+        assert!(!result_of(r#"{"error":{"code":"busy"}}"#)
+            .unwrap_err()
+            .is_empty());
         // Output that is not JSON at all is a failure, not a silence.
         assert!(result_of("herdr: no server on this socket").is_err());
         // A null result is nothing, and says so rather than handing it on.
@@ -1751,10 +1680,7 @@ mod tests {
         // An answer with nothing readable in it is neither of those. It used
         // to fall through to the same `None` as the prompt, and the pane
         // joined IDLE with no sign that anything had gone wrong.
-        assert!(matches!(
-            classify(&serde_json::json!({})),
-            Front::Unknown(_)
-        ));
+        assert!(matches!(classify(&serde_json::json!({})), Front::Unknown(_)));
         assert!(matches!(
             classify(&info(serde_json::json!({"argv": ["sh"]}), 200)),
             Front::Unknown(_)

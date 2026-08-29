@@ -48,11 +48,7 @@ fn token(pr_cfg: &serde_json::Value, gh_cfg: &serde_json::Value) -> (String, &'s
         }
     }
     let name = tc::cfg_str(pr_cfg, "token_env", "GITHUB_TOKEN");
-    let name = if name.is_empty() {
-        "GITHUB_TOKEN".into()
-    } else {
-        name
-    };
+    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -130,11 +126,7 @@ const PR_HEAVY_FIELDS: &str = "
 /// correct, they simply show their checks as unknown, which is what an
 /// unknown check should look like. Inventing "passing" because a lookup
 /// failed is the one outcome that would be worse than a dash.
-fn enrich(
-    pool: &mut HashMap<String, serde_json::Value>,
-    by_id: &HashMap<String, String>,
-    tok: &str,
-) {
+fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String, String>, tok: &str) {
     let ids: Vec<String> = by_id.keys().cloned().collect();
     for chunk in ids.chunks(50) {
         let query = format!(
@@ -148,9 +140,7 @@ fn enrich(
             // checks were never read.
             for id in chunk {
                 let Some(url) = by_id.get(id) else { continue };
-                let Some(entry) = pool.get_mut(url) else {
-                    continue;
-                };
+                let Some(entry) = pool.get_mut(url) else { continue };
                 entry["checksUnknown"] = serde_json::json!(true);
             }
             continue;
@@ -158,9 +148,7 @@ fn enrich(
         for node in d["nodes"].as_array().into_iter().flatten() {
             let id = text(node, "id");
             let Some(url) = by_id.get(&id) else { continue };
-            let Some(entry) = pool.get_mut(url) else {
-                continue;
-            };
+            let Some(entry) = pool.get_mut(url) else { continue };
             entry["stackEntry"] = node["stackEntry"].clone();
             entry["commits"] = node["commits"].clone();
         }
@@ -378,7 +366,9 @@ fn stack_of(number: i64, repo_prs: &[serde_json::Value]) -> Chain {
 type StackRow = (String, serde_json::Value, bool, Option<i64>);
 
 /// What the open is actually doing, so the wait can show real work.
-#[derive(Clone, Default)]
+#[derive(Clone)]
+
+#[derive(Default)]
 struct State {
     viewer: String,
     orgs: Vec<String>,
@@ -494,10 +484,14 @@ fn fetch_detail(
                     serde_json::json!({ "owner": owner, "name": name, "after": after }),
                 )?;
                 let conn = &repo["repository"]["pullRequests"];
-                others.extend(conn["nodes"].as_array().cloned().unwrap_or_default());
+                others.extend(
+                    conn["nodes"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 if let Ok(mut g) = state.lock() {
-                    g.stages
-                        .count("stack, from open branches", others.len(), None);
+                    g.stages.count("stack, from open branches", others.len(), None);
                 }
                 let next = conn["pageInfo"]["endCursor"]
                     .as_str()
@@ -655,7 +649,8 @@ fn fetch_list(
 
     while !live.is_empty() {
         let round: Vec<String> = live.iter().map(|i| queries[*i].clone()).collect();
-        let round_cursors: Vec<Option<String>> = live.iter().map(|i| cursors[*i].clone()).collect();
+        let round_cursors: Vec<Option<String>> =
+            live.iter().map(|i| cursors[*i].clone()).collect();
         // A round that fails ends the paging; it does not lose the pass.
         // GitHub's search stops serving these nodes somewhere past the
         // fourth page - measured: pages 1-4 answer, page 5 returns 502,
@@ -740,7 +735,8 @@ fn fetch_list(
         // the last source is exhausted, and the count in the header is the
         // count on screen at every moment in between.
         if let Ok(mut g) = state.lock() {
-            g.stages.count("pull requests", order.len(), None);
+            g.stages
+                .count("pull requests", order.len(), None);
             let partial: Vec<serde_json::Value> = order
                 .iter()
                 .filter_map(|url| pool.get(url).cloned())
@@ -901,86 +897,13 @@ fn matches(pr: &serde_json::Value, needle: &str) -> bool {
 }
 
 fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<serde_json::Value> {
-    let key = if field == "updated" {
-        "updatedAt"
-    } else {
-        "createdAt"
-    };
+    let key = if field == "updated" { "updatedAt" } else { "createdAt" };
     let mut out = prs.to_vec();
     out.sort_by(|a, b| {
         let (x, y) = (text(a, key), text(b, key));
         if newest_first { y.cmp(&x) } else { x.cmp(&y) }
     });
     out
-}
-
-/// Draw the missing-tool screen and keep settings reachable from it.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("github prs", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from GitHub's GraphQL API, and curl is",
-            "how this reaches it - the same way the other widgets reach",
-            "ss, ping and tailscale.",
-            "",
-            "The token is passed to curl on its standard input rather than",
-            "in its arguments, because /proc/<pid>/cmdline is readable by",
-            "every user on the machine.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install curl".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 fn main() {
@@ -1026,7 +949,21 @@ fn main() {
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "github prs",
+            &absent,
+            &[
+                "Everything here comes from GitHub's GraphQL API, and curl is",
+                "how this reaches it - the same way the other widgets reach",
+                "ss, ping and tailscale.",
+                "",
+                "The token is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+            SETTINGS,
+        );
         return;
     }
 
@@ -1042,59 +979,57 @@ fn main() {
     let poll_tok = tok.clone();
     let poll_sources = sources.clone();
     let poll_extra = extra.clone();
-    std::thread::spawn(move || {
-        loop {
-            if poll_tok.is_empty() {
-                if let Ok(mut g) = poller.lock() {
-                    g.err = "no token: set github.token in config.json or $GITHUB_TOKEN".into();
+    std::thread::spawn(move || loop {
+        if poll_tok.is_empty() {
+            if let Ok(mut g) = poller.lock() {
+                g.err = "no token: set github.token in config.json or $GITHUB_TOKEN".into();
+            }
+        } else {
+            let want = poller.lock().ok().and_then(|g| {
+                let have = g.detail.as_ref().map(|d| number(d, "number"));
+                match &g.want {
+                    Some(w) if Some(w.2) != have => Some(w.clone()),
+                    _ => None,
                 }
-            } else {
-                let want = poller.lock().ok().and_then(|g| {
-                    let have = g.detail.as_ref().map(|d| number(d, "number"));
-                    match &g.want {
-                        Some(w) if Some(w.2) != have => Some(w.clone()),
-                        _ => None,
-                    }
-                });
-                let mut failed = None;
-                if let Some(want) = want {
-                    if let Err(said) = fetch_detail(&poll_tok, &want, &poller) {
-                        failed = Some(said);
-                    }
-                }
-                if failed.is_none() {
-                    if let Err(said) = fetch_list(
-                        &poll_tok,
-                        source,
-                        &poll_sources,
-                        &poll_extra,
-                        limit,
-                        &poller,
-                        &poller_rate,
-                    ) {
-                        failed = Some(said);
-                    }
-                }
-                if let Some(said) = failed {
-                    if let Ok(mut g) = poller.lock() {
-                        g.err = said;
-                        g.loading = false;
-                    }
+            });
+            let mut failed = None;
+            if let Some(want) = want {
+                if let Err(said) = fetch_detail(&poll_tok, &want, &poller) {
+                    failed = Some(said);
                 }
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+            if failed.is_none() {
+                if let Err(said) = fetch_list(
+                    &poll_tok,
+                    source,
+                    &poll_sources,
+                    &poll_extra,
+                    limit,
+                    &poller,
+                    &poller_rate,
+                ) {
+                    failed = Some(said);
+                }
+            }
+            if let Some(said) = failed {
+                if let Ok(mut g) = poller.lock() {
+                    g.err = said;
+                    g.loading = false;
+                }
+            }
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     tc::setup();
@@ -1244,12 +1179,8 @@ fn main() {
                                     g.detail = None;
                                     g.stack_rows.clear();
                                     g.loading = true;
-                                    g.target = format!(
-                                        "{}/{} #{}",
-                                        parts[3],
-                                        parts[4],
-                                        number(node, "number")
-                                    );
+                                    g.target =
+                                        format!("{}/{} #{}", parts[3], parts[4], number(node, "number"));
                                     g.stages.clear();
                                 }
                                 stack_sel = 0;
@@ -1262,7 +1193,8 @@ fn main() {
                         let full = text(&pick["repository"], "nameWithOwner");
                         if let Some((owner, name)) = full.split_once('/') {
                             if let Ok(mut g) = state.lock() {
-                                g.want = Some((owner.into(), name.into(), number(pick, "number")));
+                                g.want =
+                                    Some((owner.into(), name.into(), number(pick, "number")));
                                 g.detail = None;
                                 g.stack_rows.clear();
                                 g.loading = true;
@@ -1330,19 +1262,11 @@ fn main() {
                 // never a selection - selection is the arrows' job, here as
                 // everywhere in the collection.
                 "ctrl-y" | "wheel-up" => {
-                    let at = if detail.is_some() {
-                        &mut dscroll
-                    } else {
-                        &mut board
-                    };
+                    let at = if detail.is_some() { &mut dscroll } else { &mut board };
                     *at = at.saturating_sub(1);
                 }
                 "ctrl-e" | "wheel-down" => {
-                    let at = if detail.is_some() {
-                        &mut dscroll
-                    } else {
-                        &mut board
-                    };
+                    let at = if detail.is_some() { &mut dscroll } else { &mut board };
                     *at = at.saturating_add(1);
                 }
                 _ => {}
@@ -1403,11 +1327,7 @@ fn main() {
             count.push((p.ok.as_str(), "   copied ".into()));
             count.push((
                 p.dim.as_str(),
-                copied
-                    .0
-                    .chars()
-                    .take(w.saturating_sub(46).max(10))
-                    .collect(),
+                copied.0.chars().take(w.saturating_sub(46).max(10)).collect(),
             ));
         }
         rows.push(tc::seg(&count, w - 1));
@@ -1492,10 +1412,7 @@ fn main() {
             moved = false;
             rows.extend(list);
             vec![
-                vec![
-                    (p.accent.as_str(), "↑↓".into()),
-                    (p.dim.as_str(), " select".into()),
-                ],
+                vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
                 vec![(p.dim.as_str(), "[↵] open".into())],
                 vec![(p.dim.as_str(), "[/]filter".into())],
                 vec![(p.dim.as_str(), format!("[s]ort {}", SORTS[sort_at]))],
@@ -1631,20 +1548,12 @@ fn stats_view(
             (p.dim.as_str(), format!("{} draft", drafts)),
             (p.dim.as_str(), " · ".into()),
             (
-                if conflicts > 0 {
-                    p.bad.as_str()
-                } else {
-                    p.dim.as_str()
-                },
+                if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
                 format!("{} conflicting", conflicts),
             ),
             (p.dim.as_str(), " · ".into()),
             (
-                if ready > 0 {
-                    p.ok.as_str()
-                } else {
-                    p.dim.as_str()
-                },
+                if ready > 0 { p.ok.as_str() } else { p.dim.as_str() },
                 format!("{} ready to merge", ready),
             ),
         ],
@@ -1711,11 +1620,7 @@ fn stats_view(
     let today = Utc::now().date_naive();
     let days: Vec<String> = (0..OPENED_DAYS)
         .rev()
-        .map(|k| {
-            (today - chrono::Duration::days(k))
-                .format("%Y-%m-%d")
-                .to_string()
-        })
+        .map(|k| (today - chrono::Duration::days(k)).format("%Y-%m-%d").to_string())
         .collect();
     let mut per_day: HashMap<&String, usize> = days.iter().map(|d| (d, 0)).collect();
     let mut inside = 0usize;
@@ -1759,10 +1664,7 @@ fn stats_view(
             rows.push(tc::seg(&parts, w - 1));
         }
         rows.push(tc::seg(
-            &[
-                (tc::RST, " ".into()),
-                (p.grid.as_str(), "─".repeat(cols.len())),
-            ],
+            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(cols.len()))],
             w - 1,
         ));
         let left = format!("{}d ago", OPENED_DAYS);
@@ -1871,9 +1773,7 @@ fn stats_view(
             w - 1,
         ));
     }
-    if let Some(fattest) = prs
-        .iter()
-        .max_by_key(|p| number(p, "additions") + number(p, "deletions"))
+    if let Some(fattest) = prs.iter().max_by_key(|p| number(p, "additions") + number(p, "deletions"))
     {
         let worst = |pairs: &[(f64, &serde_json::Value)]| -> String {
             match pairs.iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
@@ -1978,11 +1878,7 @@ fn list_view(
     // The time column follows the sort, so the number you ordered by is the
     // number you can see. Labelling both "AGE" had it reporting idle time
     // while the stats above reported true age, and the two disagreed.
-    let when_label = if sort_field == "created" {
-        "AGE"
-    } else {
-        "IDLE"
-    };
+    let when_label = if sort_field == "created" { "AGE" } else { "IDLE" };
     head += &format!(
         "{:<width$}{:>13}{:>8}{:>6}",
         "TITLE",
@@ -2014,27 +1910,23 @@ fn list_view(
     };
     for (i, pr) in prs.iter().enumerate().skip(first).take(room) {
         let here = i == selected;
-        let tint = if here {
-            tc::bg(38, 56, 76)
-        } else {
-            String::new()
-        };
+        let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
         let c = |colour: &str| {
-            // Any colour that would not clear AA on this tint is swapped
-            // for its lighter twin. `dim` was measured first; a review
-            // found the others after the first fix shipped saying it was
-            // done, so they are here by measurement rather than by guess.
-            let colour = if tint.is_empty() {
-                colour
-            } else if colour == p.dim {
-                p.dim_lit.as_str()
-            } else if colour == p.bad {
-                p.bad_lit.as_str()
-            } else {
-                colour
+                // Any colour that would not clear AA on this tint is swapped
+                // for its lighter twin. `dim` was measured first; a review
+                // found the others after the first fix shipped saying it was
+                // done, so they are here by measurement rather than by guess.
+                let colour = if tint.is_empty() {
+                    colour
+                } else if colour == p.dim {
+                    p.dim_lit.as_str()
+                } else if colour == p.bad {
+                    p.bad_lit.as_str()
+                } else {
+                    colour
+                };
+                format!("{}{}", tint, colour)
             };
-            format!("{}{}", tint, colour)
-        };
         let (rlabel, rcol) = review_label(&text(pr, "reviewDecision"), p);
         let (clabel, ccol) = check_label(&rollup(pr), p);
         let stacked = !pr["stackEntry"].is_null();
@@ -2052,16 +1944,26 @@ fn list_view(
             let repo = full.rsplit('/').next().unwrap_or("").to_string();
             line.push((
                 c(&p.dim),
-                tc::pad(&repo.chars().take(repo_w - 1).collect::<String>(), repo_w),
+                tc::pad(
+                    &repo.chars().take(repo_w - 1).collect::<String>(),
+                    repo_w,
+                ),
             ));
         }
-        let mut name = format!("{}{}", if stacked { "⣿ " } else { "" }, text(pr, "title"));
+        let mut name = format!(
+            "{}{}",
+            if stacked { "⣿ " } else { "" },
+            text(pr, "title")
+        );
         if pr["isDraft"].as_bool().unwrap_or(false) {
             name = format!("draft · {}", name);
         }
         line.push((
             c(&p.txt),
-            tc::pad(&name.chars().take(title_w - 1).collect::<String>(), title_w),
+            tc::pad(
+                &name.chars().take(title_w - 1).collect::<String>(),
+                title_w,
+            ),
         ));
         line.push((c(rcol), format!("{:>13}", rlabel)));
         line.push((c(ccol), format!("{:>8}", clabel)));
@@ -2071,11 +1973,7 @@ fn list_view(
                 "{:>6}",
                 ago(&text(
                     pr,
-                    if sort_field == "created" {
-                        "createdAt"
-                    } else {
-                        "updatedAt"
-                    }
+                    if sort_field == "created" { "createdAt" } else { "updatedAt" }
                 ))
             ),
         ));
@@ -2179,10 +2077,13 @@ fn detail_view(
     rows.push(tc::seg(
         &[
             (p.dim.as_str(), "  ".into()),
-            (p.dim.as_str(), match text(&pr["author"], "login") {
-                s if s.is_empty() => "?".into(),
-                s => s,
-            }),
+            (
+                p.dim.as_str(),
+                match text(&pr["author"], "login") {
+                    s if s.is_empty() => "?".into(),
+                    s => s,
+                },
+            ),
             (p.dim.as_str(), "   ".into()),
             (p.accent.as_str(), text(pr, "headRefName")),
             (p.dim.as_str(), " → ".into()),
@@ -2206,11 +2107,7 @@ fn detail_view(
         (
             "unresolved threads".into(),
             unresolved.to_string(),
-            if unresolved > 0 {
-                p.bad.as_str()
-            } else {
-                p.ok.as_str()
-            },
+            if unresolved > 0 { p.bad.as_str() } else { p.ok.as_str() },
         ),
         (
             "size".into(),
@@ -2238,11 +2135,7 @@ fn detail_view(
         ),
     ];
     let label_w = cells.iter().map(|c| c.0.len()).max().unwrap_or(8);
-    let ncols = if (w - 2) / 2 >= label_w + 3 + 18 {
-        2
-    } else {
-        1
-    };
+    let ncols = if (w - 2) / 2 >= label_w + 3 + 18 { 2 } else { 1 };
     let cw = (w - 2) / ncols;
     let val_w = cw.saturating_sub(label_w + 3).max(6);
     for chunk in cells.chunks(ncols) {
@@ -2265,11 +2158,7 @@ fn detail_view(
         }
     }
     let mut pending: Vec<String> = Vec::new();
-    for n in pr["reviewRequests"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    for n in pr["reviewRequests"]["nodes"].as_array().into_iter().flatten() {
         let who = &n["requestedReviewer"];
         let name = match text(who, "login") {
             s if !s.is_empty() => s,
@@ -2290,11 +2179,7 @@ fn detail_view(
     };
     let groups: Vec<(&str, &str, Vec<String>)> = vec![
         ("approved", p.ok.as_str(), pick("APPROVED")),
-        (
-            "changes requested",
-            p.bad.as_str(),
-            pick("CHANGES_REQUESTED"),
-        ),
+        ("changes requested", p.bad.as_str(), pick("CHANGES_REQUESTED")),
         ("commented", p.dim.as_str(), pick("COMMENTED")),
         ("awaiting", p.warn.as_str(), {
             pending.sort();
@@ -2418,7 +2303,10 @@ fn detail_view(
             } else {
                 lab.to_string()
             };
-            let took = match (parse(&text(c, "startedAt")), parse(&text(c, "completedAt"))) {
+            let took = match (
+                parse(&text(c, "startedAt")),
+                parse(&text(c, "completedAt")),
+            ) {
                 (Some(a), Some(b)) => format!("{}s", (b - a).num_seconds()),
                 _ => String::new(),
             };
@@ -2441,9 +2329,7 @@ fn detail_view(
         // already spent its height on checks cannot show them all.
         let room = h.saturating_sub(top + rows.len() + 4).max(3);
         let first = if stack_rows.len() > room {
-            stack_sel
-                .saturating_sub(room / 2)
-                .min(stack_rows.len() - room)
+            stack_sel.saturating_sub(room / 2).min(stack_rows.len() - room)
         } else {
             0
         };
@@ -2455,11 +2341,7 @@ fn detail_view(
                     format!(
                         "{} pull requests · {}",
                         stack_rows.len(),
-                        if native {
-                            "from GitHub"
-                        } else {
-                            "inferred from branches"
-                        }
+                        if native { "from GitHub" } else { "inferred from branches" }
                     ),
                 ),
                 (
@@ -2481,10 +2363,7 @@ fn detail_view(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), "  merge bottom-up: ".into()),
-                (
-                    p.txt.as_str(),
-                    "the one nearest the base branch first".into(),
-                ),
+                (p.txt.as_str(), "the one nearest the base branch first".into()),
                 (p.dim.as_str(), "   ▸ cursor · ● on screen".into()),
             ],
             w - 1,
@@ -2499,11 +2378,7 @@ fn detail_view(
                 (p.dim.as_str(), "  ".into()),
                 (
                     p.accent.as_str(),
-                    if base.is_empty() {
-                        "trunk".into()
-                    } else {
-                        base
-                    },
+                    if base.is_empty() { "trunk".into() } else { base },
                 ),
             ],
             w - 1,
@@ -2521,11 +2396,7 @@ fn detail_view(
             if on_cursor {
                 cursor = Some(rows.len());
             }
-            let tint = if on_cursor {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if on_cursor { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` was measured first; a review
@@ -2554,7 +2425,9 @@ fn detail_view(
                 if on_cursor { "▸" } else { " " },
                 if *is_here { "●" } else { " " }
             );
-            let name_w = w.saturating_sub(34 + twig.chars().count()).max(10);
+            let name_w = w
+                .saturating_sub(34 + twig.chars().count())
+                .max(10);
             let mut line = vec![
                 (c(if on_cursor { &p.accent } else { &p.dim }), gutter),
                 (c(&p.dim), twig.clone()),
@@ -2563,11 +2436,7 @@ fn detail_view(
                     format!("#{:<5} ", number(node, "number")),
                 ),
                 (
-                    c(if *is_here || on_cursor {
-                        &p.txt
-                    } else {
-                        &p.dim
-                    }),
+                    c(if *is_here || on_cursor { &p.txt } else { &p.dim }),
                     tc::pad(&name.chars().take(name_w).collect::<String>(), name_w),
                 ),
                 (c(col), format!("{:>13}", lab)),
@@ -2635,8 +2504,10 @@ mod tests {
         assert!(!ready_to_merge(&pr(
             r#"{"reviewDecision": "APPROVED", "isDraft": true}"#
         )));
-        assert!(!ready_to_merge(&pr(r#"{"reviewDecision": "APPROVED",
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}}"#)));
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}}"#
+        )));
         // Enrich failed: the rollup was never read. That is not "no CI".
         assert!(!ready_to_merge(&pr(
             r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "checksUnknown": true}"#
@@ -2660,9 +2531,10 @@ mod tests {
         assert_eq!(branched, vec![2, 3]);
         // A PR that neither sits on another nor carries one has no stack,
         // rather than a stack of itself.
-        let lone: Vec<serde_json::Value> =
-            serde_json::from_str(r#"[{"number": 9, "headRefName": "x", "baseRefName": "main"}]"#)
-                .unwrap();
+        let lone: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"number": 9, "headRefName": "x", "baseRefName": "main"}]"#,
+        )
+        .unwrap();
         assert_eq!(stack_of(9, &lone).0, None);
     }
 
@@ -2701,10 +2573,7 @@ mod tests {
     fn mine_expands_to_every_org_plus_the_account() {
         let sources = vec![
             ("orgs".to_string(), "is:open is:pr @mine".to_string()),
-            (
-                "authored".to_string(),
-                "is:open is:pr author:@me".to_string(),
-            ),
+            ("authored".to_string(), "is:open is:pr author:@me".to_string()),
         ];
         let out = searches(&sources, "wiiiimm", &["acme".into(), "beta".into()], &[]);
         assert_eq!(out[0].1, "is:open is:pr org:acme org:beta user:wiiiimm");

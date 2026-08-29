@@ -56,11 +56,7 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
         return (from_config, "config");
     }
     let name = tc::cfg_str(cfg, "token_env", "VERCEL_TOKEN");
-    let name = if name.is_empty() {
-        "VERCEL_TOKEN".into()
-    } else {
-        name
-    };
+    let name = if name.is_empty() { "VERCEL_TOKEN".into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -162,7 +158,7 @@ fn walk_teams(
                 return (
                     ids,
                     Some("team list stopped early (the cursor stopped moving)".into()),
-                );
+                )
             }
             Some(mark) => until = Some(mark),
         }
@@ -276,7 +272,10 @@ fn wrap(t: &str, width: usize) -> Vec<String> {
     if chars.is_empty() || width == 0 {
         return vec![String::new()];
     }
-    chars.chunks(width).map(|c| c.iter().collect()).collect()
+    chars
+        .chunks(width)
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 fn when(ms: Option<f64>) -> String {
@@ -290,10 +289,7 @@ fn when(ms: Option<f64>) -> String {
 }
 
 /// Everything worth copying out of a deployment.
-fn copy_items(
-    dep: &serde_json::Value,
-    detail: Option<&serde_json::Value>,
-) -> Vec<(String, String)> {
+fn copy_items(dep: &serde_json::Value, detail: Option<&serde_json::Value>) -> Vec<(String, String)> {
     let meta = &dep["meta"];
     let mut items = Vec::new();
     let mut push = |label: &str, value: String| {
@@ -523,11 +519,7 @@ fn build_log(detail: &serde_json::Value, w: usize, p: &Palette) -> Vec<String> {
                 (p.lbl.as_str(), " ── BUILD LOG ──".into()),
                 (
                     p.dim.as_str(),
-                    format!(
-                        " {} line{}",
-                        lines.len(),
-                        if lines.len() == 1 { "" } else { "s" }
-                    ),
+                    format!(" {} line{}", lines.len(), if lines.len() == 1 { "" } else { "s" }),
                 ),
             ],
             w - 1,
@@ -599,11 +591,7 @@ fn info_overlay(
     field!(
         "target",
         if production { "production" } else { "preview" }.to_string(),
-        if production {
-            p.prod.as_str()
-        } else {
-            p.dim.as_str()
-        }
+        if production { p.prod.as_str() } else { p.dim.as_str() }
     );
     field!(
         "created",
@@ -659,10 +647,7 @@ fn info_overlay(
     let (message, code) = (text(d, "errorMessage"), text(d, "errorCode"));
     if !message.is_empty() || !code.is_empty() {
         rows.push(String::new());
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), " ── WHY IT FAILED ──".into())],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── WHY IT FAILED ──".into())], w - 1));
         if !code.is_empty() {
             rows.push(tc::seg(&[(p.error.as_str(), format!("  {}", code))], w - 1));
         }
@@ -684,10 +669,7 @@ fn info_overlay(
         ));
     } else if d.is_null() {
         rows.push(String::new());
-        rows.push(tc::seg(
-            &[(p.dim.as_str(), " loading detail…".into())],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.dim.as_str(), " loading detail…".into())], w - 1));
     }
 
     let sha = text(meta, "githubCommitSha");
@@ -784,13 +766,7 @@ fn copy_overlay(
         let short = if value.chars().count() <= room {
             value.clone()
         } else {
-            format!(
-                "{}…",
-                value
-                    .chars()
-                    .take(room.saturating_sub(1))
-                    .collect::<String>()
-            )
+            format!("{}…", value.chars().take(room.saturating_sub(1)).collect::<String>())
         };
         rows.push(tc::seg(
             &[
@@ -830,75 +806,6 @@ fn copy_overlay(
     rows
 }
 
-/// Draw the missing-tool screen and keep settings reachable from it.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("vercel deployments", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from Vercel's HTTP API, and curl is how",
-            "this reaches it - the same way the other widgets reach ss,",
-            "ping and tailscale.",
-            "",
-            "The token is passed to curl on its standard input rather than",
-            "in its arguments, because /proc/<pid>/cmdline is readable by",
-            "every user on the machine.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install curl".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     let cfg = tc::load_config("deployments");
@@ -935,7 +842,21 @@ fn main() {
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "vercel deployments",
+            &absent,
+            &[
+                "Everything here comes from Vercel's HTTP API, and curl is how",
+                "this reaches it - the same way the other widgets reach ss,",
+                "ping and tailscale.",
+                "",
+                "The token is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+            SETTINGS,
+        );
         return;
     }
 
@@ -943,11 +864,7 @@ fn main() {
     let (tok, source) = token(&cfg);
     let env_name = {
         let name = tc::cfg_str(&cfg, "token_env", "VERCEL_TOKEN");
-        if name.is_empty() {
-            "VERCEL_TOKEN".to_string()
-        } else {
-            name
-        }
+        if name.is_empty() { "VERCEL_TOKEN".to_string() } else { name }
     };
     // Why the discovered scope is not everything, when it is not. Kept for
     // the poller rather than said once: `err` is rebuilt every round, and a
@@ -968,93 +885,91 @@ fn main() {
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
     let poll_scope = scope_note.clone();
-    std::thread::spawn(move || {
-        loop {
-            if poll_token.is_empty() {
-                if let Ok(mut guard) = poller.lock() {
-                    guard.err = format!(
-                        "no token: set deployments.token in config.json, or ${}",
-                        poll_env
-                    );
-                }
+    std::thread::spawn(move || loop {
+        if poll_token.is_empty() {
+            if let Ok(mut guard) = poller.lock() {
+                guard.err = format!(
+                    "no token: set deployments.token in config.json, or ${}",
+                    poll_env
+                );
+            }
+        } else {
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            // A file others can read is worth saying out loud, since this
+            // is the widget that put a token in it.
+            let mut err = if source == "config" {
+                tc::config_token_warning().unwrap_or_default()
             } else {
-                let mut out: Vec<serde_json::Value> = Vec::new();
-                // A file others can read is worth saying out loud, since this
-                // is the widget that put a token in it.
-                let mut err = if source == "config" {
-                    tc::config_token_warning().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let scopes: Vec<String> = if poll_teams.is_empty() {
-                    vec![String::new()]
-                } else {
-                    poll_teams.clone()
-                };
-                for team in &scopes {
-                    let mut path = format!("/v6/deployments?limit={}", limit);
-                    if !team.is_empty() {
-                        path += &format!("&teamId={}", team);
-                    }
-                    match api(&path, &poll_token) {
-                        Ok(res) => {
-                            for d in res["deployments"].as_array().into_iter().flatten() {
-                                let mut d = d.clone();
-                                // Carried so the detail request knows its scope.
-                                d["_team"] = serde_json::Value::String(team.clone());
-                                out.push(d);
-                            }
-                        }
-                        Err(said) => {
-                            err = if said.contains("401") || said.contains("403") {
-                                format!("{} (token expired? make a new one)", said)
-                            } else {
-                                said
-                            };
+                String::new()
+            };
+            let scopes: Vec<String> = if poll_teams.is_empty() {
+                vec![String::new()]
+            } else {
+                poll_teams.clone()
+            };
+            for team in &scopes {
+                let mut path = format!("/v6/deployments?limit={}", limit);
+                if !team.is_empty() {
+                    path += &format!("&teamId={}", team);
+                }
+                match api(&path, &poll_token) {
+                    Ok(res) => {
+                        for d in res["deployments"].as_array().into_iter().flatten() {
+                            let mut d = d.clone();
+                            // Carried so the detail request knows its scope.
+                            d["_team"] = serde_json::Value::String(team.clone());
+                            out.push(d);
                         }
                     }
-                }
-                if !poll_projects.is_empty() {
-                    out.retain(|d| poll_projects.contains(&text(d, "name")));
-                }
-                out.sort_by(|a, b| {
-                    ms_at(b, "created")
-                        .unwrap_or(0.0)
-                        .total_cmp(&ms_at(a, "created").unwrap_or(0.0))
-                });
-                if let Ok(mut guard) = poller.lock() {
-                    // A failed round keeps the last good list rather than
-                    // blanking the board: stale rows with a message beside them
-                    // say more than an empty screen does. Judged on this round's
-                    // own error, before the standing one is added to it: a scope
-                    // that was never complete is not a round that failed.
-                    if !out.is_empty() || err.is_empty() {
-                        guard.deployments = out;
-                        guard.fetched = tc::now();
+                    Err(said) => {
+                        err = if said.contains("401") || said.contains("403") {
+                            format!("{} (token expired? make a new one)", said)
+                        } else {
+                            said
+                        };
                     }
-                    // A scope that was never complete is a caveat about which
-                    // teams are being asked at all, so it goes in front of
-                    // whatever this round has to say rather than under it.
-                    guard.err = match (&poll_scope, err.is_empty()) {
-                        (None, _) => err,
-                        (Some(said), true) => said.clone(),
-                        (Some(said), false) => format!("{} · {}", said, err),
-                    };
                 }
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+            if !poll_projects.is_empty() {
+                out.retain(|d| poll_projects.contains(&text(d, "name")));
+            }
+            out.sort_by(|a, b| {
+                ms_at(b, "created")
+                    .unwrap_or(0.0)
+                    .total_cmp(&ms_at(a, "created").unwrap_or(0.0))
+            });
+            if let Ok(mut guard) = poller.lock() {
+                // A failed round keeps the last good list rather than
+                // blanking the board: stale rows with a message beside them
+                // say more than an empty screen does. Judged on this round's
+                // own error, before the standing one is added to it: a scope
+                // that was never complete is not a round that failed.
+                if !out.is_empty() || err.is_empty() {
+                    guard.deployments = out;
+                    guard.fetched = tc::now();
+                }
+                // A scope that was never complete is a caveat about which
+                // teams are being asked at all, so it goes in front of
+                // whatever this round has to say rather than under it.
+                guard.err = match (&poll_scope, err.is_empty()) {
+                    (None, _) => err,
+                    (Some(said), true) => said.clone(),
+                    (Some(said), false) => format!("{} · {}", said, err),
+                };
+            }
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     tc::setup();
@@ -1119,12 +1034,8 @@ fn main() {
                         }
                     }
                     "c" | "C" if !copying => copying = true,
-                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" if !copying => {
-                        oscroll = oscroll.saturating_sub(1)
-                    }
-                    "down" | "j" | "J" | "ctrl-e" | "wheel-down" if !copying => {
-                        oscroll = oscroll.saturating_add(1)
-                    }
+                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" if !copying => oscroll = oscroll.saturating_sub(1),
+                    "down" | "j" | "J" | "ctrl-e" | "wheel-down" if !copying => oscroll = oscroll.saturating_add(1),
                     "pgup" if !copying => {
                         let page = tc::size().1.saturating_sub(3).max(1);
                         oscroll = oscroll.saturating_sub(page);
@@ -1393,11 +1304,7 @@ fn main() {
         if live > 0 {
             head.push((
                 p.build.as_str(),
-                format!(
-                    "  {} {} building",
-                    tc::SPINNER[tick % tc::SPINNER.len()],
-                    live
-                ),
+                format!("  {} {} building", tc::SPINNER[tick % tc::SPINNER.len()], live),
             ));
         }
         head.push((
@@ -1429,17 +1336,10 @@ fn main() {
             rows.push(tc::seg(
                 &[
                     (p.build.as_str(), format!(" filter: {}", bits.join(" + "))),
-                    (
-                        p.build.as_str(),
-                        if typing { "▏".into() } else { String::new() },
-                    ),
+                    (p.build.as_str(), if typing { "▏".into() } else { String::new() }),
                     (
                         p.dim.as_str(),
-                        if typing {
-                            "  enter to keep · esc to clear".into()
-                        } else {
-                            String::new()
-                        },
+                        if typing { "  enter to keep · esc to clear".into() } else { String::new() },
                     ),
                 ],
                 w - 1,
@@ -1534,11 +1434,7 @@ fn main() {
                 break;
             }
             let here = i == selected;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let meta = &d["meta"];
             let state = text(d, "state");
             let colour = state_colour(&state, &p);
@@ -1575,17 +1471,17 @@ fn main() {
             }
             if cols.detail {
                 let sha = text(meta, "githubCommitSha");
-                line.push((c(&p.sha), format!("  {}", &sha[..sha.len().min(7)])));
+                line.push((
+                    c(&p.sha),
+                    format!("  {}", &sha[..sha.len().min(7)]),
+                ));
                 line.push((
                     c(&p.branch),
                     format!(" {}", tc::pad(&text(meta, "githubCommitRef"), cols.branch)),
                 ));
             }
             if cols.single {
-                line.push((
-                    c(if here { &p.txt } else { &p.msg }),
-                    format!(" {}", subject),
-                ));
+                line.push((c(if here { &p.txt } else { &p.msg }), format!(" {}", subject)));
             }
             if here {
                 line.push((tint.clone(), " ".repeat(w)));
@@ -1596,10 +1492,7 @@ fn main() {
             if !cols.single && rows.len() < h.saturating_sub(1) {
                 rows.push(tc::seg(
                     &[
-                        (
-                            &c(if here { &p.txt } else { &p.msg }),
-                            format!("   {}", subject),
-                        ),
+                        (&c(if here { &p.txt } else { &p.msg }), format!("   {}", subject)),
                         (&tint, if here { " ".repeat(w) } else { String::new() }),
                     ],
                     w - 1,
@@ -1608,19 +1501,13 @@ fn main() {
         }
         if shown.is_empty() {
             rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    "   (nothing matches the current filter)".into(),
-                )],
+                &[(p.dim.as_str(), "   (nothing matches the current filter)".into())],
                 w - 1,
             ));
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
@@ -1666,14 +1553,8 @@ mod tests {
         let rows = build_log(&detail, 90, &p);
         let joined = rows.join("\n");
         assert!(joined.contains("BUILD LOG"), "no heading");
-        assert!(
-            joined.contains("Error: No Next.js version"),
-            "the failing line is missing"
-        );
-        assert!(
-            joined.contains("Running build in"),
-            "the ordinary lines are missing"
-        );
+        assert!(joined.contains("Error: No Next.js version"), "the failing line is missing");
+        assert!(joined.contains("Running build in"), "the ordinary lines are missing");
 
         let of = |needle: &str| {
             rows.iter()
@@ -1708,6 +1589,7 @@ mod tests {
         assert!(build_log(&serde_json::json!({}), 90, &p).is_empty());
         assert!(build_log(&serde_json::json!({"_events": []}), 90, &p).is_empty());
     }
+
 
     #[test]
     fn a_token_prefers_the_config_then_the_environment() {
@@ -1755,12 +1637,15 @@ mod tests {
         .unwrap();
         let items = copy_items(&dep, None);
         let labels: Vec<&str> = items.iter().map(|(l, _)| l.as_str()).collect();
-        assert_eq!(labels, vec![
-            "Deployment dashboard",
-            "Commit preview",
-            "Pull request",
-            "Commit SHA"
-        ]);
+        assert_eq!(
+            labels,
+            vec![
+                "Deployment dashboard",
+                "Commit preview",
+                "Pull request",
+                "Commit SHA"
+            ]
+        );
         // A pull request needs all three parts, not just the number.
         assert_eq!(items[2].1, "https://github.com/o/r/pull/7");
         // No branch alias, so no branch preview - an empty row would be a

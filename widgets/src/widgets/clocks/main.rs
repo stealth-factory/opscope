@@ -211,24 +211,16 @@ fn countdowns(now: chrono::DateTime<Local>, office: &Office) -> Vec<Countdown> {
     let today = now.date_naive();
     let (label, target, from) = if office.is_open(&now) {
         let start = Local
-            .from_local_datetime(
-                &today.and_time(NaiveTime::from_hms_opt(office.start, 0, 0).unwrap()),
-            )
+            .from_local_datetime(&today.and_time(NaiveTime::from_hms_opt(office.start, 0, 0).unwrap()))
             .single()
             .unwrap_or(now);
         let end = Local
-            .from_local_datetime(
-                &today.and_time(NaiveTime::from_hms_opt(office.end, 0, 0).unwrap()),
-            )
+            .from_local_datetime(&today.and_time(NaiveTime::from_hms_opt(office.end, 0, 0).unwrap()))
             .single()
             .unwrap_or(now);
         ("End of Office Hour", end, start)
     } else {
-        (
-            "Start of Office Hour",
-            office.next_open(&now),
-            office.prev_close(&now),
-        )
+        ("Start of Office Hour", office.next_open(&now), office.prev_close(&now))
     };
     let span = (target - from).num_seconds().max(1);
     let left = (target - now).num_seconds();
@@ -360,15 +352,7 @@ fn herdr_toast(title: &str, body: &str) {
         // one <TITLE> and the body is an option. Passing it positionally
         // fails with "unknown option" - silently, since stderr is nulled -
         // so this toast had never once been shown.
-        .args([
-            "notification",
-            "show",
-            title,
-            "--body",
-            body,
-            "--sound",
-            "done",
-        ])
+        .args(["notification", "show", title, "--body", body, "--sound", "done"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -440,8 +424,12 @@ struct Pomodoro {
 /// implementation is picked up by the other rather than each keeping a
 /// private tally of the same afternoon.
 fn state_file() -> String {
-    let base = std::env::var("XDG_STATE_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/state", std::env::var("HOME").unwrap_or_default()));
+    let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}/.local/state",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
     format!("{}/opscope/pomodoro.json", base)
 }
 
@@ -802,6 +790,7 @@ impl Pomodoro {
     }
 }
 
+
 struct City {
     name: String,
     zone: Tz,
@@ -883,10 +872,7 @@ fn main() {
         let (w, h) = tc::size();
         let now = Local::now();
         let mut rows = vec![tc::title("clocks", w, &p.head)];
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), " ── SERVER TIME ──".into())],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ──".into())], w - 1));
 
         // Two colours down the digits, not one: the top three rows are
         // bright and the base is darker, which is what gives them weight.
@@ -903,21 +889,14 @@ fn main() {
                 (p.txt.as_str(), format!(" {}", now.format("%Y-%m-%d"))),
                 (
                     p.dim.as_str(),
-                    format!(
-                        "  {}   {}",
-                        now.format("%A").to_string().to_uppercase(),
-                        offset_str(&now)
-                    ),
+                    format!("  {}   {}", now.format("%A").to_string().to_uppercase(), offset_str(&now)),
                 ),
             ],
             w - 1,
         ));
         rows.push(String::new());
 
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), " ── COUNTDOWN ──".into())],
-            w - 1,
-        ));
+        rows.push(tc::seg(&[(p.lbl.as_str(), " ── COUNTDOWN ──".into())], w - 1));
         let bar_w = w.saturating_sub(3).min(90);
 
         // The pomodoro leads the section, as it does in the Python.
@@ -947,10 +926,7 @@ fn main() {
                 &[
                     (
                         ink.as_str(),
-                        format!(
-                            " {}",
-                            tc::pad(&format!("Pomodoro · {}", pomo.phase.label()), 23)
-                        ),
+                        format!(" {}", tc::pad(&format!("Pomodoro · {}", pomo.phase.label()), 23)),
                     ),
                     (
                         if over > 0.0 { &p.over } else { &p.txt },
@@ -962,19 +938,11 @@ fn main() {
                     ),
                     (
                         p.paused.as_str(),
-                        if pomo.running {
-                            String::new()
-                        } else {
-                            "  paused".into()
-                        },
+                        if pomo.running { String::new() } else { "  paused".into() },
                     ),
                     (
                         if over > 0.0 { &p.over } else { &p.dim },
-                        if over > 0.0 {
-                            "  OVER".into()
-                        } else {
-                            String::new()
-                        },
+                        if over > 0.0 { "  OVER".into() } else { String::new() },
                     ),
                     (p.dim.as_str(), format!("   {} done", pomo.done)),
                 ],
@@ -1038,10 +1006,7 @@ fn main() {
                 // Sun or moon by the local hour, which is the fastest way
                 // to read "is it a reasonable time to message them".
                 let (ink, glyph) = phase_of(&there, &p);
-                let day_shift = there
-                    .date_naive()
-                    .signed_duration_since(now.date_naive())
-                    .num_days();
+                let day_shift = there.date_naive().signed_duration_since(now.date_naive()).num_days();
                 rows.push(tc::seg(
                     &[
                         (ink.as_str(), format!(" {} ", glyph)),
@@ -1051,11 +1016,14 @@ fn main() {
                             p.dim.as_str(),
                             format!("  {}  {}", there.format("%a"), offset_str(&there)),
                         ),
-                        (p.dim.as_str(), match day_shift {
-                            0 => String::new(),
-                            d if d > 0 => format!("    +{}d", d),
-                            d => format!("    {}d", d),
-                        }),
+                        (
+                            p.dim.as_str(),
+                            match day_shift {
+                                0 => String::new(),
+                                d if d > 0 => format!("    +{}d", d),
+                                d => format!("    {}d", d),
+                            },
+                        ),
                     ],
                     w - 1,
                 ));
@@ -1075,11 +1043,7 @@ fn main() {
                 (p.dim.as_str(), "[space] ".into()),
                 (
                     p.txt.as_str(),
-                    if pomo.running {
-                        "pause".into()
-                    } else {
-                        "start".into()
-                    },
+                    if pomo.running { "pause".into() } else { "start".into() },
                 ),
             ]);
             hints.push(vec![(p.dim.as_str(), pomo.next_label())]);
@@ -1350,22 +1314,10 @@ mod tests {
         let text = std::fs::read_to_string(state_file()).expect("a state file");
         let d: serde_json::Value = serde_json::from_str(&text).expect("json");
         for key in [
-            "day",
-            "phase",
-            "completed",
-            "focus",
-            "enabled",
-            "running",
-            "was_running",
-            "hints",
-            "left",
-            "deadline",
+            "day", "phase", "completed", "focus", "enabled", "running",
+            "was_running", "hints", "left", "deadline",
         ] {
-            assert!(
-                d.get(key).is_some(),
-                "clocks.py reads {} and we omit it",
-                key
-            );
+            assert!(d.get(key).is_some(), "clocks.py reads {} and we omit it", key);
         }
         assert_eq!(d["completed"], 3);
         assert_eq!(d["phase"], "short");
@@ -1436,11 +1388,7 @@ mod tests {
             pomo.adjust(-1.0);
         }
         assert_eq!(pomo.short, 1.0);
-        assert_eq!(
-            (pomo.focus, pomo.long),
-            (30.0, 16.0),
-            "the others are untouched"
-        );
+        assert_eq!((pomo.focus, pomo.long), (30.0, 16.0), "the others are untouched");
     }
 
     #[test]
@@ -1484,14 +1432,16 @@ mod tests {
     fn the_office_countdown_across_a_whole_week() {
         let office = Office::from_config(&serde_json::json!({}));
         // 2026-08-17 is a Monday, so +n days walks the week.
-        let at = |day: u32, hour: u32| Local.with_ymd_and_hms(2026, 8, day, hour, 0, 0).unwrap();
+        let at = |day: u32, hour: u32| {
+            Local.with_ymd_and_hms(2026, 8, day, hour, 0, 0).unwrap()
+        };
         let read = |when| {
             let items = countdowns(when, &office);
             (items[1].label.clone(), items[1].left)
         };
 
         // Inside hours on a working day: counting to the close.
-        let (label, left) = read(at(18, 11)); // Tuesday 11:00
+        let (label, left) = read(at(18, 11));      // Tuesday 11:00
         assert_eq!(label, "End of Office Hour");
         assert_eq!(left, 7 * 3600, "seven hours until six");
 
@@ -1539,14 +1489,8 @@ mod tests {
     fn a_saturday_is_not_a_working_day() {
         let office = Office::from_config(&serde_json::json!({}));
         let saturday = Local.with_ymd_and_hms(2026, 8, 22, 11, 0, 0).unwrap();
-        assert!(
-            !office.is_open(&saturday),
-            "eleven on a Saturday is not office hours"
-        );
-        assert_eq!(
-            countdowns(saturday, &office)[1].label,
-            "Start of Office Hour"
-        );
+        assert!(!office.is_open(&saturday), "eleven on a Saturday is not office hours");
+        assert_eq!(countdowns(saturday, &office)[1].label, "Start of Office Hour");
     }
 
     #[test]
@@ -1583,7 +1527,8 @@ mod tests {
     fn each_countdown_gets_its_own_colour() {
         let now = Local.with_ymd_and_hms(2026, 8, 22, 14, 30, 0).unwrap();
         let items = countdowns(now, &Office::from_config(&serde_json::json!({})));
-        let inks: std::collections::HashSet<String> = items.iter().map(|c| c.ink.clone()).collect();
+        let inks: std::collections::HashSet<String> =
+            items.iter().map(|c| c.ink.clone()).collect();
         assert_eq!(inks.len(), 3, "three clocks, three colours");
     }
 
@@ -1591,7 +1536,9 @@ mod tests {
     fn the_world_clock_reads_more_than_light_and_dark() {
         let p = palette();
         let tokyo: Tz = "Asia/Tokyo".parse().unwrap();
-        let at = |h: u32, d: u32| tokyo.with_ymd_and_hms(2026, 8, d, h, 0, 0).unwrap();
+        let at = |h: u32, d: u32| {
+            tokyo.with_ymd_and_hms(2026, 8, d, h, 0, 0).unwrap()
+        };
         // Saturday the 22nd, Monday the 24th.
         assert_eq!(phase_of(&at(3, 24), &p).1, "☾", "the small hours");
         assert_eq!(phase_of(&at(11, 24), &p), (p.work.clone(), "☀"));
@@ -1738,12 +1685,8 @@ mod tests {
         let frozen = pomo.left;
         pomo.toggle(3720.0);
         // What is left is what was left, not an hour less.
-        assert!(
-            (pomo.remaining(3720.0) - frozen).abs() < 0.001,
-            "left {} against frozen {}",
-            pomo.remaining(3720.0),
-            frozen
-        );
+        assert!((pomo.remaining(3720.0) - frozen).abs() < 0.001,
+                "left {} against frozen {}", pomo.remaining(3720.0), frozen);
         assert!(pomo.running, "it was running when it went away");
     }
 
@@ -1784,12 +1727,7 @@ mod tests {
         assert_eq!(items.len(), 3);
         for item in &items {
             assert!(item.left > 0, "{} had {}s left", item.label, item.left);
-            assert!(
-                (0.0..=1.0).contains(&item.frac),
-                "{} at {}",
-                item.label,
-                item.frac
-            );
+            assert!((0.0..=1.0).contains(&item.frac), "{} at {}", item.label, item.frac);
         }
         // Half past two leaves half an hour of this hour.
         assert_eq!(items[0].left, 1800);
@@ -1878,11 +1816,7 @@ mod tests {
         assert!(!on.running, "a block nobody sat down for was being counted");
         let now = 1_000.0;
         assert_eq!(on.remaining(now), on.duration());
-        assert_eq!(
-            on.remaining(now + 600.0),
-            on.duration(),
-            "a paused timer moved"
-        );
+        assert_eq!(on.remaining(now + 600.0), on.duration(), "a paused timer moved");
     }
 
     #[test]

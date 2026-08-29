@@ -305,6 +305,22 @@ fn every_widget_owns_its_complete_folder() {
     if !launcher_source.contains("tc::run_settings") {
         wrong.push("launcher: does not expose shared terminal settings".into());
     }
+    let core = std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap_or_default();
+    let terminal =
+        std::fs::read_to_string(launcher.join("settings.json")).unwrap_or_default();
+    let terminal: serde_json::Value =
+        serde_json::from_str(&terminal).expect("launcher settings are valid JSON");
+    for key in terminal
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, _)| key)
+        .filter(|key| !key.starts_with('_'))
+    {
+        if !core.contains(&format!("\"{}\"", key)) {
+            wrong.push(format!("launcher: terminal.{key} is never read by core"));
+        }
+    }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 

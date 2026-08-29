@@ -289,10 +289,7 @@ fn outcome_label(kind: &str) -> &'static str {
 }
 
 fn is_failed(run: &serde_json::Value) -> bool {
-    matches!(
-        outcome(run).as_str(),
-        "failure" | "startup_failure" | "timed_out"
-    )
+    matches!(outcome(run).as_str(), "failure" | "startup_failure" | "timed_out")
 }
 
 fn is_running(run: &serde_json::Value) -> bool {
@@ -409,13 +406,13 @@ fn pick_repos(
         list.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
     }
     let mut owners: Vec<String> = groups.keys().cloned().collect();
-    owners.sort_by(
-        |a, b| match (is_personal(a, viewer), is_personal(b, viewer)) {
+    owners.sort_by(|a, b| {
+        match (is_personal(a, viewer), is_personal(b, viewer)) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
             _ => a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()),
-        },
-    );
+        }
+    });
     let mut picked = Vec::new();
     let mut stats = PickStats::default();
     for owner in owners {
@@ -536,12 +533,7 @@ fn split_repo(name: &str) -> Option<(String, String)> {
 }
 
 /// Flatten one REST workflow run into the fields the board reads.
-fn ingest_run(
-    raw: &serde_json::Value,
-    repo: &str,
-    repo_total: i64,
-    fetched: usize,
-) -> serde_json::Value {
+fn ingest_run(raw: &serde_json::Value, repo: &str, repo_total: i64, fetched: usize) -> serde_json::Value {
     let repo = if repo.is_empty() {
         raw["repository"]["full_name"]
             .as_str()
@@ -725,7 +717,12 @@ fn palette() -> Palette {
 
 /// Runs per time bucket, coloured by the worst outcome in it — the same
 /// chart `deployments` draws for deploys/hour.
-fn activity(runs: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (String, usize) {
+fn activity(
+    runs: &[serde_json::Value],
+    w: usize,
+    hours: f64,
+    p: &Palette,
+) -> (String, usize) {
     let cols = w.saturating_sub(2).max(10);
     let at = tc::now();
     let span = hours * 3_600.0;
@@ -922,10 +919,7 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-fn discover_accounts(
-    tok: &str,
-    rate: &mut Option<(i64, i64)>,
-) -> Result<(String, Vec<String>), String> {
+fn discover_accounts(tok: &str, rate: &mut Option<(i64, i64)>) -> Result<(String, Vec<String>), String> {
     let mut viewer = String::new();
     let mut accounts = Vec::new();
     let mut cursor: Option<String> = None;
@@ -989,9 +983,9 @@ fn discover_account_pages(
             }
         };
         let batch = repos_from(&data);
-        let past = batch
-            .iter()
-            .any(|r| iso_secs(&r.pushed_at).is_some_and(|at| at < since));
+        let past = batch.iter().any(|r| {
+            iso_secs(&r.pushed_at).is_some_and(|at| at < since)
+        });
         found.extend(batch);
         if past {
             break;
@@ -1164,7 +1158,10 @@ fn one_pass(
             });
         }
         let n_accounts = want.len();
-        let orgs = want.iter().filter(|a| !is_personal(a, &viewer)).count();
+        let orgs = want
+            .iter()
+            .filter(|a| !is_personal(a, &viewer))
+            .count();
         note(live, |p| {
             p.count("accounts", n_accounts, Some(n_accounts));
             p.finish("accounts");
@@ -1272,7 +1269,14 @@ fn one_pass(
         runs,
         err,
         fetched: tc::now(),
-        scope: scope_sentence(is_explicit, repos.len(), &stats, orgs, hours, pushed_days),
+        scope: scope_sentence(
+            is_explicit,
+            repos.len(),
+            &stats,
+            orgs,
+            hours,
+            pushed_days,
+        ),
         viewer,
         accounts: n_accounts,
         rate,
@@ -1309,7 +1313,7 @@ fn fetch_jobs(run: &serde_json::Value, tok: &str) -> serde_json::Value {
             // Whatever arrived is real and worth drawing; only a failure on
             // the first page leaves nothing to show.
             Err(e) if page == 1 => {
-                return serde_json::json!({ "_error": e, "_fetched_at": tc::now() });
+                return serde_json::json!({ "_error": e, "_fetched_at": tc::now() })
             }
             Err(_) => break,
         };
@@ -1401,7 +1405,11 @@ fn info_overlay(
     p: &Palette,
 ) -> Vec<String> {
     let mut rows = vec![tc::title(
-        &format!("{} / {}", text(run, "repo"), text(run, "workflow")),
+        &format!(
+            "{} / {}",
+            text(run, "repo"),
+            text(run, "workflow")
+        ),
         w,
         &p.accent,
     )];
@@ -1410,10 +1418,7 @@ fn info_overlay(
     rows.push(tc::seg(
         &[
             (p.dim.as_str(), "  #".into()),
-            (
-                p.txt.as_str(),
-                run["run_number"].as_i64().unwrap_or(0).to_string(),
-            ),
+            (p.txt.as_str(), run["run_number"].as_i64().unwrap_or(0).to_string()),
             (p.dim.as_str(), "  ".into()),
             (colour, outcome_label(&kind).to_string()),
             (p.dim.as_str(), format!("  {}", text(run, "event"))),
@@ -1445,24 +1450,16 @@ fn info_overlay(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!("  {}", &sha[..sha.len().min(7)])),
-                (
-                    p.txt.as_str(),
-                    if title.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {}", title)
-                    },
-                ),
+                (p.txt.as_str(), if title.is_empty() { String::new() } else { format!("  {}", title) }),
             ],
             w - 1,
         ));
     }
     if repeats > 1 {
         rows.push(tc::seg(
-            &[(
-                p.fail.as_str(),
-                format!("  failed {} times in this window", repeats),
-            )],
+            &[
+                (p.fail.as_str(), format!("  failed {} times in this window", repeats)),
+            ],
             w - 1,
         ));
     }
@@ -1470,10 +1467,7 @@ fn info_overlay(
     rows.push(tc::seg(&[(p.lbl.as_str(), " ── JOBS ──".into())], w - 1));
     match jobs {
         None => {
-            rows.push(tc::seg(
-                &[(p.dim.as_str(), "  loading jobs…".into())],
-                w - 1,
-            ));
+            rows.push(tc::seg(&[(p.dim.as_str(), "  loading jobs…".into())], w - 1));
         }
         Some(j) if j.get("_error").is_some() => {
             rows.push(tc::seg(
@@ -1484,61 +1478,57 @@ fn info_overlay(
         Some(j) => {
             let list = j["jobs"].as_array().cloned().unwrap_or_default();
             if list.is_empty() {
-                rows.push(tc::seg(
-                    &[(
-                        p.dim.as_str(),
-                        "  GitHub returned no jobs for this run".into(),
-                    )],
-                    w - 1,
-                ));
-            } else {
-                for job in &list {
-                    let status = job["status"].as_str().unwrap_or("");
-                    let conclusion = job["conclusion"].as_str().unwrap_or("");
-                    let kind = if status != "completed" && !status.is_empty() {
-                        status
-                    } else {
-                        conclusion
-                    };
-                    let mark = if LIVE.contains(&status) {
-                        '●'
-                    } else if matches!(kind, "failure" | "startup_failure" | "timed_out") {
-                        '✖'
-                    } else if kind == "success" {
-                        '●'
-                    } else {
-                        '○'
-                    };
-                    let started = iso_secs(job["started_at"].as_str().unwrap_or(""));
-                    let ended = iso_secs(job["completed_at"].as_str().unwrap_or(""));
-                    let took = match (started, ended) {
-                        (Some(a), Some(b)) => Some((b - a).max(0.0)),
-                        (Some(a), None) if LIVE.contains(&status) => Some((tc::now() - a).max(0.0)),
-                        _ => None,
-                    };
                     rows.push(tc::seg(
-                        &[
-                            (
-                                outcome_colour(kind, p),
-                                format!("  {} {}", mark, job["name"].as_str().unwrap_or("")),
-                            ),
-                            (p.dim.as_str(), format!("  {}", dur_label(took))),
-                        ],
+                        &[(p.dim.as_str(), "  GitHub returned no jobs for this run".into())],
                         w - 1,
                     ));
-                    if let Some((n, step)) = failed_step(job) {
+            } else {
+                    for job in &list {
+                        let status = job["status"].as_str().unwrap_or("");
+                        let conclusion = job["conclusion"].as_str().unwrap_or("");
+                        let kind = if status != "completed" && !status.is_empty() {
+                            status
+                        } else {
+                            conclusion
+                        };
+                        let mark = if LIVE.contains(&status) {
+                            '●'
+                        } else if matches!(kind, "failure" | "startup_failure" | "timed_out") {
+                            '✖'
+                        } else if kind == "success" {
+                            '●'
+                        } else {
+                            '○'
+                        };
+                        let started = iso_secs(job["started_at"].as_str().unwrap_or(""));
+                        let ended = iso_secs(job["completed_at"].as_str().unwrap_or(""));
+                        let took = match (started, ended) {
+                            (Some(a), Some(b)) => Some((b - a).max(0.0)),
+                            (Some(a), None) if LIVE.contains(&status) => Some((tc::now() - a).max(0.0)),
+                            _ => None,
+                        };
                         rows.push(tc::seg(
-                            &[(p.fail.as_str(), format!("     step {} · {}", n, step))],
+                            &[
+                                (outcome_colour(kind, p), format!("  {} {}", mark, job["name"].as_str().unwrap_or(""))),
+                                (p.dim.as_str(), format!("  {}", dur_label(took))),
+                            ],
                             w - 1,
                         ));
+                        if let Some((n, step)) = failed_step(job) {
+                            rows.push(tc::seg(
+                                &[
+                                    (p.fail.as_str(), format!("     step {} · {}", n, step)),
+                                ],
+                                w - 1,
+                            ));
+                        }
                     }
-                }
-                if let Some(said) = jobs_page_note(
-                    list.len(),
-                    j["total_count"].as_i64().unwrap_or(list.len() as i64),
-                ) {
-                    rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", said))], w - 1));
-                }
+                    if let Some(said) = jobs_page_note(
+                        list.len(),
+                        j["total_count"].as_i64().unwrap_or(list.len() as i64),
+                    ) {
+                        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", said))], w - 1));
+                    }
             }
         }
     }
@@ -1547,74 +1537,6 @@ fn info_overlay(
         rows.push(tc::seg(&[(p.ok.as_str(), format!("  {}", note))], w - 1));
     }
     rows
-}
-
-/// Draw the missing-tool screen and keep settings reachable from it.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
-                "q" | "Q" => {
-                    keyboard.restore();
-                    tc::restore_screen();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("github actions", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Everything here comes from GitHub's API, and curl is how",
-            "this reaches it - the same way github and github-prs do.",
-            "",
-            "The token is passed to curl on its standard input rather than",
-            "in its arguments, because /proc/<pid>/cmdline is readable by",
-            "every user on the machine.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install curl".into()),
-            ],
-            w - 1,
-        ));
-        let hints = vec![vec![(dim.as_str(), "[,] settings".into())], vec![(
-            dim.as_str(),
-            "[q]uit".into(),
-        )]];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        rows.truncate(h.saturating_sub(foot.len()));
-        while rows.len() < h.saturating_sub(foot.len()) {
-            rows.push(String::new());
-        }
-        rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 fn main() {
@@ -1656,7 +1578,20 @@ fn main() {
 
     let absent = tc::missing(&["curl"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start_with_settings(
+            "github actions",
+            &absent,
+            &[
+                "Everything here comes from GitHub's API, and curl is how",
+                "this reaches it - the same way github and github-prs do.",
+                "",
+                "The token is passed to curl on its standard input rather than",
+                "in its arguments, because /proc/<pid>/cmdline is readable by",
+                "every user on the machine.",
+            ],
+            "apt install curl",
+            SETTINGS,
+        );
         return;
     }
 
@@ -1687,66 +1622,64 @@ fn main() {
     let poll_accounts = accounts.clone();
     let poll_explicit = explicit.clone();
     let poll_env = env_name.clone();
-    std::thread::spawn(move || {
-        loop {
-            let hours = poller
-                .lock()
-                .map(|g| g.window_hours)
-                .unwrap_or(start_window);
-            if poll_tok.is_empty() {
-                if let Ok(mut g) = poller.lock() {
-                    g.err = format!("no token: set github.token in config.json or ${}", poll_env);
+    std::thread::spawn(move || loop {
+        let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
+        if poll_tok.is_empty() {
+            if let Ok(mut g) = poller.lock() {
+                g.err = format!(
+                    "no token: set github.token in config.json or ${}",
+                    poll_env
+                );
+            }
+        } else {
+            let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                one_pass(
+                    &poll_tok,
+                    source,
+                    &poll_accounts,
+                    &poll_explicit,
+                    pushed_days,
+                    max_repos,
+                    hours,
+                    &poller,
+                )
+            }));
+            // However the pass ended - answer, error or panic - it is no
+            // longer running, and a step list left on screen would say it
+            // was. A panic especially: that is the case the poller guard
+            // exists for, and it must not leave a spinner turning forever.
+            note(&poller, |p| p.clear());
+            match step {
+                Ok(Ok(got)) => {
+                    if let Ok(mut g) = poller.lock() {
+                        apply_pass(&mut g, got);
+                    }
                 }
-            } else {
-                let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    one_pass(
-                        &poll_tok,
-                        source,
-                        &poll_accounts,
-                        &poll_explicit,
-                        pushed_days,
-                        max_repos,
-                        hours,
-                        &poller,
-                    )
-                }));
-                // However the pass ended - answer, error or panic - it is no
-                // longer running, and a step list left on screen would say it
-                // was. A panic especially: that is the case the poller guard
-                // exists for, and it must not leave a spinner turning forever.
-                note(&poller, |p| p.clear());
-                match step {
-                    Ok(Ok(got)) => {
-                        if let Ok(mut g) = poller.lock() {
-                            apply_pass(&mut g, got);
-                        }
+                Ok(Err(said)) => {
+                    if let Ok(mut g) = poller.lock() {
+                        g.err = said;
                     }
-                    Ok(Err(said)) => {
-                        if let Ok(mut g) = poller.lock() {
-                            g.err = said;
-                        }
+                }
+                Err(_) => {
+                    if let Ok(mut g) = poller.lock() {
+                        g.err = "poller stopped - see the pane it was started from".into();
                     }
-                    Err(_) => {
-                        if let Ok(mut g) = poller.lock() {
-                            g.err = "poller stopped - see the pane it was started from".into();
-                        }
-                        return;
-                    }
+                    return;
                 }
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
+        }
+        let (lock, cond) = &*poller_wake;
+        let mut asked = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !*asked {
+            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                Ok((g, _)) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
-            }
-            *asked = false;
         }
+        *asked = false;
     });
 
     tc::setup();
@@ -1796,8 +1729,10 @@ fn main() {
                     "left" | "esc" => {
                         overlay = false;
                         overlay_id = 0;
+                    },
+                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" => {
+                        oscroll = oscroll.saturating_sub(1)
                     }
-                    "up" | "k" | "K" | "ctrl-y" | "wheel-up" => oscroll = oscroll.saturating_sub(1),
                     "down" | "j" | "J" | "ctrl-e" | "wheel-down" => {
                         oscroll = oscroll.saturating_add(1)
                     }
@@ -1812,8 +1747,7 @@ fn main() {
                     "home" => oscroll = 0,
                     "end" => oscroll = usize::MAX,
                     "r" | "R" => {
-                        if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1)))
-                        {
+                        if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1))) {
                             let id = chosen["id"].as_i64().unwrap_or(0);
                             if let Ok(mut g) = details.lock() {
                                 g.remove(&id);
@@ -1821,8 +1755,7 @@ fn main() {
                         }
                     }
                     "c" | "C" => {
-                        if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1)))
-                        {
+                        if let Some(chosen) = shown.get(selected.min(shown.len().saturating_sub(1))) {
                             let items = copy_items(chosen);
                             if let Some((_, value)) = items.first() {
                                 note = (
@@ -1993,7 +1926,10 @@ fn main() {
                 held = None;
             }
             if held.is_none() && id != 0 {
-                let start = fetching.lock().map(|mut g| g.insert(id)).unwrap_or(false);
+                let start = fetching
+                    .lock()
+                    .map(|mut g| g.insert(id))
+                    .unwrap_or(false);
                 if start {
                     let (details, fetching) = (Arc::clone(&details), Arc::clone(&fetching));
                     let (chosen, tok) = (chosen.clone(), tok.clone());
@@ -2017,26 +1953,12 @@ fn main() {
                 })
                 .count();
             let body = info_overlay(&chosen, held.as_ref(), w, repeats, &note.0, &p);
+            let foot = 2;
+            let room = h.saturating_sub(foot).max(1);
             // The title stays put: scrolled away, a run's screen stops
             // saying which run it is describing.
             let (head, rest) = body.split_at(1.min(body.len()));
-            let base_hints: Vec<Vec<(&str, String)>> = vec![
-                vec![(p.hint.as_str(), "[c]opy".into())],
-                vec![(p.hint.as_str(), "[r]efresh".into())],
-                vec![(p.hint.as_str(), "← or [esc] close".into())],
-                vec![(p.hint.as_str(), "[,] settings".into())],
-                vec![(p.hint.as_str(), "[q]uit".into())],
-            ];
-            let base_footer = tc::pack_hints(&base_hints, w - 2, " · ");
-            let base_room = h.saturating_sub(base_footer.len()).max(1);
-            let scrolling = body.len() > base_room;
-            let mut hints = base_hints;
-            if scrolling {
-                hints.insert(0, vec![(p.hint.as_str(), "↑↓ scroll".into())]);
-            }
-            let footer = tc::pack_hints(&hints, w - 2, " · ");
-            let room = h.saturating_sub(footer.len()).max(1);
-            let room_below = room.saturating_sub(head.len());
+            let room_below = room.saturating_sub(head.len()).max(1);
             let furthest = rest.len().saturating_sub(room_below);
             oscroll = oscroll.min(furthest);
             let last = (oscroll + room_below).min(rest.len());
@@ -2045,7 +1967,22 @@ fn main() {
             while out.len() < room {
                 out.push(String::new());
             }
-            out.extend(footer.into_iter().map(|line| format!(" {}", line)));
+            out.push(tc::seg(
+                &[(
+                    p.hint.as_str(),
+                    if furthest > 0 {
+                        format!(
+                            " ↑↓ scroll {}-{} of {} · [c]opy · [r]efresh · [,] settings · ← esc · [q]uit",
+                            oscroll + 1,
+                            last,
+                            rest.len()
+                        )
+                    } else {
+                        " [c]opy · [r]efresh · [,] settings · ← or esc to close · [q]uit".to_string()
+                    },
+                )],
+                w - 1,
+            ));
             tc::draw(&out, w, h);
             std::thread::sleep(Duration::from_millis(250));
             continue;
@@ -2082,11 +2019,7 @@ fn main() {
         if running > 0 {
             head.push((
                 p.run.as_str(),
-                format!(
-                    "  {} {} running",
-                    tc::SPINNER[tick % tc::SPINNER.len()],
-                    running
-                ),
+                format!("  {} {} running", tc::SPINNER[tick % tc::SPINNER.len()], running),
             ));
         }
         rows.push(tc::seg(&head, w - 1));
@@ -2107,10 +2040,7 @@ fn main() {
             rows.push(tc::seg(
                 &[
                     (p.run.as_str(), format!(" filter: {}", bits.join(" + "))),
-                    (
-                        p.run.as_str(),
-                        if typing { "▏".into() } else { String::new() },
-                    ),
+                    (p.run.as_str(), if typing { "▏".into() } else { String::new() }),
                     (
                         p.dim.as_str(),
                         if typing {
@@ -2148,10 +2078,7 @@ fn main() {
         if !runs.is_empty() {
             let mut durs: Vec<f64> = runs.iter().filter_map(|r| run_secs(r, tc::now())).collect();
             durs.sort_by(f64::total_cmp);
-            let mut queues: Vec<f64> = runs
-                .iter()
-                .filter_map(|r| queue_secs(r, tc::now()))
-                .collect();
+            let mut queues: Vec<f64> = runs.iter().filter_map(|r| queue_secs(r, tc::now())).collect();
             queues.sort_by(f64::total_cmp);
             if !durs.is_empty() {
                 rows.push(String::new());
@@ -2165,10 +2092,7 @@ fn main() {
                         (p.dim.as_str(), "  max ".into()),
                         (p.txt.as_str(), dur_label(durs.last().copied())),
                         (p.dim.as_str(), "  queue ".into()),
-                        (
-                            p.txt.as_str(),
-                            dur_label(queues.get(queues.len() / 2).copied()),
-                        ),
+                        (p.txt.as_str(), dur_label(queues.get(queues.len() / 2).copied())),
                     ],
                     w - 1,
                 ));
@@ -2233,11 +2157,7 @@ fn main() {
                 break;
             }
             let here = i == selected;
-            let tint = if here {
-                tc::bg(38, 56, 76)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
                 // for its lighter twin. `dim` is 3.81 and `fail` is 4.05
@@ -2277,14 +2197,14 @@ fn main() {
                         outcome_label(&kind)
                     ),
                 ),
-                (
-                    c(&p.dim),
-                    format!(" {}", dur_label(run_secs(run, tc::now()))),
-                ),
+                (c(&p.dim), format!(" {}", dur_label(run_secs(run, tc::now())))),
                 (c(&p.dim), format!(" {:>4}", run_age(run, tc::now()))),
             ];
             if cols.detail {
-                line.push((c(&p.sha), format!("  {}", &sha[..sha.len().min(7)])));
+                line.push((
+                    c(&p.sha),
+                    format!("  {}", &sha[..sha.len().min(7)]),
+                ));
                 line.push((
                     c(&p.branch),
                     format!(" {}", tc::pad(&text(run, "branch"), 14)),
@@ -2317,8 +2237,7 @@ fn main() {
             if here {
                 line.push((tint.clone(), " ".repeat(w)));
             }
-            let refs: Vec<(&str, String)> =
-                line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
             if !cols.single && rows.len() < h.saturating_sub(1) {
                 // The workflow joins the subject here rather than fighting
@@ -2366,10 +2285,7 @@ fn main() {
         }
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
@@ -2400,6 +2316,7 @@ fn main() {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2424,7 +2341,8 @@ mod tests {
     fn a_token_prefers_gha_then_github_then_the_environment() {
         let gha: serde_json::Value =
             serde_json::from_str(r#"{"token": "from-gha", "token_env": "NOPE_TOKEN"}"#).unwrap();
-        let gh: serde_json::Value = serde_json::from_str(r#"{"token": "from-github"}"#).unwrap();
+        let gh: serde_json::Value =
+            serde_json::from_str(r#"{"token": "from-github"}"#).unwrap();
         assert_eq!(token(&gha, &gh), ("from-gha".to_string(), "config"));
         let empty: serde_json::Value = serde_json::from_str(r#"{"token": ""}"#).unwrap();
         assert_eq!(token(&empty, &gh), ("from-github".to_string(), "config"));
@@ -2441,7 +2359,8 @@ mod tests {
         assert_eq!(token(&isolated, &gh), ("from-github".to_string(), "config"));
         // A named widget token_env that is actually set beats github.token.
         // PATH is always present; the value is compared, not hardcoded.
-        let via_env: serde_json::Value = serde_json::from_str(r#"{"token_env": "PATH"}"#).unwrap();
+        let via_env: serde_json::Value =
+            serde_json::from_str(r#"{"token_env": "PATH"}"#).unwrap();
         let expected = std::env::var("PATH").ok().filter(|s| !s.is_empty());
         assert!(
             expected.is_some(),
@@ -2525,21 +2444,13 @@ mod tests {
 
         let since = iso_secs("2026-08-01T00:00:00Z").unwrap();
         let (picked, stats) = pick_repos(&found, since, 1, "alice");
-        assert_eq!(picked, vec![
-            "alice/toy".to_string(),
-            "acme/app".to_string()
-        ]);
+        assert_eq!(picked, vec!["alice/toy".to_string(), "acme/app".to_string()]);
         assert_eq!(stats.personal, 1);
         assert_eq!(stats.personal_found, 1);
         assert_eq!(stats.org, 1);
         assert_eq!(stats.org_found, 3, "acme had three eligible, kept one");
 
-        let (none, stats) = pick_repos(
-            &found,
-            iso_secs("2026-08-27T12:00:00Z").unwrap(),
-            8,
-            "alice",
-        );
+        let (none, stats) = pick_repos(&found, iso_secs("2026-08-27T12:00:00Z").unwrap(), 8, "alice");
         assert!(none.is_empty());
         assert_eq!(stats.personal_found + stats.org_found, 0);
     }
@@ -2590,11 +2501,7 @@ mod tests {
         let first = text(&runs[0], "repo");
         for _ in 0..5 {
             sort_runs_by_time(&mut runs);
-            assert_eq!(
-                text(&runs[0], "repo"),
-                first,
-                "order moved under the cursor"
-            );
+            assert_eq!(text(&runs[0], "repo"), first, "order moved under the cursor");
         }
         assert_eq!(first, "a/one");
     }
@@ -2799,11 +2706,13 @@ mod tests {
     #[test]
     fn activity_skips_a_run_with_no_created_stamp() {
         let p = palette();
-        let runs = vec![serde_json::json!({
-            "created_at": "",
-            "status": "completed",
-            "conclusion": "success"
-        })];
+        let runs = vec![
+            serde_json::json!({
+                "created_at": "",
+                "status": "completed",
+                "conclusion": "success"
+            }),
+        ];
         let (line, peak) = activity(&runs, 40, 48.0, &p);
         assert_eq!(peak, 0);
         assert!(line.contains("no runs"), "{line}");
@@ -2835,7 +2744,10 @@ mod tests {
 
     #[test]
     fn owner_and_name_have_to_be_exactly_two_parts() {
-        assert_eq!(split_repo("acme/app"), Some(("acme".into(), "app".into())));
+        assert_eq!(
+            split_repo("acme/app"),
+            Some(("acme".into(), "app".into()))
+        );
         assert_eq!(split_repo("acme"), None);
         assert_eq!(split_repo("acme/app/extra"), None);
         assert_eq!(split_repo("/app"), None);
@@ -2880,14 +2792,17 @@ mod tests {
             window_hours: 24,
             ..Default::default()
         };
-        apply_pass(&mut live, State {
-            runs: vec![sample_run(2), sample_run(3)],
-            err: String::new(),
-            fetched: 20.0,
-            scope: "last 7d · 1 configured repo".into(),
-            window_hours: 168,
-            ..Default::default()
-        });
+        apply_pass(
+            &mut live,
+            State {
+                runs: vec![sample_run(2), sample_run(3)],
+                err: String::new(),
+                fetched: 20.0,
+                scope: "last 7d · 1 configured repo".into(),
+                window_hours: 168,
+                ..Default::default()
+            },
+        );
         assert_eq!(live.runs.len(), 1);
         assert_eq!(live.runs[0]["id"], 1);
         assert_eq!(live.window_hours, 24);
@@ -2905,14 +2820,17 @@ mod tests {
             window_hours: 48,
             ..Default::default()
         };
-        apply_pass(&mut live, State {
-            runs: vec![],
-            err: "acme/app: 502".into(),
-            fetched: 20.0,
-            scope: "last 2d · 1 configured repo".into(),
-            window_hours: 48,
-            ..Default::default()
-        });
+        apply_pass(
+            &mut live,
+            State {
+                runs: vec![],
+                err: "acme/app: 502".into(),
+                fetched: 20.0,
+                scope: "last 2d · 1 configured repo".into(),
+                window_hours: 48,
+                ..Default::default()
+            },
+        );
         assert_eq!(live.runs.len(), 1);
         assert_eq!(live.err, "acme/app: 502");
         assert_eq!(live.fetched, 10.0);

@@ -307,6 +307,8 @@ account.
 
 ```json
 "github_prs": {
+  "token": "",
+  "token_env": "GITHUB_TOKEN",
   "sources": {
     "orgs":     "is:open is:pr @mine",
     "authored": "is:open is:pr author:@me",
@@ -316,6 +318,10 @@ account.
   "refresh": 60
 }
 ```
+
+Leave `token` empty to reuse `github.token`. `token_env` names the
+environment variable to try before the shared GitHub fallback; its value is
+the variable's name, not a credential.
 
 A leftover `"pr"` section is still read when `"github_prs"` is absent, and
 the pane says so. Rename it when you next edit the file.

@@ -590,6 +590,28 @@ pub fn heat(frac: f64) -> String {
 /// that then sits at a prompt is indistinguishable from the widget never
 /// having been launched. This stays on screen until somebody reads it.
 pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) {
+    cannot_start_inner(name, needed, why, install, None);
+}
+
+/// The same persistent missing-tool screen, with the owning widget's
+/// settings reachable even though its normal UI could not start.
+pub fn cannot_start_with_settings(
+    name: &str,
+    needed: &[String],
+    why: &[&str],
+    install: &str,
+    settings: SettingsSpec,
+) {
+    cannot_start_inner(name, needed, why, install, Some(settings));
+}
+
+fn cannot_start_inner(
+    name: &str,
+    needed: &[String],
+    why: &[&str],
+    install: &str,
+    settings: Option<SettingsSpec>,
+) {
     let bad = rgb(255, 100, 110);
     let dim = rgb(127, 147, 172);
     let txt = rgb(225, 235, 245);
@@ -597,6 +619,12 @@ pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) 
     let mut keyboard = Keyboard::new();
     loop {
         for key in keyboard.poll() {
+            if key == "," {
+                if let Some(spec) = settings {
+                    run_settings(&mut keyboard, spec);
+                    continue;
+                }
+            }
             if key == "q" || key == "Q" {
                 keyboard.restore();
                 restore_screen();
@@ -626,10 +654,20 @@ pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) 
                 w - 1,
             ));
         }
-        while rows.len() < h - 1 {
+        let mut hints = Vec::new();
+        if settings.is_some() {
+            hints.push(vec![(dim.as_str(), "[,] settings".into())]);
+        }
+        hints.push(vec![(dim.as_str(), "[q]uit".into())]);
+        let foot: Vec<String> = pack_hints(&hints, w.saturating_sub(2), "  ")
+            .into_iter()
+            .map(|line| format!(" {}", line))
+            .collect();
+        rows.truncate(h.saturating_sub(foot.len()));
+        while rows.len() < h.saturating_sub(foot.len()) {
             rows.push(String::new());
         }
-        rows.push(seg(&[(dim.as_str(), " [q]uit".into())], w - 1));
+        rows.extend(foot);
         draw(&rows, w, h);
         std::thread::sleep(std::time::Duration::from_millis(200));
     }

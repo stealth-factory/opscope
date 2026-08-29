@@ -63,166 +63,75 @@ const NO_PUBLISHED_PRICE: &[&str] = &["gpt-5.3-codex-spark", "codex-auto-review"
 /// and neither is assumed. OpenAI does not charge for cache writes, so
 /// those entries are absent rather than zero.
 const LIST_RATES: &[(&str, &[(&str, f64)])] = &[
-    ("gpt-5.6-sol", &[
-        ("input", 5.0),
-        ("output", 30.0),
-        ("cache_read", 0.50),
-    ]),
-    ("gpt-5.6-terra", &[
-        ("input", 2.0),
-        ("output", 12.0),
-        ("cache_read", 0.20),
-    ]),
-    ("gpt-5.6-luna", &[
-        ("input", 0.20),
-        ("output", 1.20),
-        ("cache_read", 0.02),
-    ]),
+    ("gpt-5.6-sol", &[("input", 5.0), ("output", 30.0), ("cache_read", 0.50)]),
+    ("gpt-5.6-terra", &[("input", 2.0), ("output", 12.0), ("cache_read", 0.20)]),
+    ("gpt-5.6-luna", &[("input", 0.20), ("output", 1.20), ("cache_read", 0.02)]),
     ("gpt-5.5-pro", &[("input", 30.0), ("output", 180.0)]),
-    ("gpt-5.5", &[
-        ("input", 5.0),
-        ("output", 30.0),
-        ("cache_read", 0.50),
-    ]),
-    ("gpt-5.4-mini", &[
-        ("input", 0.75),
-        ("output", 4.50),
-        ("cache_read", 0.075),
-    ]),
-    ("gpt-5.4-nano", &[
-        ("input", 0.20),
-        ("output", 1.25),
-        ("cache_read", 0.02),
-    ]),
+    ("gpt-5.5", &[("input", 5.0), ("output", 30.0), ("cache_read", 0.50)]),
+    ("gpt-5.4-mini", &[("input", 0.75), ("output", 4.50), ("cache_read", 0.075)]),
+    ("gpt-5.4-nano", &[("input", 0.20), ("output", 1.25), ("cache_read", 0.02)]),
     ("gpt-5.4-pro", &[("input", 30.0), ("output", 180.0)]),
-    ("gpt-5.4", &[
-        ("input", 2.50),
-        ("output", 15.0),
-        ("cache_read", 0.25),
-    ]),
-    ("gpt-5.3-codex", &[
-        ("input", 1.75),
-        ("output", 14.0),
-        ("cache_read", 0.175),
-    ]),
+    ("gpt-5.4", &[("input", 2.50), ("output", 15.0), ("cache_read", 0.25)]),
+    ("gpt-5.3-codex", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
     ("gpt-5.2-pro", &[("input", 21.0), ("output", 168.0)]),
-    ("gpt-5.2", &[
-        ("input", 1.75),
-        ("output", 14.0),
-        ("cache_read", 0.175),
-    ]),
-    ("gpt-5.1", &[
-        ("input", 1.25),
-        ("output", 10.0),
-        ("cache_read", 0.125),
-    ]),
-    ("gpt-5-mini", &[
-        ("input", 0.25),
-        ("output", 2.0),
-        ("cache_read", 0.025),
-    ]),
-    ("gpt-5-nano", &[
-        ("input", 0.05),
-        ("output", 0.40),
-        ("cache_read", 0.005),
-    ]),
+    ("gpt-5.2", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
+    ("gpt-5.1", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gpt-5-mini", &[("input", 0.25), ("output", 2.0), ("cache_read", 0.025)]),
+    ("gpt-5-nano", &[("input", 0.05), ("output", 0.40), ("cache_read", 0.005)]),
     ("gpt-5-pro", &[("input", 15.0), ("output", 120.0)]),
-    ("gpt-5", &[
-        ("input", 1.25),
-        ("output", 10.0),
-        ("cache_read", 0.125),
-    ]),
-    ("claude-fable-5", &[
-        ("input", 10.0),
-        ("output", 50.0),
-        ("cache_write", 12.50),
-        ("cache_read", 1.0),
-        ("cache_write_1h", 20.0),
-    ]),
-    ("claude-mythos-5", &[
-        ("input", 10.0),
-        ("output", 50.0),
-        ("cache_write", 12.50),
-        ("cache_read", 1.0),
-        ("cache_write_1h", 20.0),
-    ]),
-    ("claude-opus-5", &[
-        ("input", 5.0),
-        ("output", 25.0),
-        ("cache_write", 6.25),
-        ("cache_read", 0.50),
-        ("cache_write_1h", 10.0),
-    ]),
-    ("claude-opus-4-8", &[
-        ("input", 5.0),
-        ("output", 25.0),
-        ("cache_write", 6.25),
-        ("cache_read", 0.50),
-        ("cache_write_1h", 10.0),
-    ]),
-    ("claude-opus-4-7", &[
-        ("input", 5.0),
-        ("output", 25.0),
-        ("cache_write", 6.25),
-        ("cache_read", 0.50),
-        ("cache_write_1h", 10.0),
-    ]),
-    ("claude-opus-4-6", &[
-        ("input", 5.0),
-        ("output", 25.0),
-        ("cache_write", 6.25),
-        ("cache_read", 0.50),
-        ("cache_write_1h", 10.0),
-    ]),
-    ("claude-opus-4-5", &[
-        ("input", 5.0),
-        ("output", 25.0),
-        ("cache_write", 6.25),
-        ("cache_read", 0.50),
-        ("cache_write_1h", 10.0),
-    ]),
-    ("claude-opus-4-1", &[
-        ("input", 15.0),
-        ("output", 75.0),
-        ("cache_write", 18.75),
-        ("cache_read", 1.50),
-        ("cache_write_1h", 30.0),
-    ]),
-    ("claude-sonnet-5", &[
-        ("input", 2.0),
-        ("output", 10.0),
-        ("cache_write", 2.50),
-        ("cache_read", 0.20),
-        ("cache_write_1h", 4.0),
-    ]),
-    ("claude-sonnet-4-6", &[
-        ("input", 3.0),
-        ("output", 15.0),
-        ("cache_write", 3.75),
-        ("cache_read", 0.30),
-        ("cache_write_1h", 6.0),
-    ]),
-    ("claude-sonnet-4-5", &[
-        ("input", 3.0),
-        ("output", 15.0),
-        ("cache_write", 3.75),
-        ("cache_read", 0.30),
-        ("cache_write_1h", 6.0),
-    ]),
-    ("claude-haiku-4-5", &[
-        ("input", 1.0),
-        ("output", 5.0),
-        ("cache_write", 1.25),
-        ("cache_read", 0.10),
-        ("cache_write_1h", 2.0),
-    ]),
-    ("claude-haiku-3-5", &[
-        ("input", 0.80),
-        ("output", 4.0),
-        ("cache_write", 1.0),
-        ("cache_read", 0.08),
-        ("cache_write_1h", 1.6),
-    ]),
+    ("gpt-5", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    (
+        "claude-fable-5",
+        &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 1.0), ("cache_write_1h", 20.0)],
+    ),
+    (
+        "claude-mythos-5",
+        &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 1.0), ("cache_write_1h", 20.0)],
+    ),
+    (
+        "claude-opus-5",
+        &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
+    ),
+    (
+        "claude-opus-4-8",
+        &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
+    ),
+    (
+        "claude-opus-4-7",
+        &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
+    ),
+    (
+        "claude-opus-4-6",
+        &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
+    ),
+    (
+        "claude-opus-4-5",
+        &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
+    ),
+    (
+        "claude-opus-4-1",
+        &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
+    ),
+    (
+        "claude-sonnet-5",
+        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
+    ),
+    (
+        "claude-sonnet-4-6",
+        &[("input", 3.0), ("output", 15.0), ("cache_write", 3.75), ("cache_read", 0.30), ("cache_write_1h", 6.0)],
+    ),
+    (
+        "claude-sonnet-4-5",
+        &[("input", 3.0), ("output", 15.0), ("cache_write", 3.75), ("cache_read", 0.30), ("cache_write_1h", 6.0)],
+    ),
+    (
+        "claude-haiku-4-5",
+        &[("input", 1.0), ("output", 5.0), ("cache_write", 1.25), ("cache_read", 0.10), ("cache_write_1h", 2.0)],
+    ),
+    (
+        "claude-haiku-3-5",
+        &[("input", 0.80), ("output", 4.0), ("cache_write", 1.0), ("cache_read", 0.08), ("cache_write_1h", 1.6)],
+    ),
 ];
 
 /// One hue, four steps, the way /stats and the contribution calendar do it.
@@ -233,26 +142,13 @@ const HEAT_STEPS: [(u8, u8, u8); 4] = [(74, 52, 46), (140, 78, 58), (196, 100, 6
 // and the vendors that use them are the next thing to be ported. Kept here
 // rather than reinvented later, where the numbers would drift.
 #[allow(dead_code)]
-const CODEX_STEPS: [(u8, u8, u8); 4] = [
-    (66, 72, 82),
-    (122, 130, 144),
-    (182, 190, 202),
-    (240, 244, 250),
-];
+const CODEX_STEPS: [(u8, u8, u8); 4] =
+    [(66, 72, 82), (122, 130, 144), (182, 190, 202), (240, 244, 250)];
 #[allow(dead_code)]
-const GROK_STEPS: [(u8, u8, u8); 4] = [
-    (44, 62, 88),
-    (62, 104, 156),
-    (86, 150, 210),
-    (120, 196, 250),
-];
+const GROK_STEPS: [(u8, u8, u8); 4] = [(44, 62, 88), (62, 104, 156), (86, 150, 210), (120, 196, 250)];
 #[allow(dead_code)]
-const CURSOR_STEPS: [(u8, u8, u8); 4] = [
-    (48, 74, 66),
-    (72, 124, 104),
-    (100, 172, 142),
-    (140, 220, 184),
-];
+const CURSOR_STEPS: [(u8, u8, u8); 4] =
+    [(48, 74, 66), (72, 124, 104), (100, 172, 142), (140, 220, 184)];
 
 /// One hue per provider. Each is the colour that agent's own tab already
 /// uses, so the same agent looks the same wherever you meet it. Copilot and
@@ -281,14 +177,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 }
 
 const SUMMARY_TAB: &str = "+";
-const ORDER: &[&str] = &[
-    "claude",
-    "codex",
-    "cursor",
-    "grok",
-    "copilot",
-    "antigravity",
-];
+const ORDER: &[&str] = &["claude", "codex", "cursor", "grok", "copilot", "antigravity"];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -419,30 +308,15 @@ fn iso_day(s: &str) -> String {
     let s = s.trim_end_matches('Z');
     for fmt in ["%Y-%m-%dT%H:%M:%S%.f%:z", "%Y-%m-%dT%H:%M:%S%:z"] {
         if let Ok(at) = chrono::DateTime::parse_from_str(s, fmt) {
-            return format!(
-                "{} {} {}",
-                at.day(),
-                MONTHS[at.month0() as usize],
-                at.year()
-            );
+            return format!("{} {} {}", at.day(), MONTHS[at.month0() as usize], at.year());
         }
     }
     for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"] {
         if let Ok(at) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
-            return format!(
-                "{} {} {}",
-                at.day(),
-                MONTHS[at.month0() as usize],
-                at.year()
-            );
+            return format!("{} {} {}", at.day(), MONTHS[at.month0() as usize], at.year());
         }
         if let Ok(at) = NaiveDate::parse_from_str(s, fmt) {
-            return format!(
-                "{} {} {}",
-                at.day(),
-                MONTHS[at.month0() as usize],
-                at.year()
-            );
+            return format!("{} {} {}", at.day(), MONTHS[at.month0() as usize], at.year());
         }
     }
     String::new()
@@ -659,18 +533,26 @@ fn paced_bar(
             // without counting cells.
             let t = 0.51 + 0.49 * (i as f64 / filled.saturating_sub(1).max(1) as f64);
             (
-                format!("{}{}", p.nobg, match hue {
-                    Some(hue) => tint(hue, t),
-                    None => tc::heat(used),
-                }),
+                format!(
+                    "{}{}",
+                    p.nobg,
+                    match hue {
+                        Some(hue) => tint(hue, t),
+                        None => tc::heat(used),
+                    }
+                ),
                 ch,
             )
         } else {
             (
-                format!("{}{}", p.nobg, match hue {
-                    Some(hue) => tint(hue, 0.34),
-                    None => p.grid.clone(),
-                }),
+                format!(
+                    "{}{}",
+                    p.nobg,
+                    match hue {
+                        Some(hue) => tint(hue, 0.34),
+                        None => p.grid.clone(),
+                    }
+                ),
                 ch,
             )
         };
@@ -744,16 +626,7 @@ fn wrap_pair(key: &str, value: &str, label_w: usize, w: usize) -> Vec<(String, S
     lines
         .into_iter()
         .enumerate()
-        .map(|(i, part)| {
-            (
-                if i == 0 {
-                    key.to_string()
-                } else {
-                    String::new()
-                },
-                part,
-            )
-        })
+        .map(|(i, part)| (if i == 0 { key.to_string() } else { String::new() }, part))
         .collect()
 }
 
@@ -900,20 +773,12 @@ fn metered_block(
             (p.lbl.as_str(), " ── METERED ── ".into()),
             (
                 p.txt.as_str(),
-                if scope.is_empty() {
-                    String::new()
-                } else {
-                    format!("{} · ", scope)
-                },
+                if scope.is_empty() { String::new() } else { format!("{} · ", scope) },
             ),
             (p.dim.as_str(), format!("at {}", where_)),
             (
                 p.dim.as_str(),
-                if note.is_empty() {
-                    String::new()
-                } else {
-                    format!("   {}", note)
-                },
+                if note.is_empty() { String::new() } else { format!("   {}", note) },
             ),
         ],
         w - 1,
@@ -941,11 +806,7 @@ fn metered_block(
             w - 1,
         ));
         let top: Vec<&(String, f64)> = models.iter().take(5).collect();
-        let name_w = top
-            .iter()
-            .map(|(m, _)| m.chars().count())
-            .max()
-            .unwrap_or(0);
+        let name_w = top.iter().map(|(m, _)| m.chars().count()).max().unwrap_or(0);
         for (model, model_cost) in &top {
             rows.push(tc::seg(
                 &[
@@ -960,10 +821,7 @@ fn metered_block(
             rows.push(tc::seg(
                 &[
                     (p.dim.as_str(), format!("  {}   ", " ".repeat(label_w))),
-                    (
-                        p.dim.as_str(),
-                        format!("+{} more", models.len() - top.len()),
-                    ),
+                    (p.dim.as_str(), format!("+{} more", models.len() - top.len())),
                 ],
                 w - 1,
             ));
@@ -1092,12 +950,7 @@ fn metered_rows(
                     ),
                     (
                         p.dim.as_str(),
-                        missing
-                            .iter()
-                            .take(3)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        missing.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
                     ),
                 ],
                 w - 1,
@@ -1126,19 +979,11 @@ fn plan_rows(
             (p.lbl.as_str(), " ── SUBSCRIPTION ── ".into()),
             (
                 p.txt.as_str(),
-                if headline.is_empty() {
-                    "unknown".into()
-                } else {
-                    headline.to_string()
-                },
+                if headline.is_empty() { "unknown".into() } else { headline.to_string() },
             ),
             (
                 p.dim.as_str(),
-                if note.is_empty() {
-                    String::new()
-                } else {
-                    format!("   {}", note)
-                },
+                if note.is_empty() { String::new() } else { format!("   {}", note) },
             ),
         ],
         w - 1,
@@ -1250,9 +1095,7 @@ fn day_calendar(
     let first = *totals.keys().min()?;
     // A caller with a bounded window says so, rather than having its month
     // of data stretched across a year of empty dots.
-    let fit = weeks
-        .unwrap_or(w.saturating_sub(7))
-        .clamp(4, w.saturating_sub(7).max(4));
+    let fit = weeks.unwrap_or(w.saturating_sub(7)).clamp(4, w.saturating_sub(7).max(4));
     let end_week = last - Days::days(last.weekday().num_days_from_monday() as i64);
     let starts: Vec<NaiveDate> = (0..fit)
         .rev()
@@ -1303,11 +1146,7 @@ fn day_calendar(
     let (mut run, mut longest) = (0usize, 0usize);
     for i in 0..span {
         let day = first + Days::days(i as i64);
-        run = if totals.get(&day).is_some_and(|v| *v > 0.0) {
-            run + 1
-        } else {
-            0
-        };
+        run = if totals.get(&day).is_some_and(|v| *v > 0.0) { run + 1 } else { 0 };
         longest = longest.max(run);
     }
     let mut current = 0usize;
@@ -1482,31 +1321,32 @@ fn pick_config_section(parsed: &serde_json::Value) -> (&'static str, bool) {
 /// vanish.
 fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
     match name {
-        "claude" => ("Claude Code", vec!["claude"], vec![under_home(
-            ".claude/stats-cache.json",
-        )]),
-        "codex" => ("OpenAI Codex", vec!["codex"], vec![under_home(
-            ".codex/sessions",
-        )]),
-        "cursor" => ("Cursor", vec!["cursor-agent", "cursor"], vec![under_home(
-            ".cursor/ai-tracking/ai-code-tracking.db",
-        )]),
+        "claude" => (
+            "Claude Code",
+            vec!["claude"],
+            vec![under_home(".claude/stats-cache.json")],
+        ),
+        "codex" => ("OpenAI Codex", vec!["codex"], vec![under_home(".codex/sessions")]),
+        "cursor" => (
+            "Cursor",
+            vec!["cursor-agent", "cursor"],
+            vec![under_home(".cursor/ai-tracking/ai-code-tracking.db")],
+        ),
         "grok" => ("Grok", vec!["grok"], vec![under_home(".grok")]),
-        "copilot" => ("GitHub Copilot", vec!["copilot"], vec![
-            under_home(".copilot/session-store.db"),
-            under_home(".copilot/config.json"),
-        ]),
+        "copilot" => (
+            "GitHub Copilot",
+            vec!["copilot"],
+            vec![under_home(".copilot/session-store.db"), under_home(".copilot/config.json")],
+        ),
         // No binary on PATH to look for: the CLI is launched by the IDE and
         // its server is fetched per run, so the state directory is the only
         // proof it is here - which is why detection takes paths as well.
-        "antigravity" => ("Antigravity", vec!["antigravity"], vec![under_home(
-            ".gemini/antigravity-cli",
-        )]),
-        other => (
-            Box::leak(other.to_string().into_boxed_str()),
-            vec![],
-            vec![],
+        "antigravity" => (
+            "Antigravity",
+            vec!["antigravity"],
+            vec![under_home(".gemini/antigravity-cli")],
         ),
+        other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
 
@@ -1522,9 +1362,12 @@ fn detect_agents() -> HashMap<String, Presence> {
             let (_, bins, paths) = agent_spec(name);
             let has_bin = bins.iter().any(|b| tc::missing(&[b]).is_empty());
             let has_data = paths.iter().any(|p| std::path::Path::new(p).exists());
-            (name.to_string(), Presence {
-                present: has_bin || has_data,
-            })
+            (
+                name.to_string(),
+                Presence {
+                    present: has_bin || has_data,
+                },
+            )
         })
         .collect()
 }
@@ -1594,7 +1437,8 @@ fn config_complaints(cfg: &Config) -> String {
 }
 
 /// Shown when the settings came from a leftover `usage` section.
-const LEGACY_SECTION_NOTE: &str = "config section is still called usage; rename it to agent_usage";
+const LEGACY_SECTION_NOTE: &str =
+    "config section is still called usage; rename it to agent_usage";
 
 /// The gripe as rows, wrapped so a narrow pane keeps the words that matter.
 ///
@@ -1678,10 +1522,7 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![
         tc::seg(
             &[
-                (
-                    p.accent.as_str(),
-                    format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()]),
-                ),
+                (p.accent.as_str(), format!(" {}", tc::SPINNER[tick % tc::SPINNER.len()])),
                 (p.txt.as_str(), "  reading local state and quotas".into()),
             ],
             w - 1,
@@ -1847,14 +1688,8 @@ fn main() {
         };
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "←→".into()),
-                (p.dim.as_str(), " agent".into()),
-            ],
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " scroll".into()),
-            ],
+            vec![(p.accent.as_str(), "←→".into()), (p.dim.as_str(), " agent".into())],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " scroll".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
@@ -1901,10 +1736,7 @@ fn main() {
         };
         // The scroll position goes last on this line but matters most, so
         // the legend stands down to make room rather than being clipped.
-        let base = format!(
-            " local state · live quota · read {} ago",
-            ago(snapshot.fetched)
-        );
+        let base = format!(" local state · live quota · read {} ago", ago(snapshot.fetched));
         let hidden_txt = if hidden > 0 {
             format!("   {} hidden by config", hidden)
         } else {
@@ -1944,15 +1776,18 @@ fn main() {
     }
 }
 
-// One module per agent, kept in this widget's folder because they share
-// only the shape the summary screen compares them in.
+// Kept in a directory of its own rather than beside this file: anything
+// dropped straight into src/bin/ risks being taken for another binary. One
+// module per agent, because they share only the shape the summary screen
+// compares them in - and because five readers being written at once should
+// not be five edits to the same file.
+mod shared;
 mod antigravity;
 mod claude;
 mod codex;
 mod copilot;
 mod cursor;
 mod grok;
-mod shared;
 mod vendors;
 
 #[cfg(test)]
@@ -2095,11 +1930,7 @@ mod tests {
         // away, and adjacent records then look 0 or 1 second apart when a
         // rate is computed by dividing tokens by that gap.
         let fine = iso_epoch("2026-08-23T04:15:00.123456789Z").expect("nanoseconds");
-        assert!(
-            (fine - (want + 0.123456)).abs() < 1e-6,
-            "got {}",
-            fine - want
-        );
+        assert!((fine - (want + 0.123456)).abs() < 1e-6, "got {}", fine - want);
         assert_eq!(iso_epoch("2026-08-23T04:15:00.123456+00:00"), Some(fine));
         assert!(iso_epoch("").is_none());
         assert!(iso_epoch("not a date").is_none());
@@ -2114,26 +1945,11 @@ mod tests {
         // toss.
         for count in 2usize..10 {
             let n = count as i64;
-            assert_eq!(
-                step_tab(0, -1, count),
-                count - 1,
-                "left from the first of {}",
-                count
-            );
-            assert_eq!(
-                step_tab(n - 1, 1, count),
-                0,
-                "right from the last of {}",
-                count
-            );
+            assert_eq!(step_tab(0, -1, count), count - 1, "left from the first of {}", count);
+            assert_eq!(step_tab(n - 1, 1, count), 0, "right from the last of {}", count);
             for at in 0..n {
                 let back = step_tab(at, -1, count) as i64;
-                assert_eq!(
-                    step_tab(back, 1, count) as i64,
-                    at,
-                    "there and back from {}",
-                    at
-                );
+                assert_eq!(step_tab(back, 1, count) as i64, at, "there and back from {}", at);
             }
         }
         // An empty tab list must not index anything.

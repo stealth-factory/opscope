@@ -31,8 +31,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     schema: include_str!("settings.json"),
 };
 
-/// Each widget's own words, taken from that widget's folder: the help text
-/// every binary answers `--help` with, and its README opening preview.
+/// Each widget's own words, taken from that widget's folder.
 struct Widget {
     stem: &'static str,
     help: &'static str,
@@ -95,7 +94,7 @@ impl Widget {
         para.join(" ").chars().take(400).collect()
     }
 
-    /// The picture from this widget's README.
+    /// The picture from this widget's doc page, if it has one.
     ///
     /// Every doc opens with a rendering of the widget it describes, kept by
     /// whoever wrote it and read by whoever is deciding whether to run the
@@ -116,7 +115,7 @@ impl Widget {
                 block.push(line);
             }
         }
-        // Only a block that is actually a picture of the widget: READMEs
+        // Only a block that is actually a picture of the widget: the docs
         // also hold shell snippets and JSON, and a config listing is not a
         // preview.
         match block.first() {
@@ -141,11 +140,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             .filter(|c| *c > width / 2)
             .unwrap_or(width);
         lines.push(rest[..cut].iter().collect());
-        rest = rest[cut..]
-            .iter()
-            .skip_while(|c| **c == ' ')
-            .copied()
-            .collect();
+        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
     }
     lines
 }
@@ -216,20 +211,12 @@ fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -
         .take(room)
         .map(|(i, item)| {
             let here = i == selected;
-            let tint = if here {
-                tc::bg(28, 44, 62)
-            } else {
-                String::new()
-            };
+            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let c = |colour: &str| format!("{}{}", tint, colour);
             let mut line = vec![
                 (
                     c(if here { &p.accent } else { &p.dim }),
-                    if here {
-                        " ▸ ".to_string()
-                    } else {
-                        "   ".to_string()
-                    },
+                    if here { " ▸ ".to_string() } else { "   ".to_string() },
                 ),
                 (
                     c(if here { &p.txt } else { &p.lbl }),
@@ -261,14 +248,16 @@ fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
     keyboard.restore();
     tc::restore_screen();
     match beside(stem) {
-        Some(path) => match std::process::Command::new(&path).status() {
-            Ok(_) => {}
-            Err(e) => {
-                tc::out(&format!("{}: {}\r\n", path.display(), e));
-                tc::flush();
-                std::thread::sleep(Duration::from_secs(2));
+        Some(path) => {
+            match std::process::Command::new(&path).status() {
+                Ok(_) => {}
+                Err(e) => {
+                    tc::out(&format!("{}: {}\r\n", path.display(), e));
+                    tc::flush();
+                    std::thread::sleep(Duration::from_secs(2));
+                }
             }
-        },
+        }
         None => {
             tc::out("cannot find where this binary lives\r\n");
             tc::flush();
@@ -448,14 +437,8 @@ fn main() {
         // a menu should cost nothing at all. Measured against the footer
         // that will actually be drawn, rather than a guess at its height.
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.accent.as_str(), "↑↓".into()),
-                (p.dim.as_str(), " select".into()),
-            ],
-            vec![
-                (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " launch".into()),
-            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " launch".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
@@ -505,13 +488,13 @@ mod tests {
 
     #[test]
     fn the_window_always_contains_the_cursor() {
-        // The bug this replaces: every row was drawn and the
+        // The bug this replaces: all thirteen rows were drawn and the
         // frame cut the tail, so on a short pane the cursor moved onto a
         // row that was not there - nothing highlighted, and Enter still
         // starting whatever it was invisibly on.
-        for room in 1usize..=WIDGETS.len() {
-            for selected in 0..WIDGETS.len() {
-                let (first, shown) = window_for(WIDGETS.len(), selected, room, 0, true);
+        for room in 1usize..14 {
+            for selected in 0..13 {
+                let (first, shown) = window_for(13, selected, room, 0, true);
                 assert!(
                     selected >= first && selected < first + shown,
                     "room {} cursor {} fell outside {}..{}",
@@ -520,7 +503,7 @@ mod tests {
                     first,
                     first + shown
                 );
-                assert!(first + shown <= WIDGETS.len(), "window ran past the list");
+                assert!(first + shown <= 13, "window ran past the list");
             }
         }
     }
@@ -529,14 +512,8 @@ mod tests {
     fn a_list_that_fits_is_not_windowed() {
         // No note, no scrolling, nothing changed for the pane sizes these
         // actually run at.
-        assert_eq!(
-            window_for(WIDGETS.len(), 0, WIDGETS.len(), 0, true),
-            (0, WIDGETS.len())
-        );
-        assert_eq!(
-            window_for(WIDGETS.len(), WIDGETS.len() - 1, 20, 0, true),
-            (0, WIDGETS.len())
-        );
+        assert_eq!(window_for(13, 0, 13, 0, true), (0, 13));
+        assert_eq!(window_for(13, 12, 20, 0, true), (0, 13));
         assert_eq!(window_for(0, 0, 5, 0, true), (0, 0));
     }
 
@@ -564,6 +541,7 @@ mod tests {
         // A list that fits is not windowed however far the wheel is turned.
         assert_eq!(window_for(13, 0, 13, 99, false), (0, 13));
     }
+
 
     #[test]
     fn every_binary_is_on_the_menu() {
@@ -627,7 +605,7 @@ mod tests {
 
     #[test]
     fn the_aside_stops_before_the_usage_block() {
-        // The launcher takes the paragraph under the summary and nothing more:
+        // start.py takes the paragraph under the summary and nothing more:
         // what follows is the synopsis and the key list, which belong to
         // --help rather than to somebody choosing a widget.
         for widget in WIDGETS {
@@ -643,7 +621,7 @@ mod tests {
 
     #[test]
     fn a_sample_is_a_picture_of_the_widget() {
-        // Every widget README opens with a rendering, and the rendering opens
+        // Every doc page opens with a rendering, and the rendering opens
         // with the same rule every widget draws across its top. A fenced
         // block that does not is a shell snippet or a config listing.
         let mut with_pictures = 0;
@@ -653,11 +631,7 @@ mod tests {
                 continue;
             }
             with_pictures += 1;
-            assert!(
-                sample[0].starts_with("╺━"),
-                "{} is not a preview",
-                widget.stem
-            );
+            assert!(sample[0].starts_with("╺━"), "{} is not a preview", widget.stem);
         }
         assert!(
             with_pictures == WIDGETS.len(),
@@ -672,7 +646,7 @@ mod tests {
         assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
         // A word longer than the line is cut rather than dropped.
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        // Three lines at most: this is a note, not the full README.
+        // Three lines at most: this is a note, not the doc page.
         assert_eq!(wrap(&"word ".repeat(60), 10).len(), 3);
         assert!(wrap("", 8).is_empty());
     }
@@ -683,7 +657,7 @@ mod tests {
         // `kill -s TERM $$` exits by signal, so `code()` is None. The
         // previous fallback turned that into 0, which is how a crashed
         // widget became a successful launch.
-        let status = std::process::Command::new("/bin/sh")
+        let status = std::process::Command::new("sh")
             .args(["-c", "kill -s TERM $$"])
             .status()
             .expect("spawn sh");
