@@ -25,9 +25,12 @@
     },
     "pomodoro_flash_gap": {
       "minimum": 0
+    },
+    "cities": {
+      "picker": "timezone"
     }
   },
-  "_cities_comment": "World clocks as [label, IANA timezone] pairs.",
+  "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored - the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
   "cities": [
     [
       "San Francisco",

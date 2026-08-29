@@ -784,6 +784,14 @@ enum Mode {
         cursor: usize,
         error: Option<String>,
     },
+    /// A search over every zone the timezone database knows, for a field
+    /// whose schema asks for `"picker": "timezone"`.
+    Pick {
+        index: usize,
+        query: String,
+        sel: usize,
+        scroll: usize,
+    },
 }
 
 struct App {
@@ -1054,6 +1062,320 @@ fn delete_before(buffer: &mut String, cursor: &mut usize) {
     *cursor = at;
 }
 
+/// Cities the timezone database does not name, and the zone that carries
+/// them.
+///
+/// IANA names one representative city per zone, so `America/Los_Angeles` is
+/// the whole US Pacific coast and there is no `America/San_Francisco` to
+/// find - searching for one of these returns nothing at all, which reads as
+/// "not supported" rather than "filed under another name".
+///
+/// Deliberately a short list of cities people actually put on a wall, not an
+/// attempt at a gazetteer. A city missing from here still works: its zone is
+/// searchable under whatever IANA calls it. This only saves the reader from
+/// having to know that Los Angeles stands in for San Jose.
+///
+/// The label comes from the alias, so adding "san francisco" writes
+/// `["San Francisco", "America/Los_Angeles"]` - which is exactly the pair
+/// `config.example.json` has shipped by hand since the beginning.
+const CITY_ALIASES: &[(&str, &str)] = &[
+    // United States and Canada
+    ("San Francisco", "America/Los_Angeles"),
+    ("San Jose", "America/Los_Angeles"),
+    ("San Diego", "America/Los_Angeles"),
+    ("Seattle", "America/Los_Angeles"),
+    ("Portland", "America/Los_Angeles"),
+    ("Las Vegas", "America/Los_Angeles"),
+    ("Austin", "America/Chicago"),
+    ("Dallas", "America/Chicago"),
+    ("Houston", "America/Chicago"),
+    ("Boston", "America/New_York"),
+    ("Washington", "America/New_York"),
+    ("Miami", "America/New_York"),
+    ("Atlanta", "America/New_York"),
+    ("Philadelphia", "America/New_York"),
+    ("Salt Lake City", "America/Denver"),
+    ("Boulder", "America/Denver"),
+    ("Montreal", "America/Toronto"),
+    ("Ottawa", "America/Toronto"),
+    // Europe
+    ("Manchester", "Europe/London"),
+    ("Edinburgh", "Europe/London"),
+    ("Cambridge", "Europe/London"),
+    ("Munich", "Europe/Berlin"),
+    ("Frankfurt", "Europe/Berlin"),
+    ("Hamburg", "Europe/Berlin"),
+    ("Barcelona", "Europe/Madrid"),
+    ("Milan", "Europe/Rome"),
+    ("Geneva", "Europe/Zurich"),
+    // Asia and Oceania
+    ("Shanghai", "Asia/Shanghai"),
+    ("Beijing", "Asia/Shanghai"),
+    ("Shenzhen", "Asia/Shanghai"),
+    ("Guangzhou", "Asia/Shanghai"),
+    ("Kyoto", "Asia/Tokyo"),
+    ("Osaka", "Asia/Tokyo"),
+    ("Bangalore", "Asia/Kolkata"),
+    ("Bengaluru", "Asia/Kolkata"),
+    ("Mumbai", "Asia/Kolkata"),
+    ("Delhi", "Asia/Kolkata"),
+    ("Hyderabad", "Asia/Kolkata"),
+    ("Pune", "Asia/Kolkata"),
+    ("Tel Aviv", "Asia/Jerusalem"),
+    ("Abu Dhabi", "Asia/Dubai"),
+    ("Canberra", "Australia/Sydney"),
+    ("Wellington", "Pacific/Auckland"),
+    // South America and Africa
+    ("Rio de Janeiro", "America/Sao_Paulo"),
+    ("Cape Town", "Africa/Johannesburg"),
+];
+
+/// The alias that answers this query for a zone, if one does.
+fn alias_hit(zone: &str, query: &str) -> Option<&'static str> {
+    if query.is_empty() {
+        return None;
+    }
+    let needle = query.to_lowercase();
+    CITY_ALIASES
+        .iter()
+        .filter(|(_, z)| *z == zone)
+        .find(|(city, _)| {
+            let c = city.to_lowercase();
+            c.starts_with(&needle) || c.split_whitespace().any(|w| w.starts_with(&needle))
+        })
+        .map(|(city, _)| *city)
+}
+
+/// The label a zone gets when it is picked: its last path segment, with the
+/// underscores the database uses turned back into spaces.
+///
+/// `Asia/Hong_Kong` becomes `Hong Kong`, which is what every entry in
+/// `config.example.json` already says by hand. The pair stays editable
+/// afterwards for the ones wanting something shorter.
+fn zone_label(zone: &str) -> String {
+    zone.rsplit('/').next().unwrap_or(zone).replace('_', " ")
+}
+
+/// How well a zone answers the query, lower being better, `None` for no
+/// match at all.
+///
+/// Matched against the whole path with the separators flattened, so `hong`,
+/// `asia`, `asia/hong` and `hong kong` all reach `Asia/Hong_Kong`. Someone
+/// searching for a city should not have to know it is filed under Asia, and
+/// someone browsing a region should not have to know the city.
+///
+/// Ranked rather than merely filtered because alphabetical order buries the
+/// obvious answer: searching `hong` matched `Asia/Chongqing` first, on the
+/// "hong" inside "Chongqing", with `Asia/Hong_Kong` below it. A city whose
+/// own name starts with what was typed comes first, then one that starts
+/// with it anywhere in the path, then a bare substring.
+fn zone_rank(zone: &str, query: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let needle = query.to_lowercase().replace(['_', '/'], " ");
+    let flat = zone.to_lowercase().replace(['_', '/'], " ");
+    let leaf = zone_label(zone).to_lowercase();
+    if leaf.starts_with(&needle) {
+        return Some(0);
+    }
+    if flat.split_whitespace().any(|w| w.starts_with(&needle)) {
+        return Some(1);
+    }
+    if flat.contains(&needle) {
+        return Some(2);
+    }
+    // A city the database does not name, filed under the zone that carries
+    // it. Ranked with the leaf-prefix matches: someone typing "san fran"
+    // means it at least as precisely as someone typing "los ang".
+    if alias_hit(zone, query).is_some() {
+        return Some(0);
+    }
+    None
+}
+
+/// The zones currently configured, in the order the file lists them.
+///
+/// Anything in the array that is not a `[label, zone]` pair is passed over
+/// rather than repaired: this screen adds and removes whole entries, and a
+/// half-understood one is the user's to fix in the file.
+fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
+    let Some(field) = app.fields.get(index) else {
+        return Vec::new();
+    };
+    current_of(&app.live, field, app.legacy_section)
+        .or(Some(&field.default))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_array())
+                .filter_map(|pair| {
+                    let zone = pair.get(1).and_then(Value::as_str)?;
+                    let label = pair
+                        .first()
+                        .and_then(Value::as_str)
+                        .unwrap_or(zone)
+                        .to_string();
+                    Some((zone.to_string(), label))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Just the zones, for the membership tests that do not care what it is
+/// called.
+fn picked_zones(app: &App, index: usize) -> Vec<String> {
+    picked_pairs(app, index)
+        .into_iter()
+        .map(|(zone, _)| zone)
+        .collect()
+}
+
+/// What the file calls a configured zone, or a derived label if it somehow
+/// has none. The name the reader chose beats the one the database implies:
+/// an entry written as "San Francisco" should not read back "Los Angeles".
+fn picked_label(app: &App, index: usize, zone: &str) -> Option<String> {
+    picked_pairs(app, index)
+        .into_iter()
+        .find(|(z, _)| z == zone)
+        .map(|(_, label)| label)
+}
+
+/// What the screen lists, which depends on whether anything has been typed.
+///
+/// **Nothing typed:** the cities already configured, and only those. That is
+/// the list somebody removing one wants - four rows, not four rows hidden in
+/// five hundred and ninety-seven - and it means removing never involves
+/// searching for what you already have.
+///
+/// **Anything typed:** every zone the query matches, ranked, with a flag for
+/// the ones already in. Deliberately *not* hoisting the configured ones to
+/// the top here: a city that moves when you tick it is a city you then have
+/// to find again, and it puts the same name in two places depending on a
+/// state you are in the middle of changing. The tick moves, the row does not.
+fn zone_choices(app: &App, index: usize, query: &str) -> Vec<(String, bool)> {
+    let picked = picked_zones(app, index);
+    if query.is_empty() {
+        return picked.into_iter().map(|z| (z, true)).collect();
+    }
+    let mut out: Vec<(u8, &'static str)> = chrono_tz::TZ_VARIANTS
+        .iter()
+        .map(|tz| tz.name())
+        .filter_map(|name| zone_rank(name, query).map(|r| (r, name)))
+        .collect();
+    // Stable, so within a rank the database's own alphabetical order holds
+    // and the list does not reshuffle as a query grows.
+    out.sort_by_key(|(rank, _)| *rank);
+    out.into_iter()
+        .map(|(_, name)| {
+            let on = picked.iter().any(|p| p == name);
+            (name.to_string(), on)
+        })
+        .collect()
+}
+
+/// Add the zone if it is absent, drop it if it is there, and write.
+///
+/// Writing per toggle rather than collecting an edit and committing it: the
+/// write is atomic and the file is small, and it means what is on screen and
+/// what is on disk never disagree - which is the whole reason this screen
+/// exists rather than an instruction to go and edit JSON.
+fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let mut rows: Vec<Value> = current_of(&app.live, field, app.legacy_section)
+        .or(Some(&field.default))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let at = rows.iter().position(|row| {
+        row.as_array()
+            .and_then(|pair| pair.get(1))
+            .and_then(Value::as_str)
+            == Some(zone)
+    });
+    let removed = at.is_some();
+    match at {
+        Some(i) => {
+            rows.remove(i);
+        }
+        None => rows.push(Value::Array(vec![
+            Value::String(label.unwrap_or_else(|| zone_label(zone))),
+            Value::String(zone.to_string()),
+        ])),
+    }
+    match write_field(app, index, Value::Array(rows)) {
+        Ok(()) => {
+            app.status = Some(format!(
+                "{} {}",
+                if removed { "removed" } else { "added" },
+                zone
+            ))
+        }
+        Err(e) => app.status = Some(e),
+    }
+}
+
+fn handle_pick_key(app: &mut App, key: &str) -> bool {
+    let Mode::Pick { index, query, sel, scroll } = &mut app.mode else {
+        return false;
+    };
+    let (index, mut q, mut s_, mut sc) = (*index, query.clone(), *sel, *scroll);
+    let total = zone_choices(app, index, &q).len();
+    match key {
+        "esc" => {
+            app.mode = Mode::List;
+            return false;
+        }
+        "q" | "Q" if q.is_empty() => {
+            app.mode = Mode::List;
+            return false;
+        }
+        "up" => s_ = s_.saturating_sub(1),
+        "down" => s_ = (s_ + 1).min(total.saturating_sub(1)),
+        "pgup" => s_ = s_.saturating_sub(10),
+        "pgdn" => s_ = (s_ + 10).min(total.saturating_sub(1)),
+        "home" => s_ = 0,
+        "end" => s_ = total.saturating_sub(1),
+        // The wheel moves the view and never the selection, as everywhere.
+        "ctrl-y" | "wheel-up" => sc = sc.saturating_sub(1),
+        "ctrl-e" | "wheel-down" => sc = sc.saturating_add(1),
+        "backspace" => {
+            q.pop();
+            s_ = 0;
+        }
+        // Back to your own list in one key rather than one per character.
+        "ctrl-u" => {
+            q.clear();
+            s_ = 0;
+            sc = 0;
+        }
+        "enter" => {
+            if let Some((zone, _)) = zone_choices(app, index, &q).get(s_).cloned() {
+                let label = alias_hit(&zone, &q).map(str::to_string);
+                toggle_zone(app, index, &zone, label);
+            }
+        }
+        other if other.chars().count() == 1 => {
+            let ch = other.chars().next().unwrap();
+            if !ch.is_control() {
+                q.push(ch);
+                s_ = 0;
+            }
+        }
+        _ => {}
+    }
+    let total = zone_choices(app, index, &q).len();
+    if let Mode::Pick { query, sel, scroll, .. } = &mut app.mode {
+        *query = q;
+        *sel = s_.min(total.saturating_sub(1));
+        *scroll = sc;
+    }
+    false
+}
+
 fn handle_list_key(app: &mut App, key: &str) -> bool {
     match key {
         "q" | "Q" | "esc" | "," => return true,
@@ -1105,6 +1427,20 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     if let Err(e) = write_field(app, app.selected, Value::Bool(!current)) {
                         app.status = Some(e);
                     }
+                } else if app
+                    .constraints
+                    .get(&field.key)
+                    .and_then(Value::as_object)
+                    .and_then(|rule| rule.get("picker"))
+                    .and_then(Value::as_str)
+                    == Some("timezone")
+                {
+                    app.mode = Mode::Pick {
+                        index: app.selected,
+                        query: String::new(),
+                        sel: 0,
+                        scroll: 0,
+                    };
                 } else {
                     let seed = edit_seed(field, current_of(&app.live, field, app.legacy_section));
                     let cursor = seed.chars().count();
@@ -1502,6 +1838,189 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body
 }
 
+fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
+    let Mode::Pick { index, query, sel, scroll } = &app.mode else {
+        return vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
+    };
+    let field = &app.fields[*index];
+    let choices = zone_choices(app, *index, query);
+    // Counted from the configuration, not from the filtered list: counting
+    // the visible ticks made a search that matched nothing report "0 of 597"
+    // to someone with four cities configured, which reads as having none.
+    let chosen = picked_zones(app, *index).len();
+
+    let mut body = vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
+    body.push(crate::seg(
+        &[(p.dim.as_str(), format!(" {}", app.path.display()))],
+        w.saturating_sub(1),
+    ));
+    body.push(String::new());
+    body.push(crate::seg(
+        &[(p.lbl.as_str(), format!(" ── {} ── ", field.path().to_uppercase()))],
+        w.saturating_sub(1),
+    ));
+    // Said here rather than only in the file's comment: someone arranging
+    // this list is exactly the person who would otherwise assume the order
+    // they choose is the order they get.
+    let heading = if query.is_empty() {
+        format!(
+            "  {} configured · type to search {} zones and add more",
+            chosen,
+            chrono_tz::TZ_VARIANTS.len()
+        )
+    } else {
+        format!(
+            "  {} of {} zones match · {} configured in all",
+            choices.len(),
+            chrono_tz::TZ_VARIANTS.len(),
+            chosen
+        )
+    };
+    body.push(crate::seg(&[(p.dim.as_str(), heading)], w.saturating_sub(1)));
+    // Said on the screen rather than only in the file's comment: whoever is
+    // arranging this list is exactly the person who would otherwise assume
+    // the order they choose is the order they get.
+    body.push(crate::seg(
+        &[(
+            p.dim.as_str(),
+            "  drawn west to east by each zone's offset, not in the order added".to_string(),
+        )],
+        w.saturating_sub(1),
+    ));
+    body.push(String::new());
+    // A field you can see the edges of. A bare caret on a bare line reads as
+    // output rather than as somewhere to type, and the one thing this screen
+    // has to make obvious is that typing does something.
+    //
+    // Blinking on the wall clock rather than a frame counter, so the cadence
+    // is the same half-second whatever the redraw interval happens to be -
+    // and so it does not race the 80ms loop into a flicker.
+    let lit = (crate::now() * 2.0) as u64 % 2 == 0;
+    let caret = if lit { "▏" } else { " " };
+    let box_w = w.saturating_sub(6).max(12);
+    let shown: String = {
+        let chars: Vec<char> = query.chars().collect();
+        let room = box_w.saturating_sub(2);
+        // Keep the tail in view: what was typed last is what is being
+        // corrected, and a query long enough to scroll is a query being
+        // narrowed.
+        let start = chars.len().saturating_sub(room);
+        chars[start..].iter().collect()
+    };
+    let field = crate::bg(24, 36, 50);
+    let ink = format!("{field}{}", p.txt);
+    let ghost = format!("{field}{}", p.dim);
+    let edge = format!("{field}{}", p.accent);
+    let used = shown.chars().count() + 1;
+    body.push(crate::seg(
+        &[
+            (p.dim.as_str(), "  ".to_string()),
+            (edge.as_str(), " ".to_string()),
+            (ink.as_str(), shown.clone()),
+            (edge.as_str(), caret.to_string()),
+            (
+                ghost.as_str(),
+                if query.is_empty() {
+                    // Only where it fits, and never over what was typed.
+                    let hint = "type a city or a zone";
+                    if hint.len() + used + 1 <= box_w {
+                        format!(" {hint}")
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                },
+            ),
+            (field.as_str(), " ".repeat(box_w)),
+        ],
+        w.saturating_sub(1),
+    ));
+    body.push(String::new());
+
+    let foot_rows = 2;
+    let room = h.saturating_sub(body.len() + foot_rows).max(1);
+    let first = if *sel >= *scroll + room {
+        sel + 1 - room
+    } else if *sel < *scroll {
+        *sel
+    } else {
+        (*scroll).min(choices.len().saturating_sub(room))
+    };
+    if choices.is_empty() {
+        let why = if query.is_empty() {
+            "  no cities yet - type to search and add one".to_string()
+        } else {
+            format!("  nothing matches /{query}")
+        };
+        body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
+    }
+    for (i, (zone, on)) in choices.iter().enumerate().skip(first).take(room) {
+        let here = i == *sel;
+        let tint = if here { crate::bg(28, 44, 62) } else { String::new() };
+        let mark = if *on { "✓" } else { " " };
+        // Owned first, borrowed after: `seg` takes `&str`, so a colour
+        // composed inline would not outlive the slice it is put in. The tint
+        // has to lead each one or the foreground that follows resets the
+        // background and the highlight stops halfway across.
+        let lead = format!("{tint}{}", if here { &p.accent } else { &p.dim });
+        let name = format!("{tint}{}", if *on { &p.txt } else { &p.dim });
+        let note = format!("{tint}{}", p.dim);
+        body.push(crate::seg(
+            &[
+                (
+                    lead.as_str(),
+                    format!(" {} {} ", if here { "▸" } else { " " }, mark),
+                ),
+                (name.as_str(), crate::pad(zone, 34)),
+                (
+                    note.as_str(),
+                    match (alias_hit(zone, query), *on) {
+                        // Why a search for a city returned a zone with
+                        // another name. Without it the row looks like a
+                        // mismatch rather than an answer.
+                        (Some(city), _) => format!("{city} is here"),
+                        (None, true) => picked_label(app, *index, zone)
+                            .unwrap_or_else(|| zone_label(zone)),
+                        (None, false) => String::new(),
+                    },
+                ),
+                (tint.as_str(), " ".repeat(w)),
+            ],
+            w.saturating_sub(1),
+        ));
+    }
+
+    let hints: Vec<Vec<(&str, String)>> = if query.is_empty() {
+        vec![
+            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " remove".into())],
+            vec![(p.dim.as_str(), "type to add".into())],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
+            vec![(p.dim.as_str(), "esc done".into())],
+        ]
+    } else {
+        vec![
+            vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " add / remove".into())],
+            vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ],
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
+            vec![(p.dim.as_str(), "esc done".into())],
+        ]
+    };
+    let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
+        .into_iter()
+        .map(|l| format!(" {l}"))
+        .collect();
+    while body.len() + foot.len() < h {
+        body.push(String::new());
+    }
+    body.extend(foot);
+    body.truncate(h);
+    body
+}
+
 fn list_hints<'a>(p: &'a Palette, reveal: bool) -> Vec<Vec<(&'a str, String)>> {
     let secret = if reveal { "[s]hide tokens" } else { "[s]how tokens" };
     vec![
@@ -1528,6 +2047,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
             let quit = match app.mode {
                 Mode::List => handle_list_key(&mut app, &key),
                 Mode::Edit { .. } => handle_edit_key(&mut app, &key),
+                Mode::Pick { .. } => handle_pick_key(&mut app, &key),
             };
             if quit {
                 return;
@@ -1537,6 +2057,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         let body = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
+            Mode::Pick { .. } => draw_pick(&app, w, h, &p),
         };
         crate::draw(&body, w, h);
         std::thread::sleep(Duration::from_millis(80));

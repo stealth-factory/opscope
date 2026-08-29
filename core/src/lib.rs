@@ -1865,6 +1865,12 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             // not among them, and neither is flow control's ^S/^Q.
             '\x19' => keys.push("ctrl-y".to_string()),
             '\x05' => keys.push("ctrl-e".to_string()),
+            // Kill-line, as readline and every shell prompt use it. Named
+            // here so a screen with a text field gets it for free, and so it
+            // cannot be confused with a character somebody meant to type -
+            // which is the whole reason to clear with a control byte rather
+            // than with tab, a letter, or a second meaning for escape.
+            '\x15' => keys.push("ctrl-u".to_string()),
             c => keys.push(c.to_string()),
         }
     }
@@ -2664,6 +2670,7 @@ mod tests {
         // vim's own scroll pair, named rather than left as control bytes.
         assert_eq!(keys("\x19"), vec!["ctrl-y"]);
         assert_eq!(keys("\x05"), vec!["ctrl-e"]);
+        assert_eq!(keys("\x15"), vec!["ctrl-u"]);
     }
 
     #[test]
