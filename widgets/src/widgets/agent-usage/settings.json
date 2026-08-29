@@ -14,7 +14,7 @@
         ]
       },
       "inactive_when": {
-        "key": "detect_agents",
+        "key": "auto_detect_agent",
         "is": true
       }
     },
@@ -44,12 +44,12 @@
       "minimum": 0.1
     }
   },
+  "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named - it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
+  "auto_detect_agent": true,
   "_agents_comment": "Agent names to show, in the order given; empty discovers whatever local state this machine has. Pick from the list rather than typing: a name that is not one of the six is not an error, it is simply an agent that never appears.",
   "agents": [],
-  "_exclude_agents_comment": "Discovered or named agents to leave out. Picked from the same six, so an exclusion cannot be spelt wrongly and silently do nothing.",
+  "_exclude_agents_comment": "Agents to leave out, applied either way - to the ones discovered automatically and to a list named by hand. Picked from the same six, so an exclusion cannot be spelt wrongly and silently do nothing.",
   "exclude_agents": [],
-  "_detect_agents_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named - it was simply spelt as an empty list, which nothing on screen could name. Turn it off to show exactly the agents picked above, in that order. Leave the key out entirely and the old rule still decides: a named list wins, an empty one discovers.",
-  "detect_agents": true,
   "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
   "refresh": 30.0,
   "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
