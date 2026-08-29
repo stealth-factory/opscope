@@ -11,9 +11,14 @@
       "minimum": 0.1
     }
   },
+  "_token_comment": "Linear personal API key; leave empty to read the named environment variable.",
   "token": "",
+  "_token_env_comment": "Environment variable that holds the Linear API key.",
   "token_env": "LINEAR_API_KEY",
+  "_exclude_teams_comment": "Linear team identifiers omitted from every aggregate.",
   "exclude_teams": [],
+  "_window_days_comment": "Days included in issue and cycle trend charts.",
   "window_days": 14.0,
+  "_refresh_comment": "Seconds between Linear API refreshes.",
   "refresh": 120.0
 }

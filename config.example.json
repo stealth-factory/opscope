@@ -7,8 +7,11 @@
   },
   "agent_usage": {
     "_comment": "Reads local agent state only - no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
+    "_agents_comment": "Agent names to show in a fixed order; empty discovers local agent state.",
     "agents": [],
+    "_exclude_agents_comment": "Discovered or named agents to leave out.",
     "exclude_agents": [],
+    "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
     "refresh": 30.0,
     "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
     "rates": {},
@@ -20,9 +23,11 @@
     "antigravity_start": true,
     "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
     "grok_ping": false,
+    "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls.",
     "grok_ping_minutes": 5.0
   },
   "clocks": {
+    "_cities_comment": "World clocks as [label, IANA timezone] pairs.",
     "cities": [
       [
         "San Francisco",
@@ -41,7 +46,9 @@
         "Asia/Tokyo"
       ]
     ],
+    "_work_start_hour_comment": "Local 24-hour clock hour when the work day begins.",
     "work_start_hour": 9,
+    "_work_end_hour_comment": "Local 24-hour clock hour when the work day ends.",
     "work_end_hour": 18,
     "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
     "show_hints": true,
@@ -53,16 +60,27 @@
       "thu",
       "fri"
     ],
+    "_pomodoro_enabled_comment": "Whether the pomodoro starts enabled when clocks launches.",
     "pomodoro_enabled": false,
+    "_pomodoro_focus_minutes_comment": "Minutes in one focus session.",
     "pomodoro_focus_minutes": 25.0,
+    "_pomodoro_short_break_minutes_comment": "Minutes in a short break.",
     "pomodoro_short_break_minutes": 5.0,
+    "_pomodoro_long_break_minutes_comment": "Minutes in a long break.",
     "pomodoro_long_break_minutes": 15.0,
+    "_pomodoro_sessions_before_long_break_comment": "Completed focus sessions before a long break.",
     "pomodoro_sessions_before_long_break": 4,
+    "_pomodoro_bell_comment": "Whether a terminal bell sounds when a phase ends.",
     "pomodoro_bell": true,
+    "_pomodoro_notify_comment": "Whether a desktop notification is attempted when a phase ends.",
     "pomodoro_notify": true,
+    "_pomodoro_flash_comment": "Whether the pane flashes when a phase ends.",
     "pomodoro_flash": true,
+    "_pomodoro_flash_count_comment": "Number of end-of-phase flashes.",
     "pomodoro_flash_count": 2,
+    "_pomodoro_flash_gap_comment": "Seconds between end-of-phase flashes.",
     "pomodoro_flash_gap": 1.0,
+    "_pomodoro_flash_rgb_comment": "Flash colour as three red, green, blue values.",
     "pomodoro_flash_rgb": [
       246,
       248,
@@ -71,74 +89,114 @@
   },
   "deployments": {
     "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
+    "_token_comment": "Vercel account token; leave empty to read the named environment variable.",
     "token": "",
+    "_token_env_comment": "Environment variable that holds the Vercel token.",
     "token_env": "VERCEL_TOKEN",
+    "_refresh_comment": "Seconds between Vercel API refreshes.",
     "refresh": 15.0,
+    "_limit_comment": "Maximum deployments requested from Vercel.",
     "limit": 100,
+    "_teams_comment": "Vercel team identifiers to include; empty uses the personal account.",
     "teams": [],
+    "_projects_comment": "Project identifiers to include; empty includes every project in scope.",
     "projects": []
   },
   "github": {
     "_comment": "token: a CLASSIC PAT with repo + read:org - fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+    "_token_comment": "Classic GitHub token; leave empty to read the named environment variable.",
     "token": "",
+    "_token_env_comment": "Environment variable that holds the GitHub token.",
     "token_env": "GITHUB_TOKEN",
+    "_accounts_comment": "GitHub users or organizations to include; empty discovers the viewer and their organizations.",
     "accounts": [],
+    "_window_days_comment": "Days included in delivery charts and summaries.",
     "window_days": 14.0,
+    "_refresh_comment": "Seconds between GitHub API refreshes.",
     "refresh": 120.0
   },
   "github_actions": {
     "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
+    "_token_comment": "Optional GitHub token override for this widget; empty reuses github.token.",
     "token": "",
+    "_token_env_comment": "Optional environment-variable override; empty reuses the shared GitHub token source.",
     "token_env": "",
+    "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
     "accounts": [],
+    "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",
     "repos": [],
+    "_window_hours_comment": "Hours of workflow runs included in summaries.",
     "window_hours": 48.0,
+    "_refresh_comment": "Seconds between GitHub Actions refreshes.",
     "refresh": 60.0,
+    "_max_repos_comment": "Maximum discovered repositories inspected per account.",
     "max_repos": 16,
+    "_pushed_days_comment": "How recently a repository must have been pushed to qualify for discovery.",
     "pushed_days": 14.0
   },
   "github_prs": {
     "_comment": "Reuses github.token by default. token and token_env override it for this widget. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "_token_comment": "Optional GitHub token override for this widget; empty reuses github.token.",
     "token": "",
+    "_token_env_comment": "Environment variable checked before the shared GitHub token source.",
     "token_env": "GITHUB_TOKEN",
+    "_sources_comment": "Named GitHub search queries pooled and de-duplicated into the follow-up queue.",
     "sources": {
       "orgs": "is:open is:pr @mine",
       "authored": "is:open is:pr author:@me",
       "assigned": "is:open is:pr assignee:@me"
     },
+    "_limit_comment": "Maximum pull requests retained after searches are combined.",
     "limit": 50,
+    "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
     "refresh": 60.0
   },
   "herdr_panes": {
+    "_refresh_comment": "Seconds between reads of Herdr pane state.",
     "refresh": 4.0
   },
   "latency": {
+    "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently.",
     "hosts": [
       "1.1.1.1",
       "8.8.8.8",
       "example.internal"
     ],
+    "_interval_comment": "Seconds between ping samples per target.",
     "interval": 0.5,
+    "_seconds_per_column_comment": "Seconds represented by one graph column; 0 chooses from the pane width and retained window.",
     "seconds_per_column": 0.0,
+    "_window_comment": "Seconds of readings retained for statistics and graphs.",
     "window": 600,
+    "_spike_factor_comment": "How many times above the recent baseline marks a latency spike.",
     "spike_factor": 3.0,
+    "_aggregate_comment": "How several samples in one graph column are combined.",
     "aggregate": "median",
+    "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only.",
     "strip_suffixes": [
       ".example.internal"
     ]
   },
   "linear": {
     "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
+    "_token_comment": "Linear personal API key; leave empty to read the named environment variable.",
     "token": "",
+    "_token_env_comment": "Environment variable that holds the Linear API key.",
     "token_env": "LINEAR_API_KEY",
+    "_exclude_teams_comment": "Linear team identifiers omitted from every aggregate.",
     "exclude_teams": [],
+    "_window_days_comment": "Days included in issue and cycle trend charts.",
     "window_days": 14.0,
+    "_refresh_comment": "Seconds between Linear API refreshes.",
     "refresh": 120.0
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+    "_ports_comment": "Listening ports counted as inbound sessions; empty uses every listening port.",
     "ports": [],
+    "_refresh_comment": "Seconds between kernel TCP-accounting reads.",
     "refresh": 2.0,
+    "_history_comment": "Minimum number of rate samples retained.",
     "history": 120,
     "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor - retention follows the longest window on its own.",
     "windows": [
@@ -150,14 +208,20 @@
   },
   "netwatch": {
     "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only - UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
+    "_interval_comment": "Seconds between kernel socket-counter samples.",
     "interval": 1.0,
+    "_limit_comment": "Maximum process rows; 0 means no configured limit.",
     "limit": 0,
+    "_sort_comment": "Initial ordering: total bytes or live rate.",
     "sort": "total",
+    "_external_comment": "Whether traffic with off-machine peers is included.",
     "external": true,
+    "_mine_comment": "Whether the initial view is limited to this user’s processes.",
     "mine": true
   },
   "ports": {
     "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` - parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+    "_system_ports_comment": "Listening ports hidden when system services are hidden.",
     "system_ports": [
       22,
       53,
@@ -166,11 +230,13 @@
       631,
       5353
     ],
+    "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
     "refresh": 4.0
   },
   "tailnet": {
     "_comment_history": "rate samples kept per peer; the chart is a window on to this",
     "history": 180,
+    "_refresh_comment": "Seconds between Tailscale status and traffic refreshes.",
     "refresh": 2.0
   }
 }

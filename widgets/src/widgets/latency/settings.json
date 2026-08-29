@@ -22,16 +22,23 @@
       ]
     }
   },
+  "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently.",
   "hosts": [
     "1.1.1.1",
     "8.8.8.8",
     "example.internal"
   ],
+  "_interval_comment": "Seconds between ping samples per target.",
   "interval": 0.5,
+  "_seconds_per_column_comment": "Seconds represented by one graph column; 0 chooses from the pane width and retained window.",
   "seconds_per_column": 0.0,
+  "_window_comment": "Seconds of readings retained for statistics and graphs.",
   "window": 600,
+  "_spike_factor_comment": "How many times above the recent baseline marks a latency spike.",
   "spike_factor": 3.0,
+  "_aggregate_comment": "How several samples in one graph column are combined.",
   "aggregate": "median",
+  "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only.",
   "strip_suffixes": [
     ".example.internal"
   ]

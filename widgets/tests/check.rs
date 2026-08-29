@@ -270,12 +270,32 @@ fn every_widget_owns_its_complete_folder() {
         let settings = folder.join("settings.json");
         if settings.exists() {
             let text = std::fs::read_to_string(&settings).unwrap_or_default();
-            if serde_json::from_str::<serde_json::Value>(&text)
+            match serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|value| value.as_object().cloned())
-                .is_none()
             {
-                wrong.push(format!("{name}: settings.json is not a JSON object"));
+                None => wrong.push(format!("{name}: settings.json is not a JSON object")),
+                Some(settings) => {
+                    for key in settings.keys().filter(|key| !key.starts_with('_')) {
+                        let has_help = [
+                            format!("_{key}_comment"),
+                            format!("_comment_{key}"),
+                            format!("_{key}"),
+                        ]
+                        .iter()
+                        .any(|comment| {
+                            settings
+                                .get(comment)
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|text| !text.trim().is_empty())
+                        });
+                        if !has_help {
+                            wrong.push(format!(
+                                "{name}: {key} has no field-specific help in settings.json"
+                            ));
+                        }
+                    }
+                }
             }
             if !source.contains("tc::run_settings") {
                 wrong.push(format!("{name}: declares settings but never opens them"));

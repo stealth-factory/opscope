@@ -15,10 +15,16 @@
       "maximum": 100
     }
   },
+  "_token_comment": "Vercel account token; leave empty to read the named environment variable.",
   "token": "",
+  "_token_env_comment": "Environment variable that holds the Vercel token.",
   "token_env": "VERCEL_TOKEN",
+  "_refresh_comment": "Seconds between Vercel API refreshes.",
   "refresh": 15.0,
+  "_limit_comment": "Maximum deployments requested from Vercel.",
   "limit": 100,
+  "_teams_comment": "Vercel team identifiers to include; empty uses the personal account.",
   "teams": [],
+  "_projects_comment": "Project identifiers to include; empty includes every project in scope.",
   "projects": []
 }

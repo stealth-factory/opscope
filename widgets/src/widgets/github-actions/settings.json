@@ -20,12 +20,20 @@
       "minimum": 1
     }
   },
+  "_token_comment": "Optional GitHub token override for this widget; empty reuses github.token.",
   "token": "",
+  "_token_env_comment": "Optional environment-variable override; empty reuses the shared GitHub token source.",
   "token_env": "",
+  "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
   "accounts": [],
+  "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",
   "repos": [],
+  "_window_hours_comment": "Hours of workflow runs included in summaries.",
   "window_hours": 48.0,
+  "_refresh_comment": "Seconds between GitHub Actions refreshes.",
   "refresh": 60.0,
+  "_max_repos_comment": "Maximum discovered repositories inspected per account.",
   "max_repos": 16,
+  "_pushed_days_comment": "How recently a repository must have been pushed to qualify for discovery.",
   "pushed_days": 14.0
 }

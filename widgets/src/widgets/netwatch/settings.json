@@ -14,9 +14,14 @@
       ]
     }
   },
+  "_interval_comment": "Seconds between kernel socket-counter samples.",
   "interval": 1.0,
+  "_limit_comment": "Maximum process rows; 0 means no configured limit.",
   "limit": 0,
+  "_sort_comment": "Initial ordering: total bytes or live rate.",
   "sort": "total",
+  "_external_comment": "Whether traffic with off-machine peers is included.",
   "external": true,
+  "_mine_comment": "Whether the initial view is limited to this user’s processes.",
   "mine": true
 }

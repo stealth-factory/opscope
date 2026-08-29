@@ -9,5 +9,6 @@
   },
   "_comment_history": "rate samples kept per peer; the chart is a window on to this",
   "history": 180,
+  "_refresh_comment": "Seconds between Tailscale status and traffic refreshes.",
   "refresh": 2.0
 }

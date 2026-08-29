@@ -11,8 +11,11 @@
       "minimum": 1
     }
   },
+  "_ports_comment": "Listening ports counted as inbound sessions; empty uses every listening port.",
   "ports": [],
+  "_refresh_comment": "Seconds between kernel TCP-accounting reads.",
   "refresh": 2.0,
+  "_history_comment": "Minimum number of rate samples retained.",
   "history": 120,
   "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor - retention follows the longest window on its own.",
   "windows": [

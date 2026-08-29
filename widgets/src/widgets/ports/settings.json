@@ -5,6 +5,7 @@
       "minimum": 1
     }
   },
+  "_system_ports_comment": "Listening ports hidden when system services are hidden.",
   "system_ports": [
     22,
     53,
@@ -13,5 +14,6 @@
     631,
     5353
   ],
+  "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
   "refresh": 4.0
 }

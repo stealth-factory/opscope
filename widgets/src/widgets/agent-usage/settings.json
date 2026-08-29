@@ -20,8 +20,11 @@
       "minimum": 0.1
     }
   },
+  "_agents_comment": "Agent names to show in a fixed order; empty discovers local agent state.",
   "agents": [],
+  "_exclude_agents_comment": "Discovered or named agents to leave out.",
   "exclude_agents": [],
+  "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
   "refresh": 30.0,
   "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
   "rates": {},
@@ -33,5 +36,6 @@
   "antigravity_start": true,
   "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
   "grok_ping": false,
+  "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls.",
   "grok_ping_minutes": 5.0
 }

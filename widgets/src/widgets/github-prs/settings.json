@@ -8,13 +8,18 @@
       "minimum": 0.1
     }
   },
+  "_token_comment": "Optional GitHub token override for this widget; empty reuses github.token.",
   "token": "",
+  "_token_env_comment": "Environment variable checked before the shared GitHub token source.",
   "token_env": "GITHUB_TOKEN",
+  "_sources_comment": "Named GitHub search queries pooled and de-duplicated into the follow-up queue.",
   "sources": {
     "orgs": "is:open is:pr @mine",
     "authored": "is:open is:pr author:@me",
     "assigned": "is:open is:pr assignee:@me"
   },
+  "_limit_comment": "Maximum pull requests retained after searches are combined.",
   "limit": 50,
+  "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
   "refresh": 60.0
 }

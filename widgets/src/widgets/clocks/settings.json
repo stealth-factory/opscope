@@ -27,6 +27,7 @@
       "minimum": 0
     }
   },
+  "_cities_comment": "World clocks as [label, IANA timezone] pairs.",
   "cities": [
     [
       "San Francisco",
@@ -45,7 +46,9 @@
       "Asia/Tokyo"
     ]
   ],
+  "_work_start_hour_comment": "Local 24-hour clock hour when the work day begins.",
   "work_start_hour": 9,
+  "_work_end_hour_comment": "Local 24-hour clock hour when the work day ends.",
   "work_end_hour": 18,
   "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
   "show_hints": true,
@@ -57,16 +60,27 @@
     "thu",
     "fri"
   ],
+  "_pomodoro_enabled_comment": "Whether the pomodoro starts enabled when clocks launches.",
   "pomodoro_enabled": false,
+  "_pomodoro_focus_minutes_comment": "Minutes in one focus session.",
   "pomodoro_focus_minutes": 25.0,
+  "_pomodoro_short_break_minutes_comment": "Minutes in a short break.",
   "pomodoro_short_break_minutes": 5.0,
+  "_pomodoro_long_break_minutes_comment": "Minutes in a long break.",
   "pomodoro_long_break_minutes": 15.0,
+  "_pomodoro_sessions_before_long_break_comment": "Completed focus sessions before a long break.",
   "pomodoro_sessions_before_long_break": 4,
+  "_pomodoro_bell_comment": "Whether a terminal bell sounds when a phase ends.",
   "pomodoro_bell": true,
+  "_pomodoro_notify_comment": "Whether a desktop notification is attempted when a phase ends.",
   "pomodoro_notify": true,
+  "_pomodoro_flash_comment": "Whether the pane flashes when a phase ends.",
   "pomodoro_flash": true,
+  "_pomodoro_flash_count_comment": "Number of end-of-phase flashes.",
   "pomodoro_flash_count": 2,
+  "_pomodoro_flash_gap_comment": "Seconds between end-of-phase flashes.",
   "pomodoro_flash_gap": 1.0,
+  "_pomodoro_flash_rgb_comment": "Flash colour as three red, green, blue values.",
   "pomodoro_flash_rgb": [
     246,
     248,
