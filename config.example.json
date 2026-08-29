@@ -7,9 +7,9 @@
   },
   "agent_usage": {
     "_comment": "Reads local agent state only - no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
-    "_agents_comment": "Agent names to show in a fixed order; empty discovers local agent state.",
+    "_agents_comment": "Agent names to show, in the order given; empty discovers whatever local state this machine has. Pick from the list rather than typing: a name that is not one of the six is not an error, it is simply an agent that never appears.",
     "agents": [],
-    "_exclude_agents_comment": "Discovered or named agents to leave out.",
+    "_exclude_agents_comment": "Discovered or named agents to leave out. Picked from the same six, so an exclusion cannot be spelt wrongly and silently do nothing.",
     "exclude_agents": [],
     "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
     "refresh": 30.0,

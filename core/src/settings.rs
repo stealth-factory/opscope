@@ -1062,6 +1062,53 @@ fn delete_before(buffer: &mut String, cursor: &mut usize) {
     *cursor = at;
 }
 
+/// Where a picker's candidates come from.
+///
+/// Two shapes, and they want opposite defaults. A closed set - the six agents
+/// this machine knows about, the seven days of a week - is a checklist: show
+/// all of it, ticked or not, because seeing what you did *not* choose is half
+/// the information. A catalogue of five hundred and ninety-seven zones is not
+/// a checklist, and opening on Africa/Abidjan tells nobody anything, so it
+/// opens on what is already configured and searches from there.
+enum PickKind {
+    /// Every zone the timezone database knows. Written as `[label, zone]`
+    /// pairs, because a zone name is not what anyone wants on screen.
+    Timezone,
+    /// A finite set the schema names. Written as bare strings.
+    Choices(Vec<String>),
+}
+
+impl PickKind {
+    /// Whether an empty query means "show me only what I have chosen".
+    ///
+    /// True only for the catalogue. A checklist that hid its unticked half
+    /// until you searched would be hiding the choice it exists to offer.
+    fn opens_on_chosen(&self) -> bool {
+        matches!(self, PickKind::Timezone)
+    }
+}
+
+/// The picker a field asks for, if it asks for one.
+///
+/// `"picker": "timezone"` for the built-in catalogue; `"picker": {"choices":
+/// [..]}` for a set the widget names itself. Declared by the widget rather
+/// than known to core, which is the same division the rest of this screen
+/// keeps: the widget owns its settings, core owns the editing of them.
+fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
+    let rule = app.constraints.get(key)?.as_object()?.get("picker")?;
+    if rule.as_str() == Some("timezone") {
+        return Some(PickKind::Timezone);
+    }
+    let choices = rule.as_object()?.get("choices")?.as_array()?;
+    Some(PickKind::Choices(
+        choices
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
 /// Cities the timezone database does not name, and the zone that carries
 /// them.
 ///
@@ -1208,15 +1255,20 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
-                .filter_map(|row| row.as_array())
-                .filter_map(|pair| {
-                    let zone = pair.get(1).and_then(Value::as_str)?;
-                    let label = pair
-                        .first()
-                        .and_then(Value::as_str)
-                        .unwrap_or(zone)
-                        .to_string();
-                    Some((zone.to_string(), label))
+                .filter_map(|row| match row {
+                    // `[label, value]`, as clocks writes its cities.
+                    Value::Array(pair) => {
+                        let value = pair.get(1).and_then(Value::as_str)?;
+                        let label = pair
+                            .first()
+                            .and_then(Value::as_str)
+                            .unwrap_or(value)
+                            .to_string();
+                        Some((value.to_string(), label))
+                    }
+                    // A bare string, as every other list writes its entries.
+                    Value::String(one) => Some((one.clone(), one.clone())),
+                    _ => None,
                 })
                 .collect()
         })
@@ -1255,22 +1307,35 @@ fn picked_label(app: &App, index: usize, zone: &str) -> Option<String> {
 /// to find again, and it puts the same name in two places depending on a
 /// state you are in the middle of changing. The tick moves, the row does not.
 fn zone_choices(app: &App, index: usize, query: &str) -> Vec<(String, bool)> {
+    let Some(field) = app.fields.get(index) else {
+        return Vec::new();
+    };
+    let Some(kind) = picker_kind(app, &field.key) else {
+        return Vec::new();
+    };
     let picked = picked_zones(app, index);
-    if query.is_empty() {
+    if kind.opens_on_chosen() && query.is_empty() {
         return picked.into_iter().map(|z| (z, true)).collect();
     }
-    let mut out: Vec<(u8, &'static str)> = chrono_tz::TZ_VARIANTS
-        .iter()
-        .map(|tz| tz.name())
-        .filter_map(|name| zone_rank(name, query).map(|r| (r, name)))
-        .collect();
-    // Stable, so within a rank the database's own alphabetical order holds
-    // and the list does not reshuffle as a query grows.
+    let mut out: Vec<(u8, String)> = match &kind {
+        PickKind::Timezone => chrono_tz::TZ_VARIANTS
+            .iter()
+            .map(|tz| tz.name().to_string())
+            .filter_map(|name| zone_rank(&name, query).map(|r| (r, name)))
+            .collect(),
+        PickKind::Choices(all) => all
+            .iter()
+            .filter_map(|one| zone_rank(one, query).map(|r| (r, one.clone())))
+            .collect(),
+    };
+    // Stable, so within a rank the source's own order holds - alphabetical
+    // for the database, and the widget's own order for a named set, which is
+    // the order it draws them in.
     out.sort_by_key(|(rank, _)| *rank);
     out.into_iter()
         .map(|(_, name)| {
-            let on = picked.iter().any(|p| p == name);
-            (name.to_string(), on)
+            let on = picked.iter().any(|p| *p == name);
+            (name, on)
         })
         .collect()
 }
@@ -1285,26 +1350,34 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
     let Some(field) = app.fields.get(index) else {
         return;
     };
+    let key = field.key.clone();
     let mut rows: Vec<Value> = current_of(&app.live, field, app.legacy_section)
         .or(Some(&field.default))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let at = rows.iter().position(|row| {
-        row.as_array()
-            .and_then(|pair| pair.get(1))
-            .and_then(Value::as_str)
-            == Some(zone)
+    let at = rows.iter().position(|row| match row {
+        Value::Array(pair) => pair.get(1).and_then(Value::as_str) == Some(zone),
+        Value::String(one) => one == zone,
+        _ => false,
     });
     let removed = at.is_some();
     match at {
         Some(i) => {
             rows.remove(i);
         }
-        None => rows.push(Value::Array(vec![
-            Value::String(label.unwrap_or_else(|| zone_label(zone))),
-            Value::String(zone.to_string()),
-        ])),
+        None => rows.push(match picker_kind(app, &key) {
+            // A pair, so the pane has something to print that is not a
+            // database identifier.
+            Some(PickKind::Timezone) => Value::Array(vec![
+                Value::String(label.unwrap_or_else(|| zone_label(zone))),
+                Value::String(zone.to_string()),
+            ]),
+            // Everything else is the value itself. Wrapping a name the user
+            // already recognises in a pair would only make the file harder
+            // to read by hand, which is still how most of it gets edited.
+            _ => Value::String(zone.to_string()),
+        }),
     }
     match write_field(app, index, Value::Array(rows)) {
         Ok(()) => {
@@ -1427,14 +1500,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     if let Err(e) = write_field(app, app.selected, Value::Bool(!current)) {
                         app.status = Some(e);
                     }
-                } else if app
-                    .constraints
-                    .get(&field.key)
-                    .and_then(Value::as_object)
-                    .and_then(|rule| rule.get("picker"))
-                    .and_then(Value::as_str)
-                    == Some("timezone")
-                {
+                } else if picker_kind(app, &field.key).is_some() {
                     app.mode = Mode::Pick {
                         index: app.selected,
                         query: String::new(),
@@ -1844,6 +1910,11 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     };
     let field = &app.fields[*index];
     let choices = zone_choices(app, *index, query);
+    let kind = picker_kind(app, &field.key).unwrap_or(PickKind::Timezone);
+    let total_choices = match &kind {
+        PickKind::Timezone => chrono_tz::TZ_VARIANTS.len(),
+        PickKind::Choices(all) => all.len(),
+    };
     // Counted from the configuration, not from the filtered list: counting
     // the visible ticks made a search that matched nothing report "0 of 597"
     // to someone with four cities configured, which reads as having none.
@@ -1862,29 +1933,35 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // Said here rather than only in the file's comment: someone arranging
     // this list is exactly the person who would otherwise assume the order
     // they choose is the order they get.
-    let heading = if query.is_empty() {
-        format!(
+    let catalogue = matches!(kind, PickKind::Timezone);
+    let heading = match (catalogue, query.is_empty()) {
+        (true, true) => format!(
             "  {} configured · type to search {} zones and add more",
             chosen,
             chrono_tz::TZ_VARIANTS.len()
-        )
-    } else {
-        format!(
+        ),
+        (true, false) => format!(
             "  {} of {} zones match · {} configured in all",
             choices.len(),
             chrono_tz::TZ_VARIANTS.len(),
             chosen
-        )
+        ),
+        // A closed set says how much of itself is chosen, which is the
+        // question a checklist answers.
+        (false, _) => format!("  {} of {} chosen", chosen, total_choices),
     };
     body.push(crate::seg(&[(p.dim.as_str(), heading)], w.saturating_sub(1)));
-    // Said on the screen rather than only in the file's comment: whoever is
-    // arranging this list is exactly the person who would otherwise assume
-    // the order they choose is the order they get.
+    // How the widget will order what is picked here, said on the screen
+    // rather than only in the file's comment: whoever is arranging a list is
+    // exactly the person who would otherwise assume the order they choose is
+    // the order they get. Which for one of these is true and the other not.
+    let ordering = if catalogue {
+        "  drawn west to east by each zone's offset, not in the order added"
+    } else {
+        "  shown in the order picked here"
+    };
     body.push(crate::seg(
-        &[(
-            p.dim.as_str(),
-            "  drawn west to east by each zone's offset, not in the order added".to_string(),
-        )],
+        &[(p.dim.as_str(), ordering.to_string())],
         w.saturating_sub(1),
     ));
     body.push(String::new());
@@ -1922,7 +1999,11 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                 ghost.as_str(),
                 if query.is_empty() {
                     // Only where it fits, and never over what was typed.
-                    let hint = "type a city or a zone";
+                    let hint = if catalogue {
+                        "type a city or a zone"
+                    } else {
+                        "type to filter"
+                    };
                     if hint.len() + used + 1 <= box_w {
                         format!(" {hint}")
                     } else {
@@ -1948,10 +2029,10 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         (*scroll).min(choices.len().saturating_sub(room))
     };
     if choices.is_empty() {
-        let why = if query.is_empty() {
-            "  no cities yet - type to search and add one".to_string()
-        } else {
-            format!("  nothing matches /{query}")
+        let why = match (catalogue, query.is_empty()) {
+            (true, true) => "  no cities yet - type to search and add one".to_string(),
+            (false, true) => "  nothing to choose from".to_string(),
+            (_, false) => format!("  nothing matches /{query}"),
         };
         body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
     }
@@ -1980,9 +2061,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                         // another name. Without it the row looks like a
                         // mismatch rather than an answer.
                         (Some(city), _) => format!("{city} is here"),
-                        (None, true) => picked_label(app, *index, zone)
+                        // Only where it says something the first column
+                        // does not. For a named set the label is the value,
+                        // and printing it twice is furniture.
+                        (None, true) if catalogue => picked_label(app, *index, zone)
                             .unwrap_or_else(|| zone_label(zone)),
-                        (None, false) => String::new(),
+                        (None, _) => String::new(),
                     },
                 ),
                 (tint.as_str(), " ".repeat(w)),
@@ -1991,7 +2075,22 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if query.is_empty() {
+    let hints: Vec<Vec<(&str, String)>> = if !catalogue {
+        // Everything is on screen, ticked or not, so one verb covers it.
+        let mut h = vec![vec![
+            (p.accent.as_str(), "↵".into()),
+            (p.dim.as_str(), " add / remove".into()),
+        ]];
+        if !query.is_empty() {
+            h.push(vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ]);
+        }
+        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![(p.dim.as_str(), "esc done".into())]);
+        h
+    } else if query.is_empty() {
         vec![
             vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " remove".into())],
             vec![(p.dim.as_str(), "type to add".into())],
