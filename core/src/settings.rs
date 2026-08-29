@@ -765,8 +765,20 @@ fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "?".into())
 }
 
-fn summary(v: &Value, secret: bool, reveal: bool) -> String {
-    if secret && !reveal {
+/// What a value reads as on a row, masked when it is one of the secrets.
+///
+/// **Only a value read out of the reader's own file is ever masked.** A
+/// declared default ships in the widget's `settings.json`, in a public repo,
+/// so hiding it says nothing and costs something: an unset token would draw
+/// as `••••••••` in the default column and read as though a value were
+/// already there. Callers pass `false` for a default deliberately.
+///
+/// There is no way to unmask. A key used to do it, and nothing on this screen
+/// needed one - the value is in the file for anyone who has to read it, and a
+/// settings screen that can put a live credential on a shared terminal is a
+/// settings screen with a footgun on it.
+fn summary(v: &Value, secret: bool) -> String {
+    if secret {
         return match v {
             Value::String(s) if s.is_empty() => "(empty)".into(),
             Value::String(_) => "••••••••".into(),
@@ -870,7 +882,6 @@ struct App {
     selected: usize,
     scroll: usize,
     chase: bool,
-    reveal: bool,
     mode: Mode,
     status: Option<String>,
     /// The screens left behind while standing inside a declared object: the
@@ -925,7 +936,6 @@ fn load(spec: SettingsSpec) -> App {
         selected: 0,
         scroll: 0,
         chase: true,
-        reveal: false,
         mode: Mode::List,
         status: None,
         stack: Vec::new(),
@@ -1014,7 +1024,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
     let key = field.key.clone();
     let schema_path = field.path();
     let schema_section = field.section.clone();
-    let shown_default = summary(&field.default, field.secret(), false);
+    let shown_default = summary(&field.default, false);
     let (fresh_raw, fresh_live) = fresh_config(app)?;
     let section = live_section(
         &fresh_live,
@@ -1051,28 +1061,6 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         app.widget
     ));
     Ok(())
-}
-
-fn copy_field(app: &mut App) {
-    let Some(field) = app.fields.get(app.selected) else {
-        return;
-    };
-    if field.secret() {
-        app.status = Some("not copied: that is a token".into());
-        return;
-    }
-    let text = match current_of(&app.live, field, app.legacy_section) {
-        Some(v) => compact(v),
-        None => {
-            app.status = Some("not copied: unset".into());
-            return;
-        }
-    };
-    if crate::clipboard(&text) {
-        app.status = Some(format!("copied {}", field.path()));
-    } else {
-        app.status = Some("clipboard unavailable; stdout is not a terminal".into());
-    }
 }
 
 fn move_sel(app: &mut App, delta: isize) {
@@ -1833,9 +1821,8 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 };
             }
         }
-        "s" | "S" => app.reveal = !app.reveal,
         "r" | "R" => {
-            let keep = (app.selected, app.reveal);
+            let keep = app.selected;
             *app = load(SettingsSpec {
                 widget: app.widget,
                 section: app.section,
@@ -1843,11 +1830,9 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 schema: app.schema,
                 catalogues: app.catalogues,
             });
-            app.selected = keep.0.min(app.fields.len().saturating_sub(1));
-            app.reveal = keep.1;
+            app.selected = keep.min(app.fields.len().saturating_sub(1));
             app.status = Some("reloaded from disk".into());
         }
-        "c" | "C" => copy_field(app),
         "d" | "D" => {
             if let Err(e) = reset_field(app, app.selected) {
                 app.status = Some(e);
@@ -2033,7 +2018,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .fields
         .get(app.selected)
         .is_some_and(|f| f.default.is_boolean());
-    let hints = list_hints(p, app.reveal, boolean, catalogue_in_reach(app).is_some());
+    let hints = list_hints(p, boolean, catalogue_in_reach(app).is_some());
     let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
         .into_iter()
         .map(|l| format!(" {l}"))
@@ -2108,7 +2093,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ];
         if show_value {
             let shown = match current {
-                Some(v) => summary(v, field.secret(), app.reveal),
+                Some(v) => summary(v, field.secret()),
                 None => "—".into(),
             };
             parts.push((
@@ -2117,7 +2102,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             ));
         }
         if show_default {
-            let shown = summary(&field.default, field.secret(), app.reveal);
+            let shown = summary(&field.default, false);
             parts.push((
                 c_of(&p.dim),
                 format!(" {}", crate::pad(&shown, value_w)),
@@ -2146,9 +2131,9 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         let facts = format!(
             "current {} · default {} · {}",
             current
-                .map(|value| summary(value, field.secret(), app.reveal))
+                .map(|value| summary(value, field.secret()))
                 .unwrap_or_else(|| "—".into()),
-            summary(&field.default, field.secret(), app.reveal),
+            summary(&field.default, false),
             if current.is_some() {
                 "set in file"
             } else {
@@ -2256,7 +2241,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                     "  {}{} · default {} · restart {} after writing",
                     field.kind(),
                     unit,
-                    summary(&field.default, field.secret(), true),
+                    summary(&field.default, false),
                     field.widget()
                 )
             },
@@ -2265,7 +2250,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     ));
     if field.secret() {
         body.push(crate::seg(
-            &[(p.warn.as_str(), "  a token · never copied to the clipboard".into())],
+            &[(p.warn.as_str(), "  a token · never shown once written".into())],
             w.saturating_sub(1),
         ));
     }
@@ -2541,21 +2526,17 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
 
 fn list_hints<'a>(
     p: &'a Palette,
-    reveal: bool,
     boolean: bool,
     catalogue: bool,
 ) -> Vec<Vec<(&'a str, String)>> {
-    let secret = if reveal { "[s]hide tokens" } else { "[s]how tokens" };
     // `edit` is wrong for the row under the cursor when that row is a
     // boolean: enter does not open anything, it moves it on one place.
     let enter = if boolean { " true / false / default" } else { " edit" };
     let mut out = vec![
         vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
         vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), enter.into())],
-        vec![(p.dim.as_str(), secret.into())],
         vec![(p.dim.as_str(), "[r]eload".into())],
         vec![(p.dim.as_str(), "[d]efault".into())],
-        vec![(p.dim.as_str(), "[c]opy".into())],
         vec![(p.dim.as_str(), "esc / [,] back".into())],
     ];
     // Only where there is a table to pick from. A hint naming a key that
@@ -2633,7 +2614,6 @@ mod tests {
             selected: 0,
             scroll: 0,
             chase: false,
-            reveal: false,
             mode: Mode::List,
             status: None,
             stack: Vec::new(),
@@ -2862,11 +2842,14 @@ mod tests {
     }
 
     #[test]
-    fn tokens_are_redacted_until_revealed() {
+    fn a_token_is_redacted_with_no_way_to_unredact_it() {
+        // There was a key to reveal one. Nothing on this screen needed it -
+        // the value is in the file for anyone who has to read it - and a
+        // screen that can put a live credential on a shared terminal is a
+        // screen with a footgun on it. So the masking has no off switch.
         let secret = Value::String("ghp_not-a-real-token".into());
-        assert_eq!(summary(&secret, true, false), "••••••••");
-        assert!(summary(&secret, true, true).contains("ghp_"));
-        assert_eq!(summary(&Value::String(String::new()), true, false), "(empty)");
+        assert_eq!(summary(&secret, true), "••••••••");
+        assert_eq!(summary(&Value::String(String::new()), true), "(empty)");
         assert!(!is_secret("token_env"));
         assert!(is_secret("token"));
     }

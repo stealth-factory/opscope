@@ -180,9 +180,16 @@ config path `load_config` reads, and a warning when a legacy section is in use.
 
 Arrows and `j`/`k` move the selected field; `ctrl-y`/`ctrl-e` and the wheel
 move the viewport without changing what `↵` edits. `↵` edits or toggles, `d`
-removes an override, `s` reveals declared secrets, `r` reloads, `c` copies
-non-secret values, and `esc`, `q` or `,` returns. A running widget keeps the
-values it started with; the screen says to restart after a write.
+removes an override, `r` reloads, `a` opens a picker where there is one, and
+`esc`, `q` or `,` returns. A running widget keeps the values it started with;
+the screen says to restart after a write.
+
+**A token is masked and there is no key to unmask it.** There was one, and
+nothing needed it: the value is in the file for anyone who has to read it,
+while a settings screen that can put a live credential on a shared terminal
+is a screen with a footgun on it. A declared *default* is never masked — it
+ships in the repo, and hiding it would make an unset token read as though a
+value were already there.
 
 **In settings mode the footer shows only settings keys** — the widget's own
 keys are not offered there, because a key that does nothing in this mode
