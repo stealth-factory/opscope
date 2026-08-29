@@ -155,9 +155,11 @@ stay together. `npx` already keeps them that way. A folder on `PATH` that
 contains `link` would shadow the real command; leave that name off `PATH`
 and type `opscope <widget>`.
 
-They are built to sit side by side and fill a wall, but nothing assumes a
-multiplexer — each is an ordinary terminal program. Tile them however you
-like.
+They are built to sit side by side, but nothing assumes a multiplexer — each
+is an ordinary terminal program. Tile them however you like, and they degrade
+rather than break as panes get narrower: columns drop out in priority order,
+footers wrap instead of truncating, and graphs rescale. A widget in a
+30-column strip still says something useful.
 
 ### Scrolling
 
@@ -184,23 +186,6 @@ your problem to fix.
 Mouse reporting is on by default and takes drag-to-select away from the
 terminal while it is. `"terminal": {"mouse": false}` in your config turns it
 off; the keys are unaffected. See [Configuration](#configuration).
-
-## Building the wall
-
-Fifteen widgets tile into whatever space you have. A layout that works on a
-wide screen:
-
-```
-┌────────────────────┬──────────────────┬────────────┐
-│ deployments        │ latency          │ clocks     │
-├────────────────────┼──────────────────┴────────────┤
-│ herdr-panes        │ tailnet                       │
-└────────────────────┴───────────────────────────────┘
-```
-
-They degrade rather than break as panes get narrower: columns drop out in
-priority order, footers wrap instead of truncating, and graphs rescale. A
-widget in a 30-column strip still says something useful.
 
 ## Configuration
 
