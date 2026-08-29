@@ -289,7 +289,8 @@ Six pages are about the repository rather than a widget:
 
 | | |
 |---|---|
-| [Widget package standard](docs/widget-standard.md) | how one folder owns a widget's code, help, preview, settings, and AI configuration guide |
+| [Making a widget](wiki/making-a-widget.md) | how one folder owns a widget's code, help, preview, settings and AI configuration guide — and everything else it takes to add one |
+| [Model prices](wiki/model-prices.md) | published API list prices per million tokens, with sources and as-of dates |
 | [Design conventions](docs/design.md) | the rules every widget holds to, and why each was paid for |
 | [Internals](docs/internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
 | [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
