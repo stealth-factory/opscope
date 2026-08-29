@@ -2054,22 +2054,20 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    let room = w.saturating_sub(4).max(8);
-    let chars: Vec<char> = buffer.chars().collect();
-    let start = if *cursor >= room {
-        cursor + 1 - room
-    } else {
-        0
-    };
-    let window: String = chars.iter().skip(start).take(room).collect();
-    body.push(crate::seg(
-        &[(p.txt.as_str(), format!("  {window}"))],
-        w.saturating_sub(1),
-    ));
-    let caret_at = cursor.saturating_sub(start);
-    body.push(crate::seg(
-        &[(p.accent.as_str(), format!("  {}▲", " ".repeat(caret_at)))],
-        w.saturating_sub(1),
+    // The same field the search uses. It was two rows before - the text on
+    // one and a caret pointing up at it from the next - which reads as a
+    // note about the value rather than as the value being typed, and cost a
+    // row on a short pane for the privilege.
+    body.push(input_row(
+        p,
+        w,
+        buffer,
+        *cursor,
+        // The kind, and nothing about clearing: an empty buffer is a parse
+        // error here, not an unset. `[d]` on the list is what removes a key,
+        // and a placeholder promising otherwise would be a line on screen
+        // that is not true.
+        field.kind(),
     ));
     if let Some(err) = error {
         body.push(crate::seg(&[(p.bad.as_str(), format!("  {err}"))], w.saturating_sub(1)));
@@ -2090,6 +2088,62 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body.extend(foot);
     body.truncate(h);
     body
+}
+
+/// One text field, drawn the same way everywhere something is typed.
+///
+/// A bare caret on a bare line reads as output rather than as somewhere to
+/// type, and the one thing an input has to make obvious is that typing does
+/// something. So: a box with visible edges, and a caret that blinks.
+///
+/// The blink runs off the wall clock rather than a frame counter, so the
+/// cadence is the same half-second whatever the redraw interval is - the
+/// list redraws at 80ms and a counter would flicker.
+///
+/// `cursor` is a character offset, not a byte one, and the window follows it:
+/// what is being corrected is what should be on screen, so a value longer
+/// than the box scrolls to keep the caret in view rather than pinning either
+/// end.
+fn input_row(p: &Palette, w: usize, text: &str, cursor: usize, placeholder: &str) -> String {
+    let box_w = w.saturating_sub(6).max(12);
+    let room = box_w.saturating_sub(2);
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    // Enough of the tail to hold the caret, and no more.
+    let start = if cursor >= room { cursor + 1 - room } else { 0 };
+    let head: String = chars[start..cursor].iter().collect();
+    let tail: String = chars[cursor..(start + room).min(chars.len())].iter().collect();
+
+    let field = crate::bg(24, 36, 50);
+    let ink = format!("{field}{}", p.txt);
+    let ghost = format!("{field}{}", p.dim);
+    let edge = format!("{field}{}", p.accent);
+    let lit = (crate::now() * 2.0) as u64 % 2 == 0;
+
+    let hint = if text.is_empty() && !placeholder.is_empty() {
+        // Only where it fits, and never over what has been typed.
+        let room_left = box_w.saturating_sub(2);
+        if placeholder.chars().count() <= room_left {
+            format!(" {placeholder}")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    crate::seg(
+        &[
+            (p.dim.as_str(), "  ".to_string()),
+            (edge.as_str(), " ".to_string()),
+            (ink.as_str(), head),
+            (edge.as_str(), if lit { "▏".into() } else { " ".to_string() }),
+            (ink.as_str(), tail),
+            (ghost.as_str(), hint),
+            (field.as_str(), " ".repeat(box_w)),
+        ],
+        w.saturating_sub(1),
+    )
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
@@ -2159,58 +2213,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    // A field you can see the edges of. A bare caret on a bare line reads as
-    // output rather than as somewhere to type, and the one thing this screen
-    // has to make obvious is that typing does something.
-    //
-    // Blinking on the wall clock rather than a frame counter, so the cadence
-    // is the same half-second whatever the redraw interval happens to be -
-    // and so it does not race the 80ms loop into a flicker.
-    let lit = (crate::now() * 2.0) as u64 % 2 == 0;
-    let caret = if lit { "▏" } else { " " };
-    let box_w = w.saturating_sub(6).max(12);
-    let shown: String = {
-        let chars: Vec<char> = query.chars().collect();
-        let room = box_w.saturating_sub(2);
-        // Keep the tail in view: what was typed last is what is being
-        // corrected, and a query long enough to scroll is a query being
-        // narrowed.
-        let start = chars.len().saturating_sub(room);
-        chars[start..].iter().collect()
+    let hint = if catalogue {
+        "type a city or a zone"
+    } else {
+        "type to filter"
     };
-    let field = crate::bg(24, 36, 50);
-    let ink = format!("{field}{}", p.txt);
-    let ghost = format!("{field}{}", p.dim);
-    let edge = format!("{field}{}", p.accent);
-    let used = shown.chars().count() + 1;
-    body.push(crate::seg(
-        &[
-            (p.dim.as_str(), "  ".to_string()),
-            (edge.as_str(), " ".to_string()),
-            (ink.as_str(), shown.clone()),
-            (edge.as_str(), caret.to_string()),
-            (
-                ghost.as_str(),
-                if query.is_empty() {
-                    // Only where it fits, and never over what was typed.
-                    let hint = if catalogue {
-                        "type a city or a zone"
-                    } else {
-                        "type to filter"
-                    };
-                    if hint.len() + used + 1 <= box_w {
-                        format!(" {hint}")
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                },
-            ),
-            (field.as_str(), " ".repeat(box_w)),
-        ],
-        w.saturating_sub(1),
-    ));
+    body.push(input_row(p, w, query, query.chars().count(), hint));
     body.push(String::new());
 
     let foot_rows = 2;
