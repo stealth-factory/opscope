@@ -47,11 +47,15 @@ offset instead of following the system.
 
 **Pomodoro** — see below. Off until you press `p`.
 
-**World clock** — each configured city in its own timezone, sorted west to
-east, coloured by what people there are plausibly doing: green at work, amber
-evening, blue asleep, grey weekend. Half-hour offsets (`UTC+5:30`) and `+1d` /
-`-1d` date rollovers are handled. Scroll with the arrow keys when the list is
-taller than the pane; everything else stays pinned.
+**World clock** — each configured city in its own timezone, west to east by
+the offset as it stands this frame (name as tie-break; the order in
+`config.json` is discarded), coloured by what people there are plausibly
+doing: green at work, amber evening, blue asleep, grey weekend. Half-hour
+offsets (`UTC+5:30`) and `+1d` / `-1d` date rollovers are handled. Scroll with
+the arrow keys when the list is taller than the pane; everything else stays
+pinned. The order is recomputed every frame so a pane left up across a DST
+change keeps being a map: London is west of a UTC+1 neighbour in winter and
+level with it in summer.
 
 ## Pomodoro
 
@@ -125,6 +129,9 @@ shown — are not tied to the day and survive.
   "show_hints": true
 }
 ```
+
+`cities` is unordered. Rows are west to east by current UTC offset, with the
+name as tie-break, so arranging them in `config.json` does nothing.
 
 The flash colour's text contrast is derived from its luminance, so a dark
 choice stays readable rather than turning the panel into a block.
