@@ -1613,7 +1613,7 @@ mod tests {
             .iter()
             .find(|f| f.section == "github" && f.key == "token")
             .unwrap();
-        assert!(token.help.contains("CLASSIC PAT"));
+        assert!(token.help.contains("GitHub token"));
         let history = fields
             .iter()
             .find(|f| f.section == "tailnet" && f.key == "history")
