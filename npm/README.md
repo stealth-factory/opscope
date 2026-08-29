@@ -18,8 +18,8 @@ commit and date.
 ## Platforms
 
 Linux x86_64 (glibc 2.35 or newer), macOS Apple Silicon, and macOS Intel.
-Windows, Alpine/musl, 32-bit, Linux arm64 and an older glibc fail at
-install with a sentence saying so.
+Anything else fails at install with a sentence naming what is published and
+where to build from source.
 
 The launcher is a thin package. Each platform is an optional dependency
 npm installs only when `os` / `cpu` / `libc` match, so a Mac never

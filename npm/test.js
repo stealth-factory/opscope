@@ -143,8 +143,6 @@ test('the unsupported sentence names every published platform', () => {
   for (const p of platform.PLATFORMS) {
     assert.match(msg, new RegExp(p.label.replace(/[()]/g, '\\$&')));
   }
-  assert.match(msg, /Windows/);
-  assert.match(msg, /musl/);
 });
 
 test('pack.js stamps one version onto all four packages', () => {
