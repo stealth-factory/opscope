@@ -1,7 +1,8 @@
 # opscope
 
-**Sci-fi hacker opscope from the movies — except these tell you the
-truth.**
+**Hollywood called. They want their terminal back.**
+
+*Sci-fi hacker panels from the movies — except these ones tell you the truth.*
 
 Fill your screen with glowing panels, scrolling graphs and blinking status
 readouts. The difference is that every number on them is real: actual network
