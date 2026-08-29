@@ -32,16 +32,58 @@
       }
     },
     "rates": {
-      "values": "number-map"
+      "values": "number-map",
+      "unit": "US$ per million tokens"
     },
     "plan_cost": {
-      "values": "number"
+      "values": "number",
+      "fields": {
+        "claude": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the claude subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        },
+        "codex": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the codex subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        },
+        "cursor": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the cursor subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        },
+        "grok": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the grok subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        },
+        "copilot": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the copilot subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        },
+        "antigravity": {
+          "default": 0,
+          "minimum": 0,
+          "help": "What the antigravity subscription costs you per month - the whole plan, not a rate per token. Set it and METERED gains 'the plan saves': the month's list-price cost minus this. 0 or unset leaves that line off, because nothing on this machine knows what you pay.",
+          "unit": "US$ per month"
+        }
+      },
+      "unit": "US$ per month"
     },
     "refresh": {
-      "minimum": 0.1
+      "minimum": 0.1,
+      "unit": "seconds"
     },
     "grok_ping_minutes": {
-      "minimum": 0.1
+      "minimum": 0.1,
+      "unit": "minutes"
     }
   },
   "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named - it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
@@ -52,9 +94,9 @@
   "exclude_agents": [],
   "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
   "refresh": 30.0,
-  "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
+  "_rates_comment": "OPTIONAL override, in US$ per million tokens, keyed by model. Published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. Each model carries the five priced kinds - input, output, cache_read, cache_write, cache_write_1h. Reasoning tokens are not among them: vendors count them inside output, so pricing them again would charge them twice. Longest matching model name wins and '*' catches the rest.",
   "rates": {},
-  "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
+  "_plan_cost_comment": "What each subscription costs you per month, per agent, in US$. A flat monthly figure - the per-token prices are `rates`, which is a different setting. Nothing ships here: plans vary by tier and region, and no invoice is on this machine. Set one and METERED gains 'the plan saves' - the month's cost at list prices against what you actually pay.",
   "plan_cost": {},
   "_antigravity_remote_comment": "Antigravity publishes its quota two ways: a language server that runs inside the app, and Google, which serves the same summary on the endpoint the tier already comes from. The local one is preferred and this only decides whether the remote one may be asked when the app is shut. On by default - it is the same host and the same credential the tier request already uses. Turn it off and the quota is absent whenever Antigravity is closed; the tab then says so, and names this key.",
   "antigravity_remote": true,

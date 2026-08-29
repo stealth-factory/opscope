@@ -2,20 +2,25 @@
   "_schema": {
     "work_start_hour": {
       "minimum": 0,
-      "maximum": 23
+      "maximum": 23,
+      "unit": "hour of the day, 0-23"
     },
     "work_end_hour": {
       "minimum": 0,
-      "maximum": 23
+      "maximum": 23,
+      "unit": "hour of the day, 0-23"
     },
     "pomodoro_focus_minutes": {
-      "minimum": 0.1
+      "minimum": 0.1,
+      "unit": "minutes"
     },
     "pomodoro_short_break_minutes": {
-      "minimum": 0.1
+      "minimum": 0.1,
+      "unit": "minutes"
     },
     "pomodoro_long_break_minutes": {
-      "minimum": 0.1
+      "minimum": 0.1,
+      "unit": "minutes"
     },
     "pomodoro_sessions_before_long_break": {
       "minimum": 1

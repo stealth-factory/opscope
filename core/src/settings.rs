@@ -42,16 +42,35 @@ pub struct SettingsSpec {
     pub schema: &'static str,
 }
 
+#[derive(Clone)]
 struct Field {
     section: String,
     key: String,
+    /// The object key this one lives inside, for a widget that declared a
+    /// structure for it. `None` for everything at the top of a section.
+    ///
+    /// One level, deliberately. Two is a file somebody should be editing by
+    /// hand, and a screen that can descend for ever is a screen nobody can
+    /// find their way out of.
+    parent: Option<String>,
     help: String,
     default: Value,
 }
 
 impl Field {
     fn path(&self) -> String {
-        format!("{}.{}", self.section, self.key)
+        match &self.parent {
+            Some(p) => format!("{}.{}.{}", self.section, p, self.key),
+            None => format!("{}.{}", self.section, self.key),
+        }
+    }
+
+    /// The keys under the section, in order, for the readers and writers.
+    fn steps(&self) -> Vec<&str> {
+        match &self.parent {
+            Some(p) => vec![p.as_str(), self.key.as_str()],
+            None => vec![self.key.as_str()],
+        }
     }
 
     fn widget(&self) -> String {
@@ -190,6 +209,13 @@ fn constraint_summary(rule: Option<&Value>) -> String {
         return String::new();
     };
     let mut parts = Vec::new();
+    // First, because it is what the number means. A field showing `200` and
+    // a default of `0` says nothing about whether that is dollars a month,
+    // dollars a million tokens, or seconds - and the reader has to guess
+    // right to set it correctly.
+    if let Some(unit) = rule.get("unit").and_then(Value::as_str) {
+        parts.push(unit.to_string());
+    }
     if let Some(choices) = rule.get("choices").and_then(Value::as_array) {
         parts.push(format!(
             "choices {}",
@@ -248,6 +274,7 @@ fn fields_from_example(text: &str) -> Result<Vec<Field>, String> {
             fields.push(Field {
                 section: section.clone(),
                 key,
+                parent: None,
                 help,
                 default: default.clone(),
             });
@@ -747,8 +774,11 @@ fn current_of<'a>(
     field: &Field,
     legacy: Option<&str>,
 ) -> Option<&'a Value> {
-    live.get(live_section(live, &field.section, legacy))
-        .and_then(|s| s.get(&field.key))
+    let mut at = live.get(live_section(live, &field.section, legacy))?;
+    for step in field.steps() {
+        at = at.get(step)?;
+    }
+    Some(at)
 }
 
 struct Palette {
@@ -812,6 +842,11 @@ struct App {
     reveal: bool,
     mode: Mode,
     status: Option<String>,
+    /// The screens left behind while standing inside a declared object: the
+    /// fields that were on show, and which of them was selected. Swapping
+    /// `fields` rather than adding a mode means the list screen, the editor,
+    /// the writers and every check on them work one level down unchanged.
+    stack: Vec<(Vec<Field>, usize)>,
 }
 
 fn load(spec: SettingsSpec) -> App {
@@ -861,6 +896,7 @@ fn load(spec: SettingsSpec) -> App {
         reveal: false,
         mode: Mode::List,
         status: None,
+        stack: Vec::new(),
     }
 }
 
@@ -898,15 +934,16 @@ fn fresh_config(app: &App) -> Result<(String, Value), String> {
 }
 
 fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> {
-    let (key, schema_path, schema_section) = {
+    let (key, steps, schema_path, schema_section) = {
         let field = app.fields.get(index).ok_or("no such field")?;
         validate_value(
             &value,
             &field.default,
-            app.constraints.get(&field.key),
+            constraint_for(app, field),
         )?;
         (
             field.key.clone(),
+            field.steps().iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             field.path(),
             field.section.clone(),
         )
@@ -918,7 +955,8 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
         app.legacy_section,
     )
     .to_string();
-    let path = [section.as_str(), key.as_str()];
+    let mut path = vec![section.as_str()];
+    path.extend(steps.iter().map(String::as_str));
     let next = set_json_path(&fresh_raw, &path, &value)?;
     serde_json::from_str::<Value>(&next).map_err(|e| format!("refusing to write: {e}"))?;
     atomic_write(&app.path, &next, Some(&fresh_raw))?;
@@ -1110,6 +1148,90 @@ impl PickKind {
 /// [..]}` for a set the widget names itself. Declared by the widget rather
 /// than known to core, which is the same division the rest of this screen
 /// keeps: the widget owns its settings, core owns the editing of them.
+/// The `_schema` rules for a field, wherever it sits.
+///
+/// A nested field's rules live under its parent's `fields`, so the lookup has
+/// to follow the same path the value does. Everything that validates or draws
+/// goes through here rather than reaching into `constraints` by key, which
+/// only ever worked for the top level.
+fn constraint_for<'a>(app: &'a App, field: &Field) -> Option<&'a Value> {
+    match &field.parent {
+        None => app.constraints.get(&field.key),
+        Some(parent) => app
+            .constraints
+            .get(parent)?
+            .as_object()?
+            .get("fields")?
+            .as_object()?
+            .get(&field.key),
+    }
+}
+
+/// The fields a widget declared inside an object, if it declared any.
+///
+/// This is the whole of the opt-in: a section key whose schema carries
+/// `"fields": { .. }` gets a screen of its own, and one that does not keeps
+/// the JSON box it has always had. Nothing is required to declare anything.
+fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
+    let field = app.fields.get(index)?;
+    if field.parent.is_some() {
+        return None; // one level
+    }
+    let declared = app
+        .constraints
+        .get(&field.key)?
+        .as_object()?
+        .get("fields")?
+        .as_object()?;
+    // The order the widget wrote them in, read back out of the schema text.
+    // A parsed map sorts its keys, which put agent-usage's six agents in
+    // alphabetical order on screen while the widget draws them in its own -
+    // and its own is the meaningful one, being the order of the tabs. The
+    // file already solves this for the top-level fields; the same helper
+    // solves it one level down.
+    let wrapped = format!("{{{}:{}}}", "\"_\"", app.schema);
+    let order: Vec<String> = find_object_at(&wrapped, &["_", "_schema", &field.key, "fields"])
+        .ok()
+        .flatten()
+        .and_then(|open| object_keys(&wrapped, open).ok())
+        .unwrap_or_default();
+    let ordered: Vec<(&String, &Value)> = if order.is_empty() {
+        declared.iter().collect()
+    } else {
+        order
+            .iter()
+            .filter_map(|k| declared.get_key_value(k))
+            .collect()
+    };
+    Some(
+        ordered
+            .into_iter()
+            .map(|(name, rule)| {
+                let rule = rule.as_object();
+                let default = rule
+                    .and_then(|r| r.get("default"))
+                    .cloned()
+                    // No declared default means the widget has none to offer,
+                    // and the type still has to come from somewhere for the
+                    // editor to validate against.
+                    .unwrap_or(Value::Number(0.into()));
+                let help = rule
+                    .and_then(|r| r.get("help"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                Field {
+                    section: field.section.clone(),
+                    key: name.clone(),
+                    parent: Some(field.key.clone()),
+                    help,
+                    default,
+                }
+            })
+            .collect(),
+    )
+}
+
 fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     let rule = app.constraints.get(key)?.as_object()?.get("picker")?;
     if rule.as_str() == Some("timezone") {
@@ -1467,6 +1589,16 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
 
 fn handle_list_key(app: &mut App, key: &str) -> bool {
     match key {
+        // Coming out of a declared object is not leaving the screen. Only
+        // the outermost list quits.
+        "esc" if !app.stack.is_empty() => {
+            if let Some((fields, sel)) = app.stack.pop() {
+                app.fields = fields;
+                app.selected = sel;
+                app.scroll = 0;
+                app.status = None;
+            }
+        }
         "q" | "Q" | "esc" | "," => return true,
         "up" | "k" | "K" => move_sel(app, -1),
         "down" | "j" | "J" => move_sel(app, 1),
@@ -1529,6 +1661,11 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     if let Err(e) = outcome {
                         app.status = Some(e);
                     }
+                } else if let Some(inner) = nested_fields(app, app.selected) {
+                    app.stack.push((app.fields.clone(), app.selected));
+                    app.fields = inner;
+                    app.selected = 0;
+                    app.scroll = 0;
                 } else if picker_kind(app, &field.key).is_some() {
                     app.mode = Mode::Pick {
                         index: app.selected,
@@ -1596,6 +1733,14 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
             }
         }
         "backspace" => delete_before(buffer, cursor),
+        // The box opens with the current value in it, so replacing a number
+        // meant holding backspace over it. Same key the search field uses,
+        // and readline's, so it is one habit rather than two.
+        "ctrl-u" => {
+            buffer.clear();
+            *cursor = 0;
+            *error = None;
+        }
         "left" => *cursor = cursor.saturating_sub(1),
         "right" => *cursor = (*cursor + 1).min(buffer.chars().count()),
         "home" => *cursor = 0,
@@ -1884,12 +2029,21 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body.push(crate::seg(
         &[(
             p.dim.as_str(),
-            format!(
-                "  {} · default {} · restart {} after writing",
-                field.kind(),
-                summary(&field.default, field.secret(), true),
-                field.widget()
-            ),
+            {
+                let unit = constraint_for(app, field)
+                    .and_then(Value::as_object)
+                    .and_then(|r| r.get("unit"))
+                    .and_then(Value::as_str)
+                    .map(|u| format!(" · {u}"))
+                    .unwrap_or_default();
+                format!(
+                    "  {}{} · default {} · restart {} after writing",
+                    field.kind(),
+                    unit,
+                    summary(&field.default, field.secret(), true),
+                    field.widget()
+                )
+            },
         )],
         w.saturating_sub(1),
     ));
@@ -1923,6 +2077,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
 
     let hints: Vec<Vec<(&str, String)>> = vec![
         vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " write".into())],
+        vec![(p.accent.as_str(), "ctrl-u".into()), (p.dim.as_str(), " clear".into())],
         vec![(p.dim.as_str(), "esc cancel".into())],
     ];
     let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
@@ -2443,6 +2598,7 @@ mod tests {
     fn widget_name_uses_the_file_hyphen() {
         let field = Field {
             section: "herdr_panes".into(),
+            parent: None,
             key: "refresh".into(),
             help: String::new(),
             default: Value::from(4),
@@ -2451,6 +2607,7 @@ mod tests {
         assert_eq!(field.path(), "herdr_panes.refresh");
         let actions = Field {
             section: "github_actions".into(),
+            parent: None,
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),
@@ -2458,6 +2615,7 @@ mod tests {
         assert_eq!(actions.widget(), "github-actions");
         let prs = Field {
             section: "github_prs".into(),
+            parent: None,
             key: "sources".into(),
             help: String::new(),
             default: serde_json::json!({}),
@@ -2465,6 +2623,7 @@ mod tests {
         assert_eq!(prs.widget(), "github-prs");
         let usage = Field {
             section: "agent_usage".into(),
+            parent: None,
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
@@ -2506,6 +2665,7 @@ mod tests {
         let leftover = serde_json::json!({"usage": {"grok_ping": true}});
         let field = Field {
             section: "agent_usage".into(),
+            parent: None,
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
@@ -2534,6 +2694,7 @@ mod tests {
 
         let prs = Field {
             section: "github_prs".into(),
+            parent: None,
             key: "limit".into(),
             help: String::new(),
             default: Value::from(50),
@@ -2550,6 +2711,7 @@ mod tests {
 
         let actions = Field {
             section: "github_actions".into(),
+            parent: None,
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),
