@@ -37,6 +37,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "ports",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 /// The machine's own ports, hidden behind `o` by default: they are never

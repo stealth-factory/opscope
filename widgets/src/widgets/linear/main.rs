@@ -33,6 +33,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "linear",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 const API: &str = "https://api.linear.app/graphql";

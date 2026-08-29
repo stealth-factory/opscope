@@ -556,13 +556,50 @@ source file and **the date on screen beside the total**. A published price is a
 fact; what makes one dangerous is going stale in silence, and a date fixes
 that.
 
-OpenAI does not charge for cache writes, so those entries carry no
-`cache_write` — inventing one would be worse than leaving it out. Two models
-are listed as having **no published price at all**: `gpt-5.3-codex-spark`,
-which is explicitly not on the API (`supported_in_api: false` in Codex's own
-model cache), and `codex-auto-review`. Without that, prefix matching would hand
+An absent kind means the vendor does not charge for it or does not publish
+it — inventing one would be worse than leaving it out, and a zero would say
+something different again: that they publish it as free. OpenAI charged
+nothing for cache writes until the 5.6 family, which publishes one, so 5.6
+carries `cache_write` and the older families still do not. xAI publishes none
+at all, and Google bills context caching by storage — per million tokens per
+*hour* — which is not a per-request write and is deliberately not carried.
+
+Fourteen models are listed as having **no published price at all** — among
+them `gpt-5.3-codex-spark`, which is explicitly not on the API
+(`supported_in_api: false` in Codex's own model cache), `codex-auto-review`,
+and the retired and shut-down models. Without that, prefix matching would hand
 Spark `gpt-5.3-codex`'s rate — a number nobody published. They report as
 unpriced instead, and are named.
+
+What the table cannot express is **long context**. Above the threshold — 272k
+for most OpenAI models, 200k for the 5.6 family, Grok and the Gemini Pros —
+the *whole* request bills at roughly double, so one rate per kind understates
+a long conversation. The published tables, with sources and what changed when,
+are in [`wiki/model-prices.md`](../../../../wiki/model-prices.md).
+
+### Setting a rate yourself
+
+`,` → `rates` opens the rate card rather than a JSON box: `↵` on an empty
+`rates` offers all the models it ships, `[a]dd / remove` reaches the same
+picker later, and typing filters it. Ticking a model writes membership and
+nothing else —
+
+```json
+"rates": { "gpt-5.6-sol": {} }
+```
+
+— and its kinds then appear as `gpt-5.6-sol · input` and so on, each showing
+the published price as its **default**.
+
+**Set only the numbers you mean to change.** Config wins per kind, not per
+model, so an override of `input` leaves output, both cache writes and cache
+reads tracking the shipped card and still getting the vendor's next
+correction. It used to replace the whole rate, which meant setting one number
+deleted the other four — and a missing kind costs zero, so output metered as
+free and the total was quietly a fraction of the real one.
+
+Unticking a model removes the entry and any numbers under it, because that is
+what removing a model has to mean.
 
 ### What each figure covers
 

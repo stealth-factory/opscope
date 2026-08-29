@@ -40,36 +40,66 @@ pub struct SettingsSpec {
     pub legacy_section: Option<&'static str>,
     /// The widget-owned JSON object of defaults and `_comment` help.
     pub schema: &'static str,
+    /// Tables of candidate keys for map-valued fields, by field name.
+    ///
+    /// Some maps are keyed by something the widget already knows in code and
+    /// cannot sensibly restate in `settings.json` - `agent-usage`'s rate card
+    /// is sixty-eight models with their published prices. The widget hands
+    /// the table over and the settings screen offers it as a picker, which
+    /// keeps one record of the fact and leaves core drawing the screen.
+    pub catalogues: &'static [(&'static str, Catalogue)],
 }
+
+/// A table of candidate keys and the per-kind numbers each one defaults to.
+/// Shaped exactly like `agent-usage`'s `LIST_RATES` so a widget can pass the
+/// constant it already has rather than build a second copy of it.
+pub type Catalogue = &'static [(&'static str, &'static [(&'static str, f64)])];
 
 #[derive(Clone)]
 struct Field {
     section: String,
     key: String,
-    /// The object key this one lives inside, for a widget that declared a
-    /// structure for it. `None` for everything at the top of a section.
+    /// The object keys this one lives inside, outermost first. Empty for
+    /// everything at the top of a section.
     ///
-    /// One level, deliberately. Two is a file somebody should be editing by
-    /// hand, and a screen that can descend for ever is a screen nobody can
-    /// find their way out of.
-    parent: Option<String>,
+    /// The invariant is on *navigation*, not on the JSON: a reader should
+    /// never be more than one screen from where they started, because a
+    /// screen that can descend for ever is a screen nobody can find their
+    /// way out of. A path may still be deeper than that when one screen
+    /// shows the leaves of a two-deep object flat - `rates` lists its models
+    /// as `model · kind` rows rather than a screen per model, so the path is
+    /// three keys long while the walk back is one `esc`.
+    parents: Vec<String>,
     help: String,
     default: Value,
 }
 
 impl Field {
     fn path(&self) -> String {
-        match &self.parent {
-            Some(p) => format!("{}.{}.{}", self.section, p, self.key),
-            None => format!("{}.{}", self.section, self.key),
+        let mut out = self.section.clone();
+        for p in &self.parents {
+            out.push('.');
+            out.push_str(p);
         }
+        out.push('.');
+        out.push_str(&self.key);
+        out
     }
 
     /// The keys under the section, in order, for the readers and writers.
     fn steps(&self) -> Vec<&str> {
-        match &self.parent {
-            Some(p) => vec![p.as_str(), self.key.as_str()],
-            None => vec![self.key.as_str()],
+        let mut out: Vec<&str> = self.parents.iter().map(String::as_str).collect();
+        out.push(self.key.as_str());
+        out
+    }
+
+    /// How the row is labelled on a screen that flattens a level: the
+    /// enclosing key is part of the name, because `input` alone appears
+    /// five times over and says nothing about which model it prices.
+    fn label(&self) -> String {
+        match self.parents.len() {
+            0 | 1 => self.key.clone(),
+            _ => format!("{} · {}", self.parents[self.parents.len() - 1], self.key),
         }
     }
 
@@ -274,7 +304,7 @@ fn fields_from_example(text: &str) -> Result<Vec<Field>, String> {
             fields.push(Field {
                 section: section.clone(),
                 key,
-                parent: None,
+                parents: Vec::new(),
                 help,
                 default: default.clone(),
             });
@@ -829,6 +859,7 @@ struct App {
     section: &'static str,
     legacy_section: Option<&'static str>,
     schema: &'static str,
+    catalogues: &'static [(&'static str, Catalogue)],
     constraints: serde_json::Map<String, Value>,
     fields: Vec<Field>,
     live: Value,
@@ -883,6 +914,7 @@ fn load(spec: SettingsSpec) -> App {
         section: spec.section,
         legacy_section: spec.legacy_section,
         schema: spec.schema,
+        catalogues: spec.catalogues,
         constraints,
         fields,
         live,
@@ -1130,6 +1162,13 @@ enum PickKind {
     Timezone,
     /// A finite set the schema names. Written as bare strings.
     Choices(Vec<String>),
+    /// The keys of a table the widget owns in code, written as the keys of
+    /// an object rather than as members of a list - each one holds the
+    /// numbers set against it, so it has to be a key with something under
+    /// it. Ticking a name adds an empty object: membership, no values, so
+    /// every number keeps tracking the widget's own defaults until the
+    /// reader changes one.
+    Catalogue(Catalogue),
 }
 
 impl PickKind {
@@ -1155,16 +1194,25 @@ impl PickKind {
 /// goes through here rather than reaching into `constraints` by key, which
 /// only ever worked for the top level.
 fn constraint_for<'a>(app: &'a App, field: &Field) -> Option<&'a Value> {
-    match &field.parent {
-        None => app.constraints.get(&field.key),
-        Some(parent) => app
-            .constraints
-            .get(parent)?
-            .as_object()?
-            .get("fields")?
-            .as_object()?
-            .get(&field.key),
+    let Some((first, rest)) = field.parents.split_first() else {
+        return app.constraints.get(&field.key);
+    };
+    let mut here = app.constraints.get(first)?;
+    // Every step but the first is a key inside the enclosing `fields`. A
+    // catalogue-backed map has no `fields` to descend into - its keys are
+    // whatever the reader added - so the rules of the map itself stand for
+    // each entry, and `values` below reads the same either way.
+    for step in rest {
+        let Some(next) = here.get("fields").and_then(Value::as_object).and_then(|f| f.get(step))
+        else {
+            return Some(here);
+        };
+        here = next;
     }
+    here.get("fields")
+        .and_then(Value::as_object)
+        .and_then(|f| f.get(&field.key))
+        .or(Some(here))
 }
 
 /// The fields a widget declared inside an object, if it declared any.
@@ -1174,8 +1222,11 @@ fn constraint_for<'a>(app: &'a App, field: &Field) -> Option<&'a Value> {
 /// the JSON box it has always had. Nothing is required to declare anything.
 fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
     let field = app.fields.get(index)?;
-    if field.parent.is_some() {
-        return None; // one level
+    if !field.parents.is_empty() {
+        return None; // one screen down, and no further
+    }
+    if let Some(rows) = catalogue_fields(app, field) {
+        return Some(rows);
     }
     let declared = app
         .constraints
@@ -1223,7 +1274,7 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
                 Field {
                     section: field.section.clone(),
                     key: name.clone(),
-                    parent: Some(field.key.clone()),
+                    parents: vec![field.key.clone()],
                     help,
                     default,
                 }
@@ -1232,7 +1283,110 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
     )
 }
 
+/// The rows for a map whose candidate keys live in the widget's code.
+///
+/// `agent-usage`'s rate card is sixty-eight models with five prices each.
+/// Copying that into `settings.json` would be two records of one fact, and
+/// the one in the schema would go stale the first time a vendor moved a
+/// price - which has happened here already. So the widget hands core the
+/// table itself and the screen reads it.
+///
+/// Only models the reader has actually added get rows, because sixty-eight
+/// models times five kinds is a screen nobody can read. The picker adds and
+/// removes them; these rows are for setting the numbers.
+///
+/// The published price is each row's **default**, never a value written into
+/// the file. Copying it in would pin that reader to today's number and stop
+/// them getting the correction when it moves.
+fn catalogue_fields(app: &App, field: &Field) -> Option<Vec<Field>> {
+    let table = catalogue_for(app, &field.key)?;
+    let configured = find_object(&app.live, &[app.section, &field.key]);
+    let mut rows = Vec::new();
+    for name in configured {
+        let listed = table.iter().find(|(m, _)| *m == name).map(|(_, r)| *r);
+        // A model the reader named themselves has no published price, so its
+        // kinds are the ones the card prices everywhere else - offered at no
+        // default rather than not offered at all.
+        let kinds: Vec<(&str, Option<f64>)> = match listed {
+            Some(rates) => rates.iter().map(|(k, v)| (*k, Some(*v))).collect(),
+            None => catalogue_kinds(table).into_iter().map(|k| (k, None)).collect(),
+        };
+        for (kind, price) in kinds {
+            rows.push(Field {
+                section: field.section.clone(),
+                key: kind.to_string(),
+                parents: vec![field.key.clone(), name.clone()],
+                help: match price {
+                    Some(_) => format!("The published list price for {name}."),
+                    None => format!("No published price for {name}: this is yours to set."),
+                },
+                default: price
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+            });
+        }
+    }
+    Some(rows)
+}
+
+/// Every kind the card prices anywhere, in the order it first names them.
+fn catalogue_kinds(table: Catalogue) -> Vec<&'static str> {
+    let mut seen: Vec<&'static str> = Vec::new();
+    for (_, rates) in table {
+        for (kind, _) in *rates {
+            if !seen.contains(kind) {
+                seen.push(kind);
+            }
+        }
+    }
+    seen
+}
+
+/// Where `a` would take you: the catalogue-backed field this screen is
+/// about, whether that is the row under the cursor or the object whose
+/// numbers are on show.
+///
+/// Returned as the index in the list it belongs to, and whether reaching it
+/// means stepping back up first, because the picker writes through the field
+/// list that holds it.
+fn catalogue_in_reach(app: &App) -> Option<(usize, bool)> {
+    if let Some(field) = app.fields.get(app.selected) {
+        if field.parents.is_empty() && catalogue_for(app, &field.key).is_some() {
+            return Some((app.selected, false));
+        }
+    }
+    // Standing among the numbers: the field is the one on the screen below.
+    let (parent_fields, parent_sel) = app.stack.last()?;
+    let parent = parent_fields.get(*parent_sel)?;
+    catalogue_for(app, &parent.key).map(|_| (*parent_sel, true))
+}
+
+fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
+    app.catalogues.iter().find(|(f, _)| *f == key).map(|(_, t)| *t)
+}
+
+/// The keys a reader has already put in an object, in file order.
+fn find_object(live: &Value, path: &[&str]) -> Vec<String> {
+    let mut here = live;
+    for step in path {
+        match here.get(step) {
+            Some(next) => here = next,
+            None => return Vec::new(),
+        }
+    }
+    here.as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
+    // A field the widget handed a table for needs no `picker` declaration:
+    // offering the table *is* the picker, and asking settings.json to say so
+    // as well would be a second place for the two to disagree.
+    if let Some(table) = catalogue_for(app, key) {
+        return Some(PickKind::Catalogue(table));
+    }
     let rule = app.constraints.get(key)?.as_object()?.get("picker")?;
     if rule.as_str() == Some("timezone") {
         return Some(PickKind::Timezone);
@@ -1388,9 +1542,15 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
     let Some(field) = app.fields.get(index) else {
         return Vec::new();
     };
-    current_of(&app.live, field, app.legacy_section)
-        .or(Some(&field.default))
-        .and_then(Value::as_array)
+    let held = current_of(&app.live, field, app.legacy_section).or(Some(&field.default));
+    // A catalogue-backed field is an object, and its keys are the choices.
+    // The value under each is the numbers, which the picker never touches.
+    if let Some(Value::Object(map)) = held {
+        if catalogue_for(app, &field.key).is_some() {
+            return map.keys().map(|k| (k.clone(), k.clone())).collect();
+        }
+    }
+    held.and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
                 .filter_map(|row| match row {
@@ -1465,6 +1625,10 @@ fn zone_choices(app: &App, index: usize, query: &str) -> Vec<(String, bool)> {
             .iter()
             .filter_map(|one| zone_rank(one, query).map(|r| (r, one.clone())))
             .collect(),
+        PickKind::Catalogue(table) => table
+            .iter()
+            .filter_map(|(name, _)| zone_rank(name, query).map(|r| (r, name.to_string())))
+            .collect(),
     };
     // Stable, so within a rank the source's own order holds - alphabetical
     // for the database, and the widget's own order for a named set, which is
@@ -1489,6 +1653,34 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
         return;
     };
     let key = field.key.clone();
+    // A catalogue is an object: the name is a key, and what it holds are the
+    // numbers set against it. Ticking writes an empty object rather than any
+    // values - membership alone - so every kind keeps reading the widget's
+    // published default until somebody edits that one number. Unticking
+    // takes the whole entry, numbers included, which is what "remove this
+    // model" has to mean.
+    if catalogue_for(app, &key).is_some() {
+        let mut held: serde_json::Map<String, Value> =
+            match current_of(&app.live, field, app.legacy_section) {
+                Some(Value::Object(map)) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+        let removed = held.remove(zone).is_some();
+        if !removed {
+            held.insert(zone.to_string(), Value::Object(serde_json::Map::new()));
+        }
+        match write_field(app, index, Value::Object(held)) {
+            Ok(()) => {
+                app.status = Some(format!(
+                    "{} {}",
+                    if removed { "removed" } else { "added" },
+                    zone
+                ))
+            }
+            Err(e) => app.status = Some(e),
+        }
+        return;
+    }
     let mut rows: Vec<Value> = current_of(&app.live, field, app.legacy_section)
         .or(Some(&field.default))
         .and_then(Value::as_array)
@@ -1620,6 +1812,27 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
             app.selected = app.fields.len().saturating_sub(1);
             app.chase = true;
         }
+        "a" | "A" => {
+            if let Some((index, step_back)) = catalogue_in_reach(app) {
+                // Step back up first: the picker writes through the list the
+                // field lives in, and from among the numbers that is the
+                // screen below. Coming back to it is also what somebody
+                // adding a second model expects to see.
+                if step_back {
+                    if let Some((fields, selected)) = app.stack.pop() {
+                        app.fields = fields;
+                        app.selected = selected;
+                        app.scroll = 0;
+                    }
+                }
+                app.mode = Mode::Pick {
+                    index,
+                    query: String::new(),
+                    sel: 0,
+                    scroll: 0,
+                };
+            }
+        }
         "s" | "S" => app.reveal = !app.reveal,
         "r" | "R" => {
             let keep = (app.selected, app.reveal);
@@ -1628,6 +1841,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 section: app.section,
                 legacy_section: app.legacy_section,
                 schema: app.schema,
+                catalogues: app.catalogues,
             });
             app.selected = keep.0.min(app.fields.len().saturating_sub(1));
             app.reveal = keep.1;
@@ -1661,7 +1875,9 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                     if let Err(e) = outcome {
                         app.status = Some(e);
                     }
-                } else if let Some(inner) = nested_fields(app, app.selected) {
+                } else if let Some(inner) =
+                    nested_fields(app, app.selected).filter(|rows| !rows.is_empty())
+                {
                     app.stack.push((app.fields.clone(), app.selected));
                     app.fields = inner;
                     app.selected = 0;
@@ -1817,7 +2033,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .fields
         .get(app.selected)
         .is_some_and(|f| f.default.is_boolean());
-    let hints = list_hints(p, app.reveal, boolean);
+    let hints = list_hints(p, app.reveal, boolean, catalogue_in_reach(app).is_some());
     let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
         .into_iter()
         .map(|l| format!(" {l}"))
@@ -1838,7 +2054,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let key_w = app
         .fields
         .iter()
-        .map(|f| f.key.chars().count())
+        .map(|f| f.label().chars().count())
         .max()
         .unwrap_or(8)
         .max(8);
@@ -1887,7 +2103,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             ),
             (
                 c_of(if here { &p.txt } else { &p.lbl }),
-                crate::pad(&field.key, key_w + 1),
+                crate::pad(&field.label(), key_w + 1),
             ),
         ];
         if show_value {
@@ -2156,6 +2372,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let total_choices = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS.len(),
         PickKind::Choices(all) => all.len(),
+        PickKind::Catalogue(table) => table.len(),
     };
     // Counted from the configuration, not from the filtered list: counting
     // the visible ticks made a search that matched nothing report "0 of 597"
@@ -2322,12 +2539,17 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body
 }
 
-fn list_hints<'a>(p: &'a Palette, reveal: bool, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
+fn list_hints<'a>(
+    p: &'a Palette,
+    reveal: bool,
+    boolean: bool,
+    catalogue: bool,
+) -> Vec<Vec<(&'a str, String)>> {
     let secret = if reveal { "[s]hide tokens" } else { "[s]how tokens" };
     // `edit` is wrong for the row under the cursor when that row is a
     // boolean: enter does not open anything, it moves it on one place.
     let enter = if boolean { " true / false / default" } else { " edit" };
-    vec![
+    let mut out = vec![
         vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
         vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), enter.into())],
         vec![(p.dim.as_str(), secret.into())],
@@ -2335,7 +2557,13 @@ fn list_hints<'a>(p: &'a Palette, reveal: bool, boolean: bool) -> Vec<Vec<(&'a s
         vec![(p.dim.as_str(), "[d]efault".into())],
         vec![(p.dim.as_str(), "[c]opy".into())],
         vec![(p.dim.as_str(), "esc / [,] back".into())],
-    ]
+    ];
+    // Only where there is a table to pick from. A hint naming a key that
+    // does nothing on this screen teaches a control that is not there.
+    if catalogue {
+        out.insert(3, vec![(p.dim.as_str(), "[a]dd / remove".into())]);
+    }
+    out
 }
 
 /// Take over the current terminal until the user returns to the widget.
@@ -2373,6 +2601,116 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = include_str!("../../config.example.json");
+
+    /// A two-model card shaped exactly like a widget's own, so the tests
+    /// exercise the same path `agent-usage` takes rather than a stand-in.
+    const CARD: Catalogue = &[
+        ("model-a", &[("input", 4.0), ("output", 20.0)]),
+        ("model-b", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.1)]),
+    ];
+
+    /// An App standing on one catalogue-backed field, holding `live`.
+    fn catalogue_app(live: Value) -> App {
+        App {
+            widget: "w",
+            section: "w",
+            legacy_section: None,
+            schema: "{}",
+            catalogues: &[("rates", CARD)],
+            constraints: serde_json::Map::new(),
+            fields: vec![Field {
+                section: "w".into(),
+                key: "rates".into(),
+                parents: Vec::new(),
+                help: String::new(),
+                default: Value::Object(serde_json::Map::new()),
+            }],
+            live,
+            raw: String::new(),
+            path: PathBuf::from("/nonexistent"),
+            exists: false,
+            skipped: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            chase: false,
+            reveal: false,
+            mode: Mode::List,
+            status: None,
+            stack: Vec::new(),
+        }
+    }
+
+    /// The published number is the row's default and never the row's value.
+    ///
+    /// Writing list prices into somebody's config pins them to the day they
+    /// pressed the key: the next correction from the vendor never reaches
+    /// them, which is exactly the staleness this table has already had once.
+    #[test]
+    fn a_picked_model_takes_its_prices_as_defaults_not_as_values() {
+        let live = serde_json::json!({"w": {"rates": {"model-a": {}}}});
+        let app = catalogue_app(live);
+        let rows = nested_fields(&app, 0).expect("a catalogue field has rows");
+        assert_eq!(rows.len(), 2, "model-a prices two kinds");
+        assert_eq!(rows[0].key, "input");
+        assert_eq!(rows[0].parents, vec!["rates".to_string(), "model-a".to_string()]);
+        assert_eq!(rows[0].default, serde_json::json!(4.0));
+        // Nothing was written, so nothing is set.
+        assert!(current_of(&app.live, &rows[0], None).is_none());
+        // And the row says which model it is, because "input" alone appears
+        // once per model and names none of them.
+        assert_eq!(rows[0].label(), "model-a · input");
+    }
+
+    /// Only models the reader added get rows. Sixty-eight models times five
+    /// kinds is a screen nobody can read.
+    #[test]
+    fn an_empty_catalogue_field_offers_no_rows() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        assert!(nested_fields(&app, 0).expect("still a catalogue").is_empty());
+    }
+
+    /// A model the card has never heard of still gets every kind, with no
+    /// default, because a name the reader typed is the case config exists for.
+    #[test]
+    fn a_model_the_card_lacks_offers_every_kind_it_knows() {
+        let live = serde_json::json!({"w": {"rates": {"mine": {}}}});
+        let rows = nested_fields(&catalogue_app(live), 0).unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(kinds, vec!["input", "output", "cache_read"]);
+        assert!(rows.iter().all(|r| r.default.is_null()), "nothing invented");
+    }
+
+    /// The picker writes membership, and unticking takes the numbers with it.
+    #[test]
+    fn ticking_a_model_writes_an_empty_object_and_unticking_removes_it() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        assert!(picked_zones(&app, 0).is_empty());
+
+        let with_one = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {}}}}));
+        assert_eq!(picked_zones(&with_one, 0), vec!["model-a".to_string()]);
+
+        // An edited model is still just a member as far as the picker is
+        // concerned - it reads the keys, never what is under them.
+        let edited =
+            catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {"input": 3.5}}}}));
+        assert_eq!(picked_zones(&edited, 0), vec!["model-a".to_string()]);
+
+        // Every model on the card is offered, ticked or not.
+        let offered = zone_choices(&edited, 0, "");
+        assert_eq!(offered.len(), 2);
+        assert_eq!(offered[0], ("model-a".to_string(), true));
+        assert_eq!(offered[1], ("model-b".to_string(), false));
+    }
+
+    /// A field the widget handed no table for keeps the box it always had.
+    #[test]
+    fn a_field_with_no_catalogue_is_untouched() {
+        let mut app = catalogue_app(serde_json::json!({"w": {"other": {}}}));
+        app.fields[0].key = "other".into();
+        assert!(catalogue_for(&app, "other").is_none());
+        assert!(picker_kind(&app, "other").is_none());
+        assert!(nested_fields(&app, 0).is_none());
+    }
 
     #[test]
     fn the_schema_is_the_example_file() {
@@ -2606,7 +2944,7 @@ mod tests {
     fn widget_name_uses_the_file_hyphen() {
         let field = Field {
             section: "herdr_panes".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "refresh".into(),
             help: String::new(),
             default: Value::from(4),
@@ -2615,7 +2953,7 @@ mod tests {
         assert_eq!(field.path(), "herdr_panes.refresh");
         let actions = Field {
             section: "github_actions".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),
@@ -2623,7 +2961,7 @@ mod tests {
         assert_eq!(actions.widget(), "github-actions");
         let prs = Field {
             section: "github_prs".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "sources".into(),
             help: String::new(),
             default: serde_json::json!({}),
@@ -2631,7 +2969,7 @@ mod tests {
         assert_eq!(prs.widget(), "github-prs");
         let usage = Field {
             section: "agent_usage".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
@@ -2673,7 +3011,7 @@ mod tests {
         let leftover = serde_json::json!({"usage": {"grok_ping": true}});
         let field = Field {
             section: "agent_usage".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
@@ -2702,7 +3040,7 @@ mod tests {
 
         let prs = Field {
             section: "github_prs".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "limit".into(),
             help: String::new(),
             default: Value::from(50),
@@ -2719,7 +3057,7 @@ mod tests {
 
         let actions = Field {
             section: "github_actions".into(),
-            parent: None,
+            parents: Vec::new(),
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),

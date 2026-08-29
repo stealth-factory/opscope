@@ -31,6 +31,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "clocks",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 /// Five rows per digit, as clocks.py draws them.

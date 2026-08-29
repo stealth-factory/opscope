@@ -31,6 +31,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "netwatch",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 const SERIES: usize = 240;

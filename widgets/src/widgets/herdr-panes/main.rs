@@ -32,6 +32,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "herdr_panes",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 /// Worst first: the states that want a human are the reason to look.

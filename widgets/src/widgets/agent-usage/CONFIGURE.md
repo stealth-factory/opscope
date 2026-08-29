@@ -14,6 +14,8 @@ Declared fields: `agents`, `exclude_agents`, `refresh`, `rates`, `plan_cost`, `a
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
+`rates` is a picker over the rate card the widget ships, not a JSON field: `↵` offers the models, `[a]dd / remove` reopens that list, and each ticked model shows its priced kinds with the published price as the default. **Set only the kinds that are actually wrong.** Config wins per kind, so an untouched kind keeps tracking the shipped card and still receives the vendor's next correction; writing all five pins that model to today's prices for good. Never copy the published numbers in to "make them explicit" — that is the stale-price failure, arranged by hand.
+
 ## Safe configuration process
 
 1. Inspect which supported agents are installed or have local state. Do not read or print their credential contents.

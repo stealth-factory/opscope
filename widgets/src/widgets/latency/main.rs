@@ -73,6 +73,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "latency",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 #[derive(Clone, Default)]

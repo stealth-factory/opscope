@@ -29,6 +29,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "terminal",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 /// Each widget's own words, taken from that widget's folder.

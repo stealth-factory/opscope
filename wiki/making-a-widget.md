@@ -205,6 +205,39 @@ choices, element types, numeric bounds, nesting, units. The generator omits it
 from `config.example.json`; it exists to stop the settings screen accepting a
 value the widget would silently ignore.
 
+### When the options live in code
+
+Some maps are keyed by something the widget already knows and cannot sensibly
+restate in `settings.json` — `agent-usage`'s rate card is sixty-eight models
+with their published prices. Copying that into the schema would be two records
+of one fact, and the copy would go stale the first time a vendor moved a price.
+
+So the widget hands the table over instead:
+
+```rust
+const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
+    ...
+    catalogues: &[("rates", LIST_RATES)],
+};
+```
+
+The screen then offers those keys as a picker — `↵` on the empty field,
+`[a]dd / remove` afterwards — and gives each ticked key a row per number, with
+the widget's own figure as the **default**. Ticking writes membership only:
+
+```json
+"rates": { "gpt-5.6-sol": {} }
+```
+
+**Never seed a picked entry with the values.** Writing today's numbers into
+somebody's config pins them there, and the correction the widget ships next
+month never reaches them. The value stays absent until they change it, which
+is also what makes "using default" on screen true.
+
+That in turn requires the *reader* to merge per key rather than take the
+configured object wholesale — `agent-usage` did the latter, so overriding one
+price silently deleted the other four and those tokens metered as free.
+
 ## Config
 
 **Config, never hardcoded.** Hostnames, cities, tokens and account lists live

@@ -34,6 +34,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "github",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 /// How many of the longest-open PRs an account's own screen names.

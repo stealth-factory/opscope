@@ -33,6 +33,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "agent_usage",
     legacy_section: Some("usage"),
     schema: include_str!("settings.json"),
+    catalogues: &[("rates", LIST_RATES)],
 };
 use opscope_core::now;
 
@@ -771,52 +772,65 @@ type Rate = HashMap<String, f64>;
 
 /// The rate for a model, and where it came from.
 ///
-/// Config wins outright, then the published list prices. Keyed by model
-/// rather than by agent, because a model has one list price wherever it
-/// ran. Longest matching name wins, so claude-opus-4 does not shadow
-/// claude-opus-4-8, and a "*" entry catches anything left over.
+/// Keyed by model rather than by agent, because a model has one list price
+/// wherever it ran. Longest matching name wins, so claude-opus-4 does not
+/// shadow claude-opus-4-8, and a "*" entry catches anything left over.
+///
+/// **Config wins per kind, not per model.** It used to replace the whole
+/// rate, which meant setting one number deleted the other four: an override
+/// of `input` alone left output, both cache writes and cache reads with no
+/// rate, and `cost_of` reads a missing kind as zero. The screen showed a
+/// cost that was quietly a fraction of the real one, which is the same
+/// wrong-by-omission shape as a key that matches nothing. Overriding one
+/// number now means exactly that, and the rest keep tracking the list.
+///
+/// It also means the published prices stay the *default* rather than being
+/// copied into config. Anyone who pins today's numbers into their own file
+/// stops getting corrections when a vendor moves a price - which is the
+/// failure this table has already had once.
 fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &'static str) {
     if NO_PUBLISHED_PRICE.contains(&model) && !configured.contains_key(model) {
         return (None, "");
     }
-    if let Some(rate) = configured.get(model) {
-        return (Some(rate.clone()), "config");
-    }
-    let mut best: Option<(usize, Rate)> = None;
-    for (key, rate) in configured {
-        if key != "*" && model.contains(key.as_str()) {
-            let len = key.chars().count();
-            if best.as_ref().is_none_or(|(had, _)| len > *had) {
-                best = Some((len, rate.clone()));
+    // Longest match wins on each side independently, so a specific config
+    // key can refine a model the list only knows by its family, and a "*"
+    // catch-all still loses to anything that named the model.
+    let longest = |source: &mut dyn Iterator<Item = (&str, Rate)>| -> Option<Rate> {
+        let mut best: Option<(usize, Rate)> = None;
+        for (key, rate) in source {
+            if key == model {
+                return Some(rate);
+            }
+            if model.contains(key) {
+                let len = key.chars().count();
+                if best.as_ref().is_none_or(|(had, _)| len > *had) {
+                    best = Some((len, rate));
+                }
             }
         }
-    }
-    if let Some((_, rate)) = best {
-        return (Some(rate), "config");
-    }
-    if let Some(rate) = configured.get("*") {
-        return (Some(rate.clone()), "config");
-    }
+        best.map(|(_, rate)| rate)
+    };
+
+    let mut named = configured.iter().filter(|(k, _)| *k != "*").map(|(k, v)| (k.as_str(), v.clone()));
+    let from_config = longest(&mut named).or_else(|| configured.get("*").cloned());
+
     let to_rate = |entries: &[(&str, f64)]| -> Rate {
         entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     };
-    for (key, entries) in LIST_RATES {
-        if *key == model {
-            return (Some(to_rate(entries)), "list");
-        }
-    }
-    let mut best: Option<(usize, Rate)> = None;
-    for (key, entries) in LIST_RATES {
-        if model.contains(key) {
-            let len = key.chars().count();
-            if best.as_ref().is_none_or(|(had, _)| len > *had) {
-                best = Some((len, to_rate(entries)));
+    let mut listed = LIST_RATES.iter().map(|(k, e)| (*k, to_rate(e)));
+    let from_list = longest(&mut listed);
+
+    match (from_config, from_list) {
+        (Some(mine), Some(mut merged)) => {
+            // Only the kinds actually named are taken; the rest stay listed.
+            for (kind, value) in mine {
+                merged.insert(kind, value);
             }
+            (Some(merged), "config")
         }
-    }
-    match best {
-        Some((_, rate)) => (Some(rate), "list"),
-        None => (None, ""),
+        (Some(mine), None) => (Some(mine), "config"),
+        (None, Some(listed)) => (Some(listed), "list"),
+        (None, None) => (None, ""),
     }
 }
 
@@ -1972,6 +1986,51 @@ mod tests {
             [("input".to_string(), 1.0)].into_iter().collect(),
         );
         assert!(rate_for("gpt-5.3-codex-spark", &mine).0.is_some());
+    }
+
+    /// Overriding one number must not delete the other four.
+    ///
+    /// cost_of reads a missing kind as zero, so a whole-rate replacement
+    /// turned "I know what input costs me" into "output is free" - and the
+    /// pane showed a smaller number with nothing to say it was wrong. This
+    /// is the config half of the rule the table itself follows: an absent
+    /// rate and a zero rate are the same number for opposite reasons.
+    #[test]
+    fn a_configured_kind_does_not_delete_the_rest_of_the_rate() {
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(
+            "gpt-5.6-sol".into(),
+            [("input".to_string(), 3.0)].into_iter().collect(),
+        );
+        let (rate, origin) = rate_for("gpt-5.6-sol", &mine);
+        let rate = rate.expect("a configured model still has a rate");
+        assert_eq!(origin, "config");
+        // The kind that was named is the reader's.
+        assert_eq!(rate.get("input"), Some(&3.0));
+        // Everything else still tracks the published list.
+        assert_eq!(rate.get("output"), Some(&20.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.40));
+        assert_eq!(rate.get("cache_write"), Some(&5.0));
+        // And the cost reflects it: output must not meter as free.
+        let tokens: Tokens = [("output".to_string(), 1_000_000.0)].into_iter().collect();
+        assert_eq!(cost_of(&tokens, &rate), 20.0);
+    }
+
+    /// A model the list has never heard of is still priced entirely by config.
+    #[test]
+    fn a_model_only_config_knows_is_priced_from_config_alone() {
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(
+            "some-local-model".into(),
+            [("input".to_string(), 1.0), ("output".to_string(), 2.0)]
+                .into_iter()
+                .collect(),
+        );
+        let (rate, origin) = rate_for("some-local-model", &mine);
+        assert_eq!(origin, "config");
+        let rate = rate.unwrap();
+        assert_eq!(rate.get("output"), Some(&2.0));
+        assert_eq!(rate.len(), 2, "nothing invented for the kinds not named");
     }
 
     /// The model strings the agents on this machine actually write down.

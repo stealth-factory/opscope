@@ -35,6 +35,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "github_actions",
     legacy_section: Some("gha"),
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 const GQL: &str = "https://api.github.com/graphql";

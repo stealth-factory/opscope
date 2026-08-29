@@ -32,6 +32,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "link",
     legacy_section: None,
     schema: include_str!("settings.json"),
+    catalogues: &[],
 };
 
 const IDLE_AFTER: f64 = 300.0;
