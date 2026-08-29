@@ -1510,10 +1510,23 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         "enter" => {
             if let Some(field) = app.fields.get(app.selected) {
                 if field.default.is_boolean() {
+                    // Three states, not two. A boolean that is not in the
+                    // file is not the same as one written to the value the
+                    // default happens to have today: the default can move in
+                    // a release, and the unwritten one moves with it. Toggling
+                    // between true and false could only ever reach two of the
+                    // three, and left the third behind a different key.
+                    //
+                    // unset -> true -> false -> unset, so the cycle always
+                    // comes back and nothing is a one-way door.
                     let current = current_of(&app.live, field, app.legacy_section)
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(field.default.as_bool().unwrap_or(false));
-                    if let Err(e) = write_field(app, app.selected, Value::Bool(!current)) {
+                        .and_then(|v| v.as_bool());
+                    let outcome = match current {
+                        None => write_field(app, app.selected, Value::Bool(true)),
+                        Some(true) => write_field(app, app.selected, Value::Bool(false)),
+                        Some(false) => reset_field(app, app.selected),
+                    };
+                    if let Err(e) = outcome {
                         app.status = Some(e);
                     }
                 } else if picker_kind(app, &field.key).is_some() {
@@ -1655,7 +1668,11 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     }
     body.push(String::new());
 
-    let hints = list_hints(p, app.reveal);
+    let boolean = app
+        .fields
+        .get(app.selected)
+        .is_some_and(|f| f.default.is_boolean());
+    let hints = list_hints(p, app.reveal, boolean);
     let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
         .into_iter()
         .map(|l| format!(" {l}"))
@@ -2142,11 +2159,14 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body
 }
 
-fn list_hints<'a>(p: &'a Palette, reveal: bool) -> Vec<Vec<(&'a str, String)>> {
+fn list_hints<'a>(p: &'a Palette, reveal: bool, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
     let secret = if reveal { "[s]hide tokens" } else { "[s]how tokens" };
+    // `edit` is wrong for the row under the cursor when that row is a
+    // boolean: enter does not open anything, it moves it on one place.
+    let enter = if boolean { " true / false / default" } else { " edit" };
     vec![
         vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-        vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " edit".into())],
+        vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), enter.into())],
         vec![(p.dim.as_str(), secret.into())],
         vec![(p.dim.as_str(), "[r]eload".into())],
         vec![(p.dim.as_str(), "[d]efault".into())],
