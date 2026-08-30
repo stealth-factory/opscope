@@ -914,6 +914,8 @@ enum Mode {
         /// reader has set something on. Starts on the reader's own, which
         /// is the shorter list and the one they came to look at.
         show_all: bool,
+        /// Where the caret sits in the box, in characters.
+        cursor: usize,
         /// Whether the rows have focus rather than the box.
         ///
         /// A list you type into cannot also let a letter be a verb: the box
@@ -1962,11 +1964,19 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
 }
 
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
-    let Mode::Pick { index, query, sel, scroll, show_all, on_list } = &mut app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &mut app.mode
+    else {
         return false;
     };
-    let (index, mut q, mut s_, mut sc, mut all, mut rows) =
-        (*index, query.clone(), *sel, *scroll, *show_all, *on_list);
+    let (index, mut q, mut s_, mut sc, mut all, mut rows, mut cur) = (
+        *index,
+        query.clone(),
+        *sel,
+        *scroll,
+        *show_all,
+        *on_list,
+        *cursor,
+    );
     let catalogue = app
         .fields
         .get(index)
@@ -1995,6 +2005,12 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "up" | "down" | "pgup" | "pgdn" | "home" | "end" if free && !rows && total > 0 => {
             rows = true;
         }
+        // The box owns the text keys. A free list that has handed focus to
+        // its rows is the one case where home and end are navigation.
+        "left" if !(free && rows) => cur = cur.saturating_sub(1),
+        "right" if !(free && rows) => cur = (cur + 1).min(q.chars().count()),
+        "home" if !(free && rows) => cur = 0,
+        "end" if !(free && rows) => cur = q.chars().count(),
         "up" => s_ = s_.saturating_sub(1),
         "down" => s_ = (s_ + 1).min(total.saturating_sub(1)),
         "pgup" => s_ = s_.saturating_sub(10),
@@ -2005,12 +2021,13 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "ctrl-y" | "wheel-up" => sc = sc.saturating_sub(1),
         "ctrl-e" | "wheel-down" => sc = sc.saturating_add(1),
         "backspace" => {
-            q.pop();
+            delete_before(&mut q, &mut cur);
             s_ = 0;
         }
         // Back to your own list in one key rather than one per character.
         "ctrl-u" => {
             q.clear();
+            cur = 0;
             s_ = 0;
             sc = 0;
         }
@@ -2042,6 +2059,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             if !typed.is_empty() {
                 add_free_entry(app, index, &typed);
                 q.clear();
+                cur = 0;
                 s_ = 0;
                 sc = 0;
             }
@@ -2102,14 +2120,15 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 // Typing is for the box, so it takes focus back. Somebody
                 // who starts typing has said where they want to be.
                 rows = false;
-                q.push(ch);
+                insert_chars(&mut q, &mut cur, other);
                 s_ = 0;
             }
         }
         _ => {}
     }
     let total = zone_choices(app, index, &q, all).len();
-    if let Mode::Pick { query, sel, scroll, show_all, on_list, .. } = &mut app.mode {
+    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } = &mut app.mode {
+        *cursor = cur.min(q.chars().count());
         *query = q;
         *sel = s_.min(total.saturating_sub(1));
         *scroll = sc;
@@ -2236,6 +2255,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                         // are none, where opening on it would be a screen
                         // saying you have nothing and offering nothing.
                         show_all: picked_zones(app, app.selected).is_empty(),
+                        cursor: 0,
                         // The box first: a list you type into is a list you
                         // came to type into.
                         on_list: false,
@@ -2733,7 +2753,8 @@ fn input_row(
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
-    let Mode::Pick { index, query, sel, scroll, show_all, on_list } = &app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &app.mode
+    else {
         return vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
     };
     let field = &app.fields[*index];
@@ -2782,9 +2803,13 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // they are not, and the count that matters is how many you have changed
     // against how many there are to change.
     let heading = match &kind {
-        PickKind::Free if chosen == 0 => {
+        // Once something is typed the line below says what ↵ will do with
+        // it, so repeating the invitation here would be advice they have
+        // already taken.
+        PickKind::Free if chosen == 0 && query.is_empty() => {
             "  Nothing here yet. Type an entry and press ↵.".to_string()
         }
+        PickKind::Free if chosen == 0 => "  Nothing here yet.".to_string(),
         PickKind::Free => format!(
             "  {} {}",
             chosen,
@@ -2862,7 +2887,7 @@ format!(
     // A set small enough to offer needs no search, and a box you cannot use
     // is a box that says the wrong thing about what this screen wants.
     if !matches!(kind, PickKind::One(_)) {
-        body.push(input_row(p, w, query, query.chars().count(), hint, !*on_list));
+        body.push(input_row(p, w, query, *cursor, hint, !*on_list));
     }
     body.push(String::new());
 
@@ -2882,6 +2907,13 @@ format!(
             }
             (false, true) if matches!(kind, PickKind::Free) => {
                 "  The list is empty. Type an entry above.".to_string()
+            }
+            // A free list is not searched, so nothing can fail to match: the
+            // box is composing an entry, and the only thing left to say is
+            // how to commit it. "Nothing matches /tes" reported a failed
+            // search on a screen that never searched.
+            (_, false) if matches!(kind, PickKind::Free) => {
+                format!("  Press ↵ to add \"{query}\".")
             }
             (false, true) => "  Nothing to choose from.".to_string(),
             (_, false) => format!("  Nothing matches /{query}."),
@@ -3410,6 +3442,7 @@ mod tests {
             scroll: 0,
             show_all: false,
             on_list: false,
+            cursor: 0,
         };
 
         handle_pick_key(&mut app, "d");
@@ -3433,6 +3466,56 @@ mod tests {
         };
         assert!(!on_list, "typing returns focus to the box");
         assert_eq!(query, "dx");
+    }
+
+    /// The box takes a correction in the middle, not only at the end.
+    ///
+    /// It appended and backspaced from the end alone, so a typo four
+    /// characters back cost everything after it. The editor beside it has
+    /// had a cursor since it was written.
+    #[test]
+    fn the_box_can_be_corrected_in_the_middle() {
+        let mut app = field_app("hosts", serde_json::json!([]), None);
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+            cursor: 0,
+        };
+        for ch in ["h", "s", "t"] {
+            handle_pick_key(&mut app, ch);
+        }
+        // "hst" - the o was missed. Back over s and t, then put it in.
+        handle_pick_key(&mut app, "left");
+        handle_pick_key(&mut app, "left");
+        handle_pick_key(&mut app, "o");
+        let Mode::Pick { query, cursor, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert_eq!(query, "host");
+        assert_eq!(*cursor, 2, "the caret sits after what was just typed");
+
+        // Backspace takes the character before the caret, not the last one.
+        handle_pick_key(&mut app, "backspace");
+        let Mode::Pick { query, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert_eq!(query, "hst");
+
+        // end goes to the far side, home comes back.
+        handle_pick_key(&mut app, "end");
+        let Mode::Pick { cursor, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert_eq!(*cursor, 3);
+        handle_pick_key(&mut app, "home");
+        let Mode::Pick { cursor, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert_eq!(*cursor, 0);
     }
 
     /// A list of numbers is left alone.
