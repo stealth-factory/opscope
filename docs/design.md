@@ -51,15 +51,27 @@ wrong first.
 - **Optional enhancements, never requirements.** The clipboard goes through
   OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
   available and skipped silently where not.
+- **`cfg` decides where bytes come from; nothing else.** Parsers — pure
+  functions from text or bytes to values — are always compiled and always
+  tested, so a Linux `/proc` reader still runs on the macOS CI runners.
+  `cfg(target_os)` is acquisition only: which file to open, which command
+  to spawn. Anything that varies *within* a platform (a tool on `PATH`,
+  whether `ping` accepts `-O`) is a runtime check, because a build-target
+  test would be wrong on the machine that matters. A widget that cannot
+  run here says `does not run on {os}` via `unsupported()`, drawn by
+  `cannot_start_because()`, rather than an empty table that looks like a quiet
+  source.
 
 ## Where these are enforced
 
-Five of them are not prose. `cargo test` runs
+These are not prose. `cargo test` runs
 [`widgets/tests/check.rs`](../widgets/tests/check.rs), which reads the
 sources and fails on a footer hint naming a key nothing answers, a hint
 missing from the widget's doc, a config key read but never documented,
-a colour drawing text on the selected-row tint below WCAG AA, and a widget
-that does not answer the wheel. See [internals](internals.md#the-checks).
+a colour drawing text on the selected-row tint below WCAG AA, a widget
+that does not answer the wheel, a parser or a test gated by
+`cfg(target_os)`, and a widget that opens `/proc` with no macOS path.
+See [internals](internals.md#the-checks).
 
 The wheel rule is enforced the way it is because the obvious marker does not
 work. A check that only looked at widgets calling `follow()` would have

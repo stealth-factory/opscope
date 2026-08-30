@@ -67,7 +67,10 @@ fn is_moved_helper(line: &str, definition: &str) -> bool {
 fn moved_helper_matcher_sees_indent_and_pub() {
     // The column-zero, private prefixes the first check used.
     assert!(is_moved_helper("fn now() -> i64 {", "fn now("));
-    assert!(is_moved_helper("const SPARK: [&str; 8] = [", "const SPARK:"));
+    assert!(is_moved_helper(
+        "const SPARK: [&str; 8] = [",
+        "const SPARK:"
+    ));
     // The two shapes it missed: indent, and `pub`.
     assert!(is_moved_helper("    fn now() -> i64 {", "fn now("));
     assert!(is_moved_helper("pub fn now() -> i64 {", "fn now("));
@@ -217,12 +220,19 @@ fn without_tests(src: &str) -> String {
 fn widgets() -> BTreeMap<String, String> {
     let dir = root().join("widgets/src/bin");
     let mut found = BTreeMap::new();
-    for entry in std::fs::read_dir(&dir).expect("the bin directory").flatten() {
+    for entry in std::fs::read_dir(&dir)
+        .expect("the bin directory")
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         // Each file's own tests are dropped before joining, not after. Split
         // on the first `#[cfg(test)]` of the joined blob and a widget with
         // submodules is read only as far as its main file's tests - agent-usage's
@@ -232,7 +242,10 @@ fn widgets() -> BTreeMap<String, String> {
         // A widget split across a directory - agent-usage - reads as one widget.
         let sub = dir.join(&stem);
         if sub.is_dir() {
-            for part in std::fs::read_dir(&sub).expect("a widget directory").flatten() {
+            for part in std::fs::read_dir(&sub)
+                .expect("a widget directory")
+                .flatten()
+            {
                 if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
                     src.push('\n');
                     src.push_str(&without_tests(
@@ -287,7 +300,16 @@ const GLYPHS: &[(char, &str)] = &[
 ];
 
 /// Named keys that appear in prose: "esc, ↵ or i to close".
-const NAMED: &[&str] = &["esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end"];
+const NAMED: &[&str] = &[
+    "esc",
+    "tab",
+    "enter",
+    "backspace",
+    "pgup",
+    "pgdn",
+    "home",
+    "end",
+];
 
 /// The keys a hint teaches, in any of the forms this tree writes them.
 ///
@@ -467,7 +489,13 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         // lookup in the file - clocks reading its own state file, link
         // parsing `ss` output, agent-usage reading token counts - none of which
         // is config. That produced 24 false failures on the first run.
-        for marker in ["cfg_f64(", "cfg_usize(", "cfg_str(", "cfg_strings(", "cfg.get("] {
+        for marker in [
+            "cfg_f64(",
+            "cfg_usize(",
+            "cfg_str(",
+            "cfg_strings(",
+            "cfg.get(",
+        ] {
             let mut from = 0;
             while let Some(at) = line[from..].find(marker) {
                 let start = from + at + marker.len();
@@ -491,8 +519,8 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
 
 /// The example config, as section -> keys.
 fn example() -> BTreeMap<String, BTreeSet<String>> {
-    let text = std::fs::read_to_string(root().join("config.example.json"))
-        .expect("config.example.json");
+    let text =
+        std::fs::read_to_string(root().join("config.example.json")).expect("config.example.json");
     let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
     let mut out = BTreeMap::new();
     for (section, body) in parsed.as_object().expect("an object") {
@@ -517,7 +545,10 @@ fn every_footer_hint_names_a_key_the_widget_answers_to() {
         let handled = handled_keys(&src);
         for key in hinted_keys(&src) {
             if !handled.contains(&key) {
-                wrong.push(format!("{}: [{}] is hinted, no match arm answers it", name, key));
+                wrong.push(format!(
+                    "{}: [{}] is hinted, no match arm answers it",
+                    name, key
+                ));
             }
         }
     }
@@ -542,10 +573,13 @@ fn every_footer_hint_is_in_the_widgets_doc() {
                 .iter()
                 .find(|(_, n)| *n == key)
                 .map(|(g, _)| format!("`{}`", g));
-            let documented = text.contains(&format!("`{}`", key))
-                || glyph.is_some_and(|g| text.contains(&g));
+            let documented =
+                text.contains(&format!("`{}`", key)) || glyph.is_some_and(|g| text.contains(&g));
             if !documented {
-                wrong.push(format!("{}: [{}] in the footer, not in docs/{}.md", name, key, name));
+                wrong.push(format!(
+                    "{}: [{}] in the footer, not in docs/{}.md",
+                    name, key, name
+                ));
             }
         }
     }
@@ -625,10 +659,7 @@ fn every_config_read_falls_back_to_a_code_default() {
             if !before.trim_end().ends_with("cfg") && !before.trim_end().ends_with("&cfg") {
                 continue;
             }
-            let key: String = src[from..]
-                .chars()
-                .take_while(|c| *c != '"')
-                .collect();
+            let key: String = src[from..].chars().take_while(|c| *c != '"').collect();
             // The statement this read belongs to, not a fixed window: an
             // earlier hand-audit used 260 characters and wrongly flagged
             // work_days, whose fallback is simply further along.
@@ -781,7 +812,13 @@ fn every_key_the_help_text_names_is_answered() {
     // missed. Catching one of the two still lands the reader in the right
     // sentence.
     const VERBS: &[&str] = &[
-        "opens", "cycles", "toggles", "quits", "refreshes", "closes", "copies",
+        "opens",
+        "cycles",
+        "toggles",
+        "quits",
+        "refreshes",
+        "closes",
+        "copies",
     ];
     let dir = root().join("widgets/src/bin");
     let mut wrong = Vec::new();
@@ -802,9 +839,7 @@ fn every_key_the_help_text_names_is_answered() {
                     continue;
                 }
                 let after_press = i > 0 && words[i - 1] == "press";
-                let before_verb = words
-                    .get(i + 1)
-                    .is_some_and(|next| VERBS.contains(next));
+                let before_verb = words.get(i + 1).is_some_and(|next| VERBS.contains(next));
                 if (after_press || before_verb) && !handled.contains(*word) {
                     wrong.push(format!(
                         "{}_help.txt names {:?} and {}.rs does not answer it",
@@ -822,7 +857,11 @@ fn every_key_the_help_text_names_is_answered() {
 fn luminance(rgb: (f64, f64, f64)) -> f64 {
     let ch = |c: f64| {
         let c = c / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * ch(rgb.0) + 0.7152 * ch(rgb.1) + 0.0722 * ch(rgb.2)
 }
@@ -873,7 +912,9 @@ fn text_on_a_selection_tint_clears_aa() {
         let mut colours: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
         for line in src.lines() {
             let t = line.trim_start();
-            let Some(field) = t.split(':').next() else { continue };
+            let Some(field) = t.split(':').next() else {
+                continue;
+            };
             if !t.contains(": tc::rgb(") || field.contains(' ') || field.is_empty() {
                 continue;
             }
@@ -932,7 +973,9 @@ fn text_on_a_selection_tint_clears_aa() {
                     true => format!("{}_lit", field),
                     false => field,
                 };
-                let Some(&c) = colours.get(&field) else { continue };
+                let Some(&c) = colours.get(&field) else {
+                    continue;
+                };
                 let r = contrast(c, tint);
                 if r < 4.5 {
                     wrong.push(format!(
@@ -945,7 +988,11 @@ fn text_on_a_selection_tint_clears_aa() {
     }
     wrong.sort();
     wrong.dedup();
-    assert!(wrong.is_empty(), "on the selected-row tint:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "on the selected-row tint:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// A widget with a lighter grey has to actually reach for it.
@@ -994,7 +1041,11 @@ fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
             }
         }
     }
-    assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "a lighter grey nobody draws:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// Widgets that answer neither wheel event, deliberately.
@@ -1076,7 +1127,9 @@ fn the_wheel_is_turned_off_on_every_way_out() {
         ("restore_screen", "pub fn restore_screen()"),
         ("Keyboard::restore", "pub fn restore(&mut self)"),
     ] {
-        let at = src.find(from).unwrap_or_else(|| panic!("{} moved or was renamed", what));
+        let at = src
+            .find(from)
+            .unwrap_or_else(|| panic!("{} moved or was renamed", what));
         let body = &src[at..src.len().min(at + 900)];
         assert!(
             body.contains("MOUSE_OFF"),
@@ -1165,4 +1218,317 @@ fn a_poller_that_dies_records_why() {
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+/// A `#[cfg(target_os ...)]` still pending when the next item starts.
+///
+/// Attributes stack, so `#[cfg(target_os)]` then `#[path]` then `mod host`
+/// is one item; a blank line or a comment does not clear it.
+fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
+    let mut pending = false;
+    let mut found = Vec::new();
+    for (n, line) in src.lines().enumerate() {
+        let t = line.trim();
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
+        if t.starts_with("#[cfg(") && t.contains("target_os") {
+            pending = true;
+            continue;
+        }
+        if t.starts_with("#[") {
+            if pending && t.starts_with("#[test]") {
+                found.push(format!("line {}: test gated by target_os", n + 1));
+            }
+            continue;
+        }
+        if pending {
+            let item = t.strip_prefix("pub ").unwrap_or(t);
+            if item.starts_with("fn parse_") {
+                found.push(format!("line {}: parser gated by target_os", n + 1));
+            }
+            pending = false;
+        }
+    }
+    found
+}
+
+#[test]
+fn target_os_gating_sees_a_parser_and_skips_acquisition() {
+    let src = r#"
+#[cfg(target_os = "linux")]
+fn parse_foo(text: &str) {}
+
+#[cfg(target_os = "linux")]
+fn sockets() {}
+
+#[cfg(target_os = "macos")]
+#[path = "ports/macos.rs"]
+mod host;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hidden() {}
+"#;
+    let got = parsers_or_tests_gated_by_target_os(src);
+    assert!(
+        got.iter().any(|s| s.contains("parser")),
+        "missed a gated parse_*: {got:?}"
+    );
+    assert!(
+        got.iter().any(|s| s.contains("test")),
+        "missed a gated #[test]: {got:?}"
+    );
+    assert!(
+        !got.iter()
+            .any(|s| s.contains("sockets") || s.contains("host")),
+        "acquisition is allowed behind cfg: {got:?}"
+    );
+}
+
+/// Every `.rs` file under `widgets/src/bin`, including per-widget
+/// directories. check.rs's `widgets()` concatenates those; these checks
+/// need the files separately so a `cfg`-gated module can be judged on
+/// its own contents.
+fn widget_rs_files() -> Vec<(String, PathBuf)> {
+    let dir = root().join("widgets/src/bin");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .expect("the bin directory")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            found.push((stem, path));
+            continue;
+        }
+        if path.is_dir() {
+            let stem = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            for part in std::fs::read_dir(&path)
+                .expect("a widget directory")
+                .flatten()
+            {
+                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                    found.push((stem.clone(), part.path()));
+                }
+            }
+        }
+    }
+    found
+}
+
+fn cfg_gated_mod_files(src: &str, file: &PathBuf) -> Vec<PathBuf> {
+    let dir = file.parent().expect("a source file has a directory");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with("#[cfg(") && t.contains("target_os") {
+            let mut path_attr = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let n = lines[j].trim();
+                if n.starts_with("//") || n.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if n.starts_with("#[path") {
+                    if let Some(q1) = n.find('"') {
+                        if let Some(q2) = n[q1 + 1..].find('"') {
+                            path_attr = Some(n[q1 + 1..q1 + 1 + q2].to_string());
+                        }
+                    }
+                    j += 1;
+                    continue;
+                }
+                if n.starts_with("#[") {
+                    j += 1;
+                    continue;
+                }
+                if let Some(rest) = n.strip_prefix("mod ") {
+                    let name = rest
+                        .trim_end_matches(';')
+                        .trim_end_matches('{')
+                        .trim()
+                        .to_string();
+                    out.push(match path_attr {
+                        Some(rel) => dir.join(rel),
+                        None => dir.join(format!("{name}.rs")),
+                    });
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn file_has_parser_or_test(src: &str) -> bool {
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        let item = t.strip_prefix("pub ").unwrap_or(t);
+        item.starts_with("fn parse_") || t.starts_with("#[test]")
+    })
+}
+
+#[test]
+fn parsers_and_their_tests_are_not_gated_by_target_os() {
+    // The failure this exists to catch: a Linux parser (or the test that
+    // would have exercised it) sitting behind cfg(target_os = "linux"),
+    // so cargo test on the macOS runners never compiles it, and a broken
+    // decoder sits behind a green build.
+    let mut wrong = Vec::new();
+    for (widget, path) in widget_rs_files() {
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        for flag in parsers_or_tests_gated_by_target_os(&src) {
+            wrong.push(format!(
+                "{} {}: {flag}",
+                widget,
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        if let Some(test_at) = src.find("#[cfg(test)]") {
+            for (n, line) in src[test_at..].lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("#[cfg(") && t.contains("target_os") {
+                    wrong.push(format!(
+                        "{} {}: test module line {} gated by target_os",
+                        widget,
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        n + 1
+                    ));
+                }
+            }
+        }
+        for gated in cfg_gated_mod_files(&src, &path) {
+            let body = std::fs::read_to_string(&gated).unwrap_or_default();
+            if file_has_parser_or_test(&body) {
+                wrong.push(format!(
+                    "{}: {} is cfg-gated but contains a parser or a test",
+                    widget,
+                    gated.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "parsers compile on every target, or the tests that prove they do vanish from macOS CI:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
+fn the_linux_socket_parser_is_compiled_on_every_target() {
+    // The proof the rule holds for the worked example. If parse_proc_net_tcp
+    // moved behind cfg(target_os = "linux"), this file would lose the
+    // function (or gain a target_os) and this test would fail on every
+    // runner, including macOS — the thing a cfg-gated unit test cannot do.
+    let path = root().join("widgets/src/bin/ports/parse.rs");
+    let src = std::fs::read_to_string(&path)
+        .expect("ports/parse.rs — the Linux /proc parser lives here so it compiles on macOS too");
+    assert!(
+        src.contains("fn parse_proc_net_tcp("),
+        "the /proc/net/tcp parser must keep its name so this check can see it"
+    );
+    assert!(
+        !src.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("#[cfg") && t.contains("target_os")
+        }),
+        "ports/parse.rs is gated by target_os — its tests would vanish from the macOS CI run"
+    );
+}
+
+fn opens_proc(src: &str) -> bool {
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        // A string that is a /proc path, not a mention of the word in
+        // prose. github.rs talks about cmdline leaking; that string does
+        // not start with /proc inside the quotes.
+        line.contains("\"/proc") || line.contains("format!(\"/proc")
+    })
+}
+
+#[test]
+fn opens_proc_sees_a_path_and_skips_a_mention() {
+    assert!(opens_proc(
+        r#"let t = std::fs::read_to_string("/proc/net/tcp");"#
+    ));
+    assert!(opens_proc(r#"format!("/proc/{}/fd", pid)"#));
+    assert!(!opens_proc(
+        r#"// /proc/<pid>/cmdline is readable by anyone"#
+    ));
+    assert!(!opens_proc(
+        r#""in its arguments, because /proc/<pid>/cmdline is readable by""#
+    ));
+}
+
+/// Widgets that still acquire from Linux-only sources, and the issue that
+/// will give them a macOS path (or decide they cannot). Adding a name
+/// here without an issue is the failure this check exists to catch: a
+/// new `/proc` reader with no explanation looks on macOS like a source
+/// with nothing in it.
+const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
+    ("netwatch", "OPS-61"),
+    ("tailnet", "process table is /proc; no macOS source yet"),
+    (
+        "herdr-panes",
+        "CPU samples are /proc/<pid>/stat; no macOS source yet",
+    ),
+    ("agent-usage", "Antigravity's port discovery walks /proc"),
+];
+
+#[test]
+fn a_proc_reader_has_a_macos_path_or_says_why() {
+    let mut wrong = Vec::new();
+    let listed: BTreeSet<&str> = LINUX_ONLY_UNTIL.iter().map(|(n, _)| *n).collect();
+    for (name, src) in widgets() {
+        if !opens_proc(&src) {
+            if listed.contains(name.as_str()) {
+                wrong.push(format!(
+                    "{name}: on LINUX_ONLY_UNTIL but no longer opens /proc — drop it"
+                ));
+            }
+            continue;
+        }
+        if listed.contains(name.as_str()) {
+            continue;
+        }
+        let macos = root().join(format!("widgets/src/bin/{name}/macos.rs"));
+        if macos.is_file() {
+            continue;
+        }
+        if src.contains("unsupported(") {
+            continue;
+        }
+        wrong.push(format!(
+            "{name}: opens /proc with no macos.rs, no unsupported() call, \
+             and no row on LINUX_ONLY_UNTIL"
+        ));
+    }
+    assert!(
+        wrong.is_empty(),
+        "a widget that reads /proc without a macOS path looks empty on a Mac:\n  {}\n\
+         Add widgets/src/bin/<widget>/macos.rs, call tc::unsupported(), \
+         or name it in LINUX_ONLY_UNTIL with the issue that will.",
+        wrong.join("\n  ")
+    );
 }

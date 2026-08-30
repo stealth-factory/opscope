@@ -15,8 +15,10 @@ answers, a hint missing from the widget's doc, a config key read but never
 documented in `config.example.json` — or documented there and never read, or
 read with no fallback behind it — a colour that draws text on the
 selected-row tint below WCAG AA, a widget missing from the README table or
-the docs index, and a name in the launcher's sample listing that is not a
-widget.
+the docs index, a name in the launcher's sample listing that is not a
+widget, a parser or a test gated by `cfg(target_os)` (which would vanish
+from the macOS CI run), and a widget that opens `/proc` with no macOS path
+and no explanation.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -27,7 +29,8 @@ screen, exactly like "there is no data".
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
-arrow-key decoding, and `clipboard()` over OSC 52.
+arrow-key decoding, `clipboard()` over OSC 52, and `unsupported()` /
+`cannot_start()` for a widget that has no source on this kernel.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),

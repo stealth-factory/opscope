@@ -735,7 +735,16 @@ fn main() {
 
     let absent = tc::missing(&["ping"]);
     if !absent.is_empty() {
-        cannot_start(&absent);
+        tc::cannot_start(
+            "latency",
+            &absent,
+            &[
+                "Every figure here comes from ping: this widget times replies,",
+                "it does not send packets itself. With no ping there is nothing",
+                "to time and nothing to draw.",
+            ],
+            "apt install iputils-ping",
+        );
         return;
     }
 
@@ -1176,55 +1185,6 @@ fn label_for(host: &str, strip: &[String]) -> String {
         }
     }
     label
-}
-
-/// Draw the reason and wait, rather than exiting.
-fn cannot_start(needed: &[String]) {
-    let bad = tc::rgb(255, 100, 110);
-    let dim = tc::rgb(127, 147, 172);
-    let txt = tc::rgb(225, 235, 245);
-    tc::setup();
-    let mut keyboard = tc::Keyboard::new();
-    loop {
-        for key in keyboard.poll() {
-            if key == "q" || key == "Q" {
-                keyboard.restore();
-                tc::restore_screen();
-                return;
-            }
-        }
-        let (w, h) = tc::size();
-        let mut rows = vec![tc::title("latency", w, &bad), String::new()];
-        rows.push(tc::seg(
-            &[
-                (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
-            ],
-            w - 1,
-        ));
-        rows.push(String::new());
-        for line in [
-            "Every figure here comes from ping: this widget times replies,",
-            "it does not send packets itself. With no ping there is nothing",
-            "to time and nothing to draw.",
-        ] {
-            rows.push(tc::seg(&[(dim.as_str(), format!(" {}", line))], w - 1));
-        }
-        rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (dim.as_str(), " try: ".into()),
-                (txt.as_str(), "apt install iputils-ping".into()),
-            ],
-            w - 1,
-        ));
-        while rows.len() < h - 1 {
-            rows.push(String::new());
-        }
-        rows.push(tc::seg(&[(dim.as_str(), " [q]uit".into())], w - 1));
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 struct Palette {

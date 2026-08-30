@@ -39,6 +39,22 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   widget actually reads**; a mismatched key is silently ignored.
 - **Secrets never enter the tree.** This repo is public. No tokens, no
   internal hostnames, no LAN addresses — in code, docs or commit messages.
+- **`cfg` decides where bytes come from; nothing else.** Three tiers, because
+  gating a parser with `cfg(target_os)` hides its tests from the macOS CI
+  run and a broken Linux parser sits behind a green build:
+  1. **Always compiled, always tested — every parser.** Pure functions from
+     text or bytes to values, named `parse_*`, taking a `&str`. They live
+     in `widgets/src/bin/<widget>/parse.rs` so they compile on every target.
+     The cost is a few KB of unused parser in each binary. Worth it.
+  2. **`cfg(target_os)` — acquisition only.** Which file to open, which
+     command to spawn, a call into a platform C API. `linux.rs` / `macos.rs`
+     beside the widget, gated on `mod host`. Shared wording lives in
+     `opscope-core`: `unsupported()` is `does not run on {os}`, drawn by
+     `cannot_start_because()`.
+  3. **Runtime detection — anything that varies *within* a platform.** A
+     tool on `PATH`; whether `ping` accepts `-O`; whether the kernel has
+     PSI. `cfg` cannot see any of it, and a build-target check would be
+     wrong on the machine that matters.
 - **Spend extra width on more content, not padding.** Add columns as a pane
   grows; drop them as it shrinks. Never truncate.
 - **The mouse moves the view. Keys move the selection.** The wheel does a
@@ -110,6 +126,14 @@ screen, exactly like "there is no data":
   substitution inside the tint closure and the light grey sits in the palette
   measuring beautifully while the dark one goes back on the tint, so the
   substitutions are counted instead, one per closure that composes a tint.
+- **a parser or a test gated by `cfg(target_os)`** — CI runs `cargo test` on
+  the macOS runners. Anything behind `cfg(target_os = "linux")`, including
+  its tests, does not compile there, so it is not merely unrun, it is
+  invisible. Parsers are named `parse_*` so the check can see them.
+- **a widget that opens `/proc` with no macOS path and no explanation** — an
+  empty table on a Mac looks like a machine with nothing listening. The
+  widget needs a `macos.rs`, a call to `unsupported()`, or a row on the
+  allowlist that names the issue still open.
 
 The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
 `[::1]`, `[[bin]]` and `args[0]` out; the glyphs `↵ → ← ↑ ↓`; the names
@@ -243,7 +267,12 @@ coloured segments to a cell budget, `pack_hints()`, `follow()` for a window
 that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `config_token_warning()` for widgets holding a secret, non-blocking
-`Keyboard`, and OSC 52 `clipboard()`.
+`Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
+`cannot_start_because()` for a widget that has no source on this kernel.
+
+A widget that acquires per OS lives as
+`widgets/src/bin/<widget>/{parse,linux,macos}.rs` — parsers always compiled,
+`mod host` gated by `cfg(target_os)`. `ports` is the worked example.
 
 Braille line charts are not in there. `latency` and `link` each keep their
 own `braille_canvas`, and the two are not the same function: latency's series
