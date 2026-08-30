@@ -791,6 +791,26 @@ fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "?".into())
 }
 
+/// The same value, said inside a sentence rather than shown in a column.
+///
+/// `array · 4` lines up under a heading and is read by scanning. Dropped
+/// into "using the default, ..." it reads as a label somebody forgot to
+/// finish. A count in words costs nothing and finishes the sentence.
+fn summary_prose(v: &Value, secret: bool) -> String {
+    if secret {
+        return summary(v, secret);
+    }
+    match v {
+        Value::Array(a) if a.is_empty() => "an empty list".into(),
+        Value::Array(a) if a.len() == 1 => "a list of 1 entry".into(),
+        Value::Array(a) => format!("a list of {} entries", a.len()),
+        Value::Object(o) if o.is_empty() => "nothing".into(),
+        Value::Object(o) if o.len() == 1 => "1 entry".into(),
+        Value::Object(o) => format!("{} entries", o.len()),
+        other => summary(other, false),
+    }
+}
+
 /// What a value reads as on a row, masked when it is one of the secrets.
 ///
 /// **Only a value read out of the reader's own file is ever masked.** A
@@ -2468,22 +2488,30 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             w.saturating_sub(1),
         ));
         let current = current_of(&app.live, field, app.legacy_section);
-        let facts = format!(
-            "current {} · default {} · {}",
-            current
-                .map(|value| summary(value, field.secret()))
-                .unwrap_or_else(|| "—".into()),
-            summary(&field.default, false),
-            if current.is_some() {
-                "set in file"
-            } else {
-                "using default"
-            }
-        );
+        // Set, or not set: the two cases read differently, and one line
+        // covering both had to hedge into "current — · default X", which
+        // shows a dash for a value that simply is not there.
+        let facts = match current {
+            Some(value) => format!(
+                "Set to {} in this file. The default is {}.",
+                summary_prose(value, field.secret()),
+                summary_prose(&field.default, false)
+            ),
+            None => format!(
+                "Not set — using the default, {}.",
+                summary_prose(&field.default, false)
+            ),
+        };
         say(&mut body, p.txt.as_str(), "  ", &facts, w);
         let constraints = constraint_summary(constraint_for(app, field));
         if !constraints.is_empty() {
             say(&mut body, p.lbl.as_str(), "  ", &constraints, w);
+        }
+        // What the widget knows is above; what its author wrote is below.
+        // They answer different questions and one wall of dim text makes
+        // the second look like more of the first.
+        if !field.help.is_empty() {
+            body.push(String::new());
         }
         let help = if field.help.is_empty() {
             field.kind().to_string()
