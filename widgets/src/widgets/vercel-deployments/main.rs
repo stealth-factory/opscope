@@ -66,8 +66,34 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 
 fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", API, path);
-    let body = tc::get(&url, &[("Authorization", &format!("Bearer {}", tok))], 25)?;
+    // get_with_headers rather than get: `get` runs curl with --fail, which
+    // throws the body away, and the body is the only place Vercel says
+    // *which* kind of 403 this is.
+    let (body, _) = tc::get_with_headers(
+        &url,
+        &[("Authorization", &format!("Bearer {}", tok))],
+        25,
+    )
+    .map_err(|said| vercel_refusal(&said))?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// What Vercel's refusal actually means, in words worth reading.
+///
+/// A 403 covers two different problems and they need opposite answers. A
+/// token that is not valid at all - revoked, mistyped, a partial paste -
+/// comes back with `invalidToken`. A valid token that may not do this one
+/// thing comes back without it. Saying "personal scope only" to somebody
+/// whose token is simply wrong sends them to read about scopes, which is
+/// the wrong page, and this cost an afternoon once.
+fn vercel_refusal(said: &str) -> String {
+    let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
+    if flat.contains("\"invalidToken\":true") {
+        return "the Vercel token is not valid - it may be revoked, or pasted \
+                short. Set it again in settings, or in `vercel_deployments.token`."
+            .to_string();
+    }
+    said.to_string()
 }
 
 /// The team ids in one page of `/v2/teams`, and the cursor for the next.
@@ -155,7 +181,12 @@ fn walk_teams(
         let res = match fetch(until) {
             Ok(res) => res,
             Err(said) => {
-                let stopped = if ids.is_empty() {
+                let stopped = if said.starts_with("the Vercel token is not valid") {
+                    // Nothing about teams is worth saying while the token
+                    // itself is refused: every other request will fail the
+                    // same way, for the same reason.
+                    said.clone()
+                } else if ids.is_empty() {
                     format!(
                         "could not list teams ({}) - showing your personal account \
                          only. A token that cannot list teams can still read a \
@@ -1033,6 +1064,10 @@ fn main() {
                 guard.err = match (&poll_scope, err.is_empty()) {
                     (None, _) => err,
                     (Some(said), true) => said.clone(),
+                    // One fact, said once. A refused token makes the scope
+                    // note and the round's own error the same sentence, and
+                    // printing it twice reads as two problems.
+                    (Some(said), false) if *said == err => err,
                     (Some(said), false) => format!("{} · {}", said, err),
                 };
             }
@@ -1620,6 +1655,48 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 403 means two different things and they need opposite answers.
+    ///
+    /// This is the body Vercel actually returned for a token pasted ten
+    /// characters short - not an invented shape. Reporting it as a scope
+    /// limit sent the reader to read about scopes, which was the wrong
+    /// page and cost an afternoon.
+    #[test]
+    fn an_invalid_token_is_told_apart_from_a_limited_one() {
+        let refused_token = concat!(
+            r#"HTTP 403: {"error":{"code":"forbidden","#,
+            r#""message":"Not authorized","invalidToken":true}}"#
+        );
+        let said = vercel_refusal(refused_token);
+        assert!(said.starts_with("the Vercel token is not valid"), "{said}");
+        assert!(!said.contains("scope"), "it is not a scope problem: {said}");
+
+        // The same status without that flag is a permission, and keeps
+        // whatever Vercel said about it.
+        let limited = r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized"}}"#;
+        assert_eq!(vercel_refusal(limited), limited);
+
+        // Whitespace in the JSON must not hide the flag.
+        let spaced = r#"HTTP 403: { "error": { "invalidToken": true } }"#;
+        assert!(vercel_refusal(spaced).starts_with("the Vercel token is not valid"));
+    }
+
+    /// While the token itself is refused, nothing about teams is worth
+    /// saying: every other request is about to fail the same way.
+    #[test]
+    fn a_refused_token_does_not_also_complain_about_teams() {
+        let (ids, stopped) = walk_teams(|_| {
+            Err(vercel_refusal(
+                r#"HTTP 403: {"error":{"invalidToken":true}}"#,
+            ))
+        });
+        assert!(ids.is_empty());
+        let stopped = stopped.expect("a walk that gave up has to say so");
+        assert!(stopped.starts_with("the Vercel token is not valid"), "{stopped}");
+        assert!(!stopped.contains("personal account"), "{stopped}");
+    }
+
 
     /// The error row wraps rather than being cut short.
     ///
