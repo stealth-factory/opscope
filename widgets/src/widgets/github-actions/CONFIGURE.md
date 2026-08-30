@@ -16,7 +16,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Inspect the shared `github` token source first; this widget's token fields are overrides. Never display either token.
+1. Inspect this widget's own `token` and `token_env`. It does not read any other widget's section, so a token under `github` is not a token for this one. Never display either.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Ask whether discovery or an explicit account/repository set is wanted, and explain the `max_repos`, pushed-age, and time-window limits before changing them.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.

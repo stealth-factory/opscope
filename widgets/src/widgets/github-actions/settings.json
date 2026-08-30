@@ -1,5 +1,5 @@
 {
-  "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
+  "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
   "_schema": {
     "accounts": {
       "items": "string"
@@ -20,9 +20,9 @@
       "minimum": 1
     }
   },
-  "_token_comment": "Optional GitHub token override for this widget; empty reuses github.token.",
+  "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
   "token": "",
-  "_token_env_comment": "Optional environment-variable override; empty reuses the shared GitHub token source.",
+  "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
   "token_env": "",
   "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
   "accounts": [],

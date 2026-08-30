@@ -298,10 +298,12 @@ one you open — so the view paints a loading shimmer and fills in.
 
 ## Credentials
 
-**Reuses `github.token`** from `config.json`, or `$GITHUB_TOKEN`. No second
-credential: it is the same classic token with `repo` and `read:org` that
-`github` uses. Set `github_prs.token` only to point this widget at a different
-account.
+**Its own `github_prs.token`** in `config.json`, or `$GITHUB_TOKEN`. It wants
+the same classic token with `repo` and `read:org` that `github` wants, and one
+variable still serves all three — but it reads only its own section. It used
+to borrow `github.token`, which was fine while both held the same string and
+wrong as soon as they did not: a settings screen showing `unset` while the
+widget quietly ran on somebody else's credential.
 
 ## Configuration
 
@@ -319,9 +321,9 @@ account.
 }
 ```
 
-Leave `token` empty to reuse `github.token`. `token_env` names the
-environment variable to try before the shared GitHub fallback; its value is
-the variable's name, not a credential.
+Leave `token` empty and the variable `token_env` names is read instead,
+defaulting to `GITHUB_TOKEN`. Its value is the variable's name, not a
+credential. Nothing here reaches into another widget's section.
 
 A leftover `"pr"` section is still read when `"github_prs"` is absent, and
 the pane says so. Rename it when you next edit the file.

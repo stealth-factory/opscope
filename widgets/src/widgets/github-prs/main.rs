@@ -40,13 +40,15 @@ const SORTS: &[&str] = &["updated", "created"];
 /// Width of the opened-per-day chart.
 const OPENED_DAYS: i64 = 30;
 
-/// The GitHub token, shared with github.py rather than duplicated.
-fn token(pr_cfg: &serde_json::Value, gh_cfg: &serde_json::Value) -> (String, &'static str) {
-    for cfg in [pr_cfg, gh_cfg] {
-        let value = tc::cfg_str(cfg, "token", "");
-        if !value.is_empty() {
-            return (value, "config");
-        }
+/// The GitHub token from this widget's own section, and nowhere else.
+///
+/// It used to fall back to `github.token` - convenient while the two hold
+/// the same string, wrong as soon as they differ, and invisible either way,
+/// because the settings screen only ever shows this widget's own value.
+fn token(pr_cfg: &serde_json::Value) -> (String, &'static str) {
+    let value = tc::cfg_str(pr_cfg, "token", "");
+    if !value.is_empty() {
+        return (value, "config");
     }
     let name = tc::cfg_str(pr_cfg, "token_env", "GITHUB_TOKEN");
     let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
@@ -914,7 +916,6 @@ fn main() {
     } else {
         tc::load_config("github_prs")
     };
-    let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 50);
     // GitHub search has no OR, so anything that is a union of conditions has
@@ -972,7 +973,7 @@ fn main() {
     let state = Arc::new(Mutex::new(State::default()));
     let rate = Arc::new(Mutex::new(Rate::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
-    let (tok, source) = token(&cfg, &gh);
+    let (tok, source) = token(&cfg);
 
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);

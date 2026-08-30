@@ -53,37 +53,22 @@ const RUN_PAGE: usize = 100;
 const DETAIL_TTL: f64 = 60.0;
 const LIVE: &[&str] = &["in_progress", "queued", "waiting", "pending", "requested"];
 
-/// `github_actions.token`, then `github_actions.token_env` when that
-/// variable is set, then `github.token`, then `github.token_env` /
-/// `GITHUB_TOKEN`. A named widget `token_env` that is unset falls
-/// through to the shared GitHub credential — it does not report missing
-/// while `github.token` is still there. Empty strings are treated as
-/// unset.
-fn token(gha: &serde_json::Value, gh: &serde_json::Value) -> (String, &'static str) {
+/// `github_actions.token`, then the variable `github_actions.token_env`
+/// names, which defaults to `GITHUB_TOKEN`.
+///
+/// Its own section and nothing else. It used to fall back to `github.token`,
+/// which is fine while the two are the same string and wrong the moment they
+/// are not: a fine-grained token for Actions and a classic one for the board
+/// is a normal thing to want, and the widget would quietly run on whichever
+/// the other one had. The settings screen shows this widget's own value, so
+/// that had better be the value it uses. Empty strings count as unset.
+fn token(gha: &serde_json::Value) -> (String, &'static str) {
     let own = tc::cfg_str(gha, "token", "");
     if !own.is_empty() {
         return (own, "config");
     }
-    let own_env = tc::cfg_str(gha, "token_env", "");
-    if !own_env.is_empty() {
-        if let Ok(value) = std::env::var(&own_env) {
-            if !value.is_empty() {
-                return (value, "env");
-            }
-        }
-    }
-    let shared = tc::cfg_str(gh, "token", "");
-    if !shared.is_empty() {
-        return (shared, "config");
-    }
-    let name = {
-        let shared_env = tc::cfg_str(gh, "token_env", "GITHUB_TOKEN");
-        if shared_env.is_empty() {
-            "GITHUB_TOKEN".into()
-        } else {
-            shared_env
-        }
-    };
+    let name = tc::cfg_str(gha, "token_env", "GITHUB_TOKEN");
+    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -1547,7 +1532,6 @@ fn main() {
     } else {
         tc::load_config("github_actions")
     };
-    let gh = tc::load_config("github");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0).max(30.0);
     let accounts = tc::cfg_strings(&cfg, "accounts", &[]);
     let configured = tc::cfg_strings(&cfg, "repos", &[]);
@@ -1597,19 +1581,12 @@ fn main() {
     }
 
     let p = palette();
-    let (tok, source) = token(&cfg, &gh);
+    let (tok, source) = token(&cfg);
+    // The variable this widget would read, for the message that names it
+    // when there is no token. Its own, like everything else here.
     let env_name = {
-        let own = tc::cfg_str(&cfg, "token_env", "");
-        if !own.is_empty() {
-            own
-        } else {
-            let name = tc::cfg_str(&gh, "token_env", "GITHUB_TOKEN");
-            if name.is_empty() {
-                "GITHUB_TOKEN".into()
-            } else {
-                name
-            }
-        }
+        let own = tc::cfg_str(&cfg, "token_env", "GITHUB_TOKEN");
+        if own.is_empty() { "GITHUB_TOKEN".to_string() } else { own }
     };
 
     let state = Arc::new(Mutex::new(State {
@@ -2338,36 +2315,40 @@ mod tests {
         })
     }
 
+    /// This widget's own token, and no reaching into anybody else's.
+    ///
+    /// It used to fall back to `github.token`. Harmless while both hold the
+    /// same string; wrong the moment they differ - a fine-grained token for
+    /// Actions beside a classic one for the board is an ordinary thing to
+    /// want - and invisible either way, because the settings screen only
+    /// ever showed this widget's own value.
     #[test]
-    fn a_token_prefers_gha_then_github_then_the_environment() {
-        let gha: serde_json::Value =
+    fn a_token_comes_from_this_widgets_own_section() {
+        let own: serde_json::Value =
             serde_json::from_str(r#"{"token": "from-gha", "token_env": "NOPE_TOKEN"}"#).unwrap();
-        let gh: serde_json::Value =
-            serde_json::from_str(r#"{"token": "from-github"}"#).unwrap();
-        assert_eq!(token(&gha, &gh), ("from-gha".to_string(), "config"));
-        let empty: serde_json::Value = serde_json::from_str(r#"{"token": ""}"#).unwrap();
-        assert_eq!(token(&empty, &gh), ("from-github".to_string(), "config"));
+        assert_eq!(token(&own), ("from-gha".to_string(), "config"));
+
         // Isolate from $GITHUB_TOKEN: CI often has that set, and the
         // last-resort read would then look like a found token. A missing
         // named env is the "no token" case, not whatever the process
         // happens to carry.
         let isolated: serde_json::Value =
             serde_json::from_str(r#"{"token_env": "OPSCOPE_GHA_NO_SUCH_TOKEN"}"#).unwrap();
-        assert_eq!(token(&isolated, &isolated).1, "missing");
-        // A named widget token_env that is unset must fall through to
-        // github.token, not report missing while the shared credential
-        // is still there.
-        assert_eq!(token(&isolated, &gh), ("from-github".to_string(), "config"));
-        // A named widget token_env that is actually set beats github.token.
-        // PATH is always present; the value is compared, not hardcoded.
+        assert_eq!(token(&isolated).1, "missing");
+
+        // An empty own token reports missing rather than borrowing one.
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"token": "", "token_env": "OPSCOPE_GHA_NO_SUCH_TOKEN"}"#)
+                .unwrap();
+        assert_eq!(token(&empty).1, "missing");
+
+        // A named token_env that is set is used. PATH is always present;
+        // the value is compared rather than hardcoded.
         let via_env: serde_json::Value =
             serde_json::from_str(r#"{"token_env": "PATH"}"#).unwrap();
         let expected = std::env::var("PATH").ok().filter(|s| !s.is_empty());
-        assert!(
-            expected.is_some(),
-            "PATH must be set for this precedence check"
-        );
-        assert_eq!(token(&via_env, &gh), (expected.unwrap(), "env"));
+        assert!(expected.is_some(), "PATH must be set for this check");
+        assert_eq!(token(&via_env), (expected.unwrap(), "env"));
     }
 
     #[test]

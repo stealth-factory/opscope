@@ -4,7 +4,7 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-GitHub search and pull-request APIs using the shared GitHub credential.
+GitHub search and pull-request APIs using this widget's own credential.
 
 ## Settings owned here
 
@@ -16,7 +16,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Inspect the shared `github` token source without printing it. Read existing search strings before proposing a replacement.
+1. Inspect this widget's own `token` and `token_env` without printing either. It does not read another widget's section. Read existing search strings before proposing a replacement.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Ask what follow-up queues are wanted. Preserve `@me` and `@mine` semantics unless the user explicitly changes the ownership model.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
