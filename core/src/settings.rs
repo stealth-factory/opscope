@@ -102,6 +102,19 @@ impl Field {
         out
     }
 
+    /// The path without the section, for a header sitting under a title
+    /// that has already named the widget. `LATENCY.STRIP_SUFFIXES` in a
+    /// narrow pane lost the half that named the field.
+    fn under_section(&self) -> String {
+        let mut out = String::new();
+        for step in &self.parents {
+            out.push_str(step);
+            out.push('.');
+        }
+        out.push_str(&self.key);
+        out
+    }
+
     /// How the row is labelled on a screen that flattens a level: the
     /// enclosing key is part of the name, because `input` alone appears
     /// five times over and says nothing about which model it prices.
@@ -1119,6 +1132,21 @@ fn move_sel(app: &mut App, delta: isize) {
         .clamp(0, app.fields.len() as isize - 1) as usize;
     app.selected = next;
     app.chase = true;
+}
+
+/// Push a line the widget is saying, wrapped to the pane rather than cut.
+///
+/// `seg` clips, which is what a column wants and the opposite of what a
+/// sentence wants. Everything prose on these screens goes through here so a
+/// narrow pane costs somebody a line break rather than the end of a thought.
+fn say(body: &mut Vec<String>, colour: &str, indent: &str, text: &str, w: usize) {
+    let room = w.saturating_sub(indent.chars().count() + 2).max(8);
+    for line in wrap_help(text, room, usize::MAX) {
+        body.push(crate::seg(
+            &[(colour, format!("{indent}{line}"))],
+            w.saturating_sub(1),
+        ));
+    }
 }
 
 fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
@@ -2286,7 +2314,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     } else {
         format!(" {} — does not exist yet, will be created 0600", app.path.display())
     };
-    body.push(crate::seg(&[(p.dim.as_str(), path_note)], w.saturating_sub(1)));
+    say(&mut body, p.dim.as_str(), " ", path_note.trim(), w);
     let unset = app
         .fields
         .iter()
@@ -2304,7 +2332,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         w.saturating_sub(1),
     ));
     for note in app.skipped.iter().take(2) {
-        body.push(crate::seg(&[(p.warn.as_str(), format!(" {note}"))], w.saturating_sub(1)));
+        say(&mut body, p.warn.as_str(), " ", &note, w);
     }
     if let Some(old) = app.legacy_section {
         let canonical = app
@@ -2317,7 +2345,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                 " this file still has `{old}` · {} reads it until the section is renamed",
                 app.widget
             );
-            body.push(crate::seg(&[(p.warn.as_str(), note)], w.saturating_sub(1)));
+            say(&mut body, p.warn.as_str(), " ", &note, w);
         }
     }
     if let Some(status) = &app.status {
@@ -2436,7 +2464,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     if let Some(field) = app.fields.get(app.selected) {
         body.push(String::new());
         body.push(crate::seg(
-            &[(p.lbl.as_str(), format!(" ── {} ── ", field.path().to_uppercase()))],
+            &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
             w.saturating_sub(1),
         ));
         let current = current_of(&app.live, field, app.legacy_section);
@@ -2452,29 +2480,17 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                 "using default"
             }
         );
-        for line in wrap_help(&facts, w.saturating_sub(4), 2) {
-            body.push(crate::seg(
-                &[(p.txt.as_str(), format!("  {line}"))],
-                w.saturating_sub(1),
-            ));
-        }
+        say(&mut body, p.txt.as_str(), "  ", &facts, w);
         let constraints = constraint_summary(constraint_for(app, field));
         if !constraints.is_empty() {
-            for line in wrap_help(&constraints, w.saturating_sub(4), 2) {
-                body.push(crate::seg(
-                    &[(p.lbl.as_str(), format!("  {line}"))],
-                    w.saturating_sub(1),
-                ));
-            }
+            say(&mut body, p.lbl.as_str(), "  ", &constraints, w);
         }
         let help = if field.help.is_empty() {
             field.kind().to_string()
         } else {
             field.help.clone()
         };
-        for line in wrap_help(&help, w.saturating_sub(4), usize::MAX) {
-            body.push(crate::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1)));
-        }
+        say(&mut body, p.dim.as_str(), "  ", &help, w);
         // Its own paragraph, and in the warn colour: it is the one line here
         // that is about what happens next rather than about the field under
         // the cursor, and run on from the help in the same grey it read as
@@ -2542,18 +2558,13 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         w,
         &p.accent,
     )];
-    body.push(crate::seg(
-        &[(p.dim.as_str(), format!(" {}", app.path.display()))],
-        w.saturating_sub(1),
-    ));
+    say(&mut body, p.dim.as_str(), " ", &app.path.display().to_string(), w);
     body.push(String::new());
     body.push(crate::seg(
-        &[(p.lbl.as_str(), format!(" ── {} ── ", field.path().to_uppercase()))],
+        &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
         w.saturating_sub(1),
     ));
-    for line in wrap_help(&field.help, w.saturating_sub(4), usize::MAX) {
-        body.push(crate::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1)));
-    }
+    say(&mut body, p.dim.as_str(), "  ", &field.help, w);
     body.push(crate::seg(
         &[(
             p.dim.as_str(),
@@ -2600,7 +2611,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         true,
     ));
     if let Some(err) = error {
-        body.push(crate::seg(&[(p.bad.as_str(), format!("  {err}"))], w.saturating_sub(1)));
+        say(&mut body, p.bad.as_str(), "  ", err, w);
     }
 
     let hints: Vec<Vec<(&str, String)>> = vec![
@@ -2713,13 +2724,10 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let chosen = picked_zones(app, *index).len();
 
     let mut body = vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
-    body.push(crate::seg(
-        &[(p.dim.as_str(), format!(" {}", app.path.display()))],
-        w.saturating_sub(1),
-    ));
+    say(&mut body, p.dim.as_str(), " ", &app.path.display().to_string(), w);
     body.push(String::new());
     body.push(crate::seg(
-        &[(p.lbl.as_str(), format!(" ── {} ── ", field.path().to_uppercase()))],
+        &[(p.lbl.as_str(), format!(" ── {} ── ", field.under_section().to_uppercase()))],
         w.saturating_sub(1),
     ));
     // Said here rather than only in the file's comment: someone arranging
@@ -2775,7 +2783,7 @@ format!(
         ),
         _ => heading,
     };
-    body.push(crate::seg(&[(p.dim.as_str(), heading)], w.saturating_sub(1)));
+    say(&mut body, p.dim.as_str(), "  ", heading.trim(), w);
     // The field's own words, on the screen where the value is chosen. They
     // were on the list, one screen back, which is the wrong place for them:
     // the list is where somebody decides to change a setting and this is
@@ -2784,12 +2792,7 @@ format!(
         // The widget's own lines are above; these are the widget author's.
         // A blank between them is how a reader tells whose words are whose.
         body.push(String::new());
-        for line in wrap_help(&field.help, w.saturating_sub(4), usize::MAX) {
-            body.push(crate::seg(
-                &[(p.dim.as_str(), format!("  {line}"))],
-                w.saturating_sub(1),
-            ));
-        }
+        say(&mut body, p.dim.as_str(), "  ", &field.help, w);
         body.push(String::new());
     }
     // How the widget will order what is picked here, said on the screen
@@ -2855,7 +2858,7 @@ format!(
             (false, true) => "  Nothing to choose from.".to_string(),
             (_, false) => format!("  Nothing matches /{query}."),
         };
-        body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
+        say(&mut body, p.dim.as_str(), "  ", why.trim(), w);
     }
     for (i, (zone, on)) in choices.iter().enumerate() {
         // A free list hands focus back and forth, and only the side holding
