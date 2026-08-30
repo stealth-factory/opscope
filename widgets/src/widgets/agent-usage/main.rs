@@ -95,115 +95,133 @@ const NO_PUBLISHED_PRICE: &[&str] = &[
 /// 200k for 5.6, Grok and the Gemini Pros - the *whole* request bills at
 /// roughly double. One rate per kind therefore understates a long
 /// conversation. The full tables are in wiki/model-prices.md.
-const LIST_RATES: &[(&str, &[(&str, f64)])] = &[
+const LIST_RATES: tc::Catalogue = &[
     (
         "gpt-5.6-sol",
+        "OpenAI",
         &[("input", 4.0), ("output", 20.0), ("cache_read", 0.40), ("cache_write", 5.0)],
     ),
     (
         "gpt-5.6-terra",
+        "OpenAI",
         &[("input", 2.0), ("output", 12.0), ("cache_read", 0.20), ("cache_write", 2.50)],
     ),
     (
         "gpt-5.6-luna",
+        "OpenAI",
         &[("input", 0.20), ("output", 1.20), ("cache_read", 0.02), ("cache_write", 0.25)],
     ),
     (
         "gpt-5.6-cyber",
+        "OpenAI",
         &[("input", 12.50), ("output", 75.0), ("cache_read", 1.25), ("cache_write", 15.625)],
     ),
-    ("gpt-5.5-pro", &[("input", 30.0), ("output", 180.0)]),
-    ("gpt-5.5-cyber", &[("input", 12.50), ("output", 75.0), ("cache_read", 1.25)]),
-    ("gpt-5.5", &[("input", 5.0), ("output", 30.0), ("cache_read", 0.50)]),
-    ("gpt-5.4-mini", &[("input", 0.75), ("output", 4.50), ("cache_read", 0.075)]),
-    ("gpt-5.4-nano", &[("input", 0.20), ("output", 1.25), ("cache_read", 0.02)]),
-    ("gpt-5.4-pro", &[("input", 30.0), ("output", 180.0)]),
-    ("gpt-5.4", &[("input", 2.50), ("output", 15.0), ("cache_read", 0.25)]),
-    ("gpt-5.3-codex", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
-    ("gpt-5.2-pro", &[("input", 21.0), ("output", 168.0)]),
-    ("gpt-5.2-codex", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
-    ("gpt-5.2", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
-    ("gpt-5.1-codex-max", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("gpt-5.1-codex-mini", &[("input", 0.25), ("output", 2.0), ("cache_read", 0.025)]),
-    ("gpt-5.1-codex", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("gpt-5.1", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("gpt-5-codex", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("gpt-5-mini", &[("input", 0.25), ("output", 2.0), ("cache_read", 0.025)]),
-    ("gpt-5-nano", &[("input", 0.05), ("output", 0.40), ("cache_read", 0.005)]),
-    ("gpt-5-pro", &[("input", 15.0), ("output", 120.0)]),
-    ("gpt-5", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("codex-mini-latest", &[("input", 1.50), ("output", 6.0), ("cache_read", 0.375)]),
+    ("gpt-5.5-pro", "OpenAI", &[("input", 30.0), ("output", 180.0)]),
+    ("gpt-5.5-cyber", "OpenAI", &[("input", 12.50), ("output", 75.0), ("cache_read", 1.25)]),
+    ("gpt-5.5", "OpenAI", &[("input", 5.0), ("output", 30.0), ("cache_read", 0.50)]),
+    ("gpt-5.4-mini", "OpenAI", &[("input", 0.75), ("output", 4.50), ("cache_read", 0.075)]),
+    ("gpt-5.4-nano", "OpenAI", &[("input", 0.20), ("output", 1.25), ("cache_read", 0.02)]),
+    ("gpt-5.4-pro", "OpenAI", &[("input", 30.0), ("output", 180.0)]),
+    ("gpt-5.4", "OpenAI", &[("input", 2.50), ("output", 15.0), ("cache_read", 0.25)]),
+    ("gpt-5.3-codex", "OpenAI", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
+    ("gpt-5.2-pro", "OpenAI", &[("input", 21.0), ("output", 168.0)]),
+    ("gpt-5.2-codex", "OpenAI", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
+    ("gpt-5.2", "OpenAI", &[("input", 1.75), ("output", 14.0), ("cache_read", 0.175)]),
+    ("gpt-5.1-codex-max", "OpenAI", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gpt-5.1-codex-mini", "OpenAI", &[("input", 0.25), ("output", 2.0), ("cache_read", 0.025)]),
+    ("gpt-5.1-codex", "OpenAI", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gpt-5.1", "OpenAI", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gpt-5-codex", "OpenAI", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gpt-5-mini", "OpenAI", &[("input", 0.25), ("output", 2.0), ("cache_read", 0.025)]),
+    ("gpt-5-nano", "OpenAI", &[("input", 0.05), ("output", 0.40), ("cache_read", 0.005)]),
+    ("gpt-5-pro", "OpenAI", &[("input", 15.0), ("output", 120.0)]),
+    ("gpt-5", "OpenAI", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("codex-mini-latest", "OpenAI", &[("input", 1.50), ("output", 6.0), ("cache_read", 0.375)]),
     // Older families, carried because a client that lets you pick a model -
     // Cursor and Copilot both do - can still be pointed at one of these, and
     // an unpriced row would read as "nobody used it" rather than "we did not
     // look it up". o1 and o3 are the shortest keys in the table; an exact
     // match is tried before any substring, so they cannot shadow o1-pro or
     // o3-mini, and no vendor ships a model whose name contains either.
-    ("gpt-4.1-mini", &[("input", 0.40), ("output", 1.60), ("cache_read", 0.10)]),
-    ("gpt-4.1-nano", &[("input", 0.10), ("output", 0.40), ("cache_read", 0.025)]),
-    ("gpt-4.1", &[("input", 2.0), ("output", 8.0), ("cache_read", 0.50)]),
-    ("gpt-4o-mini", &[("input", 0.15), ("output", 0.60), ("cache_read", 0.075)]),
-    ("gpt-4o", &[("input", 2.50), ("output", 10.0), ("cache_read", 1.25)]),
-    ("o1-pro", &[("input", 150.0), ("output", 600.0)]),
-    ("o1", &[("input", 15.0), ("output", 60.0), ("cache_read", 7.50)]),
-    ("o3-pro", &[("input", 20.0), ("output", 80.0)]),
-    ("o3-mini", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.55)]),
-    ("o3", &[("input", 2.0), ("output", 8.0), ("cache_read", 0.50)]),
-    ("o4-mini", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.275)]),
+    ("gpt-4.1-mini", "OpenAI", &[("input", 0.40), ("output", 1.60), ("cache_read", 0.10)]),
+    ("gpt-4.1-nano", "OpenAI", &[("input", 0.10), ("output", 0.40), ("cache_read", 0.025)]),
+    ("gpt-4.1", "OpenAI", &[("input", 2.0), ("output", 8.0), ("cache_read", 0.50)]),
+    ("gpt-4o-mini", "OpenAI", &[("input", 0.15), ("output", 0.60), ("cache_read", 0.075)]),
+    ("gpt-4o", "OpenAI", &[("input", 2.50), ("output", 10.0), ("cache_read", 1.25)]),
+    ("o1-pro", "OpenAI", &[("input", 150.0), ("output", 600.0)]),
+    ("o1", "OpenAI", &[("input", 15.0), ("output", 60.0), ("cache_read", 7.50)]),
+    ("o3-pro", "OpenAI", &[("input", 20.0), ("output", 80.0)]),
+    ("o3-mini", "OpenAI", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.55)]),
+    ("o3", "OpenAI", &[("input", 2.0), ("output", 8.0), ("cache_read", 0.50)]),
+    ("o4-mini", "OpenAI", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.275)]),
     (
         "claude-fable-5",
+        "Anthropic",
         &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 1.0), ("cache_write_1h", 20.0)],
     ),
     (
         "claude-mythos-5",
+        "Anthropic",
         &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 1.0), ("cache_write_1h", 20.0)],
     ),
     (
         "claude-opus-5",
+        "Anthropic",
         &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
     ),
     (
         "claude-opus-4-8",
+        "Anthropic",
         &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
     ),
     (
         "claude-opus-4-7",
+        "Anthropic",
         &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
     ),
     (
         "claude-opus-4-6",
+        "Anthropic",
         &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
     ),
     (
         "claude-opus-4-5",
+        "Anthropic",
         &[("input", 5.0), ("output", 25.0), ("cache_write", 6.25), ("cache_read", 0.50), ("cache_write_1h", 10.0)],
     ),
     (
         "claude-opus-4-1",
+        "Anthropic",
         &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
     ),
     (
         "claude-opus-4",
+        "Anthropic",
         &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
     ),
     (
         "claude-sonnet-5",
+        "Anthropic",
         &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
     ),
     (
         "claude-sonnet-4-6",
+        "Anthropic",
         &[("input", 3.0), ("output", 15.0), ("cache_write", 3.75), ("cache_read", 0.30), ("cache_write_1h", 6.0)],
     ),
     (
         "claude-sonnet-4-5",
+        "Anthropic",
         &[("input", 3.0), ("output", 15.0), ("cache_write", 3.75), ("cache_read", 0.30), ("cache_write_1h", 6.0)],
     ),
     (
         "claude-sonnet-4",
+        "Anthropic",
         &[("input", 3.0), ("output", 15.0), ("cache_write", 3.75), ("cache_read", 0.30), ("cache_write_1h", 6.0)],
     ),
     (
         "claude-haiku-4-5",
+        "Anthropic",
         &[("input", 1.0), ("output", 5.0), ("cache_write", 1.25), ("cache_read", 0.10), ("cache_write_1h", 2.0)],
     ),
     // Anthropic's own id for this one puts the version before the name, and
@@ -212,31 +230,32 @@ const LIST_RATES: &[(&str, &[(&str, f64)])] = &[
     // as long as it sat here. The 4-5 and later ids do read name-first.
     (
         "claude-3-5-haiku",
+        "Anthropic",
         &[("input", 0.80), ("output", 4.0), ("cache_write", 1.0), ("cache_read", 0.08), ("cache_write_1h", 1.6)],
     ),
     // xAI publishes no cache-write price for any model, so those are absent
     // rather than zero. grok-code-fast-1 and grok-code-fast are priced only
     // under grok-build-0.1 now; both old names reach it by substring.
-    ("grok-4.6", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.50)]),
-    ("grok-4.5", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.30)]),
-    ("grok-4.3", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
-    ("grok-4.20-0309-reasoning", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
-    ("grok-4.20-0309-non-reasoning", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
-    ("grok-4.20-multi-agent-0309", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
-    ("grok-build-0.1", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.20)]),
+    ("grok-4.6", "xAI", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.50)]),
+    ("grok-4.5", "xAI", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.30)]),
+    ("grok-4.3", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
+    ("grok-4.20-0309-reasoning", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
+    ("grok-4.20-0309-non-reasoning", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
+    ("grok-4.20-multi-agent-0309", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
+    ("grok-build-0.1", "xAI", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.20)]),
     // Google bills context caching by storage - dollars per million tokens
     // per *hour* - which is not a per-request cache write and is deliberately
     // not carried here. Pricing it as one would invent a number.
-    ("gemini-3.7-flash", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
-    ("gemini-3.6-flash", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
-    ("gemini-3.5-flash-lite", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
-    ("gemini-3.5-flash", &[("input", 1.50), ("output", 9.0), ("cache_read", 0.15)]),
-    ("gemini-3.1-pro-preview", &[("input", 2.0), ("output", 12.0), ("cache_read", 0.20)]),
-    ("gemini-3.1-flash-lite", &[("input", 0.25), ("output", 1.50), ("cache_read", 0.025)]),
-    ("gemini-3-flash-preview", &[("input", 0.50), ("output", 3.0), ("cache_read", 0.05)]),
-    ("gemini-2.5-pro", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
-    ("gemini-2.5-flash-lite", &[("input", 0.10), ("output", 0.40), ("cache_read", 0.01)]),
-    ("gemini-2.5-flash", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
+    ("gemini-3.7-flash", "Google", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
+    ("gemini-3.6-flash", "Google", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
+    ("gemini-3.5-flash-lite", "Google", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
+    ("gemini-3.5-flash", "Google", &[("input", 1.50), ("output", 9.0), ("cache_read", 0.15)]),
+    ("gemini-3.1-pro-preview", "Google", &[("input", 2.0), ("output", 12.0), ("cache_read", 0.20)]),
+    ("gemini-3.1-flash-lite", "Google", &[("input", 0.25), ("output", 1.50), ("cache_read", 0.025)]),
+    ("gemini-3-flash-preview", "Google", &[("input", 0.50), ("output", 3.0), ("cache_read", 0.05)]),
+    ("gemini-2.5-pro", "Google", &[("input", 1.25), ("output", 10.0), ("cache_read", 0.125)]),
+    ("gemini-2.5-flash-lite", "Google", &[("input", 0.10), ("output", 0.40), ("cache_read", 0.01)]),
+    ("gemini-2.5-flash", "Google", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
 ];
 
 /// One hue, four steps, the way /stats and the contribution calendar do it.
@@ -832,7 +851,7 @@ fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &
         let to_rate = |entries: &[(&str, f64)]| -> Rate {
             entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
         };
-        let mut listed = LIST_RATES.iter().map(|(k, e)| (*k, to_rate(e)));
+        let mut listed = LIST_RATES.iter().map(|(k, _, e)| (*k, to_rate(e)));
         longest(&mut listed)
     };
 

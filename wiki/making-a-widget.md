@@ -232,6 +232,12 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 };
 ```
 
+Each entry is `(key, who publishes it, the numbers each field defaults to)`.
+The middle field is drawn beside the key and is **carried, not derived** — a
+prefix rule reads fine over today's table and mislabels the first entry that
+does not follow it. `o3` and `codex-mini-latest` are OpenAI's, and nothing in
+either string says so.
+
 `↵` on that field then opens one screen carrying both halves of the job:
 the keys the reader has set something on, `tab` for the whole table, and
 typing to search all of it. `↵` on a row opens that key's numbers, each with

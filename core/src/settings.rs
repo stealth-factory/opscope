@@ -50,10 +50,19 @@ pub struct SettingsSpec {
     pub catalogues: &'static [(&'static str, Catalogue)],
 }
 
-/// A table of candidate keys and the per-kind numbers each one defaults to.
-/// Shaped exactly like `agent-usage`'s `LIST_RATES` so a widget can pass the
-/// constant it already has rather than build a second copy of it.
-pub type Catalogue = &'static [(&'static str, &'static [(&'static str, f64)])];
+/// A table a widget owns, as `(key, who publishes it, the numbers each field
+/// defaults to)`.
+///
+/// Shaped like `agent-usage`'s `LIST_RATES` so a widget passes the constant it
+/// already has rather than building a second copy of it.
+///
+/// The middle field is drawn beside the key, because a key does not always say
+/// who it belongs to: `o3` and `codex-mini-latest` are OpenAI's,
+/// `grok-build-0.1` is xAI's, and nothing in either string says so. It is
+/// carried rather than derived from the name - a prefix rule reads fine over
+/// today's table and mislabels the first entry that does not follow it.
+pub type Catalogue =
+    &'static [(&'static str, &'static str, &'static [(&'static str, f64)])];
 
 #[derive(Clone)]
 struct Field {
@@ -1315,7 +1324,9 @@ fn model_fields(app: &App, field: &Field, model: &str) -> Vec<Field> {
     let Some(table) = catalogue_for(app, &field.key) else {
         return Vec::new();
     };
-    let listed = table.iter().find(|(m, _)| *m == model).map(|(_, r)| *r);
+    let entry = table.iter().find(|(m, _, _)| *m == model);
+    let listed = entry.map(|(_, _, r)| *r);
+    let group = entry.map(|(_, g, _)| *g);
     // A model the reader named themselves has no published price, so its
     // kinds are the ones the card prices everywhere else - offered at no
     // default rather than not offered at all.
@@ -1329,9 +1340,14 @@ fn model_fields(app: &App, field: &Field, model: &str) -> Vec<Field> {
             section: field.section.clone(),
             key: kind.to_string(),
             parents: vec![field.key.clone(), model.to_string()],
-            help: match price {
-                Some(_) => format!("The published list price for {model}."),
-                None => format!("No published price for {model}: this is yours to set."),
+            help: match (price, group) {
+                (Some(_), Some(who)) => {
+                    format!("{who}'s published list price for {model}.")
+                }
+                (Some(_), None) => format!("The published list price for {model}."),
+                (None, _) => {
+                    format!("No published price for {model}: this is yours to set.")
+                }
             },
             default: price
                 .and_then(serde_json::Number::from_f64)
@@ -1362,7 +1378,7 @@ fn catalogue_chosen(app: &App, field: &Field) -> Vec<String> {
 /// Every kind the card prices anywhere, in the order it first names them.
 fn catalogue_kinds(table: Catalogue) -> Vec<&'static str> {
     let mut seen: Vec<&'static str> = Vec::new();
-    for (_, rates) in table {
+    for (_, _, rates) in table {
         for (kind, _) in *rates {
             if !seen.contains(kind) {
                 seen.push(kind);
@@ -1372,6 +1388,17 @@ fn catalogue_kinds(table: Catalogue) -> Vec<&'static str> {
     seen
 }
 
+
+/// Who publishes a catalogue entry, for the column beside its name.
+fn catalogue_group(kind: &PickKind, key: &str) -> Option<String> {
+    let PickKind::Catalogue(table) = kind else {
+        return None;
+    };
+    table
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, group, _)| group.to_string())
+}
 
 fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
     app.catalogues.iter().find(|(f, _)| *f == key).map(|(_, t)| *t)
@@ -1634,7 +1661,7 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .collect(),
         PickKind::Catalogue(table) => table
             .iter()
-            .filter_map(|(name, _)| zone_rank(name, query).map(|r| (r, name.to_string())))
+            .filter_map(|(name, _, _)| zone_rank(name, query).map(|r| (r, name.to_string())))
             .collect(),
     };
     // Stable, so within a rank the source's own order holds - alphabetical
@@ -2577,7 +2604,10 @@ format!(
                         // and printing it twice is furniture.
                         (None, true) if zones => picked_label(app, *index, zone)
                             .unwrap_or_else(|| zone_label(zone)),
-                        (None, _) => String::new(),
+                        // Who publishes it. A key does not always say - o3
+                        // and codex-mini-latest are OpenAI's - and a flat
+                        // list of sixty-eight is a list you scan by vendor.
+                        (None, _) => catalogue_group(&kind, zone).unwrap_or_default(),
                     },
                 ),
                 (tint.as_str(), " ".repeat(w)),
@@ -2715,8 +2745,8 @@ mod tests {
     /// A two-model card shaped exactly like a widget's own, so the tests
     /// exercise the same path `agent-usage` takes rather than a stand-in.
     const CARD: Catalogue = &[
-        ("model-a", &[("input", 4.0), ("output", 20.0)]),
-        ("model-b", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.1)]),
+        ("model-a", "Acme", &[("input", 4.0), ("output", 20.0)]),
+        ("model-b", "Others", &[("input", 1.0), ("output", 2.0), ("cache_read", 0.1)]),
     ];
 
     /// An App standing on one catalogue-backed field, holding `live`.
@@ -2767,6 +2797,35 @@ mod tests {
         assert!(current_of(&app.live, &rows[0], None).is_none());
         // The row names its model: "input" alone appears once per model.
         assert_eq!(rows[0].label(), "model-a · input");
+    }
+
+    /// The publisher rides with the entry rather than being read off the
+    /// name. `o3` and `codex-mini-latest` are OpenAI's and say so nowhere,
+    /// so a prefix rule would have to guess - and would mislabel the first
+    /// model that does not follow it.
+    #[test]
+    fn an_entry_carries_who_publishes_it() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        let kind = picker_kind(&app, "rates").expect("a catalogue");
+        assert_eq!(catalogue_group(&kind, "model-a").as_deref(), Some("Acme"));
+        assert_eq!(catalogue_group(&kind, "model-b").as_deref(), Some("Others"));
+        // A key the table does not carry has nobody to name.
+        assert_eq!(catalogue_group(&kind, "mine"), None);
+        // And it reaches the row that prices it.
+        let parent = app.fields[0].clone();
+        let rows = model_fields(&app, &parent, "model-a");
+        assert!(
+            rows[0].help.starts_with("Acme's published list price"),
+            "{}",
+            rows[0].help
+        );
+        // A model with no published price says that instead of a vendor.
+        let unknown = model_fields(&app, &parent, "mine");
+        assert!(
+            unknown[0].help.starts_with("No published price"),
+            "{}",
+            unknown[0].help
+        );
     }
 
     /// Enter on a catalogue field opens the picker rather than a list of

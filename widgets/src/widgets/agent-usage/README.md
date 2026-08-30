@@ -583,11 +583,11 @@ are in [`wiki/model-prices.md`](../../../../wiki/model-prices.md).
 finding and the choosing:
 
 ```
-  the 2 you have set · tab or type to search all 68
+  2 with custom rates · tab or type to search all 68
    ▏ type to filter
- ▸ ✓ gpt-5.6-sol
-   ✓ o3
- ↵ open  tab show all  [d]rop  ↑↓ pick  esc done
+ ▸ ✓ gpt-5.6-sol                       OpenAI
+   ✓ claude-opus-5                     Anthropic
+ ↵ open  tab show all  [d]efault  ↑↓ pick  esc done
 ```
 
 It opens on the models you have set something on — the short list, and the one
@@ -607,7 +607,7 @@ as its **default**:
 models is three round trips and no retyping.
 
 **Opening a model writes nothing.** An entry appears the moment you set a
-number, and `[d]rop` takes it out again — the whole entry, numbers and all,
+number, and `[d]efault` takes it out again — the whole entry, numbers and all,
 which is what putting a model back on list prices means. There is no separate
 "selected" state to drift out of step with the prices: a model is yours when
 it holds one.

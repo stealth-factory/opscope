@@ -23,7 +23,7 @@
 
 mod settings;
 
-pub use settings::{run_settings, SettingsSpec};
+pub use settings::{run_settings, Catalogue, SettingsSpec};
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
