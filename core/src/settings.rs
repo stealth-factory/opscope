@@ -2478,13 +2478,16 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             chosen
         ),
         PickKind::Catalogue(_) if *show_all => {
-            format!("  all {} · {} of them set · tab for just yours", total_choices, chosen)
+format!(
+                "  all {} · {} with custom rates · tab for those",
+                total_choices, chosen
+            )
         }
         PickKind::Catalogue(_) if chosen == 0 => {
             format!("  nothing set · tab or type to search all {total_choices}")
         }
         PickKind::Catalogue(_) => format!(
-            "  the {chosen} you have set · tab or type to search all {total_choices}"
+            "  {chosen} with custom rates · tab or type to search all {total_choices}"
         ),
         _ => heading,
     };
@@ -2594,7 +2597,11 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             (p.accent.as_str(), "tab".into()),
             (
                 p.dim.as_str(),
-                if *show_all { " just mine".into() } else { " show all".into() },
+                if *show_all {
+                    " models with custom rates".into()
+                } else {
+                    " show all".into()
+                },
             ),
         ]);
         // Only while the search is empty, because that is the only time the
