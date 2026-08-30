@@ -92,6 +92,28 @@ fn teams_page(res: &serde_json::Value) -> (Vec<String>, Option<i64>) {
     (ids, next)
 }
 
+/// The scopes to ask Vercel for.
+///
+/// Naming teams in config means exactly those: somebody who narrowed the
+/// board did it on purpose, and adding to their list would undo it.
+///
+/// Naming none means the personal account **and** every team the token can
+/// see. Discovery used to replace the personal scope rather than join it, so
+/// anyone who belonged to a single team lost their own deployments from the
+/// board - silently, while the widget went on describing itself as covering
+/// everything the token could reach. An account with no teams still lands on
+/// the personal scope, by the same path rather than a separate one.
+fn scopes_for(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
+    if !configured.is_empty() {
+        return configured;
+    }
+    // Personal first: it is the account the token belongs to, and it reads
+    // oddly below teams that were found on its behalf.
+    std::iter::once(String::new())
+        .chain(discovered.into_iter().filter(|t| !t.is_empty()))
+        .collect()
+}
+
 /// How many pages of teams to walk before giving up on the cursor.
 const TEAM_PAGES: usize = 20;
 
@@ -871,11 +893,14 @@ fn main() {
     // the poller rather than said once: `err` is rebuilt every round, and a
     // board that is missing a team goes on missing it every round too.
     let mut scope_note: Option<String> = None;
-    if !tok.is_empty() && teams.is_empty() {
+    let discovered = if !tok.is_empty() && teams.is_empty() {
         let (found, stopped) = discover_teams(&tok);
-        teams = found;
         scope_note = stopped;
-    }
+        found
+    } else {
+        Vec::new()
+    };
+    teams = scopes_for(teams, discovered);
 
     let state = Arc::new(Mutex::new(State::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
@@ -903,12 +928,10 @@ fn main() {
             } else {
                 String::new()
             };
-            let scopes: Vec<String> = if poll_teams.is_empty() {
-                vec![String::new()]
-            } else {
-                poll_teams.clone()
-            };
-            for team in &scopes {
+            // scopes_for always hands back at least the personal account, so
+            // there is no empty case to guard here - a fallback that cannot
+            // run reads as a case that can.
+            for team in &poll_teams {
                 let mut path = format!("/v6/deployments?limit={}", limit);
                 if !team.is_empty() {
                     path += &format!("&teamId={}", team);
@@ -1536,6 +1559,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty `teams` covers the personal account as well as every team.
+    ///
+    /// Discovery used to replace the personal scope: belong to one team and
+    /// your own deployments left the board, with the widget still describing
+    /// itself as covering everything the token could see. An absent board is
+    /// indistinguishable from an account that has not deployed anything.
+    #[test]
+    fn discovery_adds_the_personal_scope_rather_than_replacing_it() {
+        let found = vec!["team_a".to_string(), "team_b".to_string()];
+        let scopes = scopes_for(Vec::new(), found);
+        // "" is the personal account: the request simply carries no teamId.
+        assert_eq!(scopes, vec!["", "team_a", "team_b"]);
+    }
+
+    /// Naming teams is narrowing, and narrowing has to stay narrow.
+    #[test]
+    fn a_named_team_list_is_taken_exactly_as_given() {
+        let mine = vec!["team_a".to_string()];
+        assert_eq!(scopes_for(mine.clone(), vec!["team_b".to_string()]), mine);
+        // Including when somebody names the personal account themselves.
+        let just_me = vec![String::new()];
+        assert_eq!(scopes_for(just_me.clone(), vec!["team_b".into()]), just_me);
+    }
+
+    /// No token, or a token with no teams, still asks for something.
+    #[test]
+    fn an_account_with_no_teams_still_polls_itself() {
+        assert_eq!(scopes_for(Vec::new(), Vec::new()), vec![""]);
+    }
 
     /// The line that says why a build failed is the one worth finding, and
     /// it arrives on stderr among dozens of stdout lines that all look the
