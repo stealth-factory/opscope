@@ -2193,17 +2193,17 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             return false;
         }
         // Above the plain arrows, which would otherwise take these first.
-        // Reaching for the list is asking for it, and without this they move
-        // a selection nobody can see, which reads as a dead key. Down lands
-        // on the first entry rather than the one the cursor happened to be
-        // left on, because coming in from the box you are starting at the
-        // top of the list.
+        //
+        // Down only. The box sits above the entries, so down is the way into
+        // them and up is not - there is nothing above the box to reach. Up
+        // needs no arm of its own: the plain arrow below moves the selection
+        // and never the focus, so from the box it simply does nothing.
+        //
+        // It lands on the first entry rather than wherever the selection was
+        // left, because coming in from the top is arriving at the top.
         "down" | "pgdn" if typed && !rows && total > 0 => {
             rows = true;
             s_ = 0;
-        }
-        "up" | "pgup" | "home" | "end" if typed && !rows && total > 0 => {
-            rows = true;
         }
         // And out again the way you came: up from the first entry is not a
         // selection that will not move, it is a request to go back to typing.
@@ -3858,6 +3858,15 @@ mod tests {
             on_list: false,
             cursor: 0,
         };
+
+        // Up is inert in the box: the box is above the entries, so there is
+        // nothing up there to reach, and moving into them would be going the
+        // way nobody asked for.
+        handle_pick_key(&mut app, "up");
+        let Mode::Pick { on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(!on_list, "up in the box goes nowhere");
 
         // Down goes in, and lands on the first entry rather than wherever
         // the selection happened to be left.
