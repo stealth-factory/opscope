@@ -139,9 +139,35 @@ pub fn parse_lsof_cwd(text: &str) -> String {
     String::new()
 }
 
-/// Elapsed seconds from `ps -o etimes=`.
+/// Elapsed seconds from `ps -o etimes=` or BSD `ps -o etime=`.
+///
+/// procps prints an integer. Apple's ps prints `[[dd-]hh:]mm:ss`. Both
+/// reach this parser so a fixture test on Linux still covers the macOS
+/// acquisition path.
 pub fn parse_ps_etimes(text: &str) -> Option<f64> {
-    text.split_whitespace().next()?.parse().ok()
+    let tok = text.split_whitespace().next()?;
+    if tok.contains(':') || tok.contains('-') {
+        parse_ps_etime(tok)
+    } else {
+        tok.parse().ok()
+    }
+}
+
+/// `[[dd-]hh:]mm:ss` as Apple's `etime` writes it.
+fn parse_ps_etime(tok: &str) -> Option<f64> {
+    let (days, rest) = match tok.split_once('-') {
+        Some((d, r)) => (d.parse::<f64>().ok()?, r),
+        None => (0.0, tok),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let secs = match parts.as_slice() {
+        [mm, ss] => mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?,
+        [hh, mm, ss] => {
+            hh.parse::<f64>().ok()? * 3600.0 + mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?
+        }
+        _ => return None,
+    };
+    Some(days * 86400.0 + secs)
 }
 
 /// A uid from `ps -o uid=`.
@@ -175,7 +201,7 @@ pub fn parse_ip_json(text: &str) -> Vec<(String, String, bool)> {
         let name = link["ifname"].as_str().unwrap_or("?").to_string();
         for addr in link["addr_info"].as_array().unwrap_or(&Vec::new()) {
             let ip = addr["local"].as_str().unwrap_or("");
-            if ip.is_empty() || ip.starts_with("fe80:") {
+            if ip.is_empty() || is_link_local(ip) {
                 continue;
             }
             found.push((
@@ -199,7 +225,7 @@ pub fn parse_ifconfig(text: &str) -> Vec<(String, String, bool)> {
             if let Some((bare, _)) = ip.split_once('%') {
                 ip = bare.to_string();
             }
-            if ip.starts_with("fe80:") {
+            if is_link_local(&ip) {
                 continue;
             }
             found.push((name.clone(), ip, cols[0] == "inet6"));
@@ -212,6 +238,15 @@ pub fn parse_ifconfig(text: &str) -> Vec<(String, String, bool)> {
         }
     }
     found
+}
+
+/// IPv6 `fe80::/10` and IPv4 `169.254.0.0/16`, not only the `fe80:` prefix.
+fn is_link_local(ip: &str) -> bool {
+    if ip.starts_with("169.254.") {
+        return true;
+    }
+    let head = ip.split(':').next().unwrap_or("");
+    u16::from_str_radix(head, 16).is_ok_and(|h| h & 0xffc0 == 0xfe80)
 }
 
 #[cfg(test)]
@@ -308,6 +343,13 @@ n127.0.0.1:22\n";
     }
 
     #[test]
+    fn ps_etime_is_the_bsd_elapsed_form() {
+        assert_eq!(parse_ps_etimes("   01:23\n"), Some(83.0));
+        assert_eq!(parse_ps_etimes("1-02:03:04\n"), Some(93784.0));
+        assert_eq!(parse_ps_etimes("05:06:07\n"), Some(18367.0));
+    }
+
+    #[test]
     fn ps_uid_is_the_number_not_the_padded_column() {
         assert_eq!(parse_ps_uid("   501\n"), Some(501));
         assert_eq!(parse_ps_uid(""), None);
@@ -337,8 +379,10 @@ n127.0.0.1:22\n";
             "	inet 127.0.0.1 netmask 0xff000000\n",
             "	inet6 ::1 prefixlen 128\n",
             "	inet6 fe80::1%lo0 prefixlen 64 scopeid 0x1\n",
+            "	inet6 fe90::1 prefixlen 64\n",
             "en0: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n",
             "	inet 192.0.2.10 netmask 0xffffff00 broadcast 192.0.2.255\n",
+            "	inet 169.254.1.1 netmask 0xffff0000\n",
             "	inet6 2001:db8::10 prefixlen 64\n",
         );
         let got = parse_ifconfig(text);

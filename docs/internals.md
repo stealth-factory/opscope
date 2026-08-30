@@ -29,8 +29,9 @@ screen, exactly like "there is no data".
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
-arrow-key decoding, `clipboard()` over OSC 52, and `unsupported()` /
-`cannot_start()` for a widget that has no source on this kernel.
+arrow-key decoding, `clipboard()` over OSC 52, `unsupported()` /
+`cannot_start_because()` when this kernel has no source, and
+`cannot_start()` when a required tool is missing.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),

@@ -28,7 +28,7 @@ use super::parse::{parse_proc_net_tcp, parse_proc_stat_zombie};
 use super::Found;
 
 /// Every listening TCP socket, with the pid this user can name.
-pub fn sockets() -> Vec<Found> {
+pub fn sockets() -> Result<Vec<Found>, String> {
     let owners = socket_owners();
     let mut out = Vec::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -45,7 +45,7 @@ pub fn sockets() -> Vec<Found> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// inode -> pid, for every process this user can read.

@@ -35,13 +35,10 @@ fn unsupported_names_this_kernel() {
     // says `linux` — not a string that was true on the machine that
     // compiled it.
     let got = opscope_core::unsupported();
-    assert!(
-        got.starts_with("does not run on "),
-        "unsupported() drifted from the agreed wording: {got:?}"
-    );
-    assert!(
-        got.ends_with(std::env::consts::OS),
-        "unsupported() must name this target, not a hardcoded one: {got:?}"
+    assert_eq!(
+        got,
+        format!("does not run on {}", std::env::consts::OS),
+        "unsupported() drifted from the agreed wording"
     );
 }
 

@@ -29,12 +29,15 @@ use super::parse::{
 use super::{Found, RUN_TIMEOUT};
 
 /// Every listening TCP socket, with the pid `lsof` named beside it.
-pub fn sockets() -> Vec<Found> {
-    let text = tc::run_quiet(
+///
+/// A failed or timed-out `lsof` is an error, not an empty table: empty is
+/// what "nothing is listening" looks like.
+pub fn sockets() -> Result<Vec<Found>, String> {
+    let text = tc::run(
         &["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcunt"],
         RUN_TIMEOUT,
-    );
-    parse_lsof_listen(&text)
+    )?;
+    Ok(parse_lsof_listen(&text)
         .into_iter()
         .map(|sock| Found {
             port: sock.port,
@@ -42,7 +45,7 @@ pub fn sockets() -> Vec<Found> {
             uid: sock.uid,
             pid: sock.pid,
         })
-        .collect()
+        .collect())
 }
 
 pub fn process_info(pid: i32) -> (String, String, Option<f64>) {
@@ -54,8 +57,11 @@ pub fn process_info(pid: i32) -> (String, String, Option<f64>) {
         &["lsof", "-a", "-p", &pid_s, "-d", "cwd", "-Fn"],
         RUN_TIMEOUT,
     ));
+    // Apple's ps has `etime` (`[[dd-]hh:]mm:ss`), not the procps `etimes`
+    // seconds column. Asking for the Linux name produces no parseable
+    // stdout and every row would show `--` for uptime.
     let started = parse_ps_etimes(&tc::run_quiet(
-        &["ps", "-o", "etimes=", "-p", &pid_s],
+        &["ps", "-o", "etime=", "-p", &pid_s],
         RUN_TIMEOUT,
     ))
     .map(|elapsed| tc::now() - elapsed);

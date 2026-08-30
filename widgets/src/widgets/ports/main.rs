@@ -47,8 +47,8 @@ mod host;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod host {
-    pub fn sockets() -> Vec<super::Found> {
-        Vec::new()
+    pub fn sockets() -> Result<Vec<super::Found>, String> {
+        Ok(Vec::new())
     }
     pub fn process_info(_: i32) -> (String, String, Option<f64>) {
         (String::new(), String::new(), None)
@@ -888,14 +888,15 @@ fn proxied_ports(text: &str) -> Vec<u16> {
 }
 
 /// One entry per listening service, plus anything served but not bound.
-fn scan() -> Vec<Row> {
+fn scan() -> Result<Vec<Row>, String> {
     let served = exposure();
     let mut rows: Vec<Row> = Vec::new();
     let mut services: HashMap<(u16, Option<i32>, String), usize> = HashMap::new();
     let mut seen: Vec<u16> = Vec::new();
     let stamp = tc::now();
+    let mut infos: HashMap<i32, (String, String, Option<f64>)> = HashMap::new();
 
-    for sock in host::sockets() {
+    for sock in host::sockets()? {
         let pid = sock.pid;
         // A server on both address families is two sockets in the kernel
         // table but one thing to know about. Any of port, owner or
@@ -906,7 +907,10 @@ fn scan() -> Vec<Row> {
             continue;
         }
         let (cmdline, cwd, started) = match pid {
-            Some(pid) => host::process_info(pid),
+            Some(pid) => infos
+                .entry(pid)
+                .or_insert_with(|| host::process_info(pid))
+                .clone(),
             None => (String::new(), String::new(), None),
         };
         let (kind, guessed) = kind_of(&cmdline, sock.port);
@@ -945,7 +949,7 @@ fn scan() -> Vec<Row> {
         }
     }
     rows.sort_by_key(|r| (is_system_port(r.port), r.port));
-    rows
+    Ok(rows)
 }
 
 fn span(seconds: Option<f64>) -> String {
@@ -1755,7 +1759,7 @@ fn detail_rows(
     tunnel: &Option<Tunnel>,
     links: &[(String, String)],
     sel: usize,
-    seen: &[(f64, f64, f64)],
+    seen: Option<&[(f64, f64, f64)]>,
     gap: f64,
     w: usize,
     p: &Palette,
@@ -1839,8 +1843,16 @@ fn detail_rows(
     rows.push(String::new());
     // What has actually gone through it. The kernel's own per-socket byte
     // counters, summed over the connections accepted from this port - so
-    // this is TCP, and a port serving anything else reads as quiet.
-    rows.extend(traffic_chart(seen, "TRAFFIC", 3, gap, w, p));
+    // this is TCP, and a port serving anything else reads as quiet. A
+    // missing ss is not quiet: it is unmeasured, and the chart would look
+    // like nothing has moved.
+    match seen {
+        Some(series) => rows.extend(traffic_chart(series, "TRAFFIC", 3, gap, w, p)),
+        None => rows.push(tc::seg(
+            &[(p.dim.as_str(), " no traffic · needs ss".into())],
+            w - 1,
+        )),
+    }
     rows.push(String::new());
     rows.push(tc::seg(
         &[
@@ -2155,8 +2167,24 @@ fn main() {
         // in `unwrap_or_default()`, which handed the table an empty list and
         // drew a machine with nothing listening. The reason goes on screen
         // and the thread stops, the way agent-usage and herdr-panes do it.
+        // A failed lsof is not an empty table: keep the last good scan and
+        // put the reason on screen. The thread keeps going so the next poll
+        // can recover.
         let found = match std::panic::catch_unwind(scan) {
-            Ok(found) => found,
+            Ok(Ok(found)) => {
+                if let Ok(mut guard) = poller.err.lock() {
+                    if !guard.contains("poller stopped") {
+                        guard.clear();
+                    }
+                }
+                Some(found)
+            }
+            Ok(Err(why)) => {
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why;
+                }
+                None
+            }
             Err(_) => {
                 let why = "poller stopped - see the pane it was started from";
                 if let Ok(mut guard) = poller.err.lock() {
@@ -2165,31 +2193,35 @@ fn main() {
                 return;
             }
         };
-        // The ports to tally against, taken from the scan that just ran, so
-        // a port that has just appeared is measured from its next sample
-        // rather than never.
-        let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-        let counters = if traffic_from_ss {
-            match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
-                Ok(text) => text,
-                Err(_) => {
-                    let why = "traffic poller stopped - the table below is still current";
-                    if let Ok(mut guard) = poller.err.lock() {
-                        *guard = why.into();
+        if let Some(found) = found {
+            // The ports to tally against, taken from the scan that just ran, so
+            // a port that has just appeared is measured from its next sample
+            // rather than never.
+            let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
+            let counters = if traffic_from_ss {
+                match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        let why = "traffic poller stopped - the table below is still current";
+                        if let Ok(mut guard) = poller.err.lock() {
+                            *guard = why.into();
+                        }
+                        // Traffic is one column of many; the ports themselves are
+                        // still being found, so this one says so and carries on.
+                        String::new()
                     }
-                    // Traffic is one column of many; the ports themselves are
-                    // still being found, so this one says so and carries on.
-                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            if let Ok(mut guard) = poller.rows.lock() {
+                *guard = found;
+            }
+            if traffic_from_ss {
+                if let Ok(mut guard) = poller.traffic.lock() {
+                    guard.sample(&counters, &listening, tc::now());
                 }
             }
-        } else {
-            String::new()
-        };
-        if let Ok(mut guard) = poller.rows.lock() {
-            *guard = found;
-        }
-        if let Ok(mut guard) = poller.traffic.lock() {
-            guard.sample(&counters, &listening, tc::now());
         }
         let (lock, cond) = &poller.wake;
         let mut asked = match lock.lock() {
@@ -2534,18 +2566,22 @@ fn main() {
                     .push((t.url.clone(), "public · cloudflare".to_string()));
             }
             view.at = view.at.min(view.links.len().saturating_sub(1));
-            let seen = store
-                .traffic
-                .lock()
-                .map(|t| t.series(view.port))
-                .unwrap_or_default();
+            let seen = if traffic_from_ss {
+                store
+                    .traffic
+                    .lock()
+                    .map(|t| t.series(view.port))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let (rows, cursor) = detail_rows(
                 &view.row,
                 self_node,
                 &view.tunnel,
                 &view.links,
                 view.at,
-                &seen,
+                if traffic_from_ss { Some(&seen) } else { None },
                 refresh,
                 w,
                 &ok,

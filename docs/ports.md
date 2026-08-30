@@ -405,7 +405,8 @@ are on this screen rather than an IP.
 ## Cost
 
 Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds on Linux, or one `lsof` plus `ps` on macOS; one `ss -tine` for the
+seconds on Linux, or one listener `lsof` plus per-process `lsof` and two
+`ps` calls on macOS (one set per pid for that scan); one `ss -tine` for the
 byte counters where `ss` is installed; plus one `tailscale serve status` —
 no network, no root, no dependency beyond Tailscale for the exposure
 column, which is simply blank without it.

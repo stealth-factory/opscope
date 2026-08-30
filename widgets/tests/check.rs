@@ -1276,35 +1276,87 @@ fn a_poller_that_dies_records_why() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+/// Visibility that can hide a `fn parse_*` from a matcher that only
+/// strips `pub `.
+fn rust_item(t: &str) -> &str {
+    let t = t.strip_prefix("pub(crate) ").unwrap_or(t);
+    let t = t.strip_prefix("pub(super) ").unwrap_or(t);
+    t.strip_prefix("pub ").unwrap_or(t)
+}
+
 /// A `#[cfg(target_os ...)]` still pending when the next item starts.
 ///
 /// Attributes stack, so `#[cfg(target_os)]` then `#[path]` then `mod host`
-/// is one item; a blank line or a comment does not clear it.
+/// is one item; a blank line or a comment does not clear it. The attribute
+/// itself may span lines. An inline `mod { ... }` behind the cfg is
+/// inspected here; a `mod name;` file is judged by `cfg_gated_mod_files`.
 fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
     let mut pending = false;
+    let mut attr = String::new();
+    let mut in_attr = false;
     let mut found = Vec::new();
-    for (n, line) in src.lines().enumerate() {
-        let t = line.trim();
-        if t.starts_with("//") || t.is_empty() {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if !in_attr && (t.starts_with("//") || t.is_empty()) {
+            i += 1;
             continue;
         }
-        if t.starts_with("#[cfg(") && t.contains("target_os") {
-            pending = true;
+        if in_attr || t.starts_with("#[cfg(") {
+            if !in_attr {
+                attr.clear();
+            }
+            attr.push_str(t);
+            let open = attr.chars().filter(|&c| c == '[').count();
+            let close = attr.chars().filter(|&c| c == ']').count();
+            in_attr = open > close;
+            if !in_attr {
+                if attr.contains("target_os") {
+                    pending = true;
+                }
+                attr.clear();
+            }
+            i += 1;
             continue;
         }
         if t.starts_with("#[") {
             if pending && t.starts_with("#[test]") {
-                found.push(format!("line {}: test gated by target_os", n + 1));
+                found.push(format!("line {}: test gated by target_os", i + 1));
             }
+            i += 1;
             continue;
         }
         if pending {
-            let item = t.strip_prefix("pub ").unwrap_or(t);
+            let item = rust_item(t);
             if item.starts_with("fn parse_") {
-                found.push(format!("line {}: parser gated by target_os", n + 1));
+                found.push(format!("line {}: parser gated by target_os", i + 1));
+                pending = false;
+                i += 1;
+                continue;
+            }
+            if item.starts_with("mod ") && t.contains('{') {
+                let mut depth = t.chars().filter(|&c| c == '{').count() as i32
+                    - t.chars().filter(|&c| c == '}').count() as i32;
+                i += 1;
+                while i < lines.len() && depth > 0 {
+                    let n = lines[i].trim();
+                    depth += n.chars().filter(|&c| c == '{').count() as i32;
+                    depth -= n.chars().filter(|&c| c == '}').count() as i32;
+                    if rust_item(n).starts_with("fn parse_") {
+                        found.push(format!("line {}: parser gated by target_os", i + 1));
+                    }
+                    if n.starts_with("#[test]") {
+                        found.push(format!("line {}: test gated by target_os", i + 1));
+                    }
+                    i += 1;
+                }
+                pending = false;
+                continue;
             }
             pending = false;
         }
+        i += 1;
     }
     found
 }
@@ -1325,6 +1377,18 @@ mod host;
 #[cfg(target_os = "linux")]
 #[test]
 fn hidden() {}
+
+#[cfg(
+    target_os = "linux"
+)]
+pub(crate) fn parse_bar(text: &str) {}
+
+#[cfg(target_os = "linux")]
+mod tests {
+    #[test]
+    fn also_hidden() {}
+    fn parse_inner(text: &str) {}
+}
 "#;
     let got = parsers_or_tests_gated_by_target_os(src);
     assert!(
@@ -1334,6 +1398,14 @@ fn hidden() {}
     assert!(
         got.iter().any(|s| s.contains("test")),
         "missed a gated #[test]: {got:?}"
+    );
+    assert!(
+        got.iter().filter(|s| s.contains("parser")).count() >= 2,
+        "missed a multiline cfg / pub(crate) parser: {got:?}"
+    );
+    assert!(
+        got.iter().filter(|s| s.contains("test")).count() >= 2,
+        "missed an inline cfg-gated test module: {got:?}"
     );
     assert!(
         !got.iter()
@@ -1467,7 +1539,7 @@ fn file_has_parser_or_test(src: &str) -> bool {
         if t.starts_with("//") {
             return false;
         }
-        let item = t.strip_prefix("pub ").unwrap_or(t);
+        let item = rust_item(t);
         item.starts_with("fn parse_") || t.starts_with("#[test]")
     })
 }
@@ -1635,6 +1707,16 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
         }
         let macos = widget_macos_path(&name);
         if macos.is_file() {
+            let main = match widget_package_dir(&name) {
+                Some(dir) => dir.join("main.rs"),
+                None => root().join(format!("widgets/src/bin/{name}.rs")),
+            };
+            let main_src = std::fs::read_to_string(&main).unwrap_or_default();
+            if !main_src.contains("macos.rs") && !main_src.contains("mod macos") {
+                wrong.push(format!(
+                    "{name}: macos.rs is present but main.rs does not load it"
+                ));
+            }
             continue;
         }
         if src.contains("unsupported(") {
