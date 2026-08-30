@@ -2073,7 +2073,10 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
 }
 
 fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
-    let mut body = vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
+    // Pinned: it names the widget whose settings these are, which is the one
+    // thing that must not scroll away from somebody halfway down a long list.
+    let head = crate::title(&format!("{} settings", app.widget), w, &p.accent);
+    let mut body: Vec<String> = Vec::new();
     let path_note = if app.exists {
         format!(" {}", app.path.display())
     } else {
@@ -2089,7 +2092,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(
             p.dim.as_str(),
             format!(
-                " {} keys · {} unset · the widget reloads when you leave this screen",
+                " {} keys · {} unset",
                 app.fields.len(),
                 unset
             ),
@@ -2138,18 +2141,12 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .map(|l| format!(" {l}"))
         .collect();
 
-    let aside = 8usize;
-    let room = h.saturating_sub(body.len() + foot.len() + aside).max(1);
     if !app.fields.is_empty() {
         app.selected = app.selected.min(app.fields.len() - 1);
-        app.scroll = if app.chase {
-            crate::follow(app.scroll, app.selected, room)
-        } else {
-            app.scroll
-                .min(app.fields.len().saturating_sub(room))
-        };
-        app.chase = false;
     }
+    // Where the field rows begin, so the cursor can be followed through the
+    // whole screen rather than through a list that is only part of it.
+    let first_field_row = body.len();
     let key_w = app
         .fields
         .iter()
@@ -2169,13 +2166,10 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         0
     };
 
-    for (i, field) in app
-        .fields
-        .iter()
-        .enumerate()
-        .skip(app.scroll)
-        .take(room)
-    {
+    // Every field, at its natural height. What does not fit is below the
+    // fold and reachable, rather than absent and indistinguishable from a
+    // widget with fewer settings than it has.
+    for (i, field) in app.fields.iter().enumerate() {
         let here = i == app.selected;
         let tint = if here {
             crate::bg(38, 56, 76)
@@ -2270,22 +2264,26 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             }
         }
         let help = if field.help.is_empty() {
-            format!("{} · {} reloads when you leave", field.kind(), field.widget())
+            field.kind().to_string()
         } else {
             field.help.clone()
         };
-        for line in wrap_help(&help, w.saturating_sub(4), 2) {
+        for line in wrap_help(&help, w.saturating_sub(4), usize::MAX) {
             body.push(crate::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1)));
         }
-        if !field.help.is_empty() {
-            body.push(crate::seg(
-                &[(
-                    p.dim.as_str(),
-                    format!("  {} reloads when you leave this screen", field.widget()),
-                )],
-                w.saturating_sub(1),
-            ));
-        }
+        // Its own paragraph, and in the warn colour: it is the one line here
+        // that is about what happens next rather than about the field under
+        // the cursor, and run on from the help in the same grey it read as
+        // more of the field's description. "This widget" rather than the
+        // name, because the name is already in the title above it.
+        body.push(String::new());
+        body.push(crate::seg(
+            &[(
+                p.warn.as_str(),
+                "  This widget reloads when you leave this screen.".to_string(),
+            )],
+            w.saturating_sub(1),
+        ));
         let file_section = live_section(&app.live, &field.section, app.legacy_section);
         if file_section != field.section {
             body.push(crate::seg(
@@ -2301,12 +2299,23 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         }
     }
 
-    while body.len() + foot.len() < h {
-        body.push(String::new());
+    let room = h.saturating_sub(1 + foot.len()).max(1);
+    // The wheel moves the view and leaves the cursor where it is; a key that
+    // moved the cursor drags the view back to it. Same rule as every widget.
+    if app.chase {
+        app.scroll = crate::follow(app.scroll, first_field_row + app.selected, room);
+        app.chase = false;
     }
-    body.extend(foot);
-    body.truncate(h);
-    body
+    app.scroll = app.scroll.min(body.len().saturating_sub(room));
+
+    let mut out = vec![head];
+    out.extend(body.iter().skip(app.scroll).take(room).cloned());
+    while out.len() + foot.len() < h {
+        out.push(String::new());
+    }
+    out.extend(foot);
+    out.truncate(h);
+    out
 }
 
 fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
