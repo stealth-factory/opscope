@@ -145,7 +145,7 @@ which the compiler now makes impossible. It went with the Python.
 
 - **A background thread that dies is invisible.** Wrap every poller so it
   records why it stopped; otherwise the pane shows no data and no error, which
-  is indistinguishable from a source that has none. `deployments` sat like
+  is indistinguishable from a source that has none. `vercel-deployments` sat like
   that for a day.
 - **Never let a bare `except` swallow a programming error.** `discover_teams`
   turned a `TypeError` from passing the wrong type into "no teams found", and

@@ -43,7 +43,7 @@ you are back. It is the launcher, not another widget.
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
 | **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/99)) | [read →](widgets/src/widgets/latency/README.md) |
-| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/deployments/README.md) |
+| **`vercel-deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/vercel-deployments/README.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](widgets/src/widgets/tailnet/README.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](widgets/src/widgets/herdr-panes/README.md) |
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](widgets/src/widgets/github/README.md) |
@@ -205,7 +205,7 @@ wide screen:
 
 ```
 ┌────────────────────┬──────────────────┬────────────┐
-│ deployments        │ latency          │ clocks     │
+│ vercel-deployments │ latency          │ clocks     │
 ├────────────────────┼──────────────────┴────────────┤
 │ herdr-panes        │ tailnet                       │
 └────────────────────┴───────────────────────────────┘
@@ -256,7 +256,7 @@ terminal reporting, dragging selects nothing, so copying a line off a panel
 with the mouse stops working. Turn it off if you copy more often than you
 scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
-**Three widgets define their own token settings:** `deployments` wants a
+**Three widgets define their own token settings:** `vercel-deployments` wants a
 Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org
 each), and `linear` a personal API key from Settings → Security & access.

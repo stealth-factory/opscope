@@ -94,7 +94,7 @@ That is the only thing that proves the keystone went in.
 
 Anything slow goes on a thread. **A background thread that dies is invisible**
 — the pane shows no data and no error, indistinguishable from a source that
-genuinely has none. `deployments` sat like that for a day.
+genuinely has none. `vercel-deployments` sat like that for a day.
 
 Every poller records *why* it stopped, and that reason has to reach a row.
 `a_poller_that_dies_records_why` flags a caught panic ending in

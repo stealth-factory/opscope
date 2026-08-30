@@ -1,4 +1,4 @@
-# Configure `deployments`
+# Configure `vercel-deployments`
 
 This is configuration guidance for people and AI assistants. It is documentation, not an executable skill and not permission to change files or external services.
 
@@ -8,7 +8,7 @@ The Vercel API reached with `curl` and a user-created account token.
 
 ## Settings owned here
 
-The owned section is `deployments`.
+The owned section is `vercel_deployments`. A config written before the rename says `deployments`, and that is still read when the new one is absent.
 
 Declared fields: `token`, `token_env`, `refresh`, `limit`, `teams`, `projects`
 

@@ -52,7 +52,6 @@ macro_rules! widget {
 const WIDGETS: &[Widget] = &[
     widget!("agent-usage"),
     widget!("clocks"),
-    widget!("deployments"),
     widget!("github"),
     widget!("github-actions"),
     widget!("github-prs"),
@@ -64,6 +63,7 @@ const WIDGETS: &[Widget] = &[
     widget!("netwatch"),
     widget!("ports"),
     widget!("tailnet"),
+    widget!("vercel-deployments"),
 ];
 
 impl Widget {

@@ -28,9 +28,9 @@ use chrono::{Local, TimeZone};
 use opscope_core as tc;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "deployments",
-    section: "deployments",
-    legacy_section: None,
+    widget: "vercel-deployments",
+    section: "vercel_deployments",
+    legacy_section: Some("deployments"),
     schema: include_str!("settings.json"),
     catalogues: &[],
 };
@@ -831,7 +831,14 @@ fn copy_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
-    let cfg = tc::load_config("deployments");
+    // The section moved with the widget's name. A config written before
+    // that still says `deployments`, and a rename that quietly ignored it
+    // would look exactly like a widget that lost its settings.
+    let cfg = if tc::config_has_section("vercel_deployments") {
+        tc::load_config("vercel_deployments")
+    } else {
+        tc::load_config("deployments")
+    };
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 15.0), 15.0).max(5.0);
     let limit = tc::cfg_usize(&cfg, "limit", 100);
     let mut teams = tc::cfg_strings(&cfg, "teams", &[]);

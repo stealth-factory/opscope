@@ -52,8 +52,8 @@ name = "herdr-panes"
 path = "src/widgets/herdr-panes/main.rs"
 
 [[bin]]
-name = "deployments"
-path = "src/widgets/deployments/main.rs"
+name = "vercel-deployments"
+path = "src/widgets/vercel-deployments/main.rs"
 
 # The launcher, and the command the project is named after. One word, like
 # htop and btop, because that is what somebody types first.

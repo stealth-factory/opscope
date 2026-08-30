@@ -16,7 +16,7 @@ navigation, not itself a widget.
 | | |
 |---|---|
 | [`latency`](../widgets/src/widgets/latency/README.md) | Continuous latency to a list of hosts, with the statistics that actually explain a bad connection. |
-| [`deployments`](../widgets/src/widgets/deployments/README.md) | Vercel deployments — how they are going over time, not just what shipped last. |
+| [`vercel-deployments`](../widgets/src/widgets/vercel-deployments/README.md) | Vercel deployments — how they are going over time, not just what shipped last. |
 | [`tailnet`](../widgets/src/widgets/tailnet/README.md) | Tailscale peers, and — the part plain `tailscale status` buries — *how* you are reaching each one. |
 | [`herdr-panes`](../widgets/src/widgets/herdr-panes/README.md) | Everything running under [Herdr](https://herdr.dev), across every workspace — and one keypress to get to any of it. |
 | [`github`](../widgets/src/widgets/github/README.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |

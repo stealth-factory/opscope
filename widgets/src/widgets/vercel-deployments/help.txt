@@ -3,7 +3,7 @@ Vercel deployments, live.
 Shows deployment activity over time, build-duration trend, and the most recent
 deployments with their state, project, branch, commit and build time.
 
-    deployments [-n SECONDS] [-t TEAM_ID] [project ...]
+    vercel-deployments [-n SECONDS] [-t TEAM_ID] [project ...]
 
 Polls every 15s by default (-n changes it, minimum 5s). One request per team
 per poll, so the default is 4 polls/min — modest against the API's limits.
@@ -21,7 +21,7 @@ text reaches your local clipboard even over SSH. If your terminal or
 multiplexer blocks OSC 52, the sheet still shows each URL in full for mouse
 selection.
 
-Credentials: `deployments.token` in config.json, or $VERCEL_TOKEN. Create one
+Credentials: `vercel_deployments.token` in config.json, or $VERCEL_TOKEN. Create one
 at Account Settings -> Tokens. The Vercel CLI's own session is deliberately not
 used - it expires within hours and only the CLI can refresh it, so anything
 reading it goes dark overnight. The token is read locally and never printed. `vercel ls --all --format json` is an equivalent data source
