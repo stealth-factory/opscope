@@ -127,6 +127,10 @@ Three rules the tests measure:
   grows, drop them as it shrinks. **Never truncate.**
 - **Never truncate a key hint.** `pack_hints()` wraps footers without
   splitting one, because `[±]25` teaches a key that does not exist.
+- **A letter is not a verb on a screen with a search box.** Binding `d` to
+  drop made every model with a `d` in its name unsearchable. Guard it on an
+  empty query — as `q` already is — and hide the hint while typing, so the
+  footer never names a key the box is eating.
 - **Measure contrast, do not eyeball it.** Every text colour must clear WCAG AA
   against the terminal background *and* the selected-row tint. This was prose
   in `CLAUDE.md` and went unmet in four widgets for as long as there were four
@@ -228,15 +232,17 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 };
 ```
 
-The screen then offers those keys as a picker — `↵` on the empty field,
-`[a]dd / remove` afterwards — and gives each ticked key a row per number, with
-the widget's own figure as the **default**. Ticking writes membership only:
+`↵` on that field then opens one screen carrying both halves of the job:
+the keys the reader has set something on, `tab` for the whole table, and
+typing to search all of it. `↵` on a row opens that key's numbers, each with
+the widget's own figure as the **default**, and `esc` comes back to the table
+with the search still typed.
 
-```json
-"rates": { "gpt-5.6-sol": {} }
-```
+**Nothing is written until a number is.** There is no membership to keep in
+step with the values — a key is the reader's when it holds one — and opening a
+row to look at it leaves the file alone.
 
-**Never seed a picked entry with the values.** Writing today's numbers into
+**Never seed an entry with the values.** Writing today's numbers into
 somebody's config pins them there, and the correction the widget ships next
 month never reaches them. The value stays absent until they change it, which
 is also what makes "using default" on screen true.
@@ -245,13 +251,12 @@ That in turn requires the *reader* to merge per key rather than take the
 configured object wholesale — `agent-usage` did the latter, so overriding one
 price silently deleted the other four and those tokens metered as free.
 
-Two things follow from membership meaning nothing, and both have to be built
-deliberately:
+Two things follow, and both have to be built deliberately:
 
-- **An empty entry must be invisible to the reader.** Otherwise it answers
-  "configured" for a row of shipped defaults, and hands a key nobody has
-  filled in an empty rate — which prices at zero rather than reporting as
-  unpriced. Both are the pane stating something untrue.
+- **An empty entry must be invisible to the reader.** One can still reach the
+  file by hand, and it answers "configured" for a row of shipped defaults, or
+  hands a key nobody filled in an empty rate — which prices at zero rather
+  than reporting as unpriced. Both are the pane stating something untrue.
 - **A widget that refuses to guess must keep refusing.** `agent-usage` names
   models with no published price so prefix matching cannot hand them a
   family's rate. Merging reopened that door: naming the model in config let

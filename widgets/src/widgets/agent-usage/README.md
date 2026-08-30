@@ -579,17 +579,38 @@ are in [`wiki/model-prices.md`](../../../../wiki/model-prices.md).
 
 ### Setting a rate yourself
 
-`,` → `rates` opens the rate card rather than a JSON box: `↵` on an empty
-`rates` offers all the models it ships, `[a]dd / remove` reaches the same
-picker later, and typing filters it. Ticking a model writes membership and
-nothing else —
+`,` → `rates` opens the rate card rather than a JSON box. One screen does the
+finding and the choosing:
 
-```json
-"rates": { "gpt-5.6-sol": {} }
+```
+  the 2 you have set · tab or type to search all 68
+   ▏ type to filter
+ ▸ ✓ gpt-5.6-sol
+   ✓ o3
+ ↵ open  tab show all  [d]rop  ↑↓ pick  esc done
 ```
 
-— and its kinds then appear as `gpt-5.6-sol · input` and so on, each showing
-the published price as its **default**.
+It opens on the models you have set something on — the short list, and the one
+you came back for — or on the whole card when you have none. `tab` switches
+between the two, and typing searches all sixty-eight whichever view is on.
+
+`↵` opens a model and lists its priced kinds, each showing the published price
+as its **default**:
+
+```
+ ▸ o3 · input       —    2.0    unset
+   o3 · output      —    8.0    unset
+   o3 · cache_read  —    0.5    unset
+```
+
+`esc` goes back to the card with your search still typed, so setting three
+models is three round trips and no retyping.
+
+**Opening a model writes nothing.** An entry appears the moment you set a
+number, and `[d]rop` takes it out again — the whole entry, numbers and all,
+which is what putting a model back on list prices means. There is no separate
+"selected" state to drift out of step with the prices: a model is yours when
+it holds one.
 
 **Set only the numbers you mean to change.** Config wins per kind, not per
 model, so an override of `input` leaves output, both cache writes and cache
@@ -598,10 +619,8 @@ correction. It used to replace the whole rate, which meant setting one number
 deleted the other four — and a missing kind costs zero, so output metered as
 free and the total was quietly a fraction of the real one.
 
-A model ticked with nothing set under it is priced entirely from the card and
-reports as `list`, not as configured — membership is not a price. `*` works
-the same way: it overrides those kinds for any model no other key names,
-rather than replacing the card's rate for them.
+`*` works the same way: it overrides those kinds for any model no other key
+names, rather than replacing the card's rate for them.
 
 The one thing this does not reach is a model with **no published price** —
 `gpt-5.3-codex-spark` and the retired models. Those never inherit a family
@@ -609,8 +628,9 @@ rate however they are configured; set their kinds yourself and only those
 kinds are priced, because the alternative is showing a number nobody
 published.
 
-Unticking a model removes the entry and any numbers under it, because that is
-what removing a model has to mean.
+A model the card does not carry can still be priced: add it to `rates` in the
+file and it appears on the card with every kind and no defaults, which is the
+one case worth editing JSON by hand for.
 
 ### What each figure covers
 

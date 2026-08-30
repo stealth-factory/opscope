@@ -852,6 +852,7 @@ fn palette() -> Palette {
     }
 }
 
+#[derive(Clone)]
 enum Mode {
     List,
     Edit {
@@ -867,6 +868,10 @@ enum Mode {
         query: String,
         sel: usize,
         scroll: usize,
+        /// Whether the whole table is on show, or only the entries this
+        /// reader has set something on. Starts on the reader's own, which
+        /// is the shorter list and the one they came to look at.
+        show_all: bool,
     },
 }
 
@@ -892,7 +897,10 @@ struct App {
     /// fields that were on show, and which of them was selected. Swapping
     /// `fields` rather than adding a mode means the list screen, the editor,
     /// the writers and every check on them work one level down unchanged.
-    stack: Vec<(Vec<Field>, usize)>,
+    /// The screen to restore, and the mode it was in. A model's prices are
+    /// opened out of the picker, so going back means going back to the
+    /// picker - with the search that found it still typed.
+    stack: Vec<(Vec<Field>, usize, Option<Mode>)>,
 }
 
 fn load(spec: SettingsSpec) -> App {
@@ -1233,9 +1241,6 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
     if !field.parents.is_empty() {
         return None; // one screen down, and no further
     }
-    if let Some(rows) = catalogue_fields(app, field) {
-        return Some(rows);
-    }
     let declared = app
         .constraints
         .get(&field.key)?
@@ -1306,39 +1311,52 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
 /// The published price is each row's **default**, never a value written into
 /// the file. Copying it in would pin that reader to today's number and stop
 /// them getting the correction when it moves.
-fn catalogue_fields(app: &App, field: &Field) -> Option<Vec<Field>> {
-    let table = catalogue_for(app, &field.key)?;
-    let configured = current_of(&app.live, field, app.legacy_section)
+fn model_fields(app: &App, field: &Field, model: &str) -> Vec<Field> {
+    let Some(table) = catalogue_for(app, &field.key) else {
+        return Vec::new();
+    };
+    let listed = table.iter().find(|(m, _)| *m == model).map(|(_, r)| *r);
+    // A model the reader named themselves has no published price, so its
+    // kinds are the ones the card prices everywhere else - offered at no
+    // default rather than not offered at all.
+    let kinds: Vec<(&str, Option<f64>)> = match listed {
+        Some(rates) => rates.iter().map(|(k, v)| (*k, Some(*v))).collect(),
+        None => catalogue_kinds(table).into_iter().map(|k| (k, None)).collect(),
+    };
+    kinds
+        .into_iter()
+        .map(|(kind, price)| Field {
+            section: field.section.clone(),
+            key: kind.to_string(),
+            parents: vec![field.key.clone(), model.to_string()],
+            help: match price {
+                Some(_) => format!("The published list price for {model}."),
+                None => format!("No published price for {model}: this is yours to set."),
+            },
+            default: price
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        })
+        .collect()
+}
+
+/// The entries a reader has actually set a number on.
+///
+/// There is no separate membership any more. A model is "yours" when it holds
+/// a price, which is the only state worth distinguishing and the only one
+/// that can go stale - an empty object used to mean "picked", and it meant a
+/// screen could say "configured" over a column of shipped defaults.
+fn catalogue_chosen(app: &App, field: &Field) -> Vec<String> {
+    current_of(&app.live, field, app.legacy_section)
         .and_then(Value::as_object)
-        .map(|o| o.keys().cloned().collect::<Vec<String>>())
-        .unwrap_or_default();
-    let mut rows = Vec::new();
-    for name in configured {
-        let listed = table.iter().find(|(m, _)| *m == name).map(|(_, r)| *r);
-        // A model the reader named themselves has no published price, so its
-        // kinds are the ones the card prices everywhere else - offered at no
-        // default rather than not offered at all.
-        let kinds: Vec<(&str, Option<f64>)> = match listed {
-            Some(rates) => rates.iter().map(|(k, v)| (*k, Some(*v))).collect(),
-            None => catalogue_kinds(table).into_iter().map(|k| (k, None)).collect(),
-        };
-        for (kind, price) in kinds {
-            rows.push(Field {
-                section: field.section.clone(),
-                key: kind.to_string(),
-                parents: vec![field.key.clone(), name.clone()],
-                help: match price {
-                    Some(_) => format!("The published list price for {name}."),
-                    None => format!("No published price for {name}: this is yours to set."),
-                },
-                default: price
-                    .and_then(serde_json::Number::from_f64)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-            });
-        }
-    }
-    Some(rows)
+        .map(|o| {
+            o.iter()
+                .filter(|(_, v)| v.as_object().is_some_and(|m| !m.is_empty()))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Every kind the card prices anywhere, in the order it first names them.
@@ -1354,24 +1372,6 @@ fn catalogue_kinds(table: Catalogue) -> Vec<&'static str> {
     seen
 }
 
-/// Where `a` would take you: the catalogue-backed field this screen is
-/// about, whether that is the row under the cursor or the object whose
-/// numbers are on show.
-///
-/// Returned as the index in the list it belongs to, and whether reaching it
-/// means stepping back up first, because the picker writes through the field
-/// list that holds it.
-fn catalogue_in_reach(app: &App) -> Option<(usize, bool)> {
-    if let Some(field) = app.fields.get(app.selected) {
-        if field.parents.is_empty() && catalogue_for(app, &field.key).is_some() {
-            return Some((app.selected, false));
-        }
-    }
-    // Standing among the numbers: the field is the one on the screen below.
-    let (parent_fields, parent_sel) = app.stack.last()?;
-    let parent = parent_fields.get(*parent_sel)?;
-    catalogue_for(app, &parent.key).map(|_| (*parent_sel, true))
-}
 
 fn catalogue_for(app: &App, key: &str) -> Option<Catalogue> {
     app.catalogues.iter().find(|(f, _)| *f == key).map(|(_, t)| *t)
@@ -1543,10 +1543,11 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
     let held = current_of(&app.live, field, app.legacy_section).or(Some(&field.default));
     // A catalogue-backed field is an object, and its keys are the choices.
     // The value under each is the numbers, which the picker never touches.
-    if let Some(Value::Object(map)) = held {
-        if catalogue_for(app, &field.key).is_some() {
-            return map.keys().map(|k| (k.clone(), k.clone())).collect();
-        }
+    if matches!(held, Some(Value::Object(_))) && catalogue_for(app, &field.key).is_some() {
+        return catalogue_chosen(app, field)
+            .into_iter()
+            .map(|k| (k.clone(), k))
+            .collect();
     }
     held.and_then(Value::as_array)
         .map(|rows| {
@@ -1602,7 +1603,7 @@ fn picked_label(app: &App, index: usize, zone: &str) -> Option<String> {
 /// the top here: a city that moves when you tick it is a city you then have
 /// to find again, and it puts the same name in two places depending on a
 /// state you are in the middle of changing. The tick moves, the row does not.
-fn zone_choices(app: &App, index: usize, query: &str) -> Vec<(String, bool)> {
+fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(String, bool)> {
     let Some(field) = app.fields.get(index) else {
         return Vec::new();
     };
@@ -1612,6 +1613,14 @@ fn zone_choices(app: &App, index: usize, query: &str) -> Vec<(String, bool)> {
     let picked = picked_zones(app, index);
     if kind.opens_on_chosen() && query.is_empty() {
         return picked.into_iter().map(|z| (z, true)).collect();
+    }
+    // A catalogue shows the reader's own entries until they ask for the rest
+    // or type something. Sixty-eight rows is a table to search, not a list to
+    // read, and the three you have set are what you came back for.
+    if let PickKind::Catalogue(_) = &kind {
+        if !show_all && query.is_empty() {
+            return picked.into_iter().map(|z| (z, true)).collect();
+        }
     }
     let mut out: Vec<(u8, String)> = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS
@@ -1720,11 +1729,16 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 }
 
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
-    let Mode::Pick { index, query, sel, scroll } = &mut app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all } = &mut app.mode else {
         return false;
     };
-    let (index, mut q, mut s_, mut sc) = (*index, query.clone(), *sel, *scroll);
-    let total = zone_choices(app, index, &q).len();
+    let (index, mut q, mut s_, mut sc, mut all) =
+        (*index, query.clone(), *sel, *scroll, *show_all);
+    let catalogue = app
+        .fields
+        .get(index)
+        .is_some_and(|f| catalogue_for(app, &f.key).is_some());
+    let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
             app.mode = Mode::List;
@@ -1753,8 +1767,46 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             s_ = 0;
             sc = 0;
         }
+        // A catalogue entry is a thing with numbers under it, so opening it
+        // is what enter should do. A list of names has nothing to open, and
+        // enter still ticks.
+        "enter" if catalogue => {
+            if let Some((model, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                let Some(parent) = app.fields.get(index).cloned() else {
+                    return false;
+                };
+                let rows = model_fields(app, &parent, &model);
+                if !rows.is_empty() {
+                    app.stack
+                        .push((app.fields.clone(), index, Some(app.mode.clone())));
+                    app.fields = rows;
+                    app.selected = 0;
+                    app.scroll = 0;
+                    app.status = None;
+                    app.mode = Mode::List;
+                    return false;
+                }
+            }
+        }
+        // Clearing an entry from the picker, where the entry is visible as
+        // one row. Doing it from inside would mean deleting five fields and
+        // then finding your own way out.
+        "d" | "D" if catalogue && q.is_empty() => {
+            if let Some((model, on)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                if on {
+                    clear_catalogue_entry(app, index, &model);
+                } else {
+                    app.status = Some(format!("{model} has nothing set on it"));
+                }
+            }
+        }
+        "tab" if catalogue => {
+            all = !all;
+            s_ = 0;
+            sc = 0;
+        }
         "enter" => {
-            if let Some((zone, _)) = zone_choices(app, index, &q).get(s_).cloned() {
+            if let Some((zone, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 let label = alias_hit(&zone, &q).map(str::to_string);
                 toggle_zone(app, index, &zone, label);
             }
@@ -1768,13 +1820,37 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         }
         _ => {}
     }
-    let total = zone_choices(app, index, &q).len();
-    if let Mode::Pick { query, sel, scroll, .. } = &mut app.mode {
+    let total = zone_choices(app, index, &q, all).len();
+    if let Mode::Pick { query, sel, scroll, show_all, .. } = &mut app.mode {
         *query = q;
         *sel = s_.min(total.saturating_sub(1));
         *scroll = sc;
+        *show_all = all;
     }
     false
+}
+
+/// Take a catalogue entry back out of the file, numbers and all.
+///
+/// Removing the object rather than each number is the point: a model with
+/// nothing set is a model priced from the card, and leaving an empty husk
+/// behind would be a row claiming to be configured with nothing in it.
+fn clear_catalogue_entry(app: &mut App, index: usize, model: &str) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let mut held: serde_json::Map<String, Value> =
+        match current_of(&app.live, field, app.legacy_section) {
+            Some(Value::Object(map)) => map.clone(),
+            _ => return,
+        };
+    if held.remove(model).is_none() {
+        return;
+    }
+    match write_field(app, index, Value::Object(held)) {
+        Ok(()) => app.status = Some(format!("{model} back to list prices")),
+        Err(e) => app.status = Some(e),
+    }
 }
 
 fn handle_list_key(app: &mut App, key: &str) -> bool {
@@ -1782,11 +1858,14 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         // Coming out of a declared object is not leaving the screen. Only
         // the outermost list quits.
         "esc" if !app.stack.is_empty() => {
-            if let Some((fields, sel)) = app.stack.pop() {
+            if let Some((fields, sel, mode)) = app.stack.pop() {
                 app.fields = fields;
                 app.selected = sel;
                 app.scroll = 0;
                 app.status = None;
+                if let Some(mode) = mode {
+                    app.mode = mode;
+                }
             }
         }
         "q" | "Q" | "esc" | "," => return true,
@@ -1809,27 +1888,6 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         "end" => {
             app.selected = app.fields.len().saturating_sub(1);
             app.chase = true;
-        }
-        "a" | "A" => {
-            if let Some((index, step_back)) = catalogue_in_reach(app) {
-                // Step back up first: the picker writes through the list the
-                // field lives in, and from among the numbers that is the
-                // screen below. Coming back to it is also what somebody
-                // adding a second model expects to see.
-                if step_back {
-                    if let Some((fields, selected)) = app.stack.pop() {
-                        app.fields = fields;
-                        app.selected = selected;
-                        app.scroll = 0;
-                    }
-                }
-                app.mode = Mode::Pick {
-                    index,
-                    query: String::new(),
-                    sel: 0,
-                    scroll: 0,
-                };
-            }
         }
         "r" | "R" => {
             let keep = app.selected;
@@ -1873,7 +1931,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 } else if let Some(inner) =
                     nested_fields(app, app.selected).filter(|rows| !rows.is_empty())
                 {
-                    app.stack.push((app.fields.clone(), app.selected));
+                    app.stack.push((app.fields.clone(), app.selected, None));
                     app.fields = inner;
                     app.selected = 0;
                     app.scroll = 0;
@@ -1883,6 +1941,11 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                         query: String::new(),
                         sel: 0,
                         scroll: 0,
+                        // Your own entries first, because that is the short
+                        // list and the one you came back for - unless there
+                        // are none, where opening on it would be a screen
+                        // saying you have nothing and offering nothing.
+                        show_all: picked_zones(app, app.selected).is_empty(),
                     };
                 } else {
                     let seed = edit_seed(field, current_of(&app.live, field, app.legacy_section));
@@ -2028,7 +2091,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .fields
         .get(app.selected)
         .is_some_and(|f| f.default.is_boolean());
-    let hints = list_hints(p, boolean, catalogue_in_reach(app).is_some());
+    let hints = list_hints(p, boolean);
     let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
         .into_iter()
         .map(|l| format!(" {l}"))
@@ -2358,11 +2421,11 @@ fn input_row(p: &Palette, w: usize, text: &str, cursor: usize, placeholder: &str
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
-    let Mode::Pick { index, query, sel, scroll } = &app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all } = &app.mode else {
         return vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
     };
     let field = &app.fields[*index];
-    let choices = zone_choices(app, *index, query);
+    let choices = zone_choices(app, *index, query, *show_all);
     let kind = picker_kind(app, &field.key).unwrap_or(PickKind::Timezone);
     let total_choices = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS.len(),
@@ -2403,6 +2466,27 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         // A closed set says how much of itself is chosen, which is the
         // question a checklist answers.
         (false, _) => format!("  {} of {} chosen", chosen, total_choices),
+    };
+    // A catalogue is not a checklist: nothing is "chosen", things are set or
+    // they are not, and the count that matters is how many you have changed
+    // against how many there are to change.
+    let heading = match &kind {
+        PickKind::Catalogue(_) if !query.is_empty() => format!(
+            "  {} of {} match · {} set in all",
+            choices.len(),
+            total_choices,
+            chosen
+        ),
+        PickKind::Catalogue(_) if *show_all => {
+            format!("  all {} · {} of them set · tab for just yours", total_choices, chosen)
+        }
+        PickKind::Catalogue(_) if chosen == 0 => {
+            format!("  nothing set · tab or type to search all {total_choices}")
+        }
+        PickKind::Catalogue(_) => format!(
+            "  the {chosen} you have set · tab or type to search all {total_choices}"
+        ),
+        _ => heading,
     };
     body.push(crate::seg(&[(p.dim.as_str(), heading)], w.saturating_sub(1)));
     // How the widget will order what is picked here, said on the screen
@@ -2449,6 +2533,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     if choices.is_empty() {
         let why = match (zones, query.is_empty()) {
             (true, true) => "  no cities yet - type to search and add one".to_string(),
+            // A catalogue is never empty - the card is always there - so an
+            // empty screen here means the reader is looking at their own and
+            // has none yet. Say which key gets them the rest.
+            (false, true) if matches!(kind, PickKind::Catalogue(_)) => {
+                "  nothing set yet - tab for the whole card".to_string()
+            }
             (false, true) => "  nothing to choose from".to_string(),
             (_, false) => format!("  nothing matches /{query}"),
         };
@@ -2493,7 +2583,35 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if !zones {
+    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Catalogue(_)) {
+        // Enter opens rather than ticks here, so the footer has to say so -
+        // this is the one picker where the row is a door, not a checkbox.
+        let mut h = vec![vec![
+            (p.accent.as_str(), "↵".into()),
+            (p.dim.as_str(), " open".into()),
+        ]];
+        h.push(vec![
+            (p.accent.as_str(), "tab".into()),
+            (
+                p.dim.as_str(),
+                if *show_all { " just mine".into() } else { " show all".into() },
+            ),
+        ]);
+        // Only while the search is empty, because that is the only time the
+        // key is a verb rather than a character going into the box.
+        if chosen > 0 && query.is_empty() {
+            h.push(vec![(p.dim.as_str(), "[d]rop".into())]);
+        }
+        if !query.is_empty() {
+            h.push(vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ]);
+        }
+        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![(p.dim.as_str(), "esc done".into())]);
+        h
+    } else if !zones {
         // Everything is on screen, ticked or not, so one verb covers it.
         let mut h = vec![vec![
             (p.accent.as_str(), "↵".into()),
@@ -2538,27 +2656,17 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     body
 }
 
-fn list_hints<'a>(
-    p: &'a Palette,
-    boolean: bool,
-    catalogue: bool,
-) -> Vec<Vec<(&'a str, String)>> {
+fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
     // `edit` is wrong for the row under the cursor when that row is a
     // boolean: enter does not open anything, it moves it on one place.
     let enter = if boolean { " true / false / default" } else { " edit" };
-    let mut out = vec![
+    vec![
         vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
         vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), enter.into())],
         vec![(p.dim.as_str(), "[r]eload".into())],
         vec![(p.dim.as_str(), "[d]efault".into())],
         vec![(p.dim.as_str(), "esc / [,] back".into())],
-    ];
-    // Only where there is a table to pick from. A hint naming a key that
-    // does nothing on this screen teaches a control that is not there.
-    if catalogue {
-        out.insert(3, vec![(p.dim.as_str(), "[a]dd / remove".into())]);
-    }
-    out
+    ]
 }
 
 /// Take over the current terminal until the user returns to the widget.
@@ -2637,63 +2745,74 @@ mod tests {
     /// The published number is the row's default and never the row's value.
     ///
     /// Writing list prices into somebody's config pins them to the day they
-    /// pressed the key: the next correction from the vendor never reaches
+    /// opened the screen: the next correction from the vendor never reaches
     /// them, which is exactly the staleness this table has already had once.
     #[test]
-    fn a_picked_model_takes_its_prices_as_defaults_not_as_values() {
-        let live = serde_json::json!({"w": {"rates": {"model-a": {}}}});
-        let app = catalogue_app(live);
-        let rows = nested_fields(&app, 0).expect("a catalogue field has rows");
+    fn a_models_prices_are_offered_as_defaults_not_written_as_values() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        let parent = app.fields[0].clone();
+        let rows = model_fields(&app, &parent, "model-a");
         assert_eq!(rows.len(), 2, "model-a prices two kinds");
         assert_eq!(rows[0].key, "input");
         assert_eq!(rows[0].parents, vec!["rates".to_string(), "model-a".to_string()]);
         assert_eq!(rows[0].default, serde_json::json!(4.0));
-        // Nothing was written, so nothing is set.
+        // Opening a model writes nothing, so nothing is set.
         assert!(current_of(&app.live, &rows[0], None).is_none());
-        // And the row says which model it is, because "input" alone appears
-        // once per model and names none of them.
+        // The row names its model: "input" alone appears once per model.
         assert_eq!(rows[0].label(), "model-a · input");
     }
 
-    /// Only models the reader added get rows. Sixty-eight models times five
-    /// kinds is a screen nobody can read.
+    /// Enter on a catalogue field opens the picker rather than a list of
+    /// every model's every kind, which for a real card is three hundred rows.
     #[test]
-    fn an_empty_catalogue_field_offers_no_rows() {
-        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
-        assert!(nested_fields(&app, 0).expect("still a catalogue").is_empty());
+    fn a_catalogue_field_has_no_flat_screen_of_its_own() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {"input": 1.0}}}}));
+        assert!(nested_fields(&app, 0).is_none());
+        assert!(matches!(picker_kind(&app, "rates"), Some(PickKind::Catalogue(_))));
     }
 
-    /// A model the card has never heard of still gets every kind, with no
+    /// A model the card has never heard of still offers every kind, with no
     /// default, because a name the reader typed is the case config exists for.
     #[test]
     fn a_model_the_card_lacks_offers_every_kind_it_knows() {
-        let live = serde_json::json!({"w": {"rates": {"mine": {}}}});
-        let rows = nested_fields(&catalogue_app(live), 0).unwrap();
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        let parent = app.fields[0].clone();
+        let rows = model_fields(&app, &parent, "mine");
         let kinds: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(kinds, vec!["input", "output", "cache_read"]);
         assert!(rows.iter().all(|r| r.default.is_null()), "nothing invented");
     }
 
-    /// The picker writes membership, and unticking takes the numbers with it.
+    /// A model is the reader's when it holds a price - there is no separate
+    /// membership to get out of step with the numbers.
     #[test]
-    fn ticking_a_model_writes_an_empty_object_and_unticking_removes_it() {
-        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
-        assert!(picked_zones(&app, 0).is_empty());
+    fn a_model_counts_as_set_only_when_it_holds_a_number() {
+        let empty = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        assert!(picked_zones(&empty, 0).is_empty());
 
-        let with_one = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {}}}}));
-        assert_eq!(picked_zones(&with_one, 0), vec!["model-a".to_string()]);
+        // An entry left behind with nothing in it is not "chosen": it would
+        // otherwise show as configured over a column of shipped defaults.
+        let husk = catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {}}}}));
+        assert!(picked_zones(&husk, 0).is_empty(), "an empty object is not a choice");
 
-        // An edited model is still just a member as far as the picker is
-        // concerned - it reads the keys, never what is under them.
         let edited =
             catalogue_app(serde_json::json!({"w": {"rates": {"model-a": {"input": 3.5}}}}));
         assert_eq!(picked_zones(&edited, 0), vec!["model-a".to_string()]);
 
-        // Every model on the card is offered, ticked or not.
-        let offered = zone_choices(&edited, 0, "");
+        // With nothing typed the screen shows the reader's own; tab shows
+        // the whole card. That is the toggle, and it is what makes a list of
+        // sixty-eight readable when three of them are yours.
+        let mine = zone_choices(&edited, 0, "", false);
+        assert_eq!(mine, vec![("model-a".to_string(), true)]);
+        let offered = zone_choices(&edited, 0, "", true);
         assert_eq!(offered.len(), 2);
         assert_eq!(offered[0], ("model-a".to_string(), true));
         assert_eq!(offered[1], ("model-b".to_string(), false));
+
+        // Typing searches the whole card whichever view is on, or a model
+        // you have not set yet could not be found.
+        let found = zone_choices(&edited, 0, "model-b", false);
+        assert_eq!(found, vec![("model-b".to_string(), false)]);
     }
 
     /// A row whose widget offers no figure must still accept one.
