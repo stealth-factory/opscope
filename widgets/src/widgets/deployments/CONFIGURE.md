@@ -20,7 +20,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Ask which teams/projects should be included. Never copy a token into chat, logs, command arguments, or source files.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
-5. Save through the settings screen, restart the widget when it says restart is required, and verify that the real source answers or that the pane gives a specific reason why it cannot.
+5. Save through the settings screen and leave it — the widget reloads itself on the way out, so no restart is needed. Then verify that the real source answers, or that the pane gives a specific reason why it cannot.
 
 ## Boundaries
 

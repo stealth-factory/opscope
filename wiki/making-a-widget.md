@@ -185,8 +185,17 @@ config path `load_config` reads, and a warning when a legacy section is in use.
 Arrows and `j`/`k` move the selected field; `ctrl-y`/`ctrl-e` and the wheel
 move the viewport without changing what `↵` edits. `↵` edits or toggles, `d`
 removes an override, `r` reloads, `a` opens a picker where there is one, and
-`esc`, `q` or `,` returns. A running widget keeps the values it started with;
-the screen says to restart after a write.
+`esc`, `q` or `,` returns.
+
+**A widget that wrote something restarts itself on the way out.** A widget
+reads its config once and builds everything from it — poll intervals, hosts,
+which tabs exist — so a value written here cannot reach a process already
+running. The screen used to say so and leave it to the reader. `run_settings`
+now re-execs the binary when anything reached the file, which is one
+behaviour for every widget rather than fourteen half-implementations, and it
+happens at the one safe moment: on the way out, with the terminal being
+handed back anyway. A widget needs no code for this and should not tell
+anyone to restart.
 
 **A token is masked and there is no key to unmask it.** There was one, and
 nothing needed it: the value is in the file for anyone who has to read it,

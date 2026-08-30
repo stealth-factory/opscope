@@ -906,6 +906,9 @@ struct App {
     /// fields that were on show, and which of them was selected. Swapping
     /// `fields` rather than adding a mode means the list screen, the editor,
     /// the writers and every check on them work one level down unchanged.
+    /// Whether anything reached the file. Leaving with this set restarts the
+    /// widget, because a running one holds the config it started with.
+    wrote: bool,
     /// The screen to restore, and the mode it was in. A model's prices are
     /// opened out of the picker, so going back means going back to the
     /// picker - with the search that found it still typed.
@@ -947,6 +950,7 @@ fn load(spec: SettingsSpec) -> App {
         legacy_section: spec.legacy_section,
         schema: spec.schema,
         catalogues: spec.catalogues,
+        wrote: false,
         constraints,
         fields,
         live,
@@ -1023,17 +1027,18 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
     let next = set_json_path(&fresh_raw, &path, &value)?;
     serde_json::from_str::<Value>(&next).map_err(|e| format!("refusing to write: {e}"))?;
     atomic_write(&app.path, &next, Some(&fresh_raw))?;
+    app.wrote = true;
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
     app.exists = true;
     app.status = Some(if section != schema_section {
         format!(
-            "wrote {section}.{key} · this file still uses `{section}` · restart {}",
+            "wrote {section}.{key} · this file still uses `{section}` · reloading {}",
             app.widget
         )
     } else {
         format!(
-            "wrote {schema_path} · restart {} for the change to take effect",
+            "wrote {schema_path} · {} reloads when you leave",
             app.widget
         )
     });
@@ -1088,10 +1093,11 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         }
     }
     atomic_write(&app.path, &next, Some(&fresh_raw))?;
+    app.wrote = true;
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
     app.status = Some(format!(
-        "removed {schema_path} · default {shown_default} · restart {}",
+        "removed {schema_path} · default {shown_default} · {} reloads when you leave",
         app.widget
     ));
     Ok(())
@@ -2083,7 +2089,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(
             p.dim.as_str(),
             format!(
-                " {} keys · {} unset · a running widget will not pick a change up until it restarts",
+                " {} keys · {} unset · the widget reloads when you leave this screen",
                 app.fields.len(),
                 unset
             ),
@@ -2264,7 +2270,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             }
         }
         let help = if field.help.is_empty() {
-            format!("{} · restart {} for a change to take effect", field.kind(), field.widget())
+            format!("{} · {} reloads when you leave", field.kind(), field.widget())
         } else {
             field.help.clone()
         };
@@ -2275,7 +2281,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             body.push(crate::seg(
                 &[(
                     p.dim.as_str(),
-                    format!("  restart {} for a change to take effect", field.widget()),
+                    format!("  {} reloads when you leave this screen", field.widget()),
                 )],
                 w.saturating_sub(1),
             ));
@@ -2346,7 +2352,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
                     .map(|u| format!(" · {u}"))
                     .unwrap_or_default();
                 format!(
-                    "  {}{} · default {} · restart {} after writing",
+                    "  {}{} · default {} · {} reloads on the way out",
                     field.kind(),
                     unit,
                     summary(&field.default, false),
@@ -2730,6 +2736,9 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
                 Mode::Pick { .. } => handle_pick_key(&mut app, &key),
             };
             if quit {
+                if app.wrote {
+                    relaunch(keyboard);
+                }
                 return;
             }
         }
@@ -2742,6 +2751,36 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         crate::draw(&body, w, h);
         std::thread::sleep(Duration::from_millis(80));
     }
+}
+
+/// Start this binary again, in place, carrying the arguments it was given.
+///
+/// A widget reads its config once and builds everything from it - poll
+/// intervals, hosts, colours, which tabs exist - so a value written here
+/// cannot reach a widget already running. The screen used to say so and
+/// leave it to the reader. Doing it for them means one behaviour for every
+/// widget rather than fourteen half-implementations, and it lands at the one
+/// moment it is safe: on the way out, when the terminal is being handed back
+/// anyway.
+///
+/// `exec` replaces this process, so nothing after it runs when it works.
+/// When it does not - a binary deleted or replaced under a running pane -
+/// the terminal is put back the way the widget expects and the caller
+/// carries on with the config it started with, which is exactly where it
+/// was before.
+fn relaunch(keyboard: &mut crate::Keyboard) {
+    use std::os::unix::process::CommandExt;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    keyboard.restore();
+    crate::restore_screen();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let _ = std::process::Command::new(exe).args(args).exec();
+    // Only reached when exec failed. Put the screen back so the widget is
+    // not drawing into a terminal that has been handed away.
+    crate::setup();
 }
 
 #[cfg(test)]
@@ -2783,6 +2822,7 @@ mod tests {
             chase: false,
             mode: Mode::List,
             status: None,
+            wrote: false,
             stack: Vec::new(),
         }
     }
