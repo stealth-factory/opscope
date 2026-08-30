@@ -2086,6 +2086,9 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         .fields
         .get(index)
         .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::Map)));
+    // The two kinds whose box composes rather than filters, and which
+    // therefore have somewhere for focus to be other than the box.
+    let typed = free || map;
     let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
@@ -2096,18 +2099,32 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             app.mode = Mode::List;
             return false;
         }
-        // Above the plain arrows, which would otherwise take these first:
-        // reaching for the list is asking for it, and without this they move
-        // a selection nobody can see, which reads as a dead key.
-        "up" | "down" | "pgup" | "pgdn" | "home" | "end" if free && !rows && total > 0 => {
+        // Above the plain arrows, which would otherwise take these first.
+        // Reaching for the list is asking for it, and without this they move
+        // a selection nobody can see, which reads as a dead key. Down lands
+        // on the first entry rather than the one the cursor happened to be
+        // left on, because coming in from the box you are starting at the
+        // top of the list.
+        "down" | "pgdn" if typed && !rows && total > 0 => {
+            rows = true;
+            s_ = 0;
+        }
+        "up" | "pgup" | "home" | "end" if typed && !rows && total > 0 => {
             rows = true;
         }
-        // The box owns the text keys. A free list that has handed focus to
+        // And out again the way you came: up from the first entry is not a
+        // selection that will not move, it is a request to go back to typing.
+        "up" if typed && rows && s_ == 0 => {
+            rows = false;
+        }
+        // And out again the way you came: up from the first entry is not a
+        // selection that will not move, it is a request to go back to typing.
+        // The box owns the text keys. A typed list that has handed focus to
         // its rows is the one case where home and end are navigation.
-        "left" if !(free && rows) => cur = cur.saturating_sub(1),
-        "right" if !(free && rows) => cur = (cur + 1).min(q.chars().count()),
-        "home" if !(free && rows) => cur = 0,
-        "end" if !(free && rows) => cur = q.chars().count(),
+        "left" if !(typed && rows) => cur = cur.saturating_sub(1),
+        "right" if !(typed && rows) => cur = (cur + 1).min(q.chars().count()),
+        "home" if !(typed && rows) => cur = 0,
+        "end" if !(typed && rows) => cur = q.chars().count(),
         "up" => s_ = s_.saturating_sub(1),
         "down" => s_ = (s_ + 1).min(total.saturating_sub(1)),
         "pgup" => s_ = s_.saturating_sub(10),
@@ -3709,6 +3726,87 @@ mod tests {
             panic!("still on the picker");
         };
         assert_eq!(*cursor, 0);
+    }
+
+    /// The arrows cross into the list and back out of the top of it.
+    ///
+    /// Tab was the only way in for a map and the only way out for either,
+    /// so somebody who arrowed into a list had to remember a different key
+    /// to leave it - which is not how any other list on a screen behaves.
+    #[test]
+    fn the_arrows_cross_between_the_box_and_the_entries() {
+        let live = serde_json::json!({"w": {"hosts": ["a.example", "b.example"]}});
+        let mut app = catalogue_app(live);
+        app.catalogues = &[];
+        app.fields = vec![Field {
+            section: "w".into(),
+            key: "hosts".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: serde_json::json!([]),
+        }];
+        app.constraints
+            .insert("hosts".into(), serde_json::json!({"items": "string"}));
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+            cursor: 0,
+        };
+
+        // Down goes in, and lands on the first entry rather than wherever
+        // the selection happened to be left.
+        handle_pick_key(&mut app, "down");
+        let Mode::Pick { on_list, sel, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(on_list, "down enters the list");
+        assert_eq!(*sel, 0, "coming in from the box starts at the top");
+
+        // Down again moves within it.
+        handle_pick_key(&mut app, "down");
+        let Mode::Pick { on_list, sel, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(on_list);
+        assert_eq!(*sel, 1);
+
+        // Up moves back within it, and up again at the top leaves.
+        handle_pick_key(&mut app, "up");
+        let Mode::Pick { on_list, sel, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(on_list, "still in the list at the top");
+        assert_eq!(*sel, 0);
+
+        handle_pick_key(&mut app, "up");
+        let Mode::Pick { on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(!on_list, "up from the first entry returns to the box");
+    }
+
+    /// An empty list has nothing to step into.
+    #[test]
+    fn down_stays_in_the_box_when_there_is_nothing_to_select() {
+        let mut app = field_app("hosts", serde_json::json!([]), Some(serde_json::json!({"items": "string"})));
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+            cursor: 0,
+        };
+        handle_pick_key(&mut app, "down");
+        let Mode::Pick { on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(!on_list, "nothing to stand on is nothing to focus");
     }
 
     /// A list of numbers is left alone.
