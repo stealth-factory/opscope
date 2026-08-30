@@ -100,7 +100,7 @@ const WIDGETS: &[Widget] = &[
     },
     Widget {
         stem: "ports",
-        help: include_str!("ports_help.txt"),
+        help: include_str!("../widgets/ports/help.txt"),
         doc: include_str!("../../../docs/ports.md"),
     },
     Widget {

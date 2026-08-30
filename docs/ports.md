@@ -423,6 +423,20 @@ Linux reads `/proc/net/tcp` and walks `/proc/<pid>/fd`. macOS reads
 behind a green macOS build. Only which file to open, or which command to
 spawn, is behind `cfg(target_os)`.
 
+Those files live in the widget's package folder, next to `main.rs`:
+
+```text
+widgets/src/widgets/ports/
+├── main.rs
+├── parse.rs      always compiled, always tested
+├── linux.rs      acquisition: open /proc
+├── macos.rs      acquisition: spawn lsof / ps
+└── help.txt
+```
+
+Another widget grows a second source by dropping the same three files
+beside its `main.rs`. There is no shared platform crate to import.
+
 Traffic still needs `ss`. On a machine without it the columns stay off and
 the header says `no traffic · needs ss`, rather than filling with dots that
 look like a quiet port. Addresses come from `ip -j addr` when that is on

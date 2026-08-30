@@ -44,11 +44,12 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   run and a broken Linux parser sits behind a green build:
   1. **Always compiled, always tested — every parser.** Pure functions from
      text or bytes to values, named `parse_*`, taking a `&str`. They live
-     in `widgets/src/bin/<widget>/parse.rs` so they compile on every target.
+     in `widgets/src/widgets/<widget>/parse.rs` so they compile on every target.
      The cost is a few KB of unused parser in each binary. Worth it.
   2. **`cfg(target_os)` — acquisition only.** Which file to open, which
      command to spawn, a call into a platform C API. `linux.rs` / `macos.rs`
-     beside the widget, gated on `mod host`. Shared wording lives in
+     beside `main.rs` in the widget's package folder, gated on `mod host`.
+     Shared wording lives in
      `opscope-core`: `unsupported()` is `does not run on {os}`, drawn by
      `cannot_start_because()`.
   3. **Runtime detection — anything that varies *within* a platform.** A
@@ -132,7 +133,7 @@ screen, exactly like "there is no data":
   invisible. Parsers are named `parse_*` so the check can see them.
 - **a widget that opens `/proc` with no macOS path and no explanation** — an
   empty table on a Mac looks like a machine with nothing listening. The
-  widget needs a `macos.rs`, a call to `unsupported()`, or a row on the
+  widget needs a `macos.rs` beside `main.rs`, a call to `unsupported()`, or a row on the
   allowlist that names the issue still open.
 
 The hint reader sees `[k]` wherever it falls, four rules keeping `[{}]`,
@@ -270,9 +271,13 @@ that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.
 
-A widget that acquires per OS lives as
-`widgets/src/bin/<widget>/{parse,linux,macos}.rs` — parsers always compiled,
-`mod host` gated by `cfg(target_os)`. `ports` is the worked example.
+A widget that acquires per OS lives in its package folder
+`widgets/src/widgets/<widget>/{main,parse,linux,macos}.rs` — the same
+folder that holds `help.txt`. Parsers always compiled (`mod parse`);
+`mod host` gated by `cfg(target_os)` onto `linux.rs` / `macos.rs`. `ports`
+is the worked example; drop the same three files beside `main.rs` to give
+another widget a second source. Widgets still in `src/bin/` use that
+directory until they move.
 
 Braille line charts are not in there. `latency` and `link` each keep their
 own `braille_canvas`, and the two are not the same function: latency's series

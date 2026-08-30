@@ -25,7 +25,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "ports"
-path = "src/bin/ports.rs"
+path = "src/widgets/ports/main.rs"
 
 [[bin]]
 name = "netwatch"

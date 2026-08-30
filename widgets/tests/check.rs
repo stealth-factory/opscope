@@ -217,9 +217,34 @@ fn without_tests(src: &str) -> String {
 }
 
 /// Every widget binary, by stem, with its source.
+///
+/// A widget lives in one of two places: `src/widgets/<name>/` (the package
+/// folder, with `main.rs` beside its modules) or `src/bin/<name>.rs` (the
+/// layout that has not moved yet). Packages win when both exist.
 fn widgets() -> BTreeMap<String, String> {
-    let dir = root().join("widgets/src/bin");
     let mut found = BTreeMap::new();
+    let packages = root().join("widgets/src/widgets");
+    if packages.is_dir() {
+        for entry in std::fs::read_dir(&packages)
+            .expect("the widgets directory")
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let stem = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if !path.join("main.rs").is_file() {
+                continue;
+            }
+            found.insert(stem, concat_rs(&path));
+        }
+    }
+    let dir = root().join("widgets/src/bin");
     for entry in std::fs::read_dir(&dir)
         .expect("the bin directory")
         .flatten()
@@ -233,30 +258,60 @@ fn widgets() -> BTreeMap<String, String> {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
+        if found.contains_key(&stem) {
+            continue;
+        }
         // Each file's own tests are dropped before joining, not after. Split
         // on the first `#[cfg(test)]` of the joined blob and a widget with
         // submodules is read only as far as its main file's tests - agent-usage's
         // are two thirds of the way down, so its eight submodules, seven
         // thousand lines, were invisible to every check that did it that way.
         let mut src = without_tests(&std::fs::read_to_string(&path).unwrap_or_default());
-        // A widget split across a directory - agent-usage - reads as one widget.
         let sub = dir.join(&stem);
         if sub.is_dir() {
-            for part in std::fs::read_dir(&sub)
-                .expect("a widget directory")
-                .flatten()
-            {
-                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-                    src.push('\n');
-                    src.push_str(&without_tests(
-                        &std::fs::read_to_string(part.path()).unwrap_or_default(),
-                    ));
-                }
-            }
+            src.push('\n');
+            src.push_str(&concat_rs(&sub));
         }
         found.insert(stem, src);
     }
     found
+}
+
+fn concat_rs(dir: &std::path::Path) -> String {
+    let mut src = String::new();
+    for part in std::fs::read_dir(dir)
+        .expect("a widget directory")
+        .flatten()
+    {
+        if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+            src.push('\n');
+            src.push_str(&without_tests(
+                &std::fs::read_to_string(part.path()).unwrap_or_default(),
+            ));
+        }
+    }
+    src
+}
+
+fn widget_package_dir(name: &str) -> Option<PathBuf> {
+    let dir = root().join("widgets/src/widgets").join(name);
+    dir.join("main.rs").is_file().then_some(dir)
+}
+
+fn widget_help_path(name: &str) -> PathBuf {
+    match widget_package_dir(name) {
+        Some(dir) => dir.join("help.txt"),
+        None => root()
+            .join("widgets/src/bin")
+            .join(format!("{name}_help.txt")),
+    }
+}
+
+fn widget_macos_path(name: &str) -> PathBuf {
+    match widget_package_dir(name) {
+        Some(dir) => dir.join("macos.rs"),
+        None => root().join(format!("widgets/src/bin/{name}/macos.rs")),
+    }
 }
 
 /// Text inside double-quoted string literals, where hints live.
@@ -820,10 +875,9 @@ fn every_key_the_help_text_names_is_answered() {
         "closes",
         "copies",
     ];
-    let dir = root().join("widgets/src/bin");
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
-        let help = dir.join(format!("{}_help.txt", name));
+        let help = widget_help_path(&name);
         let Ok(text) = std::fs::read_to_string(&help) else {
             continue;
         };
@@ -842,8 +896,10 @@ fn every_key_the_help_text_names_is_answered() {
                 let before_verb = words.get(i + 1).is_some_and(|next| VERBS.contains(next));
                 if (after_press || before_verb) && !handled.contains(*word) {
                     wrong.push(format!(
-                        "{}_help.txt names {:?} and {}.rs does not answer it",
-                        name, word, name
+                        "{} names {:?} and {}.rs does not answer it",
+                        help.file_name().unwrap_or_default().to_string_lossy(),
+                        word,
+                        name
                     ));
                 }
             }
@@ -1263,7 +1319,7 @@ fn parse_foo(text: &str) {}
 fn sockets() {}
 
 #[cfg(target_os = "macos")]
-#[path = "ports/macos.rs"]
+#[path = "macos.rs"]
 mod host;
 
 #[cfg(target_os = "linux")]
@@ -1286,13 +1342,38 @@ fn hidden() {}
     );
 }
 
-/// Every `.rs` file under `widgets/src/bin`, including per-widget
-/// directories. check.rs's `widgets()` concatenates those; these checks
-/// need the files separately so a `cfg`-gated module can be judged on
-/// its own contents.
+/// Every `.rs` file that makes up a widget, including package folders
+/// and leftover `src/bin/` files. `widgets()` concatenates those; these
+/// checks need the files separately so a `cfg`-gated module can be judged
+/// on its own contents.
 fn widget_rs_files() -> Vec<(String, PathBuf)> {
-    let dir = root().join("widgets/src/bin");
     let mut found = Vec::new();
+    let packages = root().join("widgets/src/widgets");
+    if packages.is_dir() {
+        for entry in std::fs::read_dir(&packages)
+            .expect("the widgets directory")
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("main.rs").is_file() {
+                continue;
+            }
+            let stem = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            for part in std::fs::read_dir(&path)
+                .expect("a widget directory")
+                .flatten()
+            {
+                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                    found.push((stem.clone(), part.path()));
+                }
+            }
+        }
+    }
+    let dir = root().join("widgets/src/bin");
     for entry in std::fs::read_dir(&dir)
         .expect("the bin directory")
         .flatten()
@@ -1304,6 +1385,9 @@ fn widget_rs_files() -> Vec<(String, PathBuf)> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
+            if widget_package_dir(&stem).is_some() {
+                continue;
+            }
             found.push((stem, path));
             continue;
         }
@@ -1313,6 +1397,9 @@ fn widget_rs_files() -> Vec<(String, PathBuf)> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
+            if widget_package_dir(&stem).is_some() {
+                continue;
+            }
             for part in std::fs::read_dir(&path)
                 .expect("a widget directory")
                 .flatten()
@@ -1438,7 +1525,7 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
     // moved behind cfg(target_os = "linux"), this file would lose the
     // function (or gain a target_os) and this test would fail on every
     // runner, including macOS — the thing a cfg-gated unit test cannot do.
-    let path = root().join("widgets/src/bin/ports/parse.rs");
+    let path = root().join("widgets/src/widgets/ports/parse.rs");
     let src = std::fs::read_to_string(&path)
         .expect("ports/parse.rs — the Linux /proc parser lives here so it compiles on macOS too");
     assert!(
@@ -1451,6 +1538,40 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
             t.starts_with("#[cfg") && t.contains("target_os")
         }),
         "ports/parse.rs is gated by target_os — its tests would vanish from the macOS CI run"
+    );
+}
+
+#[test]
+fn a_widget_package_is_what_cargo_builds() {
+    // The folder is the binary. A package with main.rs that Cargo still
+    // points at src/bin/ is two sources, and the one people edit is the
+    // one that is not built.
+    let manifest =
+        std::fs::read_to_string(root().join("widgets/Cargo.toml")).expect("widgets/Cargo.toml");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let Some(dir) = widget_package_dir(name) else {
+            continue;
+        };
+        let path = format!("path = \"src/widgets/{name}/main.rs\"");
+        if !manifest.contains(&path) {
+            wrong.push(format!("{name}: Cargo.toml does not point at {path}"));
+        }
+        if !dir.join("help.txt").is_file() {
+            wrong.push(format!("{name}: package folder missing help.txt"));
+        }
+        if root()
+            .join("widgets/src/bin")
+            .join(format!("{name}.rs"))
+            .is_file()
+        {
+            wrong.push(format!("{name}: leftover src/bin/{name}.rs after the move"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a widget package is the thing cargo builds:\n  {}",
+        wrong.join("\n  ")
     );
 }
 
@@ -1512,7 +1633,7 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
         if listed.contains(name.as_str()) {
             continue;
         }
-        let macos = root().join(format!("widgets/src/bin/{name}/macos.rs"));
+        let macos = widget_macos_path(&name);
         if macos.is_file() {
             continue;
         }
@@ -1527,7 +1648,7 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
     assert!(
         wrong.is_empty(),
         "a widget that reads /proc without a macOS path looks empty on a Mac:\n  {}\n\
-         Add widgets/src/bin/<widget>/macos.rs, call tc::unsupported(), \
+         Add widgets/src/widgets/<widget>/macos.rs, call tc::unsupported(), \
          or name it in LINUX_ONLY_UNTIL with the issue that will.",
         wrong.join("\n  ")
     );

@@ -60,7 +60,9 @@ wrong first.
   test would be wrong on the machine that matters. A widget that cannot
   run here says `does not run on {os}` via `unsupported()`, drawn by
   `cannot_start_because()`, rather than an empty table that looks like a quiet
-  source.
+  source. Platform files live in the widget's own folder
+  (`parse.rs`, `linux.rs`, `macos.rs` beside `main.rs`); there is no shared
+  platform crate to import.
 
 ## Where these are enforced
 

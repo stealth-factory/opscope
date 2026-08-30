@@ -31,19 +31,18 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-// Kept under ports/ rather than beside this file: anything dropped
-// straight into src/bin/ is taken for another binary. Parsers are always
-// compiled; host is acquisition only, so a Linux parser still runs on
-// the macOS CI runners.
-#[path = "ports/parse.rs"]
+// Sibling modules in this folder: the widget package owns its parsers
+// and its acquisition. `mod parse` needs no #[path]. `mod host` still
+// does, because linux.rs and macos.rs are the same module under two
+// names so the rest of the widget can call host::sockets() on either.
 mod parse;
 
 #[cfg(target_os = "linux")]
-#[path = "ports/linux.rs"]
+#[path = "linux.rs"]
 mod host;
 
 #[cfg(target_os = "macos")]
-#[path = "ports/macos.rs"]
+#[path = "macos.rs"]
 mod host;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -2095,7 +2094,7 @@ impl Store {
 }
 
 fn main() {
-    tc::maybe_help(include_str!("ports_help.txt"));
+    tc::maybe_help(include_str!("help.txt"));
     // Both of ports' config keys were documented and read by nobody.
     // Config is the default; argv still overrides.
     let cfg = tc::load_config("ports");
