@@ -156,7 +156,13 @@ fn walk_teams(
             Ok(res) => res,
             Err(said) => {
                 let stopped = if ids.is_empty() {
-                    format!("could not list teams ({}) - personal scope only", said)
+                    format!(
+                        "could not list teams ({}) - showing your personal account \
+                         only. A token that cannot list teams can still read a \
+                         team's deployments: name the team ids under `teams` in \
+                         config.json to include them.",
+                        said
+                    )
                 } else {
                     format!("team list stopped early ({}) - teams may be missing", said)
                 };
@@ -299,6 +305,48 @@ fn wrap(t: &str, width: usize) -> Vec<String> {
         .chunks(width)
         .map(|c| c.iter().collect())
         .collect()
+}
+
+/// Break a message at spaces, for a sentence rather than a log line.
+///
+/// `wrap` above chunks by character, which is what a build log wants - its
+/// lines are already lines, and a hard cut keeps the columns aligned. An
+/// error is prose, and it was going through `seg`, which clips: the half of
+/// the sentence that said what to do about it never reached the screen.
+fn wrap_words(t: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![t.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in t.split_whitespace() {
+        let would = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        if !line.is_empty() && would > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        // A single word longer than the pane still has to go somewhere, and
+        // a hard break is better than a line that runs off the edge.
+        if word.chars().count() > width {
+            for chunk in wrap(word, width) {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                out.push(chunk);
+            }
+            continue;
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn when(ms: Option<f64>) -> String {
@@ -1351,7 +1399,13 @@ fn main() {
         ));
         rows.push(tc::seg(&head, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.error.as_str(), format!(" ! {}", err))], w - 1));
+            // Wrapped, not clipped: an error that explains what to do is
+            // exactly the one long enough for `seg` to cut the explanation
+            // off, which leaves the reader worse off than a short one would.
+            for (i, line) in wrap_words(&err, w.saturating_sub(4)).into_iter().enumerate() {
+                let lead = if i == 0 { " ! " } else { "   " };
+                rows.push(tc::seg(&[(p.error.as_str(), format!("{lead}{line}"))], w - 1));
+            }
         }
         let mut bits: Vec<String> = Vec::new();
         if FILTERS[filter] != "all" {
@@ -1566,6 +1620,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The error row wraps rather than being cut short.
+    ///
+    /// It went through `seg`, which clips to the pane. The messages worth
+    /// reading are the long ones - the ones that say what to do - so the
+    /// half that said it was the half that never arrived.
+    #[test]
+    fn a_long_error_wraps_instead_of_being_clipped() {
+        let said = "could not list teams (HTTP 403) - showing your personal account only";
+        let lines = wrap_words(said, 24);
+        assert!(lines.len() > 1, "one line means it was not wrapped");
+        assert!(lines.iter().all(|l| l.chars().count() <= 24), "{lines:?}");
+        // Nothing is lost and nothing is invented.
+        assert_eq!(lines.join(" "), said);
+    }
+
+    /// A word longer than the pane still has to go somewhere.
+    #[test]
+    fn a_word_wider_than_the_pane_is_broken_rather_than_dropped() {
+        let long = "supercalifragilistic";
+        let lines = wrap_words(long, 8);
+        assert!(lines.iter().all(|l| l.chars().count() <= 8), "{lines:?}");
+        assert_eq!(lines.concat(), long);
+    }
+
+    /// A pane with no room at all does not silently lose the message.
+    #[test]
+    fn a_zero_width_pane_keeps_the_text() {
+        assert_eq!(wrap_words("hello", 0), vec!["hello".to_string()]);
+    }
+
 
     /// An empty `teams` covers the personal account as well as every team.
     ///
