@@ -2043,6 +2043,57 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
     }
 }
 
+/// Open one map entry's value in the editor, with the picker behind it.
+///
+/// Straight to the editor rather than to a list holding one field: there is
+/// nothing to select on that list, and its [d]efault key removed the entry
+/// and then described what was left as a default, which a wholesale-read map
+/// does not have.
+fn open_map_entry(app: &mut App, index: usize, parent: &Field, named: &str) {
+    let field = map_entry_field(parent, named);
+    let seed = edit_seed(&field, current_of(&app.live, &field, app.legacy_section));
+    let cursor = seed.chars().count();
+    app.stack
+        .push((app.fields.clone(), index, Some(app.mode.clone())));
+    app.fields = vec![field];
+    app.selected = 0;
+    app.scroll = 0;
+    app.status = None;
+    app.mode = Mode::Edit {
+        index: 0,
+        buffer: seed,
+        cursor,
+        error: None,
+    };
+}
+
+/// Leaving an editor that was opened over a picker goes back to the picker.
+///
+/// Anywhere else it goes back to the list, as it always has.
+fn leave_edit(app: &mut App) {
+    let over_pick = app
+        .stack
+        .last()
+        .is_some_and(|(_, _, mode)| matches!(mode, Some(Mode::Pick { .. })));
+    if over_pick && app.fields.len() == 1 {
+        if let Some((fields, selected, mode)) = app.stack.pop() {
+            app.fields = fields;
+            app.selected = selected;
+            app.scroll = 0;
+            app.mode = mode.unwrap_or(Mode::List);
+            // The name that was typed to get here has become an entry, so
+            // leaving it in the box would offer to add what is already on
+            // the row below it.
+            if let Mode::Pick { query, cursor, .. } = &mut app.mode {
+                query.clear();
+                *cursor = 0;
+            }
+            return;
+        }
+    }
+    app.mode = Mode::List;
+}
+
 /// What an entry says, for the column beside its name.
 fn map_value_of(app: &App, index: usize, named: &str) -> String {
     let Some(field) = app.fields.get(index) else {
@@ -2073,29 +2124,6 @@ fn map_entry_field(parent: &Field, named: &str) -> Field {
         parents: vec![parent.key.clone()],
         help: parent.help.clone(),
         default: shipped,
-    }
-}
-
-/// Name a new entry, unless it is already there. Its value starts empty and
-/// is set on the screen the entry opens - naming and saying are two acts,
-/// and asking for both in one box is what the JSON line was doing.
-fn add_map_entry(app: &mut App, index: usize, named: &str) {
-    let Some(field) = app.fields.get(index) else {
-        return;
-    };
-    let mut held: serde_json::Map<String, Value> =
-        match current_of(&app.live, field, app.legacy_section).or(Some(&field.default)) {
-            Some(Value::Object(map)) => map.clone(),
-            _ => serde_json::Map::new(),
-        };
-    if held.contains_key(named) {
-        app.status = Some(format!("{named} is already there."));
-        return;
-    }
-    held.insert(named.to_string(), Value::String(String::new()));
-    match write_field(app, index, Value::Object(held)) {
-        Ok(()) => app.status = Some(format!("Added {named}. Open it to say what it is.")),
-        Err(e) => app.status = Some(e),
     }
 }
 
@@ -2231,23 +2259,30 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         // there are, and what each of them says.
         "enter" if map && !q.trim().is_empty() => {
             let named = q.trim().to_string();
-            add_map_entry(app, index, &named);
-            q.clear();
-            cur = 0;
-            s_ = 0;
+            let Some(parent) = app.fields.get(index).cloned() else {
+                return false;
+            };
+            let held = current_of(&app.live, &parent, app.legacy_section)
+                .or(Some(&parent.default));
+            if held.and_then(|v| v.get(&named)).is_some() {
+                app.status = Some(format!("{named} is already there."));
+                if let Mode::Pick { query, cursor, .. } = &mut app.mode {
+                    query.clear();
+                    *cursor = 0;
+                }
+                return false;
+            }
+            // Nothing is written yet: the entry exists when it says
+            // something, and esc from the editor leaves the map as it was.
+            open_map_entry(app, index, &parent, &named);
+            return false;
         }
-        "enter" if map => {
+        "enter" if map && rows => {
             if let Some((named, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 let Some(parent) = app.fields.get(index).cloned() else {
                     return false;
                 };
-                app.stack
-                    .push((app.fields.clone(), index, Some(app.mode.clone())));
-                app.fields = vec![map_entry_field(&parent, &named)];
-                app.selected = 0;
-                app.scroll = 0;
-                app.status = None;
-                app.mode = Mode::List;
+                open_map_entry(app, index, &parent, &named);
                 return false;
             }
         }
@@ -2502,8 +2537,8 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
     };
     match key {
         "esc" => {
-            app.mode = Mode::List;
-            app.status = Some("edit cancelled".into());
+            leave_edit(app);
+            app.status = Some("Nothing written.".into());
         }
         "enter" => {
             let field = match app.fields.get(*index) {
@@ -2521,7 +2556,7 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
                 Ok(value) => {
                     let i = *index;
                     match write_field(app, i, value) {
-                        Ok(()) => app.mode = Mode::List,
+                        Ok(()) => leave_edit(app),
                         Err(e) => {
                             if let Mode::Edit { error, .. } = &mut app.mode {
                                 *error = Some(e);
@@ -3216,14 +3251,14 @@ format!(
         if !query.is_empty() {
             h.push(vec![
                 (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " name it".into()),
+                (p.dim.as_str(), " name it and set it".into()),
             ]);
             h.push(vec![
                 (p.accent.as_str(), "ctrl-u".into()),
                 (p.dim.as_str(), " clear".into()),
             ]);
         } else if *on_list {
-            h.push(vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " open".into())]);
+            h.push(vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " edit it".into())]);
             h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
@@ -3923,6 +3958,83 @@ mod tests {
         // A field that is not part of a map is left to the ordinary path.
         let plain = catalogue_app(serde_json::json!({"w": {}}));
         assert!(map_parent_of(&plain, &plain.fields[0]).is_none());
+    }
+
+    /// An App on the picker for a map, as the screen is after opening one.
+    fn map_pick_app(live: Value, shipped: Value) -> App {
+        let mut app = catalogue_app(live);
+        app.catalogues = &[];
+        app.fields = vec![Field {
+            section: "w".into(),
+            key: "sources".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: shipped,
+        }];
+        app.constraints
+            .insert("sources".into(), serde_json::json!({"values": "string"}));
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+            cursor: 0,
+        };
+        app
+    }
+
+    /// Naming an entry opens its value rather than writing it empty.
+    ///
+    /// It used to write the key with "" and leave you to fill it in. The
+    /// widget sends every source as one request and fails the whole fetch on
+    /// the first error, so a half-added entry could take out the searches
+    /// that were fine and name none of them.
+    #[test]
+    fn naming_an_entry_lands_in_its_editor_and_writes_nothing_yet() {
+        let mut app = map_pick_app(
+            serde_json::json!({"w": {}}),
+            serde_json::json!({"orgs": "is:open"}),
+        );
+        for ch in ["n", "e", "w"] {
+            handle_pick_key(&mut app, ch);
+        }
+        handle_pick_key(&mut app, "enter");
+
+        // Straight into the editor, on the entry just named.
+        assert!(matches!(app.mode, Mode::Edit { .. }), "the editor opens");
+        assert_eq!(app.fields.len(), 1, "one field, not a list to select from");
+        assert_eq!(app.fields[0].key, "new");
+        assert_eq!(app.fields[0].parents, vec!["sources".to_string()]);
+        // And the file is untouched until there is something to say.
+        assert!(app.live.get("w").and_then(|w| w.get("sources")).is_none());
+        assert!(!app.wrote, "naming alone writes nothing");
+
+        // The picker is behind it, so esc goes back there rather than to
+        // the settings list.
+        assert!(matches!(
+            app.stack.last(),
+            Some((_, _, Some(Mode::Pick { .. })))
+        ));
+        handle_edit_key(&mut app, "esc");
+        assert!(matches!(app.mode, Mode::Pick { .. }), "esc returns to the picker");
+        assert!(app.live.get("w").and_then(|w| w.get("sources")).is_none());
+    }
+
+    /// A name already in the map is not opened as if it were new.
+    #[test]
+    fn naming_something_that_exists_says_so() {
+        let mut app = map_pick_app(
+            serde_json::json!({"w": {}}),
+            serde_json::json!({"orgs": "is:open"}),
+        );
+        for ch in ["o", "r", "g", "s"] {
+            handle_pick_key(&mut app, ch);
+        }
+        handle_pick_key(&mut app, "enter");
+        assert!(matches!(app.mode, Mode::Pick { .. }), "still on the picker");
+        assert!(app.status.as_deref().is_some_and(|t| t.contains("already")));
     }
 
     /// An entry that says nothing yet reads as unset rather than as blank.
