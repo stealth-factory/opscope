@@ -30,6 +30,14 @@ use std::time::Duration;
 use chrono::Utc;
 use opscope_core as tc;
 
+/// The environment variable a GitHub token is read from when `token_env`
+/// says nothing. Named once so the code and the schema cannot drift: the
+/// settings screen draws its default from `settings.json`, and a screen
+/// showing one string while the code falls back to another is a screen
+/// describing a value nobody uses. `a_declared_token_env_matches_the_code`
+/// holds the two together.
+const TOKEN_ENV: &str = "GITHUB_TOKEN";
+
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "github-actions",
     section: "github_actions",
@@ -54,7 +62,7 @@ const DETAIL_TTL: f64 = 60.0;
 const LIVE: &[&str] = &["in_progress", "queued", "waiting", "pending", "requested"];
 
 /// `github_actions.token`, then the variable `github_actions.token_env`
-/// names, which defaults to `GITHUB_TOKEN`.
+/// names, which defaults to `TOKEN_ENV`.
 ///
 /// Its own section and nothing else. It used to fall back to `github.token`,
 /// which is fine while the two are the same string and wrong the moment they
@@ -67,8 +75,8 @@ fn token(gha: &serde_json::Value) -> (String, &'static str) {
     if !own.is_empty() {
         return (own, "config");
     }
-    let name = tc::cfg_str(gha, "token_env", "GITHUB_TOKEN");
-    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
+    let name = tc::cfg_str(gha, "token_env", TOKEN_ENV);
+    let name = if name.is_empty() { TOKEN_ENV.into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -1585,8 +1593,8 @@ fn main() {
     // The variable this widget would read, for the message that names it
     // when there is no token. Its own, like everything else here.
     let env_name = {
-        let own = tc::cfg_str(&cfg, "token_env", "GITHUB_TOKEN");
-        if own.is_empty() { "GITHUB_TOKEN".to_string() } else { own }
+        let own = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
+        if own.is_empty() { TOKEN_ENV.to_string() } else { own }
     };
 
     let state = Arc::new(Mutex::new(State {

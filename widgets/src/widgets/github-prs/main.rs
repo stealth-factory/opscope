@@ -27,6 +27,14 @@ use std::time::Duration;
 use chrono::{NaiveDateTime, Utc};
 use opscope_core as tc;
 
+/// The environment variable a GitHub token is read from when `token_env`
+/// says nothing. Named once so the code and the schema cannot drift: the
+/// settings screen draws its default from `settings.json`, and a screen
+/// showing one string while the code falls back to another is a screen
+/// describing a value nobody uses. `a_declared_token_env_matches_the_code`
+/// holds the two together.
+const TOKEN_ENV: &str = "GITHUB_TOKEN";
+
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "github-prs",
     section: "github_prs",
@@ -50,8 +58,8 @@ fn token(pr_cfg: &serde_json::Value) -> (String, &'static str) {
     if !value.is_empty() {
         return (value, "config");
     }
-    let name = tc::cfg_str(pr_cfg, "token_env", "GITHUB_TOKEN");
-    let name = if name.is_empty() { "GITHUB_TOKEN".into() } else { name };
+    let name = tc::cfg_str(pr_cfg, "token_env", TOKEN_ENV);
+    let name = if name.is_empty() { TOKEN_ENV.into() } else { name };
     match std::env::var(&name) {
         Ok(value) if !value.is_empty() => (value, "env"),
         _ => (String::new(), "missing"),
@@ -984,7 +992,7 @@ fn main() {
     std::thread::spawn(move || loop {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
-                g.err = "no token: set github.token in config.json or $GITHUB_TOKEN".into();
+                g.err = format!("no token: set github_prs.token in config.json, or ${TOKEN_ENV}");
             }
         } else {
             let want = poller.lock().ok().and_then(|g| {

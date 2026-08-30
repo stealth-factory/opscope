@@ -23,7 +23,7 @@
   "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
   "token": "",
   "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
-  "token_env": "",
+  "token_env": "GITHUB_TOKEN",
   "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
   "accounts": [],
   "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",

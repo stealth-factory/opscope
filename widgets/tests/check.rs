@@ -1402,3 +1402,52 @@ fn every_catalogue_names_a_field_its_widget_actually_declares() {
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+
+/// The `token_env` default on screen is the one the code falls back to.
+///
+/// The settings screen draws a field's default from `settings.json`, and the
+/// widget reads its own fallback from `TOKEN_ENV`. Nothing tied the two
+/// together, and they had already come apart: `github-actions` declared `""`
+/// while its code fell back to `GITHUB_TOKEN`, so the screen showed an empty
+/// default for a variable that was in fact being read. Somebody reading that
+/// screen would set a variable nothing looks at, or none at all.
+#[test]
+fn a_declared_token_env_matches_the_code() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let source =
+            std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
+        // `const TOKEN_ENV: &str = "SOMETHING";`
+        let Some(at) = source.find("const TOKEN_ENV: &str = \"") else {
+            continue;
+        };
+        let rest = &source[at + "const TOKEN_ENV: &str = \"".len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let in_code = &rest[..end];
+
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let parsed: serde_json::Value = match serde_json::from_str(&settings) {
+            Ok(v) => v,
+            Err(_) => {
+                wrong.push(format!("{name}: names a TOKEN_ENV and has no settings.json"));
+                continue;
+            }
+        };
+        let declared = parsed.get("token_env").and_then(|v| v.as_str());
+        match declared {
+            Some(shown) if shown == in_code => {}
+            Some(shown) => wrong.push(format!(
+                "{name}: settings.json shows token_env {shown:?}, the code uses {in_code:?}"
+            )),
+            None => wrong.push(format!(
+                "{name}: names a TOKEN_ENV of {in_code:?} and declares no token_env default"
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
