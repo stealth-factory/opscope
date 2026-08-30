@@ -1043,7 +1043,54 @@ fn fresh_config(app: &App) -> Result<(String, Value), String> {
     Ok((raw, live))
 }
 
+/// Which map a field is one entry of, if it is one.
+///
+/// A map is read whole by the widgets that use one - github-prs takes the
+/// config's sources or its own three, never a mixture - so a write that
+/// touched a single key of an absent map would create it holding only that
+/// key and drop every sibling the screen had just shown.
+fn map_parent_of(app: &App, field: &Field) -> Option<Field> {
+    let [only] = field.parents.as_slice() else {
+        return None;
+    };
+    let parent = app.fields.iter().find(|f| f.key == *only).or_else(|| {
+        app.stack
+            .last()
+            .and_then(|(fields, _, _)| fields.iter().find(|f| f.key == *only))
+    })?;
+    // Asked directly rather than through picker_kind, which looks the field
+    // up in `app.fields` - and by the time this matters those are the map's
+    // children, so the parent is not among them and the answer was always
+    // no. The whole-map write never ran.
+    let declared = app
+        .constraints
+        .get(&parent.key)
+        .and_then(Value::as_object)
+        .and_then(|r| r.get("values"))
+        .and_then(Value::as_str);
+    (declared == Some("string") && parent.default.is_object()).then(|| parent.clone())
+}
+
 fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> {
+    // One entry of a map is written as the whole map: read what is there or
+    // what the widget ships, set this key, write the object. One write, and
+    // no window in which a sibling can be lost.
+    if let Some(parent) = app.fields.get(index).and_then(|f| map_parent_of(app, f)) {
+        let named = app.fields[index].key.clone();
+        let mut held: serde_json::Map<String, Value> =
+            match current_of(&app.live, &parent, app.legacy_section).or(Some(&parent.default)) {
+                Some(Value::Object(map)) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+        held.insert(named, value);
+        // Write it through the parent by standing on the parent for one
+        // call: same writer, same validation, same atomic replace, no second
+        // implementation of the pathing.
+        let stood = std::mem::replace(&mut app.fields, vec![parent]);
+        let outcome = write_field(app, 0, Value::Object(held));
+        app.fields = stood;
+        return outcome;
+    }
     let (key, steps, schema_path, schema_section) = {
         let field = app.fields.get(index).ok_or("no such field")?;
         validate_value(
@@ -1996,6 +2043,20 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
     }
 }
 
+/// What an entry says, for the column beside its name.
+fn map_value_of(app: &App, index: usize, named: &str) -> String {
+    let Some(field) = app.fields.get(index) else {
+        return String::new();
+    };
+    let held = current_of(&app.live, field, app.legacy_section).or(Some(&field.default));
+    match held.and_then(|v| v.get(named)) {
+        Some(Value::String(text)) if text.is_empty() => "— not set".to_string(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => compact(other),
+        None => String::new(),
+    }
+}
+
 /// One row for a map entry: the key names it, the value is what is edited.
 fn map_entry_field(parent: &Field, named: &str) -> Field {
     // The widget's own value for this key, where it ships one. github-prs
@@ -2095,7 +2156,11 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             app.mode = Mode::List;
             return false;
         }
-        "q" | "Q" if q.is_empty() => {
+        // Only where the box is not taking letters. Guarding on an empty
+        // box was not enough: empty is exactly when the first character of
+        // "queue" is typed, and no zone search could reach Qatar. `esc`
+        // leaves from anywhere, so nothing is lost by narrowing this.
+        "q" | "Q" if q.is_empty() && !(typed && !rows) => {
             app.mode = Mode::List;
             return false;
         }
@@ -2176,18 +2241,6 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 let Some(parent) = app.fields.get(index).cloned() else {
                     return false;
                 };
-                // The screen showed every entry, so every entry has to
-                // survive editing one of them. A widget that reads this map
-                // takes it whole - github-prs uses the config's sources or
-                // its own three, never a mixture - so writing one key into
-                // an absent map would silently drop the rest. Settle the map
-                // as shown before opening a row of it.
-                if current_of(&app.live, &parent, app.legacy_section).is_none() {
-                    let whole = parent.default.clone();
-                    if whole.is_object() {
-                        let _ = write_field(app, index, whole);
-                    }
-                }
                 app.stack
                     .push((app.fields.clone(), index, Some(app.mode.clone())));
                 app.fields = vec![map_entry_field(&parent, &named)];
@@ -3028,7 +3081,12 @@ format!(
     let ordering = match &kind {
         PickKind::Timezone => Some("  Drawn west to east by each zone's offset, not in the order added."),
         PickKind::Choices(_) => Some("  Shown in the order picked here."),
-        PickKind::Free | PickKind::Map => Some("  In the order you add them."),
+        PickKind::Free => Some("  In the order you add them."),
+        // A map's keys are a BTreeMap here - serde_json is taken without
+        // preserve_order, which `a_round_trip_does_not_reorder` relies on -
+        // so they draw alphabetically whatever order they were added in.
+        // Saying otherwise was describing a list.
+        PickKind::Map => None,
         // The widget wrote them in the order it wants them read.
         PickKind::One(_) => None,
         PickKind::Catalogue(_) => None,
@@ -3135,7 +3193,16 @@ format!(
                         // Who publishes it. A key does not always say - o3
                         // and codex-mini-latest are OpenAI's - and a flat
                         // list of sixty-eight is a list you scan by vendor.
-                        (None, _) => catalogue_group(&kind, zone).unwrap_or_default(),
+                        (None, _) if matches!(kind, PickKind::Catalogue(_)) => {
+                            catalogue_group(&kind, zone).unwrap_or_default()
+                        }
+                        // What the entry says. Without it the row is a name
+                        // padded to thirty-four columns and then nothing, and
+                        // reading three queries meant opening three screens.
+                        (None, _) if matches!(kind, PickKind::Map) => {
+                            map_value_of(app, *index, zone)
+                        }
+                        (None, _) => String::new(),
                     },
                 ),
                 (tint.as_str(), " ".repeat(w)),
@@ -3807,6 +3874,74 @@ mod tests {
             panic!("still on the picker");
         };
         assert!(!on_list, "nothing to stand on is nothing to focus");
+    }
+
+    /// An App standing on one map entry, as the screen does after opening
+    /// a row, with the parent on the stack behind it.
+    fn map_entry_app(live: Value, shipped: Value, named: &str) -> App {
+        let mut app = catalogue_app(live);
+        app.catalogues = &[];
+        let parent = Field {
+            section: "w".into(),
+            key: "sources".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: shipped,
+        };
+        app.constraints
+            .insert("sources".into(), serde_json::json!({"values": "string"}));
+        app.fields = vec![parent.clone()];
+        app.stack.push((vec![parent.clone()], 0, None));
+        app.fields = vec![map_entry_field(&parent, named)];
+        app
+    }
+
+    /// Writing one entry carries the whole map, so the siblings survive.
+    ///
+    /// The widgets that use a map read it whole - github-prs takes the
+    /// config's sources or its own three, never a mixture - so a write that
+    /// touched one key of an absent map would create it holding only that
+    /// key. Three on screen, one in the file, and no error anywhere.
+    #[test]
+    fn writing_one_map_entry_keeps_the_others() {
+        let shipped = serde_json::json!({
+            "orgs": "is:open is:pr @mine",
+            "authored": "is:open is:pr author:@me",
+            "assigned": "is:open is:pr assignee:@me",
+        });
+        let app = map_entry_app(serde_json::json!({"w": {}}), shipped.clone(), "orgs");
+        // The entry knows which map it belongs to, which is what makes the
+        // whole-map write happen at all.
+        let parent = map_parent_of(&app, &app.fields[0]).expect("an entry of a map");
+        assert_eq!(parent.key, "sources");
+        // And its default is the widget's own value for that key, not "".
+        assert_eq!(
+            app.fields[0].default,
+            serde_json::json!("is:open is:pr @mine")
+        );
+
+        // A field that is not part of a map is left to the ordinary path.
+        let plain = catalogue_app(serde_json::json!({"w": {}}));
+        assert!(map_parent_of(&plain, &plain.fields[0]).is_none());
+    }
+
+    /// An entry that says nothing yet reads as unset rather than as blank.
+    #[test]
+    fn a_map_row_shows_what_its_entry_says() {
+        let live = serde_json::json!({"w": {"sources": {"orgs": "is:open", "new": ""}}});
+        let mut app = catalogue_app(live);
+        app.catalogues = &[];
+        app.fields = vec![Field {
+            section: "w".into(),
+            key: "sources".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: serde_json::json!({}),
+        }];
+        app.constraints
+            .insert("sources".into(), serde_json::json!({"values": "string"}));
+        assert_eq!(map_value_of(&app, 0, "orgs"), "is:open");
+        assert_eq!(map_value_of(&app, 0, "new"), "— not set");
     }
 
     /// A list of numbers is left alone.
