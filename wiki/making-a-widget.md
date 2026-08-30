@@ -228,6 +228,23 @@ choices, element types, numeric bounds, nesting, units. The generator omits it
 from `config.example.json`; it exists to stop the settings screen accepting a
 value the widget would silently ignore.
 
+### A field with a set of answers offers them
+
+Declare `choices` on a single-valued field and `↵` offers them rather than
+asking for one to be typed:
+
+```json
+"_schema": { "aggregate": { "choices": ["median", "mean", "min", "max", "p95"] } }
+```
+
+The set was already worth declaring — `validate_value` refuses anything
+outside it — so a field that had one was rejecting wrong answers without ever
+saying what a right one looked like. Choosing writes the value and returns,
+because there is nothing further to say once one is picked.
+
+An **array** with choices keeps its checklist. Ticking several is a different
+act from choosing one, and `clocks.work_days` wants the first.
+
 ### A list of strings needs no declaration
 
 An array of strings is filled in one entry at a time: the box composes an
