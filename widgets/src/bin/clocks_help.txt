@@ -30,8 +30,9 @@ while the panel is running. Preferences - focus length, whether the timer is
 shown - are not tied to the day and persist.
 
 Big digits show this server's system-timezone clock. Below it, each hub
-is shown in its own timezone, sorted west to east, coloured by whether people
-there are plausibly at work.
+is shown in its own timezone, west to east by current offset — name as
+tie-break, config order ignored — coloured by whether people there are
+plausibly at work.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same - which is what up and down do here too.

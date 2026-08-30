@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use chrono::{Datelike, Local, NaiveTime, Offset, TimeZone, Timelike, Utc};
+use chrono::{Datelike, Local, NaiveTime, Offset, TimeZone, Timelike};
 use chrono_tz::Tz;
 use opscope_core as tc;
 
@@ -973,24 +973,27 @@ fn main() {
         rows.push(String::new());
 
         // The world clock takes whatever is left, and says which slice of
-        // the list it is showing rather than silently truncating.
+        // the list it is showing rather than silently truncating. Order is
+        // west to east by this frame's offsets, not the order at load:
+        // a pane left up across DST has to keep being a map.
+        let ordered = cities_west_to_east(&cities, &now);
         let room = h.saturating_sub(rows.len() + 3);
-        if room >= 2 && !cities.is_empty() {
-            let shown = room.saturating_sub(1).min(cities.len());
-            if scroll + shown > cities.len() {
-                scroll = cities.len().saturating_sub(shown);
+        if room >= 2 && !ordered.is_empty() {
+            let shown = room.saturating_sub(1).min(ordered.len());
+            if scroll + shown > ordered.len() {
+                scroll = ordered.len().saturating_sub(shown);
             }
             rows.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── WORLD CLOCK ── ".into()),
                     (
                         p.dim.as_str(),
-                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, cities.len()),
+                        format!(" {}-{} of {}  ↑↓", scroll + 1, scroll + shown, ordered.len()),
                     ),
                 ],
                 w - 1,
             ));
-            for city in cities.iter().skip(scroll).take(shown) {
+            for city in ordered.iter().skip(scroll).take(shown) {
                 let there = now.with_timezone(&city.zone);
                 // Sun or moon by the local hour, which is the fastest way
                 // to read "is it a reasonable time to message them".
@@ -1150,14 +1153,6 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
         }
     }
     if !out.is_empty() {
-        // West to east by current offset, so the row order is a map.
-        let now = Utc::now();
-        out.sort_by_key(|c| {
-            (
-                now.with_timezone(&c.zone).offset().fix().local_minus_utc(),
-                c.name.clone(),
-            )
-        });
         return out;
     }
     // Only when nothing was configured. A list that was set and parsed to
@@ -1179,6 +1174,30 @@ fn load_cities(cfg: &serde_json::Value) -> Vec<City> {
             }
         }
     }
+    out
+}
+
+/// West to east by the offset at `now`, name as tie-break.
+///
+/// The row order is a map, so it has to track the offset as it stands —
+/// including across a DST change. Config order is discarded; a reader who
+/// arranged the list deliberately still gets west-to-east. Called from the
+/// frame rather than from load: a pane left up for weeks will cross a
+/// transition, and the order it launched with is then a lie.
+///
+/// A few dozen entries, sorted on the same offset lookup the clock faces
+/// already do. Recomputing only when an offset changes is more code for
+/// the same result.
+fn cities_west_to_east<'a, Z: TimeZone>(
+    cities: &'a [City],
+    now: &chrono::DateTime<Z>,
+) -> Vec<&'a City> {
+    let mut out: Vec<&City> = cities.iter().collect();
+    out.sort_by(|a, b| {
+        let a_off = now.with_timezone(&a.zone).offset().fix().local_minus_utc();
+        let b_off = now.with_timezone(&b.zone).offset().fix().local_minus_utc();
+        a_off.cmp(&b_off).then_with(|| a.name.cmp(&b.name))
+    });
     out
 }
 
@@ -1247,6 +1266,7 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     /// One lock for every test that touches the state file.
     ///
@@ -1583,6 +1603,64 @@ mod tests {
         let winter = Utc.with_ymd_and_hms(2026, 1, 22, 12, 0, 0).unwrap();
         assert_eq!(offset_str(&summer.with_timezone(&london)), "UTC+1");
         assert_eq!(offset_str(&winter.with_timezone(&london)), "UTC+0");
+    }
+
+    #[test]
+    fn city_order_swaps_when_a_zone_crosses_dst() {
+        // London is UTC+0 in winter and UTC+1 in summer. Lagos is UTC+1
+        // all year, so London sits west of it until the clocks go forward
+        // and then they share an offset — which is a swap, because the
+        // name tie-break puts Lagos first. Config lists them east-to-west
+        // so a sort-once-at-load cannot hide behind the input order.
+        //
+        // Britain moved at 01:00 UTC on 29 March 2026. An hour either
+        // side of that is enough; nothing here waits for October.
+        let cities = vec![
+            City {
+                name: "Lagos".into(),
+                zone: "Africa/Lagos".parse().unwrap(),
+            },
+            City {
+                name: "London".into(),
+                zone: "Europe/London".parse().unwrap(),
+            },
+        ];
+        let london: Tz = "Europe/London".parse().unwrap();
+        let lagos: Tz = "Africa/Lagos".parse().unwrap();
+        let names = |when| {
+            cities_west_to_east(&cities, when)
+                .into_iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        let before = Utc.with_ymd_and_hms(2026, 3, 29, 0, 30, 0).unwrap();
+        assert_eq!(offset_str(&before.with_timezone(&london)), "UTC+0");
+        assert_eq!(offset_str(&before.with_timezone(&lagos)), "UTC+1");
+        assert_eq!(names(&before), ["London", "Lagos"]);
+
+        let after = Utc.with_ymd_and_hms(2026, 3, 29, 1, 30, 0).unwrap();
+        assert_eq!(offset_str(&after.with_timezone(&london)), "UTC+1");
+        assert_eq!(offset_str(&after.with_timezone(&lagos)), "UTC+1");
+        assert_eq!(names(&after), ["Lagos", "London"]);
+    }
+
+    #[test]
+    fn load_cities_leaves_config_order_alone() {
+        // The map is drawn at the frame, not here. Sorting at load would
+        // freeze the order at process start, which is how a pane left up
+        // across DST kept claiming to be a map after it had stopped being
+        // one. Tokyo is always east of San Francisco, so a leftover sort
+        // would reorder this list.
+        let cfg = serde_json::json!({
+            "cities": [
+                ["Tokyo", "Asia/Tokyo"],
+                ["San Francisco", "America/Los_Angeles"],
+                ["London", "Europe/London"]
+            ]
+        });
+        let got: Vec<_> = load_cities(&cfg).into_iter().map(|c| c.name).collect();
+        assert_eq!(got, ["Tokyo", "San Francisco", "London"]);
     }
 
     #[test]
