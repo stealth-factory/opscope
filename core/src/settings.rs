@@ -2553,7 +2553,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(p.lbl.as_str(), format!(" ── {} ── ", field.path().to_uppercase()))],
         w.saturating_sub(1),
     ));
-    for line in wrap_help(&field.help, w.saturating_sub(4), 3) {
+    for line in wrap_help(&field.help, w.saturating_sub(4), usize::MAX) {
         body.push(crate::seg(&[(p.dim.as_str(), format!("  {line}"))], w.saturating_sub(1)));
     }
     body.push(crate::seg(
@@ -2614,12 +2614,19 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .into_iter()
         .map(|l| format!(" {l}"))
         .collect();
-    while body.len() + foot.len() < h {
-        body.push(String::new());
+    // Title pinned, the rest windowed - the same shape as the list, and for
+    // the same reason: a pane too short is a pane you scroll.
+    let head = body.remove(0);
+    let room = h.saturating_sub(1 + foot.len()).max(1);
+    let at = app.scroll.min(body.len().saturating_sub(room));
+    let mut out = vec![head];
+    out.extend(body.iter().skip(at).take(room).cloned());
+    while out.len() + foot.len() < h {
+        out.push(String::new());
     }
-    body.extend(foot);
-    body.truncate(h);
-    body
+    out.extend(foot);
+    out.truncate(h);
+    out
 }
 
 /// One text field, drawn the same way everywhere something is typed.
@@ -2771,6 +2778,20 @@ format!(
         _ => heading,
     };
     body.push(crate::seg(&[(p.dim.as_str(), heading)], w.saturating_sub(1)));
+    // The field's own words, on the screen where the value is chosen. They
+    // were on the list, one screen back, which is the wrong place for them:
+    // the list is where somebody decides to change a setting and this is
+    // where they decide what to change it to.
+    if !field.help.is_empty() {
+        body.push(String::new());
+        for line in wrap_help(&field.help, w.saturating_sub(4), usize::MAX) {
+            body.push(crate::seg(
+                &[(p.dim.as_str(), format!("  {line}"))],
+                w.saturating_sub(1),
+            ));
+        }
+        body.push(String::new());
+    }
     // How the widget will order what is picked here, said on the screen
     // rather than only in the file's comment: whoever is arranging a list is
     // exactly the person who would otherwise assume the order they choose is
@@ -2814,15 +2835,11 @@ format!(
     }
     body.push(String::new());
 
-    let foot_rows = 2;
-    let room = h.saturating_sub(body.len() + foot_rows).max(1);
-    let first = if *sel >= *scroll + room {
-        sel + 1 - room
-    } else if *sel < *scroll {
-        *sel
-    } else {
-        (*scroll).min(choices.len().saturating_sub(room))
-    };
+    // Where the choices start, so the selection can be followed through the
+    // whole screen. The list used to size itself to what was left, which was
+    // fine until the field's help went above it: a long explanation could
+    // then squeeze the list it explains down to a single row.
+    let first_choice_row = body.len();
     if choices.is_empty() {
         let why = match (zones, query.is_empty()) {
             (true, true) => "  no cities yet - type to search and add one".to_string(),
@@ -2840,7 +2857,7 @@ format!(
         };
         body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
     }
-    for (i, (zone, on)) in choices.iter().enumerate().skip(first).take(room) {
+    for (i, (zone, on)) in choices.iter().enumerate() {
         // A free list hands focus back and forth, and only the side holding
         // it wears a cursor. Every other picker has one place for keys to
         // go, so its selection always stands.
@@ -2994,12 +3011,23 @@ format!(
         .into_iter()
         .map(|l| format!(" {l}"))
         .collect();
-    while body.len() + foot.len() < h {
-        body.push(String::new());
+    // Title pinned, the rest windowed - the same shape as the list, and for
+    // the same reason: a pane too short is a pane you scroll.
+    let head = body.remove(0);
+    let room = h.saturating_sub(1 + foot.len()).max(1);
+    // Follow the selection through the whole screen, using the picker's
+    // own scroll: moving it brings the window along, and the wheel still
+    // moves the view by itself.
+    let want = first_choice_row + *sel;
+    let at = crate::follow(*scroll, want, room).min(body.len().saturating_sub(room));
+    let mut out = vec![head];
+    out.extend(body.iter().skip(at).take(room).cloned());
+    while out.len() + foot.len() < h {
+        out.push(String::new());
     }
-    body.extend(foot);
-    body.truncate(h);
-    body
+    out.extend(foot);
+    out.truncate(h);
+    out
 }
 
 fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
