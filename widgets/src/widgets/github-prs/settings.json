@@ -1,6 +1,7 @@
 {
   "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
   "_schema": {
+    "sources": { "values": "string" },
     "limit": {
       "minimum": 1
     },

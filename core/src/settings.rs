@@ -1248,6 +1248,10 @@ enum PickKind {
     Timezone,
     /// A finite set the schema names. Written as bare strings.
     Choices(Vec<String>),
+    /// A map the reader keys themselves, each entry holding one string.
+    /// Adding names a key; opening one edits its value. The rate card does
+    /// the same with keys the widget owns.
+    Map,
     /// One answer out of a named few, for a field that holds a single
     /// value rather than a list. Picking replaces what is there and closes,
     /// because there is nothing further to say once one is chosen.
@@ -1496,6 +1500,17 @@ fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     if let Some(one) = one_of_kind(app, key, rule) {
         return Some(one);
     }
+    // `"values": "string"` on an object: a map whose entries are worth
+    // editing one at a time rather than as a line of JSON.
+    if rule.get("values").and_then(Value::as_str) == Some("string")
+        && app
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .is_some_and(|f| f.default.is_object())
+    {
+        return Some(PickKind::Map);
+    }
     let Some(rule) = rule.get("picker") else {
         return free_list_kind(app, key);
     };
@@ -1712,6 +1727,13 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
             .map(|k| (k.clone(), k))
             .collect();
     }
+    // A map's entries are its keys. Without this the screen counted none
+    // while listing three, and said "nothing here yet" above them.
+    if let Some(Value::Object(map)) = held {
+        if matches!(picker_kind(app, &field.key), Some(PickKind::Map)) {
+            return map.keys().map(|k| (k.clone(), k.clone())).collect();
+        }
+    }
     held.and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
@@ -1785,10 +1807,21 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             return picked.into_iter().map(|z| (z, true)).collect();
         }
     }
-    // A free list has no candidates: what is on screen is what is in it,
-    // and typing composes an entry rather than filtering these.
+    // Neither a free list nor a map has candidates: what is on screen is
+    // what is in it, and typing composes a new one rather than filtering.
     if matches!(kind, PickKind::Free) {
         return picked.into_iter().map(|z| (z, true)).collect();
+    }
+    if matches!(kind, PickKind::Map) {
+        let held = app
+            .fields
+            .get(index)
+            .and_then(|f| current_of(&app.live, f, app.legacy_section).or(Some(&f.default)));
+        let keys = match held {
+            Some(Value::Object(map)) => map.keys().cloned().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        return keys.into_iter().map(|k| (k, true)).collect();
     }
     // One of a few: every answer, with the one in force marked. No filtering
     // - a set small enough to offer is a set small enough to read.
@@ -1812,8 +1845,8 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .iter()
             .filter_map(|one| zone_rank(one, query).map(|r| (r, one.clone())))
             .collect(),
-        // Never reached: both return above, before any ranking.
-        PickKind::Free | PickKind::One(_) => Vec::new(),
+        // Never reached: these return above, before any ranking.
+        PickKind::Free | PickKind::One(_) | PickKind::Map => Vec::new(),
         PickKind::Catalogue(table) => table
             .iter()
             .filter_map(|(name, group, _)| {
@@ -1963,6 +1996,66 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
     }
 }
 
+/// One row for a map entry: the key names it, the value is what is edited.
+fn map_entry_field(parent: &Field, named: &str) -> Field {
+    // The widget's own value for this key, where it ships one. github-prs
+    // ships three searches, and showing "" as their default would say the
+    // widget had nothing to suggest when it had written the queries itself.
+    let shipped = parent
+        .default
+        .get(named)
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()));
+    Field {
+        section: parent.section.clone(),
+        key: named.to_string(),
+        parents: vec![parent.key.clone()],
+        help: parent.help.clone(),
+        default: shipped,
+    }
+}
+
+/// Name a new entry, unless it is already there. Its value starts empty and
+/// is set on the screen the entry opens - naming and saying are two acts,
+/// and asking for both in one box is what the JSON line was doing.
+fn add_map_entry(app: &mut App, index: usize, named: &str) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let mut held: serde_json::Map<String, Value> =
+        match current_of(&app.live, field, app.legacy_section).or(Some(&field.default)) {
+            Some(Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+    if held.contains_key(named) {
+        app.status = Some(format!("{named} is already there."));
+        return;
+    }
+    held.insert(named.to_string(), Value::String(String::new()));
+    match write_field(app, index, Value::Object(held)) {
+        Ok(()) => app.status = Some(format!("Added {named}. Open it to say what it is.")),
+        Err(e) => app.status = Some(e),
+    }
+}
+
+fn remove_map_entry(app: &mut App, index: usize, named: &str) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let mut held: serde_json::Map<String, Value> =
+        match current_of(&app.live, field, app.legacy_section).or(Some(&field.default)) {
+            Some(Value::Object(map)) => map.clone(),
+            _ => return,
+        };
+    if held.remove(named).is_none() {
+        return;
+    }
+    match write_field(app, index, Value::Object(held)) {
+        Ok(()) => app.status = Some(format!("Removed {named}.")),
+        Err(e) => app.status = Some(e),
+    }
+}
+
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
     let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &mut app.mode
     else {
@@ -1989,6 +2082,10 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         .fields
         .get(index)
         .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::One(_))));
+    let map = app
+        .fields
+        .get(index)
+        .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::Map)));
     let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
@@ -2046,6 +2143,52 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             }
             app.mode = Mode::List;
             return false;
+        }
+        // A name typed into the box makes an entry; enter on a row opens the
+        // one value it holds. Both, because a map is two things: which keys
+        // there are, and what each of them says.
+        "enter" if map && !q.trim().is_empty() => {
+            let named = q.trim().to_string();
+            add_map_entry(app, index, &named);
+            q.clear();
+            cur = 0;
+            s_ = 0;
+        }
+        "enter" if map => {
+            if let Some((named, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                let Some(parent) = app.fields.get(index).cloned() else {
+                    return false;
+                };
+                // The screen showed every entry, so every entry has to
+                // survive editing one of them. A widget that reads this map
+                // takes it whole - github-prs uses the config's sources or
+                // its own three, never a mixture - so writing one key into
+                // an absent map would silently drop the rest. Settle the map
+                // as shown before opening a row of it.
+                if current_of(&app.live, &parent, app.legacy_section).is_none() {
+                    let whole = parent.default.clone();
+                    if whole.is_object() {
+                        let _ = write_field(app, index, whole);
+                    }
+                }
+                app.stack
+                    .push((app.fields.clone(), index, Some(app.mode.clone())));
+                app.fields = vec![map_entry_field(&parent, &named)];
+                app.selected = 0;
+                app.scroll = 0;
+                app.status = None;
+                app.mode = Mode::List;
+                return false;
+            }
+        }
+        "d" | "D" if map && rows => {
+            if let Some((named, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                remove_map_entry(app, index, &named);
+                s_ = s_.saturating_sub(1);
+            }
+        }
+        "tab" if map => {
+            rows = !rows;
         }
         // Tab crosses between the box and the rows. It is the only key on
         // this screen that is not a character somebody might want typed.
@@ -2364,8 +2507,9 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(
             p.dim.as_str(),
             format!(
-                " {} keys, {} unset.",
+                " {} {}, {} unset.",
                 app.fields.len(),
+                if app.fields.len() == 1 { "key" } else { "keys" },
                 unset
             ),
         )],
@@ -2766,6 +2910,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         PickKind::Catalogue(table) => table.len(),
         PickKind::Free => choices.len(),
         PickKind::One(named) => named.len(),
+        PickKind::Map => choices.len(),
     };
     // Counted from the configuration, not from the filtered list: counting
     // the visible ticks made a search that matched nothing report "0 of 597"
@@ -2816,6 +2961,15 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             if chosen == 1 { "entry" } else { "entries" }
         ),
         PickKind::One(named) => format!("  One of {}.", named.len()),
+        PickKind::Map if chosen == 0 && query.is_empty() => {
+            "  Nothing here yet. Type a name and press ↵.".to_string()
+        }
+        PickKind::Map if chosen == 0 => "  Nothing here yet.".to_string(),
+        PickKind::Map => format!(
+            "  {} {}.",
+            chosen,
+            if chosen == 1 { "entry" } else { "entries" }
+        ),
         PickKind::Catalogue(_) if !query.is_empty() => format!(
             "  {} of {} match. {} set in all.",
             choices.len(),
@@ -2857,7 +3011,7 @@ format!(
     let ordering = match &kind {
         PickKind::Timezone => Some("  Drawn west to east by each zone's offset, not in the order added."),
         PickKind::Choices(_) => Some("  Shown in the order picked here."),
-        PickKind::Free => Some("  In the order you add them."),
+        PickKind::Free | PickKind::Map => Some("  In the order you add them."),
         // The widget wrote them in the order it wants them read.
         PickKind::One(_) => None,
         PickKind::Catalogue(_) => None,
@@ -2880,6 +3034,7 @@ format!(
     let hint = match &kind {
         PickKind::Timezone => "Type a city or a zone",
         PickKind::Free => "Type an entry, then ↵",
+        PickKind::Map => "Type a name, then ↵",
         _ => "Type to filter",
     };
     // The cursor is what says the box is listening, so it goes away when
@@ -2915,6 +3070,12 @@ format!(
             (_, false) if matches!(kind, PickKind::Free) => {
                 format!("  Press ↵ to add \"{query}\".")
             }
+            (false, true) if matches!(kind, PickKind::Map) => {
+                "  Nothing here yet. Type a name above.".to_string()
+            }
+            (_, false) if matches!(kind, PickKind::Map) => {
+                format!("  Press ↵ to name an entry \"{query}\".")
+            }
             (false, true) => "  Nothing to choose from.".to_string(),
             (_, false) => format!("  Nothing matches /{query}."),
         };
@@ -2924,7 +3085,7 @@ format!(
         // A free list hands focus back and forth, and only the side holding
         // it wears a cursor. Every other picker has one place for keys to
         // go, so its selection always stands.
-        let focused = !matches!(kind, PickKind::Free) || *on_list;
+        let focused = !matches!(kind, PickKind::Free | PickKind::Map) || *on_list;
         let here = focused && i == *sel;
         let tint = if here { crate::bg(28, 44, 62) } else { String::new() };
         let mark = if *on { "✓" } else { " " };
@@ -2966,7 +3127,39 @@ format!(
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::One(_)) {
+    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Map) {
+        let mut h: Vec<Vec<(&str, String)>> = Vec::new();
+        if !query.is_empty() {
+            h.push(vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " name it".into()),
+            ]);
+            h.push(vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ]);
+        } else if *on_list {
+            h.push(vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " open".into())]);
+            h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
+            h.push(vec![
+                (p.accent.as_str(), "tab".into()),
+                (p.dim.as_str(), " to add another".into()),
+            ]);
+        } else {
+            h.push(vec![(p.dim.as_str(), "type to add one".into())]);
+            if chosen > 0 {
+                h.push(vec![
+                    (p.accent.as_str(), "tab / ↑↓".into()),
+                    (p.dim.as_str(), " to open or remove one".into()),
+                ]);
+            }
+        }
+        if *on_list {
+            h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        }
+        h.push(vec![(p.dim.as_str(), "esc done".into())]);
+        h
+    } else if matches!(kind, PickKind::One(_)) {
         vec![
             vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " choose it".into())],
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())],
