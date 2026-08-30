@@ -2202,7 +2202,7 @@ fn main() {
                 match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
                     Ok(text) => Some(text),
                     Err(_) => {
-                        let why = "traffic poller stopped - the table below is still current";
+                        let why = "traffic sampling failed - the table below is still current";
                         if let Ok(mut guard) = poller.err.lock() {
                             *guard = why.into();
                         }

@@ -1284,6 +1284,23 @@ fn rust_item(t: &str) -> &str {
     t.strip_prefix("pub ").unwrap_or(t)
 }
 
+/// Text after the first complete `#[...]` on a line, if anything remains.
+fn after_first_attr(t: &str) -> Option<&str> {
+    let mut depth = 0i32;
+    for (idx, c) in t.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                let rest = t[idx + ']'.len_utf8()..].trim();
+                return if rest.is_empty() { None } else { Some(rest) };
+            }
+        }
+    }
+    None
+}
+
 /// A `#[cfg(target_os ...)]` still pending when the next item starts.
 ///
 /// Attributes stack, so `#[cfg(target_os)]` then `#[path]` then `mod host`
@@ -1359,6 +1376,9 @@ fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
         if t.starts_with("#[") {
             if pending && t.starts_with("#[test]") {
                 found.push(format!("line {line_no}: test gated by target_os"));
+            }
+            if let Some(rest) = after_first_attr(t) {
+                leftover = Some((line_no, rest.to_string()));
             }
             if consumed_source_line {
                 i += 1;
@@ -1436,6 +1456,7 @@ mod tests {
 
 #[cfg(target_os = "linux")] fn parse_same_line(text: &str) {}
 #[cfg(target_os = "linux")] #[test] fn same_line_test() {}
+#[cfg(target_os = "linux")] #[allow(dead_code)] fn parse_stacked(text: &str) {}
 "#;
     let got = parsers_or_tests_gated_by_target_os(src);
     assert!(
@@ -1447,8 +1468,8 @@ mod tests {
         "missed a gated #[test]: {got:?}"
     );
     assert!(
-        got.iter().filter(|s| s.contains("parser")).count() >= 4,
-        "missed a same-line cfg-gated parser: {got:?}"
+        got.iter().filter(|s| s.contains("parser")).count() >= 5,
+        "missed a same-line cfg plus allow parser: {got:?}"
     );
     assert!(
         got.iter().filter(|s| s.contains("test")).count() >= 3,
