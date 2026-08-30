@@ -1451,3 +1451,110 @@ fn a_declared_token_env_matches_the_code() {
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+
+/// The default on screen is the default the widget uses.
+///
+/// The settings screen draws a field's default from `settings.json`; the
+/// widget falls back to whatever it passed `cfg_*`. Nothing held the two
+/// together, and they had come apart: `latency` shipped
+/// `["1.1.1.1", "8.8.8.8", "example.internal"]` in its schema while its code
+/// defaulted to the first two, so the screen advertised a third host that
+/// was never pinged - and writing anything materialised the screen's version
+/// into the file, at which point the widget started pinging a name that does
+/// not resolve.
+///
+/// Only the four `cfg_*` helpers with a literal default are read. A default
+/// that is computed cannot be compared against a constant, and is skipped
+/// rather than guessed at.
+#[test]
+fn a_declared_default_matches_the_code() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for (name, source) in widgets() {
+        let settings = std::fs::read_to_string(dir.join(&name).join("settings.json"))
+            .unwrap_or_default();
+        let Ok(schema) = serde_json::from_str::<serde_json::Value>(&settings) else {
+            continue;
+        };
+        let Some(schema) = schema.as_object() else {
+            continue;
+        };
+        // Whitespace flattened first: these calls wrap across lines, and a
+        // line-by-line read is how a config audit here once missed most of
+        // them.
+        let flat: String = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for (call, render) in [
+            ("cfg_f64(", "number"),
+            ("cfg_usize(", "number"),
+            ("cfg_str(", "string"),
+            ("cfg_strings(", "strings"),
+        ] {
+            let mut rest = flat.as_str();
+            while let Some(at) = rest.find(call) {
+                rest = &rest[at + call.len()..];
+                let Some(end) = rest.find(')') else { break };
+                let args = &rest[..end];
+                // cfg, "key", default
+                let mut parts = args.splitn(3, ',');
+                let _cfg = parts.next();
+                let Some(key) = parts.next() else { continue };
+                let Some(default) = parts.next() else { continue };
+                let key = key.trim().trim_matches('"');
+                let default = default.trim();
+                let Some(declared) = schema.get(key) else {
+                    continue;
+                };
+                // Only a literal can be compared against a constant. A named
+                // one - TOKEN_ENV and its like - is held to its schema by
+                // a_declared_token_env_matches_the_code instead, which knows
+                // how to resolve it.
+                let literal = default.starts_with('"')
+                    || default.starts_with("&[")
+                    || default.starts_with('-')
+                    || default.starts_with(|c: char| c.is_ascii_digit());
+                if !literal {
+                    continue;
+                }
+                let agrees = match render {
+                    "number" => default
+                        .parse::<f64>()
+                        .ok()
+                        .zip(declared.as_f64())
+                        .is_some_and(|(a, b)| (a - b).abs() < 1e-9),
+                    "string" => declared.as_str() == Some(default.trim_matches('"')),
+                    // &["a", "b"] against the declared array.
+                    "strings" => {
+                        let inner = default.trim_start_matches("&[").trim_end_matches(']');
+                        let listed: Vec<String> = inner
+                            .split(',')
+                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        declared
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .is_some_and(|d| d == listed)
+                    }
+                    _ => true,
+                };
+                if !agrees {
+                    wrong.push(format!(
+                        "{name}.{key}: settings.json declares {}, the code falls back to {}",
+                        serde_json::to_string(declared).unwrap_or_default(),
+                        default
+                    ));
+                }
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}

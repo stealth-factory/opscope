@@ -25,8 +25,7 @@
   "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently.",
   "hosts": [
     "1.1.1.1",
-    "8.8.8.8",
-    "example.internal"
+    "8.8.8.8"
   ],
   "_interval_comment": "Seconds between ping samples per target.",
   "interval": 0.5,
@@ -39,7 +38,5 @@
   "_aggregate_comment": "How several samples in one graph column are combined.",
   "aggregate": "median",
   "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only.",
-  "strip_suffixes": [
-    ".example.internal"
-  ]
+  "strip_suffixes": []
 }
