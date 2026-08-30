@@ -24,28 +24,26 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::time::UNIX_EPOCH;
 
-use super::parse::{parse_proc_net_tcp, parse_proc_stat_zombie};
+use super::parse::{parse_proc_stat_zombie, proc_sockets_from_tables};
 use super::Found;
 
 /// Every listening TCP socket, with the pid this user can name.
+///
+/// One address-family table missing is fine. Both missing is an error,
+/// not an empty list: empty is what "nothing is listening" looks like.
 pub fn sockets() -> Result<Vec<Found>, String> {
     let owners = socket_owners();
-    let mut out = Vec::new();
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        for sock in parse_proc_net_tcp(&text) {
-            out.push(Found {
-                port: sock.port,
-                bind: sock.bind,
-                uid: sock.uid,
-                pid: owners.get(&sock.inode).copied(),
-            });
-        }
-    }
-    Ok(out)
+    let tcp = std::fs::read_to_string("/proc/net/tcp").ok();
+    let tcp6 = std::fs::read_to_string("/proc/net/tcp6").ok();
+    Ok(proc_sockets_from_tables(tcp.as_deref(), tcp6.as_deref())?
+        .into_iter()
+        .map(|sock| Found {
+            port: sock.port,
+            bind: sock.bind,
+            uid: sock.uid,
+            pid: owners.get(&sock.inode).copied(),
+        })
+        .collect())
 }
 
 /// inode -> pid, for every process this user can read.

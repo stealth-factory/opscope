@@ -1297,48 +1297,90 @@ fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
     let mut found = Vec::new();
     let lines: Vec<&str> = src.lines().collect();
     let mut i = 0;
-    while i < lines.len() {
-        let t = lines[i].trim();
+    // Remainder of a same-line item after `#[cfg(...)] fn parse_x()`.
+    let mut leftover: Option<(usize, String)> = None;
+    while i < lines.len() || leftover.is_some() {
+        let (line_no, owned): (usize, Option<String>) = match leftover.take() {
+            Some((n, s)) => (n, Some(s)),
+            None => (i + 1, None),
+        };
+        let t: &str = match &owned {
+            Some(s) => s.trim(),
+            None => lines[i].trim(),
+        };
+        let consumed_source_line = owned.is_none();
         if !in_attr && (t.starts_with("//") || t.is_empty()) {
-            i += 1;
+            if consumed_source_line {
+                i += 1;
+            }
             continue;
         }
         if in_attr || t.starts_with("#[cfg(") {
+            let mut depth = if in_attr {
+                attr.chars().filter(|&c| c == '[').count() as i32
+                    - attr.chars().filter(|&c| c == ']').count() as i32
+            } else {
+                0
+            };
             if !in_attr {
                 attr.clear();
             }
+            let mut closed_at = None;
+            for (idx, c) in t.char_indices() {
+                if c == '[' {
+                    depth += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed_at = Some(idx);
+                        break;
+                    }
+                }
+            }
             attr.push_str(t);
-            let open = attr.chars().filter(|&c| c == '[').count();
-            let close = attr.chars().filter(|&c| c == ']').count();
-            in_attr = open > close;
+            in_attr = depth > 0;
             if !in_attr {
                 if attr.contains("target_os") {
                     pending = true;
                 }
                 attr.clear();
+                if let Some(at) = closed_at {
+                    let rest = t[at + ']'.len_utf8()..].trim();
+                    if !rest.is_empty() {
+                        leftover = Some((line_no, rest.to_string()));
+                    }
+                }
             }
-            i += 1;
+            if consumed_source_line {
+                i += 1;
+            }
             continue;
         }
         if t.starts_with("#[") {
             if pending && t.starts_with("#[test]") {
-                found.push(format!("line {}: test gated by target_os", i + 1));
+                found.push(format!("line {line_no}: test gated by target_os"));
             }
-            i += 1;
+            if consumed_source_line {
+                i += 1;
+            }
             continue;
         }
         if pending {
             let item = rust_item(t);
             if item.starts_with("fn parse_") {
-                found.push(format!("line {}: parser gated by target_os", i + 1));
+                found.push(format!("line {line_no}: parser gated by target_os"));
                 pending = false;
-                i += 1;
+                if consumed_source_line {
+                    i += 1;
+                }
                 continue;
             }
             if item.starts_with("mod ") && t.contains('{') {
                 let mut depth = t.chars().filter(|&c| c == '{').count() as i32
                     - t.chars().filter(|&c| c == '}').count() as i32;
-                i += 1;
+                if consumed_source_line {
+                    i += 1;
+                }
                 while i < lines.len() && depth > 0 {
                     let n = lines[i].trim();
                     depth += n.chars().filter(|&c| c == '{').count() as i32;
@@ -1356,7 +1398,9 @@ fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
             }
             pending = false;
         }
-        i += 1;
+        if consumed_source_line {
+            i += 1;
+        }
     }
     found
 }
@@ -1389,6 +1433,9 @@ mod tests {
     fn also_hidden() {}
     fn parse_inner(text: &str) {}
 }
+
+#[cfg(target_os = "linux")] fn parse_same_line(text: &str) {}
+#[cfg(target_os = "linux")] #[test] fn same_line_test() {}
 "#;
     let got = parsers_or_tests_gated_by_target_os(src);
     assert!(
@@ -1400,12 +1447,12 @@ mod tests {
         "missed a gated #[test]: {got:?}"
     );
     assert!(
-        got.iter().filter(|s| s.contains("parser")).count() >= 2,
-        "missed a multiline cfg / pub(crate) parser: {got:?}"
+        got.iter().filter(|s| s.contains("parser")).count() >= 4,
+        "missed a same-line cfg-gated parser: {got:?}"
     );
     assert!(
-        got.iter().filter(|s| s.contains("test")).count() >= 2,
-        "missed an inline cfg-gated test module: {got:?}"
+        got.iter().filter(|s| s.contains("test")).count() >= 3,
+        "missed a same-line cfg-gated test: {got:?}"
     );
     assert!(
         !got.iter()

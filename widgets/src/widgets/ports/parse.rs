@@ -68,6 +68,30 @@ pub fn parse_proc_net_tcp(text: &str) -> Vec<ProcSocket> {
     out
 }
 
+/// Combine the IPv4 and IPv6 `/proc` tables.
+///
+/// One family missing is normal — a kernel with no IPv6, a container
+/// with no IPv4. Both missing is not an empty inventory: that is what
+/// "nothing is listening" looks like.
+pub fn proc_sockets_from_tables(
+    tcp: Option<&str>,
+    tcp6: Option<&str>,
+) -> Result<Vec<ProcSocket>, String> {
+    match (tcp, tcp6) {
+        (None, None) => Err("cannot read /proc/net/tcp or /proc/net/tcp6".into()),
+        (tcp, tcp6) => {
+            let mut out = Vec::new();
+            if let Some(text) = tcp {
+                out.extend(parse_proc_net_tcp(text));
+            }
+            if let Some(text) = tcp6 {
+                out.extend(parse_proc_net_tcp(text));
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// Every listener in `lsof -nP -iTCP -sTCP:LISTEN -Fpcunt` output.
 ///
 /// Field-per-line, not the human table: that one reflows with width.
@@ -286,6 +310,36 @@ mod tests {
         assert_eq!(got[0].port, 443);
         assert_eq!(got[0].bind, "::1");
         assert_eq!(got[0].uid, 0);
+    }
+
+    #[test]
+    fn both_missing_proc_tables_are_an_error_not_an_empty_inventory() {
+        let err = match proc_sockets_from_tables(None, None) {
+            Err(e) => e,
+            Ok(_) => panic!("both missing tables returned Ok"),
+        };
+        assert!(
+            err.contains("/proc/net/tcp") && err.contains("tcp6"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn one_missing_proc_table_keeps_the_family_that_was_there() {
+        let text = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        let v4 = proc_sockets_from_tables(Some(text), None).unwrap();
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].port, 8080);
+        let v6 = proc_sockets_from_tables(None, Some(text)).unwrap();
+        assert_eq!(v6.len(), 1);
+        let header_only = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        assert!(
+            proc_sockets_from_tables(Some(header_only), None)
+                .unwrap()
+                .is_empty(),
+            "a successful empty read is nothing listening, not a missing table"
+        );
     }
 
     #[test]

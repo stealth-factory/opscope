@@ -2200,7 +2200,7 @@ fn main() {
             let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
             let counters = if traffic_from_ss {
                 match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
-                    Ok(text) => text,
+                    Ok(text) => Some(text),
                     Err(_) => {
                         let why = "traffic poller stopped - the table below is still current";
                         if let Ok(mut guard) = poller.err.lock() {
@@ -2208,16 +2208,19 @@ fn main() {
                         }
                         // Traffic is one column of many; the ports themselves are
                         // still being found, so this one says so and carries on.
-                        String::new()
+                        // Do not sample an empty string: that records zeros and
+                        // looks like a quiet port, then the next good poll has
+                        // no baseline for the missed interval.
+                        None
                     }
                 }
             } else {
-                String::new()
+                None
             };
             if let Ok(mut guard) = poller.rows.lock() {
                 *guard = found;
             }
-            if traffic_from_ss {
+            if let Some(counters) = counters {
                 if let Ok(mut guard) = poller.traffic.lock() {
                     guard.sample(&counters, &listening, tc::now());
                 }
