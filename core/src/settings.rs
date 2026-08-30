@@ -881,6 +881,14 @@ enum Mode {
         /// reader has set something on. Starts on the reader's own, which
         /// is the shorter list and the one they came to look at.
         show_all: bool,
+        /// Whether the rows have focus rather than the box.
+        ///
+        /// A list you type into cannot also let a letter be a verb: the box
+        /// starts empty, which is exactly when somebody types the first
+        /// character of a new entry, and `d` meaning delete there costs you
+        /// every entry beginning with a `d`. So the verb lives on the rows,
+        /// reached with tab, and the box keeps every printable key.
+        on_list: bool,
     },
 }
 
@@ -1865,11 +1873,11 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
 }
 
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
-    let Mode::Pick { index, query, sel, scroll, show_all } = &mut app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all, on_list } = &mut app.mode else {
         return false;
     };
-    let (index, mut q, mut s_, mut sc, mut all) =
-        (*index, query.clone(), *sel, *scroll, *show_all);
+    let (index, mut q, mut s_, mut sc, mut all, mut rows) =
+        (*index, query.clone(), *sel, *scroll, *show_all, *on_list);
     let catalogue = app
         .fields
         .get(index)
@@ -1910,6 +1918,11 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         // A catalogue entry is a thing with numbers under it, so opening it
         // is what enter should do. A list of names has nothing to open, and
         // enter still ticks.
+        // Tab crosses between the box and the rows. It is the only key on
+        // this screen that is not a character somebody might want typed.
+        "tab" if free => {
+            rows = !rows;
+        }
         // What is typed is the entry. There is nothing to search, so enter
         // on an empty box would have nothing to mean.
         "enter" if free => {
@@ -1921,9 +1934,10 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 sc = 0;
             }
         }
-        // A letter is a character while the box has anything in it, or the
-        // entries with a `d` in them could not be typed at all.
-        "d" | "D" if free && q.is_empty() => {
+        // Only with the rows in focus. In the box it is a letter, always -
+        // including as the first one, which is where guarding on an empty
+        // box got it wrong.
+        "d" | "D" if free && rows => {
             if let Some((entry, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 remove_free_entry(app, index, &entry);
                 s_ = s_.saturating_sub(1);
@@ -1973,6 +1987,9 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         other if other.chars().count() == 1 => {
             let ch = other.chars().next().unwrap();
             if !ch.is_control() {
+                // Typing is for the box, so it takes focus back. Somebody
+                // who starts typing has said where they want to be.
+                rows = false;
                 q.push(ch);
                 s_ = 0;
             }
@@ -1980,11 +1997,13 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         _ => {}
     }
     let total = zone_choices(app, index, &q, all).len();
-    if let Mode::Pick { query, sel, scroll, show_all, .. } = &mut app.mode {
+    if let Mode::Pick { query, sel, scroll, show_all, on_list, .. } = &mut app.mode {
         *query = q;
         *sel = s_.min(total.saturating_sub(1));
         *scroll = sc;
         *show_all = all;
+        // Nothing to stand on is nothing to focus.
+        *on_list = rows && total > 0;
     }
     false
 }
@@ -2105,6 +2124,9 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                         // are none, where opening on it would be a screen
                         // saying you have nothing and offering nothing.
                         show_all: picked_zones(app, app.selected).is_empty(),
+                        // The box first: a list you type into is a list you
+                        // came to type into.
+                        on_list: false,
                     };
                 } else {
                     let seed = edit_seed(field, current_of(&app.live, field, app.legacy_section));
@@ -2510,6 +2532,8 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         // and a placeholder promising otherwise would be a line on screen
         // that is not true.
         field.kind(),
+        // The editor is the only thing on its screen; it always has focus.
+        true,
     ));
     if let Some(err) = error {
         body.push(crate::seg(&[(p.bad.as_str(), format!("  {err}"))], w.saturating_sub(1)));
@@ -2546,7 +2570,14 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
 /// what is being corrected is what should be on screen, so a value longer
 /// than the box scrolls to keep the caret in view rather than pinning either
 /// end.
-fn input_row(p: &Palette, w: usize, text: &str, cursor: usize, placeholder: &str) -> String {
+fn input_row(
+    p: &Palette,
+    w: usize,
+    text: &str,
+    cursor: usize,
+    placeholder: &str,
+    focused: bool,
+) -> String {
     let box_w = w.saturating_sub(6).max(12);
     let room = box_w.saturating_sub(2);
     let chars: Vec<char> = text.chars().collect();
@@ -2560,7 +2591,10 @@ fn input_row(p: &Palette, w: usize, text: &str, cursor: usize, placeholder: &str
     let ink = format!("{field}{}", p.txt);
     let ghost = format!("{field}{}", p.dim);
     let edge = format!("{field}{}", p.accent);
-    let lit = (crate::now() * 2.0) as u64 % 2 == 0;
+    // Blinking is the box saying it is listening; a box that is not being
+    // typed into does not blink, and does not pretend to be where the keys
+    // are going.
+    let lit = focused && (crate::now() * 2.0) as u64 % 2 == 0;
 
     let hint = if text.is_empty() && !placeholder.is_empty() {
         // Only where it fits, and never over what has been typed.
@@ -2589,7 +2623,7 @@ fn input_row(p: &Palette, w: usize, text: &str, cursor: usize, placeholder: &str
 }
 
 fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
-    let Mode::Pick { index, query, sel, scroll, show_all } = &app.mode else {
+    let Mode::Pick { index, query, sel, scroll, show_all, on_list } = &app.mode else {
         return vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
     };
     let field = &app.fields[*index];
@@ -2643,8 +2677,13 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         PickKind::Free if chosen == 0 => {
             "  nothing here yet · type an entry and press ↵".to_string()
         }
+        PickKind::Free if *on_list => format!(
+            "  {} {} · [d] removes the one selected · tab back to the box",
+            chosen,
+            if chosen == 1 { "entry" } else { "entries" }
+        ),
         PickKind::Free => format!(
-            "  {} {} · type to add another, [d] on a row removes it",
+            "  {} {} · type to add another · tab to the list to remove one",
             chosen,
             if chosen == 1 { "entry" } else { "entries" }
         ),
@@ -2701,7 +2740,9 @@ format!(
         PickKind::Free => "type an entry, then ↵",
         _ => "type to filter",
     };
-    body.push(input_row(p, w, query, query.chars().count(), hint));
+    // The cursor is what says the box is listening, so it goes away when
+    // the rows are the thing being driven.
+    body.push(input_row(p, w, query, query.chars().count(), hint, !*on_list));
     body.push(String::new());
 
     let foot_rows = 2;
@@ -2774,20 +2815,31 @@ format!(
 
     let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Free) {
         let mut h: Vec<Vec<(&str, String)>> = Vec::new();
-        if query.is_empty() {
-            h.push(vec![(p.dim.as_str(), "type to add".into())]);
-            if chosen > 0 {
-                h.push(vec![(p.dim.as_str(), "[d]elete the row".into())]);
-            }
+        if *on_list {
+            h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
+            h.push(vec![
+                (p.accent.as_str(), "tab".into()),
+                (p.dim.as_str(), " back to typing".into()),
+            ]);
         } else {
-            h.push(vec![
-                (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " add it".into()),
-            ]);
-            h.push(vec![
-                (p.accent.as_str(), "ctrl-u".into()),
-                (p.dim.as_str(), " clear".into()),
-            ]);
+            if query.is_empty() {
+                h.push(vec![(p.dim.as_str(), "type to add".into())]);
+            } else {
+                h.push(vec![
+                    (p.accent.as_str(), "↵".into()),
+                    (p.dim.as_str(), " add it".into()),
+                ]);
+                h.push(vec![
+                    (p.accent.as_str(), "ctrl-u".into()),
+                    (p.dim.as_str(), " clear".into()),
+                ]);
+            }
+            if chosen > 0 {
+                h.push(vec![
+                    (p.accent.as_str(), "tab".into()),
+                    (p.dim.as_str(), " the list".into()),
+                ]);
+            }
         }
         h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
@@ -3158,10 +3210,52 @@ mod tests {
         assert!(matches!(picker_kind(&inferred, "hosts"), Some(PickKind::Free)));
     }
 
+    /// Typing `d` into an empty box types a `d`.
+    ///
+    /// It was guarded on the box being empty, which is exactly the moment
+    /// somebody types the first character of a new entry - so `d` deleted
+    /// one instead, and every entry beginning with that letter was
+    /// unreachable. The verb lives on the rows now, and tab is what gets
+    /// there.
+    #[test]
+    fn a_letter_stays_a_letter_while_the_box_has_focus() {
+        let mut app = field_app("hosts", serde_json::json!(["a.example"]), None);
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+        };
+
+        handle_pick_key(&mut app, "d");
+        let Mode::Pick { query, on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert_eq!(query, "d", "the box takes the letter");
+        assert!(!on_list, "typing keeps focus in the box");
+
+        // Tab crosses to the rows, and there it is a verb.
+        handle_pick_key(&mut app, "tab");
+        let Mode::Pick { on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(on_list, "tab moves focus to the rows");
+
+        // And typing anywhere brings focus back, so nobody is stranded.
+        handle_pick_key(&mut app, "x");
+        let Mode::Pick { query, on_list, .. } = &app.mode else {
+            panic!("still on the picker");
+        };
+        assert!(!on_list, "typing returns focus to the box");
+        assert_eq!(query, "dx");
+    }
+
     /// A list of numbers is left alone.
     ///
     /// `pomodoro_flash_rgb` is one colour in three parts, not a list anybody
-    /// adds a fourth entry to, and `[d]elete the row` on it would be an
+    /// adds a fourth entry to, and `[d]elete the entry` on it would be an
     /// offer to make a two-component colour.
     #[test]
     fn a_list_of_numbers_keeps_the_box_it_had() {

@@ -127,10 +127,13 @@ Three rules the tests measure:
   grows, drop them as it shrinks. **Never truncate.**
 - **Never truncate a key hint.** `pack_hints()` wraps footers without
   splitting one, because `[±]25` teaches a key that does not exist.
-- **A letter is not a verb on a screen with a search box.** Binding `d` to
-  drop made every model with a `d` in its name unsearchable. Guard it on an
-  empty query — as `q` already is — and hide the hint while typing, so the
-  footer never names a key the box is eating.
+- **A letter is not a verb on a screen with a text box.** Binding `d` to drop
+  made every model with a `d` in its name unsearchable. Guarding it on an
+  *empty* box is not enough either: empty is exactly when somebody types the
+  first character of a new entry, so `docs.example.com` deleted something on
+  its first keystroke. Where the box composes rather than filters, give the
+  rows their own focus — `tab` crosses, typing crosses back, and the caret
+  stops blinking on the box that is not listening.
 - **Measure contrast, do not eyeball it.** Every text colour must clear WCAG AA
   against the terminal background *and* the selected-row tint. This was prose
   in `CLAUDE.md` and went unmet in four widgets for as long as there were four
