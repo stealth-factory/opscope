@@ -1190,6 +1190,11 @@ enum PickKind {
     Timezone,
     /// A finite set the schema names. Written as bare strings.
     Choices(Vec<String>),
+    /// A list the reader writes themselves: hostnames, org names, repo
+    /// paths. There is nothing to offer, so the box composes a new entry
+    /// rather than searching for an existing one, and the rows below are
+    /// what is already in the list.
+    Free,
     /// The keys of a table the widget owns in code, written as the keys of
     /// an object rather than as members of a list - each one holds the
     /// numbers set against it, so it has to be a key with something under
@@ -1418,7 +1423,15 @@ fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
     if let Some(table) = catalogue_for(app, key) {
         return Some(PickKind::Catalogue(table));
     }
-    let rule = app.constraints.get(key)?.as_object()?.get("picker")?;
+    let rule = match app.constraints.get(key).and_then(Value::as_object) {
+        Some(rule) => rule,
+        // No rules at all still leaves a list of strings worth editing as a
+        // list - latency's hosts declare no `items` and are plainly strings.
+        None => return free_list_kind(app, key),
+    };
+    let Some(rule) = rule.get("picker") else {
+        return free_list_kind(app, key);
+    };
     if rule.as_str() == Some("timezone") {
         return Some(PickKind::Timezone);
     }
@@ -1430,6 +1443,34 @@ fn picker_kind(app: &App, key: &str) -> Option<PickKind> {
             .map(str::to_string)
             .collect(),
     ))
+}
+
+/// Whether a field is a list of strings the reader fills in themselves.
+///
+/// Declared `items: "string"` says so outright. Failing that, a default that
+/// is a non-empty array of strings says it just as well - `latency.hosts`
+/// ships three and declares nothing. An array of numbers is left alone: an
+/// RGB triple is one value in three parts, not a list anybody adds to.
+fn free_list_kind(app: &App, key: &str) -> Option<PickKind> {
+    let field = app.fields.iter().find(|f| f.key == key)?;
+    if !field.default.is_array() {
+        return None;
+    }
+    let declared = app
+        .constraints
+        .get(key)
+        .and_then(Value::as_object)
+        .and_then(|r| r.get("items"))
+        .and_then(Value::as_str);
+    let stringy = match declared {
+        Some("string") => true,
+        Some(_) => false,
+        None => {
+            let items = field.default.as_array()?;
+            !items.is_empty() && items.iter().all(Value::is_string)
+        }
+    };
+    stringy.then_some(PickKind::Free)
 }
 
 /// Cities the timezone database does not name, and the zone that carries
@@ -1655,6 +1696,11 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             return picked.into_iter().map(|z| (z, true)).collect();
         }
     }
+    // A free list has no candidates: what is on screen is what is in it,
+    // and typing composes an entry rather than filtering these.
+    if matches!(kind, PickKind::Free) {
+        return picked.into_iter().map(|z| (z, true)).collect();
+    }
     let mut out: Vec<(u8, String)> = match &kind {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS
             .iter()
@@ -1665,6 +1711,8 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .iter()
             .filter_map(|one| zone_rank(one, query).map(|r| (r, one.clone())))
             .collect(),
+        // Never reached: a free list returns above, before any ranking.
+        PickKind::Free => Vec::new(),
         PickKind::Catalogue(table) => table
             .iter()
             .filter_map(|(name, group, _)| {
@@ -1769,6 +1817,53 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
     }
 }
 
+/// Put one entry into a free list, unless it is already there.
+///
+/// Appended rather than sorted: the widget decides what order means, and for
+/// a list of hosts the order somebody typed them in is the one they expect
+/// to see back.
+fn add_free_entry(app: &mut App, index: usize, entry: &str) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let mut rows: Vec<Value> = current_of(&app.live, field, app.legacy_section)
+        .or(Some(&field.default))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rows.iter().any(|v| v.as_str() == Some(entry)) {
+        app.status = Some(format!("{entry} is already in the list"));
+        return;
+    }
+    rows.push(Value::String(entry.to_string()));
+    match write_field(app, index, Value::Array(rows)) {
+        Ok(()) => app.status = Some(format!("added {entry}")),
+        Err(e) => app.status = Some(e),
+    }
+}
+
+/// Take one entry out, leaving the rest in the order they were in.
+fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
+    let Some(field) = app.fields.get(index) else {
+        return;
+    };
+    let Some(rows) = current_of(&app.live, field, app.legacy_section)
+        .or(Some(&field.default))
+        .and_then(Value::as_array)
+        .cloned()
+    else {
+        return;
+    };
+    let kept: Vec<Value> = rows
+        .into_iter()
+        .filter(|v| v.as_str() != Some(entry))
+        .collect();
+    match write_field(app, index, Value::Array(kept)) {
+        Ok(()) => app.status = Some(format!("removed {entry}")),
+        Err(e) => app.status = Some(e),
+    }
+}
+
 fn handle_pick_key(app: &mut App, key: &str) -> bool {
     let Mode::Pick { index, query, sel, scroll, show_all } = &mut app.mode else {
         return false;
@@ -1779,6 +1874,10 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         .fields
         .get(index)
         .is_some_and(|f| catalogue_for(app, &f.key).is_some());
+    let free = app
+        .fields
+        .get(index)
+        .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::Free)));
     let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
@@ -1811,6 +1910,25 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         // A catalogue entry is a thing with numbers under it, so opening it
         // is what enter should do. A list of names has nothing to open, and
         // enter still ticks.
+        // What is typed is the entry. There is nothing to search, so enter
+        // on an empty box would have nothing to mean.
+        "enter" if free => {
+            let typed = q.trim().to_string();
+            if !typed.is_empty() {
+                add_free_entry(app, index, &typed);
+                q.clear();
+                s_ = 0;
+                sc = 0;
+            }
+        }
+        // A letter is a character while the box has anything in it, or the
+        // entries with a `d` in them could not be typed at all.
+        "d" | "D" if free && q.is_empty() => {
+            if let Some((entry, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                remove_free_entry(app, index, &entry);
+                s_ = s_.saturating_sub(1);
+            }
+        }
         "enter" if catalogue => {
             if let Some((model, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 let Some(parent) = app.fields.get(index).cloned() else {
@@ -2481,6 +2599,7 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         PickKind::Timezone => chrono_tz::TZ_VARIANTS.len(),
         PickKind::Choices(all) => all.len(),
         PickKind::Catalogue(table) => table.len(),
+        PickKind::Free => choices.len(),
     };
     // Counted from the configuration, not from the filtered list: counting
     // the visible ticks made a search that matched nothing report "0 of 597"
@@ -2521,6 +2640,14 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // they are not, and the count that matters is how many you have changed
     // against how many there are to change.
     let heading = match &kind {
+        PickKind::Free if chosen == 0 => {
+            "  nothing here yet · type an entry and press ↵".to_string()
+        }
+        PickKind::Free => format!(
+            "  {} {} · type to add another, [d] on a row removes it",
+            chosen,
+            if chosen == 1 { "entry" } else { "entries" }
+        ),
         PickKind::Catalogue(_) if !query.is_empty() => format!(
             "  {} of {} match · {} set in all",
             choices.len(),
@@ -2551,6 +2678,7 @@ format!(
     let ordering = match &kind {
         PickKind::Timezone => Some("  drawn west to east by each zone's offset, not in the order added"),
         PickKind::Choices(_) => Some("  shown in the order picked here"),
+        PickKind::Free => Some("  in the order you add them"),
         PickKind::Catalogue(_) => None,
     };
     if let Some(ordering) = ordering {
@@ -2566,10 +2694,12 @@ format!(
         ));
     }
     body.push(String::new());
-    let hint = if zones {
-        "type a city or a zone"
-    } else {
-        "type to filter"
+    // The box does different work per kind: it searches a catalogue, and it
+    // composes an entry for a list that has no candidates to search.
+    let hint = match &kind {
+        PickKind::Timezone => "type a city or a zone",
+        PickKind::Free => "type an entry, then ↵",
+        _ => "type to filter",
     };
     body.push(input_row(p, w, query, query.chars().count(), hint));
     body.push(String::new());
@@ -2591,6 +2721,9 @@ format!(
             // has none yet. Say which key gets them the rest.
             (false, true) if matches!(kind, PickKind::Catalogue(_)) => {
                 "  nothing set yet - tab for the whole card".to_string()
+            }
+            (false, true) if matches!(kind, PickKind::Free) => {
+                "  the list is empty - type an entry above".to_string()
             }
             (false, true) => "  nothing to choose from".to_string(),
             (_, false) => format!("  nothing matches /{query}"),
@@ -2639,7 +2772,27 @@ format!(
         ));
     }
 
-    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Catalogue(_)) {
+    let hints: Vec<Vec<(&str, String)>> = if matches!(kind, PickKind::Free) {
+        let mut h: Vec<Vec<(&str, String)>> = Vec::new();
+        if query.is_empty() {
+            h.push(vec![(p.dim.as_str(), "type to add".into())]);
+            if chosen > 0 {
+                h.push(vec![(p.dim.as_str(), "[d]elete the row".into())]);
+            }
+        } else {
+            h.push(vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " add it".into()),
+            ]);
+            h.push(vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ]);
+        }
+        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![(p.dim.as_str(), "esc done".into())]);
+        h
+    } else if matches!(kind, PickKind::Catalogue(_)) {
         // Enter opens rather than ticks here, so the footer has to say so -
         // this is the one picker where the row is a door, not a checkbox.
         let mut h = vec![vec![
@@ -2966,6 +3119,83 @@ mod tests {
         assert!(validate_value(&serde_json::json!("x"), &Value::Null, None).is_ok());
         // A declared type is still enforced where there is one.
         assert!(validate_value(&serde_json::json!("x"), &serde_json::json!(1.0), None).is_err());
+    }
+
+    /// An App holding one field, for asking what kind of picker it gets.
+    fn field_app(key: &str, default: Value, rule: Option<Value>) -> App {
+        let mut app = catalogue_app(serde_json::json!({"w": {}}));
+        app.catalogues = &[];
+        app.fields = vec![Field {
+            section: "w".into(),
+            key: key.to_string(),
+            parents: Vec::new(),
+            help: String::new(),
+            default,
+        }];
+        if let Some(rule) = rule {
+            app.constraints.insert(key.to_string(), rule);
+        }
+        app
+    }
+
+    /// A list of strings is typed into, one entry at a time.
+    ///
+    /// It used to fall through to the JSON box, so adding a second host
+    /// meant typing the brackets and the quotes in the right places.
+    #[test]
+    fn a_list_of_strings_is_filled_in_entry_by_entry() {
+        // Declared outright.
+        let declared = field_app(
+            "accounts",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        assert!(matches!(picker_kind(&declared, "accounts"), Some(PickKind::Free)));
+
+        // Undeclared, but the shipped default says what the elements are -
+        // latency.hosts declares nothing and is plainly a list of hosts.
+        let inferred = field_app("hosts", serde_json::json!(["1.1.1.1", "8.8.8.8"]), None);
+        assert!(matches!(picker_kind(&inferred, "hosts"), Some(PickKind::Free)));
+    }
+
+    /// A list of numbers is left alone.
+    ///
+    /// `pomodoro_flash_rgb` is one colour in three parts, not a list anybody
+    /// adds a fourth entry to, and `[d]elete the row` on it would be an
+    /// offer to make a two-component colour.
+    #[test]
+    fn a_list_of_numbers_keeps_the_box_it_had() {
+        let rgb = field_app("pomodoro_flash_rgb", serde_json::json!([246, 248, 252]), None);
+        assert!(picker_kind(&rgb, "pomodoro_flash_rgb").is_none());
+
+        let declared = field_app(
+            "ports",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        assert!(picker_kind(&declared, "ports").is_none());
+
+        // And nothing that is not a list at all.
+        let text = field_app("aggregate", serde_json::json!("median"), None);
+        assert!(picker_kind(&text, "aggregate").is_none());
+    }
+
+    /// A declared picker still wins: a checklist is not a free list.
+    #[test]
+    fn a_declared_picker_is_not_turned_into_a_typed_list() {
+        let choices = field_app(
+            "agents",
+            serde_json::json!([]),
+            Some(serde_json::json!({"picker": {"choices": ["claude", "codex"]}})),
+        );
+        assert!(matches!(picker_kind(&choices, "agents"), Some(PickKind::Choices(_))));
+
+        let zones = field_app(
+            "cities",
+            serde_json::json!([]),
+            Some(serde_json::json!({"picker": "timezone"})),
+        );
+        assert!(matches!(picker_kind(&zones, "cities"), Some(PickKind::Timezone)));
     }
 
     /// A field the widget handed no table for keeps the box it always had.

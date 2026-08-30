@@ -225,6 +225,17 @@ choices, element types, numeric bounds, nesting, units. The generator omits it
 from `config.example.json`; it exists to stop the settings screen accepting a
 value the widget would silently ignore.
 
+### A list of strings needs no declaration
+
+An array of strings is filled in one entry at a time: the box composes an
+entry, `↵` adds it, `[d]` on a row removes it. Nothing has to be declared —
+`items: "string"` says so outright, and a shipped default that is a non-empty
+array of strings says it just as well.
+
+An array of *numbers* keeps the JSON box on purpose. `pomodoro_flash_rgb` is
+one colour in three parts, not a list anybody adds a fourth entry to, and
+offering to delete a row of it would be offering a two-component colour.
+
 ### When the options live in code
 
 Some maps are keyed by something the widget already knows and cannot sensibly
