@@ -1558,3 +1558,51 @@ fn a_declared_default_matches_the_code() {
     wrong.dedup();
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+
+/// Every array field declares what it holds.
+///
+/// The settings screen decides whether a list is filled in entry by entry or
+/// left as a JSON box, and it decides from `items`. Where that is missing it
+/// falls back to reading the shipped default - which works until the default
+/// is empty, and a list somebody is meant to fill in ships empty by nature.
+///
+/// This is not hypothetical. `latency.strip_suffixes` was classified by its
+/// default holding one string; correcting that default to `[]` - a separate,
+/// correct fix - silently took its editor away, and every test still passed
+/// because nothing checked that a field kept the screen it had. A capability
+/// that depends on a value is a capability that leaves when the value does.
+#[test]
+fn every_array_declares_what_it_holds() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&settings) else {
+            continue;
+        };
+        let Some(body) = parsed.as_object() else {
+            continue;
+        };
+        let schema = body.get("_schema").and_then(|v| v.as_object());
+        for (key, value) in body {
+            if key.starts_with('_') || !value.is_array() {
+                continue;
+            }
+            let rule = schema.and_then(|s| s.get(key)).and_then(|r| r.as_object());
+            // A picker names its own answers, so it has already said.
+            if rule.is_some_and(|r| r.contains_key("picker")) {
+                continue;
+            }
+            if !rule.is_some_and(|r| r.contains_key("items")) {
+                wrong.push(format!(
+                    "{name}.{key}: an array with no `items` - the screen would have to \
+                     guess from its default what kind of list it is"
+                ));
+            }
+        }
+    }
+    wrong.sort();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}

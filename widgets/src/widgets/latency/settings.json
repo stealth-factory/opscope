@@ -1,5 +1,7 @@
 {
   "_schema": {
+    "strip_suffixes": { "items": "string" },
+    "hosts": { "items": "string" },
     "interval": {
       "minimum": 0.01
     },
