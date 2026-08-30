@@ -2607,7 +2607,7 @@ format!(
         // Only while the search is empty, because that is the only time the
         // key is a verb rather than a character going into the box.
         if chosen > 0 && query.is_empty() {
-            h.push(vec![(p.dim.as_str(), "[d]rop".into())]);
+            h.push(vec![(p.dim.as_str(), "[d]efault".into())]);
         }
         if !query.is_empty() {
             h.push(vec![
