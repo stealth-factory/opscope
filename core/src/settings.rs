@@ -1661,7 +1661,15 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
             .collect(),
         PickKind::Catalogue(table) => table
             .iter()
-            .filter_map(|(name, _, _)| zone_rank(name, query).map(|r| (r, name.to_string())))
+            .filter_map(|(name, group, _)| {
+                // The publisher is searchable too, because it is on screen
+                // and a column you can read is a column you will type at.
+                // A name match always outranks one: "gpt" wants the models
+                // called that, above everything OpenAI happens to publish.
+                zone_rank(name, query)
+                    .or_else(|| zone_rank(group, query).map(|r| r.saturating_add(4)))
+                    .map(|r| (r, name.to_string()))
+            })
             .collect(),
     };
     // Stable, so within a rank the source's own order holds - alphabetical
@@ -2826,6 +2834,22 @@ mod tests {
             "{}",
             unknown[0].help
         );
+    }
+
+    /// A column you can read is a column you will type at.
+    #[test]
+    fn typing_a_publisher_finds_what_it_publishes() {
+        let app = catalogue_app(serde_json::json!({"w": {"rates": {}}}));
+        let found = zone_choices(&app, 0, "Acme", true);
+        assert_eq!(found, vec![("model-a".to_string(), false)]);
+        // Case is not a trap: the column is capitalised and nobody types it.
+        let lower = zone_choices(&app, 0, "acme", true);
+        assert_eq!(lower.len(), 1);
+        // A name still beats a publisher. Were it the other way round,
+        // searching a vendor's own model name would bury it under its
+        // siblings.
+        let both = zone_choices(&app, 0, "model-b", true);
+        assert_eq!(both.first().map(|(k, _)| k.as_str()), Some("model-b"));
     }
 
     /// Enter on a catalogue field opens the picker rather than a list of
