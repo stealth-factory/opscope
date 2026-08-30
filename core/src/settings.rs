@@ -1896,6 +1896,12 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             app.mode = Mode::List;
             return false;
         }
+        // Above the plain arrows, which would otherwise take these first:
+        // reaching for the list is asking for it, and without this they move
+        // a selection nobody can see, which reads as a dead key.
+        "up" | "down" | "pgup" | "pgdn" | "home" | "end" if free && !rows && total > 0 => {
+            rows = true;
+        }
         "up" => s_ = s_.saturating_sub(1),
         "down" => s_ = (s_ + 1).min(total.saturating_sub(1)),
         "pgup" => s_ = s_.saturating_sub(10),
@@ -2677,13 +2683,8 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         PickKind::Free if chosen == 0 => {
             "  nothing here yet · type an entry and press ↵".to_string()
         }
-        PickKind::Free if *on_list => format!(
-            "  {} {} · [d] removes the one selected · tab back to the box",
-            chosen,
-            if chosen == 1 { "entry" } else { "entries" }
-        ),
         PickKind::Free => format!(
-            "  {} {} · type to add another · tab to the list to remove one",
+            "  {} {}",
             chosen,
             if chosen == 1 { "entry" } else { "entries" }
         ),
@@ -2772,7 +2773,11 @@ format!(
         body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
     }
     for (i, (zone, on)) in choices.iter().enumerate().skip(first).take(room) {
-        let here = i == *sel;
+        // A free list hands focus back and forth, and only the side holding
+        // it wears a cursor. Every other picker has one place for keys to
+        // go, so its selection always stands.
+        let focused = !matches!(kind, PickKind::Free) || *on_list;
+        let here = focused && i == *sel;
         let tint = if here { crate::bg(28, 44, 62) } else { String::new() };
         let mark = if *on { "✓" } else { " " };
         // Owned first, borrowed after: `seg` takes `&str`, so a colour
@@ -2819,7 +2824,7 @@ format!(
             h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
-                (p.dim.as_str(), " back to typing".into()),
+                (p.dim.as_str(), " to add another entry".into()),
             ]);
         } else {
             if query.is_empty() {
@@ -2836,12 +2841,14 @@ format!(
             }
             if chosen > 0 {
                 h.push(vec![
-                    (p.accent.as_str(), "tab".into()),
-                    (p.dim.as_str(), " the list".into()),
+                    (p.accent.as_str(), "tab / ↑↓".into()),
+                    (p.dim.as_str(), " to select an entry to remove".into()),
                 ]);
             }
         }
-        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        if *on_list {
+            h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        }
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
         h
     } else if matches!(kind, PickKind::Catalogue(_)) {
