@@ -24,7 +24,7 @@
       ]
     }
   },
-  "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently. Anything ping accepts works - \"1.1.1.1\", \"db1.internal\", \"example.com\" - and a name that does not resolve shows as DOWN rather than being dropped, so a typo is visible instead of silent.",
+  "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently. Anything ping accepts works — \"1.1.1.1\", \"db1.internal\", \"example.com\" — and a name that does not resolve shows as DOWN rather than being dropped, so a typo is visible instead of silent.",
   "hosts": [
     "1.1.1.1",
     "8.8.8.8"
@@ -39,6 +39,6 @@
   "spike_factor": 3.0,
   "_aggregate_comment": "How several samples in one graph column are combined.",
   "aggregate": "median",
-  "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only - the target is still pinged by its full name. Give the leading dot: \".internal\" turns db1.internal into db1, and \".eu-west-1.compute.internal\" turns a long cloud name into the host part. Longest match wins, so a general suffix and a more specific one can both be listed.",
+  "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only — the target is still pinged by its full name. Give the leading dot: \".internal\" turns db1.internal into db1, and \".eu-west-1.compute.internal\" turns a long cloud name into the host part. Longest match wins, so a general suffix and a more specific one can both be listed.",
   "strip_suffixes": []
 }

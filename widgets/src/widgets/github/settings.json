@@ -1,5 +1,5 @@
 {
-  "_comment": "token: a CLASSIC PAT with repo + read:org - fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+  "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
   "_schema": {
     "accounts": {
       "items": "string"

@@ -18,7 +18,7 @@
   "refresh": 2.0,
   "_history_comment": "Minimum number of rate samples retained.",
   "history": 120,
-  "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor - retention follows the longest window on its own.",
+  "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor — retention follows the longest window on its own.",
   "windows": [
     60,
     300,

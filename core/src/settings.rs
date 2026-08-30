@@ -1041,12 +1041,12 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
     app.exists = true;
     app.status = Some(if section != schema_section {
         format!(
-            "wrote {section}.{key} · this file still uses `{section}` · reloading {}",
+            "Wrote {section}.{key}. This file still uses `{section}` — reloading {}.",
             app.widget
         )
     } else {
         format!(
-            "wrote {schema_path} · {} reloads when you leave",
+            "Wrote {schema_path}. {} reloads when you leave.",
             app.widget
         )
     });
@@ -1088,7 +1088,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
         true
     };
     if !held(&fresh_live) {
-        app.status = Some(format!("{schema_path} already uses its default"));
+        app.status = Some(format!("{schema_path} already uses its default."));
         return Ok(());
     }
     let mut next = fresh_raw.clone();
@@ -1105,7 +1105,7 @@ fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
     app.raw = next;
     app.live = serde_json::from_str(&app.raw).map_err(|e| e.to_string())?;
     app.status = Some(format!(
-        "removed {schema_path} · default {shown_default} · {} reloads when you leave",
+        "Removed {schema_path}. Default {shown_default}. {} reloads when you leave.",
         app.widget
     ));
     Ok(())
@@ -1819,9 +1819,8 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
         match write_field(app, index, Value::Object(held)) {
             Ok(()) => {
                 app.status = Some(format!(
-                    "{} {}",
-                    if removed { "removed" } else { "added" },
-                    zone
+                    "{} {zone}.",
+                    if removed { "Removed" } else { "Added" }
                 ))
             }
             Err(e) => app.status = Some(e),
@@ -1859,9 +1858,8 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
     match write_field(app, index, Value::Array(rows)) {
         Ok(()) => {
             app.status = Some(format!(
-                "{} {}",
-                if removed { "removed" } else { "added" },
-                zone
+                "{} {zone}.",
+                if removed { "Removed" } else { "Added" }
             ))
         }
         Err(e) => app.status = Some(e),
@@ -1883,12 +1881,12 @@ fn add_free_entry(app: &mut App, index: usize, entry: &str) {
         .cloned()
         .unwrap_or_default();
     if rows.iter().any(|v| v.as_str() == Some(entry)) {
-        app.status = Some(format!("{entry} is already in the list"));
+        app.status = Some(format!("{entry} is already in the list."));
         return;
     }
     rows.push(Value::String(entry.to_string()));
     match write_field(app, index, Value::Array(rows)) {
-        Ok(()) => app.status = Some(format!("added {entry}")),
+        Ok(()) => app.status = Some(format!("Added {entry}.")),
         Err(e) => app.status = Some(e),
     }
 }
@@ -1910,7 +1908,7 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
         .filter(|v| v.as_str() != Some(entry))
         .collect();
     match write_field(app, index, Value::Array(kept)) {
-        Ok(()) => app.status = Some(format!("removed {entry}")),
+        Ok(()) => app.status = Some(format!("Removed {entry}.")),
         Err(e) => app.status = Some(e),
     }
 }
@@ -1977,7 +1975,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "enter" if one => {
             if let Some((chosen, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 match write_field(app, index, Value::String(chosen.clone())) {
-                    Ok(()) => app.status = Some(format!("set to {chosen}")),
+                    Ok(()) => app.status = Some(format!("Set to {chosen}.")),
                     Err(e) => app.status = Some(e),
                 }
             }
@@ -2035,7 +2033,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 if on {
                     clear_catalogue_entry(app, index, &model);
                 } else {
-                    app.status = Some(format!("{model} has nothing set on it"));
+                    app.status = Some(format!("{model} has nothing set on it."));
                 }
             }
         }
@@ -2092,7 +2090,7 @@ fn clear_catalogue_entry(app: &mut App, index: usize, model: &str) {
         return;
     }
     match write_field(app, index, Value::Object(held)) {
-        Ok(()) => app.status = Some(format!("{model} back to list prices")),
+        Ok(()) => app.status = Some(format!("{model} back to list prices.")),
         Err(e) => app.status = Some(e),
     }
 }
@@ -2286,7 +2284,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let path_note = if app.exists {
         format!(" {}", app.path.display())
     } else {
-        format!(" {} · file does not exist yet · will be created 0600", app.path.display())
+        format!(" {} — does not exist yet, will be created 0600", app.path.display())
     };
     body.push(crate::seg(&[(p.dim.as_str(), path_note)], w.saturating_sub(1)));
     let unset = app
@@ -2298,7 +2296,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         &[(
             p.dim.as_str(),
             format!(
-                " {} keys · {} unset",
+                " {} keys, {} unset.",
                 app.fields.len(),
                 unset
             ),
@@ -2579,7 +2577,7 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     ));
     if field.secret() {
         body.push(crate::seg(
-            &[(p.warn.as_str(), "  a token · never shown once written".into())],
+            &[(p.warn.as_str(), "  A token. Never shown once written.".into())],
             w.saturating_sub(1),
         ));
     }
@@ -2730,50 +2728,50 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let zones = matches!(kind, PickKind::Timezone);
     let heading = match (zones, query.is_empty()) {
         (true, true) => format!(
-            "  {} configured · type to search {} zones and add more",
+            "  {} configured. Type to search {} zones and add more.",
             chosen,
             chrono_tz::TZ_VARIANTS.len()
         ),
         (true, false) => format!(
-            "  {} of {} zones match · {} configured in all",
+            "  {} of {} zones match. {} configured in all.",
             choices.len(),
             chrono_tz::TZ_VARIANTS.len(),
             chosen
         ),
         // A closed set says how much of itself is chosen, which is the
         // question a checklist answers.
-        (false, _) => format!("  {} of {} chosen", chosen, total_choices),
+        (false, _) => format!("  {} of {} chosen.", chosen, total_choices),
     };
     // A catalogue is not a checklist: nothing is "chosen", things are set or
     // they are not, and the count that matters is how many you have changed
     // against how many there are to change.
     let heading = match &kind {
         PickKind::Free if chosen == 0 => {
-            "  nothing here yet · type an entry and press ↵".to_string()
+            "  Nothing here yet. Type an entry and press ↵.".to_string()
         }
         PickKind::Free => format!(
             "  {} {}",
             chosen,
             if chosen == 1 { "entry" } else { "entries" }
         ),
-        PickKind::One(named) => format!("  one of {}", named.len()),
+        PickKind::One(named) => format!("  One of {}.", named.len()),
         PickKind::Catalogue(_) if !query.is_empty() => format!(
-            "  {} of {} match · {} set in all",
+            "  {} of {} match. {} set in all.",
             choices.len(),
             total_choices,
             chosen
         ),
         PickKind::Catalogue(_) if *show_all => {
 format!(
-                "  all {} · {} with custom rates · tab for those",
+                "  All {}. {} with custom rates — tab for those.",
                 total_choices, chosen
             )
         }
         PickKind::Catalogue(_) if chosen == 0 => {
-            format!("  nothing set · tab or type to search all {total_choices}")
+            format!("  Nothing set. Tab or type to search all {total_choices}.")
         }
         PickKind::Catalogue(_) => format!(
-            "  {chosen} with custom rates · tab or type to search all {total_choices}"
+            "  {chosen} with custom rates. Tab or type to search all {total_choices}."
         ),
         _ => heading,
     };
@@ -2783,6 +2781,8 @@ format!(
     // the list is where somebody decides to change a setting and this is
     // where they decide what to change it to.
     if !field.help.is_empty() {
+        // The widget's own lines are above; these are the widget author's.
+        // A blank between them is how a reader tells whose words are whose.
         body.push(String::new());
         for line in wrap_help(&field.help, w.saturating_sub(4), usize::MAX) {
             body.push(crate::seg(
@@ -2799,9 +2799,9 @@ format!(
     // A lookup keyed by name has no order to explain, so it says nothing
     // rather than something true of a list and meaningless here.
     let ordering = match &kind {
-        PickKind::Timezone => Some("  drawn west to east by each zone's offset, not in the order added"),
-        PickKind::Choices(_) => Some("  shown in the order picked here"),
-        PickKind::Free => Some("  in the order you add them"),
+        PickKind::Timezone => Some("  Drawn west to east by each zone's offset, not in the order added."),
+        PickKind::Choices(_) => Some("  Shown in the order picked here."),
+        PickKind::Free => Some("  In the order you add them."),
         // The widget wrote them in the order it wants them read.
         PickKind::One(_) => None,
         PickKind::Catalogue(_) => None,
@@ -2822,9 +2822,9 @@ format!(
     // The box does different work per kind: it searches a catalogue, and it
     // composes an entry for a list that has no candidates to search.
     let hint = match &kind {
-        PickKind::Timezone => "type a city or a zone",
-        PickKind::Free => "type an entry, then ↵",
-        _ => "type to filter",
+        PickKind::Timezone => "Type a city or a zone",
+        PickKind::Free => "Type an entry, then ↵",
+        _ => "Type to filter",
     };
     // The cursor is what says the box is listening, so it goes away when
     // the rows are the thing being driven.
@@ -2842,18 +2842,18 @@ format!(
     let first_choice_row = body.len();
     if choices.is_empty() {
         let why = match (zones, query.is_empty()) {
-            (true, true) => "  no cities yet - type to search and add one".to_string(),
+            (true, true) => "  No cities yet. Type to search and add one.".to_string(),
             // A catalogue is never empty - the card is always there - so an
             // empty screen here means the reader is looking at their own and
             // has none yet. Say which key gets them the rest.
             (false, true) if matches!(kind, PickKind::Catalogue(_)) => {
-                "  nothing set yet - tab for the whole card".to_string()
+                "  Nothing set yet. Tab for the whole card.".to_string()
             }
             (false, true) if matches!(kind, PickKind::Free) => {
-                "  the list is empty - type an entry above".to_string()
+                "  The list is empty. Type an entry above.".to_string()
             }
-            (false, true) => "  nothing to choose from".to_string(),
-            (_, false) => format!("  nothing matches /{query}"),
+            (false, true) => "  Nothing to choose from.".to_string(),
+            (_, false) => format!("  Nothing matches /{query}."),
         };
         body.push(crate::seg(&[(p.dim.as_str(), why)], w.saturating_sub(1)));
     }

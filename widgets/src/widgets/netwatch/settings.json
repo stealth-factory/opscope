@@ -1,5 +1,5 @@
 {
-  "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only - UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
+  "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only — UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
   "_schema": {
     "interval": {
       "minimum": 0.2
