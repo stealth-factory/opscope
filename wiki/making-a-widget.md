@@ -74,21 +74,17 @@ only shared terminal behaviour such as mouse reporting.
 | `README.md` row | `every_widget_has_a_readme_row` |
 | `docs/README.md` row | `every_documented_widget_is_in_the_docs_index` |
 | `config.example.json` | `generated_config_example_matches_widget_settings` |
-| **the launcher registry entry** | **nothing** |
+| the launcher registry entry | `every_binary_is_on_the_menu` in `widgets/src/launcher/main.rs` |
 
-**The registry entry is the keystone, and nothing forces you to add it.** Add
-it and the compiler then insists on `help.txt` and `README.md`, because
-`widget!` `include_str!`s both. Skip it and everything still builds — the
-widget simply never appears in `opscope`, which looks exactly like a widget
-nobody wrote.
+`every_binary_is_on_the_menu` reads `Cargo.toml` and asserts that every
+non-launcher `[[bin]]` appears in `WIDGETS`. Add the registry entry and the
+compiler then insists on `help.txt` and `README.md`, because `widget!`
+`include_str!`s both. Skip it and `cargo test` fails with the binary name
+that is built but missing from the menu.
 
-`docs/opscope.md` has a check, but it runs the other way:
-`widget_names_in_the_launcher_sample_are_current` catches a name in the sample
-listing that is *no longer* a widget — the thing a rename forgets. A new
-widget missing from that listing is not caught.
-
-So after `cargo test` passes, **run `opscope` and look for it in the menu.**
-That is the only thing that proves the keystone went in.
+`widget_names_in_the_launcher_sample_are_current` runs the other way: it
+catches a name in the sample listing that is *no longer* a widget — the
+thing a rename forgets.
 
 ## Polling without lying
 

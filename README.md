@@ -348,9 +348,10 @@ permission to make changes.
 ## Documentation
 
 Every widget has a page of its own — what it shows, where each number comes
-from, every key it answers to, and the settings it reads. That README lives
-beside the widget's code, help, settings declaration, and plain-Markdown AI
-configuration guide. They are linked from the table above and indexed in
+from, every key it answers to, and the settings it reads when it is
+configurable. That README lives beside the widget's code, help,
+plain-Markdown AI configuration guide, and — when the widget has settings —
+its settings declaration. They are linked from the table above and indexed in
 [`docs/`](docs/README.md).
 
 Six pages are about the repository rather than a widget:

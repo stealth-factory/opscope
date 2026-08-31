@@ -201,7 +201,11 @@ fn window_for(
 }
 
 fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -> Vec<String> {
-    let name_w = (w.saturating_sub(58)).clamp(12, 18);
+    let name_w = WIDGETS
+        .iter()
+        .map(|item| item.stem.chars().count())
+        .max()
+        .unwrap_or(12);
     // Every column keeps a space of its own, so a summary that fills its
     // width stops short of whatever is beside it rather than running in.
     let text_w = ((w - 1).saturating_sub(name_w + 6)).max(8);
@@ -221,10 +225,7 @@ fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -
                 ),
                 (
                     c(if here { &p.txt } else { &p.lbl }),
-                    tc::pad(
-                        &item.stem.chars().take(name_w - 1).collect::<String>(),
-                        name_w,
-                    ),
+                    tc::pad(item.stem, name_w),
                 ),
                 (
                     c(&p.dim),
@@ -543,6 +544,21 @@ mod tests {
         assert_eq!(window_for(13, 0, 13, 99, false), (0, 13));
     }
 
+
+    #[test]
+    fn the_menu_shows_the_whole_command() {
+        // name_w used to cap at 18 and then take one cell for padding, so
+        // `vercel-deployments` drew as the command that is not built.
+        let p = palette();
+        let rows = rows_for(86, 0, 0, WIDGETS.len(), &p);
+        for widget in WIDGETS {
+            assert!(
+                rows.iter().any(|row| row.contains(widget.stem)),
+                "{} was clipped on the menu",
+                widget.stem
+            );
+        }
+    }
 
     #[test]
     fn every_binary_is_on_the_menu() {

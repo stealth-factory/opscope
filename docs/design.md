@@ -52,9 +52,10 @@ wrong first.
   OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
   available and skipped silently where not.
 - **A widget owns its whole experience.** Code, help, README preview,
-  settings declaration, and AI configuration guide live in one folder.
-  Configurable widgets all open the shared settings screen with `,`; the
-  `opscope` launcher is not counted as a widget.
+  and AI configuration guide live in one folder, plus a settings
+  declaration when the widget is configurable. Configurable widgets all
+  open the shared settings screen with `,`; the `opscope` launcher is
+  not counted as a widget.
 
 ## Where these are enforced
 

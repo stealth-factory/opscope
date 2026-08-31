@@ -2,8 +2,8 @@
 
 [← opscope](../README.md)
 
-Each widget owns one folder containing its code, README, help, settings
-declaration, and AI configuration guide.
+Each widget owns one folder containing its code, README, help, and AI
+configuration guide, plus a settings declaration when it is configurable.
 
 ## Launcher
 

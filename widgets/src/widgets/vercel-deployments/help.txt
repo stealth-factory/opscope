@@ -13,7 +13,7 @@ Keys while running: up/down (also PgUp/PgDn, Home/End) move the selection,
 failure reason, timings, regions, commit, and everything worth copying on
 number keys - r refreshes
 now, s cycles the state filter (all / failed / production), / filters by text
-against the project, branch, commit subject and deployment id, , opens settings
+against the project, branch, commit subject and deployment id; , opens settings
 outside text entry, q quits.
 
 Copying uses OSC 52, so the terminal you are sitting at performs it and the

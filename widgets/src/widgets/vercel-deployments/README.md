@@ -157,7 +157,7 @@ the same height.
 
 Two sources, tried in order:
 
-1. **`deployments.token` in `config.json`** — a token from Account Settings →
+1. **`vercel_deployments.token` in `config.json`** — a token from Account Settings →
    Tokens. This is the durable choice and needs no CLI installed at all.
 2. **`$VERCEL_TOKEN`** — the same thing by environment; the variable name is
    configurable via `token_env`.
@@ -196,6 +196,6 @@ Empty `teams` discovers every team you can see; empty `projects` shows all.
 Polling every 15s is 4 requests/min per team.
 
 ```sh
-./target/release/deployments                    # every project, 15s
-./target/release/deployments -n 60 my-project   # one project, slower
+./target/release/vercel-deployments                    # every project, 15s
+./target/release/vercel-deployments -n 60 my-project   # one project, slower
 ```

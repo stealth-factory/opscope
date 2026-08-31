@@ -729,7 +729,7 @@ fn main() {
     let window = tc::cfg_usize(&cfg, "window", 600);
     let strip: Vec<String> = tc::cfg_strings(&cfg, "strip_suffixes", &[]);
     let mut live = Settings {
-        interval: tc::cfg_f64(&cfg, "interval", 0.5),
+        interval: tc::cfg_f64(&cfg, "interval", 0.5).max(0.2),
         seconds_per_column: tc::cfg_f64(&cfg, "seconds_per_column", 0.0),
         aggregate: tc::cfg_str(&cfg, "aggregate", "median"),
         spike_factor: tc::cfg_f64(&cfg, "spike_factor", 3.0),

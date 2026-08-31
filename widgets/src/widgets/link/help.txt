@@ -25,7 +25,7 @@ down on the last clears it, which puts the chart back to drawing every
 session alike. Right or enter opens the selected one; left or esc comes back.
 On that screen up/down scroll it and n/p step to the next or previous
 session without returning to the list. w changes the span, o toggles idle
-sessions, r refreshes, `,` opens settings, q quits.
+sessions, r refreshes, , opens settings, q quits.
 
 The chart is drawn on a braille dot canvas rather than one character per
 sample, so it reads as a line rather than a column of marks. Sessions share

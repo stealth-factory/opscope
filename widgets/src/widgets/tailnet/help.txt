@@ -33,7 +33,7 @@ Keys: up/down select a peer, right or Enter opens a full machine info view and l
 comes back out (every address,
 routes, tags, owner, handshake times), c or Enter opens a copy sheet offering its
 Tailscale IP, MagicDNS name, public IP and LAN IP, r refreshes now, o hides
-offline peers, `,` opens settings, q quits. Copying uses OSC 52, so it
+offline peers, , opens settings, q quits. Copying uses OSC 52, so it
 reaches the clipboard of the machine you are typing at even over SSH.
 
 Needs the `tailscale` CLI. Peer LAN addresses come from `tailscale debug

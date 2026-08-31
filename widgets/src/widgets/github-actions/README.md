@@ -147,11 +147,11 @@ not what somebody opened the pane for.
 
 ## Credentials
 
-Reuses `github.token` in `config.json`, or `$GITHUB_TOKEN`. `github_actions.token`
-and `github_actions.token_env` override that when set, then fall back to the github
-section. The same classic token `github` and `github-prs` already want — `repo`
-and `read:org`. This widget only reads: it does not re-run, cancel, or
-write anything.
+Its own `github_actions.token` in `config.json`, or the variable
+`token_env` names (`$GITHUB_TOKEN` when that key is unset). It does not
+read `github.token`. The same classic token `github` and `github-prs`
+already want — `repo` and `read:org`. This widget only reads: it does not
+re-run, cancel, or write anything.
 
 A missing token is said on the widget's own screen. So is an account list
 that yielded no repos with workflows.
@@ -162,8 +162,8 @@ that yielded no repos with workflows.
 
 | Key | Default | |
 |---|---|---|
-| `token` | `github.token` | classic PAT. Empty falls back to the github section. |
-| `token_env` | `github.token_env` | environment variable to read when no `github_actions.token` is set. If that variable is set it overrides `github.token`. Empty or unset falls back to github, then `$GITHUB_TOKEN`. |
+| `token` | _(unset)_ | classic PAT. Empty falls through to `token_env`. |
+| `token_env` | `GITHUB_TOKEN` | environment variable to read when no `github_actions.token` is set. |
 | `accounts` | discovered | org or user logins. Empty discovers the viewer and every org they belong to. |
 | `repos` | `[]` | `owner/name` list. Empty means recently-pushed-with-workflows, capped per owner. |
 | `window_hours` | `48` | the labelled window the counts and list cover. `w` cycles it live. |
