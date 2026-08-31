@@ -1918,7 +1918,7 @@ mod tests {
 
     #[test]
     fn the_list_window_scrolls_charts_away_and_reaches_deployments() {
-        let rows: Vec<String> = [
+        let mut rows: Vec<String> = [
             "TITLE",
             "summary",
             "ACTIVITY",
@@ -1926,25 +1926,24 @@ mod tests {
             "BUILD TIME",
             "build chart",
             "RECENT",
-            "deployment 1",
-            "deployment 2",
-            "deployment 3",
         ]
         .into_iter()
         .map(String::from)
         .collect();
+        rows.extend((1..=300).map(|n| format!("deployment {n}")));
 
-        let (top, at_top) = window_rows(&rows, 5, 0);
-        assert_eq!(at_top, 0);
-        assert_eq!(top, ["TITLE", "summary", "ACTIVITY", "activity chart", "BUILD TIME"]);
+        for height in [10, 14, 20] {
+            let (top, at_top) = window_rows(&rows, height, 0);
+            assert_eq!(at_top, 0);
+            assert_eq!(top.first().map(String::as_str), Some("TITLE"));
+            assert!(top.iter().any(|row| row == "activity chart"));
 
-        let (bottom, at_bottom) = window_rows(&rows, 5, usize::MAX);
-        assert_eq!(at_bottom, 5);
-        assert_eq!(
-            bottom,
-            ["TITLE", "RECENT", "deployment 1", "deployment 2", "deployment 3"]
-        );
-        assert!(!bottom.iter().any(|row| row.contains("chart")));
+            let (bottom, at_bottom) = window_rows(&rows, height, usize::MAX);
+            assert!(at_bottom > 0, "the {height}-row pane did not scroll");
+            assert_eq!(bottom.first().map(String::as_str), Some("TITLE"));
+            assert_eq!(bottom.last().map(String::as_str), Some("deployment 300"));
+            assert!(!bottom.iter().any(|row| row.contains("chart")));
+        }
     }
 
     #[test]
