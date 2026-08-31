@@ -6,17 +6,36 @@ Which processes are using the network, how much they have used, and how fast
 they are going right now.
 
 ```
-╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 9 processes · 3 moving · 4m 12s · sorted by total   every 1s
- TCP only · ↓ 2.4 MB/s  ↑ 118 KB/s
+╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 29 processes · showing 1-10
+ 19 moving · 13s · sorted by total   every 1s · rates over 10s
+ TCP only · ↓ 170.7 KB/s  ↑ 12.5 KB/s  · internet only
+ interfaces · ↓ 393.2 KB/s  ↑ 133.9 KB/s  · 35% of it has a socket  · ens4
 
-  PROCESS            PID          TOTAL         NOW        DOWN          UP
-  next-server        190856     1.4 GB    2.1 MB/s    2.0 MB/s   112 KB/s
-  claude             6953       312 MB     94 KB/s     71 KB/s    23 KB/s
-  (unattributed)     -          44 MB     1.2 KB/s    1.0 KB/s      200 B/s
-  curl               1234875    8.2 MB           -           -           -
+ ── PROCESS WATCH ── ↑ tx above · ↓ rx below  · 12s of history
+ ↑ 26.6 KB/s ┌────────────────────────────────────────────────────────────────────────────────────┐
+             │              ⢀⣀⣀⣀⣀                              ⢀⡠⠔⠊⠉⠑⠒⠒⠤⠤⢄⣀⣀⣀⣀⡀                   │
+             │          ⢀⡠⠔⠊⠁    ⠉⠉⠉⠉⠉⠉⠒⠒⠒⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⣀⣀⣀⣀⡠⠔⠊⠁              ⠈⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠒⠒⠤⠤⠤⠤│
+             │⠉⠉⠒⠒⠒⠒⠤⠤⠔⠊⠁                                                                         │
+           0 ├────────────────────────────────────────────────────────────────────────────────────┤
+             │⠉⠒⠒⠤⠤⣀⣀                                                                             │
+             │       ⠉⠑⠒⠢⠤⢄⣀⡀    ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀                           │
+             │              ⠈⠉⠉⠉⠉                                      ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠑⠒⠒⠒⠒⠒⠤⠤⠤⠤⣀⣀│
+↓ 170.7 KB/s └────────────────────────────────────────────────────────────────────────────────────┘
 
- [1] total  [2] live  [r]ezero  [q]uit
+  PROCESS                   PID           TOTAL        NOW       DOWN         UP
+▸ cursor                   76470      486.2 KB  89.3 KB/s  88.2 KB/s   1.2 KB/s
+  claude                   18949      145.7 KB          -          -          -
+  curl                     1713219     88.1 KB  81.0 KB/s  80.2 KB/s    792 B/s
+  claude bg-spare          42216       53.2 KB   4.9 KB/s    237 B/s   4.6 KB/s
+  codex                    908685      25.0 KB   4.6 KB/s   1.2 KB/s   3.3 KB/s
+  claude bg-spare          42702       16.9 KB   1.6 KB/s    410 B/s   1.1 KB/s
+  next-server (v1          204876      10.2 KB    805 B/s    278 B/s    526 B/s
+  chrome                   62544        4.4 KB    403 B/s      3 B/s    399 B/s
+  chrome                   1541         4.4 KB    403 B/s      3 B/s    399 B/s
+  codex                    51454        2.7 KB     66 B/s     46 B/s     19 B/s
+
+ ↑↓ select  →/↵ details  [1] total  [2] live  [o]show others  [r]ezero  [,] settings  [q]uit
 ```
 
 ## The chart

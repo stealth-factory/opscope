@@ -5,24 +5,36 @@
 What is listening on this machine, what started it, and who can reach it.
 
 ```
-╺━ DEV SERVERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 16 listening · 8 yours · 1 reachable off-box   every 4s
+╺━ DEV SERVERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 20 listening · 11 yours · 2 reachable off-box   every 4s
 
-  PORT  BIND    WHAT              PROJECT                  UP    EXPOSED
-  3000  all     Next.js 16.3.1    fix-dependabot-alerts ✗  22h   -
-  3001  all     Next.js 16.2.11   piaf-web                 8h    -
-  3002  all     Next.js 16.3.0    my-project               1h    -
-  4100  --      nothing listening                          --    tailnet
- 25001  local   Next.js           my-project               1h    -
- 42043  local   agy               wiiiimm-codes            9h    -
+ ── EVERYTHING MOVING ── ↑ out above · ↓ in below  · 8s of history, sampled every 4s
+                                                                                                █▅
+↑ 4.5 KB/s ·····················································································██
+           ───────────────────────────────────────────────────────────────────────────────────────
+           ·····················································································
 
- ↑↓ select  [k]ill  [o]show system  [r]efresh  [q]uit
+
+  PORT  BIND    WHAT               PROJECT             TRAFFIC        LAST 8s         UP    EXPOSED
+▸3003  all     Next.js 16.3.1     orders-frontend                    ············──  6h    -
+ 3006  all     Next.js 16.3.1     billing-console                    ············──  6h    -
+ 3007  all     Next.js 16.3.1     docs-site-next                     ············──  6h    -
+ 3010  all     Next.js 16.3.0     shop-web                           ············──  6h    -
+ 3333  all     Node               shop-studio                        ············──  5h    -
+ 4100  --      nothing listening                                     ············──  --    tailnet
+ 5900  local   x11vnc             williamli                          ············──  6h    -
+ 6080  local   Python             @novnc/novnc                       ············──  6h    tailnet
+ 9222  local   chrome             williamli                          ············──  1d    -
+ 24543 local   socket-tap         williamli                          ············──  1d    -
+ 25000 local   Next.js 16.3.0     my-project                         ············──  6h    -
+
+ ↑↓ select  →/↵ details  [k]ill  [o]show system  [r]efresh  [,] settings  [q]uit
 ```
 
-Seven of this machine's sixteen listening ports are hidden here — five of
-root's, plus `22` and `53` from `system_ports` — and `o` shows them. The count
-in the header is of all sixteen, so the seven it does not draw are never a
-surprise.
+Nine of this machine's twenty listening ports are hidden here — everything
+another user owns, plus the extras named in `system_ports` — and `o` shows
+them. The count in the header is of all twenty, so the nine it does not draw
+are never a surprise.
 
 ## What identifies a dev server
 

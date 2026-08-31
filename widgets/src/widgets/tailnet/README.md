@@ -6,21 +6,36 @@ Tailscale peers, and — the part plain `tailscale status` buries — *how* you 
 reaching each one.
 
 ```
-╺━ TAILNET ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- server-01  100.64.0.10  example.ts.net
- 12 online / 23 peers   4 direct   8 relayed   every 2s
+╺━ TAILNET ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ workstation-gcp-asia-east1-a-01-c  100.64.10.100  example-1.ts.net
+ 10 online / 23 peers   3 direct   7 relayed   every 2s
  3 advertising routes   exit node: none
 
  ── LIVE THROUGHPUT ── peers moving data
- workstation      ↓▁▁▁▁▅▁▁▁▁▁▁▁▂ ↑▁▁▂▁▁▁▁▁▁▁▁▁▁   2.4K/s  1.1K/s
+ tablet-lounge-ipad ↓▁▁▁▁▁▁ ↑▄█▂▃▁▁   5.3K/s  8.8K/s
+ studio-mac-desk-1  ↓▁▂▁▁▁▁ ↑▁▂▂▂▁▁   1.5K/s  1.3K/s
+ laptop-mac-1       ↓▁▁▁▁▁▁ ↑▁▁▁▁▁▁   1.2K/s  1.0K/s
 
- MACHINE                OS       PATH       RX    TX  SEEN
- rx/tx = this host ↔ peer, since tailscaled started 4d ago
-▸● workstation          macOS   DIRECT   2.6G  2.8G   now
- ● nas                  linux   DIRECT   1.1M  1.2M   now ⇄
- ● living-room-tv       tvOS    hkg        0B    0B   now
- ● build-mac            macOS   sfo        0B    0B   now ⇄
- ○ old-vm               linux   -          0B    0B  156d
+ MACHINE                           OS       PATH       RX    TX  SEEN
+ rx/tx = this host ↔ peer, since tailscaled started 26h ago
+▸◆ workstation-gcp-asia-east1-a-01 linux   this       0B    0B   now ⇄
+ ● laptop-mac-1                    macOS   DIRECT   305M  3.1G   now
+ ● studio-mac-desk-1               macOS   DIRECT   567M  2.3G   now
+ ● tablet-lounge-ipad-01           iOS     DIRECT    35M  616M   now
+ ● nas-storage-1                   linux   hkg        0B    0B   now ⇄
+ ● chat-bot                        linux   ord        0B    0B   now
+ ● mini-mac-node-1                 macOS   syd        0B    0B   now
+ ● pi-node-bedroom-2-au            linux   syd        0B    0B   now ⇄
+ ● mini-mac-node-5                 macOS   sfo        0B    0B   now ⇄
+ ● phone-personal-air-1            iOS     hkg        0B    0B   now
+  ● ml                             linux   fra        0B    0B   now
+ ○ workstation-gcp-us-west1-b-0002 linux   -          0B    0B    9d
+ ○ vpn-exit-gcp-us-west1-c-nordvpn linux   -          0B    0B  301d
+ ○ living-room-tv1                 tvOS    -          0B    0B   17d
+ ○ ubuntu-test-vm-1                linux   -          0B    0B  254d
+ ○ phone-spare-12-mini-0001        iOS     -          0B    0B   15d
+ ⇄ NAS-storage routes 192.168.100.0/24
+ ↑↓ select  →/↵ info  [c]opy  [g]raph  [o]ffline  [i]nterval 2s  [r]efresh  [,] settings
 ```
 
 
