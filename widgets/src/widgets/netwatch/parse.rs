@@ -294,12 +294,12 @@ mod tests {
     #[test]
     fn parses_captured_ss_tine_rows() {
         let text = "\
-Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-tcp   ESTAB 0      0      192.0.2.10:54321   192.0.2.1:443     ino:4242 cgroup:/user.slice/session-1.scope
+State Recv-Q Send-Q Local Address:Port Peer Address:Port
+ESTAB 0      0      192.0.2.10:54321   192.0.2.1:443     ino:4242 cgroup:/user.slice/session-1.scope
 \t cubic bytes_sent:1669 bytes_received:11469 segs_out:12
-tcp   ESTAB 0      0      [2001:db8::10]:22  [2001:db8::1]:6000 ino:99
+ESTAB 0      0      [2001:db8::10]:22  [2001:db8::1]:6000 ino:99
 \t bytes_sent:10 bytes_received:20
-tcp   ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
+ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
 \t bytes_sent:1 bytes_received:2
 ";
         assert_eq!(
