@@ -461,14 +461,35 @@ fn columns(w: usize) -> Columns {
 /// becoming a second fixed header in a short pane.
 fn window_rows(rows: &[String], room: usize, scroll: usize) -> (Vec<String>, usize) {
     let (head, rest) = rows.split_at(1.min(rows.len()));
-    let room_below = room.saturating_sub(head.len()).max(1);
+    let room_below = room.saturating_sub(head.len());
     let scroll = scroll.min(rest.len().saturating_sub(room_below));
-    let mut frame = head.to_vec();
+    let mut frame: Vec<String> = head.iter().take(room).cloned().collect();
     frame.extend(rest.iter().skip(scroll).take(room_below).cloned());
     while frame.len() < room {
         frame.push(String::new());
     }
     (frame, scroll)
+}
+
+/// Deployment rows whose first line is inside the current body window.
+///
+/// Page keys move by what the reader can actually see. Counting the pane's
+/// whole capacity skips deployments while summary and chart rows still use
+/// part (or all) of that pane.
+fn items_in_window(
+    list_start: usize,
+    item_count: usize,
+    per_item: usize,
+    head_len: usize,
+    scroll: usize,
+    room_below: usize,
+) -> usize {
+    let first = head_len.saturating_add(scroll);
+    let last = first.saturating_add(room_below);
+    (0..item_count)
+        .map(|i| list_start.saturating_add(i.saturating_mul(per_item)))
+        .filter(|at| (*at >= first) && (*at < last))
+        .count()
 }
 
 /// Deployments per time bucket, coloured by the worst outcome in it.
@@ -1557,12 +1578,10 @@ fn main() {
         ));
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
+        let list_start = rows.len();
         let mut cursor = None;
         for (i, d) in shown.iter().enumerate() {
             let here = i == selected;
-            if here {
-                cursor = Some(rows.len());
-            }
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let meta = &d["meta"];
             let state = text(d, "state");
@@ -1627,6 +1646,11 @@ fn main() {
                     w - 1,
                 ));
             }
+            if here {
+                // Point at the final rendered line, so following a two-line
+                // deployment cannot leave its commit subject below the pane.
+                cursor = Some(rows.len().saturating_sub(1));
+            }
         }
         if shown.is_empty() {
             rows.push(tc::seg(
@@ -1653,12 +1677,11 @@ fn main() {
             .collect();
         let room = h.saturating_sub(footer.len());
         let head_len = 1.min(rows.len());
-        let room_below = room.saturating_sub(head_len).max(1);
-        visible = (room_below / per_item).max(1);
+        let room_below = room.saturating_sub(head_len);
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the body back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
-        if moved {
+        if moved && room_below > 0 {
             if let Some(at) = cursor {
                 scroll = tc::follow(scroll, at.saturating_sub(head_len), room_below);
             }
@@ -1669,6 +1692,14 @@ fn main() {
         // the rows instead of turning the list into a one-row porthole.
         let (mut frame, clamped) = window_rows(&rows, room, scroll);
         scroll = clamped;
+        visible = items_in_window(
+            list_start,
+            shown.len(),
+            per_item,
+            head_len,
+            scroll,
+            room_below,
+        );
         frame.extend(footer);
         tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(250));
@@ -1944,6 +1975,44 @@ mod tests {
             assert_eq!(bottom.last().map(String::as_str), Some("deployment 300"));
             assert!(!bottom.iter().any(|row| row.contains("chart")));
         }
+    }
+
+    #[test]
+    fn the_list_window_never_spends_footer_rows() {
+        let rows = vec!["TITLE".to_string(), "body".to_string()];
+        for room in [0, 1] {
+            let (frame, _) = window_rows(&rows, room, 0);
+            assert_eq!(frame.len(), room);
+            assert!(!frame.iter().any(|row| row == "body"));
+        }
+    }
+
+    #[test]
+    fn paging_counts_only_deployments_visible_below_the_charts() {
+        // Title, six non-list rows, then two two-line deployments.
+        let list_start = 7;
+        assert_eq!(items_in_window(list_start, 2, 2, 1, 0, 6), 0);
+        assert_eq!(items_in_window(list_start, 2, 2, 1, 0, 7), 1);
+        assert_eq!(items_in_window(list_start, 2, 2, 1, 6, 4), 2);
+    }
+
+    #[test]
+    fn following_a_two_line_selection_keeps_its_subject_visible() {
+        let rows = vec![
+            "TITLE".to_string(),
+            "previous subject".to_string(),
+            "selected deployment".to_string(),
+            "selected commit subject".to_string(),
+        ];
+        let room = 3;
+        let room_below = room - 1;
+        let selected_end = 3usize;
+        let scroll = tc::follow(0, selected_end - 1, room_below);
+        let (frame, _) = window_rows(&rows, room, scroll);
+        assert_eq!(
+            frame,
+            ["TITLE", "selected deployment", "selected commit subject"]
+        );
     }
 
     #[test]
