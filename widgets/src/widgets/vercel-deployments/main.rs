@@ -1001,7 +1001,7 @@ fn main() {
         if poll_token.is_empty() {
             if let Ok(mut guard) = poller.lock() {
                 guard.err = format!(
-                    "no token: set deployments.token in config.json, or ${}",
+                    "no token: set vercel_deployments.token in config.json, or ${}",
                     poll_env
                 );
             }
@@ -1819,8 +1819,11 @@ mod tests {
         let cfg: serde_json::Value =
             serde_json::from_str(r#"{"token": "from-config", "token_env": "NOPE_TOKEN"}"#).unwrap();
         assert_eq!(token(&cfg), ("from-config".to_string(), "config"));
-        // An empty token in the config is not a token.
-        let bare: serde_json::Value = serde_json::from_str(r#"{"token": ""}"#).unwrap();
+        // An empty token in the config is not a token. Name a variable
+        // that is not set so $VERCEL_TOKEN in the environment cannot
+        // turn this into an env hit.
+        let bare: serde_json::Value =
+            serde_json::from_str(r#"{"token": "", "token_env": "NOPE_TOKEN"}"#).unwrap();
         assert_eq!(token(&bare).1, "missing");
     }
 

@@ -3,7 +3,7 @@
     "strip_suffixes": { "items": "string" },
     "hosts": { "items": "string" },
     "interval": {
-      "minimum": 0.01
+      "minimum": 0.2
     },
     "seconds_per_column": {
       "minimum": 0

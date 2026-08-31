@@ -2,8 +2,8 @@
 
 [← opscope](../README.md)
 
-Each widget owns one folder containing its code, README, help, settings
-declaration, and AI configuration guide.
+Each widget owns one folder containing its code, README, help, and AI
+configuration guide, plus a settings declaration when it is configurable.
 
 ## Launcher
 
@@ -28,8 +28,8 @@ navigation, not itself a widget.
 | [`netwatch`](../widgets/src/widgets/netwatch/README.md) | Which processes are using the network, how much they have used, and how fast they are going right now. |
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
 | [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, and everyone else's clock — the four things you need to know about time while working across timezones. |
-| [`months`](../widgets/src/widgets/months/README.md) | A month grid you can page through, with today in context — every square computed from the machine clock and the timezone database rather than fetched from anywhere. |
 | [`matrix`](../widgets/src/widgets/matrix/README.md) | Digital rain. It computes nothing and reports no data on purpose. |
+| [`months`](../widgets/src/widgets/months/README.md) | A month grid you can page through, with today in context — every square computed from the machine clock and the timezone database rather than fetched from anywhere. |
 
 ## About the repository
 

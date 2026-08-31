@@ -1613,7 +1613,7 @@ fn main() {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
                 g.err = format!(
-                    "no token: set github.token in config.json or ${}",
+                    "no token: set github_actions.token in config.json or ${}",
                     poll_env
                 );
             }

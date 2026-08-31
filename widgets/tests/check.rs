@@ -415,8 +415,9 @@ fn only_core_draws_the_settings_screen() {
 }
 
 /// The header the generated file carries, naming what regenerates it.
-const CONFIG_EXAMPLE_COMMENT: &str = "Generated from each widget's \
-settings.json by widgets/tests/check.rs - rewrite it with \
+const CONFIG_EXAMPLE_COMMENT: &str = "Generated from the launcher's \
+settings.json and each widget's settings.json by widgets/tests/check.rs - \
+rewrite it with \
 `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. \
 Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every \
 key is optional; anything omitted keeps the widget's default.";

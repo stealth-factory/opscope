@@ -13,7 +13,8 @@ that the most recently pushed repos that have workflow files, capped per owner.
 Empty `github_actions.accounts` discovers your login and every org you belong
 to.
 
-Credentials: reuses `github.token` from config.json, or $GITHUB_TOKEN.
+Credentials: `github_actions.token` in config.json, or the variable named by
+`token_env` (`$GITHUB_TOKEN` when that key is unset).
 `github_actions.token` / `github_actions.token_env` override that when set.
 A classic token with `repo` and `read:org`, the same one github uses. This
 widget only reads. An old `gha` section is still read if `github_actions` is
@@ -22,7 +23,7 @@ absent, and the pane says so.
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
 repo, workflow, branch, event, conclusion and title, w cycles the window
-(12h / 24h / 48h / 7d), `,` opens settings, q quits. On a run, c copies
+(12h / 24h / 48h / 7d), comma opens settings, q quits. On a run, c copies
 its URL, esc closes.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the

@@ -1,6 +1,6 @@
 Every widget here, what it does, and a preview before it runs.
 
-Fifteen widget binaries are a list you have to already know. This is the
+Fourteen widget binaries are a list you have to already know. This is the
 front door: pick one and it runs, quit it and you are back here.
 
     opscope [WIDGET] [ARGS...]

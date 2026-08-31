@@ -234,6 +234,15 @@ fn validate_value(
             }
         }
     }
+    if let Some(want) = rule.get("length").and_then(Value::as_u64) {
+        match value.as_array() {
+            Some(items) if items.len() as u64 == want => {}
+            Some(items) => {
+                return Err(format!("expected {want} items, got {}", items.len()));
+            }
+            None => return Err(format!("expected an array of {want} items")),
+        }
+    }
     if let Some(kind) = rule.get("values").and_then(Value::as_str) {
         if let Some(values) = value.as_object() {
             if !values.values().all(|item| named_kind(item, kind)) {
@@ -620,7 +629,9 @@ fn remove_json_path(text: &str, path: &[&str]) -> Result<String, String> {
 fn insert_member(text: &str, obj_open: usize, key: &str, value: &str) -> Result<String, String> {
     let entries = object_entries(text, obj_open)?;
     let close = object_close(text, obj_open)?;
-    let piece = format!("\"{key}\": {value}");
+    let key_json = serde_json::to_string(key)
+        .map_err(|e| format!("refusing to write key: {e}"))?;
+    let piece = format!("{key_json}: {value}");
     if entries.is_empty() {
         let indent = infer_indent(text, obj_open, &entries);
         let parent = line_indent(text, obj_open);
@@ -760,8 +771,10 @@ fn parse_edit(
     let trimmed = raw.trim();
     if expected.is_string() {
         let value = if trimmed.starts_with('"') {
-            serde_json::from_str::<Value>(trimmed)
-                .map_err(|_| "expected a JSON string or unquoted text".to_string())?
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(Value::String(s)) => Value::String(s),
+                _ => Value::String(raw.to_string()),
+            }
         } else {
             Value::String(raw.to_string())
         };
@@ -2524,7 +2537,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
     match key {
         // Coming out of a declared object is not leaving the screen. Only
         // the outermost list quits.
-        "esc" if !app.stack.is_empty() => {
+        "esc" | "," if !app.stack.is_empty() => {
             if let Some((fields, sel, mode)) = app.stack.pop() {
                 app.fields = fields;
                 app.selected = sel;
@@ -2558,6 +2571,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         }
         "r" | "R" => {
             let keep = app.selected;
+            let wrote = app.wrote;
             *app = load(SettingsSpec {
                 widget: app.widget,
                 section: app.section,
@@ -2566,6 +2580,7 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 catalogues: app.catalogues,
             });
             app.selected = keep.min(app.fields.len().saturating_sub(1));
+            app.wrote = wrote;
             app.status = Some("reloaded from disk".into());
         }
         "d" | "D" => {
@@ -3581,8 +3596,10 @@ fn relaunch(keyboard: &mut crate::Keyboard) {
     crate::restore_screen();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let _ = std::process::Command::new(exe).args(args).exec();
-    // Only reached when exec failed. Put the screen back so the widget is
-    // not drawing into a terminal that has been handed away.
+    // Only reached when exec failed. restore() already gave the saved
+    // termios back and forgot them; reclaim cbreak before redrawing so
+    // keys reach the widget instead of echoing until Enter.
+    keyboard.reclaim();
     crate::setup();
 }
 
@@ -4458,6 +4475,40 @@ mod tests {
         let choices = serde_json::json!({"choices": ["total", "live"]});
         assert!(parse_edit("live", &Value::from("total"), Some(&choices)).is_ok());
         assert!(parse_edit("newest", &Value::from("total"), Some(&choices)).is_err());
+
+        // A string that starts with a quote is not always a JSON string.
+        // GitHub search writes `"memory leak" in:title`; requiring the whole
+        // input to parse left that value unsavable.
+        assert_eq!(
+            parse_edit(
+                r#""memory leak" in:title"#,
+                &Value::String(String::new()),
+                None
+            )
+            .unwrap(),
+            Value::String(r#""memory leak" in:title"#.into())
+        );
+
+        let rgb = serde_json::json!({"items": "integer", "length": 3});
+        assert!(parse_edit("[1, 2, 3]", &serde_json::json!([]), Some(&rgb)).is_ok());
+        assert!(parse_edit("[1, 2]", &serde_json::json!([]), Some(&rgb)).is_err());
+        assert!(parse_edit("[1, 2, 3, 4]", &serde_json::json!([]), Some(&rgb)).is_err());
+    }
+
+    #[test]
+    fn a_map_key_with_quotes_is_escaped() {
+        let src = "{\n  \"github_prs\": {\n    \"sources\": {}\n  }\n}\n";
+        let next = set_json_path(
+            src,
+            &["github_prs", "sources", r#"team "alpha""#],
+            &Value::String("org:acme".into()),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(
+            parsed["github_prs"]["sources"][r#"team "alpha""#],
+            "org:acme"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ it with them, space pauses or
 resumes, r restarts the phase, s starts a break during focus and ends one during
 a break - b and e do the same, and the footer names whichever applies - +/-
 change the focus length, ? hides or shows the pomodoro controls,
-0 zeroes today's completed count, , opens settings, q quits.
+0 zeroes today's completed count, comma opens settings, q quits.
 
 The completed tally is per day: it resets when the date changes, including
 while the panel is running. Preferences - focus length, whether the timer is

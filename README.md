@@ -52,8 +52,8 @@ you are back. It is the launcher, not another widget.
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/100)) | [read →](widgets/src/widgets/netwatch/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](widgets/src/widgets/link/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
-| **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
+| **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
 **Four are Linux-only today.** `latency`, `ports`, `netwatch` and `link` read
 the kernel through `/proc` and through `ss`, neither of which exists on macOS;
@@ -92,7 +92,7 @@ npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
-It fetches the launcher and fifteen widget binaries for this machine into
+It fetches the launcher and fourteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -102,7 +102,7 @@ Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
-build all sixteen binaries. Both take about a minute.
+build all fifteen binaries. Both take about a minute.
 
 ### Download a release
 
@@ -131,7 +131,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The sixteen binaries are right there, beside `config.example.json` and a
+The fifteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -159,13 +159,13 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + fifteen widgets in ./target/release
+cargo build --release   # launcher + fourteen widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fifteen widgets, with a live preview of
+`opscope` is the front door — a menu of the fourteen widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -175,7 +175,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and fifteen
+The launcher looks for each widget beside itself, so the launcher and fourteen
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -221,9 +221,9 @@ Every widget reads optional settings from the first readable of
 the working directory, and `config.json` beside the binary.
 
 **Nothing has to be configured.** Every key is optional, and a key you leave
-out is not a gap — the widget uses the default built into it. The three token
-widgets at the end of this section are the only ones that need anything at
-all before they can show you something.
+out is not a gap — the widget uses the default built into it. Five widgets
+need a token before they can show you something; they are named under
+Credentials below. Every other widget starts on its own defaults.
 
 There are two ways in, and they write the same file.
 
@@ -231,7 +231,7 @@ There are two ways in, and they write the same file.
 
 Press `,` in any configurable widget, or in the launcher for the settings
 every widget shares. It is one screen, owned by `opscope-core` rather than
-written fifteen times, so it behaves the same everywhere.
+written fourteen times, so it behaves the same everywhere.
 
 The list shows every key that widget answers to, and for each one the value
 in force, the default it falls back to, and what the key means. The file
@@ -281,7 +281,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read fifteen widget pages to find out what you can
+**So you do not have to read fourteen widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The
@@ -308,13 +308,12 @@ scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
 ### Credentials
 
-**Three widgets define their own token settings:** `vercel-deployments` wants
+**Five widgets define their own token settings:** `vercel-deployments` wants
 a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
-and `linear` a personal API key from Settings → Security & access.
+`linear` a personal API key from Settings → Security & access, and
 `github-prs` and `github-actions` each hold their own GitHub token rather
-than borrowing one; they are not credential-free. Every other widget needs
-no configuration to start.
+than borrowing one. Every other widget needs no configuration to start.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
@@ -349,12 +348,13 @@ permission to make changes.
 ## Documentation
 
 Every widget has a page of its own — what it shows, where each number comes
-from, every key it answers to, and the settings it reads. That README lives
-beside the widget's code, help, settings declaration, and plain-Markdown AI
-configuration guide. They are linked from the table above and indexed in
+from, every key it answers to, and the settings it reads when it is
+configurable. That README lives beside the widget's code, help,
+plain-Markdown AI configuration guide, and — when the widget has settings —
+its settings declaration. They are linked from the table above and indexed in
 [`docs/`](docs/README.md).
 
-Six pages are about the repository rather than a widget:
+Seven pages are about the repository rather than a widget:
 
 | | |
 |---|---|

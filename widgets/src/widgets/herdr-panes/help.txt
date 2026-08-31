@@ -39,5 +39,5 @@ ctrl-y and ctrl-e scroll the window a row at a time, as does the mouse wheel,
 and neither touches the selection. Enter (or f) focuses that agent's pane so
 you jump straight to whatever needs you, l toggles workspace labels vs pane
 ids, i shows or hides the idle section,
-r refreshes now, `,` opens settings, q quits.
+r refreshes now, comma opens settings, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.

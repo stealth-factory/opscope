@@ -1040,17 +1040,29 @@ fn main() {
     let rate = Arc::new(Mutex::new(Rate::default()));
     let wake = Arc::new((Mutex::new(false), Condvar::new()));
     let (tok, source) = token(&cfg);
+    let env_name = {
+        let name = tc::cfg_str(&cfg, "token_env", TOKEN_ENV);
+        if name.is_empty() {
+            TOKEN_ENV.to_string()
+        } else {
+            name
+        }
+    };
 
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let poller_rate = Arc::clone(&rate);
     let poll_tok = tok.clone();
+    let poll_env = env_name.clone();
     let poll_sources = sources.clone();
     let poll_extra = extra.clone();
     std::thread::spawn(move || loop {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
-                g.err = format!("no token: set github_prs.token in config.json, or ${TOKEN_ENV}");
+                g.err = format!(
+                    "no token: set github_prs.token in config.json, or ${}",
+                    poll_env
+                );
             }
         } else {
             let want = poller.lock().ok().and_then(|g| {

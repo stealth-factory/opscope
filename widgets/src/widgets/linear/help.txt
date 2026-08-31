@@ -18,7 +18,7 @@ directly, so no CLI is required.
 
 Keys: tab focuses a pane — the cycles, then the teams, then no focus at all —
 and up/down move the cursor in whichever is focused, leaving it if you walk off
-either end. r refreshes now, w cycles the window (7/14/30/60/90 days), , opens
+either end. r refreshes now, w cycles the window (7/14/30/60/90 days), comma opens
 settings, q quits.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the

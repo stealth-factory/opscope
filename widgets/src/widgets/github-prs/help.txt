@@ -11,11 +11,12 @@ narrows to one organisation. With none given it uses `github_prs.sources`.
 An old `pr` section is still read if `github_prs` is absent, and the pane
 says so.
 
-Credentials: reuses `github.token` from config.json, or $GITHUB_TOKEN. A
-classic token with `repo` and `read:org`, the same one github uses.
+Credentials: `github_prs.token` in config.json, or the variable named by
+`token_env` (`$GITHUB_TOKEN` when that key is unset). A classic token with
+`repo` and `read:org`.
 
 Keys: up/down select, enter opens a PR, esc goes back, / filters, s cycles the
-sort, o reverses it, `,` opens settings, r refreshes, q quits.
+sort, o reverses it, comma opens settings, r refreshes, q quits.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same. They move the pane and never the selection,
