@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.7.0] - 2026-08-31
+
+### Features
+
+- **months**: A month grid you can page through, with today in context (#98)
+
 ## [0.6.0] - 2026-08-31
 
 ### Bug Fixes
