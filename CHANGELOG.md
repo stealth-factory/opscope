@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.8.1] - 2026-08-31
+
+### Bug Fixes
+
+- Point missing-config messages at the settings screen (#131)
+
 ## [0.8.0] - 2026-08-31
 
 ### Bug Fixes
