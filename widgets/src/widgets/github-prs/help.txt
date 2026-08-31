@@ -16,7 +16,7 @@ Credentials: `github_prs.token` in config.json, or the variable named by
 `repo` and `read:org`.
 
 Keys: up/down select, enter opens a PR, esc goes back, / filters, s cycles the
-sort, o reverses it, , opens settings, r refreshes, q quits.
+sort, o reverses it, comma opens settings, r refreshes, q quits.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
 mouse wheel does the same. They move the pane and never the selection,

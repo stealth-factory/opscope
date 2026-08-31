@@ -23,7 +23,7 @@ absent, and the pane says so.
 Keys: up/down select a run, Enter opens its jobs, r refreshes now, s cycles
 the state filter (all / failed / running), / filters by text against the
 repo, workflow, branch, event, conclusion and title, w cycles the window
-(12h / 24h / 48h / 7d), , opens settings, q quits. On a run, c copies
+(12h / 24h / 48h / 7d), comma opens settings, q quits. On a run, c copies
 its URL, esc closes.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the

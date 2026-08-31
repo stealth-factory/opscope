@@ -298,7 +298,8 @@ one you open — so the view paints a loading shimmer and fills in.
 
 ## Credentials
 
-**Its own `github_prs.token`** in `config.json`, or `$GITHUB_TOKEN`. It wants
+**Its own `github_prs.token`** in `config.json`, or the variable
+`token_env` names (`$GITHUB_TOKEN` when that key is unset). It wants
 the same classic token with `repo` and `read:org` that `github` wants, and one
 variable still serves all three — but it reads only its own section. It used
 to borrow `github.token`, which was fine while both held the same string and

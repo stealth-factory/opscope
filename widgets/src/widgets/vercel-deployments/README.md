@@ -182,7 +182,7 @@ good data on screen behind an error banner rather than freezing the panel.
 ## Configuration
 
 ```json
-"deployments": {
+"vercel_deployments": {
   "token": "",
   "token_env": "VERCEL_TOKEN",
   "refresh": 15,
@@ -191,6 +191,9 @@ good data on screen behind an error banner rather than freezing the panel.
   "projects": []
 }
 ```
+
+An old `deployments` section is still read if `vercel_deployments` is
+absent.
 
 Empty `teams` discovers every team you can see; empty `projects` shows all.
 Polling every 15s is 4 requests/min per team.

@@ -74,8 +74,10 @@ only shared terminal behaviour such as mouse reporting.
 | `README.md` row | `every_widget_has_a_readme_row` |
 | `docs/README.md` row | `every_documented_widget_is_in_the_docs_index` |
 | `config.example.json` | `generated_config_example_matches_widget_settings` |
-| the launcher registry entry | `every_binary_is_on_the_menu` in `widgets/src/launcher/main.rs` |
+| the launcher registry entry | `every_widget_is_on_the_launcher_menu` in `widgets/tests/check.rs`, and `every_binary_is_on_the_menu` in `widgets/src/launcher/main.rs` |
 
+`every_widget_is_on_the_launcher_menu` is the repository check: it fails
+if a widget folder is missing from the launcher registry.
 `every_binary_is_on_the_menu` reads `Cargo.toml` and asserts that every
 non-launcher `[[bin]]` appears in `WIDGETS`. Add the registry entry and the
 compiler then insists on `help.txt` and `README.md`, because `widget!`

@@ -234,6 +234,15 @@ fn validate_value(
             }
         }
     }
+    if let Some(want) = rule.get("length").and_then(Value::as_u64) {
+        match value.as_array() {
+            Some(items) if items.len() as u64 == want => {}
+            Some(items) => {
+                return Err(format!("expected {want} items, got {}", items.len()));
+            }
+            None => return Err(format!("expected an array of {want} items")),
+        }
+    }
     if let Some(kind) = rule.get("values").and_then(Value::as_str) {
         if let Some(values) = value.as_object() {
             if !values.values().all(|item| named_kind(item, kind)) {
@@ -4479,6 +4488,11 @@ mod tests {
             .unwrap(),
             Value::String(r#""memory leak" in:title"#.into())
         );
+
+        let rgb = serde_json::json!({"items": "integer", "length": 3});
+        assert!(parse_edit("[1, 2, 3]", &serde_json::json!([]), Some(&rgb)).is_ok());
+        assert!(parse_edit("[1, 2]", &serde_json::json!([]), Some(&rgb)).is_err());
+        assert!(parse_edit("[1, 2, 3, 4]", &serde_json::json!([]), Some(&rgb)).is_err());
     }
 
     #[test]

@@ -23,7 +23,7 @@
   "refresh": 15.0,
   "_limit_comment": "Maximum deployments requested from Vercel.",
   "limit": 100,
-  "_teams_comment": "Vercel team identifiers to include. Leave it empty and every team the token can see is covered — the widget lists them itself on start, so a team you join appears without editing anything. Name teams here only to narrow it to those. The personal account alone is the fallback, not the default: it is what you get when there is no token, or when the token can see no teams. If listing them fails or stops early the board says so rather than quietly showing less.",
+  "_teams_comment": "Vercel team identifiers to include. Leave it empty and every team the token can see is covered — the widget lists them itself on start, so a team you join appears without editing anything. Name teams here only to narrow it to those. With no token the poller says so and makes no request; the personal account is what you get when a valid token can see no teams. If listing them fails or stops early the board says so rather than quietly showing less.",
   "teams": [],
   "_projects_comment": "Project identifiers to include; empty includes every project in scope.",
   "projects": []

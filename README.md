@@ -220,9 +220,9 @@ Every widget reads optional settings from the first readable of
 the working directory, and `config.json` beside the binary.
 
 **Nothing has to be configured.** Every key is optional, and a key you leave
-out is not a gap — the widget uses the default built into it. The three token
-widgets at the end of this section are the only ones that need anything at
-all before they can show you something.
+out is not a gap — the widget uses the default built into it. Five widgets
+need a token before they can show you something; they are named under
+Credentials below. Every other widget starts on its own defaults.
 
 There are two ways in, and they write the same file.
 
@@ -307,13 +307,12 @@ scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
 ### Credentials
 
-**Three widgets define their own token settings:** `vercel-deployments` wants
+**Five widgets define their own token settings:** `vercel-deployments` wants
 a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
 PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
-and `linear` a personal API key from Settings → Security & access.
+`linear` a personal API key from Settings → Security & access, and
 `github-prs` and `github-actions` each hold their own GitHub token rather
-than borrowing one; they are not credential-free. Every other widget needs
-no configuration to start.
+than borrowing one. Every other widget needs no configuration to start.
 
 Keeping all of this in `config.json` is what keeps hostnames, ping targets,
 city lists and tokens out of the source tree: the repo ships generic
@@ -354,7 +353,7 @@ plain-Markdown AI configuration guide, and — when the widget has settings —
 its settings declaration. They are linked from the table above and indexed in
 [`docs/`](docs/README.md).
 
-Six pages are about the repository rather than a widget:
+Seven pages are about the repository rather than a widget:
 
 | | |
 |---|---|

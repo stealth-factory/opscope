@@ -9,7 +9,7 @@ Keys while running: up/down (or k/j) picks the target the graph brings to the
 front - up from the first target and down from the last put it back to
 drawing every target alike, as does esc - i cycles the ping
 interval (0.2/0.5/1/2/5s, applied to running pings immediately), g cycles the
-column aggregation, c cycles seconds per graph column, , opens settings, q
+column aggregation, c cycles seconds per graph column, comma opens settings, q
 quits.
 
 -i sets the ping interval. -g picks how samples sharing a column combine
