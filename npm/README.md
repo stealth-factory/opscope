@@ -8,7 +8,7 @@ npx opscope link            # skip the menu; any widget name works
 npx opscope@latest link     # pin to latest, or @0.3.0, etc.
 ```
 
-That is the launcher: a menu of the fifteen widgets, or name one and skip
+That is the launcher: a menu of the fourteen widgets, or name one and skip
 it. Only `opscope` is installed as a command; the other binaries stay beside
 it, so `pr` and `link` never replace the coreutils commands of the same
 name. The binaries it starts are the ones attached to the GitHub release of

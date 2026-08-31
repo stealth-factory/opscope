@@ -1,0 +1,38 @@
+What is listening on this machine, what started it, and who can reach it.
+
+On a box running several agents at once, "which port is that project on" and
+"is this reachable from outside" are asked constantly and answered badly.
+`lsof -i` gives a pid and a port and stops there.
+
+Each row is one listening service: the port, what it is bound to, what kind of
+server it is, the project directory it was started from - the label that
+actually identifies a dev server - how long it has been up, and whether
+anything outside this machine can reach it. A server listening on both IPv4
+and IPv6 is one row, not two.
+
+    ports [-n SECONDS]
+
+Read from /proc alone: the socket table for the ports, and each process's own
+cmdline and cwd for the rest. Exposure comes from `tailscale serve status`
+where Tailscale is installed. Another user's sockets cannot be tied to a
+process without root, so those rows name the owner the socket table gives
+and are hidden behind o along with the system ports.
+
+k stops the selected server, after a confirmation and only for a process you
+own: SIGTERM to its process group, which is what Ctrl-C in its own terminal
+would have sent, then the offer of SIGKILL if it is still up three seconds
+later.
+
+Enter opens a second screen for one port, where there is more to show than the
+table holds: the command behind it, every address it can actually be reached
+at - bounded by what the socket is bound to - and c to copy one. From there s
+and t publish it over Tailscale, to the tailnet or to the internet, and d
+opens a Cloudflare quick tunnel. Each asks first.
+
+Keys: up/down select, enter opens, esc goes back, c copies, s serves,
+t funnels, d tunnels, k kills, o hides the machine's own ports, r refreshes,
+comma opens settings, q quits.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.

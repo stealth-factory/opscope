@@ -1,26 +1,35 @@
 {
-  "_comment": "Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the tool's default.",
-  "_terminal_comment": "Shared by every widget rather than set per panel: it is a property of how you use a terminal, not of any one panel.",
+  "_comment": "Generated from the launcher's settings.json and each widget's settings.json by widgets/tests/check.rs - rewrite it with `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the widget's default.",
   "terminal": {
-    "_mouse_comment": "Whether the widgets ask the terminal for mouse reports, which is what makes the scroll wheel scroll them. It costs a real thing: while the terminal is reporting, dragging selects nothing, so copying a line off a panel with the mouse stops working. Turn it off if you copy more often than you scroll - ctrl-y and ctrl-e still scroll, and so do the arrows.",
+    "_comment": "Shared by every widget rather than set per panel: this is a property of how you use the terminal, not of one widget.",
+    "_mouse_comment": "Whether widgets ask the terminal for mouse reports so the scroll wheel works. While reporting is on, dragging selects nothing; turn it off if copying terminal text matters more. Ctrl-Y, Ctrl-E, and arrow keys still scroll.",
     "mouse": true
   },
-  "latency": {
-    "hosts": [
-      "1.1.1.1",
-      "8.8.8.8",
-      "example.internal"
-    ],
-    "interval": 0.5,
-    "seconds_per_column": 0,
-    "window": 600,
-    "spike_factor": 3.0,
-    "aggregate": "median",
-    "strip_suffixes": [
-      ".example.internal"
-    ]
+  "agent_usage": {
+    "_comment": "Reads local agent state only — no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
+    "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named — it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
+    "auto_detect_agent": true,
+    "_agents_comment": "Agent names to show, in the order given; empty discovers whatever local state this machine has. Pick from the list rather than typing: a name that is not one of the six is not an error, it is simply an agent that never appears.",
+    "agents": [],
+    "_exclude_agents_comment": "Agents to leave out, applied either way — to the ones discovered automatically and to a list named by hand. Picked from the same six, so an exclusion cannot be spelt wrongly and silently do nothing.",
+    "exclude_agents": [],
+    "_refresh_comment": "Seconds between local state and allowed quota refreshes.",
+    "refresh": 30.0,
+    "_rates_comment": "OPTIONAL override, in US$ per million tokens, keyed by model. Published list prices ship in the code, dated on screen, so nothing here is needed to price a known model. Enter opens the rate card: the models you have set something on, or all of them when you have none, with tab to switch and typing to search. Enter on a model lists its priced kinds — input, output, cache_read, cache_write, cache_write_1h — with the published price as the default, and d on the card drops a model back to list prices. Set only the numbers you want to change: config wins per kind, so the rest keep tracking the shipped card and still get a vendor's correction. A model is yours only when it holds a number; opening one writes nothing. Use this to correct a stale price, to price a model the card does not carry, or to apply your own negotiated rates. Reasoning tokens are not a kind: vendors count them inside output, so pricing them again would charge them twice. Longest matching model name wins, and '*' overrides these kinds for any model no other key names.",
+    "rates": {},
+    "_plan_cost_comment": "What each subscription costs you per month, per agent, in US$. A flat monthly figure — the per-token prices are `rates`, which is a different setting. Nothing ships here: plans vary by tier and region, and no invoice is on this machine. Set one and METERED gains 'the plan saves' — the month's cost at list prices against what you actually pay.",
+    "plan_cost": {},
+    "_antigravity_remote_comment": "Antigravity publishes its quota two ways: a language server that runs inside the app, and Google, which serves the same summary on the endpoint the tier already comes from. The local one is preferred and this only decides whether the remote one may be asked when the app is shut. On by default — it is the same host and the same credential the tier request already uses. Turn it off and the quota is absent whenever Antigravity is closed; the tab then says so, and names this key.",
+    "antigravity_remote": true,
+    "_antigravity_start_comment": "Whether the widget may start the `agy` CLI to read the quota it serves, when nothing else has one. On by default, and the only setting here that runs another program. It is your own CLI, already installed and signed in; it is started under a pseudo-terminal, killed by pid as soon as the reading is taken, and reaped, so nothing outlives the fetch; and a CLI you started yourself is found by the ordinary local probe long before this runs, so this can never shut one of yours down. Off means the quota lasts an hour past the last time Antigravity ran, which is the token's life.",
+    "antigravity_start": true,
+    "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token — without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
+    "grok_ping": false,
+    "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls.",
+    "grok_ping_minutes": 5.0
   },
   "clocks": {
+    "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
     "cities": [
       [
         "San Francisco",
@@ -39,7 +48,9 @@
         "Asia/Tokyo"
       ]
     ],
+    "_work_start_hour_comment": "Local 24-hour clock hour when the work day begins.",
     "work_start_hour": 9,
+    "_work_end_hour_comment": "Local 24-hour clock hour when the work day ends.",
     "work_end_hour": 18,
     "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
     "show_hints": true,
@@ -51,99 +62,127 @@
       "thu",
       "fri"
     ],
+    "_pomodoro_enabled_comment": "Whether the pomodoro starts enabled when clocks launches.",
     "pomodoro_enabled": false,
-    "pomodoro_focus_minutes": 25,
-    "pomodoro_short_break_minutes": 5,
-    "pomodoro_long_break_minutes": 15,
+    "_pomodoro_focus_minutes_comment": "Minutes in one focus session.",
+    "pomodoro_focus_minutes": 25.0,
+    "_pomodoro_short_break_minutes_comment": "Minutes in a short break.",
+    "pomodoro_short_break_minutes": 5.0,
+    "_pomodoro_long_break_minutes_comment": "Minutes in a long break.",
+    "pomodoro_long_break_minutes": 15.0,
+    "_pomodoro_sessions_before_long_break_comment": "Completed focus sessions before a long break.",
     "pomodoro_sessions_before_long_break": 4,
+    "_pomodoro_bell_comment": "Whether a terminal bell sounds when a phase ends.",
     "pomodoro_bell": true,
+    "_pomodoro_notify_comment": "Whether a desktop notification is attempted when a phase ends.",
     "pomodoro_notify": true,
+    "_pomodoro_flash_comment": "Whether the pane flashes when a phase ends.",
     "pomodoro_flash": true,
+    "_pomodoro_flash_count_comment": "Number of end-of-phase flashes.",
     "pomodoro_flash_count": 2,
+    "_pomodoro_flash_gap_comment": "Seconds between end-of-phase flashes.",
     "pomodoro_flash_gap": 1.0,
+    "_pomodoro_flash_rgb_comment": "Flash colour as three red, green, blue values.",
     "pomodoro_flash_rgb": [
       246,
       248,
       252
     ]
   },
-  "deployments": {
-    "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used - it expires within hours. Keep this file chmod 600.",
-    "token": "",
-    "token_env": "VERCEL_TOKEN",
-    "refresh": 15,
-    "limit": 100,
-    "teams": [],
-    "projects": []
-  },
-  "tailnet": {
-    "_comment_history": "rate samples kept per peer; the chart is a window on to this",
-    "history": 180,
-    "refresh": 5
-  },
-  "herdr_panes": {
-    "refresh": 4
-  },
   "github": {
-    "_comment": "token: a CLASSIC PAT with repo + read:org - fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+    "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+    "_token_comment": "Classic GitHub token; leave empty to read the named environment variable.",
     "token": "",
+    "_token_env_comment": "Environment variable that holds the GitHub token.",
     "token_env": "GITHUB_TOKEN",
+    "_accounts_comment": "GitHub users or organizations to include; empty discovers the viewer and their organizations.",
     "accounts": [],
-    "window_days": 14,
-    "refresh": 120
-  },
-  "linear": {
-    "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
-    "token": "",
-    "token_env": "LINEAR_API_KEY",
-    "exclude_teams": [],
-    "window_days": 14,
-    "refresh": 120
+    "_window_days_comment": "Days included in delivery charts and summaries.",
+    "window_days": 14.0,
+    "_refresh_comment": "Seconds between GitHub API refreshes.",
+    "refresh": 120.0
   },
   "github_actions": {
-    "_comment": "Reuses github.token. token / token_env here override that, then fall back to github, then $GITHUB_TOKEN. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal \u2014 never every repo the token can see. The screen names the cap.",
+    "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
+    "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
     "token": "",
-    "token_env": "",
+    "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
+    "token_env": "GITHUB_TOKEN",
+    "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
     "accounts": [],
+    "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",
     "repos": [],
-    "window_hours": 48,
-    "refresh": 60,
+    "_window_hours_comment": "Hours of workflow runs included in summaries.",
+    "window_hours": 48.0,
+    "_refresh_comment": "Seconds between GitHub Actions refreshes.",
+    "refresh": 60.0,
+    "_max_repos_comment": "Maximum discovered repositories inspected per account.",
     "max_repos": 16,
-    "pushed_days": 14
+    "_pushed_days_comment": "How recently a repository must have been pushed to qualify for discovery.",
+    "pushed_days": 14.0
   },
   "github_prs": {
-    "_comment": "Reuses github.token. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+    "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
+    "token": "",
+    "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
+    "token_env": "GITHUB_TOKEN",
+    "_sources_comment": "Named GitHub search queries pooled and de-duplicated into the follow-up queue.",
     "sources": {
       "orgs": "is:open is:pr @mine",
       "authored": "is:open is:pr author:@me",
       "assigned": "is:open is:pr assignee:@me"
     },
+    "_limit_comment": "Maximum pull requests retained after searches are combined.",
     "limit": 50,
-    "refresh": 60
+    "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
+    "refresh": 60.0
   },
-  "agent_usage": {
-    "_comment": "Reads local agent state only - no network, no credentials. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
-    "agents": [],
-    "exclude_agents": [],
-    "refresh": 30,
-    "_rates_comment": "OPTIONAL override. Anthropic's published list prices ship in the code, dated on screen, so Claude models are priced with no config at all. Set entries here to correct a stale price, to add a provider that publishes none (OpenAI, xAI), or to use your own negotiated rates. US$ per million tokens, keyed by model; longest matching name wins and '*' catches the rest.",
-    "rates": {},
-    "_plan_cost_comment": "What each subscription costs you per month, keyed by agent, for example claude: 200. Nothing ships here: Anthropic lists Max as 'from $100' because it varies by tier, and no invoice is on this machine. Set it and METERED adds 'the plan saves'.",
-    "plan_cost": {},
-    "_antigravity_remote_comment": "Antigravity publishes its quota two ways: a language server that runs inside the app, and Google, which serves the same summary on the endpoint the tier already comes from. The local one is preferred and this only decides whether the remote one may be asked when the app is shut. On by default - it is the same host and the same credential the tier request already uses. Turn it off and the quota is absent whenever Antigravity is closed; the tab then says so, and names this key.",
-    "antigravity_remote": true,
-    "_antigravity_start_comment": "Whether the widget may start the `agy` CLI to read the quota it serves, when nothing else has one. On by default, and the only setting here that runs another program. It is your own CLI, already installed and signed in; it is started under a pseudo-terminal, killed by pid as soon as the reading is taken, and reaped, so nothing outlives the fetch; and a CLI you started yourself is found by the ordinary local probe long before this runs, so this can never shut one of yours down. Off means the quota lasts an hour past the last time Antigravity ran, which is the token's life.",
-    "antigravity_start": true,
-    "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token - without it the asking works until the token lapses and then silently stops. Off by default: a widget that reads should not start talking to a vendor, or starting somebody else's program, because it was launched.",
-    "grok_ping": false,
-    "grok_ping_minutes": 5
+  "herdr_panes": {
+    "_refresh_comment": "Seconds between reads of Herdr pane state.",
+    "refresh": 4.0
+  },
+  "latency": {
+    "_hosts_comment": "Hostnames or addresses passed to ping; every target is measured independently. Anything ping accepts works — \"1.1.1.1\", \"db1.internal\", \"example.com\" — and a name that does not resolve shows as DOWN rather than being dropped, so a typo is visible instead of silent.",
+    "hosts": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "_interval_comment": "Seconds between ping samples per target.",
+    "interval": 0.5,
+    "_seconds_per_column_comment": "Seconds represented by one graph column; 0 chooses from the pane width and retained window.",
+    "seconds_per_column": 0.0,
+    "_window_comment": "Seconds of readings retained for statistics and graphs.",
+    "window": 600,
+    "_spike_factor_comment": "How many times above the recent baseline marks a latency spike.",
+    "spike_factor": 3.0,
+    "_aggregate_comment": "How several samples in one graph column are combined.",
+    "aggregate": "median",
+    "_strip_suffixes_comment": "Hostname suffixes removed from on-screen labels only — the target is still pinged by its full name. Give the leading dot: \".internal\" turns db1.internal into db1, and \".eu-west-1.compute.internal\" turns a long cloud name into the host part. Longest match wins, so a general suffix and a more specific one can both be listed.",
+    "strip_suffixes": []
+  },
+  "linear": {
+    "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
+    "_token_comment": "Linear personal API key; leave empty to read the named environment variable.",
+    "token": "",
+    "_token_env_comment": "Environment variable that holds the Linear API key.",
+    "token_env": "LINEAR_API_KEY",
+    "_exclude_teams_comment": "Linear team identifiers omitted from every aggregate.",
+    "exclude_teams": [],
+    "_window_days_comment": "Days included in issue and cycle trend charts.",
+    "window_days": 14.0,
+    "_refresh_comment": "Seconds between Linear API refreshes.",
+    "refresh": 120.0
   },
   "link": {
     "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+    "_ports_comment": "Listening ports counted as inbound sessions; empty uses every listening port.",
     "ports": [],
-    "refresh": 2,
+    "_refresh_comment": "Seconds between kernel TCP-accounting reads.",
+    "refresh": 2.0,
+    "_history_comment": "Minimum number of rate samples retained.",
     "history": 120,
-    "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor - retention follows the longest window on its own.",
+    "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor — retention follows the longest window on its own.",
     "windows": [
       60,
       300,
@@ -152,15 +191,21 @@
     ]
   },
   "netwatch": {
-    "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only - UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
+    "_comment": "Which processes are using the network, from the kernel's per-socket byte counters via `ss -tine` plus /proc/<pid>/fd for attribution. TCP only — UDP has no counters to read, so QUIC, DNS and Tailscale's own traffic are invisible. Totals start at zero each launch.",
+    "_interval_comment": "Seconds between kernel socket-counter samples.",
     "interval": 1.0,
+    "_limit_comment": "Maximum process rows; 0 means no configured limit.",
     "limit": 0,
+    "_sort_comment": "Initial ordering: total bytes or live rate.",
     "sort": "total",
+    "_external_comment": "Whether traffic with off-machine peers is included.",
     "external": true,
+    "_mine_comment": "Whether the initial view is limited to this user’s processes.",
     "mine": true
   },
   "ports": {
-    "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` - parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+    "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+    "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
     "system_ports": [
       22,
       53,
@@ -169,6 +214,28 @@
       631,
       5353
     ],
-    "refresh": 4
+    "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
+    "refresh": 4.0
+  },
+  "tailnet": {
+    "_comment_history": "rate samples kept per peer; the chart is a window on to this",
+    "history": 180,
+    "_refresh_comment": "Seconds between Tailscale status and traffic refreshes.",
+    "refresh": 2.0
+  },
+  "vercel_deployments": {
+    "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used — it expires within hours. Keep this file chmod 600.",
+    "_token_comment": "Vercel account token; leave empty to read the named environment variable.",
+    "token": "",
+    "_token_env_comment": "Environment variable that holds the Vercel token.",
+    "token_env": "VERCEL_TOKEN",
+    "_refresh_comment": "Seconds between Vercel API refreshes.",
+    "refresh": 15.0,
+    "_limit_comment": "Maximum deployments requested from Vercel.",
+    "limit": 100,
+    "_teams_comment": "Vercel team identifiers to include. Leave it empty and every team the token can see is covered — the widget lists them itself on start, so a team you join appears without editing anything. Name teams here only to narrow it to those. With no token the poller says so and makes no request; the personal account is what you get when a valid token can see no teams. If listing them fails or stops early the board says so rather than quietly showing less.",
+    "teams": [],
+    "_projects_comment": "Project identifiers to include; empty includes every project in scope.",
+    "projects": []
   }
 }

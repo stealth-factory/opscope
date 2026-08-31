@@ -1,0 +1,28 @@
+{
+  "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+  "_schema": {
+    "windows": { "items": "integer" },
+    "ports": {
+      "items": "integer"
+    },
+    "refresh": {
+      "minimum": 0.5
+    },
+    "history": {
+      "minimum": 1
+    }
+  },
+  "_ports_comment": "Listening ports counted as inbound sessions; empty uses every listening port.",
+  "ports": [],
+  "_refresh_comment": "Seconds between kernel TCP-accounting reads.",
+  "refresh": 2.0,
+  "_history_comment": "Minimum number of rate samples retained.",
+  "history": 120,
+  "_windows_comment": "What w cycles the chart through, in seconds; the first is what opens. history is only a floor — retention follows the longest window on its own.",
+  "windows": [
+    60,
+    300,
+    900,
+    3600
+  ]
+}

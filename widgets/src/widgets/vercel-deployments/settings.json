@@ -1,0 +1,30 @@
+{
+  "_comment": "token: create one at Account Settings -> Tokens. The Vercel CLI's session is not used — it expires within hours. Keep this file chmod 600.",
+  "_schema": {
+    "teams": {
+      "items": "string"
+    },
+    "projects": {
+      "items": "string"
+    },
+    "refresh": {
+      "minimum": 5
+    },
+    "limit": {
+      "minimum": 1,
+      "maximum": 100
+    }
+  },
+  "_token_comment": "Vercel account token; leave empty to read the named environment variable.",
+  "token": "",
+  "_token_env_comment": "Environment variable that holds the Vercel token.",
+  "token_env": "VERCEL_TOKEN",
+  "_refresh_comment": "Seconds between Vercel API refreshes.",
+  "refresh": 15.0,
+  "_limit_comment": "Maximum deployments requested from Vercel.",
+  "limit": 100,
+  "_teams_comment": "Vercel team identifiers to include. Leave it empty and every team the token can see is covered — the widget lists them itself on start, so a team you join appears without editing anything. Name teams here only to narrow it to those. With no token the poller says so and makes no request; the personal account is what you get when a valid token can see no teams. If listing them fails or stops early the board says so rather than quietly showing less.",
+  "teams": [],
+  "_projects_comment": "Project identifiers to include; empty includes every project in scope.",
+  "projects": []
+}

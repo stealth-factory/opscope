@@ -5,11 +5,10 @@
 # and the manifest bump. Merging that PR is the release decision. Nothing
 # is tagged, built or published until you do.
 #
-# This is release-please's shape, built by hand. release-plz would have
-# given it for free and cannot run here: it determines what changed with
-# `cargo package --verify`, and this workspace will not package, because
-# start.rs embeds the repo's docs from outside its own crate. git-cliff
-# reads git history and nothing else.
+# This is release-please's shape, built by hand. git-cliff reads the shared
+# product's history directly; the workflow then bumps both crate manifests
+# together instead of asking package publication tooling to infer which
+# half of one release changed.
 name: release-pr
 
 on:
