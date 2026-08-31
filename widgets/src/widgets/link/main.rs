@@ -947,7 +947,11 @@ fn table(
 ) -> Vec<String> {
     // The Python's header, column for column: the two have to sit side by
     // side in a wall and read as the same widget.
-    let wide = w >= 74;
+    // 82 rather than 74, which was two short of the row it turned on: the
+    // wide row measures 81 and `seg` clips to `w - 1`, so at 74 the IDLE
+    // column arrived already truncated. Widening the row by the TO column
+    // made that visible rather than causing it.
+    let wide = w >= 82;
     // Two for the glyph and its space, eighteen for the name: together they
     // land the NOW column under its heading. Three and twenty also add up to
     // a plausible-looking row, and put every number three cells right of the
@@ -962,7 +966,11 @@ fn table(
         &[
             (p.dim.as_str(), "  PEER".into()),
             (p.dim.as_str(), " ".repeat(name_w - 4)),
-            (p.dim.as_str(), "    NOW   FLOOR  JITTER    LOSS".into()),
+            // TO is the port on this machine they reached, which is the
+            // only thing on the row that says what they are connected to.
+            // The address carries the peer's own port, glued to it by a
+            // colon, so the two are never read as the same number.
+            (p.dim.as_str(), "    TO    NOW   FLOOR  JITTER    LOSS".into()),
             (p.dim.as_str(), if wide { "  ACHIEVED".into() } else { String::new() }),
             (p.dim.as_str(), if wide { "   IDLE".into() } else { String::new() }),
         ],
@@ -1018,6 +1026,12 @@ fn table(
             // not, so on a one-row list nothing said it at all.
             (mark_c.as_str(), if here { "▸".to_string() } else { " ".to_string() }),
             (label_c.as_str(), tc::pad(&label, name_w)),
+            // Which of this machine's ports they reached. Every row here is
+            // inbound - the parser drops a socket whose local port is not
+            // one being watched - so this is always a service of ours, and
+            // it is the answer to "connected to what", which the address
+            // alone cannot give.
+            (dim_c.as_str(), format!("{:>6}", row.port)),
             (tone.as_str(), cell(row.rtt, 7)),
             (dim_c.as_str(), cell(row.floor, 8)),
             (dim_c.as_str(), cell(row.jitter, 8)),
@@ -1626,7 +1640,7 @@ mod tests {
         // the other implementation can. This port had three cells of it,
         // and every half looked plausible on its own.
         let want =
-            "▐ 203.0.113.221:22 williamli   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
+            "▐ 203.0.113.221:22 williamli    22   37ms    20ms    10ms  0.00%  11.1Mbps     1m";
         let row = Session {
             peer: "203.0.113.221:22".into(),
             ip: "203.0.113.221".into(),
@@ -1674,7 +1688,37 @@ mod tests {
         let drawn = table(&[row], &state, 86, None, &palette());
         assert_eq!(
             plain(&drawn[1]),
-            "▐ 203.0.113.9:22                 --      --      --     --        --     --"
+            "▐ 203.0.113.9:22                22     --      --      --     --        --     --"
+        );
+    }
+
+    #[test]
+    fn the_to_column_is_our_port_and_not_theirs() {
+        // Both layout fixtures above happen to describe a socket whose peer
+        // port is also 22, so either number would satisfy them - they would
+        // pass just as well against a column showing the wrong end of the
+        // connection. This one cannot: the peer dialled from 54321 and
+        // arrived at 443, and only one of those says what they reached.
+        let row = Session {
+            peer: "203.0.113.9:54321".into(),
+            ip: "203.0.113.9".into(),
+            port: 443,
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::new(),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        let drawn = plain(&table(&[row], &state, 86, None, &palette())[1]);
+        let (_, after) = drawn.split_once("54321").expect("the peer's own port");
+        // By word rather than by column, so padding is free to change and
+        // only the number has to be right.
+        assert_eq!(
+            after.split_whitespace().next(),
+            Some("443"),
+            "the TO column should hold this machine's port: {drawn:?}"
         );
     }
 
