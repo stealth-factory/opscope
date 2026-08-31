@@ -19,8 +19,10 @@ records one missing sample per interval until a reply resets the clock. A
 wall-clock jump larger than that grace — a sleeping Mac, a paused VM — is
 not treated as loss: ping was frozen and transmitted nothing, so the clock
 re-arms rather than filling the window with samples that were never sent. A
-reply after either form of loss uses the ordinary recovery path; statistics,
-events, retained history and drawing are otherwise unchanged.
+reply after either form of loss uses the ordinary recovery path. A gap that
+is already closed by the reply that reveals it is recorded as empty samples
+without a LOSS/UP pair — that pair would otherwise read as a 0s outage.
+Statistics, events, retained history and drawing are otherwise unchanged.
 
 The stock macOS ping accepts the widget's 0.2-second minimum as an unprivileged
 user. The configured interval is therefore passed through unchanged on both

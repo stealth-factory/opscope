@@ -371,6 +371,17 @@ fn unaccounted_losses(missing: usize, already_recorded: usize) -> usize {
     missing.saturating_sub(already_recorded)
 }
 
+/// Empty samples for packets a later reply proves were lost.
+///
+/// Not `record_loss`: that path logs LOSS and marks the target down, and
+/// the reply we already have would then log UP after 0s. The gap is over
+/// by the time it is knowable, so the samples go in without an outage pair.
+fn record_closed_gap(target: &mut Target, stamp: f64, interval: f64, count: usize, window: usize) {
+    for k in (1..=count).rev() {
+        target.record(stamp - k as f64 * interval, None, window);
+    }
+}
+
 /// A BSD ping that receives nothing prints nothing. This clock turns that
 /// absence into measured loss after a grace period, then one sample per
 /// configured interval until a reply resets it.
@@ -555,9 +566,7 @@ fn watch(
                         // counting any packet twice.
                         let unaccounted =
                             unaccounted_losses(missing, losses_since_reply).min(window.max(1));
-                        for _ in 0..unaccounted {
-                            record_loss(target, stamp, window, &events, &hue, &label);
-                        }
+                        record_closed_gap(target, stamp, interval, unaccounted, window);
                         losses_since_reply = 0;
                     }
                 }
@@ -1654,6 +1663,16 @@ mod tests {
         // Defensive saturation avoids inventing loss if outputs arrive in an
         // unusual order and explicit signals temporarily outnumber the gap.
         assert_eq!(unaccounted_losses(2, 3), 0);
+    }
+
+    #[test]
+    fn a_recovered_sequence_gap_does_not_open_an_instant_outage() {
+        let mut t = Target::default();
+        record_closed_gap(&mut t, 10.0, 0.5, 2, 600);
+        // The samples exist for the loss percentage. down_since stays clear
+        // so the reply that revealed the gap cannot log UP after 0s.
+        assert!(t.down_since.is_none());
+        assert_eq!(t.samples, [(9.0, None), (9.5, None)]);
     }
 
     #[test]
