@@ -612,9 +612,12 @@ fn graph(
         // pane looking busy over an empty list, which is the shape this
         // repo's checks exist to catch.
         let why = if targets.is_empty() {
-            "  no hosts configured - set latency.hosts in config.json"
+            format!(
+                "  {}",
+                tc::missing_config("no hosts configured - set latency.hosts")
+            )
         } else {
-            "  collecting…"
+            "  collecting…".into()
         };
         return (vec![tc::seg(&[(p.dim.as_str(), why.into())], w - 1)], span);
     }
@@ -1565,6 +1568,19 @@ mod tests {
         // is an implementation detail; that neither vanishes is not.
         assert!(owners.contains(&"first"), "{:?}", owners);
         assert!(owners.contains(&"second"), "{:?}", owners);
+    }
+
+    #[test]
+    fn no_hosts_points_at_the_settings_key() {
+        // An empty target list is a configuration miss, not a quiet
+        // network. The chart used to send the reader to edit a file; the
+        // settings screen is one keypress away and already knows which
+        // file is in force.
+        let (rows, _) = graph(&[], 80, 8, 1.0, "median", None, &palette());
+        let shown = rows.join("\n");
+        assert!(shown.contains("latency.hosts"), "{shown}");
+        assert!(shown.contains(tc::SET_IN_SETTINGS), "{shown}");
+        assert!(!shown.contains("collecting"), "{shown}");
     }
 
 }

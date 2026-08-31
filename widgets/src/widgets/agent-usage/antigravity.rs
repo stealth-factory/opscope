@@ -579,7 +579,9 @@ fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
 /// and was never sent.
 fn remote_token(allowed: bool) -> Result<String, String> {
     if !allowed {
-        return Err("asking Google is off - set agent_usage.antigravity_remote to true".into());
+        return Err(tc::missing_config(
+            "asking Google is off - set agent_usage.antigravity_remote to true",
+        ));
     }
     let Some(file) = read_json(&token_path()) else {
         return Err(
@@ -1171,6 +1173,7 @@ mod tests {
         // key rather than blaming the network.
         let off = remote_token(false).unwrap_err();
         assert!(off.contains("agent_usage.antigravity_remote"), "{}", off);
+        assert!(off.contains(tc::SET_IN_SETTINGS), "{}", off);
         // It may name Google - that is where the request would have gone -
         // but it must not report a refusal or a silence that never happened.
         for blame in ["refused", "did not answer", "no quota groups"] {

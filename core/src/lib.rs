@@ -605,6 +605,19 @@ pub fn heat(frac: f64) -> String {
     }
 }
 
+/// The clause every "set this config key" message ends with.
+///
+/// The settings screen is one keypress away and already knows which file is
+/// in force. Sending the reader to hand-edit a JSON file is the thing this
+/// exists to stop, and building the words here is what keeps them the same
+/// in every widget.
+pub const SET_IN_SETTINGS: &str = "press `,` to set it here";
+
+/// A missing-config line, always ending with [`SET_IN_SETTINGS`].
+pub fn missing_config(said: &str) -> String {
+    format!("{} — {SET_IN_SETTINGS}", said.trim_end())
+}
+
 /// Draw the reason a widget cannot run, and hold until q.
 ///
 /// Exiting with a message loses it: a widget lives in a pane that is not
@@ -2074,6 +2087,23 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_config_line_names_the_settings_key() {
+        // One product, one clause. A widget that built its own wording
+        // would be the next place this drifted, which is how the five
+        // originals all pointed at a file instead of at `,`.
+        let got = super::missing_config("no token: set github.token or $GITHUB_TOKEN");
+        assert!(
+            got.ends_with(super::SET_IN_SETTINGS),
+            "the clause must be the constant, not a paraphrase: {got}"
+        );
+        assert!(got.contains("`,`"), "{got}");
+        assert!(
+            got.starts_with("no token: set github.token"),
+            "the reason has to stay: {got}"
+        );
+    }
+
     #[test]
     fn a_step_never_counts_towards_a_total_nobody_gave() {
         // The whole reason `of` is an Option. A source that pages without

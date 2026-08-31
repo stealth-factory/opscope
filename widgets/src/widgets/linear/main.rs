@@ -1842,10 +1842,10 @@ fn main() {
     std::thread::spawn(move || loop {
         if tok.is_empty() {
             if let Ok(mut guard) = poller.lock() {
-                guard.err = format!(
-                    "no key: set linear.token in config.json or ${}",
+                guard.err = tc::missing_config(&format!(
+                    "no key: set linear.token or ${}",
                     env_name
-                );
+                ));
             }
         } else {
             let want = poller_days.lock().map(|g| *g).unwrap_or(14);

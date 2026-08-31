@@ -1046,6 +1046,152 @@ fn every_config_read_falls_back_to_a_code_default() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+/// Config keys the example file documents, as `section.key`.
+fn example_keys() -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for (section, names) in example() {
+        for key in names {
+            keys.insert(format!("{section}.{key}"));
+        }
+    }
+    keys
+}
+
+/// Line comments dropped. Strings that teach a key live in code; the
+/// comments that mention one while explaining the port are not on screen.
+fn without_line_comments(src: &str) -> String {
+    src.lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !t.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Each double-quoted string and a window of source around it.
+///
+/// Crude on purpose, like `string_lines`: a hint never needed a parser,
+/// and neither does "set github.token". Escape sequences are unescaped
+/// just enough that a `\"` inside a format does not end the string.
+fn quoted_with_window(src: &str) -> Vec<(String, String)> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let open = i;
+            i += 1;
+            let mut s = String::new();
+            while i < chars.len() {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    s.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    break;
+                }
+                s.push(chars[i]);
+                i += 1;
+            }
+            let from = open.saturating_sub(280);
+            let to = (i + 1).min(chars.len());
+            let window: String = chars[from..to].iter().collect();
+            out.push((s, window));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `key` as a whole dotted path, so `github.token` does not fire inside
+/// `github.token_env`.
+fn contains_dotted_key(text: &str, key: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let abs = from + at;
+        let after = text[abs + key.len()..].chars().next();
+        if after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
+            return true;
+        }
+        from = abs + 1;
+    }
+    false
+}
+
+fn names_the_settings_key(text: &str) -> bool {
+    text.contains("missing_config(")
+        || text.contains("SET_IN_SETTINGS")
+        || text.contains("press `,` to set it here")
+}
+
+/// A quoted string that tells the reader to set a config key.
+fn is_config_remedy(text: &str, keys: &BTreeSet<String>) -> bool {
+    if text.contains("in config.json") {
+        return true;
+    }
+    keys.iter().any(|key| contains_dotted_key(text, key))
+}
+
+#[test]
+fn config_remedy_matcher_sees_a_key_and_skips_a_url() {
+    let keys = ["github.token".into(), "latency.hosts".into()]
+        .into_iter()
+        .collect();
+    assert!(is_config_remedy(
+        "no token: set github.token or $GITHUB_TOKEN",
+        &keys
+    ));
+    assert!(is_config_remedy(
+        "no hosts configured - set latency.hosts in config.json",
+        &keys
+    ));
+    // A URL is not a setting. `github.com` shares a prefix with the
+    // section and is exactly the false positive a dotted-path scan hits
+    // if it does not ask the example which keys exist.
+    assert!(!is_config_remedy(
+        "https://github.com/o/r/pull/7",
+        &keys
+    ));
+    // The longer key must not satisfy the shorter one.
+    assert!(!contains_dotted_key(
+        "set github.token_env",
+        "github.token"
+    ));
+    assert!(contains_dotted_key("set github.token or", "github.token"));
+}
+
+#[test]
+fn a_message_that_names_a_config_key_names_the_settings_key() {
+    // These used to say "set github.token in config.json". The settings
+    // screen is one keypress away and already knows which file is being
+    // read; sending someone to hand-edit a JSON file is the thing this
+    // exists to stop. Prose asked for the trailing clause; prose is what
+    // let the five originals drift in the first place.
+    let keys = example_keys();
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        let code = without_line_comments(&src);
+        for (text, window) in quoted_with_window(&code) {
+            if !is_config_remedy(&text, &keys) {
+                continue;
+            }
+            if names_the_settings_key(&text) || names_the_settings_key(&window) {
+                continue;
+            }
+            let clip: String = text.chars().take(80).collect();
+            wrong.push(format!("{name}: {clip:?} names a config key and never `,`"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a message that names a config key as the remedy must also name `,` \
+         (press `,` to set it here), via tc::missing_config:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
 #[test]
 fn every_widget_has_a_readme_row() {
     // check.py used to hold this, and the launcher's doc still says it does.

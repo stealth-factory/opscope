@@ -1048,7 +1048,9 @@ fn metered_rows(
                 w - 1,
             )];
             rows.extend(no_local(
-                "Set agent_usage.rates in config.json - US$ per million tokens, keyed by model.",
+                &tc::missing_config(
+                    "Set agent_usage.rates - US$ per million tokens, keyed by model.",
+                ),
                 "",
                 w,
                 p,

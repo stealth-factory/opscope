@@ -735,9 +735,10 @@ pub fn why_no_lane(d: &Data) -> String {
             .into();
     }
     if d.quota_every <= 0.0 {
-        return "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
-                ~/.grok/logs/unified.jsonl has no creditUsagePercent."
-            .into();
+        return tc::missing_config(
+            "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
+             ~/.grok/logs/unified.jsonl has no creditUsagePercent.",
+        );
     }
     "no quota · x.ai did not publish a credit figure, and the log has none either.".into()
 }
@@ -824,14 +825,16 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         ],
         w - 1,
     ));
-    out.push(tc::seg(
-        &[(
-            p.dim.as_str(),
-            "  Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead."
-                .into(),
-        )],
-        w - 1,
-    ));
+    out.extend(
+        wrap_text(
+            &tc::missing_config(
+                "Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.",
+            ),
+            w.saturating_sub(4).max(20),
+        )
+        .into_iter()
+        .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1)),
+    );
     out.push(String::new());
     out
 }
@@ -1598,6 +1601,7 @@ mod tests {
         let off = why_no_lane(&Data::default());
         assert!(off.contains("grok_ping"), "{off}");
         assert!(off.contains("creditUsagePercent"), "{off}");
+        assert!(off.contains(tc::SET_IN_SETTINGS), "{off}");
 
         let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
         let live_blank = Data {

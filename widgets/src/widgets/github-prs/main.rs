@@ -1059,10 +1059,10 @@ fn main() {
     std::thread::spawn(move || loop {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
-                g.err = format!(
-                    "no token: set github_prs.token in config.json, or ${}",
+                g.err = tc::missing_config(&format!(
+                    "no token: set github_prs.token or ${}",
                     poll_env
-                );
+                ));
             }
         } else {
             let want = poller.lock().ok().and_then(|g| {

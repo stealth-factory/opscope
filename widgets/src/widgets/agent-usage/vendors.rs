@@ -364,13 +364,12 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                 ],
                 w - 1,
             ));
-            rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    "     Set agent_usage.grok_ping in config.json to poll x.ai instead.".into(),
-                )],
-                w - 1,
-            ));
+            let said = tc::missing_config("Set agent_usage.grok_ping to poll x.ai instead.");
+            rows.extend(
+                wrap_text(&said, w.saturating_sub(7).max(20)).into_iter().map(|line| {
+                    tc::seg(&[(p.dim.as_str(), format!("     {line}"))], w - 1)
+                }),
+            );
         }
     }
     if any_stale {
@@ -566,9 +565,9 @@ mod tests {
         assert!(quiet_is_actionable(
             "no quota · no token - Cursor has not signed in here"
         ));
-        assert!(quiet_is_actionable(
+        assert!(quiet_is_actionable(&tc::missing_config(
             "no quota · asking x.ai is off (set agent_usage.grok_ping to poll)"
-        ));
+        )));
         assert!(!quiet_is_actionable(
             "no quota · Anthropic answered, and published no limit percentages."
         ));

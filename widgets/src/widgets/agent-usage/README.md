@@ -402,7 +402,7 @@ reader:
 ```
  no quota either: Antigravity's token expired 51m ago - it refreshes them
  itself, so open it or run `agy` once and sign in
- no quota either: asking Google is off - set agent_usage.antigravity_remote to true
+ no quota either: asking Google is off - set agent_usage.antigravity_remote to true — press `,` to set it here
  no quota either: Antigravity has not signed in on this machine - run `agy`
  once and sign in
  no quota either: Google refused the Antigravity token: …
@@ -1166,7 +1166,7 @@ The screen says which state it is in, in both places it appears:
 ```
 ── WEEKLY QUOTA ── resets in ~1.1 days
  not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
- Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.
+ Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead. — press `,` to set it here
 ```
 
 ```
