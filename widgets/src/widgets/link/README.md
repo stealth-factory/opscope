@@ -6,25 +6,40 @@ How good the connection is between this machine and whoever is connected to
 it — measured, not probed.
 
 ```
-╺━ CONNECTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 2 inbound · measured by the kernel, nothing sent   every 2s
+╺━ CONNECTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ 4 inbound · measured by the kernel, nothing sent   every 2s
 
-  PEER                          TO    NOW   FLOOR  JITTER    LOSS  ACHIEVED   IDLE
-▐ 198.51.100.20:49512 will      22   41ms    20ms    20ms  0.00%   3.3Mbps     0s
-▐ 100.64.0.24:60130            443   55ms    40ms    27ms  0.00% 526.6kbps     5m
+  PEER                        PORT    NOW   FLOOR  JITTER    LOSS  ACHIEVED   IDLE
+▐ 198.51.100.7:62392          3003   45ms    30ms   8.1ms  0.00%  13.0Mbps    19h
+▐ 198.51.100.114:56865        3333   76ms    52ms    34ms  0.00% 328.9kbps    14s
+▐ 100.100.100.100:59448 will    22   58ms    20ms    20ms  0.13%  23.5Mbps     0s
+▐ 198.51.100.220:57582        3010   36ms    28ms    13ms  0.00%   1.7Mbps     1m
 
-   80ms│
-       │                                                           ⣀⡠⠤⠒⠒⠒⠒⠒⠒⠤⠤⣀
-       │⢄                   ⣀⠤⠔⠒⠒⠒⠒⠒⠒⠢⠤⢄                        ⡠⠊⠉            ⠉⠑⠒⠤⣀⡀
-       │ ⠉⠑⢄⣀          ⢀⡠⠒⠊⠉            ⠉⠑⠤⣀                ⢀⠤⠊⠉                    ⠈
-       │     ⠑⠒⠢⠤⠤⠤⠤⠒⠒⠉⠁                    ⠑⠒⢄          ⢀⡠⠔⠁     ⢀⡠⠤⠒⠒⠒⠉⠉⠒⠒⠢⠤⢄⣀
-   42ms│⠤⣀                 ⣀⡠⠔⠒⠊⠉⠉⠉⠉⠒⠒⠤⢄⡀      ⠉⠑⠢⠤⢄⣀⡠⠤⠔⠊⠁     ⣀⠤⠊⠁             ⠉⠒⠢⣀⣀
-       │  ⠑⠤⢄         ⢀⣀⠤⠒⠉             ⠈⠉⠢⣀⡀               ⢀⠤⠊
-       │     ⠉⠑⠒⠤⠤⠤⠔⠒⠊⠁                     ⠈⠒⠤⡀         ⢀⠔⠊⠁
-       │                                       ⠈⠉⠒⠢⠤⠤⠤⠤⠒⠉⠁
-   24ms│
+   95ms│
+       │
+       │
+       │⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤
+       │
+       │
+       │                                          ⡀
+       │                                         ⢰⢱
+       │                                         ⡎⠈⡆   ⢀⣀⣀⣀                         ⡜
+       │     ⢰⡀                           ⢠     ⢰⠁ ⢸  ⢀⠎   ⠉⠑⢆                     ⢰⠁
+   50ms│     ⡇⢇                   ⡔⡄     ⢀⠏⡆    ⡇   ⢇ ⡜      ⠘⡄                   ⢀⠇
+       │    ⢸ ⠸⡀          ⢰⡀    ⢠⠊ ⠈⢆    ⡜ ⢣   ⡸    ⠸⡰⠁       ⢱                   ⡜
+       │⠒⠒⠒⠒⠒⠒⠒⢇⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⡇⠒⠒⠒⠒⡰⠒⠒⠒⠒⠈⠒⠒⠒⢰⠒⠒⠘⠒⠒⢀⠒⠒⠒⠒⠒⠒⠁⠒⠒⠒⠒⠒⠒⠒⠒⠒⡆⠒⠒⠒⠒⠒⠒⠒⠒⠒⢀⠒⠢⠒⠒⠒⠒⠒⡰⠒⠒⠒
+       │   ⢰⠁  ⠸⡀  ⢀⠎⢱   ⢰⠁⠈⡆ ⢰⠁      ⠑⣄⠇   ⢇ ⡜                ⠘⠢⢄⡠⠊ ⢇   ⡸   ⢣  ⢠⠃
+       │   ⡜    ⠉⠑⠒⠁  ⢇  ⡜  ⢱⢠⠃        ⠈    ⢸⢰⠁                      ⠘⡄ ⢀⠇    ⢇⢀⠇
+       │⣀⣀⢠⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠘⣀⢠⣀⣀⣀⣀⠃⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⠸⣀⡜⣀⣀⣀⣀⣀⣀⠎⣀⣀⣀⣀⣀
+       │⢀⠤⠊            ⢱⡸                                              ⢣⠃
+       │⠁               ⠃
+       │
+       │
+   27ms│
        └─────────────────────────────────────────────────────────────────────────────
-        4m ago                                                            now
+        1m ago                                                            now
+
+ ↑↓ select  →/[↵] open  [w] 1m  [o]hide idle  [r]efresh  [,] settings  [q]uit
 ```
 
 ## Why this is not the latency monitor
@@ -64,7 +79,7 @@ anyway when the question is "how is everything reaching this box".
 | | |
 |---|---|
 | **PEER** | who is connected, and the port *they* dialled from. That port is the only thing telling four browser tabs against one dev server apart — same address, same service, four sockets. A login name follows it where the pane is wide enough and `who` knows one |
-| **TO** | the port on **this** machine they reached, which is what they are connected *to*. Every row here is inbound, so this is always one of your own services — SSH, a dev server, whatever `ports` is watching. Read it against PEER: the address answers *who*, this answers *what for* |
+| **PORT** | the port on **this** machine they reached, which is what they are connected *to*. Every row here is inbound, so this is always one of your own services — SSH, a dev server, whatever `ports` is watching. Read it against PEER: the address answers *who*, this answers *what for* |
 | **NOW** | the kernel's smoothed round-trip time, this instant |
 | **FLOOR** | `minrtt` — the best this path has ever done. The *gap* between it and NOW is the congestion, and it is why NOW alone means little |
 | **JITTER** | RTT variance. A steady 90ms link types better than one flapping between 20 and 90 |

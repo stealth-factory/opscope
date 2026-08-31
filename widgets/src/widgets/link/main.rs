@@ -966,11 +966,11 @@ fn table(
         &[
             (p.dim.as_str(), "  PEER".into()),
             (p.dim.as_str(), " ".repeat(name_w - 4)),
-            // TO is the port on this machine they reached, which is the
+            // PORT is the port on this machine they reached, which is the
             // only thing on the row that says what they are connected to.
             // The address carries the peer's own port, glued to it by a
             // colon, so the two are never read as the same number.
-            (p.dim.as_str(), "    TO    NOW   FLOOR  JITTER    LOSS".into()),
+            (p.dim.as_str(), "  PORT    NOW   FLOOR  JITTER    LOSS".into()),
             (p.dim.as_str(), if wide { "  ACHIEVED".into() } else { String::new() }),
             (p.dim.as_str(), if wide { "   IDLE".into() } else { String::new() }),
         ],
@@ -1693,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn the_to_column_is_our_port_and_not_theirs() {
+    fn the_port_column_is_ours_and_not_theirs() {
         // Both layout fixtures above happen to describe a socket whose peer
         // port is also 22, so either number would satisfy them - they would
         // pass just as well against a column showing the wrong end of the
@@ -1718,7 +1718,7 @@ mod tests {
         assert_eq!(
             after.split_whitespace().next(),
             Some("443"),
-            "the TO column should hold this machine's port: {drawn:?}"
+            "the PORT column should hold this machine's port: {drawn:?}"
         );
     }
 
