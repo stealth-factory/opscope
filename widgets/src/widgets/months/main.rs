@@ -343,12 +343,15 @@ struct Layout {
 /// thing dropped on the way down - a week number is worth less than the
 /// seventh day of the week. Below seven day cells there is no honest grid to
 /// draw, so the widget says so instead of drawing six days and a cut.
-fn layout(width: usize) -> Option<Layout> {
+fn layout(width: usize, want_gutter: bool) -> Option<Layout> {
     let room = width.saturating_sub(2);
     if room < NARROWEST {
         return None;
     }
-    let gutter = room >= GUTTER + NARROWEST;
+    // Asked for and affordable. Turning it off is not only a column back: a
+    // narrower block means more months fit across, so this has to be decided
+    // here rather than blanked out afterwards.
+    let gutter = want_gutter && room >= GUTTER + NARROWEST;
     let block = block_width(gutter);
     Some(Layout {
         // A year across is the cap. Past that the strip is showing the same
@@ -551,11 +554,25 @@ fn page(anchor: Option<Month>, today: NaiveDate, months: i64, start: WeekStart) 
 }
 
 /// The footer, which is also where the keys are taught.
-fn hints(p: &Palette) -> Vec<Vec<(&str, String)>> {
+fn hints(p: &Palette, neighbours: bool) -> Vec<Vec<(&str, String)>> {
     vec![
         vec![(p.head.as_str(), "←→".into()), (p.dim.as_str(), " month".into())],
         vec![(p.head.as_str(), "↑↓".into()), (p.dim.as_str(), " year".into())],
         vec![(p.dim.as_str(), "[t]oday".into())],
+        // Named for where it goes, not for what is on: a footer that reads
+        // "[s]ingle" while a single month is showing says nothing about
+        // which way the key moves.
+        vec![(
+            p.dim.as_str(),
+            // Both inside twelve characters, because `pack_hints` will not
+            // split a hint and the frame promises no row wider than the
+            // pane from twelve columns up. The widest hint is the floor.
+            if neighbours {
+                "[s]ingle".into()
+            } else {
+                "[s]pread".into()
+            },
+        )],
         vec![(p.dim.as_str(), "[,] settings".into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
     ]
@@ -566,8 +583,8 @@ fn hints(p: &Palette) -> Vec<Vec<(&str, String)>> {
 /// A hint is never split - `[,] settin` teaches a key that does not exist -
 /// so on a pane narrower than the widest hint it is the margin that gives
 /// way, not the hint. Every other row of the frame keeps its space.
-fn footer(w: usize, p: &Palette) -> Vec<String> {
-    let hints = hints(p);
+fn footer(w: usize, neighbours: bool, p: &Palette) -> Vec<String> {
+    let hints = hints(p, neighbours);
     let widest = hints
         .iter()
         .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
@@ -585,6 +602,7 @@ fn footer(w: usize, p: &Palette) -> Vec<String> {
 /// Built as tall as it wants to be and windowed by the caller, so nothing is
 /// left undrawn because a pane is short - a grid that is not there looks
 /// exactly like a grid with nothing in it.
+#[allow(clippy::too_many_arguments)]
 fn frame(
     w: usize,
     today: NaiveDate,
@@ -592,6 +610,10 @@ fn frame(
     start: WeekStart,
     zone: &str,
     note: Option<&str>,
+    // Whether the months either side are drawn, or this one on its own, and
+    // whether the week-number gutter is wanted at all.
+    neighbours: bool,
+    weeks: bool,
     p: &Palette,
 ) -> Vec<String> {
     let mut body = vec![tc::title("months", w, &p.head)];
@@ -616,7 +638,7 @@ fn frame(
     // year the two genuinely disagree. An unlabelled number that changes
     // meaning with a config key is the thing that is not allowed - and when
     // the pane is too narrow for the gutter there are no numbers to explain.
-    if layout(w).is_some_and(|l| l.gutter) {
+    if layout(w, weeks).is_some_and(|l| l.gutter) {
         said.push((
             p.dim.as_str(),
             "wk is the ISO 8601 week, Monday-reckoned".into(),
@@ -628,7 +650,7 @@ fn frame(
     }
     body.push(String::new());
 
-    match layout(w) {
+    match layout(w, weeks) {
         None => body.extend(wrapped(
             &format!(
                 "a month needs {} columns to draw seven days; this pane has {}",
@@ -641,9 +663,17 @@ fn frame(
             // The month either side at minimum, and more when the width is
             // there to hold them: extra width still buys months, it just
             // cannot buy fewer than the three this widget is for.
-            let least = BEFORE + 1 + AFTER;
-            let months: Vec<Month> = (0..least.max(l.columns))
-                .filter_map(|i| view.shift(i as i64 - BEFORE as i64))
+            // With the neighbours off it is this month and nothing else,
+            // however wide the pane: the point of asking is to see one month
+            // on its own, and filling the width with more would be the
+            // widget declining to do the thing the key was pressed for.
+            let (before, least) = if neighbours {
+                (BEFORE, (BEFORE + 1 + AFTER).max(l.columns))
+            } else {
+                (0, 1)
+            };
+            let months: Vec<Month> = (0..least)
+                .filter_map(|i| view.shift(i as i64 - before as i64))
                 .collect();
             // Bands of whatever fits across. A pane too narrow for three
             // months stacks them rather than dropping them and scrolls to
@@ -675,6 +705,17 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let mut anchor: Option<Month> = None;
     let mut scroll = 0usize;
+    // Whether the months either side are drawn. A view rather than a
+    // setting: it is the answer to "just this month, quickly", which is a
+    // thing you want for a moment and not a thing you configure.
+    let mut neighbours = true;
+    // Whether the week-number gutter is wanted at all. Config, not a key:
+    // ISO week numbers are either part of how you work or they are noise,
+    // and that does not change between one glance and the next.
+    let weeks = cfg
+        .get("week_numbers")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     loop {
         let now = Utc::now();
@@ -698,6 +739,14 @@ fn main() {
                 "up" | "k" | "K" | "pgup" => anchor = page(anchor, today, -12, start),
                 "down" | "j" | "J" | "pgdn" => anchor = page(anchor, today, 12, start),
                 "t" | "T" | "home" => anchor = None,
+                // The scroll goes back to the top with it: the body it was
+                // measured against has just changed height, and a view left
+                // scrolled into space that no longer exists reads as an
+                // empty widget.
+                "s" | "S" => {
+                    neighbours = !neighbours;
+                    scroll = 0;
+                }
                 // The wheel moves the view and nothing else: there is no
                 // selection here to protect, but paging is what the keys do
                 // and a wheel that paged would step a month per notch.
@@ -709,8 +758,8 @@ fn main() {
 
         let (w, h) = tc::size();
         let view = anchor.unwrap_or_else(|| Month::of(today));
-        let body = frame(w, today, view, start, &zone.label(now), zone_note.as_deref(), &p);
-        let foot = footer(w, &p);
+        let body = frame(w, today, view, start, &zone.label(now), zone_note.as_deref(), neighbours, weeks, &p);
+        let foot = footer(w, neighbours, &p);
         // A window onto the body rather than a cut of it, with the title
         // pinned above: on a wall of panes it is the only row saying which
         // widget this is.
@@ -1062,7 +1111,7 @@ mod tests {
         let next = view.shift(1).expect("the month after");
 
         for width in [30usize, 64, 90, 400] {
-            let l = layout(width).expect("a month fits");
+            let l = layout(width, true).expect("a month fits");
             let months: Vec<Month> = (0..(BEFORE + 1 + AFTER).max(l.columns))
                 .filter_map(|i| view.shift(i as i64 - BEFORE as i64))
                 .collect();
@@ -1080,22 +1129,22 @@ mod tests {
     #[test]
     fn extra_width_buys_months_and_the_gutter_goes_last() {
         // Sixty to seventy columns is what the panes on the wall are.
-        assert_eq!(layout(64), Some(Layout { columns: 2, gutter: true }));
-        assert_eq!(layout(70), Some(Layout { columns: 2, gutter: true }));
-        assert_eq!(layout(90), Some(Layout { columns: 3, gutter: true }));
-        assert_eq!(layout(30), Some(Layout { columns: 1, gutter: true }));
+        assert_eq!(layout(64, true), Some(Layout { columns: 2, gutter: true }));
+        assert_eq!(layout(70, true), Some(Layout { columns: 2, gutter: true }));
+        assert_eq!(layout(90, true), Some(Layout { columns: 3, gutter: true }));
+        assert_eq!(layout(30, true), Some(Layout { columns: 1, gutter: true }));
         // One month with its gutter needs 27 columns; below that the week
         // numbers go and the seven days stay.
-        assert_eq!(layout(26), Some(Layout { columns: 1, gutter: false }));
-        assert_eq!(layout(23), Some(Layout { columns: 1, gutter: false }));
+        assert_eq!(layout(26, true), Some(Layout { columns: 1, gutter: false }));
+        assert_eq!(layout(23, true), Some(Layout { columns: 1, gutter: false }));
         // And below seven day cells there is no grid to draw.
-        assert_eq!(layout(22), None);
-        assert_eq!(layout(8), None);
+        assert_eq!(layout(22, true), None);
+        assert_eq!(layout(8, true), None);
         // A whole year across, and no more however wide the pane gets.
-        assert_eq!(layout(400).map(|l| l.columns), Some(12));
+        assert_eq!(layout(400, true).map(|l| l.columns), Some(12));
         // Whatever it says fits, fits - nothing is truncated into place.
         for w in 23..400usize {
-            let l = layout(w).expect("a grid");
+            let l = layout(w, true).expect("a grid");
             let used = l.columns * block_width(l.gutter) + (l.columns - 1) * GAP;
             assert!(used + 1 <= w, "width {} drew {} cells", w, used);
         }
@@ -1108,7 +1157,7 @@ mod tests {
         let p = palette();
         let today = day(2026, 8, 29);
         for w in [23usize, 30, 64, 90, 140] {
-            let l = layout(w).expect("a grid");
+            let l = layout(w, true).expect("a grid");
             let months: Vec<Month> = (0..l.columns)
                 .filter_map(|i| Month { year: 2026, month: 8 }.shift(i as i64))
                 .collect();
@@ -1134,7 +1183,7 @@ mod tests {
         // pushing the footer about.
         let p = palette();
         let today = day(2026, 8, 29);
-        let l = layout(64).expect("a grid");
+        let l = layout(64, true).expect("a grid");
         let mut heights = Vec::new();
         for delta in -6..=6 {
             let view = Month::of(today).shift(delta).expect("a month");
@@ -1263,11 +1312,11 @@ mod tests {
         // the longest words the frame can carry.
         for w in 12..400usize {
             for note in [None, Some("timezone \"Antarctica/DumontDUrville\" is not in the database - reckoned on this machine's zone instead")] {
-                let mut rows = frame(w, today, view, WeekStart::Sunday, "America/Argentina/ComodRivadavia (UTC-3)", note, &p);
+                let mut rows = frame(w, today, view, WeekStart::Sunday, "America/Argentina/ComodRivadavia (UTC-3)", note, true, true, &p);
                 // The footer as it is drawn, not as it is packed: the margin
                 // is part of the row, and leaving it out of the measurement
                 // is how a footer one cell too wide goes unnoticed.
-                rows.extend(footer(w, &p));
+                rows.extend(footer(w, true, &p));
                 for row in &rows {
                     assert!(
                         cells(row) <= w,
@@ -1289,13 +1338,13 @@ mod tests {
         let p = palette();
         let today = day(2026, 8, 29);
         for w in [26usize, 30, 40, 70] {
-            let rows = frame(w, today, Month::of(today), WeekStart::Sunday, "Asia/Tokyo (UTC+9)", None, &p);
+            let rows = frame(w, today, Month::of(today), WeekStart::Sunday, "Asia/Tokyo (UTC+9)", None, true, true, &p);
             let text = words(&rows);
             for word in ["2026-08-29", "SATURDAY", "Asia/Tokyo", "(UTC+9)", "Sunday"] {
                 assert!(text.contains(word), "width {} lost {:?}", w, word);
             }
             // The ISO label appears exactly when there are numbers to label.
-            let numbered = layout(w).is_some_and(|l| l.gutter);
+            let numbered = layout(w, true).is_some_and(|l| l.gutter);
             assert_eq!(
                 text.contains("ISO 8601"),
                 numbered,

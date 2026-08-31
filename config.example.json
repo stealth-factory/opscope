@@ -193,6 +193,8 @@
   "months": {
     "_week_start_comment": "Which day a week begins on. Sunday by default. It moves where the row breaks and nothing else: week numbers stay ISO 8601, which is Monday-reckoned whatever the grid does and says so on the pane, and the weekend stays Saturday and Sunday.",
     "week_start": "sunday",
+    "_week_numbers_comment": "Whether the ISO 8601 week number is shown in a gutter down the left of each month. On by default. Turning it off is not only a column back: a narrower month means more of them fit across the same pane. It is dropped on its own when the pane is too narrow for it and seven days both, because a week number is worth less than the seventh day of the week.",
+    "week_numbers": true,
     "_timezone_comment": "Which zone today is reckoned in, as an IANA name such as Asia/Tokyo. Empty is this machine's own zone, which is what clocks shows. It matters because for several hours of every day it is a different date in two places, and the pane names whichever zone it used. A name the timezone database does not know falls back to this machine and says so on screen rather than quietly marking somebody else's today.",
     "timezone": ""
   },

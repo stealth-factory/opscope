@@ -127,6 +127,14 @@ drawn looks exactly like a month with nothing in it.
 Each band keeps the same fixed height whether its months run to five weeks or
 eight, so paging never shifts what is below it.
 
+**`s` drops to this month alone**, and back. It stays one month however wide
+the pane is — filling the width with neighbours would be the widget declining
+to do the thing the key was pressed for. The footer names where the key goes
+rather than what is on, `[s]ingle` against `[s]pread`, because a footer
+reading "single" while a single month is showing says nothing about which way
+it moves. It is a view and not a setting: something you want for a moment,
+not something you configure.
+
 ## Keys
 
 | Key | Action |
@@ -134,6 +142,7 @@ eight, so paging never shifts what is below it.
 | `←` `→` | page back and forward a month — `h` and `l` do the same |
 | `↑` `↓` | a year back and forward — `k` and `j`, and `PgUp` / `PgDn` |
 | `t` | back to the month it is now — `Home` does the same |
+| `s` | this month on its own, and back again — the footer says which way it goes |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, as in vim |
 | `,` | open settings — the week start and the zone, on the shared screen |
 | `q` | quit |
@@ -154,6 +163,7 @@ what the widget reads.
 ```json
 "months": {
   "week_start": "sunday",
+  "week_numbers": true,
   "timezone": ""
 }
 ```
@@ -165,6 +175,17 @@ what `clocks` reckons too. The two answers are declared as the field's
 `choices`, so `↵` offers them rather than asking for one to be typed — and
 anything unrecognised that reaches the file by hand is the default rather than
 a stopped panel.
+
+**`week_numbers`** — whether the ISO week gutter is drawn at all. On by
+default. Turning it off is not only a column back: a narrower month means
+**more months fit across the same pane**, which is why it is decided before
+the width is divided up rather than blanked out afterwards. It is still
+dropped on its own when the pane cannot hold it and seven days both — the
+gutter goes before a day does — so this key says whether you want it, not
+whether there is room.
+
+It is config rather than a key because it is not a thing you flip while
+reading. ISO week numbers are either part of how you work or they are noise.
 
 **`timezone`** — an IANA name such as `Asia/Tokyo`. Empty means this machine's
 own zone, which is what `clocks` shows. A name the database does not know
