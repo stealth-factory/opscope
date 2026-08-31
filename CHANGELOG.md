@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.8.0] - 2026-08-31
+
+### Bug Fixes
+
+- **vercel-deployments**: Scroll the complete list body (#127)
+- **core**: Measure clipped text in terminal columns (#129)
+
+### Features
+
+- **ports**: Compile parsers on every target, acquire per OS (#115)
+
 ## [0.7.0] - 2026-08-31
 
 ### Features
