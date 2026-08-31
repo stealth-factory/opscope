@@ -39,7 +39,7 @@ you are back. It is the launcher, not another widget.
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/99)) | [read →](widgets/src/widgets/latency/README.md) |
+| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · Linux, macOS | [read →](widgets/src/widgets/latency/README.md) |
 | **`vercel-deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/vercel-deployments/README.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](widgets/src/widgets/tailnet/README.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](widgets/src/widgets/herdr-panes/README.md) |
@@ -55,10 +55,9 @@ you are back. It is the launcher, not another widget.
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-**Two are Linux-only today.** `latency` and `link` read the kernel through
-`/proc` and through `ss`, neither of which exists on macOS; each links the
-issue tracking its port above. The other thirteen run on Linux and macOS
-alike. Nothing here works on Windows.
+**One is Linux-only today.** `link` reads the kernel through `ss`, which does
+not exist on macOS; its row links the issue tracking its port. The other
+fourteen run on Linux and macOS alike. Nothing here works on Windows.
 
 Each is a single self-contained binary — every library it needs is compiled
 in, `ldd` shows only libc, libm and libgcc, and there is nothing to install

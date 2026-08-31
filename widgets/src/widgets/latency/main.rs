@@ -20,6 +20,8 @@
 //! arrives, so the numbers are what ping measured rather than anything this
 //! timed itself.
 
+mod parse;
+
 /// The hues targets are drawn in, kept as numbers rather than escapes so
 /// that a faded set can be mixed from the same nine.
 const HUES: &[(u8, u8, u8)] = &[
@@ -63,10 +65,12 @@ const FADE: f64 = 0.60;
 const LOG_ROWS: usize = 7;
 
 use std::io::{BufRead, BufReader};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opscope_core as tc;
+use parse::parse_sequence;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "latency",
@@ -156,10 +160,7 @@ impl Target {
         // means on a link: how much the round trip moves from ping to ping,
         // not how far it sits from its own average.
         let jit = if got.len() > 1 {
-            Some(
-                got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>()
-                    / (got.len() - 1) as f64,
-            )
+            Some(got.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (got.len() - 1) as f64)
         } else {
             Some(0.0)
         };
@@ -189,7 +190,6 @@ fn fmt_ms(value: Option<f64>) -> String {
         Some(v) => format!("{:>5.1}ms", v),
     }
 }
-
 
 /// One target's recent history at one character per ping.
 ///
@@ -285,7 +285,144 @@ fn rtt_of(line: &str) -> Option<f64> {
 }
 
 fn is_loss(line: &str) -> bool {
-    line.contains("Unreachable") || line.contains("no answer") || line.contains("Time to live")
+    line.contains("Unreachable")
+        || line.contains("no answer")
+        || line.contains("Time to live")
+        || line.contains("Request timeout")
+}
+
+/// Which loss signal the installed ping provides.
+///
+/// This is deliberately runtime-selected rather than target-selected: `-O`
+/// belongs to iputils, not to Linux, and a Linux host can have another ping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PingDialect {
+    /// iputils prints `no answer yet` because `-O` was accepted.
+    Outstanding,
+    /// BSD ping uses native timeouts, sequence gaps, and silence for loss.
+    SequenceGaps,
+}
+
+fn dialect_from_probe(success: bool) -> PingDialect {
+    if success {
+        PingDialect::Outstanding
+    } else {
+        PingDialect::SequenceGaps
+    }
+}
+
+/// Ask the installed binary whether it accepts `-O`.
+///
+/// Loopback makes the supported probe finish immediately without depending
+/// on the network. An execution failure is handled later by the normal
+/// per-target error path; here it conservatively selects the portable mode.
+fn ping_dialect() -> PingDialect {
+    // Even loopback can be blocked. Keep the one-time probe behind core's
+    // bounded runner so an unusual firewall cannot hold the widget before
+    // its first frame; a timeout conservatively selects the portable path.
+    tc::run_full(&["ping", "-n", "-O", "-c", "1", "127.0.0.1"], 2)
+        .map(|out| dialect_from_probe(out.status.success()))
+        .unwrap_or(PingDialect::SequenceGaps)
+}
+
+fn ping_args(dialect: PingDialect, interval: f64, host: &str) -> Vec<String> {
+    let mut args = vec!["-n".to_string()];
+    if dialect == PingDialect::Outstanding {
+        args.push("-O".to_string());
+    }
+    args.extend(["-i".to_string(), interval.to_string(), host.to_string()]);
+    args
+}
+
+#[derive(Default)]
+struct SequenceGaps {
+    last: Option<u64>,
+}
+
+impl SequenceGaps {
+    /// Lost sequence numbers before this reply, then remember the reply.
+    ///
+    /// ICMP echo sequences are 16-bit. Distances in the forward half of
+    /// that space are new replies; distances in the other half are stale or
+    /// out of order and must not invent almost 65,536 losses.
+    fn observe(&mut self, sequence: u64) -> usize {
+        const MODULUS: u64 = 1 << 16;
+        const HALF_RANGE: u64 = MODULUS / 2;
+
+        let sequence = sequence % MODULUS;
+        let Some(last) = self.last else {
+            self.last = Some(sequence);
+            // BSD ping starts at zero, so a first reply at N means 0..N-1
+            // did not answer before the watcher saw any output.
+            return sequence as usize;
+        };
+        let distance = (sequence + MODULUS - last) % MODULUS;
+        if distance == 0 || distance >= HALF_RANGE {
+            return 0;
+        }
+        self.last = Some(sequence);
+        (distance - 1) as usize
+    }
+}
+
+/// A sequence gap includes losses already emitted as native timeouts or by
+/// the silence clock. Only its remainder still needs an empty sample.
+fn unaccounted_losses(missing: usize, already_recorded: usize) -> usize {
+    missing.saturating_sub(already_recorded)
+}
+
+/// Empty samples for packets a later reply proves were lost.
+///
+/// Not `record_loss`: that path logs LOSS and marks the target down, and
+/// the reply we already have would then log UP after 0s. The gap is over
+/// by the time it is knowable, so the samples go in without an outage pair.
+fn record_closed_gap(target: &mut Target, stamp: f64, interval: f64, count: usize, window: usize) {
+    for k in (1..=count).rev() {
+        target.record(stamp - k as f64 * interval, None, window);
+    }
+}
+
+/// A BSD ping that receives nothing prints nothing. This clock turns that
+/// absence into measured loss after a grace period, then one sample per
+/// configured interval until a reply resets it.
+struct SilenceClock {
+    interval: f64,
+    timeout: f64,
+    next_loss: f64,
+}
+
+impl SilenceClock {
+    fn new(now: f64, interval: f64) -> SilenceClock {
+        let timeout = (interval * 3.0).max(2.0);
+        SilenceClock {
+            interval,
+            timeout,
+            next_loss: now + timeout,
+        }
+    }
+
+    /// Output already accounted for this interval; postpone the fallback.
+    fn observed(&mut self, now: f64) {
+        self.next_loss = now + self.timeout;
+    }
+
+    fn losses_due(&mut self, now: f64, cap: usize) -> usize {
+        if now < self.next_loss {
+            return 0;
+        }
+        // The watcher ticks about every 100ms while the machine is awake.
+        // A single call that spans more than the grace period is a clock
+        // jump — sleep, a paused VM — not ping transmitting into a void.
+        // Inventing those samples would report a real outage for a machine
+        // that was not on the network at all.
+        if now - self.next_loss > self.timeout {
+            self.next_loss = now + self.timeout;
+            return 0;
+        }
+        let count = 1 + ((now - self.next_loss) / self.interval).floor() as usize;
+        self.next_loss += count as f64 * self.interval;
+        count.min(cap)
+    }
 }
 
 /// The address ping resolved the host to, from its first line.
@@ -322,6 +459,7 @@ fn watch(
     host: String,
     index: usize,
     window: usize,
+    dialect: PingDialect,
     shared: Arc<Mutex<Vec<Target>>>,
     settings: Arc<Mutex<Settings>>,
     events: Arc<Mutex<Vec<Event>>>,
@@ -334,9 +472,10 @@ fn watch(
             Err(_) => return,
         };
         let child = std::process::Command::new("ping")
-            .args(["-n", "-O", "-i", &interval.to_string(), &host])
+            .args(ping_args(dialect, interval, &host))
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -361,7 +500,50 @@ fn watch(
             Some(s) => s,
             None => continue,
         };
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        // Reading stdout directly would block forever when BSD ping loses
+        // every packet: unlike iputils with `-O`, it prints no loss line.
+        // Give the watcher a short clock tick as well as each output line so
+        // total silence can become visible without changing the UI loop.
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut gaps = SequenceGaps::default();
+        let mut silence = SilenceClock::new(tc::now(), interval);
+        let mut losses_since_reply = 0usize;
+        loop {
+            let line = match receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => {
+                    if dialect == PingDialect::SequenceGaps {
+                        let stamp = tc::now();
+                        let due = silence.losses_due(stamp, window.max(1));
+                        if due > 0 {
+                            let mut guard = match shared.lock() {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                            for _ in 0..due {
+                                record_loss(
+                                    &mut guard[index],
+                                    stamp,
+                                    window,
+                                    &events,
+                                    &hue,
+                                    &label,
+                                );
+                            }
+                            losses_since_reply = losses_since_reply.saturating_add(due);
+                        }
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
             let stamp = tc::now();
             let mut guard = match shared.lock() {
                 Ok(g) => g,
@@ -374,6 +556,20 @@ fn watch(
                 }
             }
             if let Some(rtt) = rtt_of(&line) {
+                if dialect == PingDialect::SequenceGaps {
+                    silence.observed(stamp);
+                    if let Some(sequence) = parse_sequence(&line) {
+                        let missing = gaps.observe(sequence);
+                        // Native timeout lines and the silence clock may have
+                        // represented part of this gap already. Preserve the
+                        // grace-period packets they did not cover without
+                        // counting any packet twice.
+                        let unaccounted =
+                            unaccounted_losses(missing, losses_since_reply).min(window.max(1));
+                        record_closed_gap(target, stamp, interval, unaccounted, window);
+                        losses_since_reply = 0;
+                    }
+                }
                 // A spike is worth a line in the log because the median in
                 // the table will not move for it, and a link that is fine
                 // except once a minute is a different problem from one that
@@ -381,24 +577,40 @@ fn watch(
                 let st = target.stats();
                 if let Some(med) = st.med {
                     if st.n > 10 && rtt > med * spike_factor {
-                        log(&events, &hue, &label, "SPIKE",
-                            format!("{} (median {})", fmt_ms(Some(rtt)).trim(),
-                                    fmt_ms(Some(med)).trim()));
+                        log(
+                            &events,
+                            &hue,
+                            &label,
+                            "SPIKE",
+                            format!(
+                                "{} (median {})",
+                                fmt_ms(Some(rtt)).trim(),
+                                fmt_ms(Some(med)).trim()
+                            ),
+                        );
                     }
                 }
                 if let Some(since) = target.down_since.take() {
-                    log(&events, &hue, &label, "UP",
-                        format!("recovered after {:.0}s", stamp - since));
+                    log(
+                        &events,
+                        &hue,
+                        &label,
+                        "UP",
+                        format!("recovered after {:.0}s", stamp - since),
+                    );
                 }
                 target.alive = true;
                 target.record(stamp, Some(rtt), window);
             } else if is_loss(&line) {
-                if target.down_since.is_none() {
-                    target.down_since = Some(stamp);
-                    log(&events, &hue, &label, "LOSS", "no reply".into());
+                if dialect == PingDialect::SequenceGaps {
+                    // macOS can print `Request timeout` even though BSD ping
+                    // has no iputils `-O`. That is already a measured missing
+                    // reply, so keep the silence fallback behind it rather
+                    // than counting the same interval again.
+                    silence.observed(stamp);
+                    losses_since_reply = losses_since_reply.saturating_add(1);
                 }
-                target.alive = false;
-                target.record(stamp, None, window);
+                record_loss(target, stamp, window, &events, &hue, &label);
             }
         }
         let _ = child.wait();
@@ -421,7 +633,13 @@ fn watch(
             if target.down_since.is_none() {
                 target.down_since = Some(tc::now());
                 drop(guard);
-                log(&events, &hue, &label, "DOWN", "ping exited, retrying".into());
+                log(
+                    &events,
+                    &hue,
+                    &label,
+                    "DOWN",
+                    "ping exited, retrying".into(),
+                );
             } else {
                 drop(guard);
             }
@@ -432,6 +650,22 @@ fn watch(
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+fn record_loss(
+    target: &mut Target,
+    stamp: f64,
+    window: usize,
+    events: &Arc<Mutex<Vec<Event>>>,
+    hue: &str,
+    label: &str,
+) {
+    if target.down_since.is_none() {
+        target.down_since = Some(stamp);
+        log(events, hue, label, "LOSS", "no reply".into());
+    }
+    target.alive = false;
+    target.record(stamp, None, window);
 }
 
 fn log(events: &Arc<Mutex<Vec<Event>>>, hue: &str, host: &str, kind: &'static str, detail: String) {
@@ -594,7 +828,13 @@ fn graph(
             }
             let values = columns
                 .into_iter()
-                .map(|c| if c.is_empty() { None } else { Some(aggregate(&c, how)) })
+                .map(|c| {
+                    if c.is_empty() {
+                        None
+                    } else {
+                        Some(aggregate(&c, how))
+                    }
+                })
                 .collect();
             (i, values)
         })
@@ -704,7 +944,9 @@ fn graph(
                 0 => (p.grid.as_str(), " ".into()),
                 m => (
                     colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string(),
+                    char::from_u32(0x2800 + *m as u32)
+                        .unwrap_or(' ')
+                        .to_string(),
                 ),
             });
         }
@@ -797,6 +1039,7 @@ fn main() {
     }
 
     let p = palette();
+    let dialect = ping_dialect();
     let targets: Vec<Target> = hosts
         .iter()
         .map(|h| Target {
@@ -820,7 +1063,9 @@ fn main() {
         let hue = p.hues[index % p.hues.len()].clone();
         let label = labels[index].clone();
         std::thread::spawn(move || {
-            watch(host, index, window, shared, settings, events, hue, label)
+            watch(
+                host, index, window, dialect, shared, settings, events, hue, label,
+            )
         });
     }
 
@@ -931,7 +1176,11 @@ fn main() {
         };
         // Zero means one bucket per ping, which is the finest motion the
         // grid allows; anything larger trades that for a longer history.
-        let bucket = if per_column > 0.0 { per_column } else { interval };
+        let bucket = if per_column > 0.0 {
+            per_column
+        } else {
+            interval
+        };
 
         let mut rows = vec![tc::title("network latency monitor", w, &p.head)];
         rows.push(tc::seg(
@@ -1002,7 +1251,11 @@ fn main() {
             // The selected row is tinted rather than marked, so the thing
             // that says "this one" in the table is the same thing that says
             // it in the chart: one target at full strength, the rest behind.
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here {
+                tc::bg(28, 44, 62)
+            } else {
+                String::new()
+            };
             let raw_hue = p.hues[i % p.hues.len()].clone();
             let loss_c = if st.loss == 0.0 {
                 &p.ok
@@ -1048,7 +1301,11 @@ fn main() {
                 // the same cell, so no column moves.
                 (
                     tinted(if here { &p.head } else { &p.dim }),
-                    if here { "▸".to_string() } else { " ".to_string() },
+                    if here {
+                        "▸".to_string()
+                    } else {
+                        " ".to_string()
+                    },
                 ),
                 // Grey until this is the row being looked at, then white -
                 // which is how link tells its selected session apart, and
@@ -1061,7 +1318,11 @@ fn main() {
                 // to swing between two colours that are both readable.
                 (
                     tinted(if t.err.is_empty() {
-                        if here { &p.txt } else { &p.dim_lit }
+                        if here {
+                            &p.txt
+                        } else {
+                            &p.dim_lit
+                        }
                     } else {
                         &p.bad
                     }),
@@ -1311,7 +1572,12 @@ mod tests {
         let mut t = Target::default();
         for i in 0..500 {
             t.record(i as f64, None, window);
-            assert!(t.samples.len() <= window, "grew to {} at {}", t.samples.len(), i);
+            assert!(
+                t.samples.len() <= window,
+                "grew to {} at {}",
+                t.samples.len(),
+                i
+            );
         }
         assert_eq!(t.samples.len(), window);
         // What is kept is the newest, not the oldest.
@@ -1336,9 +1602,104 @@ mod tests {
 
     #[test]
     fn losses_are_recognised_but_not_timed() {
-        assert!(is_loss("From 192.0.2.1 icmp_seq=2 Destination Net Unreachable"));
+        assert!(is_loss(
+            "From 192.0.2.1 icmp_seq=2 Destination Net Unreachable"
+        ));
         assert!(is_loss("no answer yet for icmp_seq=3"));
+        assert!(is_loss("Request timeout for icmp_seq 0"));
         assert!(!is_loss("64 bytes from 1.1.1.1: time=1 ms"));
+    }
+
+    #[test]
+    fn bsd_sequence_gaps_expose_packet_loss() {
+        let mut gaps = SequenceGaps::default();
+        assert_eq!(gaps.observe(0), 0);
+        assert_eq!(gaps.observe(2), 1);
+    }
+
+    #[test]
+    fn bsd_sequence_gaps_include_packets_before_the_first_reply() {
+        let mut gaps = SequenceGaps::default();
+        assert_eq!(gaps.observe(1), 1);
+    }
+
+    #[test]
+    fn bsd_sequence_gaps_follow_the_16_bit_counter_across_wrap() {
+        let mut gaps = SequenceGaps { last: Some(65_535) };
+        assert_eq!(gaps.observe(0), 0);
+        assert_eq!(gaps.observe(2), 1);
+        // An old, out-of-order reply does not become a giant forward gap.
+        assert_eq!(gaps.observe(1), 0);
+    }
+
+    #[test]
+    fn captured_iputils_loss_keeps_the_existing_outstanding_path() {
+        let transcript = "no answer yet for icmp_seq=2";
+        assert!(is_loss(transcript));
+        assert_eq!(parse_sequence(transcript), Some(2));
+        assert_eq!(
+            ping_args(PingDialect::Outstanding, 0.5, "127.0.0.1"),
+            ["-n", "-O", "-i", "0.5", "127.0.0.1"]
+        );
+    }
+
+    #[test]
+    fn ping_dialect_is_decided_by_the_installed_binary_not_the_os() {
+        assert_eq!(dialect_from_probe(true), PingDialect::Outstanding);
+        assert_eq!(dialect_from_probe(false), PingDialect::SequenceGaps);
+        assert_eq!(
+            ping_args(PingDialect::SequenceGaps, 0.2, "example.test"),
+            ["-n", "-i", "0.2", "example.test"]
+        );
+    }
+
+    #[test]
+    fn recovery_fills_only_the_part_of_a_gap_silence_did_not_record() {
+        // Seven sequences vanished; the clock accounted for the last five
+        // after its grace period, so recovery must restore the first two.
+        assert_eq!(unaccounted_losses(7, 5), 2);
+        // Native timeout lines may already account for the complete gap.
+        assert_eq!(unaccounted_losses(7, 7), 0);
+        // Defensive saturation avoids inventing loss if outputs arrive in an
+        // unusual order and explicit signals temporarily outnumber the gap.
+        assert_eq!(unaccounted_losses(2, 3), 0);
+    }
+
+    #[test]
+    fn a_recovered_sequence_gap_does_not_open_an_instant_outage() {
+        let mut t = Target::default();
+        record_closed_gap(&mut t, 10.0, 0.5, 2, 600);
+        // The samples exist for the loss percentage. down_since stays clear
+        // so the reply that revealed the gap cannot log UP after 0s.
+        assert!(t.down_since.is_none());
+        assert_eq!(t.samples, [(9.0, None), (9.5, None)]);
+    }
+
+    #[test]
+    fn total_bsd_silence_becomes_loss_after_a_bounded_grace_period() {
+        let mut clock = SilenceClock::new(10.0, 0.5);
+        assert_eq!(clock.losses_due(11.99, 600), 0);
+        assert_eq!(clock.losses_due(12.0, 600), 1);
+        assert_eq!(clock.losses_due(13.1, 600), 2);
+        clock.observed(20.0);
+        assert_eq!(clock.losses_due(21.99, 600), 0);
+        assert_eq!(clock.losses_due(22.0, 600), 1);
+    }
+
+    #[test]
+    fn a_wall_clock_jump_does_not_invent_losses_ping_never_sent() {
+        let mut clock = SilenceClock::new(0.0, 0.2);
+        // A sleeping Mac, or any pause longer than the grace period. Ping
+        // was frozen; those intervals were never on the wire.
+        assert_eq!(clock.losses_due(86_400.0, 600), 0);
+        assert_eq!(clock.losses_due(86_400.0, 600), 0);
+        // After wake the clock is re-armed, so a real outage still records
+        // once grace elapses.
+        assert_eq!(clock.losses_due(86_402.0, 600), 1);
+        // A short lid-close is the same shape, not a special day-long case.
+        let mut nap = SilenceClock::new(0.0, 0.5);
+        assert_eq!(nap.losses_due(60.0, 600), 0);
+        assert_eq!(nap.losses_due(62.0, 600), 1);
     }
 
     #[test]
@@ -1543,7 +1904,11 @@ mod tests {
             let (whose, mask) = &cells[0][x];
             // Never the union: a cell shows one trace's samples, so no dot
             // is ever painted in a colour that is not its own.
-            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
+            let mine = if whose == "first" {
+                top[0][x]
+            } else {
+                bottom[0][x]
+            };
             assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
             assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
         }
@@ -1599,7 +1964,9 @@ mod tests {
         let shown = narrow.join("\n");
         assert!(shown.contains("`,`"), "{shown}");
         assert!(shown.contains("latency.hosts"), "{shown}");
-        assert!(narrow.len() > 1, "one line means it was clipped, not wrapped");
+        assert!(
+            narrow.len() > 1,
+            "one line means it was clipped, not wrapped"
+        );
     }
-
 }

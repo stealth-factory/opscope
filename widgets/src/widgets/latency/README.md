@@ -3,7 +3,8 @@
 [← all widgets](../../../../docs/README.md)
 
 Continuous latency to a list of hosts, with the statistics that actually
-explain a bad connection.
+explain a bad connection. It runs on Linux and macOS using the `ping` already
+provided by the operating system.
 
 ```
 ╺━ NETWORK LATENCY MONITOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -94,6 +95,22 @@ pressing `i` as the network changing.
 Changing the interval kills and relaunches each `ping`, since `-i` is fixed at
 launch. Those relaunches are marked internally so they are not logged as
 outages.
+
+## Linux and macOS
+
+The widget asks the installed `ping` which dialect it speaks when it starts;
+it does not assume a dialect from the operating-system name. iputils accepts
+`-O` and reports an explicit `no answer yet` line for loss. BSD ping, including
+the one supplied by macOS, rejects `-O`; it may report `Request timeout`, or
+reveal a lost packet only through a gap or total silence. The widget turns all
+three forms into the same empty samples. Replies, statistics, events and every
+part of the screen then use the same code on both systems.
+
+The 0.2-second minimum is accepted by the stock macOS ping without elevated
+permissions as well as by iputils. There is no hidden ten-second macOS refresh
+or platform-specific interval override.
+
+[Acquisition details and loss semantics →](../../../../docs/latency.md)
 
 ## The event log
 
