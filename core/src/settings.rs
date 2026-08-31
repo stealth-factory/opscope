@@ -1238,15 +1238,23 @@ fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut rest: Vec<char> = text.trim().chars().collect();
     while !rest.is_empty() && lines.len() < limit {
-        if rest.len() <= width {
-            lines.push(rest.iter().collect());
+        let remaining: String = rest.iter().collect();
+        let (fitted, _, clipped) = crate::clip_width(&remaining, width);
+        if !clipped {
+            lines.push(remaining);
             break;
         }
-        let cut = rest[..width.min(rest.len())]
-            .iter()
-            .rposition(|c| *c == ' ')
-            .filter(|c| *c > width / 3)
-            .unwrap_or(width);
+        let fit = fitted.chars().count();
+        let cut = (0..fit)
+            .rev()
+            .find(|at| {
+                rest[*at] == ' '
+                    && crate::display_width(&rest[..*at].iter().collect::<String>()) > width / 3
+            })
+            // `say` gives this at least eight columns, so one printable
+            // character always fits. Keep the fallback defensive for direct
+            // callers with a smaller width.
+            .unwrap_or(fit.max(1).min(rest.len()));
         lines.push(rest[..cut].iter().collect());
         rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
     }
@@ -4514,6 +4522,17 @@ mod tests {
             .find(|f| f.section == "tailnet" && f.key == "history")
             .unwrap();
         assert!(history.help.contains("rate samples"));
+    }
+
+    #[test]
+    fn wide_help_wraps_without_losing_its_suffix() {
+        let text = "prefix 界界 suffix";
+        let lines = wrap_help(text, 8, usize::MAX);
+        assert!(
+            lines.iter().all(|line| crate::display_width(line) <= 8),
+            "{lines:?}"
+        );
+        assert_eq!(lines.join(" "), text);
     }
 
     #[test]

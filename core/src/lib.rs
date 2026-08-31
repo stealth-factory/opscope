@@ -29,7 +29,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub const HIDE: &str = "\x1b[?25l";
 pub const SHOW: &str = "\x1b[?25h";
@@ -123,21 +123,21 @@ pub fn display_width(s: &str) -> usize {
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
 ///
-/// The boolean says that the next character did not fit. A caller must not
-/// continue with later text in that case: doing so would draw around a
-/// clipped character instead of clipping a prefix.
+/// Width is measured on each whole prefix because emoji and script ligatures
+/// can occupy fewer columns than the sum of their individual characters.
+/// The boolean says that some suffix did not fit.
 fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
-    let mut out = String::new();
+    let mut end = 0usize;
     let mut used = 0usize;
-    for ch in s.chars() {
-        let columns = ch.width().unwrap_or(0);
-        if used + columns > width {
-            return (out, used, true);
+    for (at, ch) in s.char_indices() {
+        let candidate_end = at + ch.len_utf8();
+        let columns = display_width(&s[..candidate_end]);
+        if columns <= width {
+            end = candidate_end;
+            used = columns;
         }
-        out.push(ch);
-        used += columns;
     }
-    (out, used, false)
+    (s[..end].to_string(), used, end < s.len())
 }
 
 /// Truncate or pad a plain string to exactly `n` cells.
@@ -2590,6 +2590,12 @@ mod tests {
         let emoji = seg(&[("", "x🙂after".into())], 2);
         assert_eq!(emoji, "x ");
         assert_eq!(display_width(&emoji), 2);
+
+        // String width is sequence-aware: this joined emoji is two columns,
+        // not the four its two visible scalar characters occupy separately.
+        let joined = seg(&[("", "x👩‍💻".into())], 3);
+        assert_eq!(joined, "x👩‍💻");
+        assert_eq!(display_width(&joined), 3);
     }
 
     #[test]
@@ -2599,6 +2605,8 @@ mod tests {
         assert_eq!(pad("界", 1), " ");
         assert_eq!(pad("界", 3), "界 ");
         assert_eq!(display_width(&pad("🙂", 3)), 3);
+        assert_eq!(pad("👩‍💻", 4), "👩‍💻  ");
+        assert_eq!(pad("لا", 2), "لا ");
     }
 
     #[test]
