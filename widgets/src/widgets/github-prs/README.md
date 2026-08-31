@@ -333,6 +333,19 @@ Add, remove or rename sources freely — `review-requested:@me` and
 `f` cycles through. Anything on the command line is appended to *every* source,
 so `./target/release/github-prs org:acme` narrows the lot without editing config.
 
+**`sources` replaces the shipped three wholesale — it is not merged with
+them.** Naming one search gives you one search. Leaving the key out
+altogether is what gives you the defaults, so deleting your `sources` block
+is how you get them back.
+
+Which makes an **empty** `"sources": {}` a different thing again: it is a
+choice to search for nothing, and it is honoured rather than quietly
+overruled. No request is sent at all — the pane says *No searches
+configured* and tells you how to undo it, because a board that never asked a
+question must not answer with a count. It used to print "no open PRs" and
+`0 of 0 open`, which are totals, and both were about a search that never
+ran.
+
 ```sh
 ./target/release/github-prs                          # everything you are involved in
 ./target/release/github-prs -n 120 review-requested:@me   # only what is waiting on your review

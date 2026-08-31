@@ -48,6 +48,53 @@ const SORTS: &[&str] = &["updated", "created"];
 /// Width of the opened-per-day chart.
 const OPENED_DAYS: i64 = 30;
 
+/// Whether config named `sources` and left it empty, which is not the same
+/// as leaving it out.
+///
+/// Absent means the three searches this widget ships with. An empty object
+/// means none, and none is a state the board could not describe: paging is
+/// `while !live.is_empty()` over a list built from the sources, so zero
+/// sources is zero rounds and **no request is ever sent**. Every count
+/// downstream then counts a search that did not happen, and the pane said
+/// "no open PRs" - a total, stated as fact, for a board nobody looked at.
+///
+/// A static rather than another parameter through `list_view`, which already
+/// takes thirteen: it is decided at startup, it never changes, and the two
+/// places that need it are a poll thread and a draw function with no path
+/// between them.
+static NO_SOURCES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn no_sources() -> bool {
+    NO_SOURCES.get().copied().unwrap_or(false)
+}
+
+/// The searches to run: the ones config named, or the three shipped here
+/// when it named none.
+///
+/// GitHub search has no OR, so anything that is a union of conditions has to
+/// be several searches merged - which is why this is a map rather than one
+/// query string.
+///
+/// Absent and empty are different answers and both are honoured. Absent is
+/// "you have not chosen", so the defaults stand. Empty is a choice, to look
+/// for nothing, and reinstating the defaults over it would be a widget
+/// quietly undoing a deletion. What was wrong was never that empty is
+/// allowed - it is that the board then drew an empty list as though it had
+/// searched and found nothing.
+fn sources_from(cfg: &serde_json::Value) -> Vec<(String, String)> {
+    match cfg.get("sources").and_then(|v| v.as_object()) {
+        Some(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect(),
+        None => vec![
+            ("orgs".into(), "is:open is:pr @mine".into()),
+            ("authored".into(), "is:open is:pr author:@me".into()),
+            ("assigned".into(), "is:open is:pr assignee:@me".into()),
+        ],
+    }
+}
+
 /// The GitHub token from this widget's own section, and nowhere else.
 ///
 /// It used to fall back to `github.token` - convenient while the two hold
@@ -926,19 +973,10 @@ fn main() {
     };
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
     let limit = tc::cfg_usize(&cfg, "limit", 50);
-    // GitHub search has no OR, so anything that is a union of conditions has
-    // to be several searches merged.
-    let sources: Vec<(String, String)> = match cfg.get("sources").and_then(|v| v.as_object()) {
-        Some(map) => map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-            .collect(),
-        None => vec![
-            ("orgs".into(), "is:open is:pr @mine".into()),
-            ("authored".into(), "is:open is:pr author:@me".into()),
-            ("assigned".into(), "is:open is:pr assignee:@me".into()),
-        ],
-    };
+    let sources = sources_from(&cfg);
+    // Recorded before anything reads it, because an empty map and an absent
+    // key arrive here as the same empty-looking thing everywhere further on.
+    let _ = NO_SOURCES.set(sources.is_empty());
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut extra: Vec<String> = Vec::new();
@@ -993,6 +1031,17 @@ fn main() {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
                 g.err = format!("no token: set github_prs.token in config.json, or ${TOKEN_ENV}");
+            }
+        } else if no_sources() {
+            // Said here as well as on the board, and said rather than
+            // discovered: with no sources `fetch_list` sends nothing and
+            // returns Ok, so without this the pane would sit at "loading"
+            // and then report an empty board it never went looking at.
+            if let Ok(mut g) = poller.lock() {
+                g.err = "no searches: github_prs.sources is empty, so nothing is being \
+                         looked for"
+                    .to_string();
+                g.loading = false;
             }
         } else {
             let want = poller.lock().ok().and_then(|g| {
@@ -1314,25 +1363,33 @@ fn main() {
         // "at least", because a source that filled its page has more behind
         // it and the sources overlap, so the union cannot be added up - only
         // bounded from below.
-        let mut count = vec![
-            (
-                p.dim.as_str(),
-                format!(
-                    " {} of {}{}",
-                    shown.len(),
-                    if capped { "at least " } else { "" },
-                    total
+        // "0 of 0 open" is the same false total the board itself used to
+        // print, and it survived the first pass at this because it is built
+        // somewhere else entirely. With nothing searched there is no
+        // numerator and no denominator to report.
+        let mut count = if no_sources() {
+            vec![(p.bad.as_str(), " nothing searched".to_string())]
+        } else {
+            vec![
+                (
+                    p.dim.as_str(),
+                    format!(
+                        " {} of {}{}",
+                        shown.len(),
+                        if capped { "at least " } else { "" },
+                        total
+                    ),
                 ),
-            ),
-            (
-                p.dim.as_str(),
-                if !needle.is_empty() || source_filter != "all" {
-                    " shown".to_string()
-                } else {
-                    " open".to_string()
-                },
-            ),
-        ];
+                (
+                    p.dim.as_str(),
+                    if !needle.is_empty() || source_filter != "all" {
+                        " shown".to_string()
+                    } else {
+                        " open".to_string()
+                    },
+                ),
+            ]
+        };
         if !copied.0.is_empty() && tc::now() - copied.1 < 4.0 {
             count.push((p.ok.as_str(), "   copied ".into()));
             count.push((
@@ -1860,6 +1917,27 @@ fn list_view(
     if prs.is_empty() {
         // "collecting" is only true before the first fetch: an empty filter
         // or an empty source is a result, not a wait.
+        // Nothing searched comes first, and outranks every other reading of
+        // an empty list. "no open PRs" is a total; so is "nothing matches",
+        // and neither is true of a board that was never asked a question.
+        if no_sources() {
+            rows.push(tc::seg(
+                &[(p.bad.as_str(), "  No searches configured.".to_string())],
+                w - 1,
+            ));
+            rows.push(String::new());
+            for line in [
+                "This is not an empty board. `github_prs.sources` is an empty object,",
+                "so no search ran and nothing was counted.",
+                "",
+                "Press , to add a search, or remove the sources key entirely to get",
+                "back the three this widget ships with: your orgs, what you authored,",
+                "and what is assigned to you.",
+            ] {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1));
+            }
+            return (rows, 0);
+        }
         let why = if !needle.is_empty() {
             format!("  nothing matches /{}", needle)
         } else if source_filter != "all" {
@@ -2577,6 +2655,45 @@ mod tests {
         // No sources is no floor, and above all not a claim of zero open
         // PRs dressed up as one.
         assert_eq!(union_total(&[], 0), (0, false));
+    }
+
+    #[test]
+    fn an_absent_sources_key_is_not_an_empty_one() {
+        // The distinction the board got wrong. Absent is "you have not
+        // chosen" and the shipped three stand; empty is a choice to search
+        // nothing, and it is honoured rather than quietly overruled.
+        let absent = sources_from(&serde_json::json!({}));
+        assert_eq!(absent.len(), 3, "an absent key keeps the shipped searches");
+
+        let empty = sources_from(&serde_json::json!({"sources": {}}));
+        assert!(empty.is_empty(), "an empty object is not silently refilled");
+
+        let named = sources_from(&serde_json::json!({"sources": {"mine": "is:open is:pr"}}));
+        assert_eq!(named.len(), 1, "a named map replaces the three wholesale");
+    }
+
+    #[test]
+    fn no_sources_means_no_request_was_ever_sent() {
+        // Why the empty board was a lie rather than a result. Paging is
+        // `while !live.is_empty()` over one entry per search, so zero
+        // searches is zero rounds and GitHub is never called - there is no
+        // answer of "none", only an absence of a question.
+        let none = searches(&[], "someone", &["an-org".to_string()], &[]);
+        assert!(
+            none.is_empty(),
+            "no sources has to yield no queries, or the loop would run one"
+        );
+
+        // And with a source, it does ask - so the emptiness above is the
+        // sources' doing and not this function refusing to build anything.
+        let one = searches(
+            &[("mine".to_string(), "is:open is:pr @mine".to_string())],
+            "someone",
+            &["an-org".to_string()],
+            &[],
+        );
+        assert_eq!(one.len(), 1);
+        assert!(one[0].1.contains("org:an-org"), "got {:?}", one[0].1);
     }
 
     #[test]
