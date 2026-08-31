@@ -338,13 +338,20 @@ them.** Naming one search gives you one search. Leaving the key out
 altogether is what gives you the defaults, so deleting your `sources` block
 is how you get them back.
 
-Which makes an **empty** `"sources": {}` a different thing again: it is a
-choice to search for nothing, and it is honoured rather than quietly
-overruled. No request is sent at all — the pane says *No searches
-configured* and tells you how to undo it, because a board that never asked a
-question must not answer with a count. It used to print "no open PRs" and
-`0 of 0 open`, which are totals, and both were about a search that never
-ran.
+An **empty** `"sources": {}` therefore lands on those same three, exactly as
+leaving the key out does. The two are deliberately not told apart: with no
+sources no request is sent at all, so an empty map bought a board that could
+not say anything about anything — and it used to print "no open PRs" and
+`0 of 0 open` from it, which are totals about a search that never ran.
+
+That state is one keypress away, because the settings screen will delete the
+last entry, so the defaults stand in rather than leaving you with a board
+that cannot work. The pane says when that happens — *`sources` is empty —
+using the three shipped searches* — because a config file reading `{}` beside
+a board searching three things is a disagreement worth hearing about.
+
+The cost, stated plainly: **emptying the map is not a way to search
+nothing.** There is no use for that state, so nothing offers it.
 
 ```sh
 ./target/release/github-prs                          # everything you are involved in

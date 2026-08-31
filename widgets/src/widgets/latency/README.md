@@ -70,9 +70,11 @@ to a fixed time grid, so a sample never migrates between columns as time slides.
 ## What the numbers tell you
 
 Low latency with high jitter is usually worse to work over than high latency
-that is steady. Two of the hosts above make the point: `studio` is five times
-closer than `build-mac` yet carries 21ms of jitter against 0µs — it will feel worse
-in an interactive session despite the better average.
+that is steady, and the two move independently. The capture above shows it:
+`9.9.9.9` sits eleven times further out than `1.1.1.1` — 44.70ms against
+3.95ms — and yet wanders less between one sample and the next, 65µs of
+jitter against 164µs. Distance and steadiness are different questions, and
+it is the second one an interactive session actually feels.
 
 Jitter here is the mean gap between consecutive samples, so **it is not
 comparable across different intervals**. Do not read a jitter change right after
@@ -138,7 +140,17 @@ baseline, not a path measurement.
 ```
 
 `strip_suffixes` shortens long FQDNs for display, so a narrow pane shows
-`studio` rather than clipping the interesting half.
+`db1` rather than clipping the interesting half of
+`db1.eu-west-1.compute.internal`. The target is still pinged by its full
+name; only the label changes.
+
+The **HOST column takes whatever the numbers leave**, up to the longest name
+actually on screen, and never drops below 22 characters. So on a wide pane a
+long name is shown whole and `strip_suffixes` is a preference rather than a
+necessity; on a narrow one it still earns its keep. It used to be a flat 22
+whatever the pane, which silently cut the tail off anything longer while
+columns went unused to the right of it — the names it cut being exactly the
+ones that key exists for.
 
 ```sh
 ./target/release/latency                              # config targets, 0.5s

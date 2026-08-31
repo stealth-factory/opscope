@@ -698,6 +698,30 @@ fn graph(
     (out, span)
 }
 
+/// How much of the row the host column may have.
+///
+/// It was a flat 22 whatever the pane, and `tc::pad` truncates past its
+/// width - it is `take(n)` - so a longer name quietly lost its tail with
+/// columns going begging to the right of it. In an 86-column pane the table
+/// stopped at 79 while the chart under it ran to 85. The names it cut are
+/// exactly the ones `strip_suffixes` exists for, and that key cannot always
+/// shorten them enough.
+///
+/// Three bounds, in order of who wins:
+///
+/// - never past what the numbers leave, since half a reading is worse than
+///   a shortened name;
+/// - never past the longest name on screen, because beyond that it is
+///   padding rather than content;
+/// - never below 22, so a pane that was already tight draws as it always did.
+fn host_column_width(longest: usize, w: usize, show_med: bool) -> usize {
+    // "  " plus seven number columns and their separators, and MEDIAN only
+    // when it is drawn at all.
+    let fixed = 2 + 47 + if show_med { 8 } else { 0 };
+    let room = w.saturating_sub(1).saturating_sub(fixed).max(22);
+    longest.clamp(22, room)
+}
+
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     let cfg = tc::load_config("latency");
@@ -919,7 +943,23 @@ fn main() {
         // than clipped, because half a number is worse than none.
         let wide = w >= 72;
         let show_med = w >= 80;
-        let name_w = 22usize;
+        // The host column takes what the numbers leave, rather than a fixed
+        // 22 that a wider pane never spent. `tc::pad` truncates past its
+        // width - it is `take(n)` - so a name longer than 22 quietly lost
+        // its tail while there were columns going begging to the right of
+        // it. That is the one thing this repo says never to do, and it hit
+        // exactly the names `strip_suffixes` exists for: the cloud
+        // hostnames too long to read whole.
+        //
+        // Never wider than the longest name actually on screen, because
+        // past that it stops being content and becomes padding. Never
+        // narrower than 22, so a pane that was already tight is unchanged.
+        let longest = snapshot
+            .iter()
+            .map(|t| t.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let name_w = host_column_width(longest, w, show_med);
         rows.push(tc::seg(
             &[(
                 p.lbl.as_str(),
@@ -1341,6 +1381,36 @@ mod tests {
         silent.samples.push((0.0, None));
         assert_eq!(silent.stats().loss, 100.0);
         assert_eq!(silent.stats().med, None);
+    }
+
+    #[test]
+    fn a_long_hostname_is_not_cut_while_the_pane_has_room() {
+        // The bug: 22 was fixed, and `pad` truncates past its width, so a
+        // 40-character cloud name was drawn as 22 of itself with columns
+        // unused to the right of it.
+        let long = "this-is-a-very-long-hostname.example.com".chars().count();
+        assert_eq!(long, 40);
+        assert!(
+            host_column_width(long, 110, true) >= long,
+            "a wide pane has the room and must spend it on the name"
+        );
+
+        // But never past what the numbers need, because half a reading is
+        // worse than a shortened name.
+        let tight = host_column_width(long, 86, true);
+        assert!(tight < long, "an 86-column pane cannot fit all 40");
+        assert!(tight > 22, "it should still beat the old fixed 22: {tight}");
+
+        // And never wider than the longest name present - past that the
+        // column is padding, and the width belongs to the numbers.
+        assert_eq!(
+            host_column_width(9, 200, true),
+            22,
+            "short names keep the floor rather than sprawling"
+        );
+
+        // A pane too narrow to give anything still draws as it always did.
+        assert_eq!(host_column_width(long, 40, false), 22);
     }
 
     #[test]

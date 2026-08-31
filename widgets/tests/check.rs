@@ -1003,7 +1003,11 @@ fn every_config_read_falls_back_to_a_code_default() {
         let mut from = 0;
         while let Some(at) = src[from..].find(".get(\"") {
             let start = from + at;
-            from = start + 5;
+            // Past the opening quote, not onto it. `.get("` is six
+            // characters; at five the key read back empty every time, so
+            // this check has only ever been able to say *that* something
+            // was unguarded and never *what* - which is most of the work.
+            from = start + 6;
             // Only reads of the config value itself; every other .get() in
             // these files is a JSON lookup on something else.
             let before = &src[start.saturating_sub(40)..start];
