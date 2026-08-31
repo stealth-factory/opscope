@@ -1982,8 +1982,6 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
     );
 }
 
-#[test]
-
 fn opens_proc(src: &str) -> bool {
     src.lines().any(|line| {
         let t = line.trim_start();
