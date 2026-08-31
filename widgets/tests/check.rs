@@ -414,16 +414,217 @@ fn only_core_draws_the_settings_screen() {
     );
 }
 
+/// The header the generated file carries, naming what regenerates it.
+const CONFIG_EXAMPLE_COMMENT: &str = "Generated from each widget's \
+settings.json by widgets/tests/check.rs - rewrite it with \
+`UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. \
+Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every \
+key is optional; anything omitted keeps the widget's default.";
+
+/// A JSON value that remembers the order its keys were written in.
+///
+/// `serde_json::Value` does not: its map is a `BTreeMap` unless the
+/// `preserve_order` feature is on, and that feature is not a local decision.
+/// Cargo unifies features across the graph, so switching it on for this test
+/// would switch it on for every widget - and under `cargo test` the widgets
+/// would iterate their config in file order while the release build kept
+/// sorting it. A divergence between what is tested and what ships is worse
+/// than either ordering.
+///
+/// Order is load-bearing in the generated file. Each `_<key>_comment` sits
+/// directly above the key it describes, and sorting scatters them: `ports`
+/// would read `_comment`, `_refresh_comment`, `_system_ports_comment`,
+/// `refresh`, `system_ports`, with every explanation two rows from its key.
+enum Ordered {
+    Object(Vec<(String, Ordered)>),
+    Array(Vec<Ordered>),
+    /// Anything with no order to lose - `serde_json` renders these, so the
+    /// escaping and the number formatting are its and not this file's.
+    Leaf(serde_json::Value),
+}
+
+impl<'de> serde::Deserialize<'de> for Ordered {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Any;
+        impl<'de> serde::de::Visitor<'de> for Any {
+            type Value = Ordered;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some(pair) = map.next_entry::<String, Ordered>()? {
+                    pairs.push(pair);
+                }
+                Ok(Ordered::Object(pairs))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<Ordered>()? {
+                    items.push(item);
+                }
+                Ok(Ordered::Array(items))
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(serde_json::Value::Null))
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(serde_json::Value::Null))
+            }
+        }
+        d.deserialize_any(Any)
+    }
+}
+
+impl serde::Serialize for Ordered {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self {
+            Ordered::Object(pairs) => {
+                let mut map = s.serialize_map(Some(pairs.len()))?;
+                for (key, value) in pairs {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+            Ordered::Array(items) => {
+                let mut seq = s.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Ordered::Leaf(value) => value.serialize(s),
+        }
+    }
+}
+
+fn read_ordered(path: &std::path::Path) -> Ordered {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// A section as the public example carries it: everything but the rules.
+///
+/// `_schema` is the widget telling the settings screen what a value may be -
+/// a minimum, what an array holds, which choices a field offers. None of it
+/// is a setting, so none of it belongs in a file people copy to
+/// `config.json`. Dropped at the top of a section only, which is where it
+/// lives; a `_schema` nested inside a value would be somebody's own key.
+fn without_schema(value: Ordered) -> Ordered {
+    match value {
+        Ordered::Object(pairs) => {
+            Ordered::Object(pairs.into_iter().filter(|(k, _)| k != "_schema").collect())
+        }
+        other => other,
+    }
+}
+
+/// `config.example.json`, built from the settings each widget owns.
+///
+/// This was `tools/config-example.py` until the port, and the check that
+/// read it ran
+/// `python3` as a subprocess - so `cargo test` failed on a machine without
+/// python3, for a reason it was not testing. A test that can fail for a
+/// reason it does not test teaches people to press the button again until it
+/// goes green, which is how a real failure gets waved past.
+fn render_config_example() -> String {
+    let root = root();
+    let mut top = vec![(
+        "_comment".to_string(),
+        Ordered::Leaf(serde_json::Value::String(CONFIG_EXAMPLE_COMMENT.to_string())),
+    )];
+    // Shared terminal settings first, out of alphabetical position on
+    // purpose: they are not a widget's and they belong at the top.
+    top.push((
+        "terminal".to_string(),
+        without_schema(read_ordered(
+            &root.join("widgets/src/launcher/settings.json"),
+        )),
+    ));
+    // Sorted by folder, which is the order the file has always been in:
+    // `github`, `github-actions`, `github-prs` sort by the hyphenated name
+    // rather than by the underscored section it becomes.
+    let dir = root.join("widgets/src/widgets");
+    let mut folders: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the widget directory")
+        .flatten()
+        .filter(|entry| entry.path().join("settings.json").exists())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    folders.sort();
+    assert!(!folders.is_empty(), "no widget declares any settings");
+    for folder in folders {
+        top.push((
+            folder.replace('-', "_"),
+            without_schema(read_ordered(&dir.join(&folder).join("settings.json"))),
+        ));
+    }
+    let mut out = serde_json::to_string_pretty(&Ordered::Object(top))
+        .expect("the config example serialises");
+    out.push('\n');
+    out
+}
+
 #[test]
 fn generated_config_example_matches_widget_settings() {
-    let status = std::process::Command::new("python3")
-        .args(["tools/config-example.py", "--check"])
-        .current_dir(root())
-        .status()
-        .expect("python3 runs the config example generator");
-    assert!(
-        status.success(),
-        "config.example.json is not generated from widget settings"
+    let path = root().join("config.example.json");
+    let generated = render_config_example();
+    // Writing first and comparing after means a regenerating run still
+    // proves the result, rather than rewriting the file and reporting
+    // nothing about it.
+    if std::env::var_os("UPDATE_CONFIG_EXAMPLE").is_some() {
+        std::fs::write(&path, &generated).expect("rewriting config.example.json");
+    }
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current == generated {
+        return;
+    }
+    // The whole file is 250 lines; printing both is not a diff anybody
+    // reads. Say which line parted company.
+    let parted = current
+        .lines()
+        .zip(generated.lines())
+        .position(|(a, b)| a != b);
+    let detail = match parted {
+        Some(n) => format!(
+            "line {} differs:\n     on disk: {}\n   generated: {}",
+            n + 1,
+            current.lines().nth(n).unwrap_or(""),
+            generated.lines().nth(n).unwrap_or("")
+        ),
+        None => format!(
+            "the shorter file is a prefix of the other: {} lines on disk, {} generated",
+            current.lines().count(),
+            generated.lines().count()
+        ),
+    };
+    panic!(
+        "config.example.json is not what the widget settings generate.\n  {detail}\n\n\
+         Rewrite it with:\n  UPDATE_CONFIG_EXAMPLE=1 cargo test --test check \
+         generated_config_example_matches_widget_settings -- --exact"
     );
 }
 

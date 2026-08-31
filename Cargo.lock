@@ -248,6 +248,7 @@ dependencies = [
  "libc",
  "opscope-core",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

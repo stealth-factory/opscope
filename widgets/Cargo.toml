@@ -23,6 +23,12 @@ chrono-tz = "0.10"
 # single executable being the point of the port.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+[dev-dependencies]
+# check.rs generates config.example.json and needs a JSON value that
+# keeps its key order, which means writing a Deserialize by hand -
+# serde_json alone exposes no way to ask for one.
+serde = "1"
+
 [[bin]]
 name = "ports"
 path = "src/widgets/ports/main.rs"

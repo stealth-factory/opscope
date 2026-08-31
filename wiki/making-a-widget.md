@@ -62,7 +62,7 @@ only shared terminal behaviour such as mouse reporting.
 4. Add its row to the root `README.md` and to `docs/README.md`.
 5. If configurable, declare `SETTINGS`, open it on `,`, and add
    `settings.json`.
-6. Regenerate `config.example.json` with `tools/config-example.py`.
+6. Regenerate `config.example.json` with `UPDATE_CONFIG_EXAMPLE=1 cargo test`.
 7. Run `cargo test`.
 
 ### What catches a missed step, and what does not
@@ -219,9 +219,16 @@ it. Unrelated concurrent edits survive.
 `config.example.json` is **generated** from every `settings.json`:
 
 ```sh
-tools/config-example.py            # write it
-tools/config-example.py --check    # part of cargo test
+cargo test                       # checks it, and fails saying how to fix it
+UPDATE_CONFIG_EXAMPLE=1 \
+  cargo test --test check \
+  generated_config_example_matches_widget_settings   # writes it
 ```
+
+The generator lives in `widgets/tests/check.rs` rather than in a script of
+its own. It used to be `tools/config-example.py`, run as a subprocess, which
+made `cargo test` need `python3` on the PATH and able to fail for a reason it
+was not testing.
 
 An optional `_schema` object beside the defaults carries UI-only constraints —
 choices, element types, numeric bounds, nesting, units. The generator omits it

@@ -36,7 +36,8 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
 - **Config, never hardcoded.** Hostnames, cities, tokens and account lists go
   in `config.json` (git-ignored) via `load_config()`. A widget owns its
   defaults and field help in `settings.json`; regenerate
-  `config.example.json` with `tools/config-example.py` in the same commit.
+  `config.example.json` with `UPDATE_CONFIG_EXAMPLE=1 cargo test` in the
+  same commit.
   **Use the section name the widget actually reads**; a mismatch is silently
   ignored.
 - **Secrets never enter the tree.** This repo is public. No tokens, no
