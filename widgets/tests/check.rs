@@ -23,8 +23,8 @@
 //!
 //! These are tests rather than a fifteenth binary for two reasons: they
 //! then run on every `cargo test` instead of waiting to be remembered, and
-//! `opscope`'s menu asserts that every `[[bin]]` in the manifest is on it, so
-//! a checker binary would have to be listed as a widget it is not.
+//! every widget folder has to be on `opscope`'s menu, so a checker binary
+//! would have to be listed as a widget it is not.
 //!
 //! One of check.py's five does not need porting and is recorded here rather
 //! than silently dropped:
@@ -37,8 +37,12 @@
 //! with the Python, and a rename is exactly when the gap bites: the help
 //! text and the doc page move with the source stem, but the README tables,
 //! the docs index, and a name in the launcher's sample listing do not.
-//! Those are checked here now. The launcher's own `WIDGETS` list is
-//! asserted from `opscope.rs` against every `[[bin]]` in the manifest.
+//! Those are checked here now, the launcher's own `WIDGETS` list among
+//! them: `every_widget_is_on_the_launcher_menu` reads
+//! `widgets/src/launcher/main.rs` and holds it to the widget folders both
+//! ways. Two sentences here used to describe that assertion while no such
+//! assertion existed - one of them the reason given above - and they named
+//! an `opscope.rs` that the port had already replaced.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -916,6 +920,61 @@ fn widget_names_in_the_launcher_sample_are_current() {
                 stem
             ));
         }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+/// Every widget is on the launcher's menu, and every name on it is a widget.
+///
+/// `WIDGETS` in the launcher is the keystone of a new widget and was enforced
+/// by nothing. Half of it looks enforced: the `widget!` macro `include_str!`s
+/// the named folder's `help.txt` and `README.md`, so a *wrong* name there is
+/// a compile error, and that is the half people notice.
+///
+/// Omission is the half the compiler cannot see. Add a widget folder, forget
+/// the line, and the workspace builds, every other check passes, and the
+/// widget simply never appears in `opscope` - which looks from the menu
+/// exactly like a widget nobody wrote.
+#[test]
+fn every_widget_is_on_the_launcher_menu() {
+    let source = std::fs::read_to_string(root().join("widgets/src/launcher/main.rs"))
+        .expect("the launcher's main.rs");
+    // Only the list. The `widget!` macro is defined in the same file, just
+    // above it, and its definition names no widget.
+    let list = source
+        .split("const WIDGETS: &[Widget] = &[")
+        .nth(1)
+        .expect("the WIDGETS list")
+        .split("];")
+        .next()
+        .expect("the end of the WIDGETS list");
+    let listed: BTreeSet<String> = list
+        .match_indices("widget!(\"")
+        .filter_map(|(at, _)| {
+            let after = &list[at + "widget!(\"".len()..];
+            after.find('"').map(|end| after[..end].to_string())
+        })
+        .collect();
+    // A pattern that matches nothing reads exactly like a menu with nothing
+    // on it, and this file has been fooled that way before.
+    assert!(
+        !listed.is_empty(),
+        "no widget!(\"...\") entries came out of the launcher - that is this \
+         pattern being wrong, not the menu being empty"
+    );
+
+    let built: BTreeSet<String> = widgets().into_keys().collect();
+    let mut wrong = Vec::new();
+    for name in built.difference(&listed) {
+        wrong.push(format!(
+            "{name}: is a widget and is not in the launcher's WIDGETS, so it \
+             never appears in the opscope menu"
+        ));
+    }
+    for name in listed.difference(&built) {
+        wrong.push(format!(
+            "{name}: is in the launcher's WIDGETS and is not a widget"
+        ));
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
