@@ -29,6 +29,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const HIDE: &str = "\x1b[?25l";
 pub const SHOW: &str = "\x1b[?25h";
@@ -115,16 +116,35 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[48;2;{};{};{}m", r, g, b)
 }
 
+/// The terminal columns occupied by printable text.
+pub fn display_width(s: &str) -> usize {
+    s.width()
+}
+
+/// Keep the longest character prefix that fits in `width` terminal columns.
+///
+/// The boolean says that the next character did not fit. A caller must not
+/// continue with later text in that case: doing so would draw around a
+/// clipped character instead of clipping a prefix.
+fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let columns = ch.width().unwrap_or(0);
+        if used + columns > width {
+            return (out, used, true);
+        }
+        out.push(ch);
+        used += columns;
+    }
+    (out, used, false)
+}
+
 /// Truncate or pad a plain string to exactly `n` cells.
 pub fn pad(s: &str, n: usize) -> String {
-    let count = s.chars().count();
-    if count > n {
-        s.chars().take(n).collect()
-    } else {
-        let mut out = String::from(s);
-        out.extend(std::iter::repeat(' ').take(n - count));
-        out
-    }
+    let (mut out, used, _) = clip_width(s, n);
+    out.extend(std::iter::repeat(' ').take(n - used));
+    out
 }
 
 /// Join coloured segments, hard-clipped to `width` printable cells.
@@ -141,15 +161,17 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
             break;
         }
         let room = width - n;
-        let count = text.chars().count();
-        let cut: String = if count > room {
-            text.chars().take(room).collect()
-        } else {
-            text.clone()
-        };
+        let (cut, used, clipped) = clip_width(text, room);
         out.push_str(colour);
         out.push_str(&cut);
-        n += cut.chars().count();
+        n += used;
+        if clipped {
+            // A double-width glyph cannot be drawn in one remaining column.
+            // Fill that column instead, and do not expose text after the
+            // clipped prefix from this segment or a later one.
+            out.extend(std::iter::repeat(' ').take(width - n));
+            break;
+        }
     }
     out
 }
@@ -158,7 +180,7 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 pub fn title(text: &str, w: usize, colour: &str) -> String {
     let t = format!(" {} ", text.to_uppercase());
     let left = "╺━";
-    let used = t.chars().count() + left.chars().count() + 1;
+    let used = display_width(&t) + display_width(left) + 1;
     let fill = "━".repeat(w.saturating_sub(used));
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
@@ -336,11 +358,11 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
     let mut current: Vec<String> = Vec::new();
     let mut used = 0usize;
     for hint in hints {
-        let plain: usize = hint.iter().map(|(_, t)| t.chars().count()).sum();
+        let plain: usize = hint.iter().map(|(_, t)| display_width(t)).sum();
         let extra = if current.is_empty() {
             plain
         } else {
-            plain + sep.chars().count()
+            plain + display_width(sep)
         };
         if !current.is_empty() && used + extra > width {
             lines.push(current.join(sep));
@@ -355,7 +377,7 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
         if current.is_empty() {
             used = plain;
         } else {
-            used += plain + sep.chars().count();
+            used += plain + display_width(sep);
         }
         current.push(piece);
     }
@@ -2344,7 +2366,7 @@ mod tests {
         ];
         let drawn: usize = stacked_bar(&parts, 10)
             .iter()
-            .map(|(_, t)| t.chars().count())
+            .map(|(_, t)| display_width(t))
             .sum();
         assert_eq!(drawn, 10);
         // A part that rounds to nothing takes no segment at all, rather
@@ -2403,7 +2425,7 @@ mod tests {
         // Always exactly its width, whatever the phase: the row it stands
         // in for has a fixed size.
         for tick in 0..40 {
-            assert_eq!(drawn(tick).chars().count(), 20, "at tick {}", tick);
+            assert_eq!(display_width(&drawn(tick)), 20, "at tick {}", tick);
         }
         // And the highlight actually travels, or it is just a grey bar.
         let runs = |tick: usize| skeleton(20, tick, 7).len();
@@ -2553,20 +2575,41 @@ mod tests {
         // escape bytes rode along with them.
         let line = seg(&[(red.as_str(), "hello world!!!".into())], 12);
         let visible: String = line.replace(&red, "");
-        assert_eq!(visible.chars().count(), 12);
+        assert_eq!(display_width(&visible), 12);
+    }
+
+    #[test]
+    fn seg_drops_and_pads_a_wide_glyph_that_cannot_fit() {
+        // The CJK glyph occupies two columns. Character counting admits it
+        // into a three-column row after "ab", making the terminal wrap.
+        let line = seg(&[("", "ab界after".into())], 3);
+        assert_eq!(line, "ab ");
+        assert_eq!(display_width(&line), 3);
+
+        // Emoji has the same common two-column shape.
+        let emoji = seg(&[("", "x🙂after".into())], 2);
+        assert_eq!(emoji, "x ");
+        assert_eq!(display_width(&emoji), 2);
     }
 
     #[test]
     fn pad_is_exact_in_both_directions() {
-        assert_eq!(pad("ab", 5).chars().count(), 5);
+        assert_eq!(display_width(&pad("ab", 5)), 5);
         assert_eq!(pad("abcdefgh", 3), "abc");
+        assert_eq!(pad("界", 1), " ");
+        assert_eq!(pad("界", 3), "界 ");
+        assert_eq!(display_width(&pad("🙂", 3)), 3);
     }
 
     #[test]
     fn title_fills_the_width() {
         let plain = strip(&title("clocks", 40, &rgb(0, 255, 170)));
-        assert_eq!(plain.chars().count(), 40);
+        assert_eq!(display_width(&plain), 40);
         assert!(plain.contains(" CLOCKS "));
+        assert_eq!(
+            display_width(&strip(&title("月", 20, &rgb(0, 255, 170)))),
+            20
+        );
     }
 
     /// One poll's worth of input, decoded from a fresh keyboard.
@@ -2718,10 +2761,16 @@ mod tests {
         assert!(lines.len() > 1);
         for line in &lines {
             let plain = strip(line);
-            assert!(plain.chars().count() <= 20, "{:?} is too wide", plain);
+            assert!(display_width(&plain) <= 20, "{:?} is too wide", plain);
             // A hint is never cut in half.
             assert!(!plain.ends_with("[c]har"));
         }
+
+        let wide = vec![
+            vec![(dim.as_str(), "[a]界".into())],
+            vec![(dim.as_str(), "[b]🙂".into())],
+        ];
+        assert_eq!(pack_hints(&wide, 10, "  ").len(), 2);
     }
 
     fn strip(s: &str) -> String {

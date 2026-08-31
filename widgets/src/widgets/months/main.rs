@@ -1283,7 +1283,7 @@ mod tests {
 
     /// A drawn row's width in cells, escapes not counted.
     fn cells(row: &str) -> usize {
-        plain(row).chars().count()
+        tc::display_width(&plain(row))
     }
 
     /// Every word on the frame, however the rows fell.
@@ -1321,6 +1321,14 @@ mod tests {
                 // is part of the row, and leaving it out of the measurement
                 // is how a footer one cell too wide goes unnoticed.
                 rows.extend(footer(w, true, &p));
+                // Arbitrary text in other widgets reaches the same shared
+                // clipper. This fits by character count but not by terminal
+                // columns: the final glyph occupies two. If seg lets it
+                // through, the terminal wraps this row and moves the title.
+                rows.push(tc::seg(
+                    &[("", format!("{}界", "x".repeat(w.saturating_sub(1))))],
+                    w,
+                ));
                 for row in &rows {
                     assert!(
                         cells(row) <= w,

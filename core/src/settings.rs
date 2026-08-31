@@ -1222,7 +1222,7 @@ fn move_sel(app: &mut App, delta: isize) {
 /// sentence wants. Everything prose on these screens goes through here so a
 /// narrow pane costs somebody a line break rather than the end of a thought.
 fn say(body: &mut Vec<String>, colour: &str, indent: &str, text: &str, w: usize) {
-    let room = w.saturating_sub(indent.chars().count() + 2).max(8);
+    let room = w.saturating_sub(crate::display_width(indent) + 2).max(8);
     for line in wrap_help(text, room, usize::MAX) {
         body.push(crate::seg(
             &[(colour, format!("{indent}{line}"))],
@@ -2828,7 +2828,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let key_w = app
         .fields
         .iter()
-        .map(|f| f.label().chars().count())
+        .map(|f| crate::display_width(&f.label()))
         .max()
         .unwrap_or(8)
         .max(8);
@@ -3135,7 +3135,7 @@ fn input_row(
     let hint = if text.is_empty() && !placeholder.is_empty() {
         // Only where it fits, and never over what has been typed.
         let room_left = box_w.saturating_sub(2);
-        if placeholder.chars().count() <= room_left {
+        if crate::display_width(placeholder) <= room_left {
             format!(" {placeholder}")
         } else {
             String::new()
