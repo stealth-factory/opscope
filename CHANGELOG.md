@@ -3,6 +3,23 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.6.0] - 2026-08-31
+
+### Bug Fixes
+
+- **clocks**: Sort world-clock rows by this frame's offset (#113)
+
+### Documentation
+
+- Mark the Linux-only widgets, and a new compressed demo (#105)
+- Say what is published, not what is not (#106)
+- Drop the "Building the wall" section (#108)
+- Npx is the official way, and it says so at the top (#109)
+
+### Features
+
+- Move settings into standalone widget packages (#76)
+
 ## [0.5.0] - 2026-08-28
 
 ### Bug Fixes
