@@ -144,7 +144,7 @@ not something you configure.
 | `t` | back to the month it is now — `Home` does the same |
 | `s` | this month on its own, and back again — the footer says which way it goes |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time, as in vim |
-| `,` | open settings — the week start and the zone, on the shared screen |
+| `,` | open settings — the week start, the week numbers, and the zone, on the shared screen |
 | `q` | quit |
 
 Paging has no ceiling of its own. It stops where the calendar does — some
@@ -155,7 +155,7 @@ perfectly ordinary month somewhere else.
 ## Configuration
 
 Press `,` for the settings screen, or edit `config.json` yourself — the two
-write the same file. Both fields are declared in
+write the same file. All three fields are declared in
 [`settings.json`](settings.json) beside this page, which is also where
 `config.example.json` is generated from, so the example cannot drift from
 what the widget reads.

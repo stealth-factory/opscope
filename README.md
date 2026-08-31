@@ -92,7 +92,7 @@ npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
-It fetches the launcher and fourteen widget binaries for this machine into
+It fetches the launcher and fifteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -102,7 +102,7 @@ Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
-build all fifteen binaries. Both take about a minute.
+build all sixteen binaries. Both take about a minute.
 
 ### Download a release
 
@@ -131,7 +131,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The fifteen binaries are right there, beside `config.example.json` and a
+The sixteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -159,13 +159,13 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + fourteen widgets in ./target/release
+cargo build --release   # launcher + fifteen widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fourteen widgets, with a live preview of
+`opscope` is the front door — a menu of the fifteen widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -175,7 +175,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and fourteen
+The launcher looks for each widget beside itself, so the launcher and fifteen
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -231,7 +231,7 @@ There are two ways in, and they write the same file.
 
 Press `,` in any configurable widget, or in the launcher for the settings
 every widget shares. It is one screen, owned by `opscope-core` rather than
-written fourteen times, so it behaves the same everywhere.
+written fifteen times, so it behaves the same everywhere.
 
 The list shows every key that widget answers to, and for each one the value
 in force, the default it falls back to, and what the key means. The file
@@ -281,7 +281,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read fourteen widget pages to find out what you can
+**So you do not have to read fifteen widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The

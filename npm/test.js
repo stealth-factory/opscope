@@ -75,7 +75,7 @@ test('the packer takes every [[bin]], including opscope', () => {
   assert.deepEqual(bins, [...bins].sort());
 });
 
-test('the launcher exposes one bin name, not fifteen', () => {
+test('the launcher exposes one bin name, not sixteen', () => {
   const manifest = require('./package.json');
   assert.deepEqual(Object.keys(manifest.bin), ['opscope']);
 });

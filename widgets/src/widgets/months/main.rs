@@ -36,7 +36,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     section: "months",
     legacy_section: None,
     schema: include_str!("settings.json"),
-    // Nothing here is keyed by something the code owns: two fields, both
+    // Nothing here is keyed by something the code owns: three fields, all
     // scalars, and `week_start`'s two answers are named in the schema.
     catalogues: &[],
 };
@@ -94,9 +94,12 @@ enum WeekStart {
 impl WeekStart {
     fn from_config(cfg: &serde_json::Value) -> WeekStart {
         match tc::cfg_str(cfg, "week_start", "sunday").to_lowercase().as_str() {
-            // Anything unrecognised is the default rather than an error: a
-            // typo in a shared config file should not stop a panel on a wall.
-            s if s.starts_with("mon") => WeekStart::Monday,
+            // Named answers only. A prefix would take `monsoon` as Monday,
+            // and the contract is that anything unrecognised is Sunday
+            // rather than a different grid — a typo in a shared config
+            // file should not stop a panel on a wall, or quietly move
+            // every row boundary.
+            "monday" | "mon" => WeekStart::Monday,
             _ => WeekStart::Sunday,
         }
     }
@@ -961,8 +964,9 @@ mod tests {
             WeekStart::from_config(&serde_json::json!({"week_start": "MON"})),
             WeekStart::Monday
         );
-        // Anything else is the default rather than a stopped panel.
-        for junk in ["tuesday", "", "nonsense"] {
+        // Anything else is the default rather than a stopped panel —
+        // including a typo that merely begins with `mon`.
+        for junk in ["tuesday", "", "nonsense", "mondy", "monsoon", "monkey"] {
             assert_eq!(
                 WeekStart::from_config(&serde_json::json!({"week_start": junk})),
                 WeekStart::Sunday,

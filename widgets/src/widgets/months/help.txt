@@ -22,7 +22,8 @@ belongs to a week beginning a day earlier - at the turn of a year the two
 genuinely disagree, and a number whose meaning moves with a config key is
 worse than no number.
 
-Weeks start on Sunday unless "week_start": "monday" says otherwise. Dates are
+Weeks start on Sunday unless "week_start": "monday" says otherwise. ISO week
+numbers are on unless "week_numbers": false turns the gutter off. Dates are
 reckoned on this machine's zone unless "timezone" names another; either way
 the zone is on the second line, because "today" is a different date in two
 places for several hours a day.
