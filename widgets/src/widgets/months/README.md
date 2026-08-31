@@ -7,20 +7,31 @@ that came off a network.
 
 ```
 ╺━ MONTHS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 2026-08-29 SATURDAY · reckoned on this machine (UTC+0)
+ 2026-08-31 MONDAY · reckoned on this machine (UTC+8)
  weeks start Sunday · wk is the ISO 8601 week, Monday-reckoned
 
- AUGUST 2026                 SEPTEMBER 2026
+ JULY 2026                   AUGUST 2026
   wk Su Mo Tu We Th Fr Sa     wk Su Mo Tu We Th Fr Sa
-  31 26 27 28 29 30 31  1     36 30 31  1  2  3  4  5
-  32  2  3  4  5  6  7  8     37  6  7  8  9 10 11 12
-  33  9 10 11 12 13 14 15     38 13 14 15 16 17 18 19
-  34 16 17 18 19 20 21 22     39 20 21 22 23 24 25 26
-  35 23 24 25 26 27 28 29     40 27 28 29 30  1  2  3
+  27 28 29 30  1  2  3  4     31 26 27 28 29 30 31  1
+  28  5  6  7  8  9 10 11     32  2  3  4  5  6  7  8
+  29 12 13 14 15 16 17 18     33  9 10 11 12 13 14 15
+  30 19 20 21 22 23 24 25     34 16 17 18 19 20 21 22
+  31 26 27 28 29 30 31  1     35 23 24 25 26 27 28 29
+                              36 30 31  1  2  3  4  5
+                              37  6  7  8  9 10 11 12
+                              38 13 14 15 16 17 18 19
+
+ SEPTEMBER 2026
+  wk Su Mo Tu We Th Fr Sa
+  34 16 17 18 19 20 21 22
+  35 23 24 25 26 27 28 29
   36 30 31  1  2  3  4  5
   37  6  7  8  9 10 11 12
+  38 13 14 15 16 17 18 19
+  39 20 21 22 23 24 25 26
+  40 27 28 29 30  1  2  3
 
- ←→ month  ↑↓ year  [t]oday  [q]uit
+ ←→ month  ↑↓ year  [t]oday  [,] settings  [q]uit
 ```
 
 Today is the lit square; the week it is in is the lit number in the gutter.
@@ -37,9 +48,12 @@ the top row has no weeks above it, and today in the bottom row none below.
 So the grid grows. Leading or trailing weeks are added until there are two
 either side of the row today is in — seven or eight rows instead of five or
 six — and they need no new visual language, because days outside the month
-were already drawn dimmed. In the picture above, August has grown by one week
-at the bottom: today is 29 August, in the second-to-last row of an ordinary
-August, and a week has been added under it.
+were already drawn dimmed. The picture above shows it working in both
+directions at once: today is 31 August, which falls in the *last* row of an
+ordinary August, so August has grown two weeks downward — and it is the
+*first* row of September's grid, so September has grown two weeks upward and
+opens on week 34. July does not contain today at all and draws as a plain
+five-row month.
 
 Two decisions came with that, and both are load-bearing:
 
@@ -89,14 +103,29 @@ square looking like an answer to a question nobody asked.
 
 Extra width buys months rather than margins: two side by side at the sixty to
 seventy columns these panes usually get, three from ninety, and up to a year
-across on a wall. The first month is the one you have paged to and the rest
-follow it.
+across on a wall.
+
+**The month you have paged to sits in the middle, with the one before it and
+the one after either side.** A date is checked against the month just gone at
+least as often as the month ahead — "was that the 3rd or the 10th" — and the
+strip used to begin at the month in view and only go forward, so the one
+behind was always a keypress away and never on screen. It is the same
+argument `CONTEXT` makes a row at a time, made a month at a time.
 
 Coming down, the week-number gutter goes before a day does — a week number is
 worth less than the seventh day of the week — and below 23 columns there is no
 honest grid to draw at all, so the pane says that instead of drawing six days
 and a cut edge. Nothing is ever truncated: the reckoning lines wrap, and so
 does the footer.
+
+**Those three are a floor, not a cap.** A pane too narrow to hold them side by
+side stacks them instead of dropping them, and the body scrolls to reach the
+rest — `Ctrl-E` and `Ctrl-Y`, or the wheel. Dropping a month because the pane
+is narrow is the one thing this collection does not do: a month that is not
+drawn looks exactly like a month with nothing in it.
+
+Each band keeps the same fixed height whether its months run to five weeks or
+eight, so paging never shifts what is below it.
 
 ## Keys
 

@@ -44,6 +44,18 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 /// Weeks of context kept either side of the week today is in.
 const CONTEXT: usize = 2;
 
+/// Months kept either side of the one in view.
+///
+/// The strip used to begin at the month in view and only go forward, so the
+/// month just gone - the one a date is most often checked against - was
+/// always a keypress away and never on screen. `CONTEXT` already makes this
+/// argument a row at a time; these two make it a month at a time.
+///
+/// A wide pane still fills with months rather than margins. These are a
+/// floor on how many are drawn, not a cap.
+const BEFORE: usize = 1;
+const AFTER: usize = 1;
+
 /// The rows the grid area keeps, whether or not a month fills them.
 ///
 /// The extension can need eight and never more: a month is four to six weeks
@@ -626,13 +638,27 @@ fn frame(
             w.saturating_sub(2),
         )),
         Some(l) => {
-            let months: Vec<Month> = (0..l.columns)
-                .filter_map(|i| view.shift(i as i64))
+            // The month either side at minimum, and more when the width is
+            // there to hold them: extra width still buys months, it just
+            // cannot buy fewer than the three this widget is for.
+            let least = BEFORE + 1 + AFTER;
+            let months: Vec<Month> = (0..least.max(l.columns))
+                .filter_map(|i| view.shift(i as i64 - BEFORE as i64))
                 .collect();
-            for row in strip(&months, start, today, l, p) {
-                let refs: Vec<(&str, String)> =
-                    row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-                body.push(tc::seg(&refs, w.saturating_sub(1)));
+            // Bands of whatever fits across. A pane too narrow for three
+            // months stacks them rather than dropping them and scrolls to
+            // reach the rest, which is the rule the rest of this collection
+            // follows: a pane too short is a pane you scroll, not a pane
+            // that hides things.
+            for (n, band) in months.chunks(l.columns.max(1)).enumerate() {
+                if n > 0 {
+                    body.push(String::new());
+                }
+                for row in strip(band, start, today, l, p) {
+                    let refs: Vec<(&str, String)> =
+                        row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                    body.push(tc::seg(&refs, w.saturating_sub(1)));
+                }
             }
         }
     }
@@ -1018,6 +1044,37 @@ mod tests {
         // rather than written out, because the limit is its to decide and it
         // is not the year this was first written against.
         assert_eq!(Month::of(NaiveDate::MAX).days(), 31);
+    }
+
+    #[test]
+    fn a_narrow_pane_stacks_the_months_rather_than_dropping_them() {
+        // The strip is at least the month either side of the one in view,
+        // however narrow the pane. It used to draw exactly as many months as
+        // fitted across, so at one column the month just gone - the one a
+        // date is most often checked against - simply was not there.
+        let today = day(2026, 8, 29);
+        let view = Month::of(today);
+        // Named outright rather than derived from BEFORE and AFTER. Written
+        // in terms of those constants this passed with BEFORE at 0, which is
+        // the bug it exists to catch: an assertion that moves with the thing
+        // it is checking is checking nothing.
+        let gone = view.shift(-1).expect("the month before");
+        let next = view.shift(1).expect("the month after");
+
+        for width in [30usize, 64, 90, 400] {
+            let l = layout(width).expect("a month fits");
+            let months: Vec<Month> = (0..(BEFORE + 1 + AFTER).max(l.columns))
+                .filter_map(|i| view.shift(i as i64 - BEFORE as i64))
+                .collect();
+            for (what, m) in [("the month just gone", gone), ("the one in view", view), ("the month ahead", next)] {
+                assert!(
+                    months.contains(&m),
+                    "{width} columns: {what} is not on screen — drew {months:?}"
+                );
+            }
+            // Wide panes still fill across rather than stacking needlessly.
+            assert!(months.len() >= l.columns, "at {width} columns");
+        }
     }
 
     #[test]
