@@ -1,12 +1,12 @@
 {
-  "_comment": "What is listening on this machine. system_ports is the set hidden behind `o` — parts of the machine rather than things you started. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+  "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc only, plus `tailscale serve status` for the exposure column.",
   "_schema": {
     "system_ports": { "items": "integer" },
     "refresh": {
       "minimum": 1
     }
   },
-  "_system_ports_comment": "Listening ports hidden when system services are hidden.",
+  "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
   "system_ports": [
     22,
     53,

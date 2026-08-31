@@ -424,5 +424,15 @@ with nothing to say.
 }
 ```
 
-`system_ports` is what `o` hides. Add anything that is part of the machine
-rather than something you started.
+`system_ports` is a hide-list, not a show-list, and it adds to a rule that is
+already doing most of the work: `o` hides every port another user owns,
+whatever its number. So listing a port can only ever hide more, and nothing
+listed here reveals one - root's 443 stays behind `o` whatever this says.
+
+What it is for is the ports that are yours by uid and still not yours in
+spirit: a rootless sshd, a user-session mDNS responder. The owner rule lets
+those through, because they really are yours, and this is what catches them.
+
+Empty is an answer rather than an omission. `"system_ports": []` hides nothing
+by number and leaves the owner rule alone; deleting the key altogether
+restores the six above.
