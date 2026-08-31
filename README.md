@@ -219,29 +219,81 @@ Every widget reads optional settings from the first readable of
 (`~/.config/opscope/config.json` where that is unset), `config.json` in
 the working directory, and `config.json` beside the binary.
 
-Every configurable widget owns its settings. Press `,` in that widget to
-open a consistent settings screen for its section. The screen shows the
-resolved file, current value, default, and field help, then writes atomically
-with secure permissions. `config.example.json` is generated from those same
-widget-owned declarations for people who prefer a file.
+**Nothing has to be configured.** Every key is optional, and a key you leave
+out is not a gap — the widget uses the default built into it. The three token
+widgets at the end of this section are the only ones that need anything at
+all before they can show you something.
 
-Each binary also carries a plain-Markdown guide for an AI assistant helping
-you configure it:
+There are two ways in, and they write the same file.
 
-```sh
-opscope latency --configure-help
+### The settings screen
+
+Press `,` in any configurable widget, or in the launcher for the settings
+every widget shares. It is one screen, owned by `opscope-core` rather than
+written fourteen times, so it behaves the same everywhere.
+
+The list shows every key that widget answers to, and for each one the value
+in force, the default it falls back to, and what the key means. The file
+being written is named at the top, so there is never a question of which
+`config.json` you are editing.
+
+`↵` opens the row under the cursor, and what opens depends on the value:
+
+| the value | what `↵` opens |
+|---|---|
+| text, or a number | a single-line editor |
+| true / false | nothing — it moves the value on, default included |
+| one of a fixed set | the choices, one to a row |
+| a list of names, or of numbers | an entry-at-a-time editor: type to add one, pick one to remove it |
+| a group of named settings | the same, one entry per group, each opening its own screen |
+| a model's prices | a searchable card of every model, its publisher and its rates |
+
+The editors that both take typing *and* hold a list keep the two apart: you
+are typing until `tab` or `↓`, and picking after. It is why `d` puts a `d` in
+the box rather than deleting the entry you can see — the box has focus, and a
+key that means two things at once will eventually do the wrong one.
+
+`[d]efault` on a row **removes** the key from your `config.json` rather than
+writing today's default into it, so the widget's own default goes on being
+the answer even when a later release changes it.
+
+Writes are atomic and owner-only. **The widget reloads itself as you leave
+the screen**, so nothing needs restarting.
+
+### Editing `config.json` by hand
+
+[`config.example.json`](config.example.json) is the reference, and it is
+**generated** — not written by hand, not kept current by remembering to. It
+is built from the same per-widget declarations the settings screen reads, so
+it carries every section, every key any widget reads, that key's real
+default, and a comment for each saying what it does:
+
+```json
+"ports": {
+  "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. …",
+  "system_ports": [22, 53, 123, 323, 631, 5353],
+  "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
+  "refresh": 4.0
+}
 ```
 
-The guide explains real data sources, safe inspection, credentials, and
-what must be asked rather than guessed. It is documentation, not a skill
-and not permission to make changes.
+Copy the sections you want, drop the rest. `_comment` keys are ignored, so
+they can stay where they are as a reminder.
 
-This keeps hostnames, ping targets, city lists and tokens out of the source
-tree: the repo ships generic defaults, and `config.json` is git-ignored along
-with `.env` files and anything else likely to hold a secret.
+**So you do not have to read fourteen widget pages to find out what you can
+set.** `cargo test` fails if a widget reads a key the example does not list,
+and fails again if the example lists a key no widget reads — the file is
+neither incomplete nor stale by construction, in both directions. The
+per-widget pages are for depth: where a number comes from, what it means, why
+a default is what it is. They are not the inventory.
 
-Most sections are named after the widget that reads them. `terminal` is the
-exception and applies to all of them; press `,` in the launcher to edit it:
+Section names are the widget's name with hyphens turned to underscores, so
+`vercel-deployments` reads `vercel_deployments`. **Getting one wrong is
+silent** — a section no widget reads is simply never read, and the widget
+goes on using its defaults as though you had written nothing.
+
+`terminal` is the one section that is not a widget's. It applies to all of
+them, and `,` in the launcher edits it:
 
 ```json
 "terminal": { "mouse": false }
@@ -253,13 +305,32 @@ terminal reporting, dragging selects nothing, so copying a line off a panel
 with the mouse stops working. Turn it off if you copy more often than you
 scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
-**Three widgets define their own token settings:** `vercel-deployments` wants a
-Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
-PAT with `repo` and `read:org` (fine-grained tokens reach only one org
-each), and `linear` a personal API key from Settings → Security & access.
-`github-prs` and `github-actions` reuse that GitHub token; they are not
-credential-free.
-Every other widget requires no configuration to start.
+### Credentials
+
+**Three widgets define their own token settings:** `vercel-deployments` wants
+a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
+PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
+and `linear` a personal API key from Settings → Security & access.
+`github-prs` and `github-actions` each hold their own GitHub token rather
+than borrowing one; they are not credential-free. Every other widget needs
+no configuration to start.
+
+Keeping all of this in `config.json` is what keeps hostnames, ping targets,
+city lists and tokens out of the source tree: the repo ships generic
+defaults, and `config.json` is git-ignored along with `.env` files and
+anything else likely to hold a secret.
+
+### Asking an assistant to configure one
+
+Each binary carries a plain-Markdown guide for an AI assistant helping you:
+
+```sh
+opscope latency --configure-help
+```
+
+The guide explains real data sources, safe inspection, credentials, and what
+must be asked rather than guessed. It is documentation, not a skill and not
+permission to make changes.
 
 ## Requirements
 

@@ -34,6 +34,7 @@ navigation, not itself a widget.
 
 | | |
 |---|---|
+| [Configuring them](../README.md#configuration) | Both ways in: the settings screen every widget opens with `,`, and editing `config.json` yourself against the generated example. |
 | [Making a widget](../wiki/making-a-widget.md) | One folder owns a widget's code, help, preview, settings, and AI configuration guide — and what else it takes to add one. In the [wiki](../wiki/README.md). |
 | [Design](design.md) | The rules every widget holds to, and what each one cost to learn. |
 | [Internals](internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot. |
