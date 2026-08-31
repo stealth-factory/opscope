@@ -1,0 +1,39 @@
+{
+  "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
+  "_schema": {
+    "accounts": {
+      "items": "string"
+    },
+    "repos": {
+      "items": "string"
+    },
+    "window_hours": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 30
+    },
+    "max_repos": {
+      "minimum": 1
+    },
+    "pushed_days": {
+      "minimum": 1
+    }
+  },
+  "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
+  "token": "",
+  "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
+  "token_env": "GITHUB_TOKEN",
+  "_accounts_comment": "GitHub users or organizations to inspect; empty discovers the viewer and their organizations.",
+  "accounts": [],
+  "_repos_comment": "Explicit owner/repository names; empty discovers recently pushed repositories with workflows.",
+  "repos": [],
+  "_window_hours_comment": "Hours of workflow runs included in summaries.",
+  "window_hours": 48.0,
+  "_refresh_comment": "Seconds between GitHub Actions refreshes.",
+  "refresh": 60.0,
+  "_max_repos_comment": "Maximum discovered repositories inspected per account.",
+  "max_repos": 16,
+  "_pushed_days_comment": "How recently a repository must have been pushed to qualify for discovery.",
+  "pushed_days": 14.0
+}

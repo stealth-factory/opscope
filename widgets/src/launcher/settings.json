@@ -1,0 +1,5 @@
+{
+  "_comment": "Shared by every widget rather than set per panel: this is a property of how you use the terminal, not of one widget.",
+  "_mouse_comment": "Whether widgets ask the terminal for mouse reports so the scroll wheel works. While reporting is on, dragging selects nothing; turn it off if copying terminal text matters more. Ctrl-Y, Ctrl-E, and arrow keys still scroll.",
+  "mouse": true
+}

@@ -25,10 +25,10 @@ const path = require('path');
 const LAUNCHER = 'opscope';
 
 // One row per artefact the release workflow actually produces. A
-// platform that is only a wish is not a row: Alpine, Windows and
-// Linux arm64 fail at install because they are absent here, which is
-// the sentence the issue asked for rather than a package that
-// installs and then cannot run.
+// platform that is only a wish is not a row: anything absent here
+// fails at install with a sentence saying what is published, which is
+// what the issue asked for rather than a package that installs and
+// then cannot run.
 //
 // `os` / `cpu` / `libc` are npm's own selectors. npm installs only
 // the optionalDependency whose selectors match and skips the rest,
@@ -85,7 +85,7 @@ function glibcTooOld(h) {
 }
 
 // Every binary, read from the manifest rather than restated.
-// A restated list is how a fifteenth widget ships in the tarball and
+// A restated list is how a new widget ships in the tarball and
 // not in the npm package, and the launcher then cannot launch it.
 // `[[bin]]` is the same list `opscope` already asserts against.
 function binsFromManifest(repoRoot) {
@@ -199,7 +199,6 @@ function unsupportedMessage(h) {
     'It publishes:',
     publishedPlatforms(),
     '',
-    'Windows, Alpine/musl, 32-bit and Linux arm64 are not published.',
     'Build from source: https://github.com/stealth-factory/opscope',
   ].join('\n');
 }

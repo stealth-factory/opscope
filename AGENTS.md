@@ -11,8 +11,8 @@ filed and already decided against.
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Sixteen Rust binaries sharing `opscope-core`, built with `cargo build`
---release` from the root.
+Fifteen widget binaries plus the `opscope` launcher share `opscope-core`;
+build all sixteen with `cargo build --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
 gone, and `docs/port-decisions.md` records what the port changed and why.
@@ -34,9 +34,12 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   on without what that tool would have told it - that is a different thing
   from a library and the rule is unchanged.
 - **Config, never hardcoded.** Hostnames, cities, tokens and account lists go
-  in `config.json` (git-ignored) via `load_config()`. Add new keys to
-  `config.example.json` in the same commit — and **use the section name the
-  widget actually reads**; a mismatched key is silently ignored.
+  in `config.json` (git-ignored) via `load_config()`. A widget owns its
+  defaults and field help in `settings.json`; regenerate
+  `config.example.json` with `UPDATE_CONFIG_EXAMPLE=1 cargo test` in the
+  same commit.
+  **Use the section name the widget actually reads**; a mismatch is silently
+  ignored.
 - **Secrets never enter the tree.** This repo is public. No tokens, no
   internal hostnames, no LAN addresses — in code, docs or commit messages.
 - **Spend extra width on more content, not padding.** Add columns as a pane
@@ -67,7 +70,13 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   against both the terminal background *and* the selected-row tint.
 - **Say what a number means when it is not obvious.** Label windows, note when
   a counter resets, and never present a partial result as a total.
-- Every widget has a doc in `docs/` and a row in the README table.
+- Every widget is one folder under `widgets/src/widgets/<name>/`, containing
+  its `main.rs`, `help.txt`, `README.md`, `CONFIGURE.md`, and `settings.json`
+  when configurable. It also has a row in the root README table.
+- Every configurable widget opens the shared settings screen with `,`.
+  `CONFIGURE.md` is plain AI-facing documentation, not an executable skill.
+- `widgets/src/launcher/` is the source for the public `opscope` command.
+  It is the launcher, not a widget, and does not count as one.
 
 ## Before you commit
 
@@ -137,7 +146,7 @@ which the compiler now makes impossible. It went with the Python.
 
 - **A background thread that dies is invisible.** Wrap every poller so it
   records why it stopped; otherwise the pane shows no data and no error, which
-  is indistinguishable from a source that has none. `deployments` sat like
+  is indistinguishable from a source that has none. `vercel-deployments` sat like
   that for a day.
 - **Never let a bare `except` swallow a programming error.** `discover_teams`
   turned a `TypeError` from passing the wrong type into "no teams found", and

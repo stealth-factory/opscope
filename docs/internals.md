@@ -11,12 +11,12 @@ compiler cannot. For the rules these implement, see
 `cargo test` from the root runs each widget's tests plus
 `widgets/tests/check.rs`, which reads the sources and fails on a poller that
 dies without saying why, a footer or `--help` line naming a key nothing
-answers, a hint missing from the widget's doc, a config key read but never
-documented in `config.example.json` — or documented there and never read, or
-read with no fallback behind it — a colour that draws text on the
-selected-row tint below WCAG AA, a widget missing from the README table or
-the docs index, and a name in the launcher's sample listing that is not a
-widget.
+answers, a hint missing from the widget's README, a config key read but never
+declared in its `settings.json` — or declared there and never read, or read
+with no fallback behind it — a stale generated `config.example.json`, a
+colour that draws text on the selected-row tint below WCAG AA, an incomplete
+widget folder, a widget missing from the README table or docs index, and a
+name in the launcher's sample listing that is not a widget.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -27,7 +27,10 @@ screen, exactly like "there is no data".
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
-arrow-key decoding, and `clipboard()` over OSC 52.
+arrow-key decoding, and `clipboard()` over OSC 52. It also owns the shared
+per-widget settings screen and its order-preserving, private atomic writer;
+widgets provide only their section name, optional legacy alias, and owned
+`settings.json`.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),

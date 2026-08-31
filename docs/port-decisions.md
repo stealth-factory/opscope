@@ -73,10 +73,10 @@ focus`. The Python's headings carry the per-section letters instead.
 | Widget | Python | Rust | Why |
 |---|---|---|---|
 | `tailnet` | `n` cycles the interval | `i` cycles the interval | `i` is what `latency` calls the same thing, and `i` was free once the info screen moved to the arrows. `n` was this widget's own letter and meant nothing to a reader coming from the widget beside it. |
-| `deployments` | `f` filters by project | `s` filters by state, `/` filters by text | Two different filters wanted the same letter. The one you type is `/`, as everywhere else that has one. |
+| `vercel-deployments` | `f` filters by project | `s` filters by state, `/` filters by text | Two different filters wanted the same letter. The one you type is `/`, as everywhere else that has one. |
 | `herdr-panes` | `o` | `i` | Named after what it toggles. |
 
-`clocks`, `latency` and `deployments` also answer `j` and `k` as aliases for
+`clocks`, `latency` and `vercel-deployments` also answer `j` and `k` as aliases for
 `↓` and `↑` in the Rust only.
 
 ## Charts
@@ -118,10 +118,10 @@ went once the ports were accepted:
 |---|---|
 | `linear` | A screen of its own for a cycle, a team, and a project; the board scrolls as a whole; a PROJECTS section; `[c]opy url` on a cycle's issues |
 | `ports` | Per-port traffic — a column, a per-row sparkline, a chart on the port's screen and one across the top |
-| `deployments` | Build logs, a scrolling detail screen, `[/]` filter, copy on its own page |
+| `vercel-deployments` | Build logs, a scrolling detail screen, `[/]` filter, copy on its own page |
 | `github` | A per-account screen with the oldest open PRs and `[c]opy` |
 | `matrix` | Answers `q`. `matrix.py` has no keyboard at all and exits on Ctrl-C |
-| `months` | A widget with no Python ancestor at all: a month grid, grown around today so there are always two weeks of context either side of it, with ISO week numbers labelled as ISO and the zone the dates are reckoned in on screen. The three decisions behind it — why the month is taller than a month, why only the month today is in grows, and why the grid area keeps a fixed height — are recorded in [months.md](months.md#why-the-month-is-taller-than-a-month) |
+| `months` | A widget with no Python ancestor at all: a month grid, grown around today so there are always two weeks of context either side of it, with ISO week numbers labelled as ISO and the zone the dates are reckoned in on screen. The three decisions behind it — why the month is taller than a month, why only the month today is in grows, and why the grid area keeps a fixed height — are recorded in [its own README](../widgets/src/widgets/months/README.md#why-the-month-is-taller-than-a-month) |
 
 ## Where the Rust deliberately agrees
 

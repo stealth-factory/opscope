@@ -70,11 +70,12 @@ test('every release target has an npm platform, and no extra ones', () => {
 test('the packer takes every [[bin]], including opscope', () => {
   const bins = platform.binsFromManifest(repoRoot);
   assert.ok(bins.includes('opscope'));
+  assert.ok(!bins.includes('config'));
   assert.equal(bins.length, 16);
   assert.deepEqual(bins, [...bins].sort());
 });
 
-test('the launcher exposes one bin name, not fourteen', () => {
+test('the launcher exposes one bin name, not fifteen', () => {
   const manifest = require('./package.json');
   assert.deepEqual(Object.keys(manifest.bin), ['opscope']);
 });
@@ -143,8 +144,6 @@ test('the unsupported sentence names every published platform', () => {
   for (const p of platform.PLATFORMS) {
     assert.match(msg, new RegExp(p.label.replace(/[()]/g, '\\$&')));
   }
-  assert.match(msg, /Windows/);
-  assert.match(msg, /musl/);
 });
 
 test('pack.js stamps one version onto all four packages', () => {

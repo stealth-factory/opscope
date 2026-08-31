@@ -85,7 +85,7 @@ fn main() {
     // not move it.
     //
     // Running it unconditionally does work, and costs twenty-eight seconds
-    // on every no-op build, because a rerun relinks all fourteen binaries
+    // on every no-op build, because a rerun relinks all fifteen binaries
     // whether or not the stamp changed. `cargo test` is the ritual before
     // every commit here, so that is the wrong trade.
     //

@@ -1,0 +1,112 @@
+{
+  "_schema": {
+    "pomodoro_flash_rgb": { "items": "integer", "length": 3 },
+    "work_start_hour": {
+      "minimum": 0,
+      "maximum": 23,
+      "unit": "hour of the day, 0-23"
+    },
+    "work_end_hour": {
+      "minimum": 0,
+      "maximum": 23,
+      "unit": "hour of the day, 0-23"
+    },
+    "pomodoro_focus_minutes": {
+      "minimum": 0.1,
+      "unit": "minutes"
+    },
+    "pomodoro_short_break_minutes": {
+      "minimum": 0.1,
+      "unit": "minutes"
+    },
+    "pomodoro_long_break_minutes": {
+      "minimum": 0.1,
+      "unit": "minutes"
+    },
+    "pomodoro_sessions_before_long_break": {
+      "minimum": 1
+    },
+    "pomodoro_flash_count": {
+      "minimum": 1
+    },
+    "pomodoro_flash_gap": {
+      "minimum": 0
+    },
+    "cities": {
+      "picker": "timezone"
+    },
+    "work_days": {
+      "items": "string",
+      "picker": {
+        "choices": [
+          "mon",
+          "tue",
+          "wed",
+          "thu",
+          "fri",
+          "sat",
+          "sun"
+        ]
+      }
+    }
+  },
+  "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
+  "cities": [
+    [
+      "San Francisco",
+      "America/Los_Angeles"
+    ],
+    [
+      "London",
+      "Europe/London"
+    ],
+    [
+      "Singapore",
+      "Asia/Singapore"
+    ],
+    [
+      "Tokyo",
+      "Asia/Tokyo"
+    ]
+  ],
+  "_work_start_hour_comment": "Local 24-hour clock hour when the work day begins.",
+  "work_start_hour": 9,
+  "_work_end_hour_comment": "Local 24-hour clock hour when the work day ends.",
+  "work_end_hour": 18,
+  "_show_hints_comment": "Whether the pomodoro key hints sit under the panel. Visible by default: the hints are how the keys are found in the first place, and starting hidden means a reader has to already know the key that reveals them. [?] toggles it live.",
+  "show_hints": true,
+  "_work_days_comment": "Which days count as working days, as names (sun, mon, ...) or numbers. Drives the working-day shading.",
+  "work_days": [
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri"
+  ],
+  "_pomodoro_enabled_comment": "Whether the pomodoro starts enabled when clocks launches.",
+  "pomodoro_enabled": false,
+  "_pomodoro_focus_minutes_comment": "Minutes in one focus session.",
+  "pomodoro_focus_minutes": 25.0,
+  "_pomodoro_short_break_minutes_comment": "Minutes in a short break.",
+  "pomodoro_short_break_minutes": 5.0,
+  "_pomodoro_long_break_minutes_comment": "Minutes in a long break.",
+  "pomodoro_long_break_minutes": 15.0,
+  "_pomodoro_sessions_before_long_break_comment": "Completed focus sessions before a long break.",
+  "pomodoro_sessions_before_long_break": 4,
+  "_pomodoro_bell_comment": "Whether a terminal bell sounds when a phase ends.",
+  "pomodoro_bell": true,
+  "_pomodoro_notify_comment": "Whether a desktop notification is attempted when a phase ends.",
+  "pomodoro_notify": true,
+  "_pomodoro_flash_comment": "Whether the pane flashes when a phase ends.",
+  "pomodoro_flash": true,
+  "_pomodoro_flash_count_comment": "Number of end-of-phase flashes.",
+  "pomodoro_flash_count": 2,
+  "_pomodoro_flash_gap_comment": "Seconds between end-of-phase flashes.",
+  "pomodoro_flash_gap": 1.0,
+  "_pomodoro_flash_rgb_comment": "Flash colour as three red, green, blue values.",
+  "pomodoro_flash_rgb": [
+    246,
+    248,
+    252
+  ]
+}

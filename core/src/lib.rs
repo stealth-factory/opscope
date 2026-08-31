@@ -21,6 +21,10 @@
 //! side and agree on screen, so where a choice existed this keeps the
 //! Python behaviour rather than the more idiomatic Rust one.
 
+mod settings;
+
+pub use settings::{run_settings, Catalogue, SettingsSpec};
+
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -435,6 +439,41 @@ pub fn load_config(section: &str) -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// The file `load_config` would actually read: the first path that exists
+/// and parses. `None` when nothing does, so a writer can create the
+/// preferred location rather than guessing — writing anywhere else is a
+/// silent no-op, because the next `load_config` will not look there.
+pub fn resolved_config_path() -> Option<std::path::PathBuf> {
+    first_readable_config(&config_paths())
+}
+
+/// The same rule as `load_config`, pointed at an explicit list so a test
+/// can feed it files without touching `OPSCOPE_CONFIG` and racing every
+/// other test that reads `config_paths`.
+pub fn first_readable_config(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    for path in paths {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// Where a new config should be created when nothing yet parses.
+///
+/// The first entry of `config_paths` is the highest-priority location, so
+/// a file created there is the one the next `load_config` will read.
+pub fn default_config_path() -> std::path::PathBuf {
+    config_paths()
+        .into_iter()
+        .next()
+        .expect("config_paths is never empty")
+}
+
 /// A setting, or the default when it is absent or the wrong shape.
 pub fn cfg_f64(cfg: &serde_json::Value, key: &str, fallback: f64) -> f64 {
     cfg.get(key).and_then(|v| v.as_f64()).unwrap_or(fallback)
@@ -551,6 +590,28 @@ pub fn heat(frac: f64) -> String {
 /// that then sits at a prompt is indistinguishable from the widget never
 /// having been launched. This stays on screen until somebody reads it.
 pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) {
+    cannot_start_inner(name, needed, why, install, None);
+}
+
+/// The same persistent missing-tool screen, with the owning widget's
+/// settings reachable even though its normal UI could not start.
+pub fn cannot_start_with_settings(
+    name: &str,
+    needed: &[String],
+    why: &[&str],
+    install: &str,
+    settings: SettingsSpec,
+) {
+    cannot_start_inner(name, needed, why, install, Some(settings));
+}
+
+fn cannot_start_inner(
+    name: &str,
+    needed: &[String],
+    why: &[&str],
+    install: &str,
+    settings: Option<SettingsSpec>,
+) {
     let bad = rgb(255, 100, 110);
     let dim = rgb(127, 147, 172);
     let txt = rgb(225, 235, 245);
@@ -558,6 +619,12 @@ pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) 
     let mut keyboard = Keyboard::new();
     loop {
         for key in keyboard.poll() {
+            if key == "," {
+                if let Some(spec) = settings {
+                    run_settings(&mut keyboard, spec);
+                    continue;
+                }
+            }
             if key == "q" || key == "Q" {
                 keyboard.restore();
                 restore_screen();
@@ -587,10 +654,20 @@ pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) 
                 w - 1,
             ));
         }
-        while rows.len() < h - 1 {
+        let mut hints = Vec::new();
+        if settings.is_some() {
+            hints.push(vec![(dim.as_str(), "[,] settings".into())]);
+        }
+        hints.push(vec![(dim.as_str(), "[q]uit".into())]);
+        let foot: Vec<String> = pack_hints(&hints, w.saturating_sub(2), "  ")
+            .into_iter()
+            .map(|line| format!(" {}", line))
+            .collect();
+        rows.truncate(h.saturating_sub(foot.len()));
+        while rows.len() < h.saturating_sub(foot.len()) {
             rows.push(String::new());
         }
-        rows.push(seg(&[(dim.as_str(), " [q]uit".into())], w - 1));
+        rows.extend(foot);
         draw(&rows, w, h);
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -1788,6 +1865,12 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             // not among them, and neither is flow control's ^S/^Q.
             '\x19' => keys.push("ctrl-y".to_string()),
             '\x05' => keys.push("ctrl-e".to_string()),
+            // Kill-line, as readline and every shell prompt use it. Named
+            // here so a screen with a text field gets it for free, and so it
+            // cannot be confused with a character somebody meant to type -
+            // which is the whole reason to clear with a control byte rather
+            // than with tab, a letter, or a second meaning for escape.
+            '\x15' => keys.push("ctrl-u".to_string()),
             c => keys.push(c.to_string()),
         }
     }
@@ -1879,14 +1962,38 @@ pub fn maybe_help(doc: &str) {
         std::process::exit(0);
     }
     // Answered here rather than by each widget, for the same reason `--help`
-    // is: fourteen binaries that disagree about how to say their own version
-    // are fourteen answers to one question. netwatch used to answer this
+    // is: fifteen binaries that disagree about how to say their own version
+    // are fifteen answers to one question. netwatch used to answer this
     // itself and said "netwatch 1.1" while the workspace was at 0.1.0 - a
     // number nothing set, kept up to date by nobody.
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("{}", version());
         std::process::exit(0);
     }
+}
+
+/// Widget help plus the plain-Markdown guide an AI can use to configure it.
+///
+/// The guide is embedded in the binary, so npm and release-tarball users
+/// carry the same instructions as a source checkout.
+pub fn maybe_widget_help(doc: &str, configure: &str, has_settings: bool) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--configure-help") {
+        println!("{}", configure.trim());
+        std::process::exit(0);
+    }
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{}", doc.trim());
+        println!();
+        if has_settings {
+            println!("Settings: press , in the widget");
+        } else {
+            println!("Settings: none");
+        }
+        println!("AI configuration guide: --configure-help");
+        std::process::exit(0);
+    }
+    maybe_help(doc);
 }
 
 /// What this binary is, in one line.
@@ -2403,6 +2510,35 @@ mod tests {
     }
 
     #[test]
+    fn first_readable_config_is_the_first_that_parses() {
+        // load_config returns from the first file that *parses*, even when
+        // that file has no such section. A writer that picks any later
+        // path is editing a file nobody will read.
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-config-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.json");
+        let first = dir.join("first.json");
+        let second = dir.join("second.json");
+        std::fs::write(&broken, "{").unwrap();
+        std::fs::write(&first, "{\"a\":1}").unwrap();
+        std::fs::write(&second, "{\"b\":2}").unwrap();
+        let missing = dir.join("missing.json");
+        assert_eq!(
+            first_readable_config(&[missing, broken.clone(), first.clone(), second]),
+            Some(first)
+        );
+        assert_eq!(first_readable_config(&[broken]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_old_config_env_var_still_works() {
         // Same reasoning as above, for the environment variable. Set both
         // and the new one wins; set only the old one and it is still read.
@@ -2534,6 +2670,7 @@ mod tests {
         // vim's own scroll pair, named rather than left as control bytes.
         assert_eq!(keys("\x19"), vec!["ctrl-y"]);
         assert_eq!(keys("\x05"), vec!["ctrl-e"]);
+        assert_eq!(keys("\x15"), vec!["ctrl-u"]);
     }
 
     #[test]

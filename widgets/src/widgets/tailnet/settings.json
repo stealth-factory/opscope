@@ -1,0 +1,14 @@
+{
+  "_schema": {
+    "refresh": {
+      "minimum": 1
+    },
+    "history": {
+      "minimum": 1
+    }
+  },
+  "_comment_history": "rate samples kept per peer; the chart is a window on to this",
+  "history": 180,
+  "_refresh_comment": "Seconds between Tailscale status and traffic refreshes.",
+  "refresh": 2.0
+}
