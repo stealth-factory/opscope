@@ -146,11 +146,35 @@ fn configured_ports(cfg: &serde_json::Value) -> Vec<u16> {
         .unwrap_or_default()
 }
 
+/// Which ports count as inbound: the ones named, or the ones listening.
+///
+/// Named ports are the set, not an addition to it. They used to be seeded
+/// and then joined by everything `ss` reported listening, so naming one
+/// could only ever widen the watch - and the reason to name any is to stop
+/// watching something else, which a union cannot do. The widget's README
+/// says as much: naming ports pins the set, worth doing if something else
+/// here accepts connections you would rather not watch.
+///
+/// Pinning keeps what the seeding was for. A named port is watched whether
+/// or not it is listening at the moment you look, because it was named
+/// rather than discovered.
+///
+/// Split from the command that finds the listening ones so the decision can
+/// be tested without `ss`.
+fn ports_to_watch(named: &[u16], listening: Vec<u16>) -> Vec<u16> {
+    if named.is_empty() {
+        listening
+    } else {
+        named.to_vec()
+    }
+}
+
 fn listening_ports() -> Result<Vec<u16>, String> {
-    // Seeded from config, as link.py does, then whatever is actually
-    // listening. The key exists for the ports that are not visibly
-    // listening at the moment you look.
-    let mut ports: Vec<u16> = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
+    let named: Vec<u16> = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
+    if !named.is_empty() {
+        return Ok(ports_to_watch(&named, Vec::new()));
+    }
+    let mut ports: Vec<u16> = Vec::new();
     for line in run_or(&["ss", "-tlnH"])?.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
         if let Some(local) = cols.get(3) {
@@ -161,7 +185,7 @@ fn listening_ports() -> Result<Vec<u16>, String> {
             }
         }
     }
-    Ok(ports)
+    Ok(ports_to_watch(&named, ports))
 }
 
 /// The kernel's own numbers for one socket.
@@ -1463,6 +1487,29 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Naming ports pins the set. It used to add to it.
+    ///
+    /// The configured list was joined with everything `ss` reported
+    /// listening, so naming a port could only ever widen the watch — and
+    /// the reason to name one is to stop watching something else, which the
+    /// README says outright: "worth doing if something else here accepts
+    /// connections you would rather not watch." A union cannot do that, so
+    /// the key did the opposite of what it was for and nothing said so.
+    #[test]
+    fn naming_ports_pins_the_set_rather_than_adding_to_it() {
+        // Named beats discovered, and the ones not named are dropped.
+        assert_eq!(ports_to_watch(&[443], vec![22, 80, 443]), vec![443]);
+        // A named port is watched even when nothing is listening on it,
+        // which is the case the old seeding existed for.
+        assert_eq!(ports_to_watch(&[9000], vec![22]), vec![9000]);
+        // Naming none means every port this machine listens on.
+        assert_eq!(ports_to_watch(&[], vec![22, 80]), vec![22, 80]);
+        // And naming none on a machine listening on nothing is nothing,
+        // rather than a set that quietly matches everything.
+        assert!(ports_to_watch(&[], Vec::new()).is_empty());
+    }
+
 
     #[test]
     fn both_shapes_on_the_ss_line_are_read() {
