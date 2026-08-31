@@ -4,7 +4,10 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-ICMP replies produced by the installed `ping` command.
+ICMP replies produced by the installed `ping` command. The widget detects the
+installed command's dialect at runtime: iputils supplies `no answer yet`,
+while BSD ping supplies native timeouts or exposes loss through sequence gaps
+and bounded total silence. The same configuration works on Linux and macOS.
 
 ## Settings owned here
 
