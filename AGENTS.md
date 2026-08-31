@@ -11,8 +11,8 @@ filed and already decided against.
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Fourteen widget binaries plus the `opscope` launcher share `opscope-core`;
-build all fifteen with `cargo build --release` from the root.
+Fifteen widget binaries plus the `opscope` launcher share `opscope-core`;
+build all sixteen with `cargo build --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
 gone, and `docs/port-decisions.md` records what the port changed and why.
@@ -163,6 +163,17 @@ which the compiler now makes impossible. It went with the Python.
   write PIDs to a file first.
 - **Pad coloured strings by plain-text length.** `len()` counts escape bytes
   and produces ragged borders; that is what `seg()` and `pad()` are for.
+- **A row wider than the pane is worse than a row that was cut.** Anything
+  built through `seg()` is clipped and safe; a row assembled from prose is
+  not. `months`' reckoning line overflowed a 26-column pane, the terminal
+  wrapped it, and the frame's row count was then a row short — which scrolled
+  the *pinned title* off the top and looked like a widget that had lost its
+  header rather than a sentence that was too long. `pack_hints()` wraps a
+  sentence as happily as a footer if each word is handed to it as a hint, and
+  a single word longer than the pane still has to be broken by hand. Measure
+  every row of a frame against the width it was built for, at every width —
+  the bug appears only below about thirty columns, which is not where anyone
+  looks.
 - **GitHub search returns at most 100 nodes per page.** Anything counting
   records must paginate or, better, ask for `issueCount` aggregates — which
   cost one rate-limit point per *request*, not per alias.

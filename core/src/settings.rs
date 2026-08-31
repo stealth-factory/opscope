@@ -1862,6 +1862,19 @@ fn zone_rank(zone: &str, query: &str) -> Option<u8> {
 /// Anything in the array that is not a `[label, zone]` pair is passed over
 /// rather than repaired: this screen adds and removes whole entries, and a
 /// half-understood one is the user's to fix in the file.
+/// Whether a timezone field holds one zone rather than a list of them.
+///
+/// `clocks` keeps a list of cities; `months` keeps the single zone its dates
+/// are reckoned in. Both want the same searchable database, and they differ
+/// only in what choosing does - so the shape of the field decides it, rather
+/// than a second declaration in `settings.json` that could disagree with the
+/// default sitting next to it.
+fn one_zone(app: &App, index: usize) -> bool {
+    app.fields.get(index).is_some_and(|f| {
+        matches!(picker_kind(app, &f.key), Some(PickKind::Timezone)) && !f.default.is_array()
+    })
+}
+
 fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
     let Some(field) = app.fields.get(index) else {
         return Vec::new();
@@ -1881,6 +1894,15 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
         if matches!(picker_kind(app, &field.key), Some(PickKind::Map)) {
             return map.keys().map(|k| (k.clone(), k.clone())).collect();
         }
+    }
+    // One zone rather than a list of them. Empty means unset - the widget's
+    // own fallback - and an empty string ticked as a choice would be a row
+    // saying nothing is the answer.
+    if one_zone(app, index) {
+        return match held.and_then(Value::as_str) {
+            Some(one) if !one.is_empty() => vec![(one.to_string(), zone_label(one))],
+            _ => Vec::new(),
+        };
     }
     held.and_then(Value::as_array)
         .map(|rows| {
@@ -1946,7 +1968,12 @@ fn zone_choices(app: &App, index: usize, query: &str, show_all: bool) -> Vec<(St
         return Vec::new();
     };
     let picked = picked_zones(app, index);
-    if kind.opens_on_chosen() && query.is_empty() {
+    // Opening on what is already chosen is right for a list you are adding
+    // to or removing from - four cities rather than four hidden in six
+    // hundred. It is wrong for a field holding one: there the reader came to
+    // change it, and a screen showing only the value they already have, or
+    // nothing at all when it is unset, is a picker that offers no choice.
+    if kind.opens_on_chosen() && query.is_empty() && !one_zone(app, index) {
         return picked.into_iter().map(|z| (z, true)).collect();
     }
     // A catalogue shows the reader's own entries until they ask for the rest
@@ -2033,6 +2060,19 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
         return;
     };
     let key = field.key.clone();
+    // One zone rather than a list of them: choosing replaces, and there is
+    // nothing to toggle. The picker already routes a scalar to the same arm
+    // as any other single-answer field, so this is a second door onto the
+    // same room - guarded here too, because two entry points that disagree
+    // is how a field ends up holding a one-element array that the widget
+    // reads back as no zone at all.
+    if one_zone(app, index) {
+        match write_field(app, index, Value::String(zone.to_string())) {
+            Ok(()) => app.status = Some(format!("Set to {zone}.")),
+            Err(e) => app.status = Some(e),
+        }
+        return;
+    }
     // A catalogue is an object: the name is a key, and what it holds are the
     // numbers set against it. Ticking writes an empty object rather than any
     // values - membership alone - so every kind keeps reading the widget's
@@ -2288,10 +2328,14 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         .fields
         .get(index)
         .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::Free)));
-    let one = app
-        .fields
-        .get(index)
-        .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::One(_))));
+    // A zone field holding one value answers here too: the list it offers is
+    // the database rather than a handful of names, but choosing from it means
+    // the same thing - set this, and go back.
+    let one = one_zone(app, index)
+        || app
+            .fields
+            .get(index)
+            .is_some_and(|f| matches!(picker_kind(app, &f.key), Some(PickKind::One(_))));
     let map = app
         .fields
         .get(index)
@@ -3145,7 +3189,10 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // Said here rather than only in the file's comment: someone arranging
     // this list is exactly the person who would otherwise assume the order
     // they choose is the order they get.
-    let zones = matches!(kind, PickKind::Timezone);
+    // A list of zones and a single zone want the same database and different
+    // verbs, so the footer branches on which this is rather than on the kind.
+    let single = one_zone(app, *index);
+    let zones = matches!(kind, PickKind::Timezone) && !single;
     let heading = match (zones, query.is_empty()) {
         (true, true) => format!(
             "  {} configured. Type to search {} zones and add more.",
@@ -3179,6 +3226,12 @@ fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             if chosen == 1 { "entry" } else { "entries" }
         ),
         PickKind::One(named) => format!("  One of {}.", named.len()),
+        // A single zone is one of a set too, and "1 of 597 chosen" reads as
+        // a checklist somebody has started - which it is not, and never
+        // will be, because choosing a second replaces the first.
+        PickKind::Timezone if single => {
+            format!("  One of {}.", chrono_tz::TZ_VARIANTS.len())
+        }
         PickKind::Map if chosen == 0 && query.is_empty() => {
             "  Nothing here yet. Type a name and press ↵.".to_string()
         }
@@ -3228,6 +3281,9 @@ format!(
     // A lookup keyed by name has no order to explain, so it says nothing
     // rather than something true of a list and meaningless here.
     let ordering = match &kind {
+        // Nothing is being ordered when the field holds one, and "not in the
+        // order added" describes an adding this screen is not doing.
+        PickKind::Timezone if single => None,
         PickKind::Timezone => Some("  Drawn west to east by each zone's offset, not in the order added."),
         PickKind::Choices(_) => Some("  Shown in the order picked here."),
         PickKind::Free => Some("  In the order you add them."),
@@ -3468,6 +3524,22 @@ format!(
         }
         h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
         h.push(vec![(p.dim.as_str(), "esc done".into())]);
+        h
+    } else if single {
+        // One zone, chosen from six hundred: the same verbs as any other
+        // scalar with named answers, and the search box on top of them.
+        let mut h = vec![vec![
+            (p.accent.as_str(), "↵".into()),
+            (p.dim.as_str(), " choose it".into()),
+        ]];
+        if !query.is_empty() {
+            h.push(vec![
+                (p.accent.as_str(), "ctrl-u".into()),
+                (p.dim.as_str(), " clear".into()),
+            ]);
+        }
+        h.push(vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " pick".into())]);
+        h.push(vec![(p.dim.as_str(), "esc without changing it".into())]);
         h
     } else if !zones {
         // Everything is on screen, ticked or not, so one verb covers it.
@@ -4316,6 +4388,50 @@ mod tests {
             Some(serde_json::json!({"picker": "timezone"})),
         );
         assert!(matches!(picker_kind(&zones, "cities"), Some(PickKind::Timezone)));
+    }
+
+    /// One zone gets the same database as a list of them, and choosing from
+    /// it sets the field rather than adding to it.
+    ///
+    /// `clocks` keeps a list of cities; `months` keeps the single zone its
+    /// dates are reckoned in. Before this, only the list shape was served:
+    /// `months` declared no picker at all and got a text box, so an IANA
+    /// name had to be typed from memory beside a screen that already holds
+    /// every one of them.
+    #[test]
+    fn a_single_zone_field_picks_one_rather_than_collecting_them() {
+        let rule = Some(serde_json::json!({"picker": "timezone"}));
+        let mut one = field_app("timezone", serde_json::json!(""), rule.clone());
+        let many = field_app("cities", serde_json::json!([]), rule);
+
+        // Both are the timezone picker; they differ only in shape.
+        assert!(matches!(picker_kind(&one, "timezone"), Some(PickKind::Timezone)));
+        assert!(matches!(picker_kind(&many, "cities"), Some(PickKind::Timezone)));
+        assert!(one_zone(&one, 0), "a string default holds one zone");
+        assert!(!one_zone(&many, 0), "an array default collects them");
+
+        // Unset, the scalar still offers the database. Opening on what is
+        // already chosen is right for a list and useless here: it would show
+        // an empty screen for a field whose whole purpose is choosing.
+        let offered = zone_choices(&one, 0, "", false);
+        assert!(offered.len() > 100, "offered {} zones", offered.len());
+        assert!(zone_choices(&many, 0, "", false).is_empty());
+
+        // And it searches, which is the thing that was missing.
+        let found = zone_choices(&one, 0, "tokyo", false);
+        assert!(
+            found.iter().any(|(z, _)| z == "Asia/Tokyo"),
+            "searching for tokyo found {found:?}"
+        );
+
+        // What choosing *writes* is not asserted here. `write_field` reads
+        // and replaces the real config file and refuses when the source has
+        // moved under it, so a unit test sees that refusal rather than the
+        // value - which is why the rest of this module tests `set_json_path`
+        // and its siblings instead. A scalar zone takes the same write as
+        // any other single-answer field, which `PickKind::One` already
+        // exercises; what is new here is everything above, and it is checked
+        // on screen in the widget as well.
     }
 
     /// A field the widget handed no table for keeps the box it always had.

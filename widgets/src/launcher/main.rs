@@ -60,6 +60,7 @@ const WIDGETS: &[Widget] = &[
     widget!("linear"),
     widget!("link"),
     widget!("matrix"),
+    widget!("months"),
     widget!("netwatch"),
     widget!("ports"),
     widget!("tailnet"),

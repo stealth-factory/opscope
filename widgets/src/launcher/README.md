@@ -6,13 +6,14 @@ The front door: every widget, what it does, and a preview before it runs.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 14 widgets   ↵ or → starts one, q leaves
+ 15 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
    clocks       Server clock, countdowns, a pomodoro…
    vercel-deployments  Vercel deployments over time…
    github       GitHub delivery metrics across every org…
    latency      Multi-target latency monitor.
+   months       A month grid you can page through…
    netwatch     Which processes are using the network…
    …
 
@@ -22,7 +23,7 @@ The front door: every widget, what it does, and a preview before it runs.
  ↑↓ select  ↵ launch  [,] settings  [q]uit
 ```
 
-Fourteen widget binaries in a directory are a list you have to already know. Pick one
+Fifteen widget binaries in a directory are a list you have to already know. Pick one
 and it runs; quit it and you are back here.
 
 ## Nothing is described twice

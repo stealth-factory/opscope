@@ -121,6 +121,7 @@ went once the ports were accepted:
 | `vercel-deployments` | Build logs, a scrolling detail screen, `[/]` filter, copy on its own page |
 | `github` | A per-account screen with the oldest open PRs and `[c]opy` |
 | `matrix` | Answers `q`. `matrix.py` has no keyboard at all and exits on Ctrl-C |
+| `months` | A widget with no Python ancestor at all: a month grid, grown around today so there are always two weeks of context either side of it, with ISO week numbers labelled as ISO and the zone the dates are reckoned in on screen. The three decisions behind it — why the month is taller than a month, why only the month today is in grows, and why the grid area keeps a fixed height — are recorded in [its own README](../widgets/src/widgets/months/README.md#why-the-month-is-taller-than-a-month) |
 
 ## Where the Rust deliberately agrees
 

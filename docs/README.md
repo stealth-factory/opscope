@@ -29,6 +29,7 @@ navigation, not itself a widget.
 | [`link`](../widgets/src/widgets/link/README.md) | How good the connection is between this machine and whoever is connected to it — measured, not probed. |
 | [`clocks`](../widgets/src/widgets/clocks/README.md) | This server's clock, the clocks counting down, a pomodoro, and everyone else's clock — the four things you need to know about time while working across timezones. |
 | [`matrix`](../widgets/src/widgets/matrix/README.md) | Digital rain. It computes nothing and reports no data on purpose. |
+| [`months`](../widgets/src/widgets/months/README.md) | A month grid you can page through, with today in context — every square computed from the machine clock and the timezone database rather than fetched from anywhere. |
 
 ## About the repository
 
