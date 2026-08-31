@@ -191,6 +191,15 @@ reading. ISO week numbers are either part of how you work or they are noise.
 own zone, which is what `clocks` shows. A name the database does not know
 falls back to this machine and says so on the pane.
 
+`↵` on that row opens **the same searchable list of zones `clocks` uses** —
+all 597 of them, filtered as you type — rather than asking for a name to be
+typed from memory beside a screen that already holds every one. The
+difference from `clocks` is only what choosing does: `clocks` collects
+cities, so a zone is added or removed; this holds one, so a zone replaces
+whatever was there and the screen closes. Nothing declares that in
+`settings.json` — the shape of the field decides it, so the two cannot
+disagree.
+
 Writing anything here restarts the widget on the way out of the screen, so a
 new week start or zone is on the grid immediately: a running widget holds the
 config it launched with, and the shared screen does the relaunch rather than

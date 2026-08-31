@@ -7,7 +7,8 @@
       ]
     },
     "timezone": {
-      "unit": "IANA timezone name, or empty for this machine's own"
+      "unit": "IANA timezone name, or empty for this machine's own",
+      "picker": "timezone"
     }
   },
   "_week_start_comment": "Which day a week begins on. Sunday by default. It moves where the row breaks and nothing else: week numbers stay ISO 8601, which is Monday-reckoned whatever the grid does and says so on the pane, and the weekend stays Saturday and Sunday.",
