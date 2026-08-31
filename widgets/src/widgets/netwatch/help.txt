@@ -1,32 +1,29 @@
 Which processes are using the network, how much, and how fast.
 
-`nettop` answers this on macOS and has no equivalent here. What Linux does
-have is the kernel's own per-socket accounting: `ss -tine` reports bytes_sent
-and bytes_received for every TCP socket along with its inode, and the inode
-appears in /proc/<pid>/fd, which is what ties bytes to a process. No packet
-capture, no kernel module, no root.
+Linux reads per-socket TCP counters from `ss -tine` and joins their inodes to
+/proc/<pid>/fd. macOS has no per-socket equivalent, so it reads all-protocol
+per-process totals from `nettop`. The pane names which measurement its rows
+carry. Neither needs packet capture, a kernel module, or root.
 
     netwatch [-i SECONDS] [-n COUNT] [--sort total|live]
              [--external] [--plain]
 
-Only traffic that leaves the machine is counted. Loopback is excluded, and so
-is any connection to one of this machine's own addresses - talking to your own
-10.x or tailnet address never reaches a wire, however external it looks in the
-socket table. --external is the narrower question of internet-only, and drops
-the local network and the tailnet too.
+On Linux, only traffic that leaves the machine is counted. --external narrows
+that to internet peers. Per-process nettop output has no peer field, so macOS
+cannot apply that filter and says so in the pane and README.
 
 Totals start at zero: the first sample is a baseline and only what happens
 after it is counted. A process that exits keeps what it used, marked so, since
 "what has been eating the connection" is usually asked after the thing has
 stopped.
 
-TCP only, which is the honest limit of this method - see the netwatch README.
+Linux process rows are TCP only. macOS process rows include every protocol.
+See the netwatch README for the platform contract.
 
-Enter opens one process: its command, every connection it holds separately,
-and the files it currently has open with how fast each is growing - which is
-the closest thing to "which file is it downloading" that exists outside the
-encrypted stream. The URL and the remote filename are inside TLS and are not
-readable from here by any means.
+Enter opens one process. Linux can show attributed endpoints and connections;
+macOS marks those unavailable because nettop provides only process totals.
+Both show command and open files where the OS permits it. The URL and remote
+filename remain inside TLS.
 
 Keys: up/down select, enter opens one, esc goes back, 1 sorts by total,
 2 by current rate, o shows the daemons you do not own, r rezeroes,

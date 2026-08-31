@@ -2211,7 +2211,6 @@ fn opens_proc_sees_a_path_and_skips_a_mention() {
 /// new `/proc` reader with no explanation looks on macOS like a source
 /// with nothing in it.
 const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
-    ("netwatch", "OPS-61"),
     ("tailnet", "process table is /proc; no macOS source yet"),
     (
         "herdr-panes",
