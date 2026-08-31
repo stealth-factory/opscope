@@ -454,6 +454,23 @@ fn columns(w: usize) -> Columns {
     }
 }
 
+/// Pin the title and show one window onto the complete list body.
+///
+/// The caller builds every section and every deployment first. Keeping the
+/// windowing here, after that work, prevents charts above the list from
+/// becoming a second fixed header in a short pane.
+fn window_rows(rows: &[String], room: usize, scroll: usize) -> (Vec<String>, usize) {
+    let (head, rest) = rows.split_at(1.min(rows.len()));
+    let room_below = room.saturating_sub(head.len()).max(1);
+    let scroll = scroll.min(rest.len().saturating_sub(room_below));
+    let mut frame = head.to_vec();
+    frame.extend(rest.iter().skip(scroll).take(room_below).cloned());
+    while frame.len() < room {
+        frame.push(String::new());
+    }
+    (frame, scroll)
+}
+
 /// Deployments per time bucket, coloured by the worst outcome in it.
 fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (String, usize) {
     let cols = w.saturating_sub(2).max(10);
@@ -1540,20 +1557,12 @@ fn main() {
         ));
         let cols = columns(w);
         let per_item = if cols.single { 1 } else { 2 };
-        visible = (h.saturating_sub(rows.len() + 1) / per_item).max(1);
-        scroll = scroll.min(shown.len().saturating_sub(visible));
-        // Only on the frame a key moved the cursor. Chasing it every frame
-        // pulls the list back to the selection the instant the wheel moves
-        // it, which reads as the wheel doing nothing at all.
-        if moved {
-            scroll = tc::follow(scroll, selected, visible);
-            moved = false;
-        }
-        for (i, d) in shown.iter().enumerate().skip(scroll).take(visible) {
-            if rows.len() >= h.saturating_sub(1) {
-                break;
-            }
+        let mut cursor = None;
+        for (i, d) in shown.iter().enumerate() {
             let here = i == selected;
+            if here {
+                cursor = Some(rows.len());
+            }
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let meta = &d["meta"];
             let state = text(d, "state");
@@ -1609,7 +1618,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
-            if !cols.single && rows.len() < h.saturating_sub(1) {
+            if !cols.single {
                 rows.push(tc::seg(
                     &[
                         (&c(if here { &p.txt } else { &p.msg }), format!("   {}", subject)),
@@ -1642,12 +1651,26 @@ fn main() {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        rows.truncate(h.saturating_sub(footer.len()));
-        while rows.len() < h.saturating_sub(footer.len()) {
-            rows.push(String::new());
+        let room = h.saturating_sub(footer.len());
+        let head_len = 1.min(rows.len());
+        let room_below = room.saturating_sub(head_len).max(1);
+        visible = (room_below / per_item).max(1);
+        // Only on the frame a key moved the cursor. Chasing it every frame
+        // pulls the body back to the selection the instant the wheel moves
+        // it, which reads as the wheel doing nothing at all.
+        if moved {
+            if let Some(at) = cursor {
+                scroll = tc::follow(scroll, at.saturating_sub(head_len), room_below);
+            }
+            moved = false;
         }
-        rows.extend(footer);
-        tc::draw(&rows, w, h);
+        // The summary, charts, and complete deployment list are one body.
+        // Only the title is fixed; a short pane scrolls past the charts to
+        // the rows instead of turning the list into a one-row porthole.
+        let (mut frame, clamped) = window_rows(&rows, room, scroll);
+        scroll = clamped;
+        frame.extend(footer);
+        tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(250));
     }
 }
@@ -1891,6 +1914,37 @@ mod tests {
         assert_eq!(columns(200).project, 20);
         assert_eq!(columns(200).branch, 34);
         assert_eq!(columns(40).branch, 12);
+    }
+
+    #[test]
+    fn the_list_window_scrolls_charts_away_and_reaches_deployments() {
+        let rows: Vec<String> = [
+            "TITLE",
+            "summary",
+            "ACTIVITY",
+            "activity chart",
+            "BUILD TIME",
+            "build chart",
+            "RECENT",
+            "deployment 1",
+            "deployment 2",
+            "deployment 3",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let (top, at_top) = window_rows(&rows, 5, 0);
+        assert_eq!(at_top, 0);
+        assert_eq!(top, ["TITLE", "summary", "ACTIVITY", "activity chart", "BUILD TIME"]);
+
+        let (bottom, at_bottom) = window_rows(&rows, 5, usize::MAX);
+        assert_eq!(at_bottom, 5);
+        assert_eq!(
+            bottom,
+            ["TITLE", "RECENT", "deployment 1", "deployment 2", "deployment 3"]
+        );
+        assert!(!bottom.iter().any(|row| row.contains("chart")));
     }
 
     #[test]
