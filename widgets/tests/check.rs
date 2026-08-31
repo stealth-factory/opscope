@@ -1057,16 +1057,46 @@ fn example_keys() -> BTreeSet<String> {
     keys
 }
 
-/// Line comments dropped. Strings that teach a key live in code; the
-/// comments that mention one while explaining the port are not on screen.
+/// Line comments dropped, including a trailing `//` after code.
+///
+/// Full-line comments were never on screen. A trailing one is not either,
+/// but `quoted_with_window` cannot tell a string in a comment from a
+/// string that is drawn, so `let _ = 0; // "set github.token"` would fail
+/// the remedy check for a message nobody sees. Sequences inside string
+/// literals stay: `"http://example"` is not a comment.
 fn without_line_comments(src: &str) -> String {
     src.lines()
-        .filter(|line| {
+        .filter_map(|line| {
             let t = line.trim_start();
-            !t.starts_with("//")
+            if t.starts_with("//") {
+                return None;
+            }
+            Some(strip_trailing_comment(line))
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn strip_trailing_comment(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut in_str = false;
+    while i < chars.len() {
+        if in_str && chars[i] == '\\' && i + 1 < chars.len() {
+            i += 2;
+            continue;
+        }
+        if chars[i] == '"' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if !in_str && chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            return chars[..i].iter().collect();
+        }
+        i += 1;
+    }
+    line.to_string()
 }
 
 /// Each double-quoted string and a window of source around it.
@@ -1160,6 +1190,26 @@ fn config_remedy_matcher_sees_a_key_and_skips_a_url() {
         "github.token"
     ));
     assert!(contains_dotted_key("set github.token or", "github.token"));
+}
+
+#[test]
+fn a_trailing_comment_is_not_a_config_remedy() {
+    // The string is real, the comment is not on screen, and a check that
+    // cannot tell them apart cries wolf.
+    let src = r#"
+let keep = "http://example";
+let _ = 0; // "set github.token in config.json"
+let live = "no token: set github.token";
+"#;
+    let code = without_line_comments(src);
+    let keys: BTreeSet<String> = ["github.token".into()].into_iter().collect();
+    let found: Vec<String> = quoted_with_window(&code)
+        .into_iter()
+        .filter(|(text, _)| is_config_remedy(text, &keys))
+        .map(|(text, _)| text)
+        .collect();
+    assert_eq!(found, vec!["no token: set github.token".to_string()]);
+    assert!(!code.contains("in config.json"), "{code}");
 }
 
 #[test]

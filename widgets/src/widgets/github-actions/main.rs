@@ -2015,7 +2015,7 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", scope))], w - 1));
         }
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.fail.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.fail.as_str(), &err, w));
         }
         let mut bits: Vec<String> = Vec::new();
         if FILTERS[filter] != "all" {

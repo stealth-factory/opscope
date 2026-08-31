@@ -826,14 +826,19 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         w - 1,
     ));
     out.extend(
-        wrap_text(
+        tc::wrap_words(
             &tc::missing_config(
                 "Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.",
             ),
-            w.saturating_sub(4).max(20),
+            w.saturating_sub(3).max(1),
         )
         .into_iter()
-        .map(|line| tc::seg(&[(p.dim.as_str(), format!("  {line}"))], w - 1)),
+        .map(|line| {
+            tc::seg(
+                &[(p.dim.as_str(), format!("  {line}"))],
+                w.saturating_sub(1).max(1),
+            )
+        }),
     );
     out.push(String::new());
     out
@@ -1493,6 +1498,47 @@ mod tests {
         let joined = freshness(&ok, 110, &p).join("\n");
         assert!(joined.contains("live"), "{}", joined);
         assert!(!joined.contains(" · the"), "invented a reason: {}", joined);
+    }
+
+    fn visible(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_narrow_not_live_badge_keeps_the_settings_clause() {
+        // Width 20 used to floor the wrap budget, so agent_usage.grok_ping
+        // (21) ran past `seg`'s w-1 and the settings key was the half that
+        // fell off. Trim each row before joining: a word the pane cannot
+        // hold is hard-broken, and the indent would hide the join.
+        let p = palette();
+        let d = Data {
+            quota: newest_quota([LOG_LINE].into_iter()),
+            quota_live: false,
+            quota_at: 0.0,
+            quota_every: 0.0,
+            ..Data::default()
+        };
+        let rows = freshness(&d, 20, &p);
+        for row in &rows {
+            let vis = visible(row);
+            assert!(vis.chars().count() <= 20, "overflow at 20: {vis:?}");
+        }
+        let glued: String = rows.iter().map(|r| visible(r).trim().to_string()).collect();
+        assert!(glued.contains("grok_ping"), "{glued}");
+        assert!(glued.contains("`,`"), "{glued}");
     }
 
     #[test]

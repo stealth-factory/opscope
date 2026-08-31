@@ -611,15 +611,27 @@ fn graph(
         // "collecting…" is a promise the widget cannot keep - it is the
         // pane looking busy over an empty list, which is the shape this
         // repo's checks exist to catch.
-        let why = if targets.is_empty() {
-            format!(
-                "  {}",
-                tc::missing_config("no hosts configured - set latency.hosts")
+        if targets.is_empty() {
+            // Wrapped, not clipped: the settings clause is the half of this
+            // sentence that used to fall off an eighty-column pane.
+            let rows = tc::wrap_words(
+                &tc::missing_config("no hosts configured - set latency.hosts"),
+                w.saturating_sub(3).max(1),
             )
-        } else {
-            "  collecting…".into()
-        };
-        return (vec![tc::seg(&[(p.dim.as_str(), why.into())], w - 1)], span);
+            .into_iter()
+            .map(|line| {
+                tc::seg(
+                    &[(p.dim.as_str(), format!("  {line}"))],
+                    w.saturating_sub(1).max(1),
+                )
+            })
+            .collect();
+            return (rows, span);
+        }
+        return (
+            vec![tc::seg(&[(p.dim.as_str(), "  collecting…".into())], w - 1)],
+            span,
+        );
     }
     let lo = seen.iter().cloned().fold(f64::INFINITY, f64::min).max(0.05) * 0.8;
     let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
@@ -1581,6 +1593,13 @@ mod tests {
         assert!(shown.contains("latency.hosts"), "{shown}");
         assert!(shown.contains(tc::SET_IN_SETTINGS), "{shown}");
         assert!(!shown.contains("collecting"), "{shown}");
+        // And at the width the wall actually uses, not only a wide one.
+        // The clause may wrap; the key it names must still be on screen.
+        let (narrow, _) = graph(&[], 40, 8, 1.0, "median", None, &palette());
+        let shown = narrow.join("\n");
+        assert!(shown.contains("`,`"), "{shown}");
+        assert!(shown.contains("latency.hosts"), "{shown}");
+        assert!(narrow.len() > 1, "one line means it was clipped, not wrapped");
     }
 
 }

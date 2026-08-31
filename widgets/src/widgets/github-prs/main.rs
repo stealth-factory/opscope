@@ -1412,7 +1412,7 @@ fn main() {
         }
         rows.push(tc::seg(&count, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
 
         let mut stack_cursor: Option<usize> = None;

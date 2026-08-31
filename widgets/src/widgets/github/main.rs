@@ -1389,7 +1389,7 @@ fn main() {
         }
         rows.push(tc::seg(&head, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
         if stats.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));

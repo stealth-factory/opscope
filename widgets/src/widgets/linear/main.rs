@@ -2195,7 +2195,7 @@ fn main() {
         }
         rows.push(tc::seg(&head, w - 1));
         if !s.err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", s.err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &s.err, w));
         }
         if s.teams.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
