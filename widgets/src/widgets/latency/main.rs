@@ -399,6 +399,15 @@ impl SilenceClock {
         if now < self.next_loss {
             return 0;
         }
+        // The watcher ticks about every 100ms while the machine is awake.
+        // A single call that spans more than the grace period is a clock
+        // jump — sleep, a paused VM — not ping transmitting into a void.
+        // Inventing those samples would report a real outage for a machine
+        // that was not on the network at all.
+        if now - self.next_loss > self.timeout {
+            self.next_loss = now + self.timeout;
+            return 0;
+        }
         let count = 1 + ((now - self.next_loss) / self.interval).floor() as usize;
         self.next_loss += count as f64 * self.interval;
         count.min(cap)
@@ -1659,10 +1668,19 @@ mod tests {
     }
 
     #[test]
-    fn silence_catch_up_is_bounded_but_advances_past_the_whole_pause() {
+    fn a_wall_clock_jump_does_not_invent_losses_ping_never_sent() {
         let mut clock = SilenceClock::new(0.0, 0.2);
-        assert_eq!(clock.losses_due(86_400.0, 600), 600);
+        // A sleeping Mac, or any pause longer than the grace period. Ping
+        // was frozen; those intervals were never on the wire.
         assert_eq!(clock.losses_due(86_400.0, 600), 0);
+        assert_eq!(clock.losses_due(86_400.0, 600), 0);
+        // After wake the clock is re-armed, so a real outage still records
+        // once grace elapses.
+        assert_eq!(clock.losses_due(86_402.0, 600), 1);
+        // A short lid-close is the same shape, not a special day-long case.
+        let mut nap = SilenceClock::new(0.0, 0.5);
+        assert_eq!(nap.losses_due(60.0, 600), 0);
+        assert_eq!(nap.losses_due(62.0, 600), 1);
     }
 
     #[test]

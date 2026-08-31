@@ -16,6 +16,9 @@ Linux, and another ping implementation can be installed on a Linux host.
 Sequence gaps cover intermittent loss. Total silence has no next sequence
 number to reveal the gap, so after `max(3 × interval, 2 seconds)` the watcher
 records one missing sample per interval until a reply resets the clock. A
+wall-clock jump larger than that grace — a sleeping Mac, a paused VM — is
+not treated as loss: ping was frozen and transmitted nothing, so the clock
+re-arms rather than filling the window with samples that were never sent. A
 reply after either form of loss uses the ordinary recovery path; statistics,
 events, retained history and drawing are otherwise unchanged.
 
