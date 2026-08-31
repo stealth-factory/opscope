@@ -15,3 +15,4 @@ serde_json = "1"
 # boundary without this having to parse TZif itself.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
+unicode-width = "0.2.2"

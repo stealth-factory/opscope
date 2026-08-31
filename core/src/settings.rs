@@ -1222,7 +1222,7 @@ fn move_sel(app: &mut App, delta: isize) {
 /// sentence wants. Everything prose on these screens goes through here so a
 /// narrow pane costs somebody a line break rather than the end of a thought.
 fn say(body: &mut Vec<String>, colour: &str, indent: &str, text: &str, w: usize) {
-    let room = w.saturating_sub(indent.chars().count() + 2).max(8);
+    let room = w.saturating_sub(crate::display_width(indent) + 2).max(8);
     for line in wrap_help(text, room, usize::MAX) {
         body.push(crate::seg(
             &[(colour, format!("{indent}{line}"))],
@@ -1238,15 +1238,23 @@ fn wrap_help(text: &str, width: usize, limit: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut rest: Vec<char> = text.trim().chars().collect();
     while !rest.is_empty() && lines.len() < limit {
-        if rest.len() <= width {
-            lines.push(rest.iter().collect());
+        let remaining: String = rest.iter().collect();
+        let (fitted, _, clipped) = crate::clip_width(&remaining, width);
+        if !clipped {
+            lines.push(remaining);
             break;
         }
-        let cut = rest[..width.min(rest.len())]
-            .iter()
-            .rposition(|c| *c == ' ')
-            .filter(|c| *c > width / 3)
-            .unwrap_or(width);
+        let fit = fitted.chars().count();
+        let cut = (0..fit)
+            .rev()
+            .find(|at| {
+                rest[*at] == ' '
+                    && crate::display_width(&rest[..*at].iter().collect::<String>()) > width / 3
+            })
+            // `say` gives this at least eight columns, so one printable
+            // character always fits. Keep the fallback defensive for direct
+            // callers with a smaller width.
+            .unwrap_or(fit.max(1).min(rest.len()));
         lines.push(rest[..cut].iter().collect());
         rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
     }
@@ -2828,7 +2836,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     let key_w = app
         .fields
         .iter()
-        .map(|f| f.label().chars().count())
+        .map(|f| crate::display_width(&f.label()))
         .max()
         .unwrap_or(8)
         .max(8);
@@ -3135,7 +3143,7 @@ fn input_row(
     let hint = if text.is_empty() && !placeholder.is_empty() {
         // Only where it fits, and never over what has been typed.
         let room_left = box_w.saturating_sub(2);
-        if placeholder.chars().count() <= room_left {
+        if crate::display_width(placeholder) <= room_left {
             format!(" {placeholder}")
         } else {
             String::new()
@@ -4514,6 +4522,17 @@ mod tests {
             .find(|f| f.section == "tailnet" && f.key == "history")
             .unwrap();
         assert!(history.help.contains("rate samples"));
+    }
+
+    #[test]
+    fn wide_help_wraps_without_losing_its_suffix() {
+        let text = "prefix 界界 suffix";
+        let lines = wrap_help(text, 8, usize::MAX);
+        assert!(
+            lines.iter().all(|line| crate::display_width(line) <= 8),
+            "{lines:?}"
+        );
+        assert_eq!(lines.join(" "), text);
     }
 
     #[test]
