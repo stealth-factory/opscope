@@ -1214,6 +1214,258 @@ fn every_key_in_the_example_is_read_by_the_widget_it_belongs_to() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+/// The canonical section a widget owns, and the leftover name it still reads.
+fn settings_names(src: &str) -> Option<(String, Option<String>)> {
+    let marker = "SettingsSpec {";
+    let at = src.find(marker)?;
+    let block = &src[at..src.len().min(at + 600)];
+    let section = quoted_field(block, "section")?;
+    let legacy = if block.contains("legacy_section: None") {
+        None
+    } else {
+        quoted_field(block, "legacy_section")
+    };
+    Some((section, legacy))
+}
+
+/// The quoted string after `field:`, not matching a longer field that
+/// happens to end with the same name (`legacy_section` contains `section`).
+fn quoted_field(src: &str, field: &str) -> Option<String> {
+    let marker = format!("{field}:");
+    let mut from = 0;
+    while let Some(at) = src[from..].find(&marker) {
+        let start = from + at;
+        if start > 0 {
+            let prev = src[..start].chars().next_back().unwrap_or('\n');
+            if prev.is_ascii_alphanumeric() || prev == '_' {
+                from = start + marker.len();
+                continue;
+            }
+        }
+        let rest = &src[start + marker.len()..];
+        let quote = rest.find('"')?;
+        let after = &rest[quote + 1..];
+        let end = after.find('"')?;
+        return Some(after[..end].to_string());
+    }
+    None
+}
+
+/// `{legacy}.{key}` hits in `text`, ignoring a longer name that only
+/// ends with the leftover section (`vercel_deployments.token` is not
+/// `deployments.token`).
+fn dotted_legacy_keys(text: &str, legacy: &str, keys: &BTreeSet<String>) -> Vec<String> {
+    let needle = format!("{legacy}.");
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(&needle) {
+        let start = from + at;
+        let own_word = start == 0 || {
+            let prev = text[..start].chars().next_back().unwrap();
+            !(prev.is_ascii_alphanumeric() || prev == '_')
+        };
+        from = start + needle.len();
+        if !own_word {
+            continue;
+        }
+        let key: String = text[from..]
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+            .collect();
+        if keys.contains(&key) {
+            found.push(format!("{legacy}.{key}"));
+        }
+    }
+    found
+}
+
+/// Double-quoted literals on one line, stopping at a `//` that is not
+/// inside a string. Line-continued strings must already have been joined.
+fn quoted_on_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            break;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    out.push(line[start..i].to_string());
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn settings_json_keys(name: &str) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(
+        root()
+            .join("widgets/src/widgets")
+            .join(name)
+            .join("settings.json"),
+    )
+    .unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|o| {
+            o.keys()
+                .filter(|k| !k.starts_with('_'))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Messages that still name the leftover config section.
+///
+/// `src` is the widget's Rust (tests already stripped); `help` is help.txt.
+/// Those are the two surfaces that teach a reader what to set. README and
+/// CONFIGURE.md name the old section on purpose, as the thing that is
+/// still read.
+fn leftover_section_taught(
+    src: &str,
+    help: &str,
+    legacy: &str,
+    keys: &BTreeSet<String>,
+) -> Vec<String> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let joined = src.replace("\\\n", "");
+    for line in joined.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        for lit in quoted_on_line(line) {
+            found.extend(dotted_legacy_keys(&lit, legacy, keys));
+        }
+    }
+    found.extend(dotted_legacy_keys(help, legacy, keys));
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn leftover_section_matcher_sees_the_old_name_and_not_the_new_one() {
+    let keys: BTreeSet<String> = ["token".into()].into_iter().collect();
+    // The shape that shipped: a no-token row naming the leftover section.
+    assert_eq!(
+        dotted_legacy_keys(
+            "no token: set deployments.token in config.json, or $VERCEL_TOKEN",
+            "deployments",
+            &keys
+        ),
+        vec!["deployments.token".to_string()]
+    );
+    // The current name only *ends* with the leftover one.
+    assert!(
+        dotted_legacy_keys(
+            "no token: set vercel_deployments.token in config.json, or $VERCEL_TOKEN",
+            "deployments",
+            &keys
+        )
+        .is_empty()
+    );
+    // A leftover name mentioned as a leftover, without a key, is not a path
+    // to set. github-prs says this out loud so the rename does not stick.
+    assert!(
+        dotted_legacy_keys(
+            "config: reading the old `pr` section — rename it to `github_prs`",
+            "pr",
+            &keys
+        )
+        .is_empty()
+    );
+    // `pr.py` is a file, not a setting.
+    assert!(dotted_legacy_keys("a port of pr.py", "pr", &keys).is_empty());
+
+    let src = r#"
+const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
+    widget: "vercel-deployments",
+    section: "vercel_deployments",
+    legacy_section: Some("deployments"),
+    schema: include_str!("settings.json"),
+    catalogues: &[],
+};
+"#;
+    assert_eq!(
+        settings_names(src),
+        Some(("vercel_deployments".into(), Some("deployments".into())))
+    );
+    assert_eq!(settings_names("legacy_section: None,"), None);
+
+    // A field access is not a message, and a comment is not on screen.
+    let noise = r#"
+        // set deployments.token in config.json
+        g.deployments.clone();
+        let _ = "no token: set vercel_deployments.token in config.json";
+"#;
+    assert!(leftover_section_taught(noise, "", "deployments", &keys).is_empty());
+    let taught = r#"
+        guard.err = format!(
+            "no token: set deployments.token in config.json, or ${}",
+            poll_env
+        );
+"#;
+    assert_eq!(
+        leftover_section_taught(taught, "", "deployments", &keys),
+        vec!["deployments.token".to_string()]
+    );
+    assert_eq!(
+        leftover_section_taught(
+            "",
+            "Credentials: `deployments.token` in config.json",
+            "deployments",
+            &keys
+        ),
+        vec!["deployments.token".to_string()]
+    );
+}
+
+#[test]
+fn a_message_does_not_teach_a_leftover_config_section() {
+    // A leftover section is still read, so a message that names it as the
+    // thing to set produces a working widget — and a config file written
+    // against a name we are trying to retire, with nothing on screen ever
+    // telling them so. The two names already sit in SettingsSpec next to
+    // each other; this is the check that keeps the one we teach matching
+    // the one we own.
+    let mut wrong = Vec::new();
+    let dir = root().join("widgets/src/widgets");
+    for (name, src) in widgets() {
+        let Some((_, Some(legacy))) = settings_names(&src) else {
+            continue;
+        };
+        let keys = settings_json_keys(&name);
+        let help = std::fs::read_to_string(dir.join(&name).join("help.txt")).unwrap_or_default();
+        for hit in leftover_section_taught(&src, &help, &legacy, &keys) {
+            wrong.push(format!(
+                "{name}: teaches {hit}, which is the leftover section; name the \
+                 section in SettingsSpec instead"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
 #[test]
 fn every_key_the_help_text_names_is_answered() {
     // --help is where someone looks when the footer is not enough, so a

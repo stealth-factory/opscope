@@ -64,6 +64,19 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
     }
 }
 
+/// What the pane says when nothing has handed it a token.
+///
+/// Named from `SETTINGS.section` rather than spelled here, because the
+/// leftover `deployments` name is still read and a message that taught it
+/// would keep writing configs against a name we are retiring.
+fn missing_token(env: &str) -> String {
+    format!(
+        "no token: set {}.token in config.json, or ${}",
+        SETTINGS.section,
+        env
+    )
+}
+
 fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", API, path);
     // get_with_headers rather than get: `get` runs curl with --fail, which
@@ -89,9 +102,11 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
 fn vercel_refusal(said: &str) -> String {
     let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
     if flat.contains("\"invalidToken\":true") {
-        return "the Vercel token is not valid - it may be revoked, or pasted \
-                short. Set it again in settings, or in `vercel_deployments.token`."
-            .to_string();
+        return format!(
+            "the Vercel token is not valid - it may be revoked, or pasted \
+             short. Set it again in settings, or in `{}.token`.",
+            SETTINGS.section
+        );
     }
     said.to_string()
 }
@@ -1000,10 +1015,7 @@ fn main() {
     std::thread::spawn(move || loop {
         if poll_token.is_empty() {
             if let Ok(mut guard) = poller.lock() {
-                guard.err = format!(
-                    "no token: set vercel_deployments.token in config.json, or ${}",
-                    poll_env
-                );
+                guard.err = missing_token(&poll_env);
             }
         } else {
             let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1671,6 +1683,10 @@ mod tests {
         let said = vercel_refusal(refused_token);
         assert!(said.starts_with("the Vercel token is not valid"), "{said}");
         assert!(!said.contains("scope"), "it is not a scope problem: {said}");
+        assert!(
+            said.contains("vercel_deployments.token"),
+            "taught a leftover section: {said}"
+        );
 
         // The same status without that flag is a permission, and keeps
         // whatever Vercel said about it.
@@ -1813,6 +1829,18 @@ mod tests {
         assert!(build_log(&serde_json::json!({"_events": []}), 90, &p).is_empty());
     }
 
+
+    #[test]
+    fn a_missing_token_names_the_section_the_widget_reads() {
+        let said = missing_token("VERCEL_TOKEN");
+        assert!(said.contains("vercel_deployments.token"), "{said}");
+        // `deployments.token` is a suffix of the current name; the thing we
+        // must not teach is the leftover section as a path of its own.
+        assert!(
+            !said.contains("set deployments.token"),
+            "taught the leftover section: {said}"
+        );
+    }
 
     #[test]
     fn a_token_prefers_the_config_then_the_environment() {
