@@ -1607,21 +1607,109 @@ fn free_list_kind(app: &App, key: &str) -> Option<PickKind> {
     if !field.default.is_array() {
         return None;
     }
+    let rule = app.constraints.get(key).and_then(Value::as_object);
+    // A fixed length is not a list. An RGB triple is one colour in three
+    // parts, and an editor offering to add a fourth would be offering a
+    // colour with four - so a declared `length` keeps a field out of here
+    // and leaves it the box it had.
+    if rule.is_some_and(|r| r.contains_key("length")) {
+        return None;
+    }
+    let declared = rule.and_then(|r| r.get("items")).and_then(Value::as_str);
+    let listable = match declared {
+        Some("string" | "integer" | "number") => true,
+        Some(_) => false,
+        None => {
+            // Nothing declared: a shipped default of all strings or all
+            // numbers says what the elements are just as well.
+            let items = field.default.as_array()?;
+            !items.is_empty()
+                && (items.iter().all(Value::is_string) || items.iter().all(Value::is_number))
+        }
+    };
+    listable.then_some(PickKind::Free)
+}
+
+/// Whatever the screen last had to say, in the colour that says which kind
+/// of news it is.
+///
+/// Every screen shows it. Only the list did, so a picker could report an
+/// entry added, an entry refused, or a value that would not parse, and none
+/// of it reached anybody until they left - by which time the list screen was
+/// showing news about a screen they were no longer on.
+fn say_status(body: &mut Vec<String>, app: &App, w: usize, p: &Palette) {
+    let Some(status) = &app.status else {
+        return;
+    };
+    let colour = if status.starts_with("Wrote ")
+        || status.starts_with("Removed ")
+        || status.starts_with("Added ")
+        || status.starts_with("Set to ")
+    {
+        p.ok.as_str()
+    } else if status.contains("is not ") || status.contains("refusing") {
+        p.bad.as_str()
+    } else {
+        p.dim.as_str()
+    };
+    say(body, colour, " ", status, w);
+}
+
+/// The placeholder's word for what this list holds.
+fn field_kind_hint(app: &App, index: usize) -> &'static str {
+    match app.fields.get(index) {
+        Some(field) => free_item_kind(app, field),
+        None => "string",
+    }
+}
+
+/// What one entry of a list has to parse as, from the field's own rules.
+///
+/// Declared `items` first; failing that the shipped default says it, the
+/// same way it says whether the list is editable at all.
+fn free_item_kind(app: &App, field: &Field) -> &'static str {
     let declared = app
         .constraints
-        .get(key)
+        .get(&field.key)
         .and_then(Value::as_object)
         .and_then(|r| r.get("items"))
         .and_then(Value::as_str);
-    let stringy = match declared {
-        Some("string") => true,
-        Some(_) => false,
-        None => {
-            let items = field.default.as_array()?;
-            !items.is_empty() && items.iter().all(Value::is_string)
-        }
-    };
-    stringy.then_some(PickKind::Free)
+    match declared {
+        Some("integer") => "integer",
+        Some("number") => "number",
+        Some("string") => "string",
+        _ => match field.default.as_array() {
+            Some(items) if !items.is_empty() && items.iter().all(Value::is_number) => {
+                if items.iter().all(|v| v.is_i64() || v.is_u64()) {
+                    "integer"
+                } else {
+                    "number"
+                }
+            }
+            _ => "string",
+        },
+    }
+}
+
+/// One typed entry, as the value it has to become - or why it cannot.
+///
+/// A list of ports takes 22, not "22": writing the string would put a value
+/// in the file that the widget reads as nothing, and an entry that silently
+/// counts for nothing is worse than one that was refused.
+fn parse_free_entry(kind: &str, typed: &str) -> Result<Value, String> {
+    match kind {
+        "integer" => typed
+            .parse::<i64>()
+            .map(|n| Value::Number(n.into()))
+            .map_err(|_| format!("{typed} is not a whole number.")),
+        "number" => typed
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| format!("{typed} is not a number.")),
+        _ => Ok(Value::String(typed.to_string())),
+    }
 }
 
 /// Cities the timezone database does not name, and the zone that carries
@@ -1797,6 +1885,8 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                     }
                     // A bare string, as every other list writes its entries.
                     Value::String(one) => Some((one.clone(), one.clone())),
+                    // And a number, which reads back as what was typed.
+                    Value::Number(n) => Some((n.to_string(), n.to_string())),
                     _ => None,
                 })
                 .collect()
@@ -2001,23 +2091,37 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 /// Appended rather than sorted: the widget decides what order means, and for
 /// a list of hosts the order somebody typed them in is the one they expect
 /// to see back.
-fn add_free_entry(app: &mut App, index: usize, entry: &str) {
+fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
     let Some(field) = app.fields.get(index) else {
-        return;
+        return false;
     };
     let mut rows: Vec<Value> = current_of(&app.live, field, app.legacy_section)
         .or(Some(&field.default))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if rows.iter().any(|v| v.as_str() == Some(entry)) {
+    let kind = free_item_kind(app, field);
+    let value = match parse_free_entry(kind, entry) {
+        Ok(value) => value,
+        Err(why) => {
+            app.status = Some(why);
+            return false;
+        }
+    };
+    if rows.iter().any(|v| *v == value) {
         app.status = Some(format!("{entry} is already in the list."));
-        return;
+        return false;
     }
-    rows.push(Value::String(entry.to_string()));
+    rows.push(value);
     match write_field(app, index, Value::Array(rows)) {
-        Ok(()) => app.status = Some(format!("Added {entry}.")),
-        Err(e) => app.status = Some(e),
+        Ok(()) => {
+            app.status = Some(format!("Added {entry}."));
+            true
+        }
+        Err(e) => {
+            app.status = Some(e);
+            false
+        }
     }
 }
 
@@ -2035,7 +2139,11 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
     };
     let kept: Vec<Value> = rows
         .into_iter()
-        .filter(|v| v.as_str() != Some(entry))
+        .filter(|v| match v {
+            Value::String(text) => text != entry,
+            Value::Number(n) => n.to_string() != entry,
+            _ => true,
+        })
         .collect();
     match write_field(app, index, Value::Array(kept)) {
         Ok(()) => app.status = Some(format!("Removed {entry}.")),
@@ -2304,8 +2412,10 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         // on an empty box would have nothing to mean.
         "enter" if free => {
             let typed = q.trim().to_string();
-            if !typed.is_empty() {
-                add_free_entry(app, index, &typed);
+            // Only clear it if it was taken. A refused entry is one somebody
+            // is about to correct, and emptying the box makes them type it
+            // again from memory to find out what was wrong with it.
+            if !typed.is_empty() && add_free_entry(app, index, &typed) {
                 q.clear();
                 cur = 0;
                 s_ = 0;
@@ -2637,19 +2747,7 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
             say(&mut body, p.warn.as_str(), " ", &note, w);
         }
     }
-    if let Some(status) = &app.status {
-        let colour = if status.starts_with("wrote ")
-            || status.starts_with("removed ")
-            || status.starts_with("copied ")
-        {
-            p.ok.as_str()
-        } else if status.starts_with("not copied") || status.contains("refusing") {
-            p.bad.as_str()
-        } else {
-            p.dim.as_str()
-        };
-        body.push(crate::seg(&[(colour, format!(" {status}"))], w.saturating_sub(1)));
-    }
+    say_status(&mut body, app, w, p);
     body.push(String::new());
 
     let boolean = app
@@ -3096,6 +3194,7 @@ format!(
         _ => heading,
     };
     say(&mut body, p.dim.as_str(), "  ", heading.trim(), w);
+    say_status(&mut body, app, w, p);
     // The field's own words, on the screen where the value is chosen. They
     // were on the list, one screen back, which is the wrong place for them:
     // the list is where somebody decides to change a setting and this is
@@ -3143,7 +3242,13 @@ format!(
     // composes an entry for a list that has no candidates to search.
     let hint = match &kind {
         PickKind::Timezone => "Type a city or a zone",
-        PickKind::Free => "Type an entry, then ↵",
+        // Say which kind is wanted, so a list of ports does not have to
+        // refuse "http" to teach that it takes numbers.
+        PickKind::Free => match field_kind_hint(app, *index) {
+            "integer" => "Type a whole number, then ↵",
+            "number" => "Type a number, then ↵",
+            _ => "Type an entry, then ↵",
+        },
         PickKind::Map => "Type a name, then ↵",
         _ => "Type to filter",
     };
@@ -4065,26 +4170,117 @@ mod tests {
         assert_eq!(map_value_of(&app, 0, "new"), "— not set");
     }
 
-    /// A list of numbers is left alone.
-    ///
-    /// `pomodoro_flash_rgb` is one colour in three parts, not a list anybody
-    /// adds a fourth entry to, and `[d]elete the entry` on it would be an
-    /// offer to make a two-component colour.
+    /// A list of numbers is filled in the same way a list of strings is.
     #[test]
-    fn a_list_of_numbers_keeps_the_box_it_had() {
-        let rgb = field_app("pomodoro_flash_rgb", serde_json::json!([246, 248, 252]), None);
-        assert!(picker_kind(&rgb, "pomodoro_flash_rgb").is_none());
-
+    fn a_list_of_numbers_is_a_list() {
         let declared = field_app(
             "ports",
             serde_json::json!([]),
             Some(serde_json::json!({"items": "integer"})),
         );
-        assert!(picker_kind(&declared, "ports").is_none());
+        assert!(matches!(picker_kind(&declared, "ports"), Some(PickKind::Free)));
+
+        // Undeclared, but a shipped default of numbers says it just as well.
+        let inferred = field_app("windows", serde_json::json!([60, 300, 900]), None);
+        assert!(matches!(picker_kind(&inferred, "windows"), Some(PickKind::Free)));
+    }
+
+    /// A refused entry says why, and leaves what was typed where it is.
+    #[test]
+    fn a_refused_entry_is_explained_and_kept() {
+        let mut app = field_app(
+            "system_ports",
+            serde_json::json!([22, 53]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        let took = add_free_entry(&mut app, 0, "http");
+        assert!(!took, "a non-number is not added");
+        let said = app.status.clone().expect("it says why");
+        assert!(said.contains("whole number"), "{said}");
+    }
+
+    /// The picker draws whatever it just had to say.
+    ///
+    /// Only the list screen drew app.status, so a refusal on the picker was
+    /// written and never seen - the screen appeared to do nothing, which is
+    /// what an unbound key looks like.
+    #[test]
+    fn the_picker_draws_its_own_news() {
+        let mut app = field_app(
+            "system_ports",
+            serde_json::json!([22, 53]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        app.mode = Mode::Pick {
+            index: 0,
+            query: "http".into(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: false,
+            cursor: 4,
+        };
+        assert!(!add_free_entry(&mut app, 0, "http"));
+        let drawn = draw_pick(&app, 60, 24, &palette()).join("\n");
+        assert!(
+            drawn.contains("whole number"),
+            "the refusal has to reach the screen:\n{drawn}"
+        );
+    }
+
+    /// A fixed length is not a list.
+    ///
+    /// `pomodoro_flash_rgb` is one colour in three parts, not a list anybody
+    /// adds a fourth entry to, and `[d]elete the entry` on it would be an
+    /// offer to make a two-component colour. Nothing in the schema said so,
+    /// so it says it now.
+    #[test]
+    fn a_fixed_length_array_keeps_the_box_it_had() {
+        let rgb = field_app(
+            "pomodoro_flash_rgb",
+            serde_json::json!([246, 248, 252]),
+            Some(serde_json::json!({"items": "integer", "length": 3})),
+        );
+        assert!(picker_kind(&rgb, "pomodoro_flash_rgb").is_none());
 
         // And nothing that is not a list at all.
         let text = field_app("aggregate", serde_json::json!("median"), None);
         assert!(picker_kind(&text, "aggregate").is_none());
+    }
+
+    /// A typed entry becomes the kind the list holds, or is refused saying so.
+    ///
+    /// A list of ports takes 22, not "22": the string would sit in the file
+    /// as a value the widget reads as nothing, and an entry that silently
+    /// counts for nothing is worse than one that was refused out loud.
+    #[test]
+    fn an_entry_becomes_the_kind_its_list_holds() {
+        assert_eq!(parse_free_entry("integer", "22"), Ok(serde_json::json!(22)));
+        assert_eq!(parse_free_entry("number", "0.5"), Ok(serde_json::json!(0.5)));
+        assert_eq!(
+            parse_free_entry("string", "db1.internal"),
+            Ok(serde_json::json!("db1.internal"))
+        );
+
+        // A whole-number list will not take a fraction, and says which it is.
+        let refused = parse_free_entry("integer", "0.5").unwrap_err();
+        assert!(refused.contains("whole number"), "{refused}");
+        let refused = parse_free_entry("integer", "http").unwrap_err();
+        assert!(refused.contains("whole number"), "{refused}");
+        let refused = parse_free_entry("number", "http").unwrap_err();
+        assert!(refused.contains("not a number"), "{refused}");
+
+        // And the kind comes from the declaration, or from what shipped.
+        let declared = field_app(
+            "ports",
+            serde_json::json!([]),
+            Some(serde_json::json!({"items": "integer"})),
+        );
+        assert_eq!(free_item_kind(&declared, &declared.fields[0]), "integer");
+        let inferred = field_app("windows", serde_json::json!([60, 300]), None);
+        assert_eq!(free_item_kind(&inferred, &inferred.fields[0]), "integer");
+        let hosts = field_app("hosts", serde_json::json!(["a.example"]), None);
+        assert_eq!(free_item_kind(&hosts, &hosts.fields[0]), "string");
     }
 
     /// A declared picker still wins: a checklist is not a free list.

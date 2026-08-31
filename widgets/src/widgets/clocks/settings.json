@@ -1,6 +1,6 @@
 {
   "_schema": {
-    "pomodoro_flash_rgb": { "items": "integer" },
+    "pomodoro_flash_rgb": { "items": "integer", "length": 3 },
     "work_start_hour": {
       "minimum": 0,
       "maximum": 23,
