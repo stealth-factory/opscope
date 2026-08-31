@@ -379,12 +379,24 @@ struct Reading {
 fn acquire(external: bool) -> Reading {
     let stamp = tc::now();
     let mut errors = Vec::new();
-    let (own, own_available) = match host::own_addresses() {
-        Ok(found) => (found, true),
-        Err(err) => {
-            errors.push(err);
-            (Vec::new(), false)
+    // Only the socket-detail path filters peers against our own addresses.
+    let (own, own_available) = if host::HAS_CONNECTION_DETAILS {
+        match host::own_addresses() {
+            Ok(found) => (found, true),
+            Err(err) => {
+                errors.push(err);
+                (Vec::new(), false)
+            }
         }
+    } else {
+        (Vec::new(), true)
+    };
+    // Wait for the process or socket sample first so the interface counters
+    // describe the same window rather than one taken a second earlier.
+    let traffic = if host::HAS_CONNECTION_DETAILS && !own_available {
+        Err("socket rows paused because local addresses are unavailable".into())
+    } else {
+        host::sockets(external, &own)
     };
     let counters = match host::wire_bytes() {
         Ok(found) => Some(found),
@@ -392,11 +404,6 @@ fn acquire(external: bool) -> Reading {
             errors.push(err);
             None
         }
-    };
-    let traffic = if host::HAS_CONNECTION_DETAILS && !own_available {
-        Err("socket rows paused because local addresses are unavailable".into())
-    } else {
-        host::sockets(external, &own)
     };
     let owners = match &traffic {
         Ok(TrafficSample::Sockets(found)) if !found.is_empty() => match host::socket_owners() {
@@ -693,7 +700,15 @@ fn absorb_rows(
         }
     }
 
-    state.last = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
+    let mut last: HashMap<_, _> = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
+    if !connection_details {
+        // nettop -P omits idle processes. Dropping their baseline makes the
+        // next sample treat a still-running cumulative counter as new traffic.
+        for (key, value) in &state.last {
+            last.entry(key.clone()).or_insert(*value);
+        }
+    }
+    state.last = last;
     state.stamp = stamp;
 
     // A closed connection is worth keeping - it may be the one that did the
@@ -929,7 +944,7 @@ struct OpenFile {
 /// bigger. This is the closest thing to "which file" that exists outside
 /// the encrypted stream - the name of the thing being written, rather than
 /// the name of the thing being fetched.
-fn open_files(pid: i32) -> Vec<OpenFile> {
+fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
     host::open_files(pid)
 }
 
@@ -949,6 +964,8 @@ struct DetailSnapshot {
     running: bool,
     facts: Facts,
     files: Vec<OpenFile>,
+    files_err: String,
+    err: String,
 }
 
 /// Slow per-process facts, off the drawing thread.
@@ -975,12 +992,29 @@ impl DetailLoader {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             };
-            let snapshot = DetailSnapshot {
-                running: running(pid),
-                facts: process_facts(pid),
-                files: open_files(pid),
+            let snapshot = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (files, files_err) = match open_files(pid) {
+                    Ok(files) => (files, String::new()),
+                    Err(err) => (Vec::new(), err),
+                };
+                DetailSnapshot {
+                    running: running(pid),
+                    facts: process_facts(pid),
+                    files,
+                    files_err,
+                    err: String::new(),
+                }
+            })) {
+                Ok(snapshot) => snapshot,
+                Err(_) => DetailSnapshot {
+                    running: true,
+                    err: "detail loader stopped - see the pane it was started from".into(),
+                    ..DetailSnapshot::default()
+                },
             };
             if let Ok(mut guard) = snapshots.lock() {
+                // Only the open process is ever read back.
+                guard.clear();
                 guard.insert((pid, name), snapshot);
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -1373,6 +1407,8 @@ fn detail_rows(
     spots: &[Spot],
     conns: &[Conn],
     files: &[OpenFile],
+    files_err: &str,
+    loader_err: &str,
     sizes: &HashMap<String, (u64, f64)>,
     focus: Option<usize>,
     at: &[usize; 3],
@@ -1438,6 +1474,12 @@ fn detail_rows(
             w - 1,
         ));
     }
+    if !loader_err.is_empty() {
+        out.push(tc::seg(
+            &[(p.bad.as_str(), format!(" ! {}", loader_err))],
+            w - 1,
+        ));
+    }
     out.push(String::new());
 
     // This process's own traffic, on the same chart as the machine's.
@@ -1489,11 +1531,13 @@ fn detail_rows(
         let room = shares[which];
         if counts[which] == 0 {
             let empty = if which < 2 && !host::HAS_CONNECTION_DETAILS {
-                "   unavailable: macOS exposes process totals, not per-socket bytes"
+                host::NO_SOCKET_DETAIL.to_string()
+            } else if which == 2 && !files_err.is_empty() {
+                format!("   unavailable: {}", files_err)
             } else {
-                "   none"
+                "   none".into()
             };
-            out.push(tc::seg(&[(p.dim.as_str(), empty.into())], w - 1));
+            out.push(tc::seg(&[(p.dim.as_str(), empty)], w - 1));
         } else if which == 0 {
             out.push(endpoint_head(w, p));
             let mut rows = endpoint_rows(spots, at[which], focused, room, w, names, p);
@@ -1581,7 +1625,7 @@ fn detail_rows(
                 (p.lbl.as_str(), " ── DISK ── ".into()),
                 (
                     p.dim.as_str(),
-                    "not exposed by an unprivileged macOS CLI source".into(),
+                    host::NO_DISK_IO.into(),
                 ),
             ],
             w - 1,
@@ -2082,6 +2126,8 @@ fn main() {
                 &spots,
                 &conns,
                 &files,
+                &snapshot.files_err,
+                &snapshot.err,
                 &sizes,
                 focus,
                 &at,
@@ -2234,27 +2280,30 @@ fn main() {
         }
 
         // What the interfaces actually moved, against what the sockets can
-        // explain. On a router the two differ by most of the traffic.
+        // explain. On a router the two differ by most of the traffic. The
+        // share is only shown when both sides count the same kind of
+        // traffic: Linux sockets against /proc/net/dev after the same
+        // virtual-interface filter. macOS process totals include loopback
+        // and virtual paths that netstat then excludes, so a percentage
+        // would not be a measure of attribution.
         let (wire_rx, wire_tx) = guard.wire_rate;
         let wire = wire_rx + wire_tx;
         if wire > 0.0 {
-            let share = ((down + up) / wire).min(1.0);
             let mut said = vec![
                 (p.lbl.as_str(), " interfaces".to_string()),
                 (p.dim.as_str(), " · ".into()),
                 (p.down.as_str(), format!("↓ {}", rate(wire_rx))),
                 (p.dim.as_str(), "  ".into()),
                 (p.up.as_str(), format!("↑ {}", rate(wire_tx))),
-                (p.dim.as_str(), "  · ".into()),
-                (
-                    if share >= 0.9 { &p.dim } else { &p.warn },
-                    if host::HAS_CONNECTION_DETAILS {
-                        format!("{:.0}% of it has a socket", share * 100.0)
-                    } else {
-                        format!("{:.0}% attributed to processes", share * 100.0)
-                    },
-                ),
             ];
+            if host::HAS_CONNECTION_DETAILS {
+                let share = ((down + up) / wire).min(1.0);
+                said.push((p.dim.as_str(), "  · ".into()));
+                said.push((
+                    if share >= 0.9 { p.dim.as_str() } else { p.warn.as_str() },
+                    format!("{:.0}% of it has a socket", share * 100.0),
+                ));
+            }
             let which = wire_label(&guard.wire_names);
             let used: usize = said.iter().map(|(_, t)| t.chars().count()).sum();
             if !which.is_empty() && used + which.chars().count() + 4 <= w - 1 {
@@ -2703,6 +2752,54 @@ mod tests {
             &mut state,
             3.0,
             &reading(9_100, 19_200),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        let row = state.totals.get(&(42, "browser".into())).unwrap();
+        assert_eq!((row.up, row.down), (100, 200));
+    }
+
+    #[test]
+    fn an_idle_nettop_process_keeps_its_baseline() {
+        let owners = HashMap::from([("42:browser".into(), (42, "browser".into()))]);
+        let reading = |sent, recv| {
+            HashMap::from([(
+                "42:browser".into(),
+                Seen {
+                    sent,
+                    recv,
+                    peer: String::new(),
+                    port: 0,
+                    mine: 0,
+                    cgroup: String::new(),
+                },
+            )])
+        };
+        let mut state = State::default();
+        absorb_rows(
+            &mut state,
+            1.0,
+            &reading(10_000, 20_000),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        absorb_rows(
+            &mut state,
+            2.0,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            String::new(),
+            false,
+        );
+        absorb_rows(
+            &mut state,
+            3.0,
+            &reading(10_100, 20_200),
             &owners,
             None,
             String::new(),

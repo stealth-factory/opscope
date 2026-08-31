@@ -12,20 +12,27 @@ numbers under the same label.
 
 On Linux, `ip -o addr` supplies local addresses so loopback-to-self traffic
 can be removed. The `external` setting can then narrow rows to internet peers.
-On macOS, `ifconfig -a` supplies local addresses for source visibility, but
-`nettop` has no peer or ownership field in per-process mode. The widget
-therefore cannot apply the Linux internet-only or unattributed-socket filters
-on macOS and does not claim that it has.
+On macOS, `nettop` has no peer or ownership field in per-process mode, so the
+widget does not collect local addresses and cannot apply the Linux
+internet-only or unattributed-socket filters. It does not claim that it has.
 
 The macOS process-detail screen can show command, working directory and open
-regular files through `ps` and `lsof`. It explicitly marks endpoint,
-connection and disk-I/O attribution unavailable: those facts cannot be
-derived from the per-process `nettop` counters without pretending that one
-measurement is another.
+regular files through `ps` and `lsof`. A missing or failed `lsof` is named
+rather than drawn as an empty file list. Endpoint, connection and disk-I/O
+attribution are marked unavailable: those facts cannot be derived from the
+per-process `nettop` counters without pretending that one measurement is
+another.
+
+`nettop` is a long-lived child. If it exits, the widget says so, waits, and
+starts it again rather than freezing the process table on that one error.
+Idle processes that drop out of a `nettop -P` sample keep their counter
+baseline so their return is not counted as new traffic.
 
 Every source failure is shown by name in the pane. An unavailable `ss`,
-`nettop`, `ip`, `ifconfig`, `/proc/net/dev` or `netstat` source is not rendered
-as an honestly empty table.
+`nettop`, `ip`, `/proc/net/dev` or `netstat` source is not rendered as an
+honestly empty table. Interface rates on macOS are shown without an
+attribution percentage: process totals include loopback and virtual paths
+that `netstat` excludes, so the ratio would not measure the same traffic.
 
 Both platforms establish a first-sample baseline. Totals and rates therefore
 describe traffic observed since `netwatch` started (or since `r` rezeroed),

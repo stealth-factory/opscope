@@ -6,7 +6,7 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 - Linux: `/proc` socket ownership plus TCP counters from `ss -tine`.
 - macOS: all-protocol process counters from `nettop`, interface counters from
-  `netstat -ib`, addresses from `ifconfig`, and process facts from `ps`/`lsof`.
+  `netstat -ib`, and process facts from `ps`/`lsof`.
 
 ## Settings owned here
 

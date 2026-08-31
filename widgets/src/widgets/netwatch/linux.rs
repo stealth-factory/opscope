@@ -8,6 +8,10 @@ use super::{Facts, OpenFile, RUN_TIMEOUT, Seen, TrafficSample, VIRTUAL, local_pe
 pub const ROW_SOURCE: &str = "per-socket TCP bytes · Linux ss";
 pub const HAS_CONNECTION_DETAILS: bool = true;
 pub const HAS_DISK_IO: bool = true;
+#[allow(dead_code)] // Referenced from main when this host has no socket/disk source.
+pub const NO_SOCKET_DETAIL: &str = "   none";
+#[allow(dead_code)]
+pub const NO_DISK_IO: &str = "";
 
 pub fn own_addresses() -> Result<Vec<String>, String> {
     tc::run(&["ip", "-o", "addr"], RUN_TIMEOUT)
@@ -131,11 +135,10 @@ pub fn proc_io(pid: i32) -> HashMap<String, u64> {
     out
 }
 
-pub fn open_files(pid: i32) -> Vec<OpenFile> {
+pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
     let mut found = Vec::new();
-    let Ok(dir) = std::fs::read_dir(format!("/proc/{}/fd", pid)) else {
-        return found;
-    };
+    let dir = std::fs::read_dir(format!("/proc/{}/fd", pid))
+        .map_err(|e| format!("open files unavailable: {}", e))?;
     for entry in dir.flatten() {
         let Ok(link) = std::fs::read_link(entry.path()) else {
             continue;
@@ -156,7 +159,7 @@ pub fn open_files(pid: i32) -> Vec<OpenFile> {
         }
     }
     found.sort_by(|a, b| b.size.cmp(&a.size));
-    found
+    Ok(found)
 }
 
 pub fn process_facts(pid: i32) -> Facts {

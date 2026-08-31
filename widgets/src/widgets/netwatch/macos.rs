@@ -15,6 +15,9 @@ use super::{Facts, OpenFile, ProcessSeen, RUN_TIMEOUT, TrafficSample, VIRTUAL};
 pub const ROW_SOURCE: &str = "per-process cumulative bytes · macOS nettop";
 pub const HAS_CONNECTION_DETAILS: bool = false;
 pub const HAS_DISK_IO: bool = false;
+pub const NO_SOCKET_DETAIL: &str =
+    "   unavailable: macOS exposes process totals, not per-socket bytes";
+pub const NO_DISK_IO: &str = "not exposed by an unprivileged macOS CLI source";
 
 #[derive(Default)]
 struct NettopState {
@@ -72,7 +75,44 @@ fn fail_nettop(feed: &NettopFeed, reason: String) {
     }
 }
 
+fn drain_stderr(stderr: Option<std::process::ChildStderr>) -> Arc<Mutex<String>> {
+    let last = Arc::new(Mutex::new(String::new()));
+    let Some(stderr) = stderr else {
+        return last;
+    };
+    let slot = Arc::clone(&last);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(mut guard) = slot.lock() {
+                *guard = line;
+            }
+        }
+    });
+    last
+}
+
+fn with_stderr(reason: String, stderr: &Mutex<String>) -> String {
+    match stderr.lock() {
+        Ok(line) if !line.is_empty() => format!("{}: {}", reason, line),
+        _ => reason,
+    }
+}
+
+/// Keep reading samples for as long as the widget lives. A child that exits
+/// is a source failure, not the end of the session: the next poll would
+/// otherwise keep returning that one error and freeze the process table.
 fn run_nettop(feed: Arc<NettopFeed>) {
+    loop {
+        run_nettop_once(&feed);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn run_nettop_once(feed: &NettopFeed) {
     let mut child = match Command::new("/usr/bin/script")
         .args([
             "-q",
@@ -92,20 +132,26 @@ fn run_nettop(feed: Arc<NettopFeed>) {
         // selection and scrolling appear to work only at random.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
         Err(err) => {
             fail_nettop(
-                &feed,
+                feed,
                 format!("nettop per-process bytes unavailable: {}", err),
             );
             return;
         }
     };
+    let stderr = drain_stderr(child.stderr.take());
     let Some(stdout) = child.stdout.take() else {
-        fail_nettop(&feed, "nettop stdout unavailable".into());
+        fail_nettop(
+            feed,
+            with_stderr("nettop stdout unavailable".into(), &stderr),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
         return;
     };
     let mut sample = Vec::new();
@@ -113,25 +159,31 @@ fn run_nettop(feed: Arc<NettopFeed>) {
         let line = match line {
             Ok(line) => line.trim_end_matches('\r').to_string(),
             Err(err) => {
-                fail_nettop(&feed, format!("nettop output unreadable: {}", err));
+                fail_nettop(
+                    feed,
+                    with_stderr(format!("nettop output unreadable: {}", err), &stderr),
+                );
+                let _ = child.kill();
+                let _ = child.wait();
                 return;
             }
         };
         if line.contains(",bytes_in,bytes_out,") {
-            publish_nettop(&feed, &mut sample);
+            publish_nettop(feed, &mut sample);
             sample.push(",bytes_in,bytes_out,".into());
         } else {
             sample.push(line);
         }
     }
-    publish_nettop(&feed, &mut sample);
+    publish_nettop(feed, &mut sample);
     let reason = match child.wait() {
         Ok(status) => format!("nettop stopped with {}", status),
         Err(err) => format!("nettop stopped: {}", err),
     };
-    fail_nettop(&feed, reason);
+    fail_nettop(feed, with_stderr(reason, &stderr));
 }
 
+#[allow(dead_code)] // Connection-detail hosts call this; macOS process rows do not.
 pub fn own_addresses() -> Result<Vec<String>, String> {
     tc::run(&["ifconfig", "-a"], RUN_TIMEOUT)
         .map(|text| parse_ifconfig_addresses(&text))
@@ -202,11 +254,12 @@ pub fn proc_io(_pid: i32) -> HashMap<String, u64> {
     HashMap::new()
 }
 
-pub fn open_files(pid: i32) -> Vec<OpenFile> {
-    let text = tc::run_quiet(
-        &["lsof", "-a", "-p", &pid.to_string(), "-FnFs"],
+pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
+    let text = tc::run(
+        &["lsof", "-a", "-p", &pid.to_string(), "-s", "-Fnfst"],
         RUN_TIMEOUT,
-    );
+    )
+    .map_err(|e| format!("lsof open files unavailable: {}", e))?;
     let mut found: Vec<OpenFile> = parse_lsof_files(&text)
         .into_iter()
         .map(|file| OpenFile {
@@ -215,7 +268,7 @@ pub fn open_files(pid: i32) -> Vec<OpenFile> {
         })
         .collect();
     found.sort_by(|a, b| b.size.cmp(&a.size));
-    found
+    Ok(found)
 }
 
 pub fn process_facts(pid: i32) -> Facts {

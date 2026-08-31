@@ -1141,8 +1141,13 @@ fn contains_dotted_key(text: &str, key: &str) -> bool {
     let mut from = 0;
     while let Some(at) = text[from..].find(key) {
         let abs = from + at;
+        let before_ok = abs == 0
+            || text[..abs]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
         let after = text[abs + key.len()..].chars().next();
-        if after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
+        if before_ok && after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
             return true;
         }
         from = abs + 1;
@@ -1190,6 +1195,7 @@ fn config_remedy_matcher_sees_a_key_and_skips_a_url() {
         "github.token"
     ));
     assert!(contains_dotted_key("set github.token or", "github.token"));
+    assert!(!contains_dotted_key("notgithub.token", "github.token"));
 }
 
 #[test]

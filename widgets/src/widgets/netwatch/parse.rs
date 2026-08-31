@@ -191,30 +191,47 @@ pub fn parse_nettop_processes(text: &str) -> Vec<ProcessRecord> {
     found
 }
 
-/// Regular files from `lsof -FnFs`. Each file begins with `f`; its size and
-/// name are separate fields and either may be absent.
+/// Regular files from `lsof -Fnfst`. Each record begins with `f`; cwd, txt
+/// and other non-descriptor entries are not open file descriptors whose
+/// growth would mean a download.
 pub fn parse_lsof_files(text: &str) -> Vec<FileRecord> {
     let mut out = Vec::new();
-    let (mut size, mut path) = (None, None::<String>);
-    let flush = |out: &mut Vec<FileRecord>, size: &mut Option<u64>, path: &mut Option<String>| {
+    let (mut size, mut path, mut fd, mut kind) =
+        (None, None::<String>, None::<String>, None::<String>);
+    let flush = |out: &mut Vec<FileRecord>,
+                 size: &mut Option<u64>,
+                 path: &mut Option<String>,
+                 fd: &mut Option<String>,
+                 kind: &mut Option<String>| {
+        let fd = fd.take();
+        let kind = kind.take();
         if let (Some(size), Some(path)) = (size.take(), path.take()) {
-            if path.starts_with('/') && !path.starts_with("/dev/") {
+            let descriptor = fd.is_some_and(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()));
+            let regular = kind.as_deref().is_none_or(|k| k == "REG");
+            if descriptor && regular && path.starts_with('/') && !path.starts_with("/dev/") {
                 out.push(FileRecord { path, size });
             }
         }
     };
     for line in text.lines() {
-        if line.starts_with('f') || line.starts_with('p') {
-            flush(&mut out, &mut size, &mut path);
+        if let Some(value) = line.strip_prefix('f') {
+            flush(&mut out, &mut size, &mut path, &mut fd, &mut kind);
+            fd = Some(value.to_string());
+            continue;
+        }
+        if line.starts_with('p') {
+            flush(&mut out, &mut size, &mut path, &mut fd, &mut kind);
             continue;
         }
         if let Some(value) = line.strip_prefix('s') {
             size = value.parse().ok();
         } else if let Some(value) = line.strip_prefix('n') {
             path = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix('t') {
+            kind = Some(value.to_string());
         }
     }
-    flush(&mut out, &mut size, &mut path);
+    flush(&mut out, &mut size, &mut path, &mut fd, &mut kind);
     out
 }
 
@@ -264,17 +281,47 @@ mod tests {
 
     #[test]
     fn parses_regular_files_from_lsof_fields() {
-        let text = "p42\nfcwd\ns768\nn/tmp/work\nftxt\ns123\nn/bin/tool\nf0\nn/dev/null\n";
+        let text = "p42\nfcwd\ntDIR\ns768\nn/tmp/work\nftxt\ntREG\ns123\nn/bin/tool\nf3\ntREG\ns4096\nn/tmp/download.iso\nf0\ntCHR\ns0\nn/dev/null\n";
         assert_eq!(
             parse_lsof_files(text),
+            vec![FileRecord {
+                path: "/tmp/download.iso".into(),
+                size: 4096
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_captured_ss_tine_rows() {
+        let text = "\
+Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+tcp   ESTAB 0      0      192.0.2.10:54321   192.0.2.1:443     ino:4242 cgroup:/user.slice/session-1.scope
+\t cubic bytes_sent:1669 bytes_received:11469 segs_out:12
+tcp   ESTAB 0      0      [2001:db8::10]:22  [2001:db8::1]:6000 ino:99
+\t bytes_sent:10 bytes_received:20
+tcp   ESTAB 0      0      127.0.0.1:1        127.0.0.1:2       ino:0
+\t bytes_sent:1 bytes_received:2
+";
+        assert_eq!(
+            parse_ss_sockets(text),
             vec![
-                FileRecord {
-                    path: "/tmp/work".into(),
-                    size: 768
+                SocketRecord {
+                    inode: "4242".into(),
+                    sent: 1669,
+                    recv: 11469,
+                    peer: "192.0.2.1".into(),
+                    port: 443,
+                    mine: 54321,
+                    cgroup: "/user.slice/session-1.scope".into(),
                 },
-                FileRecord {
-                    path: "/bin/tool".into(),
-                    size: 123
+                SocketRecord {
+                    inode: "99".into(),
+                    sent: 10,
+                    recv: 20,
+                    peer: "2001:db8::1".into(),
+                    port: 6000,
+                    mine: 22,
+                    cgroup: String::new(),
                 },
             ]
         );

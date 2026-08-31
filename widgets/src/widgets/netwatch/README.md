@@ -198,7 +198,10 @@ interface whatever produced them:
 The first line is what the process list adds up to. The second is what the
 interfaces actually moved. When they agree, the list below is the whole
 picture. When they do not, the difference is traffic passing through, and
-the percentage says how much of the story the table is telling.
+the percentage says how much of the story the table is telling. That
+percentage is Linux-only: macOS process totals include loopback and virtual
+paths that `netstat` then excludes, so the same ratio would not measure
+attribution.
 
 There is a second way the table can be showing less than everything, and it
 says so too. When there are more processes than rows, the header adds
@@ -493,9 +496,11 @@ and `-n` is the row limit.
 ## Cost
 
 Linux runs one `ss -tine` and walks `/proc/*/fd` per interval. macOS keeps one
-logging-mode `nettop` feed alive and reads `netstat -ib` per interval; `ps`
-and `lsof` are used only on a process detail screen. No
-network traffic of its own, no root, no capture.
+logging-mode `nettop` feed alive and reads `netstat -ib` per interval; if that
+child exits the widget names the failure and starts it again. `ps` and `lsof`
+are used only on a process detail screen, and a failed `lsof` is named rather
+than drawn as an empty file list. No network traffic of its own, no root, no
+capture.
 
 ## Configuration
 
