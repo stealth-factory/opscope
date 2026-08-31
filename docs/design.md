@@ -63,21 +63,26 @@ wrong first.
   source. Platform files live in the widget's own folder
   (`parse.rs`, `linux.rs`, `macos.rs` beside `main.rs`); there is no shared
   platform crate to import.
+- **A widget owns its whole experience.** Code, help, README preview,
+  and AI configuration guide live in one folder, plus a settings
+  declaration when the widget is configurable. Configurable widgets all
+  open the shared settings screen with `,`; the `opscope` launcher is
+  not counted as a widget.
 
 ## Where these are enforced
 
 These are not prose. `cargo test` runs
 [`widgets/tests/check.rs`](../widgets/tests/check.rs), which reads the
 sources and fails on a footer hint naming a key nothing answers, a hint
-missing from the widget's doc, a config key read but never documented,
-a colour drawing text on the selected-row tint below WCAG AA, a widget
-that does not answer the wheel, a parser or a test gated by
-`cfg(target_os)`, and a widget that opens `/proc` with no macOS path.
-See [internals](internals.md#the-checks).
+missing from the widget's README, a config key read but never declared,
+an incomplete widget folder, a colour drawing text on the selected-row tint
+below WCAG AA, a widget that does not answer the wheel, a parser or a test
+gated by `cfg(target_os)`, and a widget that opens `/proc` with no macOS
+path. See [internals](internals.md#the-checks).
 
 The wheel rule is enforced the way it is because the obvious marker does not
 work. A check that only looked at widgets calling `follow()` would have
-passed six of the fifteen — `latency`, `netwatch`, `herdr-panes`, `clocks`,
+passed six of the fourteen — `latency`, `netwatch`, `herdr-panes`, `clocks`,
 `agent-usage` and `github-prs` all keep their offset by hand. So every widget
 must answer it, and the one that genuinely has nothing to scroll — `matrix`,
 which computes nothing on purpose — is named in the check rather than inferred.

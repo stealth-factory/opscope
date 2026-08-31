@@ -1,0 +1,9 @@
+{
+  "_schema": {
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "_refresh_comment": "Seconds between reads of Herdr pane state.",
+  "refresh": 4.0
+}

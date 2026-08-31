@@ -1,0 +1,28 @@
+Every widget here, what it does, and a preview before it runs.
+
+Fifteen widget binaries are a list you have to already know. This is the
+front door: pick one and it runs, quit it and you are back here.
+
+    opscope [WIDGET] [ARGS...]
+
+Nothing is described twice. The summary and note come from each widget's
+own help.txt, and the preview comes from the README beside its code. The
+folder contract is checked by widgets/tests/check.rs.
+
+Nothing is said here about whether a widget will work. A widget that cannot
+run says so itself, on its own screen, in its own words - which is where
+somebody who has just tried to start it is already looking, and is the only
+place that knows what it actually needs.
+
+Keys: up/down select, enter launches, comma opens shared terminal settings,
+q quits.
+
+The Python original rescanned its directory on r. This one has no directory
+to rescan - the list is compiled in - so there is no recheck key here, and
+none is advertised.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the
+mouse wheel does the same. They move the pane and never the selection,
+which is what the arrows are for.
+
+--configure-help prints the launcher-owned guide for terminal.mouse.

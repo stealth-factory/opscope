@@ -1,0 +1,42 @@
+A month grid you can page through, with today in context.
+
+A calendar in a pane: today marked, at least two weeks of context either side
+of it, days belonging to the neighbouring months dimmed, and paging by month
+or by year that runs as far as the calendar itself does.
+
+Nothing here comes off the network and nothing needs a credential. Every date
+is computed from the system clock and the timezone database, which is the same
+source clocks reads.
+
+The month today is in is drawn taller than a month is: a fixed grid cannot
+promise two weeks either side of the current week, because today in the top
+row has no weeks above it. Leading or trailing weeks are added until it does,
+and they read as what they are - days outside the month, dimmed like any other
+spill. Months today is not in are drawn as ordinary grids, and the grid area
+keeps its height either way so paging does not walk the footer up and down.
+
+Week numbers are ISO 8601, which counts weeks from Monday and gives week 1 to
+the week holding the year's first Thursday. That is what the `wk` heading says
+on screen, because the grid can start on Sunday instead and then the number
+belongs to a week beginning a day earlier - at the turn of a year the two
+genuinely disagree, and a number whose meaning moves with a config key is
+worse than no number.
+
+Weeks start on Sunday unless "week_start": "monday" says otherwise. ISO week
+numbers are on unless "week_numbers": false turns the gutter off. Dates are
+reckoned on this machine's zone unless "timezone" names another; either way
+the zone is on the second line, because "today" is a different date in two
+places for several hours a day.
+
+A wide pane shows more months rather than wider margins - two at the sixty to
+seventy columns these panes usually get, three from ninety, up to a year
+across - and a narrow one drops the week-number gutter before it drops a day.
+
+    months
+
+Keys: left and right page a month, up and down a year, and both run
+indefinitely - h/l and j/k do the same. t returns to the month it is now, and
+so does Home. q quits.
+
+ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the mouse
+wheel does the same.

@@ -61,6 +61,14 @@ mod host {
     }
 }
 
+const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
+    widget: "ports",
+    section: "ports",
+    legacy_section: None,
+    schema: include_str!("settings.json"),
+    catalogues: &[],
+};
+
 /// The machine's own ports, hidden behind `o` by default: they are never
 /// the answer to "which port is my dev server on".
 const SYSTEM_PORTS: &[u16] = &[22, 53, 123, 323, 631, 5353];
@@ -2106,7 +2114,7 @@ impl Store {
 }
 
 fn main() {
-    tc::maybe_help(include_str!("help.txt"));
+    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     // Both of ports' config keys were documented and read by nobody.
     // Config is the default; argv still overrides.
     let cfg = tc::load_config("ports");
@@ -2135,7 +2143,7 @@ fn main() {
     {
         let absent = tc::missing(&["lsof"]);
         if !absent.is_empty() {
-            tc::cannot_start(
+            tc::cannot_start_with_settings(
                 "dev servers",
                 &absent,
                 &[
@@ -2143,6 +2151,7 @@ fn main() {
                     "It ships with macOS; without it this pane cannot list ports.",
                 ],
                 "",
+                SETTINGS,
             );
             return;
         }
@@ -2467,6 +2476,10 @@ fn main() {
                     keyboard.restore();
                     tc::restore_screen();
                     return;
+                }
+                "," => {
+                    tc::run_settings(&mut keyboard, SETTINGS);
+                    continue;
                 }
                 "up" => {
                     selected = selected.saturating_sub(1);
@@ -2956,6 +2969,7 @@ fn main() {
                     format!("[o]{} system", if hide_system { "show" } else { "hide" }),
                 )],
                 vec![(ok.dim.clone(), "[r]efresh".into())],
+                vec![(ok.dim.clone(), "[,] settings".into())],
                 vec![(ok.dim.clone(), "[q]uit".into())],
             ],
             &ok,

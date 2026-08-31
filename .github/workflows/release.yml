@@ -224,8 +224,8 @@ jobs:
           done
           # And a count, because a glob that matches nothing would otherwise
           # let this step pass having tested nothing at all.
-          if [ "$n" -lt 15 ]; then
-            echo "only $n binaries ran; expected all 15" >&2
+          if [ "$n" -lt 16 ]; then
+            echo "only $n binaries ran; expected all 16" >&2
             exit 1
           fi
           echo "$n binaries ran and reported themselves"
@@ -242,14 +242,26 @@ jobs:
           esac
           name="opscope-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          # The binaries, and the docs that explain them - `opscope` embeds
-          # them but a person reading the tarball has no other copy.
+          # The binaries, repository docs, and each widget's owned README,
+          # AI configuration guide, and settings declaration.
           for b in target/${{ matrix.target }}/release/*; do
             [ -f "$b" ] && [ -x "$b" ] || continue
             case "$b" in *.d|*.rlib|*.dSYM) continue ;; esac
             cp "$b" "dist/$name/"
           done
           cp -r docs README.md LICENSE config.example.json "dist/$name/"
+          mkdir -p "dist/$name/widgets/src/widgets" "dist/$name/widgets/src/launcher"
+          cp widgets/src/launcher/README.md widgets/src/launcher/help.txt \
+            "dist/$name/widgets/src/launcher/"
+          for widget in widgets/src/widgets/*; do
+            stem="$(basename "$widget")"
+            mkdir -p "dist/$name/widgets/src/widgets/$stem"
+            cp "$widget/README.md" "$widget/CONFIGURE.md" \
+              "dist/$name/widgets/src/widgets/$stem/"
+            if [ -f "$widget/settings.json" ]; then
+              cp "$widget/settings.json" "dist/$name/widgets/src/widgets/$stem/"
+            fi
+          done
           tar -C dist -czf "$name.tar.gz" "$name"
           # shasum is on both; sha256sum is not on macOS.
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"

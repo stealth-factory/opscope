@@ -1,0 +1,24 @@
+{
+  "_comment": "token: a CLASSIC PAT with repo + read:org — fine-grained tokens reach only one org each, and this board spans several. The API is called directly, so the gh CLI is not needed. Keep this file chmod 600.",
+  "_schema": {
+    "accounts": {
+      "items": "string"
+    },
+    "window_days": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "_token_comment": "Classic GitHub token; leave empty to read the named environment variable.",
+  "token": "",
+  "_token_env_comment": "Environment variable that holds the GitHub token.",
+  "token_env": "GITHUB_TOKEN",
+  "_accounts_comment": "GitHub users or organizations to include; empty discovers the viewer and their organizations.",
+  "accounts": [],
+  "_window_days_comment": "Days included in delivery charts and summaries.",
+  "window_days": 14.0,
+  "_refresh_comment": "Seconds between GitHub API refreshes.",
+  "refresh": 120.0
+}

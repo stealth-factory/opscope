@@ -85,7 +85,7 @@ function glibcTooOld(h) {
 }
 
 // Every binary, read from the manifest rather than restated.
-// A restated list is how a fifteenth widget ships in the tarball and
+// A restated list is how a new widget ships in the tarball and
 // not in the npm package, and the launcher then cannot launch it.
 // `[[bin]]` is the same list `opscope` already asserts against.
 function binsFromManifest(repoRoot) {

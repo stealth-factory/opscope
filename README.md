@@ -27,25 +27,33 @@ npx opscope clocks       # or name one and skip it
 `clocks` needs no configuration at all, so it is the one to try first.
 [Other ways to get them →](#getting-them)
 
+## The launcher
+
+`opscope` is the front door: it shows every widget, what it does, and a
+preview without starting its data source. Pick one and it runs; quit it and
+you are back. It is the launcher, not another widget.
+
+[How the launcher works →](widgets/src/launcher/README.md)
+
 ## The widgets
 
 | Widget | What it does | Needs | Docs |
 |---|---|---|---|
-| **`opscope`** | The front door: every widget, what it does, and whether it will work on this machine — pick one and it runs, quit it and you are back. | — | [read →](docs/opscope.md) |
-| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/99)) | [read →](docs/latency.md) |
-| **`deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](docs/deployments.md) |
-| **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](docs/tailnet.md) |
-| **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](docs/herdr-panes.md) |
-| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](docs/github.md) |
-| **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](docs/github-actions.md) |
-| **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](docs/github-prs.md) |
-| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](docs/linear.md) |
-| **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](docs/agent-usage.md) |
-| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic · Linux, macOS | [read →](docs/ports.md) |
-| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/100)) | [read →](docs/netwatch.md) |
-| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](docs/link.md) |
-| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](docs/clocks.md) |
-| **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | — |
+| **`latency`** | Continuous latency to a list of hosts: median, jitter, loss and a log-scale graph, so a slow link and an *unsteady* one look different. | `ping` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/99)) | [read →](widgets/src/widgets/latency/README.md) |
+| **`vercel-deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/vercel-deployments/README.md) |
+| **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](widgets/src/widgets/tailnet/README.md) |
+| **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](widgets/src/widgets/herdr-panes/README.md) |
+| **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](widgets/src/widgets/github/README.md) |
+| **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-actions/README.md) |
+| **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
+| **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](widgets/src/widgets/linear/README.md) |
+| **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
+| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the kernel's own per-socket counters rather than by capturing packets. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/100)) | [read →](widgets/src/widgets/netwatch/README.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](widgets/src/widgets/link/README.md) |
+| **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
+| **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
+| **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
 **Three are Linux-only today.** `latency`, `netwatch` and `link` read the
 kernel through `/proc` and through `ss`, neither of which exists on macOS;
@@ -84,17 +92,17 @@ npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
-It fetches the launcher and the binaries for this machine into npm's cache and
-runs whichever you named — or the menu, if you named none. **Your `PATH` is
-not touched.** Only `opscope` is a command at all; the fifteen widgets sit
-inside the package beside it, which is why `link` never shadows the coreutils
-command of that name.
+It fetches the launcher and fifteen widget binaries for this machine into
+npm's cache and runs whichever you named — or the menu, if you named none.
+**Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
+widgets sit inside the package beside it, which is why `link` never shadows
+the coreutils command of that name.
 
 Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
-build fifteen. Both take about a minute.
+build all sixteen binaries. Both take about a minute.
 
 ### Download a release
 
@@ -123,7 +131,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The fifteen binaries are right there, beside `config.example.json` and a
+The sixteen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -151,14 +159,15 @@ to check it on. If it is wrong, that is worth an issue.)*
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release            # fifteen binaries in ./target/release
-./target/release/opscope         # the menu, from the build tree
+cargo build --release   # launcher + fifteen widgets in ./target/release
+./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fifteen, with a live preview of
-whichever is highlighted. Name a widget to skip the menu.
+`opscope` is the front door — a menu of the fifteen widgets, with a live preview of
+whichever is highlighted. Name a widget to skip the menu. The same shape
+works from `npx`, from an unpacked tarball, and from a build tree:
 
 ```sh
 npx opscope              # pick one and it runs
@@ -166,9 +175,10 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the fifteen have to stay
-together — `npx` keeps them that way for you. An unpacked tarball or a build tree
-is a setup method, not the way to run them, and lives under
+The launcher looks for each widget beside itself, so the launcher and fifteen
+widget binaries have to stay together — `npx` keeps them that way for you.
+An unpacked tarball or a build tree is a setup method, not the usual way to
+run them, and lives under
 [Getting them](#getting-them).
 
 They are built to sit side by side, but nothing assumes a multiplexer — each
@@ -208,15 +218,83 @@ off; the keys are unaffected. See [Configuration](#configuration).
 Every widget reads optional settings from the first readable of
 `$OPSCOPE_CONFIG`, `$XDG_CONFIG_HOME/opscope/config.json`
 (`~/.config/opscope/config.json` where that is unset), `config.json` in
-the working directory, and `config.json` beside the binary. Copy
-`config.example.json` to start.
+the working directory, and `config.json` beside the binary.
 
-This keeps hostnames, ping targets, city lists and tokens out of the source
-tree: the repo ships generic defaults, and `config.json` is git-ignored along
-with `.env` files and anything else likely to hold a secret.
+**Nothing has to be configured.** Every key is optional, and a key you leave
+out is not a gap — the widget uses the default built into it. Five widgets
+need a token before they can show you something; they are named under
+Credentials below. Every other widget starts on its own defaults.
 
-Most sections are named after the widget that reads them. `terminal` is the
-exception and applies to all of them:
+There are two ways in, and they write the same file.
+
+### The settings screen
+
+Press `,` in any configurable widget, or in the launcher for the settings
+every widget shares. It is one screen, owned by `opscope-core` rather than
+written fifteen times, so it behaves the same everywhere.
+
+The list shows every key that widget answers to, and for each one the value
+in force, the default it falls back to, and what the key means. The file
+being written is named at the top, so there is never a question of which
+`config.json` you are editing.
+
+`↵` opens the row under the cursor, and what opens depends on the value:
+
+| the value | what `↵` opens |
+|---|---|
+| text, or a number | a single-line editor |
+| true / false | nothing — it moves the value on, default included |
+| one of a fixed set | the choices, one to a row |
+| a list of names, or of numbers | an entry-at-a-time editor: type to add one, pick one to remove it |
+| a group of named settings | the same, one entry per group, each opening its own screen |
+| a model's prices | a searchable card of every model, its publisher and its rates |
+
+The editors that both take typing *and* hold a list keep the two apart: you
+are typing until `tab` or `↓`, and picking after. It is why `d` puts a `d` in
+the box rather than deleting the entry you can see — the box has focus, and a
+key that means two things at once will eventually do the wrong one.
+
+`[d]efault` on a row **removes** the key from your `config.json` rather than
+writing today's default into it, so the widget's own default goes on being
+the answer even when a later release changes it.
+
+Writes are atomic and owner-only. **The widget reloads itself as you leave
+the screen**, so nothing needs restarting.
+
+### Editing `config.json` by hand
+
+[`config.example.json`](config.example.json) is the reference, and it is
+**generated** — not written by hand, not kept current by remembering to. It
+is built from the same per-widget declarations the settings screen reads, so
+it carries every section, every key any widget reads, that key's real
+default, and a comment for each saying what it does:
+
+```json
+"ports": {
+  "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. …",
+  "system_ports": [22, 53, 123, 323, 631, 5353],
+  "_refresh_comment": "Seconds between listening-socket and traffic refreshes.",
+  "refresh": 4.0
+}
+```
+
+Copy the sections you want, drop the rest. `_comment` keys are ignored, so
+they can stay where they are as a reminder.
+
+**So you do not have to read fifteen widget pages to find out what you can
+set.** `cargo test` fails if a widget reads a key the example does not list,
+and fails again if the example lists a key no widget reads — the file is
+neither incomplete nor stale by construction, in both directions. The
+per-widget pages are for depth: where a number comes from, what it means, why
+a default is what it is. They are not the inventory.
+
+Section names are the widget's name with hyphens turned to underscores, so
+`vercel-deployments` reads `vercel_deployments`. **Getting one wrong is
+silent** — a section no widget reads is simply never read, and the widget
+goes on using its defaults as though you had written nothing.
+
+`terminal` is the one section that is not a widget's. It applies to all of
+them, and `,` in the launcher edits it:
 
 ```json
 "terminal": { "mouse": false }
@@ -228,13 +306,31 @@ terminal reporting, dragging selects nothing, so copying a line off a panel
 with the mouse stops working. Turn it off if you copy more often than you
 scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
 
-**Three widgets define their own token settings:** `deployments` wants a
-Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
-PAT with `repo` and `read:org` (fine-grained tokens reach only one org
-each), and `linear` a personal API key from Settings → Security & access.
-`github-prs` and `github-actions` reuse that GitHub token; they are not
-credential-free.
-Every other widget runs with no configuration at all.
+### Credentials
+
+**Five widgets define their own token settings:** `vercel-deployments` wants
+a Vercel token from Account Settings → Tokens, `github` a *classic* GitHub
+PAT with `repo` and `read:org` (fine-grained tokens reach only one org each),
+`linear` a personal API key from Settings → Security & access, and
+`github-prs` and `github-actions` each hold their own GitHub token rather
+than borrowing one. Every other widget needs no configuration to start.
+
+Keeping all of this in `config.json` is what keeps hostnames, ping targets,
+city lists and tokens out of the source tree: the repo ships generic
+defaults, and `config.json` is git-ignored along with `.env` files and
+anything else likely to hold a secret.
+
+### Asking an assistant to configure one
+
+Each binary carries a plain-Markdown guide for an AI assistant helping you:
+
+```sh
+opscope latency --configure-help
+```
+
+The guide explains real data sources, safe inspection, credentials, and what
+must be asked rather than guessed. It is documentation, not a skill and not
+permission to make changes.
 
 ## Requirements
 
@@ -252,13 +348,18 @@ Every other widget runs with no configuration at all.
 ## Documentation
 
 Every widget has a page of its own — what it shows, where each number comes
-from, every key it answers to, and the settings it reads. They are linked
-from the table above, and listed together in [`docs/`](docs/README.md).
+from, every key it answers to, and the settings it reads when it is
+configurable. That README lives beside the widget's code, help,
+plain-Markdown AI configuration guide, and — when the widget has settings —
+its settings declaration. They are linked from the table above and indexed in
+[`docs/`](docs/README.md).
 
-Five pages are about the repository rather than a widget:
+Seven pages are about the repository rather than a widget:
 
 | | |
 |---|---|
+| [Making a widget](wiki/making-a-widget.md) | how one folder owns a widget's code, help, preview, settings and AI configuration guide — and everything else it takes to add one |
+| [Model prices](wiki/model-prices.md) | published API list prices per million tokens, with sources and as-of dates |
 | [Design conventions](docs/design.md) | the rules every widget holds to, and why each was paid for |
 | [Internals](docs/internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
 | [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |

@@ -23,8 +23,8 @@
 //!
 //! These are tests rather than a fifteenth binary for two reasons: they
 //! then run on every `cargo test` instead of waiting to be remembered, and
-//! `opscope`'s menu asserts that every `[[bin]]` in the manifest is on it, so
-//! a checker binary would have to be listed as a widget it is not.
+//! every widget folder has to be on `opscope`'s menu, so a checker binary
+//! would have to be listed as a widget it is not.
 //!
 //! One of check.py's five does not need porting and is recorded here rather
 //! than silently dropped:
@@ -37,8 +37,12 @@
 //! with the Python, and a rename is exactly when the gap bites: the help
 //! text and the doc page move with the source stem, but the README tables,
 //! the docs index, and a name in the launcher's sample listing do not.
-//! Those are checked here now. The launcher's own `WIDGETS` list is
-//! asserted from `opscope.rs` against every `[[bin]]` in the manifest.
+//! Those are checked here now, the launcher's own `WIDGETS` list among
+//! them: `every_widget_is_on_the_launcher_menu` reads
+//! `widgets/src/launcher/main.rs` and holds it to the widget folders both
+//! ways. Two sentences here used to describe that assertion while no such
+//! assertion existed - one of them the reason given above - and they named
+//! an `opscope.rs` that the port had already replaced.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -67,10 +71,7 @@ fn is_moved_helper(line: &str, definition: &str) -> bool {
 fn moved_helper_matcher_sees_indent_and_pub() {
     // The column-zero, private prefixes the first check used.
     assert!(is_moved_helper("fn now() -> i64 {", "fn now("));
-    assert!(is_moved_helper(
-        "const SPARK: [&str; 8] = [",
-        "const SPARK:"
-    ));
+    assert!(is_moved_helper("const SPARK: [&str; 8] = [", "const SPARK:"));
     // The two shapes it missed: indent, and `pub`.
     assert!(is_moved_helper("    fn now() -> i64 {", "fn now("));
     assert!(is_moved_helper("pub fn now() -> i64 {", "fn now("));
@@ -217,101 +218,415 @@ fn without_tests(src: &str) -> String {
 }
 
 /// Every widget binary, by stem, with its source.
-///
-/// A widget lives in one of two places: `src/widgets/<name>/` (the package
-/// folder, with `main.rs` beside its modules) or `src/bin/<name>.rs` (the
-/// layout that has not moved yet). Packages win when both exist.
 fn widgets() -> BTreeMap<String, String> {
+    let dir = root().join("widgets/src/widgets");
     let mut found = BTreeMap::new();
-    let packages = root().join("widgets/src/widgets");
-    if packages.is_dir() {
-        for entry in std::fs::read_dir(&packages)
-            .expect("the widgets directory")
-            .flatten()
-        {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let stem = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if !path.join("main.rs").is_file() {
-                continue;
-            }
-            found.insert(stem, concat_rs(&path));
-        }
-    }
-    let dir = root().join("widgets/src/bin");
-    for entry in std::fs::read_dir(&dir)
-        .expect("the bin directory")
-        .flatten()
-    {
+    for entry in std::fs::read_dir(&dir).expect("the bin directory").flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        if !path.is_dir() {
             continue;
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if found.contains_key(&stem) {
+        let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let main = path.join("main.rs");
+        if !main.exists() {
             continue;
         }
         // Each file's own tests are dropped before joining, not after. Split
         // on the first `#[cfg(test)]` of the joined blob and a widget with
-        // submodules is read only as far as its main file's tests - agent-usage's
-        // are two thirds of the way down, so its eight submodules, seven
-        // thousand lines, were invisible to every check that did it that way.
-        let mut src = without_tests(&std::fs::read_to_string(&path).unwrap_or_default());
-        let sub = dir.join(&stem);
-        if sub.is_dir() {
-            src.push('\n');
-            src.push_str(&concat_rs(&sub));
+        // submodules is read only as far as its main file's tests.
+        let mut src = String::new();
+        for part in std::fs::read_dir(&path).expect("a widget directory").flatten() {
+            if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                src.push('\n');
+                src.push_str(&without_tests(
+                    &std::fs::read_to_string(part.path()).unwrap_or_default(),
+                ));
+            }
         }
         found.insert(stem, src);
     }
     found
 }
 
-fn concat_rs(dir: &std::path::Path) -> String {
-    let mut src = String::new();
-    for part in std::fs::read_dir(dir)
-        .expect("a widget directory")
-        .flatten()
-    {
-        if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-            src.push('\n');
-            src.push_str(&without_tests(
-                &std::fs::read_to_string(part.path()).unwrap_or_default(),
-            ));
+#[test]
+fn every_widget_owns_its_complete_folder() {
+    let dir = root().join("widgets/src/widgets");
+    let manifest =
+        std::fs::read_to_string(root().join("widgets/Cargo.toml")).expect("widget manifest");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let folder = dir.join(name);
+        for required in ["main.rs", "help.txt", "README.md", "CONFIGURE.md"] {
+            if !folder.join(required).is_file() {
+                wrong.push(format!("{name}: missing {required}"));
+            }
+        }
+        let path = format!("path = \"src/widgets/{name}/main.rs\"");
+        if !manifest.contains(&path) {
+            wrong.push(format!("{name}: Cargo.toml does not point at its folder"));
+        }
+        let source = std::fs::read_to_string(folder.join("main.rs")).unwrap_or_default();
+        if !source.contains("include_str!(\"CONFIGURE.md\")")
+            || !source.contains("maybe_widget_help")
+        {
+            wrong.push(format!("{name}: binary does not carry its CONFIGURE.md"));
+        }
+        let settings = folder.join("settings.json");
+        if settings.exists() {
+            let text = std::fs::read_to_string(&settings).unwrap_or_default();
+            match serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+            {
+                None => wrong.push(format!("{name}: settings.json is not a JSON object")),
+                Some(settings) => {
+                    for key in settings.keys().filter(|key| !key.starts_with('_')) {
+                        let has_help = [
+                            format!("_{key}_comment"),
+                            format!("_comment_{key}"),
+                            format!("_{key}"),
+                        ]
+                        .iter()
+                        .any(|comment| {
+                            settings
+                                .get(comment)
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|text| !text.trim().is_empty())
+                        });
+                        if !has_help {
+                            wrong.push(format!(
+                                "{name}: {key} has no field-specific help in settings.json"
+                            ));
+                        }
+                    }
+                }
+            }
+            if !source.contains("tc::run_settings") {
+                wrong.push(format!("{name}: declares settings but never opens them"));
+            }
+            let readme = std::fs::read_to_string(folder.join("README.md")).unwrap_or_default();
+            if !readme.contains("`,`") {
+                wrong.push(format!("{name}: README does not document the settings key"));
+            }
+        } else if source.contains("tc::run_settings") {
+            wrong.push(format!("{name}: opens a settings screen with no declaration"));
         }
     }
-    src
+    let launcher = root().join("widgets/src/launcher");
+    for required in [
+        "main.rs",
+        "help.txt",
+        "README.md",
+        "CONFIGURE.md",
+        "settings.json",
+    ] {
+        if !launcher.join(required).is_file() {
+            wrong.push(format!("launcher: missing {required}"));
+        }
+    }
+    let launcher_source =
+        std::fs::read_to_string(launcher.join("main.rs")).unwrap_or_default();
+    if !launcher_source.contains("tc::run_settings") {
+        wrong.push("launcher: does not expose shared terminal settings".into());
+    }
+    let core = std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap_or_default();
+    let terminal =
+        std::fs::read_to_string(launcher.join("settings.json")).unwrap_or_default();
+    let terminal: serde_json::Value =
+        serde_json::from_str(&terminal).expect("launcher settings are valid JSON");
+    for key in terminal
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, _)| key)
+        .filter(|key| !key.starts_with('_'))
+    {
+        if !core.contains(&format!("\"{}\"", key)) {
+            wrong.push(format!("launcher: terminal.{key} is never read by core"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
-fn widget_package_dir(name: &str) -> Option<PathBuf> {
-    let dir = root().join("widgets/src/widgets").join(name);
-    dir.join("main.rs").is_file().then_some(dir)
+#[test]
+fn only_core_draws_the_settings_screen() {
+    // The division this whole feature rests on: a widget declares what it
+    // has to configure, and core decides what that looks like and how it
+    // behaves. Fifteen widgets each with their own idea of what enter does
+    // to a boolean is the thing being prevented, and it is the kind of drift
+    // that arrives one reasonable-looking exception at a time.
+    //
+    // Convention held it until now. Convention is what the contrast rule was
+    // for as long as there were four widgets to break it.
+    let mut wrong = Vec::new();
+    for (name, src) in widgets() {
+        let dir = root().join("widgets/src/widgets").join(&name);
+        let declares = dir.join("settings.json").exists();
+
+        // Ships settings data, so it must hand them to the shared screen.
+        // A widget with a settings.json and no run_settings either has no
+        // way in, or has built one.
+        if declares {
+            if !src.contains("SettingsSpec") {
+                wrong.push(format!("{name}: has settings.json but declares no SettingsSpec"));
+            }
+            if !src.contains("run_settings") {
+                wrong.push(format!("{name}: has settings.json but never calls tc::run_settings"));
+            }
+        }
+
+        // And must not have grown a screen of its own. Named shapes only -
+        // a function or module that says settings in its name - because a
+        // check that guessed from the drawing calls would flag every widget
+        // that draws anything.
+        for line in src.lines() {
+            let line = line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+            let own_module = line.starts_with("mod settings") || line.starts_with("pub mod settings");
+            let own_fn = line
+                .split_once("fn ")
+                .map(|(before, after)| {
+                    !before.ends_with('.')
+                        && after
+                            .split(['(', '<', ' '])
+                            .next()
+                            .is_some_and(|n| n.contains("settings"))
+                })
+                .unwrap_or(false);
+            if own_module || own_fn {
+                wrong.push(format!(
+                    "{name}: defines its own settings code - {}",
+                    line.chars().take(60).collect::<String>()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "settings belong to core, not to a widget:\n  {}\n\
+         A widget declares its settings in settings.json - defaults, a _schema \
+         of rules, and a _<key>_comment for each - and calls tc::run_settings. \
+         Anything the screen cannot already do is a change to core/src/settings.rs \
+         so every widget gets it, not a screen of this one's own.",
+        wrong.join("\n  ")
+    );
 }
 
-fn widget_help_path(name: &str) -> PathBuf {
-    match widget_package_dir(name) {
-        Some(dir) => dir.join("help.txt"),
-        None => root()
-            .join("widgets/src/bin")
-            .join(format!("{name}_help.txt")),
+/// The header the generated file carries, naming what regenerates it.
+const CONFIG_EXAMPLE_COMMENT: &str = "Generated from the launcher's \
+settings.json and each widget's settings.json by widgets/tests/check.rs - \
+rewrite it with \
+`UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. \
+Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every \
+key is optional; anything omitted keeps the widget's default.";
+
+/// A JSON value that remembers the order its keys were written in.
+///
+/// `serde_json::Value` does not: its map is a `BTreeMap` unless the
+/// `preserve_order` feature is on, and that feature is not a local decision.
+/// Cargo unifies features across the graph, so switching it on for this test
+/// would switch it on for every widget - and under `cargo test` the widgets
+/// would iterate their config in file order while the release build kept
+/// sorting it. A divergence between what is tested and what ships is worse
+/// than either ordering.
+///
+/// Order is load-bearing in the generated file. Each `_<key>_comment` sits
+/// directly above the key it describes, and sorting scatters them: `ports`
+/// would read `_comment`, `_refresh_comment`, `_system_ports_comment`,
+/// `refresh`, `system_ports`, with every explanation two rows from its key.
+enum Ordered {
+    Object(Vec<(String, Ordered)>),
+    Array(Vec<Ordered>),
+    /// Anything with no order to lose - `serde_json` renders these, so the
+    /// escaping and the number formatting are its and not this file's.
+    Leaf(serde_json::Value),
+}
+
+impl<'de> serde::Deserialize<'de> for Ordered {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Any;
+        impl<'de> serde::de::Visitor<'de> for Any {
+            type Value = Ordered;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some(pair) = map.next_entry::<String, Ordered>()? {
+                    pairs.push(pair);
+                }
+                Ok(Ordered::Object(pairs))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Ordered, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<Ordered>()? {
+                    items.push(item);
+                }
+                Ok(Ordered::Array(items))
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(v.into()))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(serde_json::Value::Null))
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Ordered, E> {
+                Ok(Ordered::Leaf(serde_json::Value::Null))
+            }
+        }
+        d.deserialize_any(Any)
     }
 }
 
-fn widget_macos_path(name: &str) -> PathBuf {
-    match widget_package_dir(name) {
-        Some(dir) => dir.join("macos.rs"),
-        None => root().join(format!("widgets/src/bin/{name}/macos.rs")),
+impl serde::Serialize for Ordered {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self {
+            Ordered::Object(pairs) => {
+                let mut map = s.serialize_map(Some(pairs.len()))?;
+                for (key, value) in pairs {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+            Ordered::Array(items) => {
+                let mut seq = s.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Ordered::Leaf(value) => value.serialize(s),
+        }
     }
+}
+
+fn read_ordered(path: &std::path::Path) -> Ordered {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// A section as the public example carries it: everything but the rules.
+///
+/// `_schema` is the widget telling the settings screen what a value may be -
+/// a minimum, what an array holds, which choices a field offers. None of it
+/// is a setting, so none of it belongs in a file people copy to
+/// `config.json`. Dropped at the top of a section only, which is where it
+/// lives; a `_schema` nested inside a value would be somebody's own key.
+fn without_schema(value: Ordered) -> Ordered {
+    match value {
+        Ordered::Object(pairs) => {
+            Ordered::Object(pairs.into_iter().filter(|(k, _)| k != "_schema").collect())
+        }
+        other => other,
+    }
+}
+
+/// `config.example.json`, built from the settings each widget owns.
+///
+/// This was `tools/config-example.py` until the port, and the check that
+/// read it ran
+/// `python3` as a subprocess - so `cargo test` failed on a machine without
+/// python3, for a reason it was not testing. A test that can fail for a
+/// reason it does not test teaches people to press the button again until it
+/// goes green, which is how a real failure gets waved past.
+fn render_config_example() -> String {
+    let root = root();
+    let mut top = vec![(
+        "_comment".to_string(),
+        Ordered::Leaf(serde_json::Value::String(CONFIG_EXAMPLE_COMMENT.to_string())),
+    )];
+    // Shared terminal settings first, out of alphabetical position on
+    // purpose: they are not a widget's and they belong at the top.
+    top.push((
+        "terminal".to_string(),
+        without_schema(read_ordered(
+            &root.join("widgets/src/launcher/settings.json"),
+        )),
+    ));
+    // Sorted by folder, which is the order the file has always been in:
+    // `github`, `github-actions`, `github-prs` sort by the hyphenated name
+    // rather than by the underscored section it becomes.
+    let dir = root.join("widgets/src/widgets");
+    let mut folders: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the widget directory")
+        .flatten()
+        .filter(|entry| entry.path().join("settings.json").exists())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    folders.sort();
+    assert!(!folders.is_empty(), "no widget declares any settings");
+    for folder in folders {
+        top.push((
+            folder.replace('-', "_"),
+            without_schema(read_ordered(&dir.join(&folder).join("settings.json"))),
+        ));
+    }
+    let mut out = serde_json::to_string_pretty(&Ordered::Object(top))
+        .expect("the config example serialises");
+    out.push('\n');
+    out
+}
+
+#[test]
+fn generated_config_example_matches_widget_settings() {
+    let path = root().join("config.example.json");
+    let generated = render_config_example();
+    // Writing first and comparing after means a regenerating run still
+    // proves the result, rather than rewriting the file and reporting
+    // nothing about it.
+    if std::env::var_os("UPDATE_CONFIG_EXAMPLE").is_some() {
+        std::fs::write(&path, &generated).expect("rewriting config.example.json");
+    }
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current == generated {
+        return;
+    }
+    // The whole file is 250 lines; printing both is not a diff anybody
+    // reads. Say which line parted company.
+    let parted = current
+        .lines()
+        .zip(generated.lines())
+        .position(|(a, b)| a != b);
+    let detail = match parted {
+        Some(n) => format!(
+            "line {} differs:\n     on disk: {}\n   generated: {}",
+            n + 1,
+            current.lines().nth(n).unwrap_or(""),
+            generated.lines().nth(n).unwrap_or("")
+        ),
+        None => format!(
+            "the shorter file is a prefix of the other: {} lines on disk, {} generated",
+            current.lines().count(),
+            generated.lines().count()
+        ),
+    };
+    panic!(
+        "config.example.json is not what the widget settings generate.\n  {detail}\n\n\
+         Rewrite it with:\n  UPDATE_CONFIG_EXAMPLE=1 cargo test --test check \
+         generated_config_example_matches_widget_settings -- --exact"
+    );
 }
 
 /// Text inside double-quoted string literals, where hints live.
@@ -355,16 +670,7 @@ const GLYPHS: &[(char, &str)] = &[
 ];
 
 /// Named keys that appear in prose: "esc, ↵ or i to close".
-const NAMED: &[&str] = &[
-    "esc",
-    "tab",
-    "enter",
-    "backspace",
-    "pgup",
-    "pgdn",
-    "home",
-    "end",
-];
+const NAMED: &[&str] = &["esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end"];
 
 /// The keys a hint teaches, in any of the forms this tree writes them.
 ///
@@ -544,13 +850,7 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         // lookup in the file - clocks reading its own state file, link
         // parsing `ss` output, agent-usage reading token counts - none of which
         // is config. That produced 24 false failures on the first run.
-        for marker in [
-            "cfg_f64(",
-            "cfg_usize(",
-            "cfg_str(",
-            "cfg_strings(",
-            "cfg.get(",
-        ] {
+        for marker in ["cfg_f64(", "cfg_usize(", "cfg_str(", "cfg_strings(", "cfg.get("] {
             let mut from = 0;
             while let Some(at) = line[from..].find(marker) {
                 let start = from + at + marker.len();
@@ -574,8 +874,8 @@ fn config_use(src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
 
 /// The example config, as section -> keys.
 fn example() -> BTreeMap<String, BTreeSet<String>> {
-    let text =
-        std::fs::read_to_string(root().join("config.example.json")).expect("config.example.json");
+    let text = std::fs::read_to_string(root().join("config.example.json"))
+        .expect("config.example.json");
     let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
     let mut out = BTreeMap::new();
     for (section, body) in parsed.as_object().expect("an object") {
@@ -600,10 +900,7 @@ fn every_footer_hint_names_a_key_the_widget_answers_to() {
         let handled = handled_keys(&src);
         for key in hinted_keys(&src) {
             if !handled.contains(&key) {
-                wrong.push(format!(
-                    "{}: [{}] is hinted, no match arm answers it",
-                    name, key
-                ));
+                wrong.push(format!("{}: [{}] is hinted, no match arm answers it", name, key));
             }
         }
     }
@@ -616,7 +913,10 @@ fn every_footer_hint_is_in_the_widgets_doc() {
     // exist teaches a lie, and so does an undocumented one that works.
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
-        let doc = root().join("docs").join(format!("{}.md", name));
+        let doc = root()
+            .join("widgets/src/widgets")
+            .join(&name)
+            .join("README.md");
         let Ok(text) = std::fs::read_to_string(&doc) else {
             continue; // matrix is decorative and deliberately undocumented
         };
@@ -628,13 +928,10 @@ fn every_footer_hint_is_in_the_widgets_doc() {
                 .iter()
                 .find(|(_, n)| *n == key)
                 .map(|(g, _)| format!("`{}`", g));
-            let documented =
-                text.contains(&format!("`{}`", key)) || glyph.is_some_and(|g| text.contains(&g));
+            let documented = text.contains(&format!("`{}`", key))
+                || glyph.is_some_and(|g| text.contains(&g));
             if !documented {
-                wrong.push(format!(
-                    "{}: [{}] in the footer, not in docs/{}.md",
-                    name, key, name
-                ));
+                wrong.push(format!("{}: [{}] in the footer, not in its README.md", name, key));
             }
         }
     }
@@ -707,14 +1004,21 @@ fn every_config_read_falls_back_to_a_code_default() {
         let mut from = 0;
         while let Some(at) = src[from..].find(".get(\"") {
             let start = from + at;
-            from = start + 5;
+            // Past the opening quote, not onto it. `.get("` is six
+            // characters; at five the key read back empty every time, so
+            // this check has only ever been able to say *that* something
+            // was unguarded and never *what* - which is most of the work.
+            from = start + 6;
             // Only reads of the config value itself; every other .get() in
             // these files is a JSON lookup on something else.
             let before = &src[start.saturating_sub(40)..start];
             if !before.trim_end().ends_with("cfg") && !before.trim_end().ends_with("&cfg") {
                 continue;
             }
-            let key: String = src[from..].chars().take_while(|c| *c != '"').collect();
+            let key: String = src[from..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
             // The statement this read belongs to, not a fixed window: an
             // earlier hand-audit used 260 characters and wrongly flagged
             // work_days, whose fallback is simply further along.
@@ -763,11 +1067,15 @@ fn every_documented_widget_is_in_the_docs_index() {
     let index = std::fs::read_to_string(root().join("docs/README.md")).expect("docs/README.md");
     let mut wrong = Vec::new();
     for name in widgets().keys() {
-        let doc = root().join("docs").join(format!("{}.md", name));
-        if !doc.exists() {
-            continue; // matrix is decorative and deliberately undocumented
-        }
-        let cell = format!("[`{}`]({}.md)", name, name);
+        let doc = root()
+            .join("widgets/src/widgets")
+            .join(name)
+            .join("README.md");
+        assert!(doc.exists(), "{} has no owned README.md", name);
+        let cell = format!(
+            "[`{}`](../widgets/src/widgets/{}/README.md)",
+            name, name
+        );
         if !index.contains(&cell) {
             wrong.push(format!("{}: no docs/README.md row", name));
         }
@@ -779,7 +1087,8 @@ fn every_documented_widget_is_in_the_docs_index() {
 fn widget_names_in_the_launcher_sample_are_current() {
     // The sample listing is not every widget. It is the place a rename
     // forgets: a left-column name that is not a widget is the old name.
-    let text = std::fs::read_to_string(root().join("docs/opscope.md")).expect("docs/opscope.md");
+    let text = std::fs::read_to_string(root().join("widgets/src/launcher/README.md"))
+        .expect("launcher README.md");
     let widgets = widgets();
     let mut wrong = Vec::new();
     let mut in_sample = false;
@@ -813,10 +1122,65 @@ fn widget_names_in_the_launcher_sample_are_current() {
         }
         if !widgets.contains_key(stem) {
             wrong.push(format!(
-                "docs/opscope.md lists {:?} in the sample and no widget is called that",
+                "the launcher README lists {:?} in the sample and no widget is called that",
                 stem
             ));
         }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+/// Every widget is on the launcher's menu, and every name on it is a widget.
+///
+/// `WIDGETS` in the launcher is the keystone of a new widget and was enforced
+/// by nothing. Half of it looks enforced: the `widget!` macro `include_str!`s
+/// the named folder's `help.txt` and `README.md`, so a *wrong* name there is
+/// a compile error, and that is the half people notice.
+///
+/// Omission is the half the compiler cannot see. Add a widget folder, forget
+/// the line, and the workspace builds, every other check passes, and the
+/// widget simply never appears in `opscope` - which looks from the menu
+/// exactly like a widget nobody wrote.
+#[test]
+fn every_widget_is_on_the_launcher_menu() {
+    let source = std::fs::read_to_string(root().join("widgets/src/launcher/main.rs"))
+        .expect("the launcher's main.rs");
+    // Only the list. The `widget!` macro is defined in the same file, just
+    // above it, and its definition names no widget.
+    let list = source
+        .split("const WIDGETS: &[Widget] = &[")
+        .nth(1)
+        .expect("the WIDGETS list")
+        .split("];")
+        .next()
+        .expect("the end of the WIDGETS list");
+    let listed: BTreeSet<String> = list
+        .match_indices("widget!(\"")
+        .filter_map(|(at, _)| {
+            let after = &list[at + "widget!(\"".len()..];
+            after.find('"').map(|end| after[..end].to_string())
+        })
+        .collect();
+    // A pattern that matches nothing reads exactly like a menu with nothing
+    // on it, and this file has been fooled that way before.
+    assert!(
+        !listed.is_empty(),
+        "no widget!(\"...\") entries came out of the launcher - that is this \
+         pattern being wrong, not the menu being empty"
+    );
+
+    let built: BTreeSet<String> = widgets().into_keys().collect();
+    let mut wrong = Vec::new();
+    for name in built.difference(&listed) {
+        wrong.push(format!(
+            "{name}: is a widget and is not in the launcher's WIDGETS, so it \
+             never appears in the opscope menu"
+        ));
+    }
+    for name in listed.difference(&built) {
+        wrong.push(format!(
+            "{name}: is in the launcher's WIDGETS and is not a widget"
+        ));
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
@@ -867,17 +1231,12 @@ fn every_key_the_help_text_names_is_answered() {
     // missed. Catching one of the two still lands the reader in the right
     // sentence.
     const VERBS: &[&str] = &[
-        "opens",
-        "cycles",
-        "toggles",
-        "quits",
-        "refreshes",
-        "closes",
-        "copies",
+        "opens", "cycles", "toggles", "quits", "refreshes", "closes", "copies",
     ];
+    let dir = root().join("widgets/src/widgets");
     let mut wrong = Vec::new();
     for (name, src) in widgets() {
-        let help = widget_help_path(&name);
+        let help = dir.join(&name).join("help.txt");
         let Ok(text) = std::fs::read_to_string(&help) else {
             continue;
         };
@@ -893,13 +1252,13 @@ fn every_key_the_help_text_names_is_answered() {
                     continue;
                 }
                 let after_press = i > 0 && words[i - 1] == "press";
-                let before_verb = words.get(i + 1).is_some_and(|next| VERBS.contains(next));
+                let before_verb = words
+                    .get(i + 1)
+                    .is_some_and(|next| VERBS.contains(next));
                 if (after_press || before_verb) && !handled.contains(*word) {
                     wrong.push(format!(
-                        "{} names {:?} and {}.rs does not answer it",
-                        help.file_name().unwrap_or_default().to_string_lossy(),
-                        word,
-                        name
+                        "{}/help.txt names {:?} and its main.rs does not answer it",
+                        name, word
                     ));
                 }
             }
@@ -913,11 +1272,7 @@ fn every_key_the_help_text_names_is_answered() {
 fn luminance(rgb: (f64, f64, f64)) -> f64 {
     let ch = |c: f64| {
         let c = c / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
     };
     0.2126 * ch(rgb.0) + 0.7152 * ch(rgb.1) + 0.0722 * ch(rgb.2)
 }
@@ -968,9 +1323,7 @@ fn text_on_a_selection_tint_clears_aa() {
         let mut colours: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
         for line in src.lines() {
             let t = line.trim_start();
-            let Some(field) = t.split(':').next() else {
-                continue;
-            };
+            let Some(field) = t.split(':').next() else { continue };
             if !t.contains(": tc::rgb(") || field.contains(' ') || field.is_empty() {
                 continue;
             }
@@ -1029,9 +1382,7 @@ fn text_on_a_selection_tint_clears_aa() {
                     true => format!("{}_lit", field),
                     false => field,
                 };
-                let Some(&c) = colours.get(&field) else {
-                    continue;
-                };
+                let Some(&c) = colours.get(&field) else { continue };
                 let r = contrast(c, tint);
                 if r < 4.5 {
                     wrong.push(format!(
@@ -1044,11 +1395,7 @@ fn text_on_a_selection_tint_clears_aa() {
     }
     wrong.sort();
     wrong.dedup();
-    assert!(
-        wrong.is_empty(),
-        "on the selected-row tint:\n{}",
-        wrong.join("\n")
-    );
+    assert!(wrong.is_empty(), "on the selected-row tint:\n{}", wrong.join("\n"));
 }
 
 /// A widget with a lighter grey has to actually reach for it.
@@ -1097,11 +1444,7 @@ fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
             }
         }
     }
-    assert!(
-        wrong.is_empty(),
-        "a lighter grey nobody draws:\n{}",
-        wrong.join("\n")
-    );
+    assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));
 }
 
 /// Widgets that answer neither wheel event, deliberately.
@@ -1183,9 +1526,7 @@ fn the_wheel_is_turned_off_on_every_way_out() {
         ("restore_screen", "pub fn restore_screen()"),
         ("Keyboard::restore", "pub fn restore(&mut self)"),
     ] {
-        let at = src
-            .find(from)
-            .unwrap_or_else(|| panic!("{} moved or was renamed", what));
+        let at = src.find(from).unwrap_or_else(|| panic!("{} moved or was renamed", what));
         let body = &src[at..src.len().min(at + 900)];
         assert!(
             body.contains("MOUSE_OFF"),
@@ -1482,71 +1823,31 @@ mod tests {
     );
 }
 
-/// Every `.rs` file that makes up a widget, including package folders
-/// and leftover `src/bin/` files. `widgets()` concatenates those; these
-/// checks need the files separately so a `cfg`-gated module can be judged
-/// on its own contents.
+/// Every `.rs` file that makes up a widget. `widgets()` concatenates those;
+/// these checks need the files separately so a `cfg`-gated module can be
+/// judged on its own contents.
 fn widget_rs_files() -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     let packages = root().join("widgets/src/widgets");
-    if packages.is_dir() {
-        for entry in std::fs::read_dir(&packages)
-            .expect("the widgets directory")
-            .flatten()
-        {
-            let path = entry.path();
-            if !path.is_dir() || !path.join("main.rs").is_file() {
-                continue;
-            }
-            let stem = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            for part in std::fs::read_dir(&path)
-                .expect("a widget directory")
-                .flatten()
-            {
-                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-                    found.push((stem.clone(), part.path()));
-                }
-            }
-        }
-    }
-    let dir = root().join("widgets/src/bin");
-    for entry in std::fs::read_dir(&dir)
-        .expect("the bin directory")
+    for entry in std::fs::read_dir(&packages)
+        .expect("the widgets directory")
         .flatten()
     {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if widget_package_dir(&stem).is_some() {
-                continue;
-            }
-            found.push((stem, path));
+        if !path.is_dir() || !path.join("main.rs").is_file() {
             continue;
         }
-        if path.is_dir() {
-            let stem = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if widget_package_dir(&stem).is_some() {
-                continue;
-            }
-            for part in std::fs::read_dir(&path)
-                .expect("a widget directory")
-                .flatten()
-            {
-                if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-                    found.push((stem.clone(), part.path()));
-                }
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        for part in std::fs::read_dir(&path)
+            .expect("a widget directory")
+            .flatten()
+        {
+            if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                found.push((stem.clone(), part.path()));
             }
         }
     }
@@ -1682,38 +1983,6 @@ fn the_linux_socket_parser_is_compiled_on_every_target() {
 }
 
 #[test]
-fn a_widget_package_is_what_cargo_builds() {
-    // The folder is the binary. A package with main.rs that Cargo still
-    // points at src/bin/ is two sources, and the one people edit is the
-    // one that is not built.
-    let manifest =
-        std::fs::read_to_string(root().join("widgets/Cargo.toml")).expect("widgets/Cargo.toml");
-    let mut wrong = Vec::new();
-    for name in widgets().keys() {
-        let Some(dir) = widget_package_dir(name) else {
-            continue;
-        };
-        let path = format!("path = \"src/widgets/{name}/main.rs\"");
-        if !manifest.contains(&path) {
-            wrong.push(format!("{name}: Cargo.toml does not point at {path}"));
-        }
-        if !dir.join("help.txt").is_file() {
-            wrong.push(format!("{name}: package folder missing help.txt"));
-        }
-        if root()
-            .join("widgets/src/bin")
-            .join(format!("{name}.rs"))
-            .is_file()
-        {
-            wrong.push(format!("{name}: leftover src/bin/{name}.rs after the move"));
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "a widget package is the thing cargo builds:\n  {}",
-        wrong.join("\n  ")
-    );
-}
 
 fn opens_proc(src: &str) -> bool {
     src.lines().any(|line| {
@@ -1773,13 +2042,9 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
         if listed.contains(name.as_str()) {
             continue;
         }
-        let macos = widget_macos_path(&name);
-        if macos.is_file() {
-            let main = match widget_package_dir(&name) {
-                Some(dir) => dir.join("main.rs"),
-                None => root().join(format!("widgets/src/bin/{name}.rs")),
-            };
-            let main_src = std::fs::read_to_string(&main).unwrap_or_default();
+        let folder = root().join("widgets/src/widgets").join(&name);
+        if folder.join("macos.rs").is_file() {
+            let main_src = std::fs::read_to_string(folder.join("main.rs")).unwrap_or_default();
             if !main_src.contains("macos.rs") && !main_src.contains("mod macos") {
                 wrong.push(format!(
                     "{name}: macos.rs is present but main.rs does not load it"
@@ -1802,4 +2067,258 @@ fn a_proc_reader_has_a_macos_path_or_says_why() {
          or name it in LINUX_ONLY_UNTIL with the issue that will.",
         wrong.join("\n  ")
     );
+}
+
+/// A catalogue is wired to a field by name, and nothing else ties them.
+///
+/// `catalogues: &[("rates", LIST_RATES)]` says "offer this table on the field
+/// called rates". Write `"rate"` and it compiles, every test passes, and the
+/// settings screen quietly goes on showing a JSON box - the exact failure
+/// this file exists for, since the only symptom is a feature that is simply
+/// not there.
+#[test]
+fn every_catalogue_names_a_field_its_widget_actually_declares() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let source = std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
+        let Some(rest) = source.split("catalogues: &[").nth(1) else {
+            continue;
+        };
+        let Some(list) = rest.split("],").next() else {
+            continue;
+        };
+        // Each entry opens ("field-name", TABLE.
+        let declared: Vec<String> = list
+            .match_indices("(\"")
+            .filter_map(|(at, _)| {
+                let after = &list[at + 2..];
+                after.find('"').map(|end| after[..end].to_string())
+            })
+            .collect();
+        if declared.is_empty() {
+            continue;
+        }
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let parsed: serde_json::Value = match serde_json::from_str(&settings) {
+            Ok(v) => v,
+            Err(_) => {
+                wrong.push(format!("{name}: declares a catalogue and has no settings.json"));
+                continue;
+            }
+        };
+        for field in declared {
+            if !parsed.as_object().is_some_and(|o| o.contains_key(&field)) {
+                wrong.push(format!(
+                    "{name}: catalogue names {field:?}, which is not a key in its settings.json"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+
+/// The `token_env` default on screen is the one the code falls back to.
+///
+/// The settings screen draws a field's default from `settings.json`, and the
+/// widget reads its own fallback from `TOKEN_ENV`. Nothing tied the two
+/// together, and they had already come apart: `github-actions` declared `""`
+/// while its code fell back to `GITHUB_TOKEN`, so the screen showed an empty
+/// default for a variable that was in fact being read. Somebody reading that
+/// screen would set a variable nothing looks at, or none at all.
+#[test]
+fn a_declared_token_env_matches_the_code() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let source =
+            std::fs::read_to_string(dir.join(name).join("main.rs")).unwrap_or_default();
+        // `const TOKEN_ENV: &str = "SOMETHING";`
+        let Some(at) = source.find("const TOKEN_ENV: &str = \"") else {
+            continue;
+        };
+        let rest = &source[at + "const TOKEN_ENV: &str = \"".len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let in_code = &rest[..end];
+
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let parsed: serde_json::Value = match serde_json::from_str(&settings) {
+            Ok(v) => v,
+            Err(_) => {
+                wrong.push(format!("{name}: names a TOKEN_ENV and has no settings.json"));
+                continue;
+            }
+        };
+        let declared = parsed.get("token_env").and_then(|v| v.as_str());
+        match declared {
+            Some(shown) if shown == in_code => {}
+            Some(shown) => wrong.push(format!(
+                "{name}: settings.json shows token_env {shown:?}, the code uses {in_code:?}"
+            )),
+            None => wrong.push(format!(
+                "{name}: names a TOKEN_ENV of {in_code:?} and declares no token_env default"
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+
+/// The default on screen is the default the widget uses.
+///
+/// The settings screen draws a field's default from `settings.json`; the
+/// widget falls back to whatever it passed `cfg_*`. Nothing held the two
+/// together, and they had come apart: `latency` shipped
+/// `["1.1.1.1", "8.8.8.8", "example.internal"]` in its schema while its code
+/// defaulted to the first two, so the screen advertised a third host that
+/// was never pinged - and writing anything materialised the screen's version
+/// into the file, at which point the widget started pinging a name that does
+/// not resolve.
+///
+/// Only the four `cfg_*` helpers with a literal default are read. A default
+/// that is computed cannot be compared against a constant, and is skipped
+/// rather than guessed at.
+#[test]
+fn a_declared_default_matches_the_code() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for (name, source) in widgets() {
+        let settings = std::fs::read_to_string(dir.join(&name).join("settings.json"))
+            .unwrap_or_default();
+        let Ok(schema) = serde_json::from_str::<serde_json::Value>(&settings) else {
+            continue;
+        };
+        let Some(schema) = schema.as_object() else {
+            continue;
+        };
+        // Whitespace flattened first: these calls wrap across lines, and a
+        // line-by-line read is how a config audit here once missed most of
+        // them.
+        let flat: String = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for (call, render) in [
+            ("cfg_f64(", "number"),
+            ("cfg_usize(", "number"),
+            ("cfg_str(", "string"),
+            ("cfg_strings(", "strings"),
+        ] {
+            let mut rest = flat.as_str();
+            while let Some(at) = rest.find(call) {
+                rest = &rest[at + call.len()..];
+                let Some(end) = rest.find(')') else { break };
+                let args = &rest[..end];
+                // cfg, "key", default
+                let mut parts = args.splitn(3, ',');
+                let _cfg = parts.next();
+                let Some(key) = parts.next() else { continue };
+                let Some(default) = parts.next() else { continue };
+                let key = key.trim().trim_matches('"');
+                let default = default.trim();
+                let Some(declared) = schema.get(key) else {
+                    continue;
+                };
+                // Only a literal can be compared against a constant. A named
+                // one - TOKEN_ENV and its like - is held to its schema by
+                // a_declared_token_env_matches_the_code instead, which knows
+                // how to resolve it.
+                let literal = default.starts_with('"')
+                    || default.starts_with("&[")
+                    || default.starts_with('-')
+                    || default.starts_with(|c: char| c.is_ascii_digit());
+                if !literal {
+                    continue;
+                }
+                let agrees = match render {
+                    "number" => default
+                        .parse::<f64>()
+                        .ok()
+                        .zip(declared.as_f64())
+                        .is_some_and(|(a, b)| (a - b).abs() < 1e-9),
+                    "string" => declared.as_str() == Some(default.trim_matches('"')),
+                    // &["a", "b"] against the declared array.
+                    "strings" => {
+                        let inner = default.trim_start_matches("&[").trim_end_matches(']');
+                        let listed: Vec<String> = inner
+                            .split(',')
+                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        declared
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .is_some_and(|d| d == listed)
+                    }
+                    _ => true,
+                };
+                if !agrees {
+                    wrong.push(format!(
+                        "{name}.{key}: settings.json declares {}, the code falls back to {}",
+                        serde_json::to_string(declared).unwrap_or_default(),
+                        default
+                    ));
+                }
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+
+/// Every array field declares what it holds.
+///
+/// The settings screen decides whether a list is filled in entry by entry or
+/// left as a JSON box, and it decides from `items`. Where that is missing it
+/// falls back to reading the shipped default - which works until the default
+/// is empty, and a list somebody is meant to fill in ships empty by nature.
+///
+/// This is not hypothetical. `latency.strip_suffixes` was classified by its
+/// default holding one string; correcting that default to `[]` - a separate,
+/// correct fix - silently took its editor away, and every test still passed
+/// because nothing checked that a field kept the screen it had. A capability
+/// that depends on a value is a capability that leaves when the value does.
+#[test]
+fn every_array_declares_what_it_holds() {
+    let dir = root().join("widgets/src/widgets");
+    let mut wrong = Vec::new();
+    for name in widgets().keys() {
+        let settings =
+            std::fs::read_to_string(dir.join(name).join("settings.json")).unwrap_or_default();
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&settings) else {
+            continue;
+        };
+        let Some(body) = parsed.as_object() else {
+            continue;
+        };
+        let schema = body.get("_schema").and_then(|v| v.as_object());
+        for (key, value) in body {
+            if key.starts_with('_') || !value.is_array() {
+                continue;
+            }
+            let rule = schema.and_then(|s| s.get(key)).and_then(|r| r.as_object());
+            // A picker names its own answers, so it has already said.
+            if rule.is_some_and(|r| r.contains_key("picker")) {
+                continue;
+            }
+            if !rule.is_some_and(|r| r.contains_key("items")) {
+                wrong.push(format!(
+                    "{name}.{key}: an array with no `items` - the screen would have to \
+                     guess from its default what kind of list it is"
+                ));
+            }
+        }
+    }
+    wrong.sort();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }

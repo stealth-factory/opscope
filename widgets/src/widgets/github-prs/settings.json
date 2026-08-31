@@ -1,0 +1,26 @@
+{
+  "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section. Each source is one GitHub search; results are pooled and de-duplicated, because GitHub search has no OR. @mine expands to every org you belong to plus your own account.",
+  "_schema": {
+    "sources": { "values": "string" },
+    "limit": {
+      "minimum": 1
+    },
+    "refresh": {
+      "minimum": 0.1
+    }
+  },
+  "_token_comment": "This widget's GitHub token. Empty falls through to the variable token_env names, not to another widget's token.",
+  "token": "",
+  "_token_env_comment": "Which environment variable holds the token, when `token` is empty. Defaults to GITHUB_TOKEN. This is a variable name, never a credential.",
+  "token_env": "GITHUB_TOKEN",
+  "_sources_comment": "Named GitHub search queries pooled and de-duplicated into the follow-up queue.",
+  "sources": {
+    "orgs": "is:open is:pr @mine",
+    "authored": "is:open is:pr author:@me",
+    "assigned": "is:open is:pr assignee:@me"
+  },
+  "_limit_comment": "Maximum pull requests retained after searches are combined.",
+  "limit": 50,
+  "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
+  "refresh": 60.0
+}

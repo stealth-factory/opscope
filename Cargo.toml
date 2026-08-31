@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "widgets"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -15,7 +15,7 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 # unwind, deliberately, and not for free: it costs about 0.5 MB across the
-# fourteen binaries, 4.5%, measured. It buys the poller guards in agent-usage,
+# widget binaries, 4.5%, measured. It buys the poller guards in agent-usage,
 # herdr-panes and ports, which wrap their poll threads in catch_unwind and
 # record why they stopped. Under panic = "abort" those guards cannot fire
 # at all - the process dies before the Err arm is reached - so the source
