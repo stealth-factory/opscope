@@ -589,8 +589,12 @@ pub fn heat(frac: f64) -> String {
 /// being watched at the moment it starts, and a line printed to a shell
 /// that then sits at a prompt is indistinguishable from the widget never
 /// having been launched. This stays on screen until somebody reads it.
+///
+/// `needed` is formatted as `needs ss, ping`. For a reason that is not a
+/// missing tool — `unsupported()` when this kernel has no source — use
+/// `cannot_start_because`.
 pub fn cannot_start(name: &str, needed: &[String], why: &[&str], install: &str) {
-    cannot_start_inner(name, needed, why, install, None);
+    cannot_start_because(name, &format!("needs {}", needed.join(", ")), why, install);
 }
 
 /// The same persistent missing-tool screen, with the owning widget's
@@ -602,12 +606,26 @@ pub fn cannot_start_with_settings(
     install: &str,
     settings: SettingsSpec,
 ) {
-    cannot_start_inner(name, needed, why, install, Some(settings));
+    cannot_start_inner(
+        name,
+        &format!("needs {}", needed.join(", ")),
+        why,
+        install,
+        Some(settings),
+    );
+}
+
+/// Same screen as `cannot_start`, with the reason already worded.
+///
+/// Every widget that cannot run on this kernel passes `unsupported()`, so
+/// the sentence on screen is the same one.
+pub fn cannot_start_because(name: &str, reason: &str, why: &[&str], install: &str) {
+    cannot_start_inner(name, reason, why, install, None);
 }
 
 fn cannot_start_inner(
     name: &str,
-    needed: &[String],
+    reason: &str,
     why: &[&str],
     install: &str,
     settings: Option<SettingsSpec>,
@@ -636,7 +654,7 @@ fn cannot_start_inner(
         rows.push(seg(
             &[
                 (bad.as_str(), " cannot start · ".into()),
-                (txt.as_str(), format!("needs {}", needed.join(", "))),
+                (txt.as_str(), reason.to_string()),
             ],
             w - 1,
         ));
@@ -1526,6 +1544,15 @@ pub fn missing(programs: &[&str]) -> Vec<String> {
         })
         .map(|p| p.to_string())
         .collect()
+}
+
+/// Why a widget cannot run on this kernel.
+///
+/// One sentence, used by every widget that has no source here, so four
+/// wordings do not grow as four widgets grow a macOS path. The OS name is
+/// what rustc calls this target (`linux`, `macos`), not a marketing name.
+pub fn unsupported() -> String {
+    format!("does not run on {}", std::env::consts::OS)
 }
 
 /// Non-blocking key input, decoding the sequences arrows arrive as.

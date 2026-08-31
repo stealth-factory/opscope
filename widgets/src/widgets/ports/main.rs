@@ -16,10 +16,9 @@
 
 //! What is listening on this machine, what started it, and who can reach it.
 //!
-//! A port of ports.py. Same sources - the kernel's socket table for the
-//! ports, each process's own cmdline and cwd for the rest - and deliberately
-//! the same behaviour on screen, so the two can be compared side by side
-//! while the rest of the collection is translated.
+//! Linux reads `/proc`; macOS reads `lsof` and `ps`. The parsers for both
+//! compile everywhere so their fixture tests run on every CI target. Only
+//! which file to open, or which command to spawn, is behind `cfg(target_os)`.
 //!
 //!     ports [-n SECONDS]
 //!
@@ -28,9 +27,39 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use opscope_core as tc;
+
+// Sibling modules in this folder: the widget package owns its parsers
+// and its acquisition. `mod parse` needs no #[path]. `mod host` still
+// does, because linux.rs and macos.rs are the same module under two
+// names so the rest of the widget can call host::sockets() on either.
+mod parse;
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod host;
+
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod host;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod host {
+    pub fn sockets() -> Result<Vec<super::Found>, String> {
+        Ok(Vec::new())
+    }
+    pub fn process_info(_: i32) -> (String, String, Option<f64>) {
+        (String::new(), String::new(), None)
+    }
+    pub fn ours(_: i32) -> Result<bool, ()> {
+        Err(())
+    }
+    pub fn is_zombie(_: i32) -> bool {
+        false
+    }
+}
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "ports",
@@ -301,7 +330,11 @@ fn extra_columns(
 
 /// The widest name in the table, which is what the WHAT column has to be.
 fn longest_kind(rows: &[&Row]) -> usize {
-    rows.iter().map(|r| r.kind.chars().count()).max().unwrap_or(0).max(4)
+    rows.iter()
+        .map(|r| r.kind.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4)
 }
 
 /// A rate in as few cells as it can be read in, for a table column.
@@ -367,7 +400,13 @@ fn spark(series: &[(f64, f64, f64)], cells: usize, p: &Palette) -> Vec<(String, 
     if cells == 0 {
         return Vec::new();
     }
-    let window: Vec<f64> = series.iter().rev().take(cells).rev().map(|s| s.0 + s.1).collect();
+    let window: Vec<f64> = series
+        .iter()
+        .rev()
+        .take(cells)
+        .rev()
+        .map(|s| s.0 + s.1)
+        .collect();
     let peak = window.iter().copied().fold(0.0f64, f64::max);
     let mut out = Vec::new();
     if window.len() < cells {
@@ -445,7 +484,11 @@ fn traffic_chart(
                 if window.is_empty() {
                     String::new()
                 } else {
-                    format!("  · {} of history, sampled every {}", over(reach), over(gap))
+                    format!(
+                        "  · {} of history, sampled every {}",
+                        over(reach),
+                        over(gap)
+                    )
                 },
             ),
         ],
@@ -472,7 +515,10 @@ fn traffic_chart(
                 text: &str,
                 down: bool|
      -> Vec<String> {
-        let cols: Vec<(f64, String)> = window.iter().map(|s| (pick(s), colour.to_string())).collect();
+        let cols: Vec<(f64, String)> = window
+            .iter()
+            .map(|s| (pick(s), colour.to_string()))
+            .collect();
         let bars = if down {
             tc::vbars_down(&cols, rows, peak)
         } else {
@@ -481,7 +527,11 @@ fn traffic_chart(
         // The label sits on the row nearest the divider, which is the row a
         // full-height bar reaches: the top for the upward half, the first
         // drawn row for the downward one.
-        let on = if down { 0 } else { bars.len().saturating_sub(1) };
+        let on = if down {
+            0
+        } else {
+            bars.len().saturating_sub(1)
+        };
         bars.into_iter()
             .enumerate()
             .map(|(i, row)| {
@@ -516,7 +566,13 @@ fn traffic_chart(
         ],
         w - 1,
     ));
-    out.extend(half(|s| s.1, p.local.as_str(), down_peak, &down_label, true));
+    out.extend(half(
+        |s| s.1,
+        p.local.as_str(),
+        down_peak,
+        &down_label,
+        true,
+    ));
     out
 }
 
@@ -699,79 +755,15 @@ fn compress_v6(groups: &[String]) -> String {
     format!("{}::{}", head, tail)
 }
 
-struct Socket {
+/// A listening socket after acquisition, pid already resolved.
+///
+/// Linux walks `/proc` for the inode; macOS gets the pid from `lsof`.
+/// The rest of the widget does not care which.
+struct Found {
     port: u16,
     bind: String,
-    inode: String,
     uid: u32,
-}
-
-/// Every listening TCP socket, from the kernel's own table.
-fn listening() -> Vec<Socket> {
-    let mut out = Vec::new();
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        for line in text.lines().skip(1) {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 10 || cols[3] != "0A" {
-                continue;
-            }
-            let (addr, port) = match cols[1].rsplit_once(':') {
-                Some(pair) => pair,
-                None => continue,
-            };
-            let port = match u16::from_str_radix(port, 16) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            out.push(Socket {
-                port,
-                bind: hex_addr(addr),
-                inode: cols[9].to_string(),
-                // The uid is in the table even where the process behind it
-                // is not reachable, which is the difference between
-                // "somebody else's" and "a mystery".
-                uid: cols[7].parse().unwrap_or(0),
-            });
-        }
-    }
-    out
-}
-
-/// inode -> pid, for every process this user can read.
-///
-/// Root's sockets are not readable, so sshd and the like arrive unowned.
-/// That is stated on screen rather than papered over.
-fn socket_owners() -> HashMap<String, i32> {
-    let mut owners = HashMap::new();
-    let entries = match std::fs::read_dir("/proc") {
-        Ok(e) => e,
-        Err(_) => return owners,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let pid: i32 = match name.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let fds = match std::fs::read_dir(format!("/proc/{}/fd", pid)) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        for fd in fds.flatten() {
-            if let Ok(target) = std::fs::read_link(fd.path()) {
-                let target = target.to_string_lossy();
-                if let Some(rest) = target.strip_prefix("socket:[") {
-                    owners.insert(rest.trim_end_matches(']').to_string(), pid);
-                }
-            }
-        }
-    }
-    owners
+    pid: Option<i32>,
 }
 
 /// Whose socket it is, by name where the machine has one.
@@ -785,34 +777,6 @@ fn owner_name(uid: u32) -> String {
     }
     let name = unsafe { std::ffi::CStr::from_ptr((*entry).pw_name) };
     name.to_string_lossy().to_string()
-}
-
-fn process_info(pid: i32) -> (String, String, Option<f64>) {
-    let cmdline = std::fs::read(format!("/proc/{}/cmdline", pid))
-        .map(|raw| {
-            String::from_utf8_lossy(&raw)
-                .replace('\0', " ")
-                .trim()
-                .to_string()
-        })
-        .unwrap_or_default();
-    let cwd = std::fs::read_link(format!("/proc/{}/cwd", pid))
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    // The link resolves even when the directory is gone; the kernel just
-    // marks it, and that marker is worth keeping.
-    let deleted = std::fs::metadata(format!("/proc/{}/cwd", pid)).is_err() && !cwd.is_empty();
-    let cwd = if deleted && !cwd.ends_with("(deleted)") {
-        format!("{} (deleted)", cwd)
-    } else {
-        cwd
-    };
-    let started = std::fs::metadata(format!("/proc/{}", pid))
-        .ok()
-        .and_then(|m| m.created().or_else(|_| m.modified()).ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs_f64());
-    (cmdline, cwd, started)
 }
 
 /// What a directory calls itself, for the label a person would use.
@@ -932,16 +896,16 @@ fn proxied_ports(text: &str) -> Vec<u16> {
 }
 
 /// One entry per listening service, plus anything served but not bound.
-fn scan() -> Vec<Row> {
-    let owners = socket_owners();
+fn scan() -> Result<Vec<Row>, String> {
     let served = exposure();
     let mut rows: Vec<Row> = Vec::new();
     let mut services: HashMap<(u16, Option<i32>, String), usize> = HashMap::new();
     let mut seen: Vec<u16> = Vec::new();
     let stamp = tc::now();
+    let mut infos: HashMap<i32, (String, String, Option<f64>)> = HashMap::new();
 
-    for sock in listening() {
-        let pid = owners.get(&sock.inode).copied();
+    for sock in host::sockets()? {
+        let pid = sock.pid;
         // A server on both address families is two sockets in the kernel
         // table but one thing to know about. Any of port, owner or
         // reachability differing is a real second row.
@@ -951,7 +915,10 @@ fn scan() -> Vec<Row> {
             continue;
         }
         let (cmdline, cwd, started) = match pid {
-            Some(pid) => process_info(pid),
+            Some(pid) => infos
+                .entry(pid)
+                .or_insert_with(|| host::process_info(pid))
+                .clone(),
             None => (String::new(), String::new(), None),
         };
         let (kind, guessed) = kind_of(&cmdline, sock.port);
@@ -990,7 +957,7 @@ fn scan() -> Vec<Row> {
         }
     }
     rows.sort_by_key(|r| (is_system_port(r.port), r.port));
-    rows
+    Ok(rows)
 }
 
 fn span(seconds: Option<f64>) -> String {
@@ -1022,24 +989,15 @@ fn theirs(row: &Row) -> bool {
 /// Link-local is dropped: an fe80:: address needs a zone index to be usable
 /// and is never what somebody wants pasted into a browser.
 fn interfaces() -> Vec<(String, String, bool)> {
-    let mut found = Vec::new();
-    let data: serde_json::Value =
-        serde_json::from_str(&tc::run_quiet(&["ip", "-j", "addr"], RUN_TIMEOUT)).unwrap_or(serde_json::Value::Null);
-    for link in data.as_array().unwrap_or(&Vec::new()) {
-        let name = link["ifname"].as_str().unwrap_or("?").to_string();
-        for addr in link["addr_info"].as_array().unwrap_or(&Vec::new()) {
-            let ip = addr["local"].as_str().unwrap_or("");
-            if ip.is_empty() || ip.starts_with("fe80:") {
-                continue;
-            }
-            found.push((
-                name.clone(),
-                ip.to_string(),
-                addr["family"].as_str() == Some("inet6"),
-            ));
-        }
+    // Which command is on PATH varies within a platform: a Linux box
+    // without iproute2, a Mac with it. cfg cannot see any of that.
+    if have("ip") {
+        return parse::parse_ip_json(&tc::run_quiet(&["ip", "-j", "addr"], RUN_TIMEOUT));
     }
-    found
+    if have("ifconfig") {
+        return parse::parse_ifconfig(&tc::run_quiet(&["ifconfig", "-a"], RUN_TIMEOUT));
+    }
+    Vec::new()
 }
 
 #[derive(Clone, Default)]
@@ -1058,8 +1016,11 @@ struct Net {
 /// key that only ever returns an error.
 fn tailnet_self() -> Net {
     let mut out = Net::default();
-    let data: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "status", "--json"], RUN_TIMEOUT))
-        .unwrap_or(serde_json::Value::Null);
+    let data: serde_json::Value = serde_json::from_str(&tc::run_quiet(
+        &["tailscale", "status", "--json"],
+        RUN_TIMEOUT,
+    ))
+    .unwrap_or(serde_json::Value::Null);
     let node = &data["Self"];
     out.name = node["DNSName"]
         .as_str()
@@ -1080,8 +1041,11 @@ fn tailnet_self() -> Net {
     // Changing the serve config is a root operation unless this user has
     // been named the operator. Worth knowing before the key is pressed,
     // since the fix is a one-off command rather than anything this can do.
-    let prefs: serde_json::Value = serde_json::from_str(&tc::run_quiet(&["tailscale", "debug", "prefs"], RUN_TIMEOUT))
-        .unwrap_or(serde_json::Value::Null);
+    let prefs: serde_json::Value = serde_json::from_str(&tc::run_quiet(
+        &["tailscale", "debug", "prefs"],
+        RUN_TIMEOUT,
+    ))
+    .unwrap_or(serde_json::Value::Null);
     let who = prefs["OperatorUser"].as_str().unwrap_or("");
     out.operator = unsafe { libc::getuid() } == 0 || (!who.is_empty() && who == username());
     out
@@ -1194,8 +1158,11 @@ fn addresses(row: &Row, net: &Net, cfg: &serde_json::Value) -> Vec<(String, Stri
 /// needs to know which mounts are already taken. Both are structure the
 /// text output only implies.
 fn serve_config() -> serde_json::Value {
-    serde_json::from_str(&tc::run_quiet(&["tailscale", "serve", "status", "--json"], RUN_TIMEOUT))
-        .unwrap_or(serde_json::Value::Null)
+    serde_json::from_str(&tc::run_quiet(
+        &["tailscale", "serve", "status", "--json"],
+        RUN_TIMEOUT,
+    ))
+    .unwrap_or(serde_json::Value::Null)
 }
 
 /// Whether a proxy target names this port - `:3000` or `:3000/`, not
@@ -1299,7 +1266,11 @@ fn quick_url(text: &str) -> String {
         None => return String::new(),
     };
     let name = &head[start + 8..];
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return String::new();
     }
     format!("https://{}{}", name, TAIL)
@@ -1371,21 +1342,18 @@ fn start_tunnel(port: u16, wait: f64) -> (String, String) {
 /// A zombie answers signal 0 and is not running: it is an exit status its
 /// parent has not collected yet. Reporting one as alive would leave the
 /// widget offering to SIGKILL something already dead, forever, since no
-/// signal moves a zombie. /proc knows the difference.
+/// signal moves a zombie. Which file or command names that state is
+/// acquisition; the parsers live in `parse.rs`.
 fn alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+    if unsafe { libc::kill(pid, 0) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
         return false;
     }
-    match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
-        Ok(text) => match text.rsplit_once(')') {
-            Some((_, rest)) => rest.split_whitespace().next() != Some("Z"),
-            None => true,
-        },
-        Err(_) => true,
-    }
+    !host::is_zombie(pid)
 }
 
 /// Whether this row can be signalled, and why not when it cannot.
@@ -1397,26 +1365,16 @@ fn alive(pid: i32) -> bool {
 fn killable(row: &Row) -> (Option<i32>, String) {
     let pid = match row.pid {
         Some(p) => p,
-        None => {
-            return (
-                None,
-                "not yours - no owner for this socket in /proc".into(),
-            )
-        }
+        None => return (None, "not yours - no owner for this socket".into()),
     };
     if pid <= 1 {
         return (None, format!("refusing to signal pid {}", pid));
     }
-    match std::fs::metadata(format!("/proc/{}", pid)) {
-        Ok(meta) => {
-            use std::os::unix::fs::MetadataExt;
-            if meta.uid() != unsafe { libc::getuid() } {
-                return (None, format!("pid {} is not yours", pid));
-            }
-        }
-        Err(_) => return (None, format!("pid {} is already gone", pid)),
+    match host::ours(pid) {
+        Ok(true) => (Some(pid), String::new()),
+        Ok(false) => (None, format!("pid {} is not yours", pid)),
+        Err(()) => (None, format!("pid {} is already gone", pid)),
     }
-    (Some(pid), String::new())
 }
 
 /// Signal the process group, falling back to the process alone.
@@ -1534,7 +1492,12 @@ fn serve_port(port: u16, public: bool) -> String {
 /// Which tailnet-side port a local port is currently published on.
 fn listen_for(cfg: &serde_json::Value, port: u16) -> u16 {
     for (mount, entry) in cfg["Web"].as_object().into_iter().flatten() {
-        for handler in entry["Handlers"].as_object().into_iter().flatten().map(|(_, v)| v) {
+        for handler in entry["Handlers"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(_, v)| v)
+        {
             if proxies_port(handler["Proxy"].as_str().unwrap_or(""), port) {
                 return mount
                     .rsplit_once(':')
@@ -1637,10 +1600,8 @@ fn prompt(
         vec![key.clone(), (dim.to_string(), text.to_string())]
     };
     let line = |parts: &[(String, String)]| -> String {
-        let refs: Vec<(&str, String)> = parts
-            .iter()
-            .map(|(c, t)| (c.as_str(), t.clone()))
-            .collect();
+        let refs: Vec<(&str, String)> =
+            parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         tc::seg(&refs, w - 1)
     };
     // The bare last form - "[y] yes", with no word on what anything else
@@ -1703,7 +1664,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             .filter(|c| *c > width / 2)
             .unwrap_or(width);
         lines.push(rest[..cut].iter().collect());
-        rest = rest[cut..].iter().skip_while(|c| **c == ' ').copied().collect();
+        rest = rest[cut..]
+            .iter()
+            .skip_while(|c| **c == ' ')
+            .copied()
+            .collect();
     }
     if lines.is_empty() {
         vec![String::new()]
@@ -1802,7 +1767,7 @@ fn detail_rows(
     tunnel: &Option<Tunnel>,
     links: &[(String, String)],
     sel: usize,
-    seen: &[(f64, f64, f64)],
+    seen: Option<&[(f64, f64, f64)]>,
     gap: f64,
     w: usize,
     p: &Palette,
@@ -1837,8 +1802,15 @@ fn detail_rows(
     rows.push(String::new());
 
     if let Some(pid) = row.pid {
-        rows.push(tc::seg(&[(p.lbl.as_str(), " ── PROCESS ── ".into())], w - 1));
-        let cmd = if row.cmdline.is_empty() { "?" } else { &row.cmdline };
+        rows.push(tc::seg(
+            &[(p.lbl.as_str(), " ── PROCESS ── ".into())],
+            w - 1,
+        ));
+        let cmd = if row.cmdline.is_empty() {
+            "?"
+        } else {
+            &row.cmdline
+        };
         rows.extend(field("command", cmd, w, &p.txt, p));
         let cwd = if row.cwd.is_empty() { "?" } else { &row.cwd };
         let cwd_c = if row.gone { &p.warn } else { &p.txt };
@@ -1879,8 +1851,16 @@ fn detail_rows(
     rows.push(String::new());
     // What has actually gone through it. The kernel's own per-socket byte
     // counters, summed over the connections accepted from this port - so
-    // this is TCP, and a port serving anything else reads as quiet.
-    rows.extend(traffic_chart(seen, "TRAFFIC", 3, gap, w, p));
+    // this is TCP, and a port serving anything else reads as quiet. A
+    // missing ss is not quiet: it is unmeasured, and the chart would look
+    // like nothing has moved.
+    match seen {
+        Some(series) => rows.extend(traffic_chart(series, "TRAFFIC", 3, gap, w, p)),
+        None => rows.push(tc::seg(
+            &[(p.dim.as_str(), " no traffic · needs ss".into())],
+            w - 1,
+        )),
+    }
     rows.push(String::new());
     rows.push(tc::seg(
         &[
@@ -1903,7 +1883,11 @@ fn detail_rows(
         rows.push(tc::seg(
             &[
                 (
-                    if here { p.accent.as_str() } else { p.dim.as_str() },
+                    if here {
+                        p.accent.as_str()
+                    } else {
+                        p.dim.as_str()
+                    },
                     if here { " ▸ ".into() } else { "   ".into() },
                 ),
                 (
@@ -2095,12 +2079,7 @@ fn footer(
     }
     let refs: Vec<Vec<(&str, String)>> = hints
         .iter()
-        .map(|group| {
-            group
-                .iter()
-                .map(|(c, t)| (c.as_str(), t.clone()))
-                .collect()
-        })
+        .map(|group| group.iter().map(|(c, t)| (c.as_str(), t.clone())).collect())
         .collect();
     tc::pack_hints(&refs, w - 2, "  ")
         .into_iter()
@@ -2154,6 +2133,35 @@ fn main() {
         }
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        tc::cannot_start_because("dev servers", &tc::unsupported(), &[], "");
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let absent = tc::missing(&["lsof"]);
+        if !absent.is_empty() {
+            tc::cannot_start_with_settings(
+                "dev servers",
+                &absent,
+                &[
+                    "lsof names each listening socket and the process behind it.",
+                    "It ships with macOS; without it this pane cannot list ports.",
+                ],
+                "",
+                SETTINGS,
+            );
+            return;
+        }
+    }
+
+    // Traffic is ss. A Linux box without iproute2, or any Mac, has none:
+    // the columns stay off and the header says so, rather than filling
+    // with dots that look like a quiet port.
+    let traffic_from_ss = have("ss");
+
     let ok = rgb_ok();
     let store = Arc::new(Store {
         rows: Mutex::new(Vec::new()),
@@ -2168,8 +2176,24 @@ fn main() {
         // in `unwrap_or_default()`, which handed the table an empty list and
         // drew a machine with nothing listening. The reason goes on screen
         // and the thread stops, the way agent-usage and herdr-panes do it.
+        // A failed lsof is not an empty table: keep the last good scan and
+        // put the reason on screen. The thread keeps going so the next poll
+        // can recover.
         let found = match std::panic::catch_unwind(scan) {
-            Ok(found) => found,
+            Ok(Ok(found)) => {
+                if let Ok(mut guard) = poller.err.lock() {
+                    if !guard.contains("poller stopped") {
+                        guard.clear();
+                    }
+                }
+                Some(found)
+            }
+            Ok(Err(why)) => {
+                if let Ok(mut guard) = poller.err.lock() {
+                    *guard = why;
+                }
+                None
+            }
             Err(_) => {
                 let why = "poller stopped - see the pane it was started from";
                 if let Ok(mut guard) = poller.err.lock() {
@@ -2178,27 +2202,38 @@ fn main() {
                 return;
             }
         };
-        // The ports to tally against, taken from the scan that just ran, so
-        // a port that has just appeared is measured from its next sample
-        // rather than never.
-        let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-        let counters = match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
-            Ok(text) => text,
-            Err(_) => {
-                let why = "traffic poller stopped - the table below is still current";
-                if let Ok(mut guard) = poller.err.lock() {
-                    *guard = why.into();
+        if let Some(found) = found {
+            // The ports to tally against, taken from the scan that just ran, so
+            // a port that has just appeared is measured from its next sample
+            // rather than never.
+            let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
+            let counters = if traffic_from_ss {
+                match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
+                    Ok(text) => Some(text),
+                    Err(_) => {
+                        let why = "traffic sampling failed - the table below is still current";
+                        if let Ok(mut guard) = poller.err.lock() {
+                            *guard = why.into();
+                        }
+                        // Traffic is one column of many; the ports themselves are
+                        // still being found, so this one says so and carries on.
+                        // Do not sample an empty string: that records zeros and
+                        // looks like a quiet port, then the next good poll has
+                        // no baseline for the missed interval.
+                        None
+                    }
                 }
-                // Traffic is one column of many; the ports themselves are
-                // still being found, so this one says so and carries on.
-                String::new()
+            } else {
+                None
+            };
+            if let Ok(mut guard) = poller.rows.lock() {
+                *guard = found;
             }
-        };
-        if let Ok(mut guard) = poller.rows.lock() {
-            *guard = found;
-        }
-        if let Ok(mut guard) = poller.traffic.lock() {
-            guard.sample(&counters, &listening, tc::now());
+            if let Some(counters) = counters {
+                if let Ok(mut guard) = poller.traffic.lock() {
+                    guard.sample(&counters, &listening, tc::now());
+                }
+            }
         }
         let (lock, cond) = &poller.wake;
         let mut asked = match lock.lock() {
@@ -2392,7 +2427,11 @@ fn main() {
                                     if copied { "copied  " } else { "no clipboard  " },
                                     url
                                 ),
-                                if copied { ok.ok.clone() } else { ok.warn.clone() },
+                                if copied {
+                                    ok.ok.clone()
+                                } else {
+                                    ok.warn.clone()
+                                },
                                 tc::now() + 8.0,
                             ));
                         }
@@ -2516,10 +2555,7 @@ fn main() {
         // Rebuilt after the keys rather than before them, so that a press of
         // o is answered in the frame it was made in and not the next one.
         let all: Vec<Row> = store.rows.lock().map(|g| g.clone()).unwrap_or_default();
-        let shown: Vec<&Row> = all
-            .iter()
-            .filter(|r| !(hide_system && theirs(r)))
-            .collect();
+        let shown: Vec<&Row> = all.iter().filter(|r| !(hide_system && theirs(r))).collect();
         if !shown.is_empty() && selected >= shown.len() {
             selected = shown.len() - 1;
         }
@@ -2546,18 +2582,22 @@ fn main() {
                     .push((t.url.clone(), "public · cloudflare".to_string()));
             }
             view.at = view.at.min(view.links.len().saturating_sub(1));
-            let seen = store
-                .traffic
-                .lock()
-                .map(|t| t.series(view.port))
-                .unwrap_or_default();
+            let seen = if traffic_from_ss {
+                store
+                    .traffic
+                    .lock()
+                    .map(|t| t.series(view.port))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let (rows, cursor) = detail_rows(
                 &view.row,
                 self_node,
                 &view.tunnel,
                 &view.links,
                 view.at,
-                &seen,
+                if traffic_from_ss { Some(&seen) } else { None },
                 refresh,
                 w,
                 &ok,
@@ -2569,7 +2609,10 @@ fn main() {
                 &notice,
                 w,
                 &[
-                    vec![(ok.accent.clone(), "↑↓".into()), (ok.dim.clone(), " address".into())],
+                    vec![
+                        (ok.accent.clone(), "↑↓".into()),
+                        (ok.dim.clone(), " address".into()),
+                    ],
                     vec![(ok.dim.clone(), "[c]opy".into())],
                     vec![(ok.dim.clone(), "[s]erve".into())],
                     vec![(ok.dim.clone(), "[t]unnel".into())],
@@ -2630,6 +2673,12 @@ fn main() {
             ],
             w - 1,
         ));
+        if !traffic_from_ss {
+            rows.push(tc::seg(
+                &[(ok.dim.as_str(), " no traffic · needs ss".into())],
+                w - 1,
+            ));
+        }
         // A dead poller says so, right under the counts it has stopped
         // updating. Same line, same shape and same words as herdr-panes and
         // agent-usage, so it reads the same wherever you meet it.
@@ -2640,7 +2689,11 @@ fn main() {
         rows.push(String::new());
 
         let wide = w >= 78;
-        let rates = store.traffic.lock().ok();
+        let rates = if traffic_from_ss {
+            store.traffic.lock().ok()
+        } else {
+            None
+        };
         // Everything moving through every listening port, over time. The
         // table is what this widget is for, so the chart yields to it: it is
         // drawn only when there are rows to spare after the table, the
@@ -2682,7 +2735,13 @@ fn main() {
         let widest_project = shown
             .iter()
             .map(|r| {
-                if r.project.is_empty() { &r.user } else { &r.project }.chars().count()
+                if r.project.is_empty() {
+                    &r.user
+                } else {
+                    &r.project
+                }
+                .chars()
+                .count()
             })
             .max()
             .unwrap_or(8)
@@ -2707,9 +2766,7 @@ fn main() {
                 let deepest = shown
                     .iter()
                     .map(|r| t.series(r.port))
-                    .map(|s| {
-                        s.iter().rev().take(spark_cells).map(|x| x.2).sum::<f64>()
-                    })
+                    .map(|s| s.iter().rev().take(spark_cells).map(|x| x.2).sum::<f64>())
                     .fold(0.0f64, f64::max);
                 if deepest > 0.0 {
                     format!("LAST {}", over(deepest))
@@ -2729,7 +2786,11 @@ fn main() {
                 (ok.dim.as_str(), tc::pad("PROJECT", name_w)),
                 (
                     ok.dim.as_str(),
-                    if busy { tc::pad("TRAFFIC", traffic_w) } else { String::new() },
+                    if busy {
+                        tc::pad("TRAFFIC", traffic_w)
+                    } else {
+                        String::new()
+                    },
                 ),
                 // The window the shapes cover, named rather than left to be
                 // guessed at - a sparkline without one is a shape.
@@ -2745,7 +2806,11 @@ fn main() {
                 ),
                 (
                     ok.dim.as_str(),
-                    if wide { "UP    EXPOSED".into() } else { String::new() },
+                    if wide {
+                        "UP    EXPOSED".into()
+                    } else {
+                        String::new()
+                    },
                 ),
             ],
             w - 1,
@@ -2763,7 +2828,11 @@ fn main() {
 
         for (i, row) in shown.iter().enumerate().skip(scroll).take(visible) {
             let here = i == selected;
-            let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+            let tint = if here {
+                tc::bg(28, 44, 62)
+            } else {
+                String::new()
+            };
             let (note, note_colour) = bind_note(row, &ok);
             // Another user's row names its owner rather than its project,
             // which it has none of that we can read. That is the whole of
@@ -2825,7 +2894,10 @@ fn main() {
             // outlive the borrows the row is assembled from.
             let shape: Vec<(String, String)> = if sparks {
                 let mut out = vec![(format!("{}{}", tint, ok.dim), "  ".to_string())];
-                let seen = rates.as_ref().map(|t| t.series(row.port)).unwrap_or_default();
+                let seen = rates
+                    .as_ref()
+                    .map(|t| t.series(row.port))
+                    .unwrap_or_default();
                 for (colour, text) in spark(&seen, spark_cells, &ok) {
                     out.push((format!("{}{}", tint, colour), text));
                 }
@@ -2883,7 +2955,10 @@ fn main() {
             &notice,
             w,
             &[
-                vec![(ok.accent.clone(), "↑↓".into()), (ok.dim.clone(), " select".into())],
+                vec![
+                    (ok.accent.clone(), "↑↓".into()),
+                    (ok.dim.clone(), " select".into()),
+                ],
                 vec![
                     (ok.accent.clone(), "→/↵".into()),
                     (ok.dim.clone(), " details".into()),
@@ -2977,8 +3052,22 @@ mod tests {
         let got = socket_counters(&ss_dump(1000, 2000, "222"));
         assert_eq!(got.len(), 2);
         // The *local* port, because that is the one a listener is on.
-        assert_eq!(got["111"], Counters { port: 3000, sent: 1000, recv: 40 });
-        assert_eq!(got["222"], Counters { port: 9999, sent: 2000, recv: 70 });
+        assert_eq!(
+            got["111"],
+            Counters {
+                port: 3000,
+                sent: 1000,
+                recv: 40
+            }
+        );
+        assert_eq!(
+            got["222"],
+            Counters {
+                port: 9999,
+                sent: 2000,
+                recv: 70
+            }
+        );
     }
 
     #[test]
@@ -2997,7 +3086,11 @@ mod tests {
         let mut fresh = after.clone();
         fresh.insert(
             "333".into(),
-            Counters { port: 3000, sent: 8_000_000, recv: 8_000_000 },
+            Counters {
+                port: 3000,
+                sent: 8_000_000,
+                recv: 8_000_000,
+            },
         );
         let moved_now = moved(&before, &fresh, &[3000, 9999]);
         assert_eq!(
@@ -3075,7 +3168,9 @@ mod tests {
             assert!(
                 now.0 >= had.0 && now.1 >= had.1,
                 "w={} lost a column the narrower pane had: {:?} then {:?}",
-                w, had, now
+                w,
+                had,
+                now
             );
             // The shapes are the more decorative of the two and never
             // arrive on their own.
@@ -3083,8 +3178,14 @@ mod tests {
             had = now;
         }
         // Both ends: nothing in a narrow pane, both in a wide one.
-        assert_eq!(extra_columns(60, kind_w, project_w, traffic_w, spark_w), (false, false));
-        assert_eq!(extra_columns(210, kind_w, project_w, traffic_w, spark_w), (true, true));
+        assert_eq!(
+            extra_columns(60, kind_w, project_w, traffic_w, spark_w),
+            (false, false)
+        );
+        assert_eq!(
+            extra_columns(210, kind_w, project_w, traffic_w, spark_w),
+            (true, true)
+        );
     }
 
     #[test]
@@ -3108,7 +3209,11 @@ mod tests {
         // Bounded like the per-port rings, or a chart that keeps one column
         // per sample grows for as long as the widget is up.
         for i in 0..(TRAFFIC_KEPT + 20) {
-            t.sample(&ss_dump(2000 + i as u64, 0, "222"), &[3000], 200.0 + i as f64);
+            t.sample(
+                &ss_dump(2000 + i as u64, 0, "222"),
+                &[3000],
+                200.0 + i as f64,
+            );
         }
         assert_eq!(t.totals().len(), TRAFFIC_KEPT);
     }
@@ -3131,14 +3236,20 @@ mod tests {
 
         // Partly sampled: dots for what is missing, then the rest.
         let some: Vec<(f64, f64, f64)> = (0..2).map(|_| (0.0, 0.0, 1.0)).collect();
-        assert_eq!(plain(spark(&some, 6, &p)), "········".chars().take(4).collect::<String>() + "──");
+        assert_eq!(
+            plain(spark(&some, 6, &p)),
+            "········".chars().take(4).collect::<String>() + "──"
+        );
 
         // Scaled to its own peak, not to some other row's: the biggest
         // sample here is full height whatever its absolute size.
         let small: Vec<(f64, f64, f64)> = vec![(1.0, 0.0, 1.0), (8.0, 0.0, 1.0)];
         let big: Vec<(f64, f64, f64)> = vec![(1e6, 0.0, 1.0), (8e6, 0.0, 1.0)];
         assert_eq!(plain(spark(&small, 2, &p)), plain(spark(&big, 2, &p)));
-        assert!(plain(spark(&small, 2, &p)).ends_with('█'), "the peak is full height");
+        assert!(
+            plain(spark(&small, 2, &p)).ends_with('█'),
+            "the peak is full height"
+        );
     }
 
     #[test]
@@ -3166,7 +3277,10 @@ mod tests {
         // the widget said "Node".
         let under = "/home/u/.nvm/versions/node/v24.18.0/lib/node_modules/agent-browser/bin/agent-browser-linux-x64";
         assert_eq!(kind_of(under, 37397).0, "agent-browser-linux-x64");
-        assert_eq!(kind_of("/srv/python-tools/bin/collector", 9000).0, "collector");
+        assert_eq!(
+            kind_of("/srv/python-tools/bin/collector", 9000).0,
+            "collector"
+        );
 
         // The runtimes themselves still answer to their names.
         assert_eq!(kind_of("/usr/bin/node server.js", 3000).0, "Node");
@@ -3189,7 +3303,10 @@ mod tests {
         // whole bug: a standalone binary installed under node_modules was
         // listed as "Node", the runtime it is not written in.
         assert!(!runs_command("/usr/lib/node_modules/x/bin/mytool", "node"));
-        assert!(!runs_command("/home/u/.nvm/versions/node/v24/bin/agent-browser-linux-x64", "node"));
+        assert!(!runs_command(
+            "/home/u/.nvm/versions/node/v24/bin/agent-browser-linux-x64",
+            "node"
+        ));
         assert!(!runs_command("/srv/python-tools/bin/collector", "python"));
         // And a name that merely starts the same way is a different name.
         assert!(!runs_command("/usr/bin/nodemon app.js", "node"));

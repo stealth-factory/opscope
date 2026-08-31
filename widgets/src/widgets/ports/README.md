@@ -406,14 +406,48 @@ are on this screen rather than an IP.
 ## Cost
 
 Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds, one `ss -tine` for the byte counters, plus one `tailscale serve
-status` — no network, no root, no dependency beyond Tailscale for the exposure
+seconds on Linux, or one listener `lsof` plus per-process `lsof` and two
+`ps` calls on macOS (one set per pid for that scan); one `ss -tine` for the
+byte counters where `ss` is installed; plus one `tailscale serve status` —
+no network, no root, no dependency beyond Tailscale for the exposure
 column, which is simply blank without it.
 
 The traffic sampling rides that same poll rather than a thread of its own. A
 second thread would buy a finer chart and would also have to be watched: a
 poller that dies is invisible, and its pane is indistinguishable from a source
 with nothing to say.
+
+## Platforms
+
+Linux reads `/proc/net/tcp` and walks `/proc/<pid>/fd`. macOS reads
+`lsof -nP -iTCP -sTCP:LISTEN -F` and `ps`. The parsers for both take a
+`&str` and compile on every target, so a broken Linux decoder cannot sit
+behind a green macOS build. Only which file to open, or which command to
+spawn, is behind `cfg(target_os)`.
+
+Those files live in the widget's package folder, next to `main.rs`:
+
+```text
+widgets/src/widgets/ports/
+├── main.rs
+├── parse.rs      always compiled, always tested
+├── linux.rs      acquisition: open /proc
+├── macos.rs      acquisition: spawn lsof / ps
+└── help.txt
+```
+
+Another widget grows a second source by dropping the same three files
+beside its `main.rs`. There is no shared platform crate to import.
+
+Traffic still needs `ss`. On a machine without it the columns stay off and
+the header says `no traffic · needs ss`, rather than filling with dots that
+look like a quiet port. Addresses come from `ip -j addr` when that is on
+`PATH`, and from `ifconfig -a` otherwise.
+
+A kernel with neither source — Windows, today — holds on
+`cannot start · does not run on windows` rather than drawing an empty
+table. That sentence is `unsupported()` in `opscope-core`, the same
+wording every widget uses.
 
 ## Configuration
 

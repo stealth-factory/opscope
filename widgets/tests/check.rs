@@ -1617,6 +1617,455 @@ fn a_poller_that_dies_records_why() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+/// Visibility that can hide a `fn parse_*` from a matcher that only
+/// strips `pub `.
+fn rust_item(t: &str) -> &str {
+    let t = t.strip_prefix("pub(crate) ").unwrap_or(t);
+    let t = t.strip_prefix("pub(super) ").unwrap_or(t);
+    t.strip_prefix("pub ").unwrap_or(t)
+}
+
+/// Text after the first complete `#[...]` on a line, if anything remains.
+fn after_first_attr(t: &str) -> Option<&str> {
+    let mut depth = 0i32;
+    for (idx, c) in t.char_indices() {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                let rest = t[idx + ']'.len_utf8()..].trim();
+                return if rest.is_empty() { None } else { Some(rest) };
+            }
+        }
+    }
+    None
+}
+
+/// A `#[cfg(target_os ...)]` still pending when the next item starts.
+///
+/// Attributes stack, so `#[cfg(target_os)]` then `#[path]` then `mod host`
+/// is one item; a blank line or a comment does not clear it. The attribute
+/// itself may span lines. An inline `mod { ... }` behind the cfg is
+/// inspected here; a `mod name;` file is judged by `cfg_gated_mod_files`.
+fn parsers_or_tests_gated_by_target_os(src: &str) -> Vec<String> {
+    let mut pending = false;
+    let mut attr = String::new();
+    let mut in_attr = false;
+    let mut found = Vec::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    // Remainder of a same-line item after `#[cfg(...)] fn parse_x()`.
+    let mut leftover: Option<(usize, String)> = None;
+    while i < lines.len() || leftover.is_some() {
+        let (line_no, owned): (usize, Option<String>) = match leftover.take() {
+            Some((n, s)) => (n, Some(s)),
+            None => (i + 1, None),
+        };
+        let t: &str = match &owned {
+            Some(s) => s.trim(),
+            None => lines[i].trim(),
+        };
+        let consumed_source_line = owned.is_none();
+        if !in_attr && (t.starts_with("//") || t.is_empty()) {
+            if consumed_source_line {
+                i += 1;
+            }
+            continue;
+        }
+        if in_attr || t.starts_with("#[cfg(") {
+            let mut depth = if in_attr {
+                attr.chars().filter(|&c| c == '[').count() as i32
+                    - attr.chars().filter(|&c| c == ']').count() as i32
+            } else {
+                0
+            };
+            if !in_attr {
+                attr.clear();
+            }
+            let mut closed_at = None;
+            for (idx, c) in t.char_indices() {
+                if c == '[' {
+                    depth += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed_at = Some(idx);
+                        break;
+                    }
+                }
+            }
+            attr.push_str(t);
+            in_attr = depth > 0;
+            if !in_attr {
+                if attr.contains("target_os") {
+                    pending = true;
+                }
+                attr.clear();
+                if let Some(at) = closed_at {
+                    let rest = t[at + ']'.len_utf8()..].trim();
+                    if !rest.is_empty() {
+                        leftover = Some((line_no, rest.to_string()));
+                    }
+                }
+            }
+            if consumed_source_line {
+                i += 1;
+            }
+            continue;
+        }
+        if t.starts_with("#[") {
+            if pending && t.starts_with("#[test]") {
+                found.push(format!("line {line_no}: test gated by target_os"));
+            }
+            if let Some(rest) = after_first_attr(t) {
+                leftover = Some((line_no, rest.to_string()));
+            }
+            if consumed_source_line {
+                i += 1;
+            }
+            continue;
+        }
+        if pending {
+            let item = rust_item(t);
+            if item.starts_with("fn parse_") {
+                found.push(format!("line {line_no}: parser gated by target_os"));
+                pending = false;
+                if consumed_source_line {
+                    i += 1;
+                }
+                continue;
+            }
+            if item.starts_with("mod ") && t.contains('{') {
+                let mut depth = t.chars().filter(|&c| c == '{').count() as i32
+                    - t.chars().filter(|&c| c == '}').count() as i32;
+                if consumed_source_line {
+                    i += 1;
+                }
+                while i < lines.len() && depth > 0 {
+                    let n = lines[i].trim();
+                    depth += n.chars().filter(|&c| c == '{').count() as i32;
+                    depth -= n.chars().filter(|&c| c == '}').count() as i32;
+                    if rust_item(n).starts_with("fn parse_") {
+                        found.push(format!("line {}: parser gated by target_os", i + 1));
+                    }
+                    if n.starts_with("#[test]") {
+                        found.push(format!("line {}: test gated by target_os", i + 1));
+                    }
+                    i += 1;
+                }
+                pending = false;
+                continue;
+            }
+            pending = false;
+        }
+        if consumed_source_line {
+            i += 1;
+        }
+    }
+    found
+}
+
+#[test]
+fn target_os_gating_sees_a_parser_and_skips_acquisition() {
+    let src = r#"
+#[cfg(target_os = "linux")]
+fn parse_foo(text: &str) {}
+
+#[cfg(target_os = "linux")]
+fn sockets() {}
+
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod host;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hidden() {}
+
+#[cfg(
+    target_os = "linux"
+)]
+pub(crate) fn parse_bar(text: &str) {}
+
+#[cfg(target_os = "linux")]
+mod tests {
+    #[test]
+    fn also_hidden() {}
+    fn parse_inner(text: &str) {}
+}
+
+#[cfg(target_os = "linux")] fn parse_same_line(text: &str) {}
+#[cfg(target_os = "linux")] #[test] fn same_line_test() {}
+#[cfg(target_os = "linux")] #[allow(dead_code)] fn parse_stacked(text: &str) {}
+"#;
+    let got = parsers_or_tests_gated_by_target_os(src);
+    assert!(
+        got.iter().any(|s| s.contains("parser")),
+        "missed a gated parse_*: {got:?}"
+    );
+    assert!(
+        got.iter().any(|s| s.contains("test")),
+        "missed a gated #[test]: {got:?}"
+    );
+    assert!(
+        got.iter().filter(|s| s.contains("parser")).count() >= 5,
+        "missed a same-line cfg plus allow parser: {got:?}"
+    );
+    assert!(
+        got.iter().filter(|s| s.contains("test")).count() >= 3,
+        "missed a same-line cfg-gated test: {got:?}"
+    );
+    assert!(
+        !got.iter()
+            .any(|s| s.contains("sockets") || s.contains("host")),
+        "acquisition is allowed behind cfg: {got:?}"
+    );
+}
+
+/// Every `.rs` file that makes up a widget. `widgets()` concatenates those;
+/// these checks need the files separately so a `cfg`-gated module can be
+/// judged on its own contents.
+fn widget_rs_files() -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let packages = root().join("widgets/src/widgets");
+    for entry in std::fs::read_dir(&packages)
+        .expect("the widgets directory")
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_dir() || !path.join("main.rs").is_file() {
+            continue;
+        }
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        for part in std::fs::read_dir(&path)
+            .expect("a widget directory")
+            .flatten()
+        {
+            if part.path().extension().and_then(|e| e.to_str()) == Some("rs") {
+                found.push((stem.clone(), part.path()));
+            }
+        }
+    }
+    found
+}
+
+fn cfg_gated_mod_files(src: &str, file: &PathBuf) -> Vec<PathBuf> {
+    let dir = file.parent().expect("a source file has a directory");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with("#[cfg(") && t.contains("target_os") {
+            let mut path_attr = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let n = lines[j].trim();
+                if n.starts_with("//") || n.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if n.starts_with("#[path") {
+                    if let Some(q1) = n.find('"') {
+                        if let Some(q2) = n[q1 + 1..].find('"') {
+                            path_attr = Some(n[q1 + 1..q1 + 1 + q2].to_string());
+                        }
+                    }
+                    j += 1;
+                    continue;
+                }
+                if n.starts_with("#[") {
+                    j += 1;
+                    continue;
+                }
+                if let Some(rest) = n.strip_prefix("mod ") {
+                    let name = rest
+                        .trim_end_matches(';')
+                        .trim_end_matches('{')
+                        .trim()
+                        .to_string();
+                    out.push(match path_attr {
+                        Some(rel) => dir.join(rel),
+                        None => dir.join(format!("{name}.rs")),
+                    });
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn file_has_parser_or_test(src: &str) -> bool {
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        let item = rust_item(t);
+        item.starts_with("fn parse_") || t.starts_with("#[test]")
+    })
+}
+
+#[test]
+fn parsers_and_their_tests_are_not_gated_by_target_os() {
+    // The failure this exists to catch: a Linux parser (or the test that
+    // would have exercised it) sitting behind cfg(target_os = "linux"),
+    // so cargo test on the macOS runners never compiles it, and a broken
+    // decoder sits behind a green build.
+    let mut wrong = Vec::new();
+    for (widget, path) in widget_rs_files() {
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        for flag in parsers_or_tests_gated_by_target_os(&src) {
+            wrong.push(format!(
+                "{} {}: {flag}",
+                widget,
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        if let Some(test_at) = src.find("#[cfg(test)]") {
+            for (n, line) in src[test_at..].lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("#[cfg(") && t.contains("target_os") {
+                    wrong.push(format!(
+                        "{} {}: test module line {} gated by target_os",
+                        widget,
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        n + 1
+                    ));
+                }
+            }
+        }
+        for gated in cfg_gated_mod_files(&src, &path) {
+            let body = std::fs::read_to_string(&gated).unwrap_or_default();
+            if file_has_parser_or_test(&body) {
+                wrong.push(format!(
+                    "{}: {} is cfg-gated but contains a parser or a test",
+                    widget,
+                    gated.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "parsers compile on every target, or the tests that prove they do vanish from macOS CI:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+#[test]
+fn the_linux_socket_parser_is_compiled_on_every_target() {
+    // The proof the rule holds for the worked example. If parse_proc_net_tcp
+    // moved behind cfg(target_os = "linux"), this file would lose the
+    // function (or gain a target_os) and this test would fail on every
+    // runner, including macOS — the thing a cfg-gated unit test cannot do.
+    let path = root().join("widgets/src/widgets/ports/parse.rs");
+    let src = std::fs::read_to_string(&path)
+        .expect("ports/parse.rs — the Linux /proc parser lives here so it compiles on macOS too");
+    assert!(
+        src.contains("fn parse_proc_net_tcp("),
+        "the /proc/net/tcp parser must keep its name so this check can see it"
+    );
+    assert!(
+        !src.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("#[cfg") && t.contains("target_os")
+        }),
+        "ports/parse.rs is gated by target_os — its tests would vanish from the macOS CI run"
+    );
+}
+
+fn opens_proc(src: &str) -> bool {
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            return false;
+        }
+        // A string that is a /proc path, not a mention of the word in
+        // prose. github.rs talks about cmdline leaking; that string does
+        // not start with /proc inside the quotes.
+        line.contains("\"/proc") || line.contains("format!(\"/proc")
+    })
+}
+
+#[test]
+fn opens_proc_sees_a_path_and_skips_a_mention() {
+    assert!(opens_proc(
+        r#"let t = std::fs::read_to_string("/proc/net/tcp");"#
+    ));
+    assert!(opens_proc(r#"format!("/proc/{}/fd", pid)"#));
+    assert!(!opens_proc(
+        r#"// /proc/<pid>/cmdline is readable by anyone"#
+    ));
+    assert!(!opens_proc(
+        r#""in its arguments, because /proc/<pid>/cmdline is readable by""#
+    ));
+}
+
+/// Widgets that still acquire from Linux-only sources, and the issue that
+/// will give them a macOS path (or decide they cannot). Adding a name
+/// here without an issue is the failure this check exists to catch: a
+/// new `/proc` reader with no explanation looks on macOS like a source
+/// with nothing in it.
+const LINUX_ONLY_UNTIL: &[(&str, &str)] = &[
+    ("netwatch", "OPS-61"),
+    ("tailnet", "process table is /proc; no macOS source yet"),
+    (
+        "herdr-panes",
+        "CPU samples are /proc/<pid>/stat; no macOS source yet",
+    ),
+    ("agent-usage", "Antigravity's port discovery walks /proc"),
+];
+
+#[test]
+fn a_proc_reader_has_a_macos_path_or_says_why() {
+    let mut wrong = Vec::new();
+    let listed: BTreeSet<&str> = LINUX_ONLY_UNTIL.iter().map(|(n, _)| *n).collect();
+    for (name, src) in widgets() {
+        if !opens_proc(&src) {
+            if listed.contains(name.as_str()) {
+                wrong.push(format!(
+                    "{name}: on LINUX_ONLY_UNTIL but no longer opens /proc — drop it"
+                ));
+            }
+            continue;
+        }
+        if listed.contains(name.as_str()) {
+            continue;
+        }
+        let folder = root().join("widgets/src/widgets").join(&name);
+        if folder.join("macos.rs").is_file() {
+            let main_src = std::fs::read_to_string(folder.join("main.rs")).unwrap_or_default();
+            if !main_src.contains("macos.rs") && !main_src.contains("mod macos") {
+                wrong.push(format!(
+                    "{name}: macos.rs is present but main.rs does not load it"
+                ));
+            }
+            continue;
+        }
+        if src.contains("unsupported(") {
+            continue;
+        }
+        wrong.push(format!(
+            "{name}: opens /proc with no macos.rs, no unsupported() call, \
+             and no row on LINUX_ONLY_UNTIL"
+        ));
+    }
+    assert!(
+        wrong.is_empty(),
+        "a widget that reads /proc without a macOS path looks empty on a Mac:\n  {}\n\
+         Add widgets/src/widgets/<widget>/macos.rs, call tc::unsupported(), \
+         or name it in LINUX_ONLY_UNTIL with the issue that will.",
+        wrong.join("\n  ")
+    );
+}
 
 /// A catalogue is wired to a field by name, and nothing else ties them.
 ///

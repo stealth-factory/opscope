@@ -15,8 +15,10 @@ answers, a hint missing from the widget's README, a config key read but never
 declared in its `settings.json` — or declared there and never read, or read
 with no fallback behind it — a stale generated `config.example.json`, a
 colour that draws text on the selected-row tint below WCAG AA, an incomplete
-widget folder, a widget missing from the README table or docs index, and a
-name in the launcher's sample listing that is not a widget.
+widget folder, a widget missing from the README table or docs index, a
+name in the launcher's sample listing that is not a widget, a parser or a
+test gated by `cfg(target_os)` (which would vanish from the macOS CI run),
+and a widget that opens `/proc` with no macOS path and no explanation.
 
 Every one of them exists because something shipped broken and looked, on
 screen, exactly like "there is no data".
@@ -27,7 +29,9 @@ screen, exactly like "there is no data".
 24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
-arrow-key decoding, and `clipboard()` over OSC 52. It also owns the shared
+arrow-key decoding, `clipboard()` over OSC 52, `unsupported()` /
+`cannot_start_because()` when this kernel has no source, and
+`cannot_start()` when a required tool is missing. It also owns the shared
 per-widget settings screen and its order-preserving, private atomic writer;
 widgets provide only their section name, optional legacy alias, and owned
 `settings.json`.
