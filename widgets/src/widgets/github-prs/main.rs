@@ -1059,10 +1059,10 @@ fn main() {
     std::thread::spawn(move || loop {
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
-                g.err = format!(
-                    "no token: set github_prs.token in config.json, or ${}",
+                g.err = tc::missing_config(&format!(
+                    "no token: set github_prs.token or ${}",
                     poll_env
-                );
+                ));
             }
         } else {
             let want = poller.lock().ok().and_then(|g| {
@@ -1412,7 +1412,7 @@ fn main() {
         }
         rows.push(tc::seg(&count, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
 
         let mut stack_cursor: Option<usize> = None;

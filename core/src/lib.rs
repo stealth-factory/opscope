@@ -140,6 +140,64 @@ fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
     (s[..end].to_string(), used, end < s.len())
 }
 
+/// Break a word that is itself wider than the pane, rather than dropping it.
+fn hard_wrap(t: &str, width: usize) -> Vec<String> {
+    if t.is_empty() || width == 0 {
+        return vec![t.to_string()];
+    }
+    let mut rest = t;
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let (chunk, _, _) = clip_width(rest, width);
+        if chunk.is_empty() {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch.to_string());
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        }
+        rest = &rest[chunk.len()..];
+        out.push(chunk);
+    }
+    out
+}
+
+/// Break prose at spaces so `seg` does not clip the instruction off.
+///
+/// A word longer than the pane is hard-broken rather than left to overflow.
+/// Width zero keeps the whole string: a pane with no room still has to say
+/// something, and dropping the text is indistinguishable from no error.
+pub fn wrap_words(t: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![t.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in t.split_whitespace() {
+        let extra = if line.is_empty() { 0 } else { 1 };
+        if !line.is_empty() && display_width(&line) + extra + display_width(word) > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        if display_width(word) > width {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            out.extend(hard_wrap(word, width));
+            continue;
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// Truncate or pad a plain string to exactly `n` cells.
 pub fn pad(s: &str, n: usize) -> String {
     let (mut out, used, _) = clip_width(s, n);
@@ -603,6 +661,35 @@ pub fn heat(frac: f64) -> String {
         let t = (frac - 0.5) / 0.5;
         rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
     }
+}
+
+/// The clause every "set this config key" message ends with.
+///
+/// The settings screen is one keypress away and already knows which file is
+/// in force. Sending the reader to hand-edit a JSON file is the thing this
+/// exists to stop, and building the words here is what keeps them the same
+/// in every widget.
+pub const SET_IN_SETTINGS: &str = "press `,` to set it here";
+
+/// A missing-config line, always ending with [`SET_IN_SETTINGS`].
+pub fn missing_config(said: &str) -> String {
+    format!("{} — {SET_IN_SETTINGS}", said.trim_end())
+}
+
+/// Error lines, wrapped so the instruction is not the half `seg` clips off.
+///
+/// Continuation lines sit under the `!` rather than under the first word.
+pub fn error_rows(colour: &str, said: &str, w: usize) -> Vec<String> {
+    let width = w.saturating_sub(1).max(1);
+    let budget = width.saturating_sub(3).max(1);
+    wrap_words(said, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let lead = if i == 0 { " ! " } else { "   " };
+            seg(&[(colour, format!("{lead}{line}"))], width)
+        })
+        .collect()
 }
 
 /// Draw the reason a widget cannot run, and hold until q.
@@ -2074,6 +2161,48 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_config_line_names_the_settings_key() {
+        // One product, one clause. A widget that built its own wording
+        // would be the next place this drifted, which is how the five
+        // originals all pointed at a file instead of at `,`.
+        let got = super::missing_config("no token: set github.token or $GITHUB_TOKEN");
+        assert!(
+            got.ends_with(super::SET_IN_SETTINGS),
+            "the clause must be the constant, not a paraphrase: {got}"
+        );
+        assert!(got.contains("`,`"), "{got}");
+        assert!(
+            got.starts_with("no token: set github.token"),
+            "the reason has to stay: {got}"
+        );
+    }
+
+    #[test]
+    fn a_missing_config_line_wraps_so_the_settings_key_survives() {
+        // The clause is the reason this helper exists, and it is the half
+        // `seg` used to clip off at eighty columns.
+        let said = super::missing_config(
+            "no token: set github.token or $GITHUB_TOKEN (needs repo + read:org)",
+        );
+        let rows = super::error_rows("", &said, 80);
+        assert!(rows.len() > 1, "one line means it was clipped, not wrapped: {rows:?}");
+        let shown = rows.join("\n");
+        // The clause itself may wrap; the key it names must still be there.
+        assert!(shown.contains("`,`"), "{shown}");
+        assert!(shown.contains("github.token"), "{shown}");
+        for word in super::SET_IN_SETTINGS.split_whitespace() {
+            assert!(shown.contains(word), "missing {word:?} in {shown}");
+        }
+    }
+
+    #[test]
+    fn a_word_wider_than_the_pane_is_broken_rather_than_dropped() {
+        let lines = super::wrap_words("supercalifragilistic", 8);
+        assert!(lines.iter().all(|l| super::display_width(l) <= 8), "{lines:?}");
+        assert_eq!(lines.concat(), "supercalifragilistic");
+    }
+
     #[test]
     fn a_step_never_counts_towards_a_total_nobody_gave() {
         // The whole reason `of` is an Option. A source that pages without

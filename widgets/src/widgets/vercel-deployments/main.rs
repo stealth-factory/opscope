@@ -89,9 +89,10 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
 fn vercel_refusal(said: &str) -> String {
     let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
     if flat.contains("\"invalidToken\":true") {
-        return "the Vercel token is not valid - it may be revoked, or pasted \
-                short. Set it again in settings, or in `vercel_deployments.token`."
-            .to_string();
+        return tc::missing_config(
+            "the Vercel token is not valid - it may be revoked, or pasted \
+             short. Set vercel_deployments.token",
+        );
     }
     said.to_string()
 }
@@ -187,13 +188,13 @@ fn walk_teams(
                     // same way, for the same reason.
                     said.clone()
                 } else if ids.is_empty() {
-                    format!(
+                    tc::missing_config(&format!(
                         "could not list teams ({}) - showing your personal account \
                          only. A token that cannot list teams can still read a \
-                         team's deployments: name the team ids under `teams` in \
-                         config.json to include them.",
+                         team's deployments: name the team ids under \
+                         vercel_deployments.teams to include them.",
                         said
-                    )
+                    ))
                 } else {
                     format!("team list stopped early ({}) - teams may be missing", said)
                 };
@@ -1038,10 +1039,10 @@ fn main() {
     std::thread::spawn(move || loop {
         if poll_token.is_empty() {
             if let Ok(mut guard) = poller.lock() {
-                guard.err = format!(
-                    "no token: set vercel_deployments.token in config.json, or ${}",
+                guard.err = tc::missing_config(&format!(
+                    "no token: set vercel_deployments.token or ${}",
                     poll_env
-                );
+                ));
             }
         } else {
             let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1725,6 +1726,7 @@ mod tests {
         let said = vercel_refusal(refused_token);
         assert!(said.starts_with("the Vercel token is not valid"), "{said}");
         assert!(!said.contains("scope"), "it is not a scope problem: {said}");
+        assert!(said.contains(tc::SET_IN_SETTINGS), "{said}");
 
         // The same status without that flag is a permission, and keeps
         // whatever Vercel said about it.

@@ -735,9 +735,10 @@ pub fn why_no_lane(d: &Data) -> String {
             .into();
     }
     if d.quota_every <= 0.0 {
-        return "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
-                ~/.grok/logs/unified.jsonl has no creditUsagePercent."
-            .into();
+        return tc::missing_config(
+            "no quota · asking x.ai is off (set agent_usage.grok_ping to poll) and \
+             ~/.grok/logs/unified.jsonl has no creditUsagePercent.",
+        );
     }
     "no quota · x.ai did not publish a credit figure, and the log has none either.".into()
 }
@@ -824,14 +825,21 @@ fn freshness(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         ],
         w - 1,
     ));
-    out.push(tc::seg(
-        &[(
-            p.dim.as_str(),
-            "  Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead."
-                .into(),
-        )],
-        w - 1,
-    ));
+    out.extend(
+        tc::wrap_words(
+            &tc::missing_config(
+                "Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead.",
+            ),
+            w.saturating_sub(3).max(1),
+        )
+        .into_iter()
+        .map(|line| {
+            tc::seg(
+                &[(p.dim.as_str(), format!("  {line}"))],
+                w.saturating_sub(1).max(1),
+            )
+        }),
+    );
     out.push(String::new());
     out
 }
@@ -1492,6 +1500,47 @@ mod tests {
         assert!(!joined.contains(" · the"), "invented a reason: {}", joined);
     }
 
+    fn visible(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_narrow_not_live_badge_keeps_the_settings_clause() {
+        // Width 20 used to floor the wrap budget, so agent_usage.grok_ping
+        // (21) ran past `seg`'s w-1 and the settings key was the half that
+        // fell off. Trim each row before joining: a word the pane cannot
+        // hold is hard-broken, and the indent would hide the join.
+        let p = palette();
+        let d = Data {
+            quota: newest_quota([LOG_LINE].into_iter()),
+            quota_live: false,
+            quota_at: 0.0,
+            quota_every: 0.0,
+            ..Data::default()
+        };
+        let rows = freshness(&d, 20, &p);
+        for row in &rows {
+            let vis = visible(row);
+            assert!(vis.chars().count() <= 20, "overflow at 20: {vis:?}");
+        }
+        let glued: String = rows.iter().map(|r| visible(r).trim().to_string()).collect();
+        assert!(glued.contains("grok_ping"), "{glued}");
+        assert!(glued.contains("`,`"), "{glued}");
+    }
+
     #[test]
     fn the_tab_carries_its_subscription_at_every_width_the_wall_uses() {
         // The bar's width is what is left after the labels, and this pane
@@ -1598,6 +1647,7 @@ mod tests {
         let off = why_no_lane(&Data::default());
         assert!(off.contains("grok_ping"), "{off}");
         assert!(off.contains("creditUsagePercent"), "{off}");
+        assert!(off.contains(tc::SET_IN_SETTINGS), "{off}");
 
         let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
         let live_blank = Data {

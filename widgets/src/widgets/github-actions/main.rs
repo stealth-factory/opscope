@@ -1144,7 +1144,9 @@ fn one_pass(
         };
         if want.is_empty() {
             return Ok(State {
-                err: "no accounts: leave github_actions.accounts empty to discover your login and orgs, or name them".into(),
+                err: tc::missing_config(
+                    "no accounts: leave github_actions.accounts empty to discover your login and orgs, or name them",
+                ),
                 viewer,
                 rate,
                 window_hours: hours,
@@ -1188,10 +1190,10 @@ fn one_pass(
     if repos.is_empty() {
         // Explicit non-empty input is already `repos`, so this branch is
         // only the discovery miss: nothing recently pushed had workflows.
-        let said = format!(
+        let said = tc::missing_config(&format!(
             "no repos with workflows among those pushed in the last {}d — set github_actions.repos to name them",
             pushed_days
-        );
+        ));
         return Ok(State {
             err: if err.is_empty() {
                 said
@@ -1612,10 +1614,10 @@ fn main() {
         let hours = poller.lock().map(|g| g.window_hours).unwrap_or(start_window);
         if poll_tok.is_empty() {
             if let Ok(mut g) = poller.lock() {
-                g.err = format!(
-                    "no token: set github_actions.token in config.json or ${}",
+                g.err = tc::missing_config(&format!(
+                    "no token: set github_actions.token or ${}",
                     poll_env
-                );
+                ));
             }
         } else {
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2013,7 +2015,7 @@ fn main() {
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", scope))], w - 1));
         }
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.fail.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.fail.as_str(), &err, w));
         }
         let mut bits: Vec<String> = Vec::new();
         if FILTERS[filter] != "all" {

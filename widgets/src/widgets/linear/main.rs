@@ -1842,10 +1842,10 @@ fn main() {
     std::thread::spawn(move || loop {
         if tok.is_empty() {
             if let Ok(mut guard) = poller.lock() {
-                guard.err = format!(
-                    "no key: set linear.token in config.json or ${}",
+                guard.err = tc::missing_config(&format!(
+                    "no key: set linear.token or ${}",
                     env_name
-                );
+                ));
             }
         } else {
             let want = poller_days.lock().map(|g| *g).unwrap_or(14);
@@ -2195,7 +2195,7 @@ fn main() {
         }
         rows.push(tc::seg(&head, w - 1));
         if !s.err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", s.err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &s.err, w));
         }
         if s.teams.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));

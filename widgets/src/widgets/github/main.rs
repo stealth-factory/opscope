@@ -1173,10 +1173,10 @@ fn main() {
         loop {
             if tok.is_empty() {
                 if let Ok(mut g) = poller.lock() {
-                    g.err = format!(
-                        "no token: set github.token in config.json or ${} (needs repo + read:org)",
+                    g.err = tc::missing_config(&format!(
+                        "no token: set github.token or ${} (needs repo + read:org)",
                         env_name
-                    );
+                    ));
                 }
             } else if let Err(said) = one_pass(
                 &tok,
@@ -1389,7 +1389,7 @@ fn main() {
         }
         rows.push(tc::seg(&head, w - 1));
         if !err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+            rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
         if stats.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), " collecting…".into())], w - 1));
