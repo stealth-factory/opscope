@@ -22,9 +22,19 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opscope_core as tc;
+
+mod parse;
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod host;
+
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod host;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "netwatch",
@@ -44,7 +54,7 @@ const SERIES: usize = 240;
 /// twice.
 const VIRTUAL: &[&str] = &[
     "lo", "tailscale0", "docker", "veth", "br-", "virbr", "wg", "tun", "tap", "cni", "flannel",
-    "kube",
+    "kube", "utun", "bridge", "awdl", "llw", "gif", "stf", "anpi", "vmenet", "pktap", "ap",
 ];
 
 /// Systemd names the slice, not the thing in it.
@@ -82,25 +92,8 @@ fn elapsed(seconds: f64) -> String {
 /// Seconds before an external command is given up on, from netwatch.py.
 const RUN_TIMEOUT: u64 = 5;
 
-/// Every address this machine answers to.
-///
-/// A connection to one of them is turned around inside the kernel and never
-/// reaches a wire, so it is not traffic leaving the machine even though the
-/// address is not loopback.
-fn own_addresses() -> Vec<String> {
-    let mut found = Vec::new();
-    for line in tc::run_quiet(&["ip", "-o", "addr"], RUN_TIMEOUT).lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if let Some(at) = cols.iter().position(|c| *c == "inet" || *c == "inet6") {
-            if let Some(addr) = cols.get(at + 1) {
-                found.push(addr.split('/').next().unwrap_or(addr).to_string());
-            }
-        }
-    }
-    found
-}
-
 /// Whether this traffic never leaves the machine.
+#[allow(dead_code)] // Linux filtering, still tested on macOS.
 fn local_peer(host: &str, own: &[String]) -> bool {
     if host.starts_with("127.") || host == "::1" || host.is_empty() || host == "*" {
         return true;
@@ -110,6 +103,7 @@ fn local_peer(host: &str, own: &[String]) -> bool {
 }
 
 /// Whether a peer is out on the internet rather than nearby.
+#[allow(dead_code)] // Linux filtering, still tested on macOS.
 fn off_box(host: &str, own: &[String]) -> bool {
     if local_peer(host, own) {
         return false;
@@ -151,84 +145,18 @@ struct Seen {
     cgroup: String,
 }
 
-/// Every TCP socket's byte counters, keyed by inode.
-///
-/// -i for the counters, -e for the inode. Without the inode there is no
-/// honest way to reach the process: `ss -p` needs root to name anybody
-/// else's, while /proc/<pid>/fd needs nothing to name our own.
-fn sockets(external: bool, own: &[String]) -> (HashMap<String, Seen>, String) {
-    let text = tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT);
-    if text.is_empty() {
-        return (HashMap::new(), "ss would not run".into());
-    }
-    let mut found = HashMap::new();
-    let (mut inode, mut peer, mut port, mut cgroup) = (None, String::new(), 0u16, String::new());
-    let mut mine = 0u16;
-    for (i, line) in text.lines().enumerate() {
-        if i == 0 {
-            continue;
-        }
-        // A socket is two lines: the addresses and inode, then the counters
-        // on an indented continuation. Neither is usable without the other.
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            peer = cols
-                .get(4)
-                .and_then(|a| a.rsplit_once(':'))
-                .map(|(h, _)| h.trim_matches(|c| c == '[' || c == ']').to_string())
-                .unwrap_or_default();
-            port = cols
-                .get(4)
-                .and_then(|a| a.rsplit_once(':'))
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(0);
-            // Column 3 is our address, column 4 is theirs.
-            mine = cols
-                .get(3)
-                .and_then(|a| a.rsplit_once(':'))
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(0);
-            inode = field(line, "ino:").filter(|v| v != "0");
-            cgroup = field(line, "cgroup:").unwrap_or_default();
-            continue;
-        }
-        let id = match inode.take() {
-            Some(id) => id,
-            None => continue,
-        };
-        if local_peer(&peer, own) || (external && !off_box(&peer, own)) {
-            continue;
-        }
-        found.insert(
-            id,
-            Seen {
-                sent: field(line, "bytes_sent:")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                recv: field(line, "bytes_received:")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                peer: peer.clone(),
-                port,
-                mine,
-                cgroup: cgroup.clone(),
-            },
-        );
-    }
-    (found, String::new())
+#[derive(Clone)]
+struct ProcessSeen {
+    pid: i32,
+    name: String,
+    sent: u64,
+    recv: u64,
 }
 
-/// The value after `key:` on a line, up to the next space.
-fn field(line: &str, key: &str) -> Option<String> {
-    let at = line.find(key)? + key.len();
-    let rest = &line[at..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let value = &rest[..end];
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
+#[allow(dead_code)] // Each platform constructs one of the two source shapes.
+enum TrafficSample {
+    Sockets(HashMap<String, Seen>),
+    Processes(Vec<ProcessSeen>),
 }
 
 /// Who owns a socket, from the cgroup the kernel already reports.
@@ -254,102 +182,6 @@ fn unit_name(cgroup: &str) -> String {
         return name.to_string();
     }
     String::new()
-}
-
-/// inode -> (pid, name), for every process this user can read.
-fn socket_owners() -> HashMap<String, (i32, String)> {
-    let mut owners = HashMap::new();
-    let entries = match std::fs::read_dir("/proc") {
-        Ok(e) => e,
-        Err(_) => return owners,
-    };
-    for entry in entries.flatten() {
-        let pid: i32 = match entry.file_name().to_string_lossy().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let fds = match std::fs::read_dir(format!("/proc/{}/fd", pid)) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let mut name = String::new();
-        for fd in fds.flatten() {
-            if let Ok(target) = std::fs::read_link(fd.path()) {
-                let target = target.to_string_lossy();
-                if let Some(rest) = target.strip_prefix("socket:[") {
-                    if name.is_empty() {
-                        name = process_name(pid);
-                    }
-                    owners.insert(rest.trim_end_matches(']').to_string(), (pid, name.clone()));
-                }
-            }
-        }
-    }
-    owners
-}
-
-/// What to call a process, preferring something a person would recognise.
-///
-/// /proc/<pid>/comm is the kernel's answer and usually right, but some
-/// binaries are versioned - .../claude/versions/2.1.233 reports itself as
-/// "2.1.233", which is true and useless.
-fn process_name(pid: i32) -> String {
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if comm.chars().any(|c| c.is_ascii_alphabetic()) {
-        return comm;
-    }
-    const GENERIC: &[&str] = &[
-        "versions", "bin", "sbin", "libexec", "node_modules", "dist", "build", "lib", "share",
-        "local", "current", "releases",
-    ];
-    let argv0 = std::fs::read(format!("/proc/{}/cmdline", pid))
-        .map(|raw| {
-            String::from_utf8_lossy(&raw)
-                .split('\0')
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .unwrap_or_default();
-    for part in argv0.split('/').rev() {
-        if part.chars().any(|c| c.is_ascii_alphabetic())
-            && !GENERIC.contains(&part.to_lowercase().as_str())
-        {
-            return part.to_string();
-        }
-    }
-    if comm.is_empty() {
-        "?".into()
-    } else {
-        comm
-    }
-}
-
-/// Bytes in and out of this machine's real interfaces.
-///
-/// The kernel counts these whatever produced them, which is the point: a
-/// packet this machine routes rather than terminates never touches a
-/// socket. On an exit node that is most of the traffic.
-fn wire_bytes() -> Option<(u64, u64, Vec<String>)> {
-    let text = std::fs::read_to_string("/proc/net/dev").ok()?;
-    let (mut rx, mut tx, mut names) = (0u64, 0u64, Vec::new());
-    for line in text.lines().skip(2) {
-        let (name, rest) = line.split_once(':')?;
-        let name = name.trim();
-        if VIRTUAL.iter().any(|v| name.starts_with(v)) {
-            continue;
-        }
-        let fields: Vec<&str> = rest.split_whitespace().collect();
-        if fields.len() < 9 {
-            continue;
-        }
-        rx += fields[0].parse::<u64>().unwrap_or(0);
-        tx += fields[8].parse::<u64>().unwrap_or(0);
-        names.push(name.to_string());
-    }
-    Some((rx, tx, names))
 }
 
 /// Which interfaces are being counted, for the end of the line.
@@ -527,22 +359,136 @@ struct State {
     stamp: f64,
     started: f64,
     wire: Option<(u64, u64)>,
+    wire_stamp: f64,
     wire_rate: (f64, f64),
     wire_names: Vec<String>,
     err: String,
 }
 
-fn sample(state: &mut State, external: bool) {
+/// A complete operating-system reading, collected without holding the UI
+/// state lock. `nettop` is allowed to wait for its next sample here; cursor
+/// movement and redraws continue against the last complete reading.
+struct Reading {
+    stamp: f64,
+    counters: Option<(u64, u64, Vec<String>)>,
+    traffic: Result<TrafficSample, String>,
+    owners: HashMap<String, (i32, String)>,
+    errors: Vec<String>,
+}
+
+fn acquire(external: bool) -> Reading {
     let stamp = tc::now();
-    let own = own_addresses();
-    let counters = wire_bytes();
-    let (found, err) = sockets(external, &own);
-    let owners = if found.is_empty() {
-        HashMap::new()
+    let mut errors = Vec::new();
+    // Only the socket-detail path filters peers against our own addresses.
+    let (own, own_available) = if host::HAS_CONNECTION_DETAILS {
+        match host::own_addresses() {
+            Ok(found) => (found, true),
+            Err(err) => {
+                errors.push(err);
+                (Vec::new(), false)
+            }
+        }
     } else {
-        socket_owners()
+        (Vec::new(), true)
     };
-    absorb(state, stamp, &found, &owners, counters, err);
+    // Wait for the process or socket sample first so the interface counters
+    // describe the same window rather than one taken a second earlier.
+    let traffic = if host::HAS_CONNECTION_DETAILS && !own_available {
+        Err("socket rows paused because local addresses are unavailable".into())
+    } else {
+        host::sockets(external, &own)
+    };
+    let counters = match host::wire_bytes() {
+        Ok(found) => Some(found),
+        Err(err) => {
+            errors.push(err);
+            None
+        }
+    };
+    let owners = match &traffic {
+        Ok(TrafficSample::Sockets(found)) if !found.is_empty() => match host::socket_owners() {
+            Ok(found) => found,
+            Err(err) => {
+                errors.push(err);
+                HashMap::new()
+            }
+        },
+        _ => HashMap::new(),
+    };
+    Reading {
+        stamp,
+        counters,
+        traffic,
+        owners,
+        errors,
+    }
+}
+
+/// Apply a completed reading while holding the lock for arithmetic only.
+fn apply_reading(state: &mut State, reading: Reading) {
+    let Reading {
+        stamp,
+        counters,
+        traffic,
+        owners,
+        mut errors,
+    } = reading;
+    match traffic {
+        Ok(TrafficSample::Sockets(found)) => {
+            absorb(state, stamp, &found, &owners, counters, String::new());
+        }
+        Ok(TrafficSample::Processes(rows)) => {
+            let mut found = HashMap::new();
+            let mut owners = HashMap::new();
+            for row in rows {
+                let key = format!("{}:{}", row.pid, row.name);
+                found.insert(
+                    key.clone(),
+                    Seen {
+                        sent: row.sent,
+                        recv: row.recv,
+                        peer: String::new(),
+                        port: 0,
+                        mine: 0,
+                        cgroup: String::new(),
+                    },
+                );
+                owners.insert(key, (row.pid, row.name));
+            }
+            absorb_rows(state, stamp, &found, &owners, counters, String::new(), false);
+        }
+        Err(err) => {
+            errors.push(err.clone());
+            absorb(state, stamp, &HashMap::new(), &HashMap::new(), counters, err);
+        }
+    }
+    state.err = errors.join(" · ");
+}
+
+/// Run one acquisition/application cycle. The closure is deliberately
+/// invoked before `state.lock()`: it may wait on an operating-system source,
+/// while the drawing thread must remain free to move its cursor and redraw.
+fn poll_once<F>(state: &Arc<Mutex<State>>, acquire_one: F) -> bool
+where
+    F: FnOnce() -> Reading,
+{
+    let reading = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(acquire_one)) {
+        Ok(reading) => reading,
+        Err(_) => {
+            let mut guard = match state.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            guard.err = "poller stopped - see the pane it was started from".into();
+            return false;
+        }
+    };
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    apply_reading(&mut guard, reading);
+    true
 }
 
 /// Fold one reading into the running totals.
@@ -557,6 +503,20 @@ fn absorb(
     counters: Option<(u64, u64, Vec<String>)>,
     err: String,
 ) {
+    absorb_rows(state, stamp, found, owners, counters, err, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn absorb_rows(
+    state: &mut State,
+    stamp: f64,
+    found: &HashMap<String, Seen>,
+    owners: &HashMap<String, (i32, String)>,
+    counters: Option<(u64, u64, Vec<String>)>,
+    err: String,
+    connection_details: bool,
+) {
+    absorb_wire(state, stamp, counters);
     // A failed `ss` is not a machine with no sockets, and the difference
     // matters more than it looks: this used to say why and then go on to
     // overwrite `state.last` with the empty map it had been handed. The
@@ -607,7 +567,18 @@ fn absorb(
                 None => (seen.sent, seen.recv),
                 // A reused inode reads lower than it did; subtracting would
                 // underflow, so the new socket's own figures are the delta.
-                Some((s, r)) if seen.sent < s || seen.recv < r => (seen.sent, seen.recv),
+                Some((s, r)) if seen.sent < s || seen.recv < r => {
+                    if connection_details {
+                        // A Linux socket inode was reused; the replacement
+                        // socket started at zero after our baseline.
+                        (seen.sent, seen.recv)
+                    } else {
+                        // Separate nettop invocations can revise a process
+                        // total slightly down as connections disappear. It
+                        // is still the same pid, not a fresh lifetime to add.
+                        (seen.sent.saturating_sub(s), seen.recv.saturating_sub(r))
+                    }
+                }
                 Some((s, r)) => (seen.sent - s, seen.recv - r),
             }
         };
@@ -639,34 +610,36 @@ fn absorb(
             fold!(*row, stamp, gap, d_sent, d_recv);
         }
 
-        let conn = state.conns.entry(inode.clone()).or_insert_with(|| Conn {
-            pid,
-            name: name.clone(),
-            peer: seen.peer.clone(),
-            port: seen.port,
-            mine: seen.mine,
-            ..Default::default()
-        });
-        conn.alive = true;
-        conn.seen = stamp;
-        if gap > 0.0 {
-            fold!(*conn, stamp, gap, d_sent, d_recv);
-        }
-
-        let spot = state
-            .spots
-            .entry((pid, name.clone(), seen.peer.clone()))
-            .or_insert_with(|| Spot {
+        if connection_details {
+            let conn = state.conns.entry(inode.clone()).or_insert_with(|| Conn {
                 pid,
                 name: name.clone(),
                 peer: seen.peer.clone(),
+                port: seen.port,
+                mine: seen.mine,
                 ..Default::default()
             });
-        spot.alive = true;
-        spot.seen = stamp;
-        spot.ports.insert(seen.port);
-        if gap > 0.0 {
-            fold!(*spot, stamp, gap, d_sent, d_recv);
+            conn.alive = true;
+            conn.seen = stamp;
+            if gap > 0.0 {
+                fold!(*conn, stamp, gap, d_sent, d_recv);
+            }
+
+            let spot = state
+                .spots
+                .entry((pid, name.clone(), seen.peer.clone()))
+                .or_insert_with(|| Spot {
+                    pid,
+                    name: name.clone(),
+                    peer: seen.peer.clone(),
+                    ..Default::default()
+                });
+            spot.alive = true;
+            spot.seen = stamp;
+            spot.ports.insert(seen.port);
+            if gap > 0.0 {
+                fold!(*spot, stamp, gap, d_sent, d_recv);
+            }
         }
     }
 
@@ -727,20 +700,15 @@ fn absorb(
         }
     }
 
-    if let Some((rx, tx, names)) = counters {
-        if let Some((was_rx, was_tx)) = state.wire {
-            if gap > 0.0 {
-                state.wire_rate = (
-                    rx.saturating_sub(was_rx) as f64 / gap,
-                    tx.saturating_sub(was_tx) as f64 / gap,
-                );
-            }
+    let mut last: HashMap<_, _> = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
+    if !connection_details {
+        // nettop -P omits idle processes. Dropping their baseline makes the
+        // next sample treat a still-running cumulative counter as new traffic.
+        for (key, value) in &state.last {
+            last.entry(key.clone()).or_insert(*value);
         }
-        state.wire = Some((rx, tx));
-        state.wire_names = names;
     }
-
-    state.last = found.iter().map(|(k, v)| (k.clone(), (v.sent, v.recv))).collect();
+    state.last = last;
     state.stamp = stamp;
 
     // A closed connection is worth keeping - it may be the one that did the
@@ -759,6 +727,24 @@ fn absorb(
             }
         }
     }
+}
+
+fn absorb_wire(state: &mut State, stamp: f64, counters: Option<(u64, u64, Vec<String>)>) {
+    let Some((rx, tx, names)) = counters else {
+        return;
+    };
+    if let Some((was_rx, was_tx)) = state.wire {
+        let gap = stamp - state.wire_stamp;
+        if gap > 0.0 {
+            state.wire_rate = (
+                rx.saturating_sub(was_rx) as f64 / gap,
+                tx.saturating_sub(was_tx) as f64 / gap,
+            );
+        }
+    }
+    state.wire = Some((rx, tx));
+    state.wire_stamp = stamp;
+    state.wire_names = names;
 }
 
 /// Plot a series on a dot canvas eight times finer than the cells.
@@ -937,24 +923,16 @@ fn service(port: u16) -> String {
 /// nor open connections and has certainly not exited, and saying it had
 /// would be worse than saying nothing.
 fn running(pid: i32) -> bool {
-    pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).is_dir()
+    host::running(pid)
 }
 
-/// Disk bytes this process has read and written, from /proc/<pid>/io.
+/// Disk bytes this process has read and written, when the platform exposes
+/// them without elevated privileges.
 fn proc_io(pid: i32) -> HashMap<String, u64> {
-    let mut out = HashMap::new();
-    if let Ok(text) = std::fs::read_to_string(format!("/proc/{}/io", pid)) {
-        for line in text.lines() {
-            if let Some((key, value)) = line.split_once(':') {
-                if let Ok(n) = value.trim().parse() {
-                    out.insert(key.trim().to_string(), n);
-                }
-            }
-        }
-    }
-    out
+    host::proc_io(pid)
 }
 
+#[derive(Clone)]
 struct OpenFile {
     path: String,
     size: u64,
@@ -966,39 +944,11 @@ struct OpenFile {
 /// bigger. This is the closest thing to "which file" that exists outside
 /// the encrypted stream - the name of the thing being written, rather than
 /// the name of the thing being fetched.
-fn open_files(pid: i32) -> Vec<OpenFile> {
-    let mut found = Vec::new();
-    let dir = match std::fs::read_dir(format!("/proc/{}/fd", pid)) {
-        Ok(d) => d,
-        Err(_) => return found,
-    };
-    for entry in dir.flatten() {
-        let link = match std::fs::read_link(entry.path()) {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let path = link.to_string_lossy().to_string();
-        if !path.starts_with('/')
-            || path.starts_with("/dev/")
-            || path.starts_with("/proc/")
-            || path.starts_with("/sys/")
-        {
-            continue;
-        }
-        // Through the fd rather than the path: the target may have been
-        // unlinked, and a temporary file being written is exactly the case
-        // this screen exists for.
-        let size = match std::fs::metadata(entry.path()) {
-            Ok(m) => m.len(),
-            Err(_) => continue,
-        };
-        found.push(OpenFile { path, size });
-    }
-    found.sort_by(|a, b| b.size.cmp(&a.size));
-    found
+fn open_files(pid: i32) -> Result<Vec<OpenFile>, String> {
+    host::open_files(pid)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Facts {
     cmdline: String,
     cwd: String,
@@ -1006,17 +956,91 @@ struct Facts {
 
 /// Command and directory - what the table has no room for.
 fn process_facts(pid: i32) -> Facts {
-    let mut facts = Facts::default();
-    if let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
-        facts.cmdline = String::from_utf8_lossy(&raw)
-            .replace('\0', " ")
-            .trim()
-            .to_string();
+    host::process_facts(pid)
+}
+
+#[derive(Clone, Default)]
+struct DetailSnapshot {
+    running: bool,
+    facts: Facts,
+    files: Vec<OpenFile>,
+    files_err: String,
+    err: String,
+}
+
+/// Slow per-process facts, off the drawing thread.
+///
+/// Linux reads these from procfs quickly; macOS has to invoke `ps` and
+/// `lsof`. Keeping those calls in `detail_rows` made every redraw wait for
+/// them, which also meant wheel and key events sat unread while a frame was
+/// being assembled. The UI asks for the current process and uses the newest
+/// completed snapshot; acquisition refreshes independently once a second.
+struct DetailLoader {
+    current: Arc<Mutex<Option<(i32, String)>>>,
+    known: Arc<Mutex<HashMap<(i32, String), DetailSnapshot>>>,
+}
+
+impl DetailLoader {
+    fn new() -> DetailLoader {
+        let current: Arc<Mutex<Option<(i32, String)>>> = Arc::new(Mutex::new(None));
+        let known: Arc<Mutex<HashMap<(i32, String), DetailSnapshot>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (wanted, snapshots) = (Arc::clone(&current), Arc::clone(&known));
+        std::thread::spawn(move || loop {
+            let request = wanted.lock().ok().and_then(|guard| guard.clone());
+            let Some((pid, name)) = request else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            let snapshot = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (files, files_err) = match open_files(pid) {
+                    Ok(files) => (files, String::new()),
+                    Err(err) => (Vec::new(), err),
+                };
+                DetailSnapshot {
+                    running: running(pid),
+                    facts: process_facts(pid),
+                    files,
+                    files_err,
+                    err: String::new(),
+                }
+            })) {
+                Ok(snapshot) => snapshot,
+                Err(_) => DetailSnapshot {
+                    running: true,
+                    err: "detail loader stopped - see the pane it was started from".into(),
+                    ..DetailSnapshot::default()
+                },
+            };
+            if let Ok(mut guard) = snapshots.lock() {
+                // Only the open process is ever read back.
+                guard.clear();
+                guard.insert((pid, name), snapshot);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        DetailLoader { current, known }
     }
-    if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
-        facts.cwd = link.to_string_lossy().to_string();
+
+    fn get(&self, pid: i32, name: &str) -> DetailSnapshot {
+        if let Ok(mut guard) = self.current.lock() {
+            *guard = Some((pid, name.to_string()));
+        }
+        self.known
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&(pid, name.to_string())).cloned())
+            .unwrap_or_else(|| DetailSnapshot {
+                running: true,
+                ..DetailSnapshot::default()
+            })
     }
-    facts
+
+    fn clear(&self) {
+        if let Ok(mut guard) = self.current.lock() {
+            *guard = None;
+        }
+    }
 }
 
 /// A path that fits, keeping the end - which is the filename.
@@ -1378,9 +1402,13 @@ fn file_rows(
 #[allow(clippy::too_many_arguments)]
 fn detail_rows(
     row: &Proc,
+    facts: &Facts,
+    here_now: bool,
     spots: &[Spot],
     conns: &[Conn],
     files: &[OpenFile],
+    files_err: &str,
+    loader_err: &str,
     sizes: &HashMap<String, (u64, f64)>,
     focus: Option<usize>,
     at: &[usize; 3],
@@ -1395,8 +1423,6 @@ fn detail_rows(
     // the body is built at whatever height it needs and the selected row's
     // position depends on how many rows every section above it drew.
     let mut cursor: Option<(usize, usize)> = None;
-    let facts = process_facts(row.pid);
-    let here_now = running(row.pid);
     let total = (row.up + row.down) as f64;
     let mut out = vec![tc::title(
         &format!("{} · pid {}", row.name, row.pid),
@@ -1417,9 +1443,13 @@ fn detail_rows(
         out.push(tc::seg(
             &[(
                 p.dim.as_str(),
-                " another user's process - named from its control group, \
-                 since /proc is closed to us"
-                    .into(),
+                if host::HAS_CONNECTION_DETAILS {
+                    " another user's process - named from its control group, \
+                     since /proc is closed to us"
+                        .into()
+                } else {
+                    " system traffic reported by nettop; pid 0 is the kernel total".into()
+                },
             )],
             w - 1,
         ));
@@ -1441,6 +1471,12 @@ fn detail_rows(
                  last that was seen"
                     .into(),
             )],
+            w - 1,
+        ));
+    }
+    if !loader_err.is_empty() {
+        out.push(tc::seg(
+            &[(p.bad.as_str(), format!(" ! {}", loader_err))],
             w - 1,
         ));
     }
@@ -1494,7 +1530,14 @@ fn detail_rows(
         out.push(section_head(name, counts[which], note, focused, next, w, p));
         let room = shares[which];
         if counts[which] == 0 {
-            out.push(tc::seg(&[(p.dim.as_str(), "   none".into())], w - 1));
+            let empty = if which < 2 && !host::HAS_CONNECTION_DETAILS {
+                host::NO_SOCKET_DETAIL.to_string()
+            } else if which == 2 && !files_err.is_empty() {
+                format!("   unavailable: {}", files_err)
+            } else {
+                "   none".into()
+            };
+            out.push(tc::seg(&[(p.dim.as_str(), empty)], w - 1));
         } else if which == 0 {
             out.push(endpoint_head(w, p));
             let mut rows = endpoint_rows(spots, at[which], focused, room, w, names, p);
@@ -1576,17 +1619,32 @@ fn detail_rows(
         if disk_h > 0 && !row.disk.is_empty() {
             out.extend(chart(&row.disk, w, disk_h, p));
         }
+    } else if !host::HAS_DISK_IO && h.saturating_sub(out.len()) >= 2 {
+        out.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── DISK ── ".into()),
+                (
+                    p.dim.as_str(),
+                    host::NO_DISK_IO.into(),
+                ),
+            ],
+            w - 1,
+        ));
     }
     (out, cursor)
 }
 
 /// One block per interval, for a log or a pipe.
 fn plain_line(rows: &[Proc], started: f64, live: bool, limit: usize) -> String {
-    let mut lines = vec![format!(
+    let mut heading = format!(
         "--- {} elapsed · sorted by {} ---",
         elapsed(tc::now() - started),
         if live { "live" } else { "total" }
-    )];
+    );
+    if !host::HAS_CONNECTION_DETAILS {
+        heading = format!("{}\n--- {} ---", heading, host::ROW_SOURCE);
+    }
+    let mut lines = vec![heading];
     for row in rows.iter().take(limit) {
         lines.push(format!(
             "{:<22} {:<8} {:>11} {:>11} {:>11} {:>11}",
@@ -1688,6 +1746,12 @@ fn main() {
             }
         }
     }
+    // nettop accepts whole-second update delays and cannot publish faster
+    // than one second. Keep the displayed cadence honest on macOS while
+    // leaving Linux's existing sub-second option unchanged.
+    if !host::HAS_CONNECTION_DETAILS {
+        interval = interval.max(1.0);
+    }
 
     let p = palette();
     let state = Arc::new(Mutex::new(State {
@@ -1698,21 +1762,17 @@ fn main() {
     std::thread::spawn(move || loop {
         // A poller that dies takes its explanation with it, and an empty
         // table looks exactly like a machine with no sockets on it.
-        {
-            let mut guard = match poller.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sample(&mut guard, external);
-            }))
-            .is_err()
-            {
-                guard.err = "poller stopped - see the pane it was started from".into();
-                return;
-            }
+        let began = tc::now();
+        if !poll_once(&poller, || acquire(external)) {
+            return;
         }
-        std::thread::sleep(Duration::from_secs_f64(interval));
+
+        // `interval` is start-to-start. A slow source must not add its own
+        // runtime and then sleep the full interval again.
+        let left = interval - (tc::now() - began);
+        if left > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(left));
+        }
     });
 
     // One block per interval, for a log or a pipe. Nothing here touches
@@ -1770,9 +1830,17 @@ fn main() {
     // What `c` would copy: known while drawing, wanted when the key is hit.
     let mut pending_copy = String::new();
     let names = Resolver::new();
+    let details = DetailLoader::new();
+    // Input is sampled independently of painting and of source acquisition.
+    // A key or wheel turn forces the next frame immediately; otherwise ten
+    // frames a second are enough for resize and elapsed-time updates without
+    // repainting a large terminal continuously.
+    let mut next_redraw = Instant::now();
 
     loop {
-        for key in keyboard.poll() {
+        let keys = keyboard.poll();
+        let had_input = !keys.is_empty();
+        for key in keys {
             if detail.is_some() {
                 match key.as_str() {
                     // Left and esc come out; q quits, which is what the
@@ -1780,6 +1848,7 @@ fn main() {
                     // else. backspace is gone: an alias no hint named.
                     "esc" | "left" => {
                         detail = None;
+                        details.clear();
                         sizes.clear();
                     }
                     "q" | "Q" => {
@@ -1796,6 +1865,7 @@ fn main() {
                             guard.started = tc::now();
                         }
                         detail = None;
+                        details.clear();
                         sizes.clear();
                     }
                     // Focused, up and down walk the three lists as though
@@ -1937,6 +2007,13 @@ fn main() {
             }
         }
 
+        let now = Instant::now();
+        if !had_input && now < next_redraw {
+            std::thread::sleep(Duration::from_millis(10).min(next_redraw - now));
+            continue;
+        }
+        next_redraw = now + Duration::from_millis(100);
+
         let (w, h) = tc::size();
         if notice.as_ref().is_some_and(|n| tc::now() >= n.2) {
             notice = None;
@@ -1983,7 +2060,8 @@ fn main() {
                     continue;
                 }
             };
-            let files = if running(pid) { open_files(pid) } else { Vec::new() };
+            let snapshot = details.get(pid, &name);
+            let files = snapshot.files;
             for file in &files {
                 sizes.entry(file.path.clone()).or_insert((file.size, tc::now()));
             }
@@ -2042,7 +2120,22 @@ fn main() {
             // what does not fit is scrolled to rather than dropped.
             let natural = room + spots.len() + conns.len() + files.len() + 24;
             let (body, cursor) = detail_rows(
-                &row, &spots, &conns, &files, &sizes, focus, &at, w, natural, interval, &names, &p,
+                &row,
+                &snapshot.facts,
+                snapshot.running,
+                &spots,
+                &conns,
+                &files,
+                &snapshot.files_err,
+                &snapshot.err,
+                &sizes,
+                focus,
+                &at,
+                w,
+                natural,
+                interval,
+                &names,
+                &p,
             );
             // The title is pinned and everything below it is the window.
             // `cursor` addresses the whole body, so its row shifts by the
@@ -2105,7 +2198,6 @@ fn main() {
             }
             shown.extend(foot);
             tc::draw(&shown, w, h);
-            std::thread::sleep(Duration::from_millis(300));
             continue;
         }
 
@@ -2140,54 +2232,78 @@ fn main() {
                 ),
                 (
                     p.dim.as_str(),
-                    format!("   every {}s · rates over {}s", interval, RATE_WINDOW as i64),
-                ),
-            ],
-            w - 1,
-        ));
-        out.push(tc::seg(
-            &[
-                (
-                    p.dim.as_str(),
-                    if mine {
-                        " TCP only · ".into()
+                    if host::HAS_CONNECTION_DETAILS {
+                        format!("   every {}s · rates over {}s", interval, RATE_WINDOW as i64)
                     } else {
-                        " TCP only · every user · ".into()
-                    },
-                ),
-                (p.down.as_str(), format!("↓ {}", rate(down))),
-                (p.dim.as_str(), "  ".into()),
-                (p.up.as_str(), format!("↑ {}", rate(up))),
-                (
-                    p.dim.as_str(),
-                    if external {
-                        "  · internet only".into()
-                    } else {
-                        "  · everything off-box".into()
+                        format!("   data every {}s · {}s rate window", interval, RATE_WINDOW as i64)
                     },
                 ),
             ],
             w - 1,
         ));
+        if host::HAS_CONNECTION_DETAILS {
+            out.push(tc::seg(
+                &[
+                    (
+                        p.dim.as_str(),
+                        if mine {
+                            " TCP only · ".into()
+                        } else {
+                            " TCP only · every user · ".into()
+                        },
+                    ),
+                    (p.down.as_str(), format!("↓ {}", rate(down))),
+                    (p.dim.as_str(), "  ".into()),
+                    (p.up.as_str(), format!("↑ {}", rate(up))),
+                    (
+                        p.dim.as_str(),
+                        if external {
+                            "  · internet only".into()
+                        } else {
+                            "  · everything off-box".into()
+                        },
+                    ),
+                ],
+                w - 1,
+            ));
+        } else {
+            out.push(tc::seg(
+                &[
+                    (p.dim.as_str(), " process rows · all protocols · ".into()),
+                    (p.down.as_str(), format!("↓ {}", rate(down))),
+                    (p.dim.as_str(), "  ".into()),
+                    (p.up.as_str(), format!("↑ {}", rate(up))),
+                    (p.grid.as_str(), format!("  · {}", host::ROW_SOURCE)),
+                ],
+                w - 1,
+            ));
+        }
 
         // What the interfaces actually moved, against what the sockets can
-        // explain. On a router the two differ by most of the traffic.
+        // explain. On a router the two differ by most of the traffic. The
+        // share is only shown when both sides count the same kind of
+        // traffic: Linux sockets against /proc/net/dev after the same
+        // virtual-interface filter. macOS process totals include loopback
+        // and virtual paths that netstat then excludes, so a percentage
+        // would not be a measure of attribution.
         let (wire_rx, wire_tx) = guard.wire_rate;
         let wire = wire_rx + wire_tx;
         if wire > 0.0 {
-            let share = ((down + up) / wire).min(1.0);
             let mut said = vec![
                 (p.lbl.as_str(), " interfaces".to_string()),
                 (p.dim.as_str(), " · ".into()),
                 (p.down.as_str(), format!("↓ {}", rate(wire_rx))),
                 (p.dim.as_str(), "  ".into()),
                 (p.up.as_str(), format!("↑ {}", rate(wire_tx))),
-                (p.dim.as_str(), "  · ".into()),
-                (
-                    if share >= 0.9 { &p.dim } else { &p.warn },
-                    format!("{:.0}% of it has a socket", share * 100.0),
-                ),
             ];
+            if host::HAS_CONNECTION_DETAILS {
+                let share = ((down + up) / wire).min(1.0);
+                said.push((p.dim.as_str(), "  · ".into()));
+                said.push((
+                    if share >= 0.9 { p.dim.as_str() } else { p.warn.as_str() },
+                    format!("{:.0}% of it has a socket", share * 100.0),
+                ));
+            }
             let which = wire_label(&guard.wire_names);
             let used: usize = said.iter().map(|(_, t)| t.chars().count()).sum();
             if !which.is_empty() && used + which.chars().count() + 4 <= w - 1 {
@@ -2195,8 +2311,11 @@ fn main() {
             }
             out.push(tc::seg(&said, w - 1));
         }
-        if !guard.err.is_empty() {
-            out.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", guard.err))], w - 1));
+        // Each absent source gets its own row. One joined sentence can be
+        // clipped before the second source's name, turning an explicit
+        // failure back into an apparently empty pane at narrow widths.
+        for reason in guard.err.split(" · ").filter(|reason| !reason.is_empty()) {
+            out.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", reason))], w - 1));
         }
         out.push(String::new());
 
@@ -2321,7 +2440,6 @@ fn main() {
         }
         out.extend(foot);
         tc::draw(&out, w, h);
-        std::thread::sleep(Duration::from_millis(300).min(Duration::from_secs_f64(interval)));
     }
 }
 
@@ -2522,6 +2640,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn acquisition_does_not_hold_the_ui_state_lock() {
+        let state = Arc::new(Mutex::new(State::default()));
+        let probe = Arc::clone(&state);
+        assert!(poll_once(&state, || {
+            assert!(
+                probe.try_lock().is_ok(),
+                "source acquisition ran while the UI state was locked"
+            );
+            Reading {
+                stamp: 1.0,
+                counters: None,
+                traffic: Ok(TrafficSample::Processes(Vec::new())),
+                owners: HashMap::new(),
+                errors: Vec::new(),
+            }
+        }));
+    }
+
+    #[test]
     fn a_failed_ss_read_does_not_reset_the_counter_baselines() {
         // One socket, open throughout, whose kernel counters only ever
         // climb. `ss` answers, fails, then answers again.
@@ -2572,6 +2709,104 @@ mod tests {
         // reading that had numbers in it.
         assert!((row.up_rate - 250.0).abs() < 1.0, "{}", row.up_rate);
         assert!((row.down_rate - 500.0).abs() < 1.0, "{}", row.down_rate);
+    }
+
+    #[test]
+    fn a_revised_nettop_total_is_not_added_as_a_new_lifetime() {
+        let owners = HashMap::from([("42:browser".into(), (42, "browser".into()))]);
+        let reading = |sent, recv| {
+            HashMap::from([(
+                "42:browser".into(),
+                Seen {
+                    sent,
+                    recv,
+                    peer: String::new(),
+                    port: 0,
+                    mine: 0,
+                    cgroup: String::new(),
+                },
+            )])
+        };
+        let mut state = State::default();
+        absorb_rows(
+            &mut state,
+            1.0,
+            &reading(10_000, 20_000),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        // nettop aggregates currently visible connections, so a process
+        // total can fall when one closes. That is not a fresh lifetime.
+        absorb_rows(
+            &mut state,
+            2.0,
+            &reading(9_000, 19_000),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        absorb_rows(
+            &mut state,
+            3.0,
+            &reading(9_100, 19_200),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        let row = state.totals.get(&(42, "browser".into())).unwrap();
+        assert_eq!((row.up, row.down), (100, 200));
+    }
+
+    #[test]
+    fn an_idle_nettop_process_keeps_its_baseline() {
+        let owners = HashMap::from([("42:browser".into(), (42, "browser".into()))]);
+        let reading = |sent, recv| {
+            HashMap::from([(
+                "42:browser".into(),
+                Seen {
+                    sent,
+                    recv,
+                    peer: String::new(),
+                    port: 0,
+                    mine: 0,
+                    cgroup: String::new(),
+                },
+            )])
+        };
+        let mut state = State::default();
+        absorb_rows(
+            &mut state,
+            1.0,
+            &reading(10_000, 20_000),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        absorb_rows(
+            &mut state,
+            2.0,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            String::new(),
+            false,
+        );
+        absorb_rows(
+            &mut state,
+            3.0,
+            &reading(10_100, 20_200),
+            &owners,
+            None,
+            String::new(),
+            false,
+        );
+        let row = state.totals.get(&(42, "browser".into())).unwrap();
+        assert_eq!((row.up, row.down), (100, 200));
     }
 
     /// Colour is not width: `len()` counts escape bytes, so every column
@@ -2851,9 +3086,12 @@ mod tests {
     #[test]
     fn ss_fields_are_read_off_the_line() {
         let line = "\t ts sack cubic bytes_sent:1669 bytes_acked:1670 bytes_received:11469 segs_out:272";
-        assert_eq!(field(line, "bytes_sent:"), Some("1669".into()));
-        assert_eq!(field(line, "bytes_received:"), Some("11469".into()));
-        assert_eq!(field(line, "nothing:"), None);
+        assert_eq!(parse::field(line, "bytes_sent:"), Some("1669".into()));
+        assert_eq!(
+            parse::field(line, "bytes_received:"),
+            Some("11469".into())
+        );
+        assert_eq!(parse::field(line, "nothing:"), None);
     }
 
     #[test]

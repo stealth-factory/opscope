@@ -75,9 +75,25 @@ host as a compact one under the endpoint list, a single row each way.
 
 ## Where the numbers come from
 
-macOS has `nettop`, which reports per-process network use directly. Linux has
-no such thing — but it does have the kernel's own per-socket accounting, which
-gets to the same answer without packet capture, a kernel module, or root.
+The pane states which of two genuinely different measurements it is showing.
+The complete platform contract is in [`docs/netwatch.md`](../../../../docs/netwatch.md).
+
+- **Linux** uses per-socket TCP payload counters from `ss -tine`, joined to
+  process owners through `/proc/<pid>/fd`. Peer filters and the endpoint and
+  connection detail sections are available.
+- **macOS** uses all-protocol, per-process cumulative byte counters from a
+  persistent `nettop -P -x -L 0 -s 1` feed. It has no peer or per-socket byte
+  attribution, so the pane says `process rows`, does not claim to apply the
+  internet-only filter, and marks endpoint and connection details unavailable
+  rather than empty.
+
+Both sources are differenced from a first-sample baseline, so the totals on
+screen mean bytes observed since `netwatch` started or was rezeroed.
+
+### Linux socket attribution
+
+Linux has the kernel's own per-socket accounting, which reaches process
+attribution without packet capture, a kernel module, or root.
 
 Two facts combine:
 
@@ -170,8 +186,9 @@ On a Tailscale exit node that is most of the traffic. Measured on one:
 `ens4` moved 9.6 MB in twenty seconds while the sockets accounted for 2.0 MB
 — **85% forwarded**, and invisible.
 
-So the header carries a second line, read from `/proc/net/dev`, which counts
-bytes per interface whatever produced them:
+So the header carries a second line, read from `/proc/net/dev` on Linux and
+from the link-layer rows of `netstat -ib` on macOS, which counts bytes per
+interface whatever produced them:
 
 ```
  TCP only · ↓ 6.3 KB/s  ↑ 72.2 KB/s  · internet only
@@ -181,7 +198,10 @@ bytes per interface whatever produced them:
 The first line is what the process list adds up to. The second is what the
 interfaces actually moved. When they agree, the list below is the whole
 picture. When they do not, the difference is traffic passing through, and
-the percentage says how much of the story the table is telling.
+the percentage says how much of the story the table is telling. That
+percentage is Linux-only: macOS process totals include loopback and virtual
+paths that `netstat` then excludes, so the same ratio would not measure
+attribution.
 
 There is a second way the table can be showing less than everything, and it
 says so too. When there are more processes than rows, the header adds
@@ -276,8 +296,9 @@ that fetch on another process's behalf.
 This is the opscope equivalent of
 [`traffic-ctrl`](https://github.com/stealth-factory/traffic-ctrl), a Swift
 tool that does the same job on macOS with `nettop`. The feature set is
-matched; the interface is this repository's, not that one's, and the data
-comes from `ss` and `/proc` rather than `nettop`.
+not identical because the operating systems expose different measurements:
+this interface states that difference instead of presenting per-process and
+per-socket counters as interchangeable.
 
 **One feature is deliberately absent: pausing a process.** `traffic-ctrl` can
 `SIGSTOP` a process for thirty seconds as a diagnostic. That is a reasonable
@@ -372,9 +393,10 @@ files the process has open, their size, and how fast that size is growing
 since you opened this screen. That is the name of the thing being *written*,
 which is usually what you wanted when you asked which file was being fetched.
 
-**DISK** is the process's own read and write totals from `/proc/<pid>/io`,
-which is how you tell a download being written to disk from one being
-streamed and discarded.
+On Linux, **DISK** is the process's own read and write totals from
+`/proc/<pid>/io`, which is how you tell a download being written to disk from
+one being streamed and discarded. macOS has no matching unprivileged CLI
+source, so the section says it is unavailable.
 
 ### What this cannot tell you, and why
 
@@ -414,7 +436,11 @@ and a file's growth — is an average over the last **ten seconds**, not over
 the one-second sample. Almost all traffic is bursty, so an instantaneous rate
 is honest and unreadable: a process that is steadily busy flickers between a
 figure and a dash. An average over a stated window is just as true and can
-actually be read. The header says the window (`every 1s · rates over 10s`) so
+actually be read. The Linux header says the window (`every 1s · rates over 10s`);
+macOS spells the two clocks out as `data every 1s · 10s rate window`, so the
+rate window cannot be mistaken for redraw or input latency. Cursor movement
+and redraw are independent of source acquisition on both platforms, so a
+slow or failed poll never holds the selection still. The window is shown so
 the number is never a mystery, and the **totals** are untouched by it.
 
 ## Keys
@@ -469,8 +495,12 @@ and `-n` is the row limit.
 
 ## Cost
 
-One `ss -tine` and one walk of `/proc/*/fd` per interval. No network traffic
-of its own, no root, no capture.
+Linux runs one `ss -tine` and walks `/proc/*/fd` per interval. macOS keeps one
+logging-mode `nettop` feed alive and reads `netstat -ib` per interval; if that
+child exits the widget names the failure and starts it again. `ps` and `lsof`
+are used only on a process detail screen, and a failed `lsof` is named rather
+than drawn as an empty file list. No network traffic of its own, no root, no
+capture.
 
 ## Configuration
 

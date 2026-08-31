@@ -2,9 +2,11 @@
 
 This is configuration guidance for people and AI assistants. It is documentation, not an executable skill and not permission to change files or external services.
 
-## Real source
+## Real sources
 
-Linux `/proc` socket ownership plus TCP counters from `ss -tine`.
+- Linux: `/proc` socket ownership plus TCP counters from `ss -tine`.
+- macOS: all-protocol process counters from `nettop`, interface counters from
+  `netstat -ib`, and process facts from `ps`/`lsof`.
 
 ## Settings owned here
 
@@ -16,9 +18,11 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Confirm `ss` and `/proc` are available. Process names are local observations, not configuration values.
+1. Confirm the pane names the platform source, or gives the precise missing
+   source. Process names are local observations, not configuration values.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
-3. Ask about polling cadence, row limit, sort order, and whether external/local traffic should be included.
+3. Ask about polling cadence, row limit, and sort order. Peer filtering is
+   Linux-only because macOS `nettop` process rows carry no peer field.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
 5. Save through the settings screen and leave it — the widget reloads itself on the way out, so no restart is needed. Then verify that the real source answers, or that the pane gives a specific reason why it cannot.
 
