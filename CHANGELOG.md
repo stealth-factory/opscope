@@ -3,6 +3,22 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.10.0] - 2026-09-01
+
+### CI
+
+- Gate pull requests on macos (#143)
+
+### Documentation
+
+- **wiki**: Explain platform-specific widget code (#141)
+- **wiki**: Complete widget contributor onboarding (#144)
+
+### Features
+
+- **ports**: Add macOS listener and traffic sources (#137)
+- **link**: Add macOS TCP metrics (#139)
+
 ## [0.9.0] - 2026-08-31
 
 ### Features
