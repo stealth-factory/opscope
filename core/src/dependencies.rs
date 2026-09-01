@@ -421,6 +421,9 @@ fn parse_version(text: &str) -> Option<Version> {
                 .chars()
                 .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
                 .collect();
+            if let Some(version) = parse_yyyymmdd(&core) {
+                return Some(version);
+            }
             let normalized = match core.matches('.').count() {
                 1 => format!("{core}.0"),
                 2 => core,
@@ -434,13 +437,32 @@ fn parse_version(text: &str) -> Option<Version> {
     None
 }
 
-pub fn unsatisfied_required(dependencies: &Dependencies, platform: Platform) -> Vec<Dependency> {
+/// iputils prints snapshot dates such as `s20220713` or `iputils-20190709`.
+fn parse_yyyymmdd(digits: &str) -> Option<Version> {
+    if digits.len() != 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: u64 = digits[0..4].parse().ok()?;
+    let month: u64 = digits[4..6].parse().ok()?;
+    let day: u64 = digits[6..8].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(Version::new(year, month, day))
+}
+
+pub fn unsatisfied_required(
+    dependencies: &Dependencies,
+    platform: Platform,
+) -> Vec<(Dependency, DependencyStatus)> {
     dependencies
         .required
         .iter()
         .filter(|dependency| dependency.applies_to(platform))
-        .filter(|dependency| !dependency_status(dependency).satisfies())
-        .cloned()
+        .filter_map(|dependency| {
+            let status = dependency_status(dependency);
+            (!status.satisfies()).then(|| (dependency.clone(), status))
+        })
         .collect()
 }
 
@@ -537,11 +559,13 @@ pub fn install_command<'a>(
 }
 
 pub fn dependency_install_hint(host: &Host, dependencies: &[Dependency]) -> String {
+    let mut parts = Vec::new();
     if let Some(command) = install_command(host, dependencies) {
-        return command;
+        parts.push(command);
     }
     let separate: Vec<String> = dependencies
         .iter()
+        .filter(|dependency| package(dependency.tool, host).is_none())
         .filter_map(|dependency| {
             dependency
                 .tool
@@ -550,7 +574,10 @@ pub fn dependency_install_hint(host: &Host, dependencies: &[Dependency]) -> Stri
         })
         .collect();
     if !separate.is_empty() {
-        return separate.join("; ");
+        parts.push(separate.join("; "));
+    }
+    if !parts.is_empty() {
+        return parts.join("; ");
     }
     if host.platform == Platform::Macos {
         "restore the missing macOS system tool".into()
@@ -607,6 +634,19 @@ pub fn doctor_report(host: &Host, widgets: &[(&str, &str)]) -> Result<String, St
         }
     }
 
+    let status_by_tool: BTreeMap<Tool, (Vec<DependencyStatus>, Vec<DependencyStatus>)> = tools
+        .iter()
+        .map(|(tool, usage)| {
+            (
+                *tool,
+                (
+                    usage.required.iter().map(dependency_status).collect(),
+                    usage.recommended.iter().map(dependency_status).collect(),
+                ),
+            )
+        })
+        .collect();
+
     let mut out = vec![format!("Host: {}", host.name)];
     for (heading, required) in [("Required", true), ("Recommended", false)] {
         out.push(String::new());
@@ -622,20 +662,19 @@ pub fn doctor_report(host: &Host, widgets: &[(&str, &str)]) -> Result<String, St
                 continue;
             }
             count += 1;
-            let dependencies = if required {
-                &usage.required
+            let (required_status, recommended_status) = status_by_tool
+                .get(tool)
+                .expect("every reported tool was evaluated");
+            let (dependencies, statuses) = if required {
+                (&usage.required, required_status)
             } else {
-                &usage.recommended
+                (&usage.recommended, recommended_status)
             };
             let (checked, status) = dependencies
                 .iter()
-                .map(|dependency| (dependency, dependency_status(dependency)))
+                .zip(statuses)
                 .find(|(_, status)| !status.satisfies())
-                .or_else(|| {
-                    dependencies
-                        .first()
-                        .map(|dependency| (dependency, dependency_status(dependency)))
-                })
+                .or_else(|| dependencies.first().zip(statuses.first()))
                 .expect("a reported tool has at least one declaration");
             let label = match status {
                 DependencyStatus::Available(Some(version)) => format!("ok {version}"),
@@ -668,13 +707,22 @@ pub fn doctor_report(host: &Host, widgets: &[(&str, &str)]) -> Result<String, St
         }
     }
 
-    let missing: Vec<Dependency> = tools
-        .values()
-        .flat_map(|usage| usage.required.iter().chain(&usage.recommended))
-        .filter(|dependency| !dependency_status(dependency).satisfies())
-        .cloned()
+    let missing: Vec<&Dependency> = tools
+        .iter()
+        .flat_map(|(tool, usage)| {
+            let (required_status, recommended_status) = status_by_tool
+                .get(tool)
+                .expect("every reported tool was evaluated");
+            usage
+                .required
+                .iter()
+                .zip(required_status)
+                .chain(usage.recommended.iter().zip(recommended_status))
+                .filter(|(_, status)| !status.satisfies())
+                .map(|(dependency, _)| dependency)
+        })
         .collect();
-    if let Some(command) = install_command(host, &missing) {
+    if let Some(command) = install_command(host, missing.iter().copied()) {
         out.push(String::new());
         out.push("Install missing packages (review, then run):".into());
         out.push(format!("  {command}"));
@@ -788,6 +836,15 @@ mod tests {
             Some(Version::new(6, 1, 0))
         );
         assert_eq!(parse_version("1.74.1\n  tailscale commit"), Some(Version::new(1, 74, 1)));
+        assert_eq!(
+            parse_version("ping from iputils s20220713"),
+            Some(Version::new(2022, 7, 13))
+        );
+        assert_eq!(
+            parse_version("ping utility, iputils-20190709"),
+            Some(Version::new(2019, 7, 9))
+        );
+        assert_eq!(parse_version("s20221399"), None);
     }
 
     #[test]
@@ -829,6 +886,20 @@ mod tests {
             install_command(&host, &dependencies.recommended),
             Some("brew install cloudflared tailscale".into())
         );
+    }
+
+    #[test]
+    fn mixed_package_and_vendor_tools_keep_both_install_hints() {
+        let dependencies = parse_dependencies(
+            r#"{"required":{"curl":"*","herdr":"*"}}"#,
+        )
+        .unwrap();
+        let hint = dependency_install_hint(
+            &Host::from_os_release("ID=debian"),
+            &dependencies.required,
+        );
+        assert!(hint.contains("sudo apt install curl"), "{hint}");
+        assert!(hint.contains("install herdr from https://herdr.dev"), "{hint}");
     }
 
     #[test]

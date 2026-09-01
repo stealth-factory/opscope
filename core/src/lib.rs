@@ -773,7 +773,7 @@ pub fn dependencies_available(
         "needs {}",
         missing
             .iter()
-            .map(|dependency| {
+            .map(|(dependency, _)| {
                 if dependency.version_text == "*" {
                     dependency.tool.command().to_string()
                 } else {
@@ -785,8 +785,8 @@ pub fn dependencies_available(
     );
     let lines: Vec<String> = missing
         .iter()
-        .map(|dependency| {
-            let status = match dependency_status(dependency) {
+        .map(|(dependency, status)| {
+            let status = match status {
                 DependencyStatus::Missing => "is not installed or is not on PATH".to_string(),
                 DependencyStatus::TooOld(version) => format!(
                     "is {version}; this widget requires {}",
@@ -796,7 +796,9 @@ pub fn dependencies_available(
                     "is present, but its version could not be checked against {}",
                     dependency.version_text
                 ),
-                DependencyStatus::Available(_) => "is available".to_string(),
+                DependencyStatus::Available(_) => unreachable!(
+                    "unsatisfied_required only returns statuses that do not satisfy"
+                ),
             };
             match &dependency.why {
                 Some(why) => format!("{} {status}. {why}", dependency.tool.command()),
@@ -805,7 +807,8 @@ pub fn dependencies_available(
         })
         .collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let install = dependency_install_hint(&host, &missing);
+    let needed: Vec<Dependency> = missing.into_iter().map(|(dependency, _)| dependency).collect();
+    let install = dependency_install_hint(&host, &needed);
     cannot_start_inner(name, &reason, &refs, &install, settings);
     false
 }

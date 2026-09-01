@@ -113,7 +113,7 @@ Package names do not belong to the widget. Core maps the command to Debian,
 Fedora, Arch, Alpine, or Homebrew and the widget that cannot start draws the
 shared warning screen:
 
-```
+```text
 ╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  cannot start · needs ss
 
@@ -134,7 +134,7 @@ like everything else.
 All fifteen binaries check the same owned file, including `matrix` and
 `months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
 those declarations across the full registry, reports which widgets use each
-tool, checks declared versions, and prints a single host-specific command:
+tool, checks declared versions, and prints host-specific installation guidance:
 
 ```sh
 opscope doctor

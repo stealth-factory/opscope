@@ -327,7 +327,7 @@ fn doctor() -> i32 {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     // A widget name is resolved before --help is looked at, so that
     // `start netwatch --help` is netwatch's help, not this one's. Every
     // argument after the name belongs to the widget, including that one.
@@ -336,15 +336,15 @@ fn main() {
         if first == "doctor" {
             if args.len() > 1 && !args[1..].iter().all(|arg| arg == "-h" || arg == "--help") {
                 eprintln!("opscope doctor takes no arguments");
-                std::process::exit(2);
+                return std::process::ExitCode::from(2);
             }
             if args.iter().any(|arg| arg == "-h" || arg == "--help") {
                 println!(
                     "Inspect every widget's required and recommended external tools.\n\n    opscope doctor\n\nPrints host-specific installation advice; never installs anything."
                 );
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
-            std::process::exit(doctor());
+            return std::process::ExitCode::from(doctor() as u8);
         }
         if !first.starts_with('-') {
             // `.py` is still accepted, and only for that: every widget here
@@ -401,7 +401,7 @@ fn main() {
                 "q" | "Q" => {
                     keyboard.restore();
                     tc::restore_screen();
-                    return;
+                    return std::process::ExitCode::SUCCESS;
                 }
                 "up" | "k" | "K" => {
                     selected = selected.saturating_sub(1);

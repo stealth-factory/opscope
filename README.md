@@ -48,7 +48,7 @@ you are back. It is the launcher, not another widget.
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](widgets/src/widgets/linear/README.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
-| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or to publish it over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ip` + `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
 | **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
@@ -361,10 +361,11 @@ permission to make changes.
   produced yet; that machine builds from source
 - A terminal with 24-bit colour
 - Per-widget, the external *tools* the table above names: `curl`, `ss`,
-  `ping`, `tailscale`, `herdr`, and the macOS system tools `lsof`, `ps` and
-  `nettop`. Each widget needs only its own; one that
-  cannot work without its tool says so rather than drawing an empty pane; and
-  **none needs root**
+  `ping`, `tailscale`, `herdr`, `ip`, and the macOS system tools `lsof`,
+  `ps`, `nettop`, `ifconfig` and `script`. `cloudflared` is an optional
+  integration, not a hard requirement. Each widget needs only its own; one
+  that cannot work without its tool says so rather than drawing an empty
+  pane; and **none needs root**
 
 ## Documentation
 

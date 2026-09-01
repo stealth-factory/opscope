@@ -16,8 +16,8 @@ somebody who has just tried to start it is already looking, and is the only
 place that knows what it actually needs.
 
 `opscope doctor` checks the same widget-owned declarations in bulk, reports
-required and recommended tools separately, and prints the install command for
-the detected macOS or Linux family. It never installs anything.
+required and recommended tools separately, and prints host-specific installation
+guidance for the detected macOS or Linux family. It never installs anything.
 
 Keys: up/down select, enter launches, comma opens shared terminal settings,
 q quits.
