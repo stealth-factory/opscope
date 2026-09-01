@@ -18,14 +18,26 @@
 //!
 //! A port of link.py. Every other network widget in the collection measures
 //! a path it chose; this one measures the path you are on, and it sends
-//! nothing to do it - `ss -tin` reports what the kernel has already
-//! measured for each established socket.
+//! nothing to do it. Linux reads `ss`; macOS reads `nettop`. Both report
+//! what the kernel has already measured for each established socket.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use opscope_core as tc;
+
+#[allow(dead_code)]
+mod parse;
+use parse::num;
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod host;
+
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod host;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "link",
@@ -91,6 +103,10 @@ struct Session {
     /// that has the previous reading to subtract.
     recent_loss: Option<f64>,
     delivery: Option<f64>,
+    /// macOS `nettop` has no equivalent to Linux `ss`'s delivery-rate
+    /// estimate. Kept explicit so absence is explained rather than drawn as
+    /// the same dash an individual Linux socket can legitimately report.
+    delivery_unavailable: bool,
     mss: Option<f64>,
     lastsnd: Option<f64>,
     lastrcv: Option<f64>,
@@ -161,6 +177,7 @@ fn configured_ports(cfg: &serde_json::Value) -> Vec<u16> {
 ///
 /// Split from the command that finds the listening ones so the decision can
 /// be tested without `ss`.
+#[allow(dead_code)]
 fn ports_to_watch(named: &[u16], listening: Vec<u16>) -> Vec<u16> {
     if named.is_empty() {
         listening
@@ -169,120 +186,10 @@ fn ports_to_watch(named: &[u16], listening: Vec<u16>) -> Vec<u16> {
     }
 }
 
-fn listening_ports() -> Result<Vec<u16>, String> {
-    let named: Vec<u16> = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
-    if !named.is_empty() {
-        return Ok(ports_to_watch(&named, Vec::new()));
-    }
-    let mut ports: Vec<u16> = Vec::new();
-    for line in run_or(&["ss", "-tlnH"])?.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if let Some(local) = cols.get(3) {
-            if let Some((_, port)) = local.rsplit_once(':') {
-                if let Ok(p) = port.parse() {
-                    ports.push(p);
-                }
-            }
-        }
-    }
-    Ok(ports_to_watch(&named, ports))
-}
-
-/// The kernel's own numbers for one socket.
-///
-/// `ss` mixes two shapes on that line: `key:value` pairs and
-/// space-separated ones like `delivery_rate 45107960bps`. Both are read;
-/// anything unknown is left alone rather than guessed at.
-fn parse_metrics(text: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let words: Vec<&str> = text.split_whitespace().collect();
-    for key in ["send", "pacing_rate", "delivery_rate"] {
-        if let Some(at) = words.iter().position(|w| *w == key) {
-            if let Some(value) = words.get(at + 1) {
-                if let Some(bps) = value.strip_suffix("bps") {
-                    out.insert(key.to_string(), bps.to_string());
-                }
-            }
-        }
-    }
-    for word in &words {
-        if let Some((key, value)) = word.split_once(':') {
-            out.insert(key.to_string(), value.to_string());
-        }
-    }
-    out
-}
-
-fn num(map: &HashMap<String, String>, key: &str) -> Option<f64> {
-    map.get(key).and_then(|v| v.parse().ok())
-}
-
 /// One entry per established inbound connection, with its metrics.
 fn sessions() -> Result<Vec<Session>, String> {
-    let ports = listening_ports()?;
-    if ports.is_empty() {
-        return Ok(Vec::new());
-    }
-    let text = run_or(&["ss", "-tinH", "state", "established"])?;
-    let mut found = Vec::new();
-    let mut head: Option<Vec<String>> = None;
-    for line in text.lines() {
-        if !line.starts_with('\t') && !line.starts_with(' ') {
-            head = Some(line.split_whitespace().map(|s| s.to_string()).collect());
-            continue;
-        }
-        let cols = match &head {
-            Some(c) if c.len() >= 4 => c.clone(),
-            _ => continue,
-        };
-        let (local, peer) = (&cols[2], &cols[3]);
-        let lport: u16 = match local.rsplit_once(':').and_then(|(_, p)| p.parse().ok()) {
-            Some(p) => p,
-            None => {
-                head = None;
-                continue;
-            }
-        };
-        let (peer_host, peer_port) = match peer.rsplit_once(':') {
-            Some((h, p)) => (h.trim_matches(|c| c == '[' || c == ']'), p),
-            None => {
-                head = None;
-                continue;
-            }
-        };
-        // ::ffff:10.0.0.1 is an IPv4 address wearing an IPv6 hat - the same
-        // machine, the same session - so it is unwrapped before anything
-        // else looks at it. Left wrapped, ::ffff:127.0.0.1 walked straight
-        // past the loopback filter and put a 22-microsecond local socket on
-        // the chart, flattening every real session against the ceiling.
-        let peer_ip = peer_host.strip_prefix("::ffff:").unwrap_or(peer_host);
-        if !ports.contains(&lport) || peer_ip.starts_with("127.") || peer_ip.starts_with("::1") {
-            head = None;
-            continue;
-        }
-        let m = parse_metrics(line);
-        let rtt_pair = m.get("rtt").cloned().unwrap_or_default();
-        let mut halves = rtt_pair.split('/');
-        found.push(Session {
-            peer: format!("{}:{}", peer_ip, peer_port),
-            ip: peer_ip.to_string(),
-            port: lport,
-            rtt: halves.next().and_then(|v| v.parse().ok()),
-            jitter: halves.next().and_then(|v| v.parse().ok()),
-            floor: num(&m, "minrtt"),
-            sent: num(&m, "bytes_sent").unwrap_or(0.0),
-            recv: num(&m, "bytes_received").unwrap_or(0.0),
-            retrans_bytes: num(&m, "bytes_retrans").unwrap_or(0.0),
-            recent_loss: None,
-            delivery: num(&m, "delivery_rate"),
-            mss: num(&m, "mss"),
-            lastsnd: num(&m, "lastsnd"),
-            lastrcv: num(&m, "lastrcv"),
-            raw: m,
-        });
-        head = None;
-    }
-    Ok(found)
+    let named = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
+    host::sessions(&named)
 }
 
 /// Who is logged in from where, to put a name against an address.
@@ -465,17 +372,13 @@ fn main() {
     let history_len = ((windows.iter().cloned().fold(0.0f64, f64::max) / refresh) as usize + 2)
         .max(tc::cfg_usize(&cfg, "history", 120));
 
-    let absent = tc::missing(&["ss"]);
+    let absent = host::missing();
     if !absent.is_empty() {
         tc::cannot_start_with_settings(
             "connections",
             &absent,
-            &[
-                "ss reads the kernel's own per-socket metrics, which is where",
-                "every figure here comes from: round-trip time, retransmits,",
-                "delivery rate. Nothing else on the machine reports them.",
-            ],
-            "apt install iproute2",
+            host::missing_reason(),
+            host::install_hint(),
             SETTINGS,
         );
         return;
@@ -802,7 +705,7 @@ fn main() {
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
                 (
                     p.dim.as_str(),
-                    " · measured by the kernel, nothing sent".into(),
+                    format!(" · {}", host::source_note()),
                 ),
                 (p.dim.as_str(), format!("   every {}s", refresh)),
             ],
@@ -824,7 +727,7 @@ fn main() {
             rows.push(tc::seg(
                 &[(
                     p.dim.as_str(),
-                    "  Nothing is connected to this machine, or ss cannot see it.".into(),
+                    format!("  {}", host::empty_note()),
                 )],
                 w - 1,
             ));
@@ -1044,7 +947,12 @@ fn table(
             ),
         ];
         if wide {
-            line.push((dim_c.as_str(), format!("{:>10}", rate(row.delivery))));
+            let achieved = if row.delivery_unavailable {
+                "macOS n/a".to_string()
+            } else {
+                rate(row.delivery)
+            };
+            line.push((dim_c.as_str(), format!("{:>10}", achieved)));
             line.push((dim_c.as_str(), format!("{:>7}", span(idle))));
         }
         if here {
@@ -1200,12 +1108,21 @@ fn detail_view(
 
     field!("sent", Some(size_of(row.sent)), &p.txt, "");
     field!("received", Some(size_of(row.recv)), &p.txt, "");
-    field!(
-        "achieved",
-        Some(rate(row.delivery)),
-        &p.txt,
-        "what it has delivered, not its capacity",
-    );
+    if row.delivery_unavailable {
+        field!(
+            "achieved",
+            Some("unavailable".to_string()),
+            &p.dim,
+            "macOS nettop has no delivery-rate estimate",
+        );
+    } else {
+        field!(
+            "achieved",
+            Some(rate(row.delivery)),
+            &p.txt,
+            "what it has delivered, not its capacity",
+        );
+    }
     field!(
         "pacing at",
         Some(rate(num(&row.raw, "pacing_rate"))),
@@ -1529,7 +1446,7 @@ mod tests {
     fn both_shapes_on_the_ss_line_are_read() {
         let line = "\t ts sack cubic rtt:3.604/1.027 minrtt:3.553 cwnd:10 \
                     bytes_sent:1669 delivery_rate 6287464bps";
-        let m = parse_metrics(line);
+        let m = parse::parse_ss_metrics(line);
         assert_eq!(m.get("rtt").map(String::as_str), Some("3.604/1.027"));
         assert_eq!(m.get("minrtt").map(String::as_str), Some("3.553"));
         // The space-separated shape, which a key:value scan alone misses.
@@ -1690,6 +1607,35 @@ mod tests {
             plain(&drawn[1]),
             "▐ 203.0.113.9:22                22     --      --      --     --        --     --"
         );
+    }
+
+    #[test]
+    fn macos_delivery_rate_is_explained_in_both_views() {
+        let row = Session {
+            peer: "203.0.113.9:51000".into(),
+            ip: "203.0.113.9".into(),
+            port: 22,
+            rtt: Some(12.0),
+            floor: Some(10.0),
+            jitter: Some(1.0),
+            delivery_unavailable: true,
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::new(),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        let list = plain(&table(&[row.clone()], &state, 100, None, &palette())[1]);
+        assert!(list.contains("macOS n/a"), "{list}");
+        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette())
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("achieved"), "{detail}");
+        assert!(detail.contains("macOS nettop has no delivery-rate estimate"), "{detail}");
     }
 
     #[test]

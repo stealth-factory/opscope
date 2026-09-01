@@ -175,7 +175,7 @@
     "refresh": 120.0
   },
   "link": {
-    "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+    "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss on Linux or nettop on macOS.",
     "_ports_comment": "Listening ports counted as inbound sessions; empty uses every listening port.",
     "ports": [],
     "_refresh_comment": "Seconds between kernel TCP-accounting reads.",
