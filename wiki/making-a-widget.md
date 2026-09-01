@@ -99,6 +99,8 @@ parsers that compile and run their tests on every target. Copy that shape into
 the widget's own folder rather than creating a shared platform crate. The
 reasoning behind this boundary is recorded in
 [OPS-65](https://linear.app/stealth-company/issue/OPS-65/decide-how-platform-specific-code-is-split-and-compiled-in).
+This contributor-facing platform contract was added under
+[OPS-71](https://linear.app/stealth-company/issue/OPS-71/document-linuxmacos-splits-in-the-widget-creation-wiki).
 
 Two repository checks defend the boundary:
 
@@ -110,28 +112,283 @@ Two repository checks defend the boundary:
   for those three shapes, and an allowlisted widget is still waiting on a
   macOS path.
 
-## Adding one
+## Adding one: the complete path
 
-1. Add the folder and its required files.
-2. Add one `[[bin]]` entry in `widgets/Cargo.toml`.
-3. Add `widget!("<name>")` to the launcher's registry in
-   `widgets/src/launcher/main.rs`.
-4. Add its row to the root `README.md` and to `docs/README.md`.
-5. If configurable, declare `SETTINGS`, open it on `,`, and add
-   `settings.json`.
-6. Regenerate `config.example.json` with `UPDATE_CONFIG_EXAMPLE=1 cargo test`.
-7. Run `cargo test`.
+Follow these steps from the repository root. The examples use
+`example-widget`; replace it consistently.
+
+### 1. Choose the name and source
+
+Confirm the widget and its decisions are already represented in the
+[Linear project](https://linear.app/stealth-company/project/opscope-e829b47d84b8/issues).
+Choose a lowercase hyphenated name that does not shadow a normal shell command.
+Write down the real source for every figure before drawing it.
+
+### 2. Create the owned folder
+
+Create `widgets/src/widgets/example-widget/` with all four required files:
+
+- `main.rs` — acquisition, state, drawing, input, and local unit tests;
+- `help.txt` — the launcher's summary and explanation, plus CLI usage and keys;
+- `README.md` — the maintained preview, provenance, controls, and settings;
+- `CONFIGURE.md` — safe, plain-Markdown guidance for a person or AI assistant.
+
+Add `settings.json` only when the widget is configurable. Add `parse.rs`,
+`linux.rs`, and `macos.rs` when the platform section above calls for them.
+`every_widget_owns_its_complete_folder` checks the four required files, the
+Cargo path, the embedded configuration guide, and the settings shape.
+
+In `main.rs`, every widget must expose its two embedded help documents before
+starting the terminal:
+
+```rust
+use opscope_core as tc;
+
+fn main() {
+    tc::maybe_widget_help(
+        include_str!("help.txt"),
+        include_str!("CONFIGURE.md"),
+        false, // true when this widget has settings
+    );
+
+    tc::setup();
+    // Acquire, draw, and answer keys here.
+    tc::restore_screen();
+}
+```
+
+Use `matrix` as the smallest non-configurable example and `ports` as the
+worked configurable, platform-split example. A real poller also needs the
+failure handling described under [Polling without lying](#polling-without-lying).
+
+### 3. Give the launcher parseable help and a preview
+
+`help.txt` has a maintained shape because the launcher parses it:
+
+```text
+One-line summary shown on the launcher row.
+
+One introductory paragraph explaining why the widget exists. The launcher
+uses this paragraph as its aside, up to the next blank or indented line.
+
+    example-widget [-n SECONDS]
+
+Keys: up/down select, q quits.
+```
+
+Line one and the introductory paragraph must both be non-empty. Put the
+indented usage synopsis after that paragraph; do not let `Keys:` enter the
+introductory paragraph. The binary returns this whole file for `--help`, and
+`every_key_the_help_text_names_is_answered` checks the key phrases it can
+recognise against `main.rs`. The sample above is the non-configurable set;
+a configurable widget also names comma here (`ports/help.txt` is the shape).
+Do not advertise `,` unless the widget actually opens the shared settings
+screen.
+
+In `README.md`, make the **first fenced block** a static picture of the widget.
+Its first line must begin with `╺━`; an earlier shell or JSON fence makes the
+launcher see that instead and reject the page. This is the copyable shape:
+
+````markdown
+# `example-widget`
+
+[← all widgets](../../../../docs/README.md)
+
+What this widget answers in one sentence.
+
+```text
+╺━ EXAMPLE WIDGET ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+ real-looking layout, clearly maintained as an example
+ [q]uit
+```
+````
+
+The launcher embeds that first preview without starting the data source.
+`a_sample_is_a_picture_of_the_widget` checks the `╺━` opening for every
+registry entry. Document every footer key in the README; the repository checks
+both that a hinted key is handled and that the README names it.
+
+`CONFIGURE.md` must identify the real sources, safe inspection steps, the
+owned settings section (or explicitly say there is none), secrets and other
+facts that must be asked rather than guessed, and how to verify an honest
+answer. It is documentation, not executable authority.
+
+### 4. Choose the settings path
+
+For a **non-configurable** widget, omit `settings.json`, pass `false` to
+`maybe_widget_help`, define no `SettingsSpec`, and do not call `run_settings`.
+Its README and `CONFIGURE.md` should explicitly say that it has no settings.
+`matrix` is the worked example.
+
+For a **configurable** widget, add `settings.json`, pass `true` to
+`maybe_widget_help`, and declare the shared screen in `main.rs`:
+
+```rust
+const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
+    widget: "example-widget",
+    section: "example_widget",
+    legacy_section: None,
+    schema: include_str!("settings.json"),
+    catalogues: &[],
+};
+```
+
+The section is the widget name with `-` changed to `_`; it must also be the
+section passed to `load_config()`. `legacy_section` is only for a real renamed
+section that existing users may still have—otherwise use `None`. In the normal
+navigation match, the literal comma opens core's screen:
+
+```rust
+"," => {
+    tc::run_settings(&mut keyboard, SETTINGS);
+    continue;
+}
+```
+
+Document the settings key as literal `` `,` `` in `README.md`, mention it in
+`help.txt`, and let core draw the screen. A widget must not implement its own
+settings UI.
+
+Every non-metadata field in `settings.json` is a real default and needs
+field-specific help. The preferred key is `_<field>_comment`; the checker also
+accepts the older `_comment_<field>` and `_<field>` forms. `_comment` describes
+the whole widget and does not replace per-field help. Put validation-only
+rules under the top-level `_schema`, beside the defaults:
+
+```json
+{
+  "_comment": "What the widget reads and reports.",
+  "_schema": {
+    "hosts": { "items": "string" },
+    "refresh": { "minimum": 1 }
+  },
+  "_hosts_comment": "Hosts to measure.",
+  "hosts": [],
+  "_refresh_comment": "Seconds between samples.",
+  "refresh": 4.0
+}
+```
+
+Every array must declare `items` (or a picker), including one that already
+ships a non-empty default. The settings screen can infer a list editor from
+that default, but `every_array_declares_what_it_holds` still requires the
+declaration so emptying that default later cannot steal the editor. `_schema`
+never appears in `config.example.json`.
+Repository checks also require every declared field to be read, every read
+field to be declared, code fallbacks to match the declared defaults, token
+environment names to match, and dynamic catalogues to name real fields.
+
+### 5. Register and index it
+
+Add one `[[bin]]` to `widgets/Cargo.toml`:
+
+```toml
+[[bin]]
+name = "example-widget"
+path = "src/widgets/example-widget/main.rs"
+```
+
+Then add `widget!("example-widget")` to `WIDGETS` in
+`widgets/src/launcher/main.rs` **in alphabetical order**. Cargo defines what
+ships; `every_binary_is_on_the_menu` and
+`every_widget_is_on_the_launcher_menu` enforce that every non-launcher binary
+is registered as a widget, while `the_list_is_in_a_settled_order`
+enforces the alphabetical launcher order.
+
+Bump the expected `[[bin]]` count in `npm/test.js` (`the packer takes every
+[[bin]], including opscope`). That number is sixteen today — the launcher
+plus fifteen widgets — and it is a gate, not a reading of the manifest:
+`cargo test` runs it whenever Node is on PATH, and CI always does. Skip
+it and the new binary builds while the packer still expects the old
+inventory.
+
+Add the widget to the root `README.md` table and to `docs/README.md`. The
+repository checks both indexes. Do not add a second copy of the summary or
+preview to the launcher: it embeds `help.txt` and `README.md` from the owned
+folder. [The launcher documentation](../widgets/src/launcher/README.md)
+explains that boundary.
+
+### 6. Implement input, scrolling, and honest failure
+
+Footer hints, README controls, `help.txt`, and key match arms must agree. The
+wheel moves the full-widget viewport without changing selection or focus;
+`ctrl-y` and `ctrl-e` expose the same movement from the keyboard. Every new
+widget handles `wheel-up` and `wheel-down` unless it genuinely has no
+scrollable body. That exception requires an explicit, reviewable entry and
+reason in `NO_SCROLL` in `widgets/tests/check.rs`; `matrix` is the only current
+exception.
+
+Detect external tools at run time with `tc::missing()`. Use the shared
+`tc::cannot_start()` / `tc::cannot_start_with_settings()` helpers when a
+required tool is absent, `tc::missing_config()` for a configurable input that
+is absent, and `tc::cannot_start_because()` with `tc::unsupported()` when the
+kernel has no truthful source. Do not copy a one-off failure screen or turn a
+failed command into an empty result.
+
+### 7. Generate configuration and run the gates
+
+If settings changed, regenerate the checked-in example with the focused test:
+
+```sh
+UPDATE_CONFIG_EXAMPLE=1 cargo test -p opscope-widgets --test check \
+  generated_config_example_matches_widget_settings
+```
+
+`config.example.json` generation is Rust code in `widgets/tests/check.rs`.
+There is no `tools/config-example.py`, and **Python 3 is not a build or test
+dependency**; the old subprocess was removed because it could fail for a
+reason the test was not meant to test.
+
+Run the new binary's focused tests while iterating, then the complete gate:
+
+```sh
+cargo test -p opscope-widgets --bin example-widget
+cargo test
+cargo build --workspace --bins
+```
+
+`cargo test` compiles every parser on the current target, runs widget and core
+unit tests, runs the source-contract checks below, and runs the npm packaging
+tests. CI repeats it on Linux and macOS. `cargo build --workspace --bins`
+separately proves all sixteen executable targets build as binaries.
+
+### 8. Smoke-test the built widget
+
+Commands in the repository must use the build-tree launcher; a fresh checkout
+does not have `opscope` on `PATH`:
+
+```sh
+./target/debug/opscope example-widget
+./target/debug/example-widget --help
+./target/debug/example-widget --configure-help
+```
+
+Manually verify the real source and its honest empty/error states, narrow and
+wide resize, a pane short enough to scroll, wheel versus selection behaviour,
+every documented key, and the shared settings screen where present. Restart
+the process after editing—the running binary still holds the old code.
+
+### 9. Hand it off
+
+Keep the pull request to this one logical widget, use a Conventional Commit
+title, and include the focused, full-suite, and manual evidence. The release
+and npm publication path is separate from PR merge; it is documented in
+[Releasing](../docs/releasing.md).
 
 ### What catches a missed step, and what does not
 
 | step | caught by |
 |---|---|
-| `[[bin]]` entry | the compiler — it is how it builds |
-| the four folder files | `every_widget_owns_its_complete_folder` |
+| `[[bin]]` name and folder path | `every_widget_owns_its_complete_folder`, then the compiler |
+| the four folder files and embedded guide | `every_widget_owns_its_complete_folder` |
 | `README.md` row | `every_widget_has_a_readme_row` |
 | `docs/README.md` row | `every_documented_widget_is_in_the_docs_index` |
 | `config.example.json` | `generated_config_example_matches_widget_settings` |
 | the launcher registry entry | `every_widget_is_on_the_launcher_menu` in `widgets/tests/check.rs`, and `every_binary_is_on_the_menu` in `widgets/src/launcher/main.rs` |
+| npm packer `[[bin]]` count | `the packer takes every [[bin]]` in `npm/test.js` |
+| alphabetical launcher order | `the_list_is_in_a_settled_order` in `widgets/src/launcher/main.rs` |
+| first README preview | `a_sample_is_a_picture_of_the_widget` in `widgets/src/launcher/main.rs` |
+| `help.txt` summary and paragraph | `every_widget_describes_itself` in `widgets/src/launcher/main.rs` |
 
 `every_widget_is_on_the_launcher_menu` is the repository check: it fails
 if a widget folder is missing from the launcher registry.
@@ -168,6 +425,10 @@ quietly showed 3 projects instead of 21.
 keeps a cursor in view; `vbars`, `vbars_down`, `stacked_bar`, `meter`,
 `skeleton`; `get()`/`post_json()` over `curl`; `run()`/`run_full()` for bounded
 commands; `clipboard()` over OSC 52.
+
+Use those shared helpers rather than copying them into one widget;
+`shared_helpers_are_not_redefined_by_widgets` enforces the helpers whose
+duplication has already caused drift.
 
 Use `seg()` and `pad()` rather than `len()` — `len()` counts escape bytes and
 produces ragged borders.
@@ -271,19 +532,9 @@ selected effective JSON value, validates the result, writes a private
 same-directory temporary file with exclusive no-follow creation, then renames
 it. Unrelated concurrent edits survive.
 
-`config.example.json` is **generated** from every `settings.json`:
-
-```sh
-cargo test                       # checks it, and fails saying how to fix it
-UPDATE_CONFIG_EXAMPLE=1 \
-  cargo test --test check \
-  generated_config_example_matches_widget_settings   # writes it
-```
-
-The generator lives in `widgets/tests/check.rs` rather than in a script of
-its own. It used to be `tools/config-example.py`, run as a subprocess, which
-made `cargo test` need `python3` on the PATH and able to fail for a reason it
-was not testing.
+`config.example.json` is **generated** from every `settings.json`. The exact
+fresh-checkout command and the reason it has no Python dependency are in
+[step 7 above](#7-generate-configuration-and-run-the-gates).
 
 An optional `_schema` object beside the defaults carries UI-only constraints —
 choices, element types, numeric bounds, nesting, units. The generator omits it
@@ -307,12 +558,14 @@ because there is nothing further to say once one is picked.
 An **array** with choices keeps its checklist. Ticking several is a different
 act from choosing one, and `clocks.work_days` wants the first.
 
-### A list of strings needs no declaration
+### A list of strings is filled in one entry at a time
 
 An array of strings is filled in one entry at a time: the box composes an
-entry, `↵` adds it, `[d]` on a row removes it. Nothing has to be declared —
-`items: "string"` says so outright, and a shipped default that is a non-empty
-array of strings says it just as well.
+entry, `↵` adds it, `[d]` on a row removes it. `items: "string"` says so
+outright. The screen can also infer that editor from a non-empty default of
+strings, but still declare `items` — a default that later becomes `[]` would
+otherwise leave the field as a JSON box, which is why the check requires the
+declaration even when the shipped default is already a list of strings.
 
 An array of *numbers* keeps the JSON box on purpose. `pomodoro_flash_rgb` is
 one colour in three parts, not a list anybody adds a fourth entry to, and
