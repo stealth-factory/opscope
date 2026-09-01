@@ -38,7 +38,7 @@ It never pretends.
 ```text
 widgets/src/widgets/<name>/
 ├── main.rs         Rust entry point, UI, and local tests
-├── parse.rs        platform-independent parsers and their tests (when needed)
+├── parse.rs        platform-independent parsers and their tests (when the widget parses source text)
 ├── linux.rs        Linux acquisition only (when sources differ by OS)
 ├── macos.rs        macOS acquisition only (when sources differ by OS)
 ├── help.txt        `--help` summary and controls
@@ -89,10 +89,12 @@ Keep the parser visible to every build. The platform split has three tiers:
 If an OS has no truthful source, do not draw an empty table. Return
 `tc::unsupported()`, whose reason is `does not run on {os}`, and render it with
 `tc::cannot_start_because()`. That makes an unsupported widget visibly
-different from a supported source returning no rows.
+different from a supported source returning no rows. A source that exists
+on this OS but failed to open is still an error, not `unsupported()`.
 
 `ports` is the worked example: its package contains `parse.rs`, `linux.rs`,
-and `macos.rs`; both hosts acquire different command output and pass it to
+and `macos.rs`. Linux reads `/proc/net/tcp` and `/proc/net/tcp6`; macOS runs
+`lsof` (and `ps` / `nettop` for the rest). Both hosts pass that text to
 parsers that compile and run their tests on every target. Copy that shape into
 the widget's own folder rather than creating a shared platform crate. The
 reasoning behind this boundary is recorded in
@@ -102,8 +104,11 @@ Two repository checks defend the boundary:
 
 - `parsers_and_their_tests_are_not_gated_by_target_os` rejects platform-gated
   `parse_*` functions and tests.
-- `a_proc_reader_has_a_macos_path_or_says_why` rejects a widget that reads
-  `/proc` without a `macos.rs` path or an explicit unsupported explanation.
+- `a_proc_reader_has_a_macos_path_or_says_why` rejects a `/proc` reader with
+  no `macos.rs`, no `unsupported()` call, and no row on `LINUX_ONLY_UNTIL`.
+  Passing is not proof of a reachable unsupported screen: the check looks
+  for those three shapes, and an allowlisted widget is still waiting on a
+  macOS path.
 
 ## Adding one
 
