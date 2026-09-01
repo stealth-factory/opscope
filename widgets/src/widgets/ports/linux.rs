@@ -24,8 +24,10 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::time::UNIX_EPOCH;
 
-use super::parse::{parse_proc_stat_zombie, proc_sockets_from_tables};
-use super::Found;
+use opscope_core as tc;
+
+use super::parse::{parse_proc_stat_zombie, parse_ss_counters, proc_sockets_from_tables, Counters};
+use super::{Found, RUN_TIMEOUT};
 
 /// Every listening TCP socket, with the pid this user can name.
 ///
@@ -79,7 +81,7 @@ fn socket_owners() -> HashMap<String, i32> {
     owners
 }
 
-pub fn process_info(pid: i32) -> (String, String, Option<f64>) {
+fn process_info(pid: i32) -> (String, String, Option<f64>) {
     let cmdline = std::fs::read(format!("/proc/{}/cmdline", pid))
         .map(|raw| {
             String::from_utf8_lossy(&raw)
@@ -105,6 +107,34 @@ pub fn process_info(pid: i32) -> (String, String, Option<f64>) {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64());
     (cmdline, cwd, started)
+}
+
+/// Keep the shared scan shape identical on both platforms. Linux already
+/// reads process metadata directly from `/proc`, so batching is just one
+/// pass over the same per-pid reads and does not alter its source or output.
+pub fn process_infos(pids: &[i32]) -> Result<HashMap<i32, (String, String, Option<f64>)>, String> {
+    Ok(pids
+        .iter()
+        .copied()
+        .map(|pid| (pid, process_info(pid)))
+        .collect())
+}
+
+pub fn traffic_available() -> bool {
+    super::have("ss")
+}
+
+pub fn traffic_unavailable() -> &'static str {
+    "no traffic · needs ss"
+}
+
+pub fn traffic_counters() -> Result<HashMap<String, Counters>, String> {
+    // Preserve the Linux source and parsing exactly; this function is the
+    // platform seam that lets macOS supply equivalent counters from nettop.
+    // `run`, not `run_quiet`: an ss that fails or times out must stay an
+    // error so the poller can keep the last baseline instead of sampling
+    // an empty map as a quiet moment.
+    Ok(parse_ss_counters(&tc::run(&["ss", "-tine"], RUN_TIMEOUT)?))
 }
 
 /// Whether this pid is ours to signal.

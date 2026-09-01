@@ -23,6 +23,8 @@
 //! cost of not having a test that vanishes from a green build.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 /// A listening TCP socket as `/proc/net/tcp` writes it.
 pub struct ProcSocket {
     pub port: u16,
@@ -37,6 +39,111 @@ pub struct LsofSocket {
     pub bind: String,
     pub uid: u32,
     pub pid: Option<i32>,
+}
+
+/// One row from a batched macOS `ps` process query.
+pub struct PsProcess {
+    pub pid: i32,
+    pub elapsed: Option<f64>,
+    pub command: String,
+}
+
+/// One established TCP connection from macOS `nettop` logging output.
+pub struct NettopConnection {
+    pub id: String,
+    pub port: u16,
+    pub sent: u64,
+    pub recv: u64,
+}
+
+/// One TCP socket's cumulative byte counters.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Counters {
+    pub port: u16,
+    pub sent: u64,
+    pub recv: u64,
+}
+
+/// Every TCP socket's counters from Linux `ss -tine`, keyed by inode.
+pub fn parse_ss_counters(text: &str) -> HashMap<String, Counters> {
+    let mut found = HashMap::new();
+    let (mut inode, mut port) = (None, 0u16);
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 && line.starts_with("State") {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            port = cols
+                .get(3)
+                .and_then(|address| address.rsplit_once(':'))
+                .and_then(|(_, port)| port.parse().ok())
+                .unwrap_or(0);
+            inode = counter_field(line, "ino:").filter(|value| value != "0");
+            continue;
+        }
+        let Some(id) = inode.take() else { continue };
+        found.insert(
+            id,
+            Counters {
+                port,
+                sent: counter_field(line, "bytes_sent:")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+                recv: counter_field(line, "bytes_received:")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            },
+        );
+    }
+    found
+}
+
+fn counter_field(line: &str, key: &str) -> Option<String> {
+    let at = line.find(key)? + key.len();
+    let rest = &line[at..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some(rest[..end].to_string()).filter(|value| !value.is_empty())
+}
+
+/// Connection-level cumulative counters from
+/// `nettop -m tcp -n -x -L 1 -J bytes_in,bytes_out`.
+///
+/// Process summary rows have no `<->` endpoint pair and listener rows have
+/// no counters, so both fall out naturally. macOS prints IPv4 ports after a
+/// colon and IPv6 ports after a dot; the last separator before `<->` is the
+/// local port in either form.
+pub fn parse_nettop_connections(text: &str) -> Vec<NettopConnection> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.trim_end_matches(',').split(',').collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        let description = cols[0];
+        let Some((local, _)) = description.split_once("<->") else {
+            continue;
+        };
+        let local = local
+            .strip_prefix("tcp4 ")
+            .or_else(|| local.strip_prefix("tcp6 "))
+            .unwrap_or(local);
+        let Some(split) = local.rfind([':', '.']) else {
+            continue;
+        };
+        let (Ok(port), Ok(recv), Ok(sent)) =
+            (local[split + 1..].parse(), cols[1].parse(), cols[2].parse())
+        else {
+            continue;
+        };
+        found.push(NettopConnection {
+            id: description.to_string(),
+            port,
+            sent,
+            recv,
+        });
+    }
+    found
 }
 
 /// Every listener in one `/proc/net/tcp` or `/proc/net/tcp6` table.
@@ -163,6 +270,57 @@ pub fn parse_lsof_cwd(text: &str) -> String {
     String::new()
 }
 
+/// Working directories from one batched
+/// `lsof -a -p PID,PID -d cwd -Fpn` query.
+pub fn parse_lsof_cwds(text: &str) -> HashMap<i32, String> {
+    let mut pid = None;
+    let mut found = HashMap::new();
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value.parse().ok();
+            continue;
+        }
+        let Some(path) = line.strip_prefix('n') else {
+            continue;
+        };
+        if let Some(pid) = pid {
+            if path.starts_with('/') || path.ends_with("(deleted)") {
+                found.insert(pid, path.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Processes from `ps -www -o pid=,etime=,args= -p PID,PID` on macOS.
+///
+/// The command is the final field and may contain spaces, so only the pid
+/// and elapsed-time prefixes are split off.
+pub fn parse_ps_processes(text: &str) -> Vec<PsProcess> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        let Some(pid_end) = line.find(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = line[..pid_end].parse() else {
+            continue;
+        };
+        let rest = line[pid_end..].trim_start();
+        let Some(elapsed_end) = rest.find(char::is_whitespace) else {
+            continue;
+        };
+        let elapsed = parse_ps_etimes(&rest[..elapsed_end]);
+        let command = rest[elapsed_end..].trim_start().to_string();
+        found.push(PsProcess {
+            pid,
+            elapsed,
+            command,
+        });
+    }
+    found
+}
+
 /// Elapsed seconds from `ps -o etimes=` or BSD `ps -o etime=`.
 ///
 /// procps prints an integer. Apple's ps prints `[[dd-]hh:]mm:ss`. Both
@@ -187,7 +345,9 @@ fn parse_ps_etime(tok: &str) -> Option<f64> {
     let secs = match parts.as_slice() {
         [mm, ss] => mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?,
         [hh, mm, ss] => {
-            hh.parse::<f64>().ok()? * 3600.0 + mm.parse::<f64>().ok()? * 60.0 + ss.parse::<f64>().ok()?
+            hh.parse::<f64>().ok()? * 3600.0
+                + mm.parse::<f64>().ok()? * 60.0
+                + ss.parse::<f64>().ok()?
         }
         _ => return None,
     };
@@ -388,6 +548,54 @@ n127.0.0.1:22\n";
             parse_lsof_cwd("p1\nfcwd\nn/tmp/gone (deleted)\n"),
             "/tmp/gone (deleted)"
         );
+    }
+
+    #[test]
+    fn batched_lsof_cwds_stay_with_their_processes() {
+        let text = "p41\nfcwd\nn/Users/me/one\np73\nfcwd\nn/Users/me/two project\n";
+        let got = parse_lsof_cwds(text);
+        assert_eq!(got.get(&41).map(String::as_str), Some("/Users/me/one"));
+        assert_eq!(
+            got.get(&73).map(String::as_str),
+            Some("/Users/me/two project")
+        );
+    }
+
+    #[test]
+    fn batched_macos_ps_keeps_the_complete_command() {
+        let text = concat!(
+            "  41 00:01 /usr/bin/python3 -m http.server 49123 --bind 127.0.0.1\n",
+            "  73 1-02:03:04 /Applications/Example App.app/Contents/MacOS/Example --flag\n",
+        );
+        let got = parse_ps_processes(text);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].pid, 41);
+        assert_eq!(got[0].elapsed, Some(1.0));
+        assert_eq!(
+            got[0].command,
+            "/usr/bin/python3 -m http.server 49123 --bind 127.0.0.1"
+        );
+        assert_eq!(got[1].pid, 73);
+        assert_eq!(got[1].elapsed, Some(93784.0));
+        assert!(got[1].command.contains("Example App.app"));
+    }
+
+    #[test]
+    fn macos_nettop_connections_keep_local_ports_and_counter_direction() {
+        let text = concat!(
+            ",bytes_in,bytes_out,\n",
+            "Example.41,700,900,\n",
+            "tcp4 *:3000<->*:*,,,\n",
+            "tcp4 127.0.0.1:3000<->127.0.0.1:51000,120,340,\n",
+            "tcp6 fd00::1.8443<->fd00::2.52000,50,75,\n",
+        );
+        let got = parse_nettop_connections(text);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].port, 3000);
+        assert_eq!((got[0].sent, got[0].recv), (340, 120));
+        assert_eq!(got[1].port, 8443);
+        assert_eq!((got[1].sent, got[1].recv), (75, 50));
+        assert!(got[0].id.contains("127.0.0.1:3000"));
     }
 
     #[test]

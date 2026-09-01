@@ -83,10 +83,10 @@ for lacking a socket.
 
 ## Traffic
 
-The **TRAFFIC** column, and the chart on a port's own screen, come from the
-kernel's own per-socket byte counters — `bytes_sent` and `bytes_received` out
-of `ss -tine`, the same two fields netwatch reads. Nothing here is derived
-from a guess.
+The **TRAFFIC** column, and the chart on a port's own screen, come from
+cumulative bytes on each TCP connection: `bytes_sent` / `bytes_received` from
+`ss -tine` on Linux, and `bytes_out` / `bytes_in` from connection-level
+`nettop` rows on macOS. Nothing here is derived from a guess.
 
 A *listening* socket carries no bytes. The traffic is on the connections
 accepted from it, so a port's figure is the sum over every established socket
@@ -131,6 +131,10 @@ interval would read high every time somebody pressed it.
 counters exist only for TCP sockets. Ports whose process belongs to another
 user are counted the same as any other — the byte counters need no privilege,
 even where naming the process does.
+
+A failed `ss` or `nettop` sample is not a quiet port. Last rates stay on
+screen, both views name the failure, and the chart heading says the last
+sample is held until sampling recovers.
 
 Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
 it is about what leaves the machine; here loopback is the whole point, since a
@@ -177,8 +181,10 @@ the failure and return an empty list, so the pane read `0 listening` — a
 machine with nothing running on it, which is a thing this widget is supposed
 to be able to say truthfully.
 
-The traffic sampler is separate: if it stops, the columns it feeds go quiet
-and the line says so, while the table below carries on being found.
+The traffic sampler is separate: if it stops, last rates stay on both
+screens, the line says they are held, and no new sample is taken. The
+columns do not go quiet — that would look like a port nobody is calling —
+and the table below carries on being found.
 
 ## What it cannot see
 
@@ -406,11 +412,11 @@ are on this screen rather than an IP.
 ## Cost
 
 Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds on Linux, or one listener `lsof` plus per-process `lsof` and two
-`ps` calls on macOS (one set per pid for that scan); one `ss -tine` for the
-byte counters where `ss` is installed; plus one `tailscale serve status` —
-no network, no root, no dependency beyond Tailscale for the exposure
-column, which is simply blank without it.
+seconds on Linux, or one listener `lsof`, one batched cwd `lsof` and one
+batched `ps` call on macOS; one `ss -tine` on Linux or one logging-mode
+`nettop` sample on macOS for byte counters; plus one `tailscale serve status`
+— no network, no root, no dependency beyond Tailscale for the exposure column,
+which is simply blank without it.
 
 The traffic sampling rides that same poll rather than a thread of its own. A
 second thread would buy a finer chart and would also have to be watched: a
@@ -420,7 +426,8 @@ with nothing to say.
 ## Platforms
 
 Linux reads `/proc/net/tcp` and walks `/proc/<pid>/fd`. macOS reads
-`lsof -nP -iTCP -sTCP:LISTEN -F` and `ps`. The parsers for both take a
+`lsof -nP -iTCP -sTCP:LISTEN -F`, `ps` and connection counters from `nettop`.
+The parsers for both take a
 `&str` and compile on every target, so a broken Linux decoder cannot sit
 behind a green macOS build. Only which file to open, or which command to
 spawn, is behind `cfg(target_os)`.
@@ -432,22 +439,25 @@ widgets/src/widgets/ports/
 ├── main.rs
 ├── parse.rs      always compiled, always tested
 ├── linux.rs      acquisition: open /proc
-├── macos.rs      acquisition: spawn lsof / ps
+├── macos.rs      acquisition: spawn lsof / ps / nettop
 └── help.txt
 ```
 
 Another widget grows a second source by dropping the same three files
 beside its `main.rs`. There is no shared platform crate to import.
 
-Traffic still needs `ss`. On a machine without it the columns stay off and
-the header says `no traffic · needs ss`, rather than filling with dots that
-look like a quiet port. Addresses come from `ip -j addr` when that is on
-`PATH`, and from `ifconfig -a` otherwise.
+Traffic uses `ss` on Linux and connection-level `nettop` rows on macOS. If the
+platform source is missing, the columns and chart stay off and the header names
+it, rather than filling with dots that look like a quiet port. Addresses come
+from `ip -j addr` when that is on `PATH`, and from `ifconfig -a` otherwise.
 
 A kernel with neither source — Windows, today — holds on
 `cannot start · does not run on windows` rather than drawing an empty
 table. That sentence is `unsupported()` in `opscope-core`, the same
 wording every widget uses.
+
+The source-by-source platform contract is recorded in
+[`docs/ports.md`](../../../../docs/ports.md).
 
 ## Configuration
 

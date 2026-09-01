@@ -26,6 +26,7 @@
 //! q quits.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -36,6 +37,7 @@ use opscope_core as tc;
 // does, because linux.rs and macos.rs are the same module under two
 // names so the rest of the widget can call host::sockets() on either.
 mod parse;
+use parse::Counters;
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -47,11 +49,22 @@ mod host;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod host {
+    use std::collections::HashMap;
+
     pub fn sockets() -> Result<Vec<super::Found>, String> {
         Ok(Vec::new())
     }
-    pub fn process_info(_: i32) -> (String, String, Option<f64>) {
-        (String::new(), String::new(), None)
+    pub fn process_infos(_: &[i32]) -> Result<HashMap<i32, (String, String, Option<f64>)>, String> {
+        Ok(HashMap::new())
+    }
+    pub fn traffic_available() -> bool {
+        false
+    }
+    pub fn traffic_unavailable() -> &'static str {
+        "traffic unavailable on this platform"
+    }
+    pub fn traffic_counters() -> Result<HashMap<String, super::Counters>, String> {
+        Ok(HashMap::new())
     }
     pub fn ours(_: i32) -> Result<bool, ()> {
         Err(())
@@ -135,8 +148,13 @@ struct Traffic {
 
 impl Traffic {
     /// Fold one sample in, and forget ports nothing is listening on.
+    #[allow(dead_code)]
     fn sample(&mut self, text: &str, listening: &[u16], at: f64) {
-        let now = socket_counters(text);
+        self.sample_counters(parse::parse_ss_counters(text), listening, at);
+    }
+
+    /// Fold already-parsed platform counters into the shared history.
+    fn sample_counters(&mut self, now: HashMap<String, Counters>, listening: &[u16], at: f64) {
         let gap = at - self.at;
         // The first sample has nothing to subtract from, and a gap of zero
         // would divide a rate by nothing.
@@ -201,73 +219,6 @@ fn rates(ring: &VecDeque<(u64, u64, f64)>) -> Vec<(f64, f64, f64)> {
 /// pane anyone opens it in. At the default four-second poll it is a little
 /// over half an hour.
 const TRAFFIC_KEPT: usize = 512;
-
-/// One TCP socket's byte counters, as the kernel has them.
-///
-/// Keyed by inode because that is what identifies a socket across samples.
-/// The port is the *local* one: traffic to a listening port arrives on the
-/// connections accepted from it, and the listening socket itself carries
-/// none.
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-struct Counters {
-    port: u16,
-    sent: u64,
-    recv: u64,
-}
-
-/// Every TCP socket's byte counters, keyed by inode.
-///
-/// `-i` for the counters, `-e` for the inode - the same two flags netwatch
-/// asks for, and the same two-line shape: addresses and inode, then the
-/// counters on an indented continuation.
-///
-/// Unlike netwatch this filters nothing. netwatch drops loopback peers
-/// because it is about what leaves the machine; here the loopback peers are
-/// the whole point, since a browser hitting a dev server on 127.0.0.1 is
-/// the traffic being asked about.
-fn socket_counters(text: &str) -> HashMap<String, Counters> {
-    let mut found = HashMap::new();
-    let (mut inode, mut port) = (None, 0u16);
-    for (i, line) in text.lines().enumerate() {
-        if i == 0 && line.starts_with("State") {
-            continue;
-        }
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            // Column 3 is our address, and its port is the one a listener
-            // would be on.
-            port = cols
-                .get(3)
-                .and_then(|a| a.rsplit_once(':'))
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(0);
-            inode = counter_field(line, "ino:").filter(|v| v != "0");
-            continue;
-        }
-        let Some(id) = inode.take() else { continue };
-        found.insert(
-            id,
-            Counters {
-                port,
-                sent: counter_field(line, "bytes_sent:")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                recv: counter_field(line, "bytes_received:")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-            },
-        );
-    }
-    found
-}
-
-/// The value after `key:` on a line, up to the next space.
-fn counter_field(line: &str, key: &str) -> Option<String> {
-    let at = line.find(key)? + key.len();
-    let rest = &line[at..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(rest[..end].to_string()).filter(|v| !v.is_empty())
-}
 
 /// What moved on each listening port between two samples.
 ///
@@ -446,6 +397,7 @@ fn traffic_chart(
     gap: f64,
     w: usize,
     p: &Palette,
+    stale: bool,
 ) -> Vec<String> {
     let up_peak = series.iter().map(|s| s.0).fold(0.0f64, f64::max);
     let down_peak = series.iter().map(|s| s.1).fold(0.0f64, f64::max);
@@ -483,6 +435,10 @@ fn traffic_chart(
                 p.dim.as_str(),
                 if window.is_empty() {
                     String::new()
+                } else if stale {
+                    // Held history is still real; calling it a live sample
+                    // is the reading this flag exists to prevent.
+                    format!("  · {} of history, last sample held", over(reach))
                 } else {
                     format!(
                         "  · {} of history, sampled every {}",
@@ -902,9 +858,13 @@ fn scan() -> Result<Vec<Row>, String> {
     let mut services: HashMap<(u16, Option<i32>, String), usize> = HashMap::new();
     let mut seen: Vec<u16> = Vec::new();
     let stamp = tc::now();
-    let mut infos: HashMap<i32, (String, String, Option<f64>)> = HashMap::new();
+    let sockets = host::sockets()?;
+    let mut pids: Vec<i32> = sockets.iter().filter_map(|socket| socket.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let infos = host::process_infos(&pids)?;
 
-    for sock in host::sockets()? {
+    for sock in sockets {
         let pid = sock.pid;
         // A server on both address families is two sockets in the kernel
         // table but one thing to know about. Any of port, owner or
@@ -915,10 +875,7 @@ fn scan() -> Result<Vec<Row>, String> {
             continue;
         }
         let (cmdline, cwd, started) = match pid {
-            Some(pid) => infos
-                .entry(pid)
-                .or_insert_with(|| host::process_info(pid))
-                .clone(),
+            Some(pid) => infos.get(&pid).cloned().unwrap_or_default(),
             None => (String::new(), String::new(), None),
         };
         let (kind, guessed) = kind_of(&cmdline, sock.port);
@@ -1771,11 +1728,18 @@ fn detail_rows(
     gap: f64,
     w: usize,
     p: &Palette,
+    err: &str,
 ) -> (Vec<String>, Option<usize>) {
     // Which row the selected address came out on, so the caller can keep it
     // in view. Nothing when there are no addresses to pick between.
     let mut cursor = None;
     let mut rows = vec![tc::title(&format!(":{}", row.port), w, &p.port)];
+    // Same banner as the list: a sampling failure that only appears there
+    // leaves this screen presenting held rates as if they were still being
+    // taken.
+    if !err.is_empty() {
+        rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+    }
     let mut head = if !row.kind.is_empty() {
         row.kind.clone()
     } else if !row.user.is_empty() {
@@ -1855,9 +1819,17 @@ fn detail_rows(
     // missing ss is not quiet: it is unmeasured, and the chart would look
     // like nothing has moved.
     match seen {
-        Some(series) => rows.extend(traffic_chart(series, "TRAFFIC", 3, gap, w, p)),
+        Some(series) => rows.extend(traffic_chart(
+            series,
+            "TRAFFIC",
+            3,
+            gap,
+            w,
+            p,
+            !err.is_empty(),
+        )),
         None => rows.push(tc::seg(
-            &[(p.dim.as_str(), " no traffic · needs ss".into())],
+            &[(p.dim.as_str(), format!(" {}", host::traffic_unavailable()))],
             w - 1,
         )),
     }
@@ -2089,6 +2061,10 @@ fn footer(
 
 struct Store {
     rows: Mutex<Vec<Row>>,
+    /// False until the first scan has either produced rows or explained why
+    /// it could not. An empty vector before then is not evidence that zero
+    /// ports are listening.
+    ready: AtomicBool,
     /// Why the poller stopped, if it did. A caught panic used to be thrown
     /// away here: the scan returned an empty list and the table drew as if
     /// nothing were listening, which is the one thing this widget must
@@ -2157,14 +2133,15 @@ fn main() {
         }
     }
 
-    // Traffic is ss. A Linux box without iproute2, or any Mac, has none:
-    // the columns stay off and the header says so, rather than filling
-    // with dots that look like a quiet port.
-    let traffic_from_ss = have("ss");
+    // Both platforms feed the same per-port history. Only acquisition
+    // differs: Linux uses ss and macOS uses connection rows from nettop.
+    // A missing source stays explicit rather than looking like quiet ports.
+    let traffic_available = host::traffic_available();
 
     let ok = rgb_ok();
     let store = Arc::new(Store {
         rows: Mutex::new(Vec::new()),
+        ready: AtomicBool::new(false),
         err: Mutex::new(String::new()),
         traffic: Mutex::new(Traffic::default()),
         wake: (Mutex::new(false), Condvar::new()),
@@ -2199,6 +2176,7 @@ fn main() {
                 if let Ok(mut guard) = poller.err.lock() {
                     *guard = why.into();
                 }
+                poller.ready.store(true, Ordering::Release);
                 return;
             }
         };
@@ -2207,11 +2185,17 @@ fn main() {
             // a port that has just appeared is measured from its next sample
             // rather than never.
             let listening: Vec<u16> = found.iter().filter(|r| !r.gone).map(|r| r.port).collect();
-            let counters = if traffic_from_ss {
-                match std::panic::catch_unwind(|| tc::run_quiet(&["ss", "-tine"], RUN_TIMEOUT)) {
-                    Ok(text) => Some(text),
+            let counters = if traffic_available {
+                match std::panic::catch_unwind(host::traffic_counters) {
+                    Ok(Ok(counters)) => Some(counters),
+                    Ok(Err(why)) => {
+                        if let Ok(mut guard) = poller.err.lock() {
+                            *guard = format!("traffic sampling failed: {} - last rates held", why);
+                        }
+                        None
+                    }
                     Err(_) => {
-                        let why = "traffic sampling failed - the table below is still current";
+                        let why = "traffic sampling failed - last rates held";
                         if let Ok(mut guard) = poller.err.lock() {
                             *guard = why.into();
                         }
@@ -2231,10 +2215,14 @@ fn main() {
             }
             if let Some(counters) = counters {
                 if let Ok(mut guard) = poller.traffic.lock() {
-                    guard.sample(&counters, &listening, tc::now());
+                    guard.sample_counters(counters, &listening, tc::now());
                 }
             }
         }
+        // Publish readiness only after rows or the error explaining their
+        // absence has been stored. Otherwise the UI can briefly turn the
+        // pre-scan empty vector into a real-looking zero.
+        poller.ready.store(true, Ordering::Release);
         let (lock, cond) = &poller.wake;
         let mut asked = match lock.lock() {
             Ok(g) => g,
@@ -2563,6 +2551,19 @@ fn main() {
             notice = None;
         }
 
+        if !store.ready.load(Ordering::Acquire) {
+            let rows = vec![
+                tc::title("dev servers", w, &ok.port),
+                tc::seg(
+                    &[(ok.dim.as_str(), " scanning listening ports…".into())],
+                    w - 1,
+                ),
+            ];
+            tc::draw(&rows, w, h);
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
         if let Some(view) = detail.as_mut() {
             if net.is_none() {
                 net = Some((tailnet_self(), serve_config()));
@@ -2582,7 +2583,8 @@ fn main() {
                     .push((t.url.clone(), "public · cloudflare".to_string()));
             }
             view.at = view.at.min(view.links.len().saturating_sub(1));
-            let seen = if traffic_from_ss {
+            let err = store.err.lock().map(|g| g.clone()).unwrap_or_default();
+            let seen = if traffic_available {
                 store
                     .traffic
                     .lock()
@@ -2597,10 +2599,11 @@ fn main() {
                 &view.tunnel,
                 &view.links,
                 view.at,
-                if traffic_from_ss { Some(&seen) } else { None },
+                if traffic_available { Some(&seen) } else { None },
                 refresh,
                 w,
                 &ok,
+                &err,
             );
             let foot = footer(
                 &confirm,
@@ -2673,9 +2676,9 @@ fn main() {
             ],
             w - 1,
         ));
-        if !traffic_from_ss {
+        if !traffic_available {
             rows.push(tc::seg(
-                &[(ok.dim.as_str(), " no traffic · needs ss".into())],
+                &[(ok.dim.as_str(), format!(" {}", host::traffic_unavailable()))],
                 w - 1,
             ));
         }
@@ -2689,7 +2692,7 @@ fn main() {
         rows.push(String::new());
 
         let wide = w >= 78;
-        let rates = if traffic_from_ss {
+        let rates = if traffic_available {
             store.traffic.lock().ok()
         } else {
             None
@@ -2710,6 +2713,7 @@ fn main() {
                 refresh,
                 w,
                 &ok,
+                !err.is_empty(),
             ));
             rows.push(String::new());
         }
@@ -3049,7 +3053,7 @@ mod tests {
 
     #[test]
     fn a_sockets_counters_are_read_off_its_continuation_line() {
-        let got = socket_counters(&ss_dump(1000, 2000, "222"));
+        let got = parse::parse_ss_counters(&ss_dump(1000, 2000, "222"));
         assert_eq!(got.len(), 2);
         // The *local* port, because that is the one a listener is on.
         assert_eq!(
@@ -3072,8 +3076,8 @@ mod tests {
 
     #[test]
     fn only_a_socket_seen_twice_can_say_what_moved() {
-        let before = socket_counters(&ss_dump(1000, 2000, "222"));
-        let after = socket_counters(&ss_dump(1500, 2000, "222"));
+        let before = parse::parse_ss_counters(&ss_dump(1000, 2000, "222"));
+        let after = parse::parse_ss_counters(&ss_dump(1500, 2000, "222"));
         let moved_now = moved(&before, &after, &[3000, 9999]);
         assert_eq!(moved_now.get(&3000), Some(&(500, 0)));
         assert_eq!(moved_now.get(&9999), Some(&(0, 0)));
@@ -3111,9 +3115,9 @@ mod tests {
         // Inodes come back after a socket closes. The new socket's counters
         // start again, so subtracting the old ones is meaningless - and
         // subtracting a larger number from a smaller one would wrap.
-        let before = socket_counters(&ss_dump(1000, 9_000_000, "222"));
+        let before = parse::parse_ss_counters(&ss_dump(1000, 9_000_000, "222"));
         // Same inode, now on a different port: a different socket.
-        let after = socket_counters(&ss_dump(1000, 5, "222"))
+        let after = parse::parse_ss_counters(&ss_dump(1000, 5, "222"))
             .into_iter()
             .map(|(k, mut c)| {
                 if k == "222" {
@@ -3127,7 +3131,7 @@ mod tests {
 
         // And on the same port, a counter that went backwards clamps rather
         // than wrapping to sixteen exabytes.
-        let after = socket_counters(&ss_dump(1000, 5, "222"));
+        let after = parse::parse_ss_counters(&ss_dump(1000, 5, "222"));
         let moved_now = moved(&before, &after, &[3000, 9999]);
         assert_eq!(moved_now.get(&9999), Some(&(0, 0)));
     }
@@ -3522,5 +3526,62 @@ mod tests {
         assert_eq!(span(Some(7200.0)), "2h");
         assert_eq!(span(Some(200_000.0)), "2d");
         assert_eq!(span(None), "--");
+    }
+
+    #[test]
+    fn a_held_traffic_sample_is_named_on_the_port_screen() {
+        // A sampling failure used to reach only the list. The detail
+        // chart kept drawing last rates under "sampled every", which is
+        // the reading "this is still being taken".
+        let p = rgb_ok();
+        let row = Row {
+            port: 3000,
+            kind: "node".into(),
+            ..Default::default()
+        };
+        let series = vec![(1_000.0, 0.0, 4.0), (2_000.0, 0.0, 4.0)];
+        let why = "traffic sampling failed: ss timed out - last rates held";
+        let (held, _) = detail_rows(
+            &row,
+            &Net::default(),
+            &None,
+            &[],
+            0,
+            Some(&series),
+            4.0,
+            80,
+            &p,
+            why,
+        );
+        let held = held.join("\n");
+        assert!(
+            held.contains("traffic sampling failed"),
+            "the port screen hid the sampling error:\n{held}"
+        );
+        assert!(
+            held.contains("last sample held"),
+            "held history still read as a live sample:\n{held}"
+        );
+        assert!(
+            !held.contains("sampled every"),
+            "held history still claimed a live interval:\n{held}"
+        );
+
+        let (live, _) = detail_rows(
+            &row,
+            &Net::default(),
+            &None,
+            &[],
+            0,
+            Some(&series),
+            4.0,
+            80,
+            &p,
+            "",
+        );
+        let live = live.join("\n");
+        assert!(!live.contains("traffic sampling failed"));
+        assert!(live.contains("sampled every"));
+        assert!(!live.contains("last sample held"));
     }
 }
