@@ -1,0 +1,9 @@
+{
+  "required": {
+    "ping": {
+      "version": "*",
+      "why": "Every latency, loss, and spike measurement is parsed from ping replies."
+    }
+  },
+  "recommended": {}
+}

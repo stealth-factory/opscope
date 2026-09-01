@@ -949,6 +949,13 @@ fn copy_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "vercel-deployments",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     // The section moved with the widget's name. A config written before
     // that still says `deployments`, and a rename that quietly ignored it
     // would look exactly like a widget that lost its settings.
@@ -987,26 +994,6 @@ fn main() {
     } else {
         named.into_iter().collect()
     };
-
-    let absent = tc::missing(&["curl"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "vercel deployments",
-            &absent,
-            &[
-                "Everything here comes from Vercel's HTTP API, and curl is how",
-                "this reaches it - the same way the other widgets reach ss,",
-                "ping and tailscale.",
-                "",
-                "The token is passed to curl on its standard input rather than",
-                "in its arguments, because /proc/<pid>/cmdline is readable by",
-                "every user on the machine.",
-            ],
-            "apt install curl",
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let (tok, source) = token(&cfg);

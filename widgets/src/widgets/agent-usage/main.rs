@@ -1718,6 +1718,13 @@ fn loading_rows(w: usize, tick: usize, p: &Palette) -> Vec<String> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "agent-usage",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     let cfg = read_config();
     let mut refresh = cfg.refresh;
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -988,6 +988,13 @@ fn sort_prs(prs: &[serde_json::Value], field: &str, newest_first: bool) -> Vec<s
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "github-prs",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     let cfg = if on_legacy_section() {
         tc::load_config("pr")
     } else {
@@ -1013,26 +1020,6 @@ fn main() {
             }
             _ => i += 1,
         }
-    }
-
-    let absent = tc::missing(&["curl"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "github prs",
-            &absent,
-            &[
-                "Everything here comes from GitHub's GraphQL API, and curl is",
-                "how this reaches it - the same way the other widgets reach",
-                "ss, ping and tailscale.",
-                "",
-                "The token is passed to curl on its standard input rather than",
-                "in its arguments, because /proc/<pid>/cmdline is readable by",
-                "every user on the machine.",
-            ],
-            "apt install curl",
-            SETTINGS,
-        );
-        return;
     }
 
     let p = palette();

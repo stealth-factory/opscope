@@ -48,22 +48,6 @@ pub fn source_note() -> &'static str {
     "measured by the kernel via ss, nothing sent"
 }
 
-pub fn missing() -> Vec<String> {
-    opscope_core::missing(&["ss"])
-}
-
-pub fn missing_reason() -> &'static [&'static str] {
-    &[
-        "ss reads the kernel's own per-socket metrics, which is where",
-        "every figure here comes from: round-trip time, retransmits,",
-        "delivery rate. Nothing else on the machine reports them.",
-    ]
-}
-
-pub fn install_hint() -> &'static str {
-    "apt install iproute2"
-}
-
 pub fn empty_note() -> &'static str {
     "Nothing is connected to this machine, or ss cannot see it."
 }

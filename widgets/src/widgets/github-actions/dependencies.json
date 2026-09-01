@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Workflow runs and rate-limit headers come from GitHub's API over HTTPS."
+    }
+  },
+  "recommended": {}
+}

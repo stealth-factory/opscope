@@ -29,9 +29,11 @@ libc, libm and libgcc. **A crate that wants a system library at run time is the
 one kind that cannot come in.**
 
 External *tools* are different and allowed. A widget needing `curl`, `ss`,
-`ping`, `tailscale` or `herdr` either says so and stops (`tc::missing`,
-`tc::cannot_start`) or carries on without what that tool would have told it.
-It never pretends.
+`ping`, `tailscale` or `herdr` declares it in its owned `dependencies.json`.
+Required tools stop on the shared dependency screen; recommended tools appear
+in `opscope doctor` without blocking the widget. Package names and distro
+detection live in `opscope-core`, so a widget never hardcodes `apt` on a
+machine that may use `dnf`, `pacman`, or `apk`.
 
 ## One folder owns the widget
 
@@ -44,11 +46,12 @@ widgets/src/widgets/<name>/
 ├── help.txt        `--help` summary and controls
 ├── README.md       data provenance, preview, keys, and configuration
 ├── CONFIGURE.md    plain guidance for an AI helping a user configure it
+├── dependencies.json  required and recommended external tools
 └── settings.json   defaults, field order, and field help (when configurable)
 ```
 
 Private Rust modules stay in the same folder; `agent-usage` is the largest
-example. `every_widget_owns_its_complete_folder` enforces the four required
+example. `every_widget_owns_its_complete_folder` enforces the five required
 files.
 
 The public `opscope` binary is different. Its source is
@@ -126,16 +129,18 @@ Write down the real source for every figure before drawing it.
 
 ### 2. Create the owned folder
 
-Create `widgets/src/widgets/example-widget/` with all four required files:
+Create `widgets/src/widgets/example-widget/` with all five required files:
 
 - `main.rs` — acquisition, state, drawing, input, and local unit tests;
 - `help.txt` — the launcher's summary and explanation, plus CLI usage and keys;
 - `README.md` — the maintained preview, provenance, controls, and settings;
-- `CONFIGURE.md` — safe, plain-Markdown guidance for a person or AI assistant.
+- `CONFIGURE.md` — safe, plain-Markdown guidance for a person or AI assistant;
+- `dependencies.json` — required and recommended external commands, even when
+  both lists are empty.
 
 Add `settings.json` only when the widget is configurable. Add `parse.rs`,
 `linux.rs`, and `macos.rs` when the platform section above calls for them.
-`every_widget_owns_its_complete_folder` checks the four required files, the
+`every_widget_owns_its_complete_folder` checks the five required files, the
 Cargo path, the embedded configuration guide, and the settings shape.
 
 In `main.rs`, every widget must expose its two embedded help documents before
@@ -150,6 +155,13 @@ fn main() {
         include_str!("CONFIGURE.md"),
         false, // true when this widget has settings
     );
+    if !tc::dependencies_available(
+        "example-widget",
+        include_str!("dependencies.json"),
+        None, // Some(SETTINGS) when this widget has settings
+    ) {
+        return;
+    }
 
     tc::setup();
     // Acquire, draw, and answer keys here.
@@ -160,6 +172,45 @@ fn main() {
 Use `matrix` as the smallest non-configurable example and `ports` as the
 worked configurable, platform-split example. A real poller also needs the
 failure handling described under [Polling without lying](#polling-without-lying).
+
+Declare external commands in two tiers, with npm-style version ranges:
+
+```json
+{
+  "required": {
+    "curl": {
+      "version": ">=8",
+      "why": "Every figure comes from the service API over HTTPS."
+    },
+    "ss": {
+      "version": "*",
+      "platforms": ["linux"]
+    }
+  },
+  "recommended": {
+    "herdr": {
+      "version": "^1.2",
+      "why": "Herdr can show a desktop notification when work finishes."
+    }
+  }
+}
+```
+
+`required` means the widget cannot tell the truth without the command and the
+shared warning screen holds until the user reads it. `recommended` means only
+that a feature is absent; it never blocks launch. The optional `why` text is
+shown on the warning screen and in `opscope doctor`, so write it for the user,
+not as an implementation comment. Omit it when the command name is enough.
+
+`"*"` checks presence only. Other ranges use familiar semver comparison,
+caret, tilde, and wildcard syntax. Version commands and parsers belong to the
+shared tool catalogue; a declaration with a range is rejected until core knows
+how that tool reports its version. `platforms` may contain `linux`, `macos`, or
+`any`; omitting it means both supported platforms.
+
+Do not call a package manager or `sudo`. Core reads `os-release`, aggregates
+package names, and prints a command for the user to review and run. Unknown
+Linux families get the missing command names rather than a guessed installer.
 
 ### 3. Give the launcher parseable help and a preview
 

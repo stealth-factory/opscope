@@ -700,6 +700,9 @@ fn frame(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("months", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("months");
     let start = WeekStart::from_config(&cfg);
     let (zone, zone_note) = Zone::from_config(&cfg);

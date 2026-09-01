@@ -1,0 +1,9 @@
+{
+  "required": {
+    "herdr": {
+      "version": "*",
+      "why": "The pane and agent inventory comes from the running Herdr session through its CLI."
+    }
+  },
+  "recommended": {}
+}

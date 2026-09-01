@@ -50,7 +50,9 @@ wrong first.
   than left to quietly undercount.
 - **Optional enhancements, never requirements.** The clipboard goes through
   OSC 52 so it survives SSH; Herdr toasts and `sudo`-gated data are added where
-  available and skipped silently where not.
+  available and skipped silently where not. External commands are declared as
+  `required` or `recommended` in the widget's `dependencies.json`; only the
+  first tier can block launch.
 - **`cfg` decides where bytes come from; nothing else.** Parsers — pure
   functions from text or bytes to values — are always compiled and always
   tested, so a Linux `/proc` reader still runs on the macOS CI runners.
@@ -64,10 +66,10 @@ wrong first.
   (`parse.rs`, `linux.rs`, `macos.rs` beside `main.rs`); there is no shared
   platform crate to import.
 - **A widget owns its whole experience.** Code, help, README preview,
-  and AI configuration guide live in one folder, plus a settings
-  declaration when the widget is configurable. Configurable widgets all
-  open the shared settings screen with `,`; the `opscope` launcher is
-  not counted as a widget.
+  AI configuration guide, and external dependency declaration live in one
+  folder, plus a settings declaration when the widget is configurable.
+  Configurable widgets all open the shared settings screen with `,`; the
+  `opscope` launcher is not counted as a widget.
 
 ## Where these are enforced
 

@@ -376,6 +376,9 @@ struct State {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("link", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("link");
     let named = configured_ports(&cfg);
     if !named.is_empty() {
@@ -403,18 +406,6 @@ fn main() {
     // a window the samples could never fill.
     let history_len = ((windows.iter().cloned().fold(0.0f64, f64::max) / refresh) as usize + 2)
         .max(tc::cfg_usize(&cfg, "history", 120));
-
-    let absent = host::missing();
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "connections",
-            &absent,
-            host::missing_reason(),
-            host::install_hint(),
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let state = Arc::new(Mutex::new(State {

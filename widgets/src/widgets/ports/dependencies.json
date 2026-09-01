@@ -1,0 +1,44 @@
+{
+  "required": {
+    "lsof": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Listening sockets and their owning processes come from lsof on macOS."
+    }
+  },
+  "recommended": {
+    "cloudflared": {
+      "version": "*",
+      "why": "The expose action can create a temporary public tunnel."
+    },
+    "ifconfig": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Interface addresses label which listeners are reachable from the LAN."
+    },
+    "ip": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Interface addresses label which listeners are reachable from the LAN."
+    },
+    "nettop": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Per-connection counters add traffic rates on macOS."
+    },
+    "ps": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Process command lines and uptime come from ps on macOS."
+    },
+    "ss": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Per-socket counters add traffic rates on Linux."
+    },
+    "tailscale": {
+      "version": "*",
+      "why": "Serve and Funnel status label listeners already exposed through Tailscale."
+    }
+  }
+}

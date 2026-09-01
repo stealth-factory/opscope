@@ -48,9 +48,9 @@ you are back. It is the launcher, not another widget.
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
 | **`linear`** | Linear across every team: what is outstanding, the running cycles and their scope creep, issues created against completed, and every project still going. `↵` opens a cycle, a team or a project on a screen of its own. | `curl`, a Linear API key | [read →](widgets/src/widgets/linear/README.md) |
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
-| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` on Linux, `lsof` / `ps` / `nettop` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
-| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ss` on Linux, `nettop` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
-| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
+| **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `lsof` on macOS · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
+| **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ip` + `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` + `script` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
@@ -58,9 +58,31 @@ you are back. It is the launcher, not another widget.
 All fifteen widgets run on Linux and macOS. Nothing here works on Windows.
 
 Each is a single self-contained binary — every library it needs is compiled
-in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
-alongside it. 24-bit colour, and a full redraw each frame so everything
-reflows when you resize the pane.
+in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
+declare them and check before launch instead of drawing an empty pane.
+
+Ask the downloaded launcher about this machine at any time:
+
+```sh
+npx opscope doctor       # or: ./opscope doctor
+```
+
+It reports required and recommended tools separately, names the widgets that
+use each one, and prints installation advice. It never installs anything.
+For the package-managed Linux tools needed by the main data sources, the
+family commands are:
+
+```sh
+sudo apt install curl iproute2 iputils-ping     # Debian / Ubuntu
+sudo dnf install curl iproute iputils           # Fedora / RHEL
+sudo pacman -S curl iproute2 iputils            # Arch
+apk add curl iproute2 iputils                    # Alpine (normally as root)
+```
+
+Tailscale and Herdr keep their own installers and are reported separately;
+optional integrations such as Cloudflare tunnels never block a widget that
+can otherwise run. On macOS, the core tools ship with the operating system;
+`doctor` can offer Homebrew packages for optional tools where one exists.
 
 ## How it started
 

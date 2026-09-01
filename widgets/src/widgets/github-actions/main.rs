@@ -1537,6 +1537,13 @@ fn info_overlay(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "github-actions",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     let cfg = if on_legacy_section() {
         tc::load_config("gha")
     } else {
@@ -1570,25 +1577,6 @@ fn main() {
     } else {
         &named
     });
-
-    let absent = tc::missing(&["curl"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "github actions",
-            &absent,
-            &[
-                "Everything here comes from GitHub's API, and curl is how",
-                "this reaches it - the same way github and github-prs do.",
-                "",
-                "The token is passed to curl on its standard input rather than",
-                "in its arguments, because /proc/<pid>/cmdline is readable by",
-                "every user on the machine.",
-            ],
-            "apt install curl",
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let (tok, source) = token(&cfg);

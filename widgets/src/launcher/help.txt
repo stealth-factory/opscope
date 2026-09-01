@@ -4,6 +4,7 @@ Fifteen widget binaries are a list you have to already know. This is the
 front door: pick one and it runs, quit it and you are back here.
 
     opscope [WIDGET] [ARGS...]
+    opscope doctor
 
 Nothing is described twice. The summary and note come from each widget's
 own help.txt, and the preview comes from the README beside its code. The
@@ -13,6 +14,10 @@ Nothing is said here about whether a widget will work. A widget that cannot
 run says so itself, on its own screen, in its own words - which is where
 somebody who has just tried to start it is already looking, and is the only
 place that knows what it actually needs.
+
+`opscope doctor` checks the same widget-owned declarations in bulk, reports
+required and recommended tools separately, and prints the install command for
+the detected macOS or Linux family. It never installs anything.
 
 Keys: up/down select, enter launches, comma opens shared terminal settings,
 q quits.

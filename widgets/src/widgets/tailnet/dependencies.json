@@ -1,0 +1,14 @@
+{
+  "required": {
+    "tailscale": {
+      "version": "*",
+      "why": "Peers, paths, and WireGuard counters come from the local tailscaled through its CLI."
+    }
+  },
+  "recommended": {
+    "ping": {
+      "version": "*",
+      "why": "Live probes add latency and loss columns for online peers."
+    }
+  }
+}

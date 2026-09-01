@@ -92,6 +92,9 @@ fn shade(level: f64) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), false);
+    if !tc::dependencies_available("matrix", include_str!("dependencies.json"), None) {
+        return;
+    }
     let head = tc::rgb(210, 255, 225);
     let near = tc::rgb(120, 255, 170);
     let glyphs: Vec<char> = GLYPHS.chars().collect();

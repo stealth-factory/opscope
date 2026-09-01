@@ -1,0 +1,46 @@
+{
+  "required": {
+    "ip": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Local interface addresses distinguish off-box traffic from local connections."
+    },
+    "ss": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Linux per-socket byte counters and process ownership come from ss."
+    },
+    "nettop": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "macOS per-process network byte counters come from nettop."
+    },
+    "script": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "script gives the long-running macOS nettop logger the terminal it requires."
+    }
+  },
+  "recommended": {
+    "getent": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Reverse lookups label remote addresses with host names."
+    },
+    "lsof": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Open-file and working-directory details come from lsof on macOS."
+    },
+    "netstat": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Interface totals provide the whole-machine traffic rate on macOS."
+    },
+    "ps": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "Process command lines come from ps on macOS."
+    }
+  }
+}

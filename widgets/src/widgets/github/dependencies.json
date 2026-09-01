@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Every delivery metric comes from GitHub's GraphQL API over HTTPS."
+    }
+  },
+  "recommended": {}
+}
