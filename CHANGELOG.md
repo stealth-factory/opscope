@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.11.0] - 2026-09-01
+
+### Features
+
+- Add widget dependency declarations and doctor (#145)
+
 ## [0.10.0] - 2026-09-01
 
 ### CI
