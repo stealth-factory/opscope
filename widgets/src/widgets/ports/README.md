@@ -181,8 +181,10 @@ the failure and return an empty list, so the pane read `0 listening` — a
 machine with nothing running on it, which is a thing this widget is supposed
 to be able to say truthfully.
 
-The traffic sampler is separate: if it stops, the columns it feeds go quiet
-and the line says so, while the table below carries on being found.
+The traffic sampler is separate: if it stops, last rates stay on both
+screens, the line says they are held, and no new sample is taken. The
+columns do not go quiet — that would look like a port nobody is calling —
+and the table below carries on being found.
 
 ## What it cannot see
 
