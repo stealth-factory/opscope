@@ -126,6 +126,18 @@ release, not maintained in git. Their version is the tag. A Mac never
 downloads the Linux binaries; an unsupported platform fails at install
 with a sentence naming the three that exist.
 
+**Every platform artefact contains every binary.** Each release tarball and
+each platform-specific npm package carries `opscope` plus all fifteen widgets;
+there are no per-widget downloads and no platform package may publish only the
+widgets that happen to work there. `npm/pack.js` reads the authoritative
+`[[bin]]` list from `widgets/Cargo.toml` and refuses a tarball missing any one
+of them, so `npx opscope` cannot install a launcher whose menu names a binary
+the package does not carry. A widget without a source on the current kernel
+must still ship and explain that state on screen. The canonical source layout
+and platform boundary live in the
+[widget-creation wiki](../wiki/making-a-widget.md); the release workflows only
+build and verify that contract rather than maintaining a second diagram.
+
 **Both macOS architectures are built on one Apple Silicon runner.**
 `macos-13` is retired, so a job asking for it queues forever; the Intel
 images that replaced it are `-large` runners and bill even on a public

@@ -44,6 +44,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -73,3 +75,30 @@ jobs:
         # packer untested: these are the checks that a missing tarball
         # or an unsupported platform still fail with a sentence.
         run: node --test npm/test.js
+
+  macos:
+    # Parser modules and their tests deliberately compile on both operating
+    # systems even when only acquisition differs. A Linux-only CI job can
+    # enforce that shape by reading source, but it cannot prove the shared
+    # code actually compiles on macOS. Keep this as an ordinary PR gate,
+    # before the three-platform release build is allowed to be the first Mac
+    # compiler that sees a change.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: "1.98.0"
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
+        with:
+          key: macos
+
+      - name: Tests
+        run: cargo test --workspace --all-targets
+
+      - name: Every binary builds
+        run: cargo build --workspace --bins
