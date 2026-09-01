@@ -266,8 +266,11 @@ rules under the top-level `_schema`, beside the defaults:
 }
 ```
 
-Arrays must declare `items` (or a picker) so an empty default cannot silently
-change editor type. `_schema` never appears in `config.example.json`.
+Every array must declare `items` (or a picker), including one that already
+ships a non-empty default. The settings screen can infer a list editor from
+that default, but `every_array_declares_what_it_holds` still requires the
+declaration so emptying that default later cannot steal the editor. `_schema`
+never appears in `config.example.json`.
 Repository checks also require every declared field to be read, every read
 field to be declared, code fallbacks to match the declared defaults, token
 environment names to match, and dynamic catalogues to name real fields.
@@ -544,12 +547,14 @@ because there is nothing further to say once one is picked.
 An **array** with choices keeps its checklist. Ticking several is a different
 act from choosing one, and `clocks.work_days` wants the first.
 
-### A list of strings needs no declaration
+### A list of strings is filled in one entry at a time
 
 An array of strings is filled in one entry at a time: the box composes an
-entry, `↵` adds it, `[d]` on a row removes it. Nothing has to be declared —
-`items: "string"` says so outright, and a shipped default that is a non-empty
-array of strings says it just as well.
+entry, `↵` adds it, `[d]` on a row removes it. `items: "string"` says so
+outright. The screen can also infer that editor from a non-empty default of
+strings, but still declare `items` — a default that later becomes `[]` would
+otherwise leave the field as a JSON box, which is why the check requires the
+declaration even when the shipped default is already a list of strings.
 
 An array of *numbers* keeps the JSON box on purpose. `pomodoro_flash_rgb` is
 one colour in three parts, not a list anybody adds a fourth entry to, and

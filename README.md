@@ -142,10 +142,12 @@ live wherever you like. Start them from it — do not copy `link` onto your
 **On macOS, download with `curl` rather than a browser.** These binaries are
 not signed or notarised, and a browser marks what it downloads with
 `com.apple.quarantine`, which makes Gatekeeper refuse to run them. `curl`
-does not set that mark. If you did use a browser, clear it:
+does not set that mark. If you did use a browser, extract the tarball and
+clear the mark on that extracted `opscope-<version>-<arch>` directory — not
+on Downloads, and not on `.`:
 
 ```sh
-xattr -dr com.apple.quarantine .
+xattr -dr com.apple.quarantine opscope-*-apple-darwin
 ```
 
 ### Or build them
