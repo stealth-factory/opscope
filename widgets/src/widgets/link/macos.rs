@@ -19,6 +19,7 @@ use super::Session;
 #[derive(Default)]
 struct NettopState {
     latest: String,
+    published: Option<Instant>,
     error: String,
 }
 
@@ -54,6 +55,7 @@ fn publish_nettop(feed: &NettopFeed, lines: &mut Vec<String>) {
     lines.clear();
     if let Ok(mut state) = feed.state.lock() {
         state.latest = text;
+        state.published = Some(Instant::now());
         state.error.clear();
         feed.changed.notify_all();
     }
@@ -173,6 +175,13 @@ fn run_nettop_once(feed: &NettopFeed) {
     fail_nettop(feed, with_stderr(reason, &stderr));
 }
 
+fn sample_is_fresh(state: &NettopState) -> bool {
+    state
+        .published
+        .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+        && !state.latest.is_empty()
+}
+
 fn latest_snapshot() -> Result<String, String> {
     let feed = nettop_feed();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -180,7 +189,13 @@ fn latest_snapshot() -> Result<String, String> {
         .state
         .lock()
         .map_err(|_| "nettop feed lock failed".to_string())?;
-    while state.latest.is_empty() && state.error.is_empty() {
+    loop {
+        if !state.error.is_empty() {
+            return Err(state.error.clone());
+        }
+        if sample_is_fresh(&state) {
+            return Ok(state.latest.clone());
+        }
         let now = Instant::now();
         if now >= deadline {
             return Err("nettop did not publish a TCP sample within 5s".into());
@@ -190,17 +205,10 @@ fn latest_snapshot() -> Result<String, String> {
             .wait_timeout(state, deadline - now)
             .map_err(|_| "nettop feed lock failed".to_string())?;
         state = next;
-        if timeout.timed_out() && state.latest.is_empty() && state.error.is_empty() {
+        if timeout.timed_out() && !sample_is_fresh(&state) && state.error.is_empty() {
             return Err("nettop did not publish a TCP sample within 5s".into());
         }
     }
-    if !state.error.is_empty() && state.latest.is_empty() {
-        return Err(state.error.clone());
-    }
-    if state.latest.is_empty() {
-        return Err("nettop did not publish a TCP sample within 5s".into());
-    }
-    Ok(state.latest.clone())
 }
 
 pub fn sessions(named: &[u16]) -> Result<Vec<Session>, String> {

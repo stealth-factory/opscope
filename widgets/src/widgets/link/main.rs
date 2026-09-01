@@ -1772,7 +1772,12 @@ mod tests {
             detail.contains("macOS nettop counts retransmitted segments, not bytes"),
             "{detail}"
         );
-        assert!(detail.contains("4"), "{detail}");
+        assert!(
+            detail
+                .lines()
+                .any(|line| line.contains("retransmitted") && line.contains('4')),
+            "{detail}"
+        );
         assert!(!detail.contains("0.00%"), "{detail}");
     }
 
