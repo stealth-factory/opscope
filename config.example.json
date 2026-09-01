@@ -212,7 +212,7 @@
     "mine": true
   },
   "ports": {
-    "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc only, plus `tailscale serve status` for the exposure column.",
+    "_comment": "What is listening on this machine. `o` hides the machine's own ports — every port another user owns, plus the extras named in system_ports. Reads /proc and ss on Linux or lsof, ps and nettop on macOS, plus `tailscale serve status` for the exposure column.",
     "_system_ports_comment": "Extra ports to hide behind `o`, which hides them by default. Ports another user owns are hidden already, so this list only ever adds to them and can never reveal one. It is for what is yours by uid and still not yours in spirit — a rootless sshd, a user-session mDNS responder. Empty hides none by port.",
     "system_ports": [
       22,

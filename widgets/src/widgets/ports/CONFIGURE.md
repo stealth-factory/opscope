@@ -4,7 +4,9 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-Linux `/proc`, optional `ss` counters, and `tailscale serve status` for exposure.
+Linux `/proc` and `ss`, or macOS `lsof`, `ps` and connection-level `nettop`
+counters, plus `tailscale serve status` for exposure. If the platform traffic
+source is absent, the pane names that boundary instead of drawing zeroes.
 
 ## Settings owned here
 
