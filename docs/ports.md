@@ -19,7 +19,11 @@ starting three subprocesses for each pid.
 `lsof` ships with macOS, but it is still checked at runtime. If it is absent,
 the widget names the missing tool and does not draw an empty table. A failed or
 timed-out listener scan likewise reaches the pane as an error while preserving
-the last good result.
+the last good result. A failed `ss` or `nettop` sample does the same for
+traffic: last rates are held, the failure is named on both the list and the
+port's own screen, and the chart says the sample is held rather than still
+being taken. An empty map from a failed command would look like a quiet moment
+and wipe the baseline the next good poll needs.
 
 macOS `nettop` logging output includes cumulative bytes and the local endpoint
 for each TCP connection. The parser maps those connection rows to their local

@@ -397,6 +397,7 @@ fn traffic_chart(
     gap: f64,
     w: usize,
     p: &Palette,
+    stale: bool,
 ) -> Vec<String> {
     let up_peak = series.iter().map(|s| s.0).fold(0.0f64, f64::max);
     let down_peak = series.iter().map(|s| s.1).fold(0.0f64, f64::max);
@@ -434,6 +435,10 @@ fn traffic_chart(
                 p.dim.as_str(),
                 if window.is_empty() {
                     String::new()
+                } else if stale {
+                    // Held history is still real; calling it a live sample
+                    // is the reading this flag exists to prevent.
+                    format!("  · {} of history, last sample held", over(reach))
                 } else {
                     format!(
                         "  · {} of history, sampled every {}",
@@ -1723,11 +1728,18 @@ fn detail_rows(
     gap: f64,
     w: usize,
     p: &Palette,
+    err: &str,
 ) -> (Vec<String>, Option<usize>) {
     // Which row the selected address came out on, so the caller can keep it
     // in view. Nothing when there are no addresses to pick between.
     let mut cursor = None;
     let mut rows = vec![tc::title(&format!(":{}", row.port), w, &p.port)];
+    // Same banner as the list: a sampling failure that only appears there
+    // leaves this screen presenting held rates as if they were still being
+    // taken.
+    if !err.is_empty() {
+        rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", err))], w - 1));
+    }
     let mut head = if !row.kind.is_empty() {
         row.kind.clone()
     } else if !row.user.is_empty() {
@@ -1807,7 +1819,15 @@ fn detail_rows(
     // missing ss is not quiet: it is unmeasured, and the chart would look
     // like nothing has moved.
     match seen {
-        Some(series) => rows.extend(traffic_chart(series, "TRAFFIC", 3, gap, w, p)),
+        Some(series) => rows.extend(traffic_chart(
+            series,
+            "TRAFFIC",
+            3,
+            gap,
+            w,
+            p,
+            !err.is_empty(),
+        )),
         None => rows.push(tc::seg(
             &[(p.dim.as_str(), format!(" {}", host::traffic_unavailable()))],
             w - 1,
@@ -2170,15 +2190,12 @@ fn main() {
                     Ok(Ok(counters)) => Some(counters),
                     Ok(Err(why)) => {
                         if let Ok(mut guard) = poller.err.lock() {
-                            *guard = format!(
-                                "traffic sampling failed: {} - the table below is still current",
-                                why
-                            );
+                            *guard = format!("traffic sampling failed: {} - last rates held", why);
                         }
                         None
                     }
                     Err(_) => {
-                        let why = "traffic sampling failed - the table below is still current";
+                        let why = "traffic sampling failed - last rates held";
                         if let Ok(mut guard) = poller.err.lock() {
                             *guard = why.into();
                         }
@@ -2566,6 +2583,7 @@ fn main() {
                     .push((t.url.clone(), "public · cloudflare".to_string()));
             }
             view.at = view.at.min(view.links.len().saturating_sub(1));
+            let err = store.err.lock().map(|g| g.clone()).unwrap_or_default();
             let seen = if traffic_available {
                 store
                     .traffic
@@ -2585,6 +2603,7 @@ fn main() {
                 refresh,
                 w,
                 &ok,
+                &err,
             );
             let foot = footer(
                 &confirm,
@@ -2694,6 +2713,7 @@ fn main() {
                 refresh,
                 w,
                 &ok,
+                !err.is_empty(),
             ));
             rows.push(String::new());
         }
@@ -3506,5 +3526,62 @@ mod tests {
         assert_eq!(span(Some(7200.0)), "2h");
         assert_eq!(span(Some(200_000.0)), "2d");
         assert_eq!(span(None), "--");
+    }
+
+    #[test]
+    fn a_held_traffic_sample_is_named_on_the_port_screen() {
+        // A sampling failure used to reach only the list. The detail
+        // chart kept drawing last rates under "sampled every", which is
+        // the reading "this is still being taken".
+        let p = rgb_ok();
+        let row = Row {
+            port: 3000,
+            kind: "node".into(),
+            ..Default::default()
+        };
+        let series = vec![(1_000.0, 0.0, 4.0), (2_000.0, 0.0, 4.0)];
+        let why = "traffic sampling failed: ss timed out - last rates held";
+        let (held, _) = detail_rows(
+            &row,
+            &Net::default(),
+            &None,
+            &[],
+            0,
+            Some(&series),
+            4.0,
+            80,
+            &p,
+            why,
+        );
+        let held = held.join("\n");
+        assert!(
+            held.contains("traffic sampling failed"),
+            "the port screen hid the sampling error:\n{held}"
+        );
+        assert!(
+            held.contains("last sample held"),
+            "held history still read as a live sample:\n{held}"
+        );
+        assert!(
+            !held.contains("sampled every"),
+            "held history still claimed a live interval:\n{held}"
+        );
+
+        let (live, _) = detail_rows(
+            &row,
+            &Net::default(),
+            &None,
+            &[],
+            0,
+            Some(&series),
+            4.0,
+            80,
+            &p,
+            "",
+        );
+        let live = live.join("\n");
+        assert!(!live.contains("traffic sampling failed"));
+        assert!(live.contains("sampled every"));
+        assert!(!live.contains("last sample held"));
     }
 }

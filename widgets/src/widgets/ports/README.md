@@ -132,6 +132,10 @@ counters exist only for TCP sockets. Ports whose process belongs to another
 user are counted the same as any other — the byte counters need no privilege,
 even where naming the process does.
 
+A failed `ss` or `nettop` sample is not a quiet port. Last rates stay on
+screen, both views name the failure, and the chart heading says the last
+sample is held until sampling recovers.
+
 Unlike netwatch, nothing is filtered by peer. netwatch drops loopback because
 it is about what leaves the machine; here loopback is the whole point, since a
 browser hitting a dev server on `127.0.0.1` is the traffic being asked about.

@@ -131,10 +131,10 @@ pub fn traffic_unavailable() -> &'static str {
 pub fn traffic_counters() -> Result<HashMap<String, Counters>, String> {
     // Preserve the Linux source and parsing exactly; this function is the
     // platform seam that lets macOS supply equivalent counters from nettop.
-    Ok(parse_ss_counters(&tc::run_quiet(
-        &["ss", "-tine"],
-        RUN_TIMEOUT,
-    )))
+    // `run`, not `run_quiet`: an ss that fails or times out must stay an
+    // error so the poller can keep the last baseline instead of sampling
+    // an empty map as a quiet moment.
+    Ok(parse_ss_counters(&tc::run(&["ss", "-tine"], RUN_TIMEOUT)?))
 }
 
 /// Whether this pid is ours to signal.
