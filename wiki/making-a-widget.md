@@ -173,14 +173,17 @@ uses this paragraph as its aside, up to the next blank or indented line.
 
     example-widget [-n SECONDS]
 
-Keys: up/down select, comma opens settings, q quits.
+Keys: up/down select, q quits.
 ```
 
 Line one and the introductory paragraph must both be non-empty. Put the
 indented usage synopsis after that paragraph; do not let `Keys:` enter the
 introductory paragraph. The binary returns this whole file for `--help`, and
 `every_key_the_help_text_names_is_answered` checks the key phrases it can
-recognise against `main.rs`.
+recognise against `main.rs`. The sample above is the non-configurable set;
+a configurable widget also names comma here (`ports/help.txt` is the shape).
+Do not advertise `,` unless the widget actually opens the shared settings
+screen.
 
 In `README.md`, make the **first fenced block** a static picture of the widget.
 Its first line must begin with `╺━`; an earlier shell or JSON fence makes the
