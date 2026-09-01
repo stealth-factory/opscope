@@ -37,7 +37,10 @@ It never pretends.
 
 ```text
 widgets/src/widgets/<name>/
-├── main.rs         Rust entry point and local tests
+├── main.rs         Rust entry point, UI, and local tests
+├── parse.rs        platform-independent parsers and their tests (when needed)
+├── linux.rs        Linux acquisition only (when sources differ by OS)
+├── macos.rs        macOS acquisition only (when sources differ by OS)
 ├── help.txt        `--help` summary and controls
 ├── README.md       data provenance, preview, keys, and configuration
 ├── CONFIGURE.md    plain guidance for an AI helping a user configure it
@@ -52,6 +55,55 @@ The public `opscope` binary is different. Its source is
 `widgets/src/launcher/`: it launches widgets and embeds their help and README
 previews, but is not counted or packaged as a widget. Its own `,` screen holds
 only shared terminal behaviour such as mouse reporting.
+
+## Platforms: `cfg` decides where bytes come from
+
+Keep the parser visible to every build. The platform split has three tiers:
+
+1. **Parsers are always compiled and always tested.** Put pure functions from
+   text or bytes to values in `parse.rs`, name them `parse_*`, and take the
+   input as `&str`. Never put a parser, its module, or its tests behind
+   `cfg(target_os)`: the macOS CI build would otherwise never compile a Linux
+   parser or its tests, so broken Linux code could sit behind a green build.
+2. **Use `cfg(target_os)` for acquisition only.** Opening `/proc`, spawning a
+   platform command, or calling a platform C API belongs in `linux.rs` or
+   `macos.rs`. Select those files as one `host` module from `main.rs`:
+
+   ```rust
+   #[cfg(target_os = "linux")]
+   #[path = "linux.rs"]
+   mod host;
+   #[cfg(target_os = "macos")]
+   #[path = "macos.rs"]
+   mod host;
+   ```
+
+   Both acquisition modules feed the same platform-independent state and
+   drawing code. Keep shared wording and behaviour in `opscope-core` rather
+   than duplicating it between hosts.
+3. **Detect differences within an OS at run time.** Whether a tool is on
+   `PATH`, whether `ping` accepts a flag, and whether a kernel exposes a
+   feature cannot be decided by the build target. Probe them when the widget
+   runs and either use the result or explain what is unavailable.
+
+If an OS has no truthful source, do not draw an empty table. Return
+`tc::unsupported()`, whose reason is `does not run on {os}`, and render it with
+`tc::cannot_start_because()`. That makes an unsupported widget visibly
+different from a supported source returning no rows.
+
+`ports` is the worked example: its package contains `parse.rs`, `linux.rs`,
+and `macos.rs`; both hosts acquire different command output and pass it to
+parsers that compile and run their tests on every target. Copy that shape into
+the widget's own folder rather than creating a shared platform crate. The
+reasoning behind this boundary is recorded in
+[OPS-65](https://linear.app/stealth-company/issue/OPS-65/decide-how-platform-specific-code-is-split-and-compiled-in).
+
+Two repository checks defend the boundary:
+
+- `parsers_and_their_tests_are_not_gated_by_target_os` rejects platform-gated
+  `parse_*` functions and tests.
+- `a_proc_reader_has_a_macos_path_or_says_why` rejects a widget that reads
+  `/proc` without a `macos.rs` path or an explicit unsupported explanation.
 
 ## Adding one
 
