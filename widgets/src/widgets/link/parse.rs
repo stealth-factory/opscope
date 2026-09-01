@@ -70,7 +70,11 @@ pub fn num(map: &HashMap<String, String>, key: &str) -> Option<f64> {
 pub fn parse_ss_listening(text: &str) -> Vec<u16> {
     text.lines()
         .filter_map(|line| line.split_whitespace().nth(3))
-        .filter_map(|local| local.rsplit_once(':').and_then(|(_, port)| port.parse().ok()))
+        .filter_map(|local| {
+            local
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse().ok())
+        })
         .collect()
 }
 
@@ -88,7 +92,10 @@ pub fn parse_ss_sessions(text: &str, ports: &[u16]) -> Vec<ParsedSession> {
             _ => continue,
         };
         let (local, peer) = (&cols[2], &cols[3]);
-        let Some(local_port) = local.rsplit_once(':').and_then(|(_, port)| port.parse().ok()) else {
+        let Some(local_port) = local
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+        else {
             head = None;
             continue;
         };
@@ -136,11 +143,36 @@ fn endpoint(text: &str) -> Option<(&str, u16)> {
 }
 
 fn measurement(text: &str) -> Option<f64> {
-    text.trim().strip_suffix(" ms").unwrap_or(text.trim()).parse().ok()
+    text.trim()
+        .strip_suffix(" ms")
+        .unwrap_or(text.trim())
+        .parse()
+        .ok()
 }
 
 fn is_loopback(ip: &str) -> bool {
     ip.starts_with("127.") || ip == "::1"
+}
+
+/// Logging-mode `nettop` names its first column `time` (or leaves it blank).
+/// Connection rows carry `<->`; a header never does.
+pub fn is_nettop_sample_header(line: &str) -> bool {
+    let fields: Vec<&str> = line.trim_end_matches(',').split(',').collect();
+    nettop_header_fields(&fields)
+}
+
+fn nettop_header_fields(fields: &[&str]) -> bool {
+    fields.iter().any(|name| *name == "bytes_in")
+        && !fields.first().is_some_and(|field| field.contains("<->"))
+}
+
+fn nettop_columns<'a>(fields: &[&'a str]) -> HashMap<&'a str, usize> {
+    fields
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(index, name)| (*name, index))
+        .collect()
 }
 
 /// One unprivileged macOS `nettop` CSV sample.
@@ -148,18 +180,14 @@ fn is_loopback(ip: &str) -> bool {
 /// Column positions are read from the header because `nettop` documents
 /// that ordering may change. Process summaries have no endpoint pair;
 /// listener rows name a wildcard peer and established rows carry counters.
+/// `re-tx` is a segment count and stays in `raw`; it is not a byte total.
 pub fn parse_nettop_snapshot(text: &str, named_ports: &[u16]) -> NettopSnapshot {
     let mut snapshot = NettopSnapshot::default();
     let mut columns: HashMap<&str, usize> = HashMap::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.trim_end_matches(',').split(',').collect();
-        if fields.first() == Some(&"") {
-            columns = fields
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(index, name)| (*name, index))
-                .collect();
+        if nettop_header_fields(&fields) {
+            columns = nettop_columns(&fields);
             continue;
         }
         let Some(description) = fields.first() else {
@@ -184,14 +212,29 @@ pub fn parse_nettop_snapshot(text: &str, named_ports: &[u16]) -> NettopSnapshot 
         if local_host == "*" {
             continue;
         }
-        let get = |name: &str| columns.get(name).and_then(|index| fields.get(*index)).copied();
+        let get = |name: &str| {
+            columns
+                .get(name)
+                .and_then(|index| fields.get(*index))
+                .copied()
+        };
         let mut raw = HashMap::new();
-        for name in ["bytes_in", "bytes_out", "re-tx", "rtt_min", "rtt_avg", "rtt_var"] {
+        for name in [
+            "bytes_in",
+            "bytes_out",
+            "re-tx",
+            "rtt_min",
+            "rtt_avg",
+            "rtt_var",
+        ] {
             if let Some(value) = get(name).filter(|value| !value.is_empty()) {
                 raw.insert(name.to_string(), value.to_string());
             }
         }
         snapshot.sessions.push(ParsedSession {
+            // Display identity: the remote endpoint. Sockets that share it
+            // and terminate on different local ports are told apart by
+            // `port`; the poller keys history and loss on both.
             peer: format!("{}:{}", peer_ip, peer_port),
             ip: peer_ip.to_string(),
             port: local_port,
@@ -200,7 +243,6 @@ pub fn parse_nettop_snapshot(text: &str, named_ports: &[u16]) -> NettopSnapshot 
             floor: get("rtt_min").and_then(measurement),
             sent: get("bytes_out").and_then(measurement).unwrap_or(0.0),
             recv: get("bytes_in").and_then(measurement).unwrap_or(0.0),
-            retrans_bytes: get("re-tx").and_then(measurement).unwrap_or(0.0),
             raw,
             ..ParsedSession::default()
         });
@@ -227,7 +269,10 @@ mod tests {
         let metrics = parse_ss_metrics(line);
         assert_eq!(metrics.get("rtt").map(String::as_str), Some("3.604/1.027"));
         assert_eq!(metrics.get("minrtt").map(String::as_str), Some("3.553"));
-        assert_eq!(metrics.get("delivery_rate").map(String::as_str), Some("6287464"));
+        assert_eq!(
+            metrics.get("delivery_rate").map(String::as_str),
+            Some("6287464")
+        );
         assert_eq!(num(&metrics, "cwnd"), Some(10.0));
     }
 
@@ -245,9 +290,57 @@ mod tests {
         assert_eq!(got.listening, vec![3000]);
         assert_eq!(got.sessions.len(), 1);
         let row = &got.sessions[0];
-        assert_eq!((row.port, row.sent, row.recv, row.retrans_bytes), (3000, 340.0, 120.0, 4.0));
-        assert_eq!((row.floor, row.rtt, row.jitter), (Some(1.09), Some(1.22), Some(0.38)));
+        assert_eq!(
+            (row.port, row.sent, row.recv, row.retrans_bytes),
+            (3000, 340.0, 120.0, 0.0)
+        );
+        assert_eq!(row.raw.get("re-tx").map(String::as_str), Some("4"));
+        assert_eq!(
+            (row.floor, row.rtt, row.jitter),
+            (Some(1.09), Some(1.22), Some(0.38))
+        );
         assert_eq!(row.peer, "203.0.113.9:51000");
+    }
+
+    #[test]
+    fn a_time_prefixed_nettop_header_still_yields_metrics() {
+        let text = concat!(
+            "time,bytes_in,bytes_out,re-tx,rtt_min,rtt_avg,rtt_var,\n",
+            "tcp4 *:3000<->*:*,\n",
+            "tcp4 192.0.2.10:3000<->203.0.113.9:51000,120,340,4,1.09 ms,1.22 ms,0.38 ms,\n",
+        );
+        let got = parse_nettop_snapshot(text, &[]);
+        assert_eq!(got.sessions.len(), 1);
+        let row = &got.sessions[0];
+        assert_eq!((row.sent, row.recv), (340.0, 120.0));
+        assert_eq!(
+            (row.floor, row.rtt, row.jitter),
+            (Some(1.09), Some(1.22), Some(0.38))
+        );
+        assert_eq!(row.raw.get("re-tx").map(String::as_str), Some("4"));
+        assert!(is_nettop_sample_header(
+            "time,bytes_in,bytes_out,re-tx,rtt_min,rtt_avg,rtt_var,"
+        ));
+        assert!(!is_nettop_sample_header(
+            "tcp4 192.0.2.10:3000<->203.0.113.9:51000,120,340,4,1.09 ms,1.22 ms,0.38 ms,"
+        ));
+    }
+
+    #[test]
+    fn macos_sessions_that_share_a_remote_endpoint_keep_their_local_ports() {
+        let text = concat!(
+            ",bytes_in,bytes_out,re-tx,rtt_min,rtt_avg,rtt_var,\n",
+            "tcp4 *:3000<->*:*,\n",
+            "tcp4 *:4000<->*:*,\n",
+            "tcp4 192.0.2.10:3000<->203.0.113.9:51000,10,20,1,1 ms,2 ms,0.5 ms,\n",
+            "tcp4 192.0.2.10:4000<->203.0.113.9:51000,30,40,2,3 ms,4 ms,1 ms,\n",
+        );
+        let got = parse_nettop_snapshot(text, &[]);
+        assert_eq!(got.sessions.len(), 2);
+        assert_eq!(got.sessions[0].peer, got.sessions[1].peer);
+        assert_eq!(got.sessions[0].port, 3000);
+        assert_eq!(got.sessions[1].port, 4000);
+        assert_eq!((got.sessions[0].sent, got.sessions[1].sent), (20.0, 40.0));
     }
 
     #[test]

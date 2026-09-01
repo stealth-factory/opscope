@@ -6,7 +6,9 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 Kernel TCP accounting exposed by `ss` on Linux and `nettop` on macOS; the
 widget sends no probes. macOS does not expose Linux's achieved delivery-rate
-estimate, and the pane says so instead of substituting interval throughput.
+estimate, and `nettop`'s `re-tx` is a segment count rather than retransmitted
+bytes, so those two fields say so instead of substituting a different
+measurement.
 
 ## Settings owned here
 
