@@ -107,6 +107,10 @@ struct Session {
     /// estimate. Kept explicit so absence is explained rather than drawn as
     /// the same dash an individual Linux socket can legitimately report.
     delivery_unavailable: bool,
+    /// macOS `nettop` reports `re-tx` as a segment count, not retransmitted
+    /// bytes, so a percentage against `bytes_out` would mix units. Kept
+    /// explicit so absence is explained rather than drawn as 0%.
+    loss_unavailable: bool,
     mss: Option<f64>,
     lastsnd: Option<f64>,
     lastrcv: Option<f64>,
@@ -190,6 +194,35 @@ fn ports_to_watch(named: &[u16], listening: Vec<u16>) -> Vec<u16> {
 fn sessions() -> Result<Vec<Session>, String> {
     let named = CONFIGURED_PORTS.get().cloned().unwrap_or_default();
     host::sessions(&named)
+}
+
+/// Poller identity: the remote endpoint plus the local port it arrived on.
+///
+/// `peer` is what the list draws, and two inbound sockets can share that
+/// string when they terminate on different watched ports. Loss deltas and
+/// RTT history would then mix those sockets, so the maps key on both ends.
+fn session_id(row: &Session) -> String {
+    format!("{}#{}", row.peer, row.port)
+}
+
+/// Retransmits since the last look, rather than since the connection opened:
+/// a session hours old has long since forgiven whatever went wrong at breakfast.
+fn apply_loss(rows: &mut [Session], last: &mut HashMap<String, (f64, f64)>) {
+    for row in rows {
+        if row.loss_unavailable {
+            continue;
+        }
+        let id = session_id(row);
+        if let Some((sent, retrans)) = last.get(&id) {
+            let moved = row.sent - sent;
+            row.recent_loss = Some(if moved > 0.0 {
+                100.0 * (row.retrans_bytes - retrans) / moved
+            } else {
+                0.0
+            });
+        }
+        last.insert(id, (row.sent, row.retrans_bytes));
+    }
 }
 
 /// Who is logged in from where, to put a name against an address.
@@ -301,7 +334,6 @@ fn colour_for<'a>(ratio: Option<f64>, loss: Option<f64>, p: &'a Palette) -> &'a 
     }
 }
 
-
 /// Fit samples to the columns available, by median.
 ///
 /// A fifteen-minute window at a two-second poll is 450 readings and a pane
@@ -410,68 +442,55 @@ fn main() {
         };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
-        let mut found = match sessions() {
-            Ok(rows) => {
-                if let Ok(mut guard) = poller.lock() {
-                    guard.err = String::new();
+            let mut found = match sessions() {
+                Ok(rows) => {
+                    if let Ok(mut guard) = poller.lock() {
+                        guard.err = String::new();
+                    }
+                    rows
                 }
-                rows
-            }
-            // Not fatal: ss can fail for a moment. Reported and retried
-            // rather than ending the thread, but never silently - an empty
-            // list and a failed read look identical on screen otherwise.
-            Err(why) => {
-                if let Ok(mut guard) = poller.lock() {
-                    guard.err = why;
+                // Not fatal: ss can fail for a moment. Reported and retried
+                // rather than ending the thread, but never silently - an empty
+                // list and a failed read look identical on screen otherwise.
+                Err(why) => {
+                    if let Ok(mut guard) = poller.lock() {
+                        guard.err = why;
+                    }
+                    Vec::new()
                 }
-                Vec::new()
-            }
-        };
-        let names = who();
-        for row in &mut found {
-            // Retransmits since the last look, rather than since the
-            // connection opened: a session hours old has long since
-            // forgiven whatever went wrong at breakfast.
-            if let Some((sent, retrans)) = last.get(&row.peer) {
-                let moved = row.sent - sent;
-                row.recent_loss = Some(if moved > 0.0 {
-                    100.0 * (row.retrans_bytes - retrans) / moved
-                } else {
-                    0.0
-                });
-            }
-            last.insert(row.peer.clone(), (row.sent, row.retrans_bytes));
-        }
-        {
-            let mut guard = match poller.lock() {
-                Ok(g) => g,
-                Err(_) => return,
             };
-            for row in &found {
-                if let Some(rtt) = row.rtt {
-                    let series = guard.history.entry(row.peer.clone()).or_default();
-                    series.push(rtt);
-                    if series.len() > history_len {
-                        let drop = series.len() - history_len;
-                        series.drain(..drop);
+            let names = who();
+            apply_loss(&mut found, &mut last);
+            {
+                let mut guard = match poller.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                for row in &found {
+                    if let Some(rtt) = row.rtt {
+                        let series = guard.history.entry(session_id(row)).or_default();
+                        series.push(rtt);
+                        if series.len() > history_len {
+                            let drop = series.len() - history_len;
+                            series.drain(..drop);
+                        }
                     }
                 }
+                guard.rows = found;
+                guard.names = names;
             }
-            guard.rows = found;
-            guard.names = names;
-        }
-        let (lock, cond) = &*poller_wake;
-        let mut asked = match lock.lock() {
-            Ok(g) => g,
-            Err(_) => return stopped("the wake lock was poisoned"),
-        };
-        if !*asked {
-            asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                Ok((g, _)) => g,
-                Err(_) => return stopped("the wake lock was poisoned while waiting"),
+            let (lock, cond) = &*poller_wake;
+            let mut asked = match lock.lock() {
+                Ok(g) => g,
+                Err(_) => return stopped("the wake lock was poisoned"),
             };
-        }
-        *asked = false;
+            if !*asked {
+                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+                    Ok((g, _)) => g,
+                    Err(_) => return stopped("the wake lock was poisoned while waiting"),
+                };
+            }
+            *asked = false;
         }
     });
 
@@ -482,8 +501,7 @@ fn main() {
     // lands there and walking off it again comes in at the other. The chart
     // then opens showing every session at equal weight, and focus is
     // something you leave the way you entered it.
-    let (mut selected, mut hide_idle, mut span_at) =
-        (None::<usize>, false, 0usize);
+    let (mut selected, mut hide_idle, mut span_at) = (None::<usize>, false, 0usize);
     let mut count = 0usize;
     let mut detail = false;
     // How far down the detail screen we are. Clamped against the body every
@@ -703,16 +721,16 @@ fn main() {
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
-                (
-                    p.dim.as_str(),
-                    format!(" · {}", host::source_note()),
-                ),
+                (p.dim.as_str(), format!(" · {}", host::source_note())),
                 (p.dim.as_str(), format!("   every {}s", refresh)),
             ],
             w - 1,
         ));
         if !guard.err.is_empty() {
-            rows.push(tc::seg(&[(p.bad.as_str(), format!(" ! {}", guard.err))], w - 1));
+            rows.push(tc::seg(
+                &[(p.bad.as_str(), format!(" ! {}", guard.err))],
+                w - 1,
+            ));
         }
         rows.push(String::new());
 
@@ -725,10 +743,7 @@ fn main() {
                 w - 1,
             ));
             rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    format!("  {}", host::empty_note()),
-                )],
+                &[(p.dim.as_str(), format!("  {}", host::empty_note()))],
                 w - 1,
             ));
         } else {
@@ -759,14 +774,20 @@ fn main() {
             rows.push(tc::seg(
                 &[
                     (p.dim.as_str(), " ".repeat(7)),
-                    (p.grid.as_str(), format!("└{}", "─".repeat(w.saturating_sub(9).max(10)))),
+                    (
+                        p.grid.as_str(),
+                        format!("└{}", "─".repeat(w.saturating_sub(9).max(10))),
+                    ),
                 ],
                 w - 1,
             ));
             let covered = plotted_span(&shown, &guard.history, window, refresh, w);
             rows.push(tc::seg(
                 &[
-                    (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
+                    (
+                        p.dim.as_str(),
+                        format!("        {} ago", span(Some(covered * 1000.0))),
+                    ),
                     (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
                     (p.dim.as_str(), "now".into()),
                 ],
@@ -775,7 +796,10 @@ fn main() {
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "↑↓".into()),
+                (p.dim.as_str(), " select".into()),
+            ],
             vec![
                 (p.accent.as_str(), "→".into()),
                 (p.dim.as_str(), "/[↵] open".into()),
@@ -834,7 +858,7 @@ fn plotted_span(
     let _ = w;
     let longest = rows
         .iter()
-        .filter_map(|r| history.get(&r.peer).map(|h| h.len()))
+        .filter_map(|r| history.get(&session_id(r)).map(|h| h.len()))
         .max()
         .unwrap_or(0);
     let capped = longest.min((window / refresh).round() as usize);
@@ -873,15 +897,36 @@ fn table(
             // only thing on the row that says what they are connected to.
             // The address carries the peer's own port, glued to it by a
             // colon, so the two are never read as the same number.
-            (p.dim.as_str(), "  PORT    NOW   FLOOR  JITTER    LOSS".into()),
-            (p.dim.as_str(), if wide { "  ACHIEVED".into() } else { String::new() }),
-            (p.dim.as_str(), if wide { "   IDLE".into() } else { String::new() }),
+            (
+                p.dim.as_str(),
+                "  PORT    NOW   FLOOR  JITTER    LOSS".into(),
+            ),
+            (
+                p.dim.as_str(),
+                if wide {
+                    "  ACHIEVED".into()
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                p.dim.as_str(),
+                if wide {
+                    "   IDLE".into()
+                } else {
+                    String::new()
+                },
+            ),
         ],
         w - 1,
     )];
     for (i, row) in rows.iter().enumerate() {
         let here = selected == Some(i);
-        let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
+        let tint = if here {
+            tc::bg(28, 44, 62)
+        } else {
+            String::new()
+        };
         let hue = &p.hues[i % p.hues.len()];
 
         // One login, and only where there is room for it: the address is
@@ -905,12 +950,18 @@ fn table(
         let loss_c = format!(
             "{}{}",
             tint,
-            if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.dim }
+            if loss.unwrap_or(0.0) >= 0.5 {
+                &p.bad
+            } else {
+                &p.dim
+            }
         );
         let idle = [row.lastsnd, row.lastrcv]
             .into_iter()
             .flatten()
-            .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.min(v)))
+            });
         // A missing reading is a dash of the column's own width, not a
         // narrower cell - anything else shifts every number to its right.
         let cell = |value: Option<f64>, width: usize| match value {
@@ -927,7 +978,14 @@ fn table(
             // The same marker the rest of the collection uses. The tint and
             // the brighter name said "selected" only next to a row that was
             // not, so on a one-row list nothing said it at all.
-            (mark_c.as_str(), if here { "▸".to_string() } else { " ".to_string() }),
+            (
+                mark_c.as_str(),
+                if here {
+                    "▸".to_string()
+                } else {
+                    " ".to_string()
+                },
+            ),
             (label_c.as_str(), tc::pad(&label, name_w)),
             // Which of this machine's ports they reached. Every row here is
             // inbound - the parser drops a socket whose local port is not
@@ -939,10 +997,18 @@ fn table(
             (dim_c.as_str(), cell(row.floor, 8)),
             (dim_c.as_str(), cell(row.jitter, 8)),
             (
-                loss_c.as_str(),
+                if row.loss_unavailable {
+                    dim_c.as_str()
+                } else {
+                    loss_c.as_str()
+                },
                 format!(
                     "{:>7}",
-                    loss.map_or("--".to_string(), |v| format!("{:.2}%", v))
+                    if row.loss_unavailable {
+                        "n/a".to_string()
+                    } else {
+                        loss.map_or("--".to_string(), |v| format!("{:.2}%", v))
+                    }
                 ),
             ),
         ];
@@ -989,13 +1055,15 @@ fn detail_view(
             (p.hues[idx % p.hues.len()].as_str(), " ▐ ".to_string()),
             (p.txt.as_str(), row.peer.clone()),
             // Their port identifies the socket; ours identifies the service
-            // it reached. Both, because the list is keyed on the first and
-            // the question "what is this connected to" is answered by the
-            // second.
+            // it reached. Both, because the list draws the first and keys
+            // history on both, and the question "what is this connected to"
+            // is answered by the second.
             (p.dim.as_str(), format!("  · to port {}", row.port)),
             (
                 p.dim.as_str(),
-                users.first().map_or(String::new(), |(u, _)| format!("  {}", u)),
+                users
+                    .first()
+                    .map_or(String::new(), |(u, _)| format!("  {}", u)),
             ),
         ],
         w - 1,
@@ -1064,7 +1132,12 @@ fn detail_view(
         &p.dim,
         "the floor; the gap above it is congestion",
     );
-    field!("jitter", live(row.jitter), &p.dim, "variation in the round trip");
+    field!(
+        "jitter",
+        live(row.jitter),
+        &p.dim,
+        "variation in the round trip"
+    );
     field!(
         "timeout",
         num(&row.raw, "rto").map(|v| ms(Some(v))),
@@ -1076,28 +1149,47 @@ fn detail_view(
     // Lifetime loss lives here rather than in the table because it is a fact
     // about the whole session and changes by the hour, while the table's
     // loss column is about the last two seconds.
-    let lifetime = if row.sent > 0.0 {
-        100.0 * row.retrans_bytes / row.sent
+    if row.loss_unavailable {
+        field!(
+            "loss just now",
+            Some("unavailable".to_string()),
+            &p.dim,
+            "macOS nettop counts retransmitted segments, not bytes",
+        );
+        field!(
+            "retransmitted",
+            row.raw.get("re-tx").cloned(),
+            &p.dim,
+            "segments resent over the life of the socket",
+        );
     } else {
-        0.0
-    };
-    let loss = row.recent_loss;
-    field!(
-        "loss just now",
-        loss.map(|v| format!("{:.2}%", v)),
-        if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.txt },
-        "resent since the last look",
-    );
-    field!(
-        "loss lifetime",
-        Some(format!("{:.2}%", lifetime)),
-        &p.dim,
-        &format!(
-            "{} resent of {}",
-            size_of(row.retrans_bytes),
-            size_of(row.sent)
-        ),
-    );
+        let lifetime = if row.sent > 0.0 {
+            100.0 * row.retrans_bytes / row.sent
+        } else {
+            0.0
+        };
+        let loss = row.recent_loss;
+        field!(
+            "loss just now",
+            loss.map(|v| format!("{:.2}%", v)),
+            if loss.unwrap_or(0.0) >= 0.5 {
+                &p.bad
+            } else {
+                &p.txt
+            },
+            "resent since the last look",
+        );
+        field!(
+            "loss lifetime",
+            Some(format!("{:.2}%", lifetime)),
+            &p.dim,
+            &format!(
+                "{} resent of {}",
+                size_of(row.retrans_bytes),
+                size_of(row.sent)
+            ),
+        );
+    }
     field!(
         "reordering",
         row.raw.get("reord_seen").cloned(),
@@ -1144,7 +1236,9 @@ fn detail_view(
     let idle = [row.lastsnd, row.lastrcv]
         .into_iter()
         .flatten()
-        .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))));
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a| a.min(v)))
+        });
     field!(
         "idle",
         Some(span(idle)),
@@ -1185,7 +1279,10 @@ fn detail_view(
         let covered = plotted_span(&one, &state.history, window, refresh, w);
         rows.push(tc::seg(
             &[
-                (p.dim.as_str(), format!("        {} ago", span(Some(covered * 1000.0)))),
+                (
+                    p.dim.as_str(),
+                    format!("        {} ago", span(Some(covered * 1000.0))),
+                ),
                 (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
                 (p.dim.as_str(), "now".into()),
             ],
@@ -1293,7 +1390,7 @@ fn graph(
         .iter()
         .enumerate()
         .filter_map(|(i, row)| {
-            let all = history.get(&row.peer)?;
+            let all = history.get(&session_id(row))?;
             let start = all.len().saturating_sub(want);
             // The same span of history as before, condensed to twice as many
             // points: two dots to a cell across.
@@ -1376,7 +1473,9 @@ fn graph(
                 0 => (p.grid.as_str(), " ".into()),
                 m => (
                     colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string(),
+                    char::from_u32(0x2800 + *m as u32)
+                        .unwrap_or(' ')
+                        .to_string(),
                 ),
             });
         }
@@ -1440,7 +1539,6 @@ mod tests {
         // rather than a set that quietly matches everything.
         assert!(ports_to_watch(&[], Vec::new()).is_empty());
     }
-
 
     #[test]
     fn both_shapes_on_the_ss_line_are_read() {
@@ -1635,7 +1733,106 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(detail.contains("achieved"), "{detail}");
-        assert!(detail.contains("macOS nettop has no delivery-rate estimate"), "{detail}");
+        assert!(
+            detail.contains("macOS nettop has no delivery-rate estimate"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn macos_loss_is_explained_rather_than_shown_as_zero() {
+        let row = Session {
+            peer: "203.0.113.9:51000".into(),
+            ip: "203.0.113.9".into(),
+            port: 22,
+            rtt: Some(12.0),
+            floor: Some(10.0),
+            jitter: Some(1.0),
+            sent: 340.0,
+            loss_unavailable: true,
+            raw: HashMap::from([("re-tx".into(), "4".into())]),
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::new(),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        let list = plain(&table(&[row.clone()], &state, 86, None, &palette())[1]);
+        assert!(list.contains("n/a"), "{list}");
+        assert!(!list.contains("0.00%"), "{list}");
+        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette())
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("unavailable"), "{detail}");
+        assert!(
+            detail.contains("macOS nettop counts retransmitted segments, not bytes"),
+            "{detail}"
+        );
+        assert!(detail.contains("4"), "{detail}");
+        assert!(!detail.contains("0.00%"), "{detail}");
+    }
+
+    #[test]
+    fn loss_and_history_keep_sockets_that_share_a_remote_endpoint_apart() {
+        let mut last = HashMap::new();
+        let mut first = vec![
+            Session {
+                peer: "203.0.113.9:51000".into(),
+                port: 3000,
+                sent: 100.0,
+                retrans_bytes: 2.0,
+                ..Default::default()
+            },
+            Session {
+                peer: "203.0.113.9:51000".into(),
+                port: 4000,
+                sent: 50.0,
+                retrans_bytes: 10.0,
+                ..Default::default()
+            },
+        ];
+        apply_loss(&mut first, &mut last);
+        assert_eq!(session_id(&first[0]), "203.0.113.9:51000#3000");
+        assert_ne!(session_id(&first[0]), session_id(&first[1]));
+        let mut second = vec![
+            Session {
+                peer: "203.0.113.9:51000".into(),
+                port: 3000,
+                sent: 200.0,
+                retrans_bytes: 4.0,
+                ..Default::default()
+            },
+            Session {
+                peer: "203.0.113.9:51000".into(),
+                port: 4000,
+                sent: 150.0,
+                retrans_bytes: 10.0,
+                ..Default::default()
+            },
+        ];
+        apply_loss(&mut second, &mut last);
+        assert_eq!(second[0].recent_loss, Some(2.0));
+        assert_eq!(second[1].recent_loss, Some(0.0));
+    }
+
+    #[test]
+    fn unavailable_loss_is_not_computed_from_byte_deltas() {
+        let mut last = HashMap::new();
+        let mut rows = vec![Session {
+            peer: "203.0.113.9:51000".into(),
+            port: 22,
+            sent: 100.0,
+            retrans_bytes: 50.0,
+            loss_unavailable: true,
+            ..Default::default()
+        }];
+        apply_loss(&mut rows, &mut last);
+        assert!(rows[0].recent_loss.is_none());
+        assert!(last.is_empty());
     }
 
     #[test]
@@ -1750,7 +1947,11 @@ mod tests {
         );
         for x in 0..4 {
             let (whose, mask) = &cells[0][x];
-            let mine = if whose == "first" { top[0][x] } else { bottom[0][x] };
+            let mine = if whose == "first" {
+                top[0][x]
+            } else {
+                bottom[0][x]
+            };
             assert_eq!(*mask, mine, "column {} carries the other trace's dots", x);
             assert_ne!(*mask, top[0][x] | bottom[0][x], "column {} merged", x);
         }
@@ -1790,7 +1991,11 @@ mod tests {
         // which is too long to spend in a test.
         let began = std::time::Instant::now();
         let why = tc::run(&["sleep", "30"], 1).expect_err("a wedged child must not wait for ever");
-        assert!(began.elapsed() < Duration::from_secs(20), "{:?}", began.elapsed());
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            began.elapsed()
+        );
         assert!(why.contains("did not answer"), "{}", why);
     }
 
@@ -1801,8 +2006,16 @@ mod tests {
         // looked at what was asked for. Nothing on screen could say so.
         let cfg = serde_json::json!({"ports": [22, 70000, 65535, 4_294_967_296u64]});
         let got = configured_ports(&cfg);
-        assert!(!got.contains(&4464), "70000 wrapped into a different port: {:?}", got);
-        assert!(!got.contains(&0), "a multiple of 65536 wrapped to port 0: {:?}", got);
+        assert!(
+            !got.contains(&4464),
+            "70000 wrapped into a different port: {:?}",
+            got
+        );
+        assert!(
+            !got.contains(&0),
+            "a multiple of 65536 wrapped to port 0: {:?}",
+            got
+        );
         // The two that are ports survive, including the top of the range.
         assert_eq!(got, vec![22, 65535]);
         // A key that is absent or the wrong shape is simply no ports.
@@ -1833,5 +2046,4 @@ mod tests {
         assert!(owners.contains(&"first"), "{:?}", owners);
         assert!(owners.contains(&"second"), "{:?}", owners);
     }
-
 }

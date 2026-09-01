@@ -13,7 +13,7 @@ use super::{ports_to_watch, run_or, Session};
 
 pub fn sessions(named: &[u16]) -> Result<Vec<Session>, String> {
     let listening = if named.is_empty() {
-        parse_ss_listening(&run_or(&["ss", "-tlnH"])? )
+        parse_ss_listening(&run_or(&["ss", "-tlnH"])?)
     } else {
         Vec::new()
     };

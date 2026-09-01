@@ -83,7 +83,7 @@ anyway when the question is "how is everything reaching this box".
 | **NOW** | the kernel's smoothed round-trip time, this instant |
 | **FLOOR** | `minrtt` — the best this path has ever done. The *gap* between it and NOW is the congestion, and it is why NOW alone means little |
 | **JITTER** | RTT variance. A steady 90ms link types better than one flapping between 20 and 90 |
-| **LOSS** | retransmitted bytes **since the last poll**, not since the connection opened. A session running for a day has long forgiven whatever went wrong at breakfast |
+| **LOSS** | Linux: retransmitted bytes **since the last poll**, not since the connection opened. A session running for a day has long forgiven whatever went wrong at breakfast. macOS shows `n/a`: `nettop`'s `re-tx` is a segment count, and mixing it with byte totals would invent a percentage |
 | **ACHIEVED** | Linux `delivery_rate` — what the connection *has* delivered. macOS explicitly shows `macOS n/a`: `nettop` has no equivalent, and interval byte throughput is not the same measurement. It is never capacity; measuring that means flooding the link |
 
 Colour is judged against the socket's own floor rather than a fixed threshold:
@@ -170,8 +170,9 @@ and finding a `●` chart reads as a different connection.
 
 ## Cost
 
-One `ss` invocation on Linux or one `nettop` sample on macOS per refresh,
-default every two seconds, and one `who`.
+Linux: one or two `ss` invocations per refresh (two when `ports` is empty and
+at least one listener is found), default every two seconds, and one `who`.
+macOS: one persistent `nettop` sample per refresh, and one `who`.
 **No network traffic whatsoever** — every number is read from the kernel's
 existing accounting for sockets that already exist.
 
