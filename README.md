@@ -55,7 +55,7 @@ you are back. It is the launcher, not another widget.
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-All fifteen widgets run on Linux and macOS. Nothing here works on Windows.
+All fifteen widgets run on Linux and macOS.
 
 Each is a single self-contained binary — every library it needs is compiled
 in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
