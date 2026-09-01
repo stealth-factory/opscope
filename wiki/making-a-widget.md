@@ -292,6 +292,13 @@ ships; `every_binary_is_on_the_menu` and
 is registered as a widget, while `the_list_is_in_a_settled_order`
 enforces the alphabetical launcher order.
 
+Bump the expected `[[bin]]` count in `npm/test.js` (`the packer takes every
+[[bin]], including opscope`). That number is sixteen today — the launcher
+plus fifteen widgets — and it is a gate, not a reading of the manifest:
+`cargo test` runs it whenever Node is on PATH, and CI always does. Skip
+it and the new binary builds while the packer still expects the old
+inventory.
+
 Add the widget to the root `README.md` table and to `docs/README.md`. The
 repository checks both indexes. Do not add a second copy of the summary or
 preview to the launcher: it embeds `help.txt` and `README.md` from the owned
@@ -375,6 +382,7 @@ and npm publication path is separate from PR merge; it is documented in
 | `docs/README.md` row | `every_documented_widget_is_in_the_docs_index` |
 | `config.example.json` | `generated_config_example_matches_widget_settings` |
 | the launcher registry entry | `every_widget_is_on_the_launcher_menu` in `widgets/tests/check.rs`, and `every_binary_is_on_the_menu` in `widgets/src/launcher/main.rs` |
+| npm packer `[[bin]]` count | `the packer takes every [[bin]]` in `npm/test.js` |
 | alphabetical launcher order | `the_list_is_in_a_settled_order` in `widgets/src/launcher/main.rs` |
 | first README preview | `a_sample_is_a_picture_of_the_widget` in `widgets/src/launcher/main.rs` |
 | `help.txt` summary and paragraph | `every_widget_describes_itself` in `widgets/src/launcher/main.rs` |
