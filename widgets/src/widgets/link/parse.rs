@@ -43,15 +43,30 @@ pub struct NettopSnapshot {
 /// `ss` mixes `key:value` pairs with space-separated values such as
 /// `delivery_rate 45107960bps`. Unknown fields remain available to the
 /// detail screen rather than being guessed at.
+/// `ss` prints `21990bps` or `12.3Mbps`. Stored as bits per second so `num`
+/// can read it; a leftover `12.3M` would silently drop ACHIEVED.
+fn parse_ss_bps(value: &str) -> Option<String> {
+    let value = value.strip_suffix("bps")?;
+    let (digits, factor) = if let Some(digits) = value.strip_suffix(['G', 'g']) {
+        (digits, 1e9)
+    } else if let Some(digits) = value.strip_suffix(['M', 'm']) {
+        (digits, 1e6)
+    } else if let Some(digits) = value.strip_suffix(['K', 'k']) {
+        (digits, 1e3)
+    } else {
+        (value, 1.0)
+    };
+    let n: f64 = digits.parse().ok()?;
+    Some((n * factor).to_string())
+}
+
 pub fn parse_ss_metrics(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let words: Vec<&str> = text.split_whitespace().collect();
     for key in ["send", "pacing_rate", "delivery_rate"] {
         if let Some(at) = words.iter().position(|word| *word == key) {
-            if let Some(value) = words.get(at + 1) {
-                if let Some(bps) = value.strip_suffix("bps") {
-                    out.insert(key.to_string(), bps.to_string());
-                }
+            if let Some(value) = words.get(at + 1).and_then(|value| parse_ss_bps(value)) {
+                out.insert(key.to_string(), value);
             }
         }
     }
@@ -78,6 +93,21 @@ pub fn parse_ss_listening(text: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Local and peer endpoints on an `ss` row.
+///
+/// `ss -tinH` keeps the State column, so Local is index 3 and Peer is 4 —
+/// the same offsets `ports` and `netwatch` already use. A four-column row
+/// without State still works.
+fn ss_local_peer(cols: &[String]) -> Option<(&str, &str)> {
+    if cols.len() >= 5 {
+        Some((&cols[3], &cols[4]))
+    } else if cols.len() >= 4 {
+        Some((&cols[2], &cols[3]))
+    } else {
+        None
+    }
+}
+
 /// Established Linux sockets whose local port belongs to the watched set.
 pub fn parse_ss_sessions(text: &str, ports: &[u16]) -> Vec<ParsedSession> {
     let mut found = Vec::new();
@@ -87,11 +117,12 @@ pub fn parse_ss_sessions(text: &str, ports: &[u16]) -> Vec<ParsedSession> {
             head = Some(line.split_whitespace().map(str::to_string).collect());
             continue;
         }
-        let cols = match &head {
-            Some(cols) if cols.len() >= 4 => cols,
-            _ => continue,
+        let Some(cols) = head.as_ref() else {
+            continue;
         };
-        let (local, peer) = (&cols[2], &cols[3]);
+        let Some((local, peer)) = ss_local_peer(cols) else {
+            continue;
+        };
         let Some(local_port) = local
             .rsplit_once(':')
             .and_then(|(_, port)| port.parse().ok())
@@ -274,6 +305,31 @@ mod tests {
             Some("6287464")
         );
         assert_eq!(num(&metrics, "cwnd"), Some(10.0));
+    }
+
+    #[test]
+    fn ss_rate_prefixes_become_bits_per_second() {
+        let line = "\t delivery_rate 12Mbps pacing_rate 2Kbps send 3Gbps";
+        let metrics = parse_ss_metrics(line);
+        assert_eq!(num(&metrics, "delivery_rate"), Some(12_000_000.0));
+        assert_eq!(num(&metrics, "pacing_rate"), Some(2_000.0));
+        assert_eq!(num(&metrics, "send"), Some(3_000_000_000.0));
+    }
+
+    #[test]
+    fn ss_established_rows_use_the_state_column() {
+        let text = concat!(
+            "ESTAB 0 0 192.0.2.10:3000 203.0.113.9:51000\n",
+            "\t ts sack cubic rtt:3.604/1.027 minrtt:3.553 bytes_sent:1669 bytes_received:80 bytes_retrans:4 delivery_rate 12Mbps\n",
+            "ESTAB 0 0 192.0.2.10:22 203.0.113.9:4000\n",
+            "\t rtt:1.0/0.1 minrtt:0.9 bytes_sent:10\n",
+        );
+        let got = parse_ss_sessions(text, &[3000]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].port, 3000);
+        assert_eq!(got[0].peer, "203.0.113.9:51000");
+        assert_eq!(got[0].sent, 1669.0);
+        assert_eq!(got[0].delivery, Some(12_000_000.0));
     }
 
     #[test]
