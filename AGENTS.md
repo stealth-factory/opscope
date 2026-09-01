@@ -8,6 +8,11 @@ reviews, and the decisions waiting on William. Before starting anything,
 look for the issue; before proposing something, check it is not already
 filed and already decided against.
 
+For a new widget, follow the ordered contributor guide in
+[`wiki/making-a-widget.md`](wiki/making-a-widget.md). It is the source of truth
+for the owned folder, launcher registration, settings, platform split, tests,
+manual smoke test, and release handoff.
+
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
