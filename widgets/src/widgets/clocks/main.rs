@@ -799,6 +799,9 @@ struct City {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("clocks", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("clocks");
     let office = Office::from_config(&cfg);
     let cities = load_cities(&cfg);

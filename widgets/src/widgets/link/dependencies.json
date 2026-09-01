@@ -1,0 +1,25 @@
+{
+  "required": {
+    "ss": {
+      "version": "*",
+      "platforms": ["linux"],
+      "why": "Linux socket RTT, retransmit, and delivery counters come from the kernel through ss."
+    },
+    "nettop": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "macOS socket RTT and retransmit counters come from the kernel through nettop."
+    },
+    "script": {
+      "version": "*",
+      "platforms": ["macos"],
+      "why": "script gives the long-running macOS nettop logger the terminal it requires."
+    }
+  },
+  "recommended": {
+    "who": {
+      "version": "*",
+      "why": "Login records let inbound sessions be labeled with a user and terminal."
+    }
+  }
+}

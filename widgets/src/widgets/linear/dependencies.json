@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Teams, cycles, and issues come from Linear's GraphQL API over HTTPS."
+    }
+  },
+  "recommended": {}
+}

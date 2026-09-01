@@ -21,8 +21,14 @@
 //! side and agree on screen, so where a choice existed this keeps the
 //! Python behaviour rather than the more idiomatic Rust one.
 
+mod dependencies;
 mod settings;
 
+pub use dependencies::{
+    Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
+    dependency_install_hint, dependency_status, doctor_report, install_command,
+    parse_dependencies, parse_os_release, tool_available, unsatisfied_required,
+};
 pub use settings::{run_settings, Catalogue, SettingsSpec};
 
 use std::io::{Read, Write};
@@ -730,6 +736,81 @@ pub fn cannot_start_with_settings(
 /// the sentence on screen is the same one.
 pub fn cannot_start_because(name: &str, reason: &str, why: &[&str], install: &str) {
     cannot_start_inner(name, reason, why, install, None);
+}
+
+/// Check the calling widget's owned dependency declaration before it starts.
+///
+/// Required tools block on the same persistent screen as every other startup
+/// failure. Recommended tools are deliberately absent here: they belong in
+/// `opscope doctor`, because losing an enhancement must not make a useful
+/// widget unavailable.
+pub fn dependencies_available(
+    name: &str,
+    source: &str,
+    settings: Option<SettingsSpec>,
+) -> bool {
+    let dependencies = match parse_dependencies(source) {
+        Ok(dependencies) => dependencies,
+        Err(error) => {
+            let message = format!("dependencies.json is invalid: {error}");
+            cannot_start_inner(
+                name,
+                "has an invalid dependency declaration",
+                &[&message],
+                "",
+                settings,
+            );
+            return false;
+        }
+    };
+    let host = Host::detect();
+    let missing = unsatisfied_required(&dependencies, host.platform);
+    if missing.is_empty() {
+        return true;
+    }
+
+    let reason = format!(
+        "needs {}",
+        missing
+            .iter()
+            .map(|(dependency, _)| {
+                if dependency.version_text == "*" {
+                    dependency.tool.command().to_string()
+                } else {
+                    format!("{} {}", dependency.tool.command(), dependency.version_text)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|(dependency, status)| {
+            let status = match status {
+                DependencyStatus::Missing => "is not installed or is not on PATH".to_string(),
+                DependencyStatus::TooOld(version) => format!(
+                    "is {version}; this widget requires {}",
+                    dependency.version_text
+                ),
+                DependencyStatus::VersionUnknown => format!(
+                    "is present, but its version could not be checked against {}",
+                    dependency.version_text
+                ),
+                DependencyStatus::Available(_) => unreachable!(
+                    "unsatisfied_required only returns statuses that do not satisfy"
+                ),
+            };
+            match &dependency.why {
+                Some(why) => format!("{} {status}. {why}", dependency.tool.command()),
+                None => format!("{} {status}.", dependency.tool.command()),
+            }
+        })
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let needed: Vec<Dependency> = missing.into_iter().map(|(dependency, _)| dependency).collect();
+    let install = dependency_install_hint(&host, &needed);
+    cannot_start_inner(name, &reason, &refs, &install, settings);
+    false
 }
 
 fn cannot_start_inner(

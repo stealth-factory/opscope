@@ -1775,6 +1775,9 @@ fn tidy(v: f64) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("linear", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("linear");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let exclude: Vec<String> = tc::cfg_strings(&cfg, "exclude_teams", &[]);
@@ -1797,26 +1800,6 @@ fn main() {
         }
     }
     refresh = tc::poll_secs(refresh, 120.0);
-
-    let absent = tc::missing(&["curl"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "linear ops",
-            &absent,
-            &[
-                "Everything here comes from Linear's GraphQL API, and curl is",
-                "how this reaches it - the same way the other widgets reach",
-                "ss, ping and tailscale.",
-                "",
-                "The key is passed to curl on its standard input rather than",
-                "in its arguments, because /proc/<pid>/cmdline is readable by",
-                "every user on the machine.",
-            ],
-            "apt install curl",
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let state = Arc::new(Mutex::new(State {

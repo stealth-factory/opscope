@@ -1,0 +1,9 @@
+{
+  "required": {},
+  "recommended": {
+    "herdr": {
+      "version": "*",
+      "why": "Herdr can show a desktop notification when a timer finishes."
+    }
+  }
+}

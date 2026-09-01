@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Deployments and project metadata come from Vercel's API over HTTPS."
+    }
+  },
+  "recommended": {}
+}

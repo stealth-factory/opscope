@@ -11,6 +11,10 @@ license.workspace = true
 # farm for no gain.
 libc = "0.2"
 serde_json = "1"
+# Widget dependency files use familiar npm-style ranges such as `>=8` and
+# `^1.2`; version probing remains central rather than being reimplemented by
+# every widget that invokes an external tool.
+semver = "1"
 # Timezones: the IANA database, so a world clock is right across a DST
 # boundary without this having to parse TZif itself.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

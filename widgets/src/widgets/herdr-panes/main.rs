@@ -685,6 +685,13 @@ fn homely(path: &str) -> String {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "herdr-panes",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     // The section is spelled with an underscore while everything else about
     // this widget is hyphenated. A mismatched key is read as absent rather
     // than as an error, so it is worth saying out loud.
@@ -693,25 +700,6 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
         refresh = tc::poll_secs(args[1].parse().unwrap_or(4.0), 4.0).max(1.0);
-    }
-
-    let absent = tc::missing(&["herdr"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "herdr panes",
-            &absent,
-            &[
-                "This reads a running Herdr session through its own CLI: the",
-                "workspaces, the panes in them, and which agent is in which.",
-                "There is no other source for any of it.",
-                "",
-                "If Herdr is installed but not on PATH, this widget will find",
-                "it as soon as the shell can.",
-            ],
-            "see https://herdr.dev",
-            SETTINGS,
-        );
-        return;
     }
 
     let p = palette();

@@ -17,7 +17,8 @@ with no fallback behind it — a stale generated `config.example.json`, a
 colour that draws text on the selected-row tint below WCAG AA, an incomplete
 widget folder, a widget missing from the README table or docs index, a
 name in the launcher's sample listing that is not a widget, a parser or a
-test gated by `cfg(target_os)` (which would vanish from the macOS CI run),
+test gated by `cfg(target_os)` (which would vanish from the macOS CI run), an
+invalid or unwired `dependencies.json`,
 and a widget that opens `/proc` with no macOS path and no explanation.
 
 Every one of them exists because something shipped broken and looked, on
@@ -31,10 +32,13 @@ text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
 arrow-key decoding, `clipboard()` over OSC 52, `unsupported()` /
 `cannot_start_because()` when this kernel has no source, and
-`cannot_start()` when a required tool is missing. It also owns the shared
-per-widget settings screen and its order-preserving, private atomic writer;
-widgets provide only their section name, optional legacy alias, and owned
-`settings.json`.
+the dependency warning screen when a required tool is missing. It also owns
+the two-tier dependency parser, semver probes, `os-release` distro detection,
+native package catalogue, and `opscope doctor` report. Widgets provide the
+command, range, platform, and optional reason in their owned
+`dependencies.json`; they never choose or invoke a package manager. Core also
+owns the shared per-widget settings screen and its order-preserving, private
+atomic writer.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),

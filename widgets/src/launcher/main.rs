@@ -37,6 +37,7 @@ struct Widget {
     stem: &'static str,
     help: &'static str,
     readme: &'static str,
+    dependencies: &'static str,
 }
 
 macro_rules! widget {
@@ -45,6 +46,7 @@ macro_rules! widget {
             stem: $stem,
             help: include_str!(concat!("../widgets/", $stem, "/help.txt")),
             readme: include_str!(concat!("../widgets/", $stem, "/README.md")),
+            dependencies: include_str!(concat!("../widgets/", $stem, "/dependencies.json")),
         }
     };
 }
@@ -308,12 +310,42 @@ fn resolve_stem(name: &str) -> &str {
     }
 }
 
-fn main() {
+fn doctor() -> i32 {
+    let widgets: Vec<(&str, &str)> = WIDGETS
+        .iter()
+        .map(|widget| (widget.stem, widget.dependencies))
+        .collect();
+    match tc::doctor_report(&tc::Host::detect(), &widgets) {
+        Ok(report) => {
+            println!("{report}");
+            0
+        }
+        Err(error) => {
+            eprintln!("cannot inspect dependencies: {error}");
+            2
+        }
+    }
+}
+
+fn main() -> std::process::ExitCode {
     // A widget name is resolved before --help is looked at, so that
     // `start netwatch --help` is netwatch's help, not this one's. Every
     // argument after the name belongs to the widget, including that one.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(first) = args.first() {
+        if first == "doctor" {
+            if args.len() > 1 && !args[1..].iter().all(|arg| arg == "-h" || arg == "--help") {
+                eprintln!("opscope doctor takes no arguments");
+                return std::process::ExitCode::from(2);
+            }
+            if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+                println!(
+                    "Inspect every widget's required and recommended external tools.\n\n    opscope doctor\n\nPrints host-specific installation advice; never installs anything."
+                );
+                return std::process::ExitCode::SUCCESS;
+            }
+            return std::process::ExitCode::from(doctor() as u8);
+        }
         if !first.starts_with('-') {
             // `.py` is still accepted, and only for that: every widget here
             // answered to that name for years and the muscle memory outlives
@@ -369,7 +401,7 @@ fn main() {
                 "q" | "Q" => {
                     keyboard.restore();
                     tc::restore_screen();
-                    return;
+                    return std::process::ExitCode::SUCCESS;
                 }
                 "up" | "k" | "K" => {
                     selected = selected.saturating_sub(1);

@@ -256,7 +256,13 @@ fn every_widget_owns_its_complete_folder() {
     let mut wrong = Vec::new();
     for name in widgets().keys() {
         let folder = dir.join(name);
-        for required in ["main.rs", "help.txt", "README.md", "CONFIGURE.md"] {
+        for required in [
+            "main.rs",
+            "help.txt",
+            "README.md",
+            "CONFIGURE.md",
+            "dependencies.json",
+        ] {
             if !folder.join(required).is_file() {
                 wrong.push(format!("{name}: missing {required}"));
             }
@@ -270,6 +276,18 @@ fn every_widget_owns_its_complete_folder() {
             || !source.contains("maybe_widget_help")
         {
             wrong.push(format!("{name}: binary does not carry its CONFIGURE.md"));
+        }
+        let dependencies = std::fs::read_to_string(folder.join("dependencies.json"))
+            .unwrap_or_default();
+        if let Err(error) = opscope_core::parse_dependencies(&dependencies) {
+            wrong.push(format!("{name}: dependencies.json: {error}"));
+        }
+        if !source.contains("include_str!(\"dependencies.json\")")
+            || !source.contains("dependencies_available")
+        {
+            wrong.push(format!(
+                "{name}: binary does not check its owned dependencies.json"
+            ));
         }
         let settings = folder.join("settings.json");
         if settings.exists() {

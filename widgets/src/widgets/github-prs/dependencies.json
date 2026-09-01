@@ -1,0 +1,9 @@
+{
+  "required": {
+    "curl": {
+      "version": "*",
+      "why": "Pull requests, reviews, checks, and merge state come from GitHub's GraphQL API."
+    }
+  },
+  "recommended": {}
+}

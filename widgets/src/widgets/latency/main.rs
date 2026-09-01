@@ -981,6 +981,9 @@ fn host_column_width(longest: usize, w: usize, show_med: bool) -> usize {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("latency", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("latency");
     let hosts = tc::cfg_strings(&cfg, "hosts", &["1.1.1.1", "8.8.8.8"]);
     let window = tc::cfg_usize(&cfg, "window", 600);
@@ -1021,22 +1024,6 @@ fn main() {
         }
     }
     let hosts = if named.is_empty() { hosts } else { named };
-
-    let absent = tc::missing(&["ping"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "latency",
-            &absent,
-            &[
-                "Every figure here comes from ping: this widget times replies,",
-                "it does not send packets itself. With no ping there is nothing",
-                "to time and nothing to draw.",
-            ],
-            "apt install iputils-ping",
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let dialect = ping_dialect();

@@ -1692,6 +1692,13 @@ fn ordered(state: &Arc<Mutex<State>>, mine: bool, live: bool) -> Vec<Proc> {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available(
+        "netwatch",
+        include_str!("dependencies.json"),
+        Some(SETTINGS),
+    ) {
+        return;
+    }
     // Config first, argv second: `--interval 2` beats a config saying 1,
     // which is the precedence netwatch.py uses. These five were documented
     // in config.example.json and read by nobody.

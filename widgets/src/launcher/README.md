@@ -41,9 +41,10 @@ rather than keeping another description:
   cannot enumerate its siblings the way a directory of scripts could.
 
 `check.rs` enforces the folder contract: `main.rs`, `help.txt`, `README.md`,
-`CONFIGURE.md`, and `settings.json` when the widget has settings. Adding a
-widget still adds one name to the compiled registry and Cargo manifest, but
-the contributor owns its full experience in that one folder.
+`CONFIGURE.md`, `dependencies.json`, and `settings.json` when the widget has
+settings. Adding a widget still adds one name to the compiled registry and
+Cargo manifest, but the contributor owns its full experience in that one
+folder.
 
 The launcher has the same maintained-file shape for its own help and docs.
 Its settings declaration and configuration guide cover only the shared
@@ -98,28 +99,28 @@ What is lost is colour, and the certainty that the picture matches today's
 build. The docs are checked by review rather than by machine, so a page that
 falls behind its widget shows a stale picture here too.
 
-## It says nothing about whether a widget will work
+## Dependencies stay with the widget
 
 It used to. There was a column reporting whether each command was installed
 and each token set, and it was the wrong place for all of it.
 
-A widget that cannot run is the thing that knows why — which command, what it
-is for, what to install. Saying it out here meant saying it twice, in less
-detail, to somebody who has not yet asked. Now the launcher describes what
-each widget *is*, and a widget that cannot start says so on its own screen:
+A widget that cannot run is the thing that knows why — which command and what
+it is for. Every widget owns a `dependencies.json` with two npm-shaped maps:
+`required` blocks launch and `recommended` only unlocks an enhancement. Each
+entry can carry a semver range, platform list, and optional `why` message.
 
-```
+Package names do not belong to the widget. Core maps the command to Debian,
+Fedora, Arch, Alpine, or Homebrew and the widget that cannot start draws the
+shared warning screen:
+
+```text
 ╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  cannot start · needs ss
 
- ss reports the per-socket byte counters this is built on: how much each
- TCP connection has carried, and the inode that ties it to a process.
- Without it there is nothing to read.
+ ss is not installed or is not on PATH. Linux per-socket byte counters and
+ process ownership come from ss.
 
- It ships in iproute2, which is on essentially every Linux system — its
- absence usually means a very small container image.
-
- try: apt install iproute2
+ try: sudo apt install iproute2
 
  [q]uit
 ```
@@ -130,9 +131,17 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-`link`, `netwatch`, `latency` and `herdr-panes` all do this, via
-`cannot_start` in `opscope-core`. The first two used to exit; the second two used
-to run and quietly show nothing, which was worse.
+All fifteen binaries check the same owned file, including `matrix` and
+`months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
+those declarations across the full registry, reports which widgets use each
+tool, checks declared versions, and prints host-specific installation guidance:
+
+```sh
+opscope doctor
+```
+
+It prints only. Neither the launcher nor a widget invokes a package manager,
+asks for `sudo`, or installs anything during download or first run.
 
 ## Shared terminal settings
 
@@ -161,6 +170,7 @@ through:
 
 ```sh
 opscope                    # the menu
+opscope doctor             # every dependency on this machine
 opscope netwatch           # straight into one
 opscope netwatch -i 2 -n 5 # arguments go to the widget
 opscope link --help        # including --help

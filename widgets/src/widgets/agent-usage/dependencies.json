@@ -1,0 +1,9 @@
+{
+  "required": {},
+  "recommended": {
+    "curl": {
+      "version": "*",
+      "why": "Live provider limits supplement the usage already recorded on disk."
+    }
+  }
+}

@@ -1103,6 +1103,9 @@ fn publish(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("github", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("github");
     let mut refresh = tc::cfg_f64(&cfg, "refresh", 120.0);
     let configured: Vec<String> = tc::cfg_strings(&cfg, "accounts", &[]);
@@ -1125,26 +1128,6 @@ fn main() {
         }
     }
     refresh = tc::poll_secs(refresh, 120.0).max(30.0);
-
-    let absent = tc::missing(&["curl"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "github ops",
-            &absent,
-            &[
-                "Everything here comes from GitHub's GraphQL API, and curl is",
-                "how this reaches it - the same way the other widgets reach",
-                "ss, ping and tailscale.",
-                "",
-                "The token is passed to curl on its standard input rather than",
-                "in its arguments, because /proc/<pid>/cmdline is readable by",
-                "every user on the machine.",
-            ],
-            "apt install curl",
-            SETTINGS,
-        );
-        return;
-    }
 
     let p = palette();
     let state = Arc::new(Mutex::new(State {

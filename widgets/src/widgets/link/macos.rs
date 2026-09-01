@@ -238,26 +238,6 @@ pub fn source_note() -> &'static str {
     "measured by the kernel via nettop, nothing sent"
 }
 
-pub fn missing() -> Vec<String> {
-    if std::path::Path::new("/usr/bin/nettop").is_file() {
-        Vec::new()
-    } else {
-        vec!["/usr/bin/nettop".to_string()]
-    }
-}
-
-pub fn missing_reason() -> &'static [&'static str] {
-    &[
-        "nettop reads the kernel's own per-socket metrics, which is where",
-        "round-trip time and retransmit counters come from on macOS.",
-        "Without it the pane cannot distinguish no sessions from no source.",
-    ]
-}
-
-pub fn install_hint() -> &'static str {
-    "nettop is included with macOS"
-}
-
 pub fn empty_note() -> &'static str {
     "Nothing is connected to this machine, or nettop cannot see it."
 }

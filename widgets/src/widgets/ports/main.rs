@@ -2091,6 +2091,9 @@ impl Store {
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("ports", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     // Both of ports' config keys were documented and read by nobody.
     // Config is the default; argv still overrides.
     let cfg = tc::load_config("ports");
@@ -2113,24 +2116,6 @@ fn main() {
     {
         tc::cannot_start_because("dev servers", &tc::unsupported(), &[], "");
         return;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let absent = tc::missing(&["lsof"]);
-        if !absent.is_empty() {
-            tc::cannot_start_with_settings(
-                "dev servers",
-                &absent,
-                &[
-                    "lsof names each listening socket and the process behind it.",
-                    "It ships with macOS; without it this pane cannot list ports.",
-                ],
-                "",
-                SETTINGS,
-            );
-            return;
-        }
     }
 
     // Both platforms feed the same per-port history. Only acquisition

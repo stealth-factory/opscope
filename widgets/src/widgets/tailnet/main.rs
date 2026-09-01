@@ -645,32 +645,15 @@ fn activity_rows(
 
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    if !tc::dependencies_available("tailnet", include_str!("dependencies.json"), Some(SETTINGS)) {
+        return;
+    }
     let cfg = tc::load_config("tailnet");
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 2.0), 2.0);
     let history = tc::cfg_usize(&cfg, "history", 180);
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
         refresh = tc::poll_secs(args[1].parse().unwrap_or(2.0), 2.0).max(1.0);
-    }
-
-    let absent = tc::missing(&["tailscale"]);
-    if !absent.is_empty() {
-        tc::cannot_start_with_settings(
-            "tailnet",
-            &absent,
-            &[
-                "Everything here comes from the local tailscaled through its",
-                "own CLI: who is online, whether each peer is direct or",
-                "relayed, and the byte counters the WireGuard engine keeps.",
-                "",
-                "There is no other source for any of it, and nothing here is",
-                "sent anywhere - the DERP region names come from the local",
-                "map rather than from a geolocation service.",
-            ],
-            "see https://tailscale.com/download",
-            SETTINGS,
-        );
-        return;
     }
 
     let p = palette();
