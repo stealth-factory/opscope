@@ -1,5 +1,5 @@
 {
-  "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss.",
+  "_comment": "Every established connection into a port this machine listens on. Empty ports means all of them, which is the useful default. No network traffic: the numbers come from the kernel's own accounting via ss on Linux or nettop on macOS.",
   "_schema": {
     "windows": { "items": "integer" },
     "ports": {

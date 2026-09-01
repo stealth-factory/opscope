@@ -4,10 +4,12 @@ Every other network widget in this repo measures a path it chose - ping these
 hosts, watch that tailnet. This one measures the path *you* are on: the TCP
 socket carrying your session, as the kernel already sees it.
 
-Nothing is sent. `ss -tin` reports what the kernel has measured for each
-established socket - round-trip time and its variance, the best round trip it
-has ever seen, retransmitted bytes, the delivery rate it actually achieved -
-so this widget can describe the link without adding a single packet to it.
+Nothing is sent. Linux `ss -tin` and macOS `nettop` report what the kernel has
+measured for each established socket: round-trip time and its variance, the
+best round trip it has ever seen, and retransmissions. Linux also exposes the
+delivery rate it actually achieved. macOS marks delivery rate and byte-loss
+as unavailable because `nettop` has no delivery-rate estimate and counts
+retransmitted segments rather than bytes.
 
     link [-n SECONDS]
 

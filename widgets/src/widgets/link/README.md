@@ -48,10 +48,10 @@ it — measured, not probed.
 measures the path **you are on**, and sends nothing at all.
 
 Every established TCP connection has a kernel that has been timing it since it
-opened. `ss -tin` hands that over: smoothed round-trip time and its variance,
-the best round trip the path has ever managed, retransmitted bytes, the
-delivery rate actually achieved, the congestion window. All of it measured on
-the packets your session was already sending.
+opened. Linux `ss -tin` and macOS `nettop` hand over smoothed round-trip time,
+its variance, the best round trip the path has managed and retransmissions.
+Linux also exposes its delivery-rate estimate and congestion details. All of
+it is measured on packets your session was already sending.
 
 So this widget adds no traffic to the link it is describing — which matters,
 because a probe that competes with the session it measures is measuring itself.
@@ -83,8 +83,8 @@ anyway when the question is "how is everything reaching this box".
 | **NOW** | the kernel's smoothed round-trip time, this instant |
 | **FLOOR** | `minrtt` — the best this path has ever done. The *gap* between it and NOW is the congestion, and it is why NOW alone means little |
 | **JITTER** | RTT variance. A steady 90ms link types better than one flapping between 20 and 90 |
-| **LOSS** | retransmitted bytes **since the last poll**, not since the connection opened. A session running for a day has long forgiven whatever went wrong at breakfast |
-| **ACHIEVED** | `delivery_rate` — what the connection *has* delivered. Not capacity: measuring that means flooding the link, which this repo will not do to a link someone is typing on |
+| **LOSS** | Linux: retransmitted bytes **since the last poll**, not since the connection opened. A session running for a day has long forgiven whatever went wrong at breakfast. macOS shows `n/a`: `nettop`'s `re-tx` is a segment count, and mixing it with byte totals would invent a percentage |
+| **ACHIEVED** | Linux `delivery_rate` — what the connection *has* delivered. macOS explicitly shows `macOS n/a`: `nettop` has no equivalent, and interval byte throughput is not the same measurement. It is never capacity; measuring that means flooding the link |
 
 Colour is judged against the socket's own floor rather than a fixed threshold:
 40ms is excellent from another continent and poor from the next rack, and the
@@ -170,7 +170,9 @@ and finding a `●` chart reads as a different connection.
 
 ## Cost
 
-One `ss` invocation per refresh, default every two seconds, and one `who`.
+Linux: one or two `ss` invocations per refresh (two when `ports` is empty and
+at least one listener is found), default every two seconds, and one `who`.
+macOS: one persistent `nettop` sample per refresh, and one `who`.
 **No network traffic whatsoever** — every number is read from the kernel's
 existing accounting for sockets that already exist.
 
@@ -198,5 +200,6 @@ kilobytes.
 
 ## Needs
 
-`ss`, from iproute2, and `who`. Both are standard on Linux. The widget exits
-with a message rather than drawing an empty frame if `ss` is missing.
+Linux needs `ss`, from iproute2, and `who`. macOS uses the system
+`/usr/bin/nettop` and `who`. The widget exits with a specific message rather
+than drawing an empty frame if its platform source is missing.

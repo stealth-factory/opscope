@@ -4,7 +4,11 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-Linux kernel TCP accounting exposed by `ss`; the widget sends no probes.
+Kernel TCP accounting exposed by `ss` on Linux and `nettop` on macOS; the
+widget sends no probes. macOS does not expose Linux's achieved delivery-rate
+estimate, and `nettop`'s `re-tx` is a segment count rather than retransmitted
+bytes, so those two fields say so instead of substituting a different
+measurement.
 
 ## Settings owned here
 
@@ -16,7 +20,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## Safe configuration process
 
-1. Confirm `ss` exists and inspect listening ports only if the user authorizes it. Do not persist LAN addresses.
+1. Confirm `ss` exists on Linux or `/usr/bin/nettop` exists on macOS, and inspect listening ports only if the user authorises it. Do not persist LAN addresses.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. Ask whether all inbound listening ports or an explicit port set should count, and which chart windows are useful.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.

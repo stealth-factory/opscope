@@ -50,14 +50,12 @@ you are back. It is the launcher, not another widget.
 | **`agent-usage`** | How much each coding agent on the machine has been used — tokens, sessions, AI-written code — and what is left of each one's rate limit, one tab per agent. | the agents' own logins | [read →](widgets/src/widgets/agent-usage/README.md) |
 | **`ports`** | What is listening on this machine — the dev servers you have running, which project each was started from, how long it has been up, how much traffic it is carrying, and whether anything outside the box can reach it. `k` stops the selected one; `↵` opens it for a traffic chart, an address to copy, or a publish over Tailscale or Cloudflare. | `ss` for the traffic · Linux, macOS | [read →](widgets/src/widgets/ports/README.md) |
 | **`netwatch`** | Which processes are using the network — total since it started, current rate, up and down, per process — read from the operating system's own counters rather than by capturing packets. | `ss` on Linux, `nettop` on macOS · Linux, macOS | [read →](widgets/src/widgets/netwatch/README.md) |
-| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter, loss and achieved rate for every inbound session, read from the kernel rather than probed. | `ss` · **Linux only** ([macOS →](https://github.com/stealth-factory/opscope/issues/101)) | [read →](widgets/src/widgets/link/README.md) |
+| **`link`** | How good the connection is between this machine and whoever is connected to it — round-trip time, jitter and loss for every inbound session, plus achieved delivery rate where the kernel exposes it, read rather than probed. | `ss` on Linux, `nettop` on macOS · Linux, macOS | [read →](widgets/src/widgets/link/README.md) |
 | **`clocks`** | Server clock, countdowns to the next hour / end of office hours / end of day, a pomodoro, and a world clock. | — | [read →](widgets/src/widgets/clocks/README.md) |
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-**One is Linux-only today.** `link` reads the kernel through `ss`, which does
-not exist on macOS; its row links the issue tracking its port. The other
-fourteen run on Linux and macOS alike. Nothing here works on Windows.
+All fifteen widgets run on Linux and macOS. Nothing here works on Windows.
 
 Each is a single self-contained binary — every library it needs is compiled
 in, `ldd` shows only libc, libm and libgcc, and there is nothing to install
