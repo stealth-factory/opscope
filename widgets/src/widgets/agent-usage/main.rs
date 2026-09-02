@@ -2208,6 +2208,11 @@ mod tests {
         assert_eq!(fable_51.unwrap().get("cache_read"), Some(&0.25));
         let (fable_5, _) = rate_for("claude-fable-5", &none);
         assert_eq!(fable_5.unwrap().get("cache_read"), Some(&1.0));
+        // Mythos 5.1 has the same footnote and the same prefix problem.
+        let (mythos_51, _) = rate_for("claude-mythos-5-1", &none);
+        assert_eq!(mythos_51.unwrap().get("cache_read"), Some(&0.25));
+        let (mythos_5, _) = rate_for("claude-mythos-5", &none);
+        assert_eq!(mythos_5.unwrap().get("cache_read"), Some(&1.0));
         // o1 and o3 are two characters long and matched as substrings. An
         // exact match runs first, so the bare ids get their own rate, and the
         // longer o-series names must not collapse onto them.
