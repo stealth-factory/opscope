@@ -2,7 +2,7 @@
 
 [← wiki](README.md)
 
-Published API list prices, US$ per million tokens, collected **2026-08-29**
+Published API list prices, US$ per million tokens, collected **2026-09-02**
 from each vendor's own pricing page.
 
 **This is a reference, not the source of truth for anything running.**
@@ -12,7 +12,7 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 29 Aug 2026 the two agree — see
+As of 2 Sep 2026 the two agree — see
 [what this collection changed](#what-this-collection-changed) for what moved.
 
 ## The two rules that shape every table here
@@ -36,6 +36,8 @@ record which was taken, so both are carried.
 
 | model | input | output | cache_read | cache_write | cache_write_1h |
 |---|--:|--:|--:|--:|--:|
+| `claude-fable-5-1` | 10 | 50 | 0.25 | 12.50 | 20 |
+| `claude-mythos-5-1` | 10 | 50 | 0.25 | 12.50 | 20 |
 | `claude-fable-5` | 10 | 50 | 1 | 12.50 | 20 |
 | `claude-mythos-5` | 10 | 50 | 1 | 12.50 | 20 |
 | `claude-opus-5` | 5 | 25 | 0.50 | 6.25 | 10 |
@@ -53,6 +55,10 @@ record which was taken, so both are carried.
 | `claude-3-5-haiku` | 0.80 | 4 | 0.08 | 1 | 1.60 |
 
 - **Thinking tokens bill as output.** They are not a sixth kind.
+- **Fable 5.1 and Mythos 5.1 read cache at 0.025× input**, $0.25, where every
+  other model is 0.1×. The page footnotes it; it is not a typo for $1.
+  `claude-fable-5` is a prefix of `claude-fable-5-1`, so the 5.1 row has to
+  exist or 5.1 inherits Fable 5's reads at four times the price.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
 - Fast mode, where offered, is a different rate — `claude-opus-5` and
@@ -105,6 +111,13 @@ record which was taken, so both are carried.
 | `o3-mini` | 1.10 | 4.40 | 0.55 | — |
 | `o4-mini` | 1.10 | 4.40 | 0.275 | — |
 
+- **`gpt-5.6-sol` is a promotional price.** OpenAI cut it from 5 / 30 / 0.50
+  on 21 Aug 2026 and says the promotion runs *at least through 21 Nov 2026*.
+  The page shows only the promotional figures — no standard price beside
+  them — so those are what is carried: they are what the meter bills at.
+  When it lapses, the pre-promotion row was `5 / 30 / 0.50` with no
+  published `cache_write`, and whatever the page shows then is what goes
+  back. Terra and Luna are not promotional.
 - **The 5.6 family now has a `cache_write` price.** Earlier families did not,
   which is why the code comment says OpenAI does not charge for cache writes.
   That is no longer true for 5.6.
@@ -193,6 +206,25 @@ Named so prefix matching cannot hand them a family rate.
 
 ## What this collection changed
 
+### 2 Sep 2026
+
+**Added `claude-fable-5-1` and `claude-mythos-5-1`.** Neither is a new
+price for most kinds — 10 / 50 / 12.50 / 20 as Fable 5 — but cache reads are
+0.25, a quarter of Fable 5's. The row matters because of prefix matching:
+`claude-fable-5-1` was already in the local transcripts, over a thousand
+records, and every one of them was priced from the `claude-fable-5` key, so
+**Fable 5.1's cache reads were overstated four times** for as long as the
+model had been in use. `a_longer_name_is_not_swallowed_by_a_shorter_one` now
+pins both reads, and fails on the card as it was.
+
+**Checked, not changed: `gpt-5.6-sol`.** The question was whether the row
+carried the promotional or the standard price and whether the promotion had
+ended. It is the promotional price, it is the only one the page publishes,
+and OpenAI dates it *at least through 21 Nov 2026* — not September. See the
+OpenAI notes above for the pre-promotion figures.
+
+### 29 Aug 2026
+
 `LIST_RATES` was carrying prices dated `Aug 2026`. Reconciling it against the
 above moved three rows, fixed one key that had never worked, and roughly
 doubled the table. Applied on 29 Aug 2026.
@@ -231,7 +263,7 @@ only names that appear are worth carrying. From local logs:
 
 | agent | records |
 |---|---|
-| `claude` | `claude-opus-5`, `claude-opus-4-8`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
+| `claude` | `claude-opus-5`, `claude-opus-4-8`, `claude-fable-5-1`, `claude-fable-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` |
 | `codex` | `codex-auto-review`, `gpt-5.6-sol`, `gpt-5.6-luna` |
 | `copilot` | `claude-sonnet-5` — the API id, not the marketing name |
 

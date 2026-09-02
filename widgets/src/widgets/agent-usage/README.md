@@ -564,6 +564,14 @@ carries `cache_write` and the older families still do not. xAI publishes none
 at all, and Google bills context caching by storage — per million tokens per
 *hour* — which is not a per-request write and is deliberately not carried.
 
+Two rows are worth knowing about. Fable 5.1 reads cache at a quarter of the
+price the rest of Anthropic's card does, and its id extends Fable 5's — so it
+needs a row of its own, or prefix matching hands it Fable 5's reads at four
+times the price, which is what happened until the row went in. And
+`gpt-5.6-sol` is a promotional price, dated by OpenAI as running at least
+through 21 Nov 2026; it is carried because it is the only price published and
+the one the meter bills at.
+
 Fourteen models are listed as having **no published price at all** — among
 them `gpt-5.3-codex-spark`, which is explicitly not on the API
 (`supported_in_api: false` in Codex's own model cache), `codex-auto-review`,

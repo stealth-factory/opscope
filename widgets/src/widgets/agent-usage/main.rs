@@ -46,7 +46,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "29 Aug 2026";
+const LIST_RATES_AS_OF: &str = "2 Sep 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -89,6 +89,13 @@ const NO_PUBLISHED_PRICE: &[&str] = &[
 /// publishes one - so 5.6 carries cache_write and the older families still
 /// do not. Reading "OpenAI does not charge for cache writes" as a standing
 /// fact is what left the four 5.6 rows short after the price moved.
+///
+/// gpt-5.6-sol's row is a promotional price: OpenAI cut it from 5 / 30 /
+/// 0.50 on 21 Aug 2026 and says the promotion runs at least through 21 Nov
+/// 2026. It is carried because it is the only price the page shows and the
+/// one the meter actually bills at; the pre-promotion figures are in
+/// wiki/model-prices.md so the row can be put back when it lapses, and
+/// nothing here should be "corrected" back to them before then.
 ///
 /// What this shape cannot express: long context is a different rate rather
 /// than a surcharge, and above the threshold - 272k for most OpenAI models,
@@ -154,6 +161,22 @@ const LIST_RATES: tc::Catalogue = &[
     ("o3-mini", "OpenAI", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.55)]),
     ("o3", "OpenAI", &[("input", 2.0), ("output", 8.0), ("cache_read", 0.50)]),
     ("o4-mini", "OpenAI", &[("input", 1.10), ("output", 4.40), ("cache_read", 0.275)]),
+    // Fable 5.1 and Mythos 5.1 read cache at 0.025x input - $0.25, against
+    // the 0.1x every other Anthropic row follows - and the vendor says so
+    // in a footnote of its own. It is not a typo for 1.00. Both keys must
+    // sit in the table: claude-fable-5 is a prefix of claude-fable-5-1, so
+    // without its own row 5.1 would inherit Fable 5's reads at four times
+    // the price, with every other kind looking right.
+    (
+        "claude-fable-5-1",
+        "Anthropic",
+        &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 0.25), ("cache_write_1h", 20.0)],
+    ),
+    (
+        "claude-mythos-5-1",
+        "Anthropic",
+        &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 0.25), ("cache_write_1h", 20.0)],
+    ),
     (
         "claude-fable-5",
         "Anthropic",
@@ -2140,6 +2163,7 @@ mod tests {
             // Claude, from ~/.claude/projects transcripts.
             "claude-opus-5",
             "claude-opus-4-8",
+            "claude-fable-5-1",
             "claude-fable-5",
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
@@ -2177,6 +2201,13 @@ mod tests {
         assert_eq!(four.unwrap().get("input"), Some(&15.0));
         let (eight, _) = rate_for("claude-opus-4-8", &none);
         assert_eq!(eight.unwrap().get("input"), Some(&5.0));
+        // claude-fable-5 is a prefix of claude-fable-5-1, and the two differ
+        // only on cache reads - 0.025x input against 0.1x - so the swallow
+        // would leave every other kind right and the reads four times high.
+        let (fable_51, _) = rate_for("claude-fable-5-1", &none);
+        assert_eq!(fable_51.unwrap().get("cache_read"), Some(&0.25));
+        let (fable_5, _) = rate_for("claude-fable-5", &none);
+        assert_eq!(fable_5.unwrap().get("cache_read"), Some(&1.0));
         // o1 and o3 are two characters long and matched as substrings. An
         // exact match runs first, so the bare ids get their own rate, and the
         // longer o-series names must not collapse onto them.
