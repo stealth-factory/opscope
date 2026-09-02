@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.11.1] - 2026-09-02
+
+### Bug Fixes
+
+- **agent-usage**: Price claude-fable-5-1 on its own row (#150)
+
+### Documentation
+
+- Drop the Windows sentence from the platforms note
+
 ## [0.11.0] - 2026-09-01
 
 ### Features
