@@ -566,7 +566,7 @@ at all, and Google bills context caching by storage — per million tokens per
 
 Two rows are worth knowing about. Fable 5.1 and Mythos 5.1 read cache at
 $0.25, a quarter of the $1 that Fable 5 and Mythos 5 charge and a smaller
-multiplier than every other Anthropic model; and each 5.1 id extends the
+multiplier than every other Anthropic model. Each 5.1 id extends the
 5 id — so both need rows of their own, or prefix matching hands them the
 older reads at four times the price, which is what happened to Fable 5.1
 until its row went in. And
