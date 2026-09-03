@@ -574,12 +574,26 @@ until its row went in. And
 through 21 Nov 2026; it is carried because it is the only price published and
 the one the meter bills at.
 
-Fourteen models are listed as having **no published price at all** — among
+`gemini-3.8-flash` is the third. Its numbers are identical to
+`gemini-3.7-flash` — 0.75 / 3.75 / 0.075 — which makes the row look redundant
+and is precisely why it is not: matching is by substring, and no existing key
+is a substring of `gemini-3.8-flash`, so without its own line the model has no
+price and its tokens cost nothing. That is the 5.1 fault turned around. An
+inherited rate overstates and gets queried; an absent one understates the whole
+bill while every row on screen looks ordinary. Its price is also
+**introductory** — Google dates the end on the page, and input, output and
+cached input all double on 1 January 2027. The successor figures are in
+`wiki/model-prices.md`, so the row moves on the day rather than being
+rediscovered after a month of half-price totals.
+
+Fifteen models are listed as having **no published price at all** — among
 them `gpt-5.3-codex-spark`, which is explicitly not on the API
 (`supported_in_api: false` in Codex's own model cache), `codex-auto-review`,
-and the retired and shut-down models. Without that, prefix matching would hand
-Spark `gpt-5.3-codex`'s rate — a number nobody published. They report as
-unpriced instead, and are named.
+`gemini-3.8-flash-lite` (never published; 3.8 ships as one model, but the
+new `gemini-3.8-flash` key is a substring of that id), and the retired and
+shut-down models. Without that, prefix matching would hand Spark
+`gpt-5.3-codex`'s rate — and would meter the unpublished Lite variant at
+Flash prices. They report as unpriced instead, and are named.
 
 What the table cannot express is **long context**. Above the threshold — 272k
 for most OpenAI models, 200k for the 5.6 family, Grok and the Gemini Pros —
