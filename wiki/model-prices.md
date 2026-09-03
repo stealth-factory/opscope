@@ -12,7 +12,7 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 2 Sep 2026 the two agree — see
+As of 3 Sep 2026 the two agree — see
 [what this collection changed](#what-this-collection-changed) for what moved.
 
 ## The two rules that shape every table here
@@ -158,6 +158,7 @@ record which was taken, so both are carried.
 
 | model | input | output | cache_read |
 |---|--:|--:|--:|
+| `gemini-3.8-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.7-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.6-flash` | 0.75 | 3.75 | 0.075 |
 | `gemini-3.5-flash` | 1.50 | 9 | 0.15 |
@@ -205,6 +206,41 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 3 Sep 2026
+
+**Added `gemini-3.8-flash`,** at 0.75 / 3.75 / 0.075 — the same three numbers
+as `gemini-3.7-flash`, which is exactly why the row is easy to think
+unnecessary and is not. `rate_for` matches by *substring*: no existing key is
+a substring of `gemini-3.8-flash`, so without a line of its own the model
+resolves to no price at all. That is the fable-5-1 fault inverted. Fable 5.1
+inherited a neighbour's rate and **over**stated cache reads fourfold; an
+unpriced model costs zero and **under**states the whole bill, with every row on
+screen looking perfectly ordinary. Overstating gets queried. Understating does
+not.
+
+**These are introductory prices, and Google dates their end on the page.**
+Through **31 December 2026**: 0.75 input, 3.75 output, 0.075 cached input.
+From **1 January 2027** all three double:
+
+| model | input | output | cached input | from |
+| --- | --- | --- | --- | --- |
+| `gemini-3.8-flash` | 1.50 | 7.50 | 0.15 | 1 Jan 2027 |
+
+Recorded here rather than in the code for the same reason `gpt-5.6-sol`'s
+pre-promotion figures are: the table carries what the meter bills *today*, and
+the successor is written down so the row can be moved on the day rather than
+rediscovered after a month of half-price totals. Nothing in `LIST_RATES`
+should be "corrected" to the 2027 column before then.
+
+Storage-based context caching — $0.50 per million tokens per hour, doubling to
+$1.00 on the same date — is still not carried, for the reason the Google note
+in `LIST_RATES` gives: it is not a per-request cache write, and pricing it as
+one would invent a number.
+
+**No `gemini-3.8-flash-lite` and no `gemini-3.8-pro`.** Checked against the
+pricing page on this date; 3.8 ships as one model. Said here so the next
+person does not re-check.
 
 ### 2 Sep 2026
 

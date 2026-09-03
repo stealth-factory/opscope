@@ -46,7 +46,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "2 Sep 2026";
+const LIST_RATES_AS_OF: &str = "3 Sep 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -269,6 +269,21 @@ const LIST_RATES: tc::Catalogue = &[
     // Google bills context caching by storage - dollars per million tokens
     // per *hour* - which is not a per-request cache write and is deliberately
     // not carried here. Pricing it as one would invent a number.
+    //
+    // gemini-3.8-flash's row is an INTRODUCTORY price and the page dates its
+    // own end: 0.75 / 3.75 / 0.075 through 31 December 2026, doubling to
+    // 1.50 / 7.50 / 0.15 on 1 January 2027. The introductory figures are
+    // carried because they are what the meter bills today - the same call as
+    // gpt-5.6-sol above - and the successor figures are in
+    // wiki/model-prices.md so the row can be moved on the day rather than
+    // rediscovered. Nothing here should be "corrected" to them before then.
+    //
+    // It needs its own row despite matching 3.7's numbers exactly: rate_for
+    // matches by substring, and no existing key is a substring of
+    // "gemini-3.8-flash", so without this line the model is unpriced and its
+    // tokens cost zero - the mirror of the fable-5-1 fault, understating the
+    // bill instead of overstating it.
+    ("gemini-3.8-flash", "Google", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
     ("gemini-3.7-flash", "Google", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
     ("gemini-3.6-flash", "Google", &[("input", 0.75), ("output", 3.75), ("cache_read", 0.075)]),
     ("gemini-3.5-flash-lite", "Google", &[("input", 0.30), ("output", 2.50), ("cache_read", 0.03)]),
@@ -2156,6 +2171,39 @@ mod tests {
     /// matched nothing, so it priced nothing - and an unpriced model looks
     /// exactly like a model nobody used. A key can be wrong in a way that
     /// only a real name can expose, so real names are what this asserts.
+    #[test]
+    fn a_new_gemini_row_is_priced_rather_than_silently_free() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        // The fault this row exists to prevent is the mirror of fable-5-1's.
+        // `rate_for` matches by SUBSTRING, and no key is a substring of
+        // "gemini-3.8-flash" - not 3.7, not `gemini-3-flash-preview` - so
+        // without its own line the model resolves to nothing, its tokens cost
+        // zero, and the total understates the bill while every row on screen
+        // looks ordinary. Overstating gets noticed; understating does not.
+        let (rate, origin) = rate_for("gemini-3.8-flash", &none);
+        let rate = rate.expect("gemini-3.8-flash must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&0.75));
+        assert_eq!(rate.get("output"), Some(&3.75));
+        assert_eq!(rate.get("cache_read"), Some(&0.075));
+
+        // Introductory pricing: these figures stand through 31 Dec 2026 and
+        // double on 1 Jan 2027. The successors are recorded in
+        // wiki/model-prices.md rather than here, so this assertion is a
+        // statement about today's meter and is meant to be changed on the day.
+
+        // 3.7 keeps its own row and is untouched by the addition.
+        let (older, _) = rate_for("gemini-3.7-flash", &none);
+        let older = older.expect("gemini-3.7-flash was already priced");
+        assert_eq!(older.get("input"), Some(&0.75));
+
+        // And a Gemini id nobody has published a price for stays unpriced
+        // rather than inheriting a neighbour's - the property the substring
+        // matcher gives for free here, pinned so a widened key cannot lose it.
+        assert!(rate_for("gemini-9.9-flash", &none).0.is_none());
+    }
+
     #[test]
     fn every_model_string_an_agent_writes_down_finds_a_price() {
         let none: HashMap<String, Rate> = HashMap::new();
