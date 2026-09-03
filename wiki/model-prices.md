@@ -202,6 +202,7 @@ Named so prefix matching cannot hand them a family rate.
 | `grok-4-0709` | Retired 15 May 2026, redirects to `grok-4.3`. |
 | `claude-mythos-preview` | Deprecated; use `claude-mythos-5`. |
 | `gemini-2.0-flash`, `gemini-2.0-flash-lite`, `gemini-3-pro-preview` | Shut down. |
+| `gemini-3.8-flash-lite` | Never published; 3.8 ships as one model. Named so `gemini-3.8-flash` cannot price it by substring. |
 | `gemma-4` | Free tier only; paid rates listed as unavailable. |
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
@@ -240,7 +241,10 @@ one would invent a number.
 
 **No `gemini-3.8-flash-lite` and no `gemini-3.8-pro`.** Checked against the
 pricing page on this date; 3.8 ships as one model. Said here so the next
-person does not re-check.
+person does not re-check. Lite is also in `NO_PUBLISHED_PRICE`: the new
+`gemini-3.8-flash` key is a substring of that unpublished id, so without a
+name there the row would meter it at flash rates. Pro matches no key and
+stays unpriced without one.
 
 ### 2 Sep 2026
 

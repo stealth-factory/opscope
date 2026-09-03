@@ -70,6 +70,10 @@ const NO_PUBLISHED_PRICE: &[&str] = &[
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-3-pro-preview",
+    // Never published — 3.8 ships as one model — but gemini-3.8-flash is a
+    // substring of this id, so without a name here the new row would meter
+    // an unpublished variant at flash rates.
+    "gemini-3.8-flash-lite",
     "gemma-4",
 ];
 
@@ -2199,9 +2203,12 @@ mod tests {
         assert_eq!(older.get("input"), Some(&0.75));
 
         // And a Gemini id nobody has published a price for stays unpriced
-        // rather than inheriting a neighbour's - the property the substring
-        // matcher gives for free here, pinned so a widened key cannot lose it.
+        // rather than inheriting a neighbour's. gemini-9.9-flash gets that
+        // from the matcher for free; gemini-3.8-flash-lite does not — the
+        // new flash key is a substring of it — so it is named in
+        // NO_PUBLISHED_PRICE and pinned here.
         assert!(rate_for("gemini-9.9-flash", &none).0.is_none());
+        assert!(rate_for("gemini-3.8-flash-lite", &none).0.is_none());
     }
 
     #[test]

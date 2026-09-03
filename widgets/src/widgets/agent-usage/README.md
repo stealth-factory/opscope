@@ -586,12 +586,14 @@ cached input all double on 1 January 2027. The successor figures are in
 `wiki/model-prices.md`, so the row moves on the day rather than being
 rediscovered after a month of half-price totals.
 
-Fourteen models are listed as having **no published price at all** — among
+Fifteen models are listed as having **no published price at all** — among
 them `gpt-5.3-codex-spark`, which is explicitly not on the API
 (`supported_in_api: false` in Codex's own model cache), `codex-auto-review`,
-and the retired and shut-down models. Without that, prefix matching would hand
-Spark `gpt-5.3-codex`'s rate — a number nobody published. They report as
-unpriced instead, and are named.
+`gemini-3.8-flash-lite` (never published; 3.8 ships as one model, but the
+new `gemini-3.8-flash` key is a substring of that id), and the retired and
+shut-down models. Without that, prefix matching would hand Spark
+`gpt-5.3-codex`'s rate — and would meter the unpublished Lite variant at
+Flash prices. They report as unpriced instead, and are named.
 
 What the table cannot express is **long context**. Above the threshold — 272k
 for most OpenAI models, 200k for the 5.6 family, Grok and the Gemini Pros —
