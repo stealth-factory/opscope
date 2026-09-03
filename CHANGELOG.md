@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.12.0] - 2026-09-03
+
+### Features
+
+- **agent-usage**: Price gemini-3.8-flash (#152)
+
 ## [0.11.1] - 2026-09-02
 
 ### Bug Fixes
