@@ -128,8 +128,8 @@ record which was taken, so both are carried.
   per kind and cannot express this, so long conversations are **understated**.
   `gpt-5.6-sol` above the line: 8 / 30 / 0.80 / 10.
   `gpt-6-astra` above the line: 20 / 75 / 2 / 25 — output is 1.5x rather
-  than the usual 2x, and the page states the tiers without naming the token
-  threshold, so the boundary is recorded as unknown rather than guessed.
+  than the usual 2x. The threshold is **272K** input tokens, named on the
+  model page (`developers.openai.com/api/docs/models/gpt-6-astra`).
 - `gpt-5.6` and `gpt-daybreak-blue-latest` alias `gpt-5.6-sol`;
   `gpt-daybreak-red-latest` aliases `gpt-5.6-cyber`.
 - Reasoning tokens bill as output. Regional data-residency endpoints add 10%
@@ -220,12 +220,10 @@ this family; leaving it out would say they publish it as free, which is a
 different claim from not publishing one.
 
 **Long context is its own tier again, and worse than usual.** Astra bills
-20 / 75 / 2 / 25 above the threshold. Input, cached input and cache writes all
-double, as elsewhere, but output rises only 1.5x — so the familiar "roughly
-double" shorthand overstates one kind and understates none. The pricing page
-gives the two tiers **without naming the token boundary**, so the threshold is
-recorded here as unknown rather than assumed to be 272k like most OpenAI
-models or 200k like the 5.6 family. Anyone who finds it should write it in.
+20 / 75 / 2 / 25 above **272K** input tokens. Input, cached input and cache
+writes all double, as elsewhere, but output rises only 1.5x — so the familiar
+"roughly double" shorthand overstates one kind and understates none. The
+model page names the boundary; the pricing table lists both tiers without it.
 
 **No variants and no promotional dates.** Checked on this date: Astra ships as
 one model, with Batch, Flex and Fast Mode as inference modes rather than
@@ -237,9 +235,10 @@ it was dispatched.
 **A trap worth naming.** `gpt-6-astra` is a substring of `gpt-6-astra-mini`,
 so if OpenAI ships a mini it inherits Astra's row and prices several times
 high — the `claude-fable-5-1` fault, which went unnoticed for over a thousand
-records. `gpt_6_astra_is_priced_and_does_not_disturb_the_5_6_family` pins that
-inheritance as it behaves today, so the assertion starts failing the moment a
-real mini appears and someone has to give it a row.
+records. Dated snapshots need that same match, so unknown suffixes cannot be
+left unpriced without unpricing snapshots too. The test pins the inheritance
+as it behaves today; it fails when a mini row is added to the catalogue, which
+is the moment someone has to give a real variant its own row.
 
 ### 3 Sep 2026
 

@@ -109,10 +109,10 @@ const NO_PUBLISHED_PRICE: &[&str] = &[
 const LIST_RATES: tc::Catalogue = &[
     (
         // Short-context standard rates. Astra prices long context as its own
-        // tier rather than a surcharge - 20 / 75 / 2 / 25 above the threshold,
-        // against 10 / 50 / 1 / 12.50 below it - which is the shape the note
-        // above says this table cannot express. The long column is in
-        // wiki/model-prices.md; carrying the short one understates a long
+        // tier rather than a surcharge - 20 / 75 / 2 / 25 above 272K input
+        // tokens, against 10 / 50 / 1 / 12.50 below it - which is the shape
+        // the note above says this table cannot express. The long column is
+        // in wiki/model-prices.md; carrying the short one understates a long
         // conversation and never overstates a short one, which is the same
         // trade every other OpenAI row here already makes.
         "gpt-6-astra",
@@ -2220,23 +2220,29 @@ mod tests {
          * THE TRAP THIS ROW SETS, pinned as it actually behaves rather than as
          * it should.
          *
-         * "gpt-6-astra" is a substring of "gpt-6-astra-mini", so the day
-         * OpenAI ships a mini it silently inherits Astra's rate - and a mini
-         * is always cheaper, so every one of its records would price several
-         * times high. That is exactly the claude-fable-5-1 fault, which sat
-         * unnoticed over a thousand records because only one kind was wrong.
+         * "gpt-6-astra" is a substring of "gpt-6-astra-mini", so a mini id
+         * silently inherits Astra's rate - and a mini is always cheaper, so
+         * every one of its records would price several times high. That is
+         * exactly the claude-fable-5-1 fault, which sat unnoticed over a
+         * thousand records because only one kind was wrong.
          *
-         * The assertion below documents the hazard instead of hiding it: when
-         * it starts failing, a real variant exists and needs its own row
-         * ABOVE this one. It is deliberately not written as `|| true`, which
-         * would make it a test that cannot fail.
+         * Dated snapshots (`gpt-6-astra-2026-09-05`) need that same substring
+         * match, so unknown suffixes cannot be left unpriced without
+         * unpricing snapshots too. NO_PUBLISHED_PRICE is for ids that exist
+         * and have no published rate, not for a hypothetical.
+         *
+         * This assertion is a catalogue canary, not a launch detector: an
+         * external ship does not change LIST_RATES. It fails when a mini row
+         * (or an unpriced-list entry) is added, which is the moment someone
+         * has to put a real variant ABOVE this one. All four kinds are
+         * pinned so a mini that shares only input cannot slip through.
          */
         let (mini, _) = rate_for("gpt-6-astra-mini", &none);
-        assert_eq!(
-            mini.expect("today a mini inherits Astra's row - see above").get("input"),
-            Some(&10.0),
-            "if this changed, gpt-6-astra-mini now has its own row and this note can go"
-        );
+        let mini = mini.expect("today a mini inherits Astra's row - see above");
+        assert_eq!(mini.get("input"), Some(&10.0), "if this changed, gpt-6-astra-mini now has its own row and this note can go");
+        assert_eq!(mini.get("output"), Some(&50.0));
+        assert_eq!(mini.get("cache_read"), Some(&1.0));
+        assert_eq!(mini.get("cache_write"), Some(&12.50));
     }
 
     #[test]
