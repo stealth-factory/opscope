@@ -9,7 +9,7 @@ license.workspace = true
 # dependency that has no version requirement. release-pr.yml bumps this
 # line in the same step as the workspace version, so the two crates cannot
 # drift apart - they are one product and are versioned together.
-opscope-core = { path = "../core", version = "0.12.0" }
+opscope-core = { path = "../core", version = "0.13.0" }
 libc = "0.2"
 serde_json = "1"
 # clocks needs these; nothing else does yet, and an unused dependency costs

@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.13.0] - 2026-09-05
+
+### Features
+
+- **agent-usage**: Price gpt-6-astra (#154)
+
 ## [0.12.0] - 2026-09-03
 
 ### Features
