@@ -46,7 +46,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "3 Sep 2026";
+const LIST_RATES_AS_OF: &str = "4 Sep 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -107,6 +107,18 @@ const NO_PUBLISHED_PRICE: &[&str] = &[
 /// roughly double. One rate per kind therefore understates a long
 /// conversation. The full tables are in wiki/model-prices.md.
 const LIST_RATES: tc::Catalogue = &[
+    (
+        // Short-context standard rates. Astra prices long context as its own
+        // tier rather than a surcharge - 20 / 75 / 2 / 25 above 272K input
+        // tokens, against 10 / 50 / 1 / 12.50 below it - which is the shape
+        // the note above says this table cannot express. The long column is
+        // in wiki/model-prices.md; carrying the short one understates a long
+        // conversation and never overstates a short one, which is the same
+        // trade every other OpenAI row here already makes.
+        "gpt-6-astra",
+        "OpenAI",
+        &[("input", 10.0), ("output", 50.0), ("cache_read", 1.0), ("cache_write", 12.50)],
+    ),
     (
         "gpt-5.6-sol",
         "OpenAI",
@@ -2175,6 +2187,64 @@ mod tests {
     /// matched nothing, so it priced nothing - and an unpriced model looks
     /// exactly like a model nobody used. A key can be wrong in a way that
     /// only a real name can expose, so real names are what this asserts.
+    #[test]
+    fn gpt_6_astra_is_priced_and_does_not_disturb_the_5_6_family() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        // Short-context standard rates, which is what the table carries.
+        let (rate, origin) = rate_for("gpt-6-astra", &none);
+        let rate = rate.expect("gpt-6-astra must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&10.0));
+        assert_eq!(rate.get("output"), Some(&50.0));
+        assert_eq!(rate.get("cache_read"), Some(&1.0));
+        // OpenAI publishes a cache write for this family, so it is carried -
+        // absent would say "they publish it as free", which is a different
+        // claim from "they do not publish one".
+        assert_eq!(rate.get("cache_write"), Some(&12.50));
+
+        // A new major must not swallow, or be swallowed by, the family below
+        // it. Matching is by substring in both directions, and "gpt-6-astra"
+        // shares no substring key with the 5.6 rows - pinned so a future
+        // widening to a bare "gpt-6" cannot quietly reprice them.
+        let (sol, _) = rate_for("gpt-5.6-sol", &none);
+        assert_eq!(sol.unwrap().get("output"), Some(&20.0));
+        let (cyber, _) = rate_for("gpt-5.6-cyber", &none);
+        assert_eq!(cyber.unwrap().get("input"), Some(&12.50));
+
+        // A gpt-6 id sharing no substring with any key stays unpriced, which
+        // is right: an unpublished model must not inherit a neighbour's rate.
+        assert!(rate_for("gpt-6-nova", &none).0.is_none());
+
+        /*
+         * THE TRAP THIS ROW SETS, pinned as it actually behaves rather than as
+         * it should.
+         *
+         * "gpt-6-astra" is a substring of "gpt-6-astra-mini", so a mini id
+         * silently inherits Astra's rate - and a mini is always cheaper, so
+         * every one of its records would price several times high. That is
+         * exactly the claude-fable-5-1 fault, which sat unnoticed over a
+         * thousand records because only one kind was wrong.
+         *
+         * Dated snapshots (`gpt-6-astra-2026-09-05`) need that same substring
+         * match, so unknown suffixes cannot be left unpriced without
+         * unpricing snapshots too. NO_PUBLISHED_PRICE is for ids that exist
+         * and have no published rate, not for a hypothetical.
+         *
+         * This assertion is a catalogue canary, not a launch detector: an
+         * external ship does not change LIST_RATES. It fails when a mini row
+         * (or an unpriced-list entry) is added, which is the moment someone
+         * has to put a real variant ABOVE this one. All four kinds are
+         * pinned so a mini that shares only input cannot slip through.
+         */
+        let (mini, _) = rate_for("gpt-6-astra-mini", &none);
+        let mini = mini.expect("today a mini inherits Astra's row - see above");
+        assert_eq!(mini.get("input"), Some(&10.0), "if this changed, gpt-6-astra-mini now has its own row and this note can go");
+        assert_eq!(mini.get("output"), Some(&50.0));
+        assert_eq!(mini.get("cache_read"), Some(&1.0));
+        assert_eq!(mini.get("cache_write"), Some(&12.50));
+    }
+
     #[test]
     fn a_new_gemini_row_is_priced_rather_than_silently_free() {
         let none: HashMap<String, Rate> = HashMap::new();

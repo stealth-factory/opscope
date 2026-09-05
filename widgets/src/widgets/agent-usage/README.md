@@ -564,7 +564,7 @@ carries `cache_write` and the older families still do not. xAI publishes none
 at all, and Google bills context caching by storage — per million tokens per
 *hour* — which is not a per-request write and is deliberately not carried.
 
-Two rows are worth knowing about. Fable 5.1 and Mythos 5.1 read cache at
+Four pricing exceptions are worth knowing about. Fable 5.1 and Mythos 5.1 read cache at
 $0.25, a quarter of the $1 that Fable 5 and Mythos 5 charge and a smaller
 multiplier than every other Anthropic model. Each 5.1 id extends the
 5 id — so both need rows of their own, or prefix matching hands them the
@@ -574,7 +574,18 @@ until its row went in. And
 through 21 Nov 2026; it is carried because it is the only price published and
 the one the meter bills at.
 
-`gemini-3.8-flash` is the third. Its numbers are identical to
+`gpt-6-astra` is the third. It carries OpenAI's short-context standard rates
+— 10 / 50 / 1 / 12.50 — and its long-context tier is 20 / 75 / 2 / 25, which
+this table cannot express for the reason given above. Two details are worth
+knowing: output rises only 1.5x above the line rather than the usual double,
+and that line is **272K** input tokens, named on the model page. There
+is also a trap in the id — `gpt-6-astra` is a substring of a hypothetical
+`gpt-6-astra-mini`, which would therefore inherit Astra's rate and price a
+cheaper model several times high. A test pins that inheritance as it behaves
+today; it fails when a mini row is added to the catalogue, not when OpenAI
+ships one.
+
+`gemini-3.8-flash` is the fourth. Its numbers are identical to
 `gemini-3.7-flash` — 0.75 / 3.75 / 0.075 — which makes the row look redundant
 and is precisely why it is not: matching is by substring, and no existing key
 is a substring of `gemini-3.8-flash`, so without its own line the model has no
