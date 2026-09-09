@@ -149,11 +149,41 @@ fn plain_refusal(said: &str) -> String {
         Some(c @ (502 | 503 | 504)) => {
             format!("GitHub returned {} - the search was too slow to serve", c)
         }
-        Some(c) => format!("GitHub returned {}", c),
+        Some(c) => match short_explain(said, c) {
+            Some(why) => format!("GitHub returned {}: {}", c, why),
+            None => format!("GitHub returned {}", c),
+        },
         // Not a status at all: a timeout or a curl failure, already a
         // sentence, and short enough to draw.
         None => said.chars().take(100).collect(),
     }
+}
+
+/// A non-gateway body's useful words, when it has any.
+///
+/// Gateway HTML is dropped above. A 401, 403 or 429 usually carries the
+/// reason in JSON (`Bad credentials`, a missing scope, the rate-limit
+/// message) and that is the sentence the pane should keep. Markup, or an
+/// empty body, leaves only the status.
+fn short_explain(said: &str, code: u16) -> Option<String> {
+    let rest = said
+        .strip_prefix("HTTP ")
+        .and_then(|s| s.strip_prefix(&code.to_string()))
+        .unwrap_or("")
+        .trim_start_matches(':')
+        .trim();
+    if rest.is_empty() || rest.starts_with('<') {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
+        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+            let m = m.trim();
+            if !m.is_empty() {
+                return Some(m.chars().take(80).collect());
+            }
+        }
+    }
+    Some(rest.chars().take(80).collect())
 }
 
 fn graphql(
@@ -661,11 +691,18 @@ const PAGE_FLOOR: usize = 10;
 
 /// Whether a failed round is worth asking again, smaller.
 ///
-/// Only the gateway giving up. A GraphQL error - bad credentials, a query
-/// GitHub will not accept - says the same thing however small the page is,
-/// and retrying it twice only spends rate limit to reprint the message.
+/// Only a gateway giving up, or curl hitting `--max-time`. A GraphQL
+/// error - bad credentials, a query GitHub will not accept - says the
+/// same thing however small the page is, and retrying it twice only
+/// spends rate limit to reprint the message. A 500 is the same: the
+/// search backend is not shedding load, it is broken, and a smaller
+/// page will not change its mind.
 fn worth_retrying(said: &str) -> bool {
-    said.starts_with("GitHub returned 5") || said.contains("did not answer in")
+    said.starts_with("GitHub returned 502")
+        || said.starts_with("GitHub returned 503")
+        || said.starts_with("GitHub returned 504")
+        || said.contains("curl: (28)")
+        || said.contains("curl exited 28")
 }
 
 /// One round of paging, backing off the page size when GitHub refuses.
@@ -2625,9 +2662,11 @@ fn detail_view(
 mod tests {
     use super::*;
 
-    /// Word for word what `run_with_timeout` says when curl outlives its
-    /// deadline - the other way a slow search reaches this widget.
-    const TIMED_OUT: &str = "curl did not answer in 45s";
+    /// Word for word what `post_json` hands back when curl hits `--max-time`.
+    /// Exit 28 is curl's timeout; `run_full`'s "did not answer in Ns" is a
+    /// different helper and never sits on this path.
+    const TIMED_OUT: &str =
+        "curl: (28) Operation timed out after 45000 milliseconds with 0 bytes received";
 
     #[test]
     fn a_gateway_page_never_reaches_the_screen() {
@@ -2650,22 +2689,36 @@ mod tests {
         let said = plain_refusal("HTTP 418: <html>teapot</html>");
         assert_eq!(said, "GitHub returned 418");
 
+        // A 401's body is the reason the token was refused. Dropping it
+        // left the pane saying only the number.
+        let said = plain_refusal(r#"HTTP 401: {"message":"Bad credentials"}"#);
+        assert_eq!(said, "GitHub returned 401: Bad credentials");
+
         // Not a status at all - curl failed, or the request timed out.
         // Already a sentence, and it is kept.
         assert_eq!(plain_refusal(TIMED_OUT), TIMED_OUT);
+        assert!(
+            worth_retrying(&plain_refusal(TIMED_OUT)),
+            "a timeout has to stay retryable after it is shortened"
+        );
     }
 
     #[test]
     fn only_the_gateway_is_worth_asking_again() {
         assert!(worth_retrying("GitHub returned 502 - the search was too slow to serve"));
+        assert!(worth_retrying("GitHub returned 503 - the search was too slow to serve"));
         assert!(worth_retrying("GitHub returned 504 - the search was too slow to serve"));
         assert!(worth_retrying(TIMED_OUT));
+        assert!(worth_retrying("curl exited 28"));
 
         // A smaller page does not change GitHub's mind about any of these,
         // and asking twice more spends rate limit to reprint the message.
         assert!(!worth_retrying("Bad credentials"));
         assert!(!worth_retrying("GitHub returned 401"));
         assert!(!worth_retrying("GitHub returned 403"));
+        assert!(!worth_retrying("GitHub returned 500"));
+        assert!(!worth_retrying("GitHub returned 501"));
+        assert!(!worth_retrying("GitHub returned 505"));
         assert!(!worth_retrying(
             "Field 'stackEntry' doesn't exist on type 'PullRequest'"
         ));
