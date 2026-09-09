@@ -133,10 +133,13 @@ it to code you have a stake in.
 `f` cycles which source is shown — `all`, then each by name. It is instant and
 costs no request, because the pooling already recorded the answer.
 
-**Page size is 50 per source, and every source is paged to exhaustion.**
+**Page size is 25 per source, and every source is paged to exhaustion.**
 Three searches of 100 return HTTP 502; three of 50 do not, so more results
-come from more rounds and never from a bigger page. Each source carries its
-own cursor and drops out of the round once GitHub says it has no next page.
+come from more rounds and never from a bigger page. The shipped default is
+25 because a slow spell sheds larger pages first; a gateway 502/503/504
+or a curl timeout asks again at half the size, down to ten. Each source
+carries its own cursor and drops out of the round once GitHub says it has
+no next page.
 Rows are published as each round lands, so the board fills while it works
 rather than staying empty until the last source is done, and the count in
 the header is the count on screen throughout.
@@ -317,10 +320,20 @@ widget quietly ran on somebody else's credential.
     "authored": "is:open is:pr author:@me",
     "assigned": "is:open is:pr assignee:@me"
   },
-  "limit": 50,
+  "limit": 25,
   "refresh": 60
 }
 ```
+
+`limit` is the page size a search asks GitHub for, not a cap on what the
+pane shows — paging runs until every source is exhausted either way. It
+matters because GitHub's search backend goes through slow spells and sheds
+the heaviest requests first: measured during one, every size from 25 up
+returned 502 at about 10.7s while 20 and below answered in three, and an
+hour later 50 answered in five with nothing changed at this end. So a round
+that is refused — a gateway 502, 503 or 504, or curl running out of its
+45 seconds — asks again at half the size, down to a floor of ten, and the
+pane says when it had to.
 
 Leave `token` empty and the variable `token_env` names is read instead,
 defaulting to `GITHUB_TOKEN`. Its value is the variable's name, not a

@@ -129,6 +129,63 @@ struct Rate {
     limit: Option<i64>,
 }
 
+/// What to say when the transport refused, rather than what it said.
+///
+/// A gateway that gives up answers with an HTML page, and `post_json` hands
+/// that back whole: `HTTP 502: <html> <head><title>502 Bad Gateway ...`.
+/// Every other error this widget draws is a sentence, and a pane is no
+/// place for markup - the banner wrapped the nginx body across four rows
+/// and said nothing a reader could act on. The status is the part that
+/// carries meaning, so keep it and drop the document.
+fn plain_refusal(said: &str) -> String {
+    let code = said
+        .strip_prefix("HTTP ")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|c| c.trim().parse::<u16>().ok());
+    match code {
+        // GitHub's search backend goes through slow spells and sheds the
+        // heaviest queries first; the widget is not broken and neither is
+        // the token, so the wording says which end gave up.
+        Some(c @ (502 | 503 | 504)) => {
+            format!("GitHub returned {} - the search was too slow to serve", c)
+        }
+        Some(c) => match short_explain(said, c) {
+            Some(why) => format!("GitHub returned {}: {}", c, why),
+            None => format!("GitHub returned {}", c),
+        },
+        // Not a status at all: a timeout or a curl failure, already a
+        // sentence, and short enough to draw.
+        None => said.chars().take(100).collect(),
+    }
+}
+
+/// A non-gateway body's useful words, when it has any.
+///
+/// Gateway HTML is dropped above. A 401, 403 or 429 usually carries the
+/// reason in JSON (`Bad credentials`, a missing scope, the rate-limit
+/// message) and that is the sentence the pane should keep. Markup, or an
+/// empty body, leaves only the status.
+fn short_explain(said: &str, code: u16) -> Option<String> {
+    let rest = said
+        .strip_prefix("HTTP ")
+        .and_then(|s| s.strip_prefix(&code.to_string()))
+        .unwrap_or("")
+        .trim_start_matches(':')
+        .trim();
+    if rest.is_empty() || rest.starts_with('<') {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
+        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+            let m = m.trim();
+            if !m.is_empty() {
+                return Some(m.chars().take(80).collect());
+            }
+        }
+    }
+    Some(rest.chars().take(80).collect())
+}
+
 fn graphql(
     query: &str,
     tok: &str,
@@ -144,7 +201,8 @@ fn graphql(
         ],
         &body,
         45,
-    )?;
+    )
+    .map_err(|said| plain_refusal(&said))?;
     let data: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
     if let Some(first) = data["errors"].as_array().and_then(|a| a.first()) {
         return Err(first["message"]
@@ -624,6 +682,67 @@ fn fetch_detail(
     Ok(())
 }
 
+/// The smallest page worth asking for before calling a round a failure.
+///
+/// Below this the request count climbs faster than the odds of an answer,
+/// and a search that will not serve ten per page is not having a slow
+/// minute, it is down.
+const PAGE_FLOOR: usize = 10;
+
+/// Whether a failed round is worth asking again, smaller.
+///
+/// Only a gateway giving up, or curl hitting `--max-time`. A GraphQL
+/// error - bad credentials, a query GitHub will not accept - says the
+/// same thing however small the page is, and retrying it twice only
+/// spends rate limit to reprint the message. A 500 is the same: the
+/// search backend is not shedding load, it is broken, and a smaller
+/// page will not change its mind.
+fn worth_retrying(said: &str) -> bool {
+    said.starts_with("GitHub returned 502")
+        || said.starts_with("GitHub returned 503")
+        || said.starts_with("GitHub returned 504")
+        || said.contains("curl: (28)")
+        || said.contains("curl exited 28")
+}
+
+/// One round of paging, backing off the page size when GitHub refuses.
+///
+/// Measured against the live API during a slow spell: every size from 25
+/// up returned 502 at about 10.7s while 20 and below answered in three,
+/// and an hour later 50 answered in five. The page size is not what
+/// decides it - search was slow across the board and the larger pages were
+/// simply the first over whatever budget it was enforcing. So the answer
+/// is not a smaller page everywhere, it is a smaller page for as long as
+/// GitHub is refusing the big one - which is why the caller feeds the size
+/// that worked back in rather than starting each round at the default.
+/// Halving twice from there reaches the floor, so a bad minute costs two
+/// extra requests once, not once per round.
+fn fetch_round(
+    round: &[String],
+    cursors: &[Option<String>],
+    limit: usize,
+    tok: &str,
+) -> Result<(serde_json::Value, usize), String> {
+    let mut size = limit.max(1);
+    loop {
+        match graphql(&list_query(round, size, cursors), tok, serde_json::json!({})) {
+            Ok(d) => return Ok((d, size)),
+            Err(said) => match smaller(size).filter(|_| worth_retrying(&said)) {
+                Some(next) => size = next,
+                None => return Err(said),
+            },
+        }
+    }
+}
+
+/// The next page size to try, or `None` at the floor.
+///
+/// Its own function so the walk can be tested rather than reimplemented in
+/// the test, which is a test of the arithmetic it copied.
+fn smaller(size: usize) -> Option<usize> {
+    (size > PAGE_FLOOR).then(|| (size / 2).max(PAGE_FLOOR))
+}
+
 /// How many open pull requests the pooled sources really cover, and whether
 /// that number is a floor rather than a count.
 ///
@@ -723,6 +842,14 @@ fn fetch_list(
     // Why paging stopped early, when it did. Kept apart from `err` so a
     // partial list is not dressed up as a failed fetch.
     let mut deepened: Option<String> = None;
+    // The smallest page any round had to fall back to, when one did, and
+    // what every later round in this pass starts from. A shorter page is
+    // not a smaller answer - paging carries on either way - but going back
+    // to the full size each round would spend a refusal and ten seconds
+    // relearning the same thing on every one of fifty-odd rounds. It also
+    // reaches the banner: a pane that says nothing about it looks like a
+    // pane that simply got slower.
+    let mut served: Option<usize> = None;
 
     while !live.is_empty() {
         let round: Vec<String> = live.iter().map(|i| queries[*i].clone()).collect();
@@ -734,12 +861,13 @@ fn fetch_list(
         // and it is the per-node subqueries that cost it, not the depth.
         // Everything already pooled is real and stays on screen, and
         // `capped` below already says the total is a lower bound.
-        let d = match graphql(
-            &list_query(&round, limit, &round_cursors),
-            tok,
-            serde_json::json!({}),
-        ) {
-            Ok(d) => d,
+        let d = match fetch_round(&round, &round_cursors, served.unwrap_or(limit), tok) {
+            Ok((d, size)) => {
+                if size < limit {
+                    served = served.map_or(Some(size), |had: usize| Some(had.min(size)));
+                }
+                d
+            }
             Err(said) if !order.is_empty() => {
                 deepened = Some(said);
                 break;
@@ -852,6 +980,16 @@ fn fetch_list(
             .into_iter()
             .flatten()
         {
+            said = if said.is_empty() {
+                note
+            } else {
+                format!("{} · {}", said, note)
+            };
+        }
+        if let Some(size) = served {
+            // Said plainly, because the list is whole and the only thing
+            // that changed is how many rounds it took to get here.
+            let note = format!("GitHub refused {} per page; served {}", limit, size);
             said = if said.is_empty() {
                 note
             } else {
@@ -1001,7 +1139,7 @@ fn main() {
         tc::load_config("github_prs")
     };
     let mut refresh = tc::poll_secs(tc::cfg_f64(&cfg, "refresh", 60.0), 60.0);
-    let limit = tc::cfg_usize(&cfg, "limit", 50);
+    let limit = tc::cfg_usize(&cfg, "limit", 25);
     let sources = sources_from(&cfg);
     let _ = SOURCES_REFILLED.set(sources_were_emptied(&cfg));
 
@@ -2523,6 +2661,81 @@ fn detail_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Word for word what `post_json` hands back when curl hits `--max-time`.
+    /// Exit 28 is curl's timeout; `run_full`'s "did not answer in Ns" is a
+    /// different helper and never sits on this path.
+    const TIMED_OUT: &str =
+        "curl: (28) Operation timed out after 45000 milliseconds with 0 bytes received";
+
+    #[test]
+    fn a_gateway_page_never_reaches_the_screen() {
+        // What `post_json` hands back when nginx gives up, shortened from
+        // the real body. Left whole it wrapped across four rows of the
+        // pane and told the reader nothing.
+        let body = "HTTP 502: <html> <head><title>502 Bad Gateway</title></head> \
+                    <body> <center><h1>502 Bad Gateway</h1></center> \
+                    <hr><center>nginx</center> </body> </html>";
+        let said = plain_refusal(body);
+        assert!(!said.contains('<'), "markup reached the banner: {}", said);
+        assert!(said.contains("502"), "the status is the part worth keeping");
+        assert!(
+            said.contains("too slow"),
+            "say which end gave up, not just the number: {}",
+            said
+        );
+
+        // A status with no meaning of its own still loses the document.
+        let said = plain_refusal("HTTP 418: <html>teapot</html>");
+        assert_eq!(said, "GitHub returned 418");
+
+        // A 401's body is the reason the token was refused. Dropping it
+        // left the pane saying only the number.
+        let said = plain_refusal(r#"HTTP 401: {"message":"Bad credentials"}"#);
+        assert_eq!(said, "GitHub returned 401: Bad credentials");
+
+        // Not a status at all - curl failed, or the request timed out.
+        // Already a sentence, and it is kept.
+        assert_eq!(plain_refusal(TIMED_OUT), TIMED_OUT);
+        assert!(
+            worth_retrying(&plain_refusal(TIMED_OUT)),
+            "a timeout has to stay retryable after it is shortened"
+        );
+    }
+
+    #[test]
+    fn only_the_gateway_is_worth_asking_again() {
+        assert!(worth_retrying("GitHub returned 502 - the search was too slow to serve"));
+        assert!(worth_retrying("GitHub returned 503 - the search was too slow to serve"));
+        assert!(worth_retrying("GitHub returned 504 - the search was too slow to serve"));
+        assert!(worth_retrying(TIMED_OUT));
+        assert!(worth_retrying("curl exited 28"));
+
+        // A smaller page does not change GitHub's mind about any of these,
+        // and asking twice more spends rate limit to reprint the message.
+        assert!(!worth_retrying("Bad credentials"));
+        assert!(!worth_retrying("GitHub returned 401"));
+        assert!(!worth_retrying("GitHub returned 403"));
+        assert!(!worth_retrying("GitHub returned 500"));
+        assert!(!worth_retrying("GitHub returned 501"));
+        assert!(!worth_retrying("GitHub returned 505"));
+        assert!(!worth_retrying(
+            "Field 'stackEntry' doesn't exist on type 'PullRequest'"
+        ));
+    }
+
+    #[test]
+    fn the_page_size_halves_to_a_floor_and_stops() {
+        // The sequence `fetch_round` walks from the shipped default. It
+        // stops at the floor rather than grinding down to one, because a
+        // search that will not serve ten per page is down, not slow.
+        let mut sizes = vec![25usize];
+        while let Some(next) = smaller(*sizes.last().unwrap()) {
+            sizes.push(next);
+        }
+        assert_eq!(sizes, vec![25, 12, 10]);
+        assert_eq!(smaller(PAGE_FLOOR), None, "the floor is where it stops");
+    }
 
     #[test]
     fn a_search_that_cannot_be_paged_is_a_search_capped_at_one_page() {

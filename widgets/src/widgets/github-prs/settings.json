@@ -19,8 +19,8 @@
     "authored": "is:open is:pr author:@me",
     "assigned": "is:open is:pr assignee:@me"
   },
-  "_limit_comment": "Maximum pull requests retained after searches are combined.",
-  "limit": 50,
+  "_limit_comment": "How many results to ask GitHub for per page. Not a cap on what is shown: paging continues until every search is exhausted. A smaller page is slower to finish and far likelier to be served when GitHub search is having a slow minute; a round that is refused backs off to 10 on its own.",
+  "limit": 25,
   "_refresh_comment": "Seconds between GitHub pull-request refreshes.",
   "refresh": 60.0
 }
