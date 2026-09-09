@@ -317,10 +317,19 @@ widget quietly ran on somebody else's credential.
     "authored": "is:open is:pr author:@me",
     "assigned": "is:open is:pr assignee:@me"
   },
-  "limit": 50,
+  "limit": 25,
   "refresh": 60
 }
 ```
+
+`limit` is the page size a search asks GitHub for, not a cap on what the
+pane shows — paging runs until every source is exhausted either way. It
+matters because GitHub's search backend goes through slow spells and sheds
+the heaviest requests first: measured during one, every size from 25 up
+returned 502 at about 10.7s while 20 and below answered in three, and an
+hour later 50 answered in five with nothing changed at this end. So a round
+that is refused asks again at half the size, down to a floor of ten, and the
+pane says when it had to.
 
 Leave `token` empty and the variable `token_env` names is read instead,
 defaulting to `GITHUB_TOKEN`. Its value is the variable's name, not a
