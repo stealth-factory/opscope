@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.13.1] - 2026-09-09
+
+### Bug Fixes
+
+- **github-prs**: Keep the pane readable when GitHub search is slow (#157)
+
 ## [0.13.0] - 2026-09-05
 
 ### Features
