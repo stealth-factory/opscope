@@ -1098,13 +1098,13 @@ of a credit window that had closed on the 19th, while the account had spent 57%
 of the window it was actually in. More than double, with nothing on screen to
 say the figure was old.
 
-Three settings, all off or hourly by default:
+Four settings, all on by default except the interval:
 
 | key | default | what it does |
 |---|---|---|
 | `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
-| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
+| `grok_ping` | `true` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
 ### Grok Bot (Cursor's weekly allowance)
