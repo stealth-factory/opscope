@@ -14,10 +14,18 @@ you open.
  ▇ approved 2   ▇ CHANGES REQ 1   ▇ needs review 27   · checks pass 24   · checks FAIL 6
 
  ── OPENED / DAY ── last 30d · 12 of 34 still open · peak 11/day
-                                                                        ██
-                                                                        ██
-                                                                        ██             ▂▂
- 30d ago                                                                            today
+                                                 ████                               █ █ █
+                                                 ████                               █ ▀▀█
+                                                 ████    ▄▄▄▄                       ▀   ▀
+ ────────────────────────────────────────────────────────────
+ 30d ago                                                today                     opened · last 24h
+
+ ── MERGED / DAY ── last 30d · 216 merged · peak 33/day
+                           ██                                                       █   █
+                   ▅▅    ▂▂██▄▄      ▁▁                  ▁▁                         █   █
+ ▅▅▃▃▆▆▂▂        ▂▂██▂▂▅▅██████▅▅▂▂▁▁██▇▇▁▁▁▁  ▁▁▆▆▅▅▃▃▁▁██▆▆                       ▀   ▀
+ ────────────────────────────────────────────────────────────
+ 30d ago                                                today                     merged · last 24h
 
  ── AGE ── median 53d  p95 1.9y  max 3.9y   idle median 53d
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▃▃▃▃▃▃▃▄▄▄▄▄██
@@ -56,9 +64,10 @@ Open one and it becomes a dashboard:
 
 ## The stats
 
-Three sections above the list, all computed from data already fetched, so they
-cost nothing. `t` toggles them, and they stand down on their own below thirty
-rows rather than leaving the list too short to be a list.
+Four sections above the list. Three are computed from data already fetched and
+cost nothing; the merge figures are the exception and cost one request, which
+is described below. `t` toggles them, and they stand down on their own below
+thirty rows rather than leaving the list too short to be a list.
 
 **They describe every open pull request, not the filtered list.** Typing in the
 filter is a search of the board, not a redefinition of it: watching the age
@@ -79,13 +88,42 @@ this is the one number that says something can be done right now.
 Not a throughput chart: it is the shape of the backlog's arrival, so a spike
 means a batch landed and never left.
 
+**Merged / day** — the same 30 days, the same bar height and the same
+`30d ago … today` axis, directly underneath, so the two can be read against
+one another: arrivals over departures. Each carries **one figure drawn large**
+in its right half — `opened · last 24h` and `merged · last 24h` — which is the
+only pair of numbers on the board that says whether the backlog is growing
+today.
+
+The window is **rolling, not a calendar day**, which is what the labels say. At
+nine in the morning "today" is three hours of evidence and reads as a collapse
+in throughput; 24 hours back from now does not.
+
+The two halves of the OPENED row count different populations, and the caption
+keeps saying so. The bars count only pull requests **still open** — `12 of 34
+still open` — because that is what the pool holds. The figure counts everything
+**opened**, including what has since been merged or closed. Read as one series
+they would contradict each other; they are not one series.
+
+The figure's half is as wide as its label when there is room for both. Narrower,
+the label wraps onto two lines under the digits rather than being cut, and
+narrower still the number sits on its own line under the caption, so the
+heading and the peak cannot push it off the pane. A narrow pane loses the
+size of the number, never the number. The digits themselves are drawn on
+**half blocks, two pixel rows to a cell**, which is how three rows of text
+carry a 3x5 glyph — core has no large-digit font.
+
+When nothing is open, STATE, OPENED / DAY and AGE have nothing to say and
+stand down. MERGED / DAY still draws: that is the one remaining signal, and
+the count request has already been spent on it.
+
 **Age** — median, p95 and max, then **one bar per open PR, youngest on the left
 and oldest on the right**. The x axis is *rank, not time*: neighbouring bars are
 adjacent in the sorted order, not a day apart. The shape of the tail is the
 point — a backlog ending in a wall of full blocks is a different problem from
 one that slopes.
 
-Both charts carry a **baseline rule and end labels**, and the age chart spreads
+All three charts carry a **baseline rule and end labels**, and the age chart spreads
 its bars to reach the right edge exactly. Without that a short chart simply
 stopped mid-pane with no way to tell a finished chart from a truncated one.
 When there are more PRs than columns the oldest are kept and the middle label
@@ -98,6 +136,41 @@ Heights are **linear against the oldest PR**, which is worth knowing when the
 spread is wide: with an outlier at 3.9 years, everything under a couple of
 months lands on the same lowest block. `latency` solves the same problem
 with a log scale; this chart has not adopted one yet.
+
+## Where the merge counts come from
+
+Every search on this board is `is:open` throughout, so **nothing merged is ever
+in hand** and no amount of reading the pool can produce a merge figure. GitHub
+is asked for it instead, as counts rather than records: one aliased
+`search(query:"… is:pr is:merged merged:YYYY-MM-DD", type:ISSUE) { issueCount }`
+per day, plus one for each rolling window, all in a single request. Thirty-two
+aliases, one round trip — measured against the live API at HTTP 200, and a whole
+pass including the account walk cost 15 of 5000 rate-limit points. Paging the
+merged pull requests to count them would have been a hundred round trips for two
+numbers.
+
+The rolling windows are asked for as full datetimes — `merged:>=2026-09-10T09:00:00Z`
+— which GitHub's search accepts. That was verified before it was relied on: the
+same query at a one-hour cut returns a smaller count than at 24, so the time
+part is read rather than ignored.
+
+**The counts are their own request on the list's own cadence, and never folded
+into the list's paging.** A count GitHub refuses must not cost the list, which
+has its own hard-won resilience to GitHub's slow spells: the reason lands beside
+the figures rather than in the pane's error line, the last good counts stay on
+screen, and the MERGED caption says the count failed and how old what you are
+looking at is.
+
+**A figure that has not arrived is not a figure of zero.** Nothing merged in a
+day is a real and unremarkable reading, so an unfetched count draws a shimmer
+and the word `loading` instead, and an alias GitHub leaves out of the answer
+fails the whole read rather than landing on a zero the chart would draw as a
+quiet day.
+
+They count over `@mine` — every org you belong to plus your own account, the
+same expansion the list's own scope uses. That is deliberate and it is worth
+knowing: if your configured `sources` do not use `@mine`, the two rows still
+describe every account you can see, not the narrower ground the list searched.
 
 ## Which PRs, and why it takes three searches
 
