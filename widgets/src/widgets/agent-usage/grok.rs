@@ -446,6 +446,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean
     // starting the CLI under somebody who is using it.
+    let mut refreshed = false;
     if cfg.grok_ping && newest > 0.0 {
         let quiet = now() - newest;
         let handled = caches
@@ -456,6 +457,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             .unwrap_or(0.0);
         if (SESSION_QUIET..SESSION_STALE).contains(&quiet) && newest > handled {
             refresh_token();
+            refreshed = true;
             caches.live.insert(
                 SEEN_KEY.to_string(),
                 (now(), Some(serde_json::json!(newest)), f64::MAX),
@@ -465,7 +467,14 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             caches.live.remove(PING_KEY);
         }
     }
-    refresh_if_token_lapsing(caches, cfg, newest);
+    // One read, one spawn. The expiry helper re-reads auth.json, so a
+    // session-end refresh that actually moved the token already no-ops
+    // it; this skip is for the case that did not, which would otherwise
+    // start the CLI a second time in the same frame. The next poll still
+    // reaches the expiry gate.
+    if !refreshed {
+        refresh_if_token_lapsing(caches, cfg, newest);
+    }
     let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
