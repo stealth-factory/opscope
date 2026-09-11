@@ -222,17 +222,18 @@ fn graphql(
     Ok(data["data"].clone())
 }
 
-/// What a search can hand over at any depth.
+/// What a search can hand over at any depth, cheaply.
 ///
-/// Everything here is a plain field on the pull request. Measured against
-/// the live API: with these alone a search of 665 pages out in full, in
-/// fourteen rounds, and never refuses.
+/// Everything here is a plain stored field on the pull request - nothing
+/// GitHub has to compute to answer. Measured against the live API: with
+/// these alone a search of 665 pages out in full, in fourteen rounds, and
+/// never refuses, and one page costs 2.2-2.8s at 25 against 3.3-9.8s when
+/// the computed fields below ride along.
 const PR_FIELDS: &str = "
       id number title url isDraft createdAt updatedAt
-      additions deletions changedFiles
       author { login }
       repository { nameWithOwner }
-      headRefName baseRefName reviewDecision mergeable";
+      headRefName baseRefName reviewDecision";
 
 /// The two fields a search cannot page deeply with, fetched by node id.
 ///
@@ -247,6 +248,24 @@ const PR_HEAVY_FIELDS: &str = "
       id
       stackEntry { position stack { number size } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+
+/// The four fields GitHub has to compute, fetched by node id.
+///
+/// A different complaint from the one above: a search serves these at any
+/// depth, it just serves them slowly. `mergeable` makes GitHub run a trial
+/// merge and the diff counts make it total a diff, and together they about
+/// double the search - measured at 25 per page, 2.2-2.8s without them
+/// against 3.3-9.8s with, one run of which was the 9.8. That is what
+/// carries a slow minute over the gateway's ten seconds, on the one
+/// request whose failure ends the whole pass.
+///
+/// Asked for by node id instead they cost 2.3-3.3s per fifty and fail on
+/// their own. And kept apart from `PR_HEAVY_FIELDS` rather than folded
+/// into it: the two groups together in one node query is a 502 as readily
+/// as the search was - measured, three runs, one refusal - and a stack
+/// lookup that failed should not also cost the conflicting count.
+const PR_COMPUTED_FIELDS: &str = "
+      id mergeable additions deletions changedFiles";
 
 /// Fill in the fields a search would not serve, for results already held.
 ///
@@ -280,6 +299,43 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
             let Some(entry) = pool.get_mut(url) else { continue };
             entry["stackEntry"] = node["stackEntry"].clone();
             entry["commits"] = node["commits"].clone();
+        }
+    }
+}
+
+/// The same again for the fields the search stopped carrying.
+///
+/// Fifty at a time, and a failed chunk leaves them absent - which is the
+/// whole point of the split. The checks above needed a flag on failure
+/// because a missing rollup read as a repository with no CI; here absence
+/// already means *not read yet* to every reader, because `mergeable_state`
+/// and `diff_of` hand back `None` rather than a happy default. So a chunk
+/// that fails costs a SIZE column that stays blank and a conflicting count
+/// that says how many it was over, and nothing claims anything it did not
+/// see.
+fn enrich_computed(
+    pool: &mut HashMap<String, serde_json::Value>,
+    by_id: &HashMap<String, String>,
+    tok: &str,
+) {
+    let ids: Vec<String> = by_id.keys().cloned().collect();
+    for chunk in ids.chunks(50) {
+        let query = format!(
+            "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
+            PR_COMPUTED_FIELDS
+        );
+        let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
+            continue;
+        };
+        for node in d["nodes"].as_array().into_iter().flatten() {
+            let id = text(node, "id");
+            let Some(url) = by_id.get(&id) else { continue };
+            let Some(entry) = pool.get_mut(url) else { continue };
+            for key in ["mergeable", "additions", "deletions", "changedFiles"] {
+                if !node[key].is_null() {
+                    entry[key] = node[key].clone();
+                }
+            }
         }
     }
 }
@@ -451,10 +507,38 @@ fn rollup(pr: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a trial merge has been read for this PR, and what it said.
+///
+/// `None` covers both halves of not knowing: the second enrichment pass
+/// has not reached this row yet or was refused, and GitHub's own `UNKNOWN`,
+/// which is what it answers while the trial merge is still running. Either
+/// way nobody has been told whether this branch conflicts, and the readers
+/// below have to say so rather than pick the pleasant answer.
+fn mergeable_state(pr: &serde_json::Value) -> Option<String> {
+    match text(pr, "mergeable").as_str() {
+        "MERGEABLE" => Some("MERGEABLE".into()),
+        "CONFLICTING" => Some("CONFLICTING".into()),
+        _ => None,
+    }
+}
+
+/// The diff figures, or `None` while they have not arrived.
+///
+/// A pull request that adds nothing and deletes nothing is a real answer
+/// and `number()` cannot tell it from an absent field, which is why this
+/// goes through `as_i64` instead. Both halves have to be there: half a
+/// size is not a size.
+fn diff_of(pr: &serde_json::Value) -> Option<(i64, i64)> {
+    Some((pr["additions"].as_i64()?, pr["deletions"].as_i64()?))
+}
+
 /// Approved, green, no conflict, not a draft - the actionable count.
 ///
 /// Everything else on this board describes work in flight; this is the one
-/// number that says something can be done right now.
+/// number that says something can be done right now. Which is exactly why
+/// nothing unread may fall into it: an unknown rollup and an unread trial
+/// merge both keep a PR out, because "you can merge this now" is a claim
+/// and the other rows are only descriptions.
 fn ready_to_merge(pr: &serde_json::Value) -> bool {
     if pr["checksUnknown"].as_bool().unwrap_or(false) {
         return false;
@@ -462,7 +546,7 @@ fn ready_to_merge(pr: &serde_json::Value) -> bool {
     let checks = rollup(pr);
     text(pr, "reviewDecision") == "APPROVED"
         && (checks == "SUCCESS" || checks.is_empty())
-        && text(pr, "mergeable") != "CONFLICTING"
+        && mergeable_state(pr).is_some_and(|m| m != "CONFLICTING")
         && !pr["isDraft"].as_bool().unwrap_or(false)
 }
 
@@ -1017,6 +1101,34 @@ fn discover_owners(tok: &str, state: &Arc<Mutex<State>>) -> Result<(), String> {
     Ok(())
 }
 
+/// Put what has landed on screen, without waiting for the rest.
+///
+/// Called after each enrichment pass of each round, so the board fills as
+/// the pages arrive rather than staying empty until the last source is
+/// exhausted, and the count in the header is the count on screen at every
+/// moment in between.
+fn publish(
+    state: &Arc<Mutex<State>>,
+    pool: &HashMap<String, serde_json::Value>,
+    order: &[String],
+    counted: &[(i64, usize)],
+    more_to_come: bool,
+) {
+    if let Ok(mut g) = state.lock() {
+        g.stages.count("pull requests", order.len(), None);
+        let partial: Vec<serde_json::Value> = order
+            .iter()
+            .filter_map(|url| pool.get(url).cloned())
+            .collect();
+        let (total, capped) = union_total(counted, partial.len());
+        g.total = total;
+        // Still fetching is still capped, whatever the counts say: the
+        // sources that remain live have more behind them.
+        g.capped = capped || more_to_come;
+        g.prs = partial;
+    }
+}
+
 fn fetch_list(
     tok: &str,
     source: &str,
@@ -1156,26 +1268,20 @@ fn fetch_list(
             }
         }
         live = next_live;
+        // Checks first, and published only once they are in. A round's
+        // rows could go up a second earlier than this, but `ready_to_merge`
+        // reads an absent rollup as a repository with no CI, so the board
+        // would count approved PRs as ready and then take it back - and
+        // "ready to merge" is the one figure anybody acts on.
         enrich(&mut pool, &fresh_ids, tok);
-
-        // Publish what has landed before asking for the next page. The
-        // board fills as the pages arrive rather than staying empty until
-        // the last source is exhausted, and the count in the header is the
-        // count on screen at every moment in between.
-        if let Ok(mut g) = state.lock() {
-            g.stages
-                .count("pull requests", order.len(), None);
-            let partial: Vec<serde_json::Value> = order
-                .iter()
-                .filter_map(|url| pool.get(url).cloned())
-                .collect();
-            let (total, capped) = union_total(&counted, partial.len());
-            g.total = total;
-            // Still fetching is still capped, whatever the counts say: the
-            // sources that remain live have more behind them.
-            g.capped = capped || !live.is_empty();
-            g.prs = partial;
-        }
+        publish(state, &pool, &order, &counted, !live.is_empty());
+        // The computed fields after, and published again. These do not
+        // need holding back: until they land the SIZE column is blank and
+        // the conflicting count says what it was over, so the board is
+        // visibly waiting rather than quietly wrong, and the rows are on
+        // screen two and a half seconds sooner for it.
+        enrich_computed(&mut pool, &fresh_ids, tok);
+        publish(state, &pool, &order, &counted, !live.is_empty());
     }
 
     let nodes: Vec<serde_json::Value> = order
@@ -2401,6 +2507,12 @@ fn stats_view(
         let mut review: HashMap<&str, usize> = HashMap::new();
         let mut checks: HashMap<&str, usize> = HashMap::new();
         let (mut drafts, mut conflicts, mut ready) = (0usize, 0usize, 0usize);
+        // How many trial merges have actually been read. The second
+        // enrichment pass lands a round behind the rows, so for a few
+        // seconds on every refresh this is short of `n` - and a bare
+        // "0 conflicting" over readings nobody has taken is a claim about
+        // the board rather than a count of it.
+        let mut merge_read = 0usize;
         for pr in prs {
             let decision = text(pr, "reviewDecision");
             let slot = match decision.as_str() {
@@ -2421,8 +2533,11 @@ fn stats_view(
             if pr["isDraft"].as_bool().unwrap_or(false) {
                 drafts += 1;
             }
-            if text(pr, "mergeable") == "CONFLICTING" {
-                conflicts += 1;
+            if let Some(m) = mergeable_state(pr) {
+                merge_read += 1;
+                if m == "CONFLICTING" {
+                    conflicts += 1;
+                }
             }
             if ready_to_merge(pr) {
                 ready += 1;
@@ -2448,7 +2563,11 @@ fn stats_view(
                 (p.dim.as_str(), " · ".into()),
                 (
                     if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
-                    format!("{} conflicting", conflicts),
+                    if merge_read < n {
+                        format!("{} conflicting of {} read", conflicts, merge_read)
+                    } else {
+                        format!("{} conflicting", conflicts)
+                    },
                 ),
                 (p.dim.as_str(), " · ".into()),
                 (
@@ -2687,8 +2806,18 @@ fn stats_view(
             w - 1,
         ));
     }
-    if let Some(fattest) = prs.iter().max_by_key(|p| number(p, "additions") + number(p, "deletions"))
     {
+        // Only over the PRs whose diff has actually been counted. Ranking
+        // by `number()` would hand the title to whichever unread row came
+        // first, at `+0/-0`, and call it the biggest change on the board.
+        // The other two figures on this line are computed from fields the
+        // search itself carries, so they draw either way - the line loses
+        // its third cell for a moment, not the row.
+        let fattest = prs
+            .iter()
+            .filter_map(|p| diff_of(p).map(|(add, del)| (add + del, p)))
+            .max_by_key(|(bulk, _)| *bulk)
+            .map(|(_, p)| p);
         let worst = |pairs: &[(f64, &serde_json::Value)]| -> String {
             match pairs.iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
                 Some((hours, pr)) => {
@@ -2705,13 +2834,13 @@ fn stats_view(
                 (p.warn.as_str(), tc::pad(&worst(&idles), 12)),
                 (p.dim.as_str(), "  biggest ".into()),
                 (
-                    p.txt.as_str(),
-                    format!(
-                        "#{} +{}/-{}",
-                        number(fattest, "number"),
-                        number(fattest, "additions"),
-                        number(fattest, "deletions")
-                    ),
+                    if fattest.is_some() { p.txt.as_str() } else { p.dim.as_str() },
+                    match fattest.and_then(|f| diff_of(f).map(|d| (f, d))) {
+                        Some((f, (add, del))) => {
+                            format!("#{} +{}/-{}", number(f, "number"), add, del)
+                        }
+                        None => "…".into(),
+                    },
                 ),
             ],
             w - 1,
@@ -2889,11 +3018,19 @@ fn list_view(
             ),
         ));
         if size_w > 0 {
+            // Blank until the figures arrive, never `+0/-0`. The column is
+            // filled by the second enrichment pass a moment after the row
+            // appears, and a zero drawn in the meantime is a wrong number
+            // rather than a missing one - it would say this PR changes
+            // nothing, which is a thing a PR can genuinely be.
             line.push((
                 c(&p.dim),
                 format!(
                     "{:>width$}",
-                    format!("+{}/-{}", number(pr, "additions"), number(pr, "deletions")),
+                    match diff_of(pr) {
+                        Some((add, del)) => format!("+{}/-{}", add, del),
+                        None => String::new(),
+                    },
                     width = size_w
                 ),
             ));
@@ -3022,12 +3159,18 @@ fn detail_view(
         ),
         (
             "size".into(),
-            format!(
-                "+{}/-{} in {} files",
-                number(pr, "additions"),
-                number(pr, "deletions"),
-                number(pr, "changedFiles")
-            ),
+            // The detail query asks for all three itself, so this is
+            // normally just there - but it says "not counted" rather than
+            // zero for the same reason the list column goes blank.
+            match diff_of(pr) {
+                Some((add, del)) => format!(
+                    "+{}/-{} in {} files",
+                    add,
+                    del,
+                    number(pr, "changedFiles")
+                ),
+                None => "not counted".into(),
+            },
             p.txt.as_str(),
         ),
         (
@@ -3657,6 +3800,13 @@ mod tests {
         assert!(first.contains("hasNextPage"), "{}", first);
         assert!(first.contains("endCursor"), "{}", first);
         assert!(!first.contains("after:"), "no cursor yet: {}", first);
+        // And nothing GitHub has to compute to answer. A trial merge and
+        // a diff total about double the request, which is what carried it
+        // over the gateway's budget on a slow minute; they are fetched by
+        // node id afterwards instead.
+        for costly in ["mergeable", "additions", "deletions", "changedFiles"] {
+            assert!(!first.contains(costly), "{} is not a search field: {}", costly, first);
+        }
         assert_eq!(first.matches("search(").count(), 2);
 
         // A cursor reaches the source it belongs to, and only that one.
@@ -3699,6 +3849,165 @@ mod tests {
         assert!(!ready_to_merge(&pr(
             r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "checksUnknown": true}"#
         )));
+    }
+
+    /// The same list with the second enrichment pass not yet landed - the
+    /// state every row is in for a couple of seconds after it appears, and
+    /// the state it stays in when that pass is refused.
+    fn awaiting_the_second_pass(n: usize) -> Vec<serde_json::Value> {
+        a_long_list(n)
+            .into_iter()
+            .map(|mut pr| {
+                let obj = pr.as_object_mut().unwrap();
+                obj.remove("additions");
+                obj.remove("deletions");
+                obj.remove("changedFiles");
+                obj.remove("mergeable");
+                pr
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unread_trial_merge_is_never_ready_to_merge() {
+        let pr = |json: &str| -> serde_json::Value { serde_json::from_str(json).unwrap() };
+        // Approved, green, not a draft - and nobody has asked GitHub
+        // whether it conflicts. The search no longer carries `mergeable`,
+        // so this is every row for as long as the second pass takes, and
+        // `!= "CONFLICTING"` on an absent field waved all of them through.
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}"#
+        )));
+        // GitHub's own answer while the trial merge is still running is a
+        // reading nobody took either.
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "UNKNOWN"}"#
+        )));
+        // And the reading itself, once it lands, still decides.
+        assert!(ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE"}"#
+        )));
+    }
+
+    #[test]
+    fn the_state_line_counts_conflicts_over_what_was_read() {
+        let p = palette();
+        let waiting = awaiting_the_second_pass(40);
+        let state = |prs: &[serde_json::Value]| -> String {
+            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+                .iter()
+                .map(|r| plain(r))
+                .find(|r| r.contains("STATE"))
+                .expect("a board with PRs on it has a STATE line")
+        };
+
+        // Nought conflicting out of nought read is not "no conflicts".
+        let line = state(&waiting);
+        assert!(
+            line.contains("0 conflicting of 0 read"),
+            "the count has to say what it is over: {}",
+            line
+        );
+        assert!(
+            line.contains("0 ready to merge"),
+            "and nothing is ready while the readings are out: {}",
+            line
+        );
+
+        // Every reading in, and the line stops qualifying itself.
+        let read: Vec<serde_json::Value> = waiting
+            .iter()
+            .enumerate()
+            .map(|(i, pr)| {
+                let mut pr = pr.clone();
+                pr["mergeable"] =
+                    serde_json::json!(if i < 3 { "CONFLICTING" } else { "MERGEABLE" });
+                pr
+            })
+            .collect();
+        let line = state(&read);
+        assert!(line.contains("3 conflicting"), "{}", line);
+        assert!(
+            !line.contains("conflicting of"),
+            "nothing left to qualify: {}",
+            line
+        );
+
+        // Half of them in, and it says half.
+        let mut partial = read.clone();
+        for pr in partial.iter_mut().skip(20) {
+            pr.as_object_mut().unwrap().remove("mergeable");
+        }
+        let line = state(&partial);
+        assert!(line.contains("3 conflicting of 20 read"), "{}", line);
+    }
+
+    #[test]
+    fn the_size_column_is_blank_until_the_figures_arrive() {
+        let p = palette();
+        let rows = |prs: &[serde_json::Value]| -> Vec<String> {
+            list_view(prs, 0, "created", true, "", 100, false, "all", &p)
+                .0
+                .iter()
+                .map(|r| plain(r))
+                .collect()
+        };
+
+        // A hundred columns is wide enough for SIZE, which is the only
+        // width where any of this is visible.
+        let drawn = rows(&a_long_list(4));
+        assert!(drawn.iter().any(|r| r.contains("SIZE")), "the column is there");
+        assert!(drawn.iter().any(|r| r.contains("+12/-3")), "and it fills");
+
+        // Nothing read yet: blank, not a figure of nought. `+0/-0` says
+        // this PR changes nothing, which is a thing a PR can really be.
+        let waiting = rows(&awaiting_the_second_pass(4));
+        assert!(waiting.iter().any(|r| r.contains("SIZE")), "the column stays");
+        assert!(
+            !waiting.iter().any(|r| r.contains("+0/-0")),
+            "a blank column, not a zero: {:?}",
+            waiting
+        );
+
+        // And a PR that genuinely changes nothing still says so.
+        let mut empty = a_long_list(1);
+        empty[0]["additions"] = serde_json::json!(0);
+        empty[0]["deletions"] = serde_json::json!(0);
+        assert!(
+            rows(&empty).iter().any(|r| r.contains("+0/-0")),
+            "a real nought is a real answer"
+        );
+    }
+
+    #[test]
+    fn the_biggest_pr_is_not_picked_from_figures_nobody_read() {
+        let p = palette();
+        let line = |prs: &[serde_json::Value]| -> String {
+            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+                .iter()
+                .map(|r| plain(r))
+                .find(|r| r.contains("biggest"))
+                .expect("the reckoning line draws whenever anything is open")
+        };
+
+        // Ranked on nothing, every PR ties at nought and the first one
+        // wins - a wrong winner rather than a missing one. The other two
+        // figures on the line come from fields the search still carries,
+        // so they draw either way.
+        let waiting = line(&awaiting_the_second_pass(4));
+        assert!(waiting.contains("oldest"), "the rest of the line stays: {}", waiting);
+        assert!(
+            !waiting.contains("+0/-0") && !waiting.contains("biggest #"),
+            "no winner from nothing: {}",
+            waiting
+        );
+
+        // One figure lands and it is the only candidate there is.
+        let mut some = awaiting_the_second_pass(4);
+        some[2]["additions"] = serde_json::json!(9);
+        some[2]["deletions"] = serde_json::json!(1);
+        assert!(line(&some).contains("biggest #3 +9/-1"), "{}", line(&some));
     }
 
     #[test]
