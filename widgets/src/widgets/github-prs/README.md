@@ -392,10 +392,10 @@ by accident.
 
 ## Cost
 
-One search request per page of the list, then one request per fifty
-returned pull requests for each of the two enrichment passes, plus one
-detail query when you open a PR and one more to reconstruct an inferred
-stack.
+Each paging round is one search, then two enrichment passes over that
+round's new rows, fifty ids at a time. Opening a PR costs one detail
+query. Reconstructing an inferred stack pages the repository, a hundred
+open pull requests at a time.
 
 The round costs what it always did, around eight seconds per fifty pull
 requests. What changed is where: the search is 2.2–2.8s of it instead of
