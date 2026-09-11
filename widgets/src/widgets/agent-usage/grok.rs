@@ -325,6 +325,57 @@ fn refresh_token() {
     let _ = child.wait();
 }
 
+/// Whether the expiry-keyed refresh should run, on a clock the tests can
+/// hold still.
+///
+/// `newest` is the newest session mtime, or 0 when there are none. No
+/// sessions is treated as quiet: the alternative is never refreshing a
+/// signed-in machine that has not used Grok here, which is the path a
+/// fresh install takes now that asking is on by default.
+fn token_is_due_a_refresh(newest: f64, expiry: f64, tried: f64, at: f64) -> bool {
+    let quiet = if newest > 0.0 { at - newest } else { f64::MAX };
+    quiet > SESSION_QUIET && expiry <= at + TOKEN_MARGIN && tried != expiry
+}
+
+/// Refresh the token when it is about to lapse, even if no session just ended.
+///
+/// The session-end gate fires only in the six hours after a session ends,
+/// and the token lapses on its own clock about that often. So anyone who
+/// has not run Grok since yesterday — or who signed in and never has — had
+/// the asking silently switched off. Reaching it needs a gate keyed on
+/// the token rather than on a session.
+///
+/// Both of the original guards are kept: nothing happens unless asking was
+/// turned on, and nothing starts the CLI underneath somebody who is using
+/// it. What is dropped is the upper bound on how long ago they last did.
+///
+/// Deduped on the expiry value, not on time. A refresh that does not
+/// move the expiry - a login that has genuinely run out - must be tried
+/// once and then left alone; a CLI respawned every five minutes for ever
+/// is a worse failure than the stale row it was trying to fix.
+fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
+    if !cfg.grok_ping {
+        return;
+    }
+    let Some(expiry) = token_expiry() else {
+        return;
+    };
+    let tried = caches
+        .live
+        .get(EXPIRY_KEY)
+        .and_then(|(_, v, _)| v.as_ref())
+        .and_then(|v| v.as_f64())
+        .unwrap_or(f64::NAN);
+    if token_is_due_a_refresh(newest, expiry, tried, now()) {
+        refresh_token();
+        caches.live.insert(
+            EXPIRY_KEY.to_string(),
+            (now(), Some(serde_json::json!(expiry)), f64::MAX),
+        );
+        caches.live.remove(PING_KEY);
+    }
+}
+
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
     let mut files = Vec::new();
@@ -335,6 +386,11 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // missing is the failure this repo keeps paying for. ok stays false,
         // so the tab says there are no sessions - under the quota, not
         // instead of it.
+        //
+        // The expiry refresh still runs: a machine that has auth.json and
+        // no session files is the fresh-install path, and returning here
+        // used to skip the only refresh that can keep the ask working.
+        refresh_if_token_lapsing(caches, cfg, 0.0);
         let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg);
         return Data {
             quota,
@@ -409,43 +465,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             caches.live.remove(PING_KEY);
         }
     }
-    // The gate above fires only in the six hours after a session ends, and
-    // the token lapses on its own clock about that often - measured at six
-    // hours on the machine this was found on. So anyone who has not run
-    // Grok since yesterday had the asking silently switched off, which is
-    // the exact failure the refresh above exists to prevent and says so in
-    // its own comment. Reaching it needs a gate keyed on the token rather
-    // than on a session.
-    //
-    // Both of the original guards are kept: nothing happens unless asking
-    // was turned on, and nothing starts the CLI underneath somebody who is
-    // using it. What is dropped is the upper bound on how long ago they
-    // last did.
-    //
-    // Deduped on the expiry value, not on time. A refresh that does not
-    // move the expiry - a login that has genuinely run out - must be tried
-    // once and then left alone; a CLI respawned every five minutes for ever
-    // is a worse failure than the stale row it was trying to fix.
-    if cfg.grok_ping {
-        let quiet = if newest > 0.0 { now() - newest } else { f64::MAX };
-        let expiry = token_expiry();
-        if let Some(expiry) = expiry {
-            let tried = caches
-                .live
-                .get(EXPIRY_KEY)
-                .and_then(|(_, v, _)| v.as_ref())
-                .and_then(|v| v.as_f64())
-                .unwrap_or(f64::NAN);
-            if quiet > SESSION_QUIET && expiry <= now() + TOKEN_MARGIN && tried != expiry {
-                refresh_token();
-                caches.live.insert(
-                    EXPIRY_KEY.to_string(),
-                    (now(), Some(serde_json::json!(expiry)), f64::MAX),
-                );
-                caches.live.remove(PING_KEY);
-            }
-        }
-    }
+    refresh_if_token_lapsing(caches, cfg, newest);
     let quota_read = quota_now(caches, cfg);
     Data {
         ok: true,
@@ -1473,6 +1493,31 @@ mod tests {
         // No key is a different reason again.
         let why = token_of(&serde_json::json!({"expires_at": "x"}), at).unwrap_err();
         assert!(why.contains("no account"), "{}", why);
+    }
+
+    #[test]
+    fn a_signed_in_machine_with_no_sessions_still_refreshes_a_lapsing_token() {
+        // The empty-session return used to skip the expiry gate, so a
+        // fresh install with auth.json and no transcripts asked until the
+        // token lapsed and then silently stopped. newest = 0 is that path.
+        let at = 1_000_000_000.0;
+        let lapsing = at + 60.0;
+        assert!(
+            token_is_due_a_refresh(0.0, lapsing, f64::NAN, at),
+            "no sessions, token inside the margin"
+        );
+        assert!(
+            !token_is_due_a_refresh(0.0, lapsing, lapsing, at),
+            "the same expiry is not tried twice"
+        );
+        assert!(
+            !token_is_due_a_refresh(0.0, at + 3600.0, f64::NAN, at),
+            "a token an hour out is left alone"
+        );
+        // A session that is still running keeps the CLI from starting
+        // underneath it, same as when transcripts exist.
+        assert!(!token_is_due_a_refresh(at - 30.0, lapsing, f64::NAN, at));
+        assert!(token_is_due_a_refresh(at - 200.0, lapsing, f64::NAN, at));
     }
 
     #[test]
