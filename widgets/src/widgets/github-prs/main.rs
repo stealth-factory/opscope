@@ -1237,6 +1237,28 @@ fn settle(
     g.err = warnings;
 }
 
+/// Where the window onto the body sits after a frame's worth of input.
+///
+/// The wheel writes `at` and nothing else, and this hands it straight
+/// back: the whole point of the rule is that scrolling to look at
+/// something never changes what `↵` opens, and a view that re-centred on
+/// the cursor every frame dragged itself back from wherever the wheel had
+/// just put it. Only on the frame a key moved the selection - `chase` -
+/// does the window follow the cursor.
+///
+/// Its own function so the composition can be tested. `tc::follow` is
+/// already tested; what has been wrong here is when it is called.
+fn scrolled(at: usize, cursor: Option<usize>, chase: bool, body: usize, room: usize) -> usize {
+    let at = match cursor.filter(|_| chase) {
+        Some(row) => tc::follow(at, row, room),
+        None => at,
+    };
+    // Clamped last, and written back by the caller: without that a wheel
+    // spun past the end leaves a scroll nobody can see, and the same
+    // number of wheel-ups to undo.
+    at.min(body.saturating_sub(room))
+}
+
 /// The dim line under the header when a pass fell back or stopped short.
 ///
 /// One line, or nothing at all. The sentence this replaced was two
@@ -1878,6 +1900,9 @@ fn main() {
         }
 
         let mut stack_cursor: Option<usize> = None;
+        // Where the selected PR ended up in the body, so the window can be
+        // brought to it on the frame a key moved the selection.
+        let mut list_cursor: Option<usize> = None;
         let hints: Vec<Vec<(&str, String)>> = if detail.is_some() || loading {
             let mut stack_sel_clamped = stack_sel;
             if !stack_rows.is_empty() {
@@ -1921,13 +1946,11 @@ fn main() {
             if !shown.is_empty() && selected >= shown.len() {
                 selected = shown.len() - 1;
             }
-            // Two day charts plus state and age, so the block is a board of
-            // its own. Raising this gate to match that height would hide the
-            // new charts on a pane that can scroll, which is the reading the
-            // scroll rule forbids. The body is a window onto whatever they
-            // need, and `t` hides them when the list should have the first
-            // screen.
-            if show_stats && h >= 30 {
+            // No height gate. A section that is not drawn looks exactly
+            // like a section with nothing in it, and with the whole widget
+            // scrolling there is nothing left to gain by hiding the stats
+            // on a short pane - `[t]stats` is the reader's own choice.
+            if show_stats {
                 // Every open PR, not `shown`: the filter is a search of the
                 // board, not a redefinition of it.
                 rows.extend(stats_view(
@@ -1942,23 +1965,18 @@ fn main() {
                 ));
             }
             let top = rows.len();
-            let (list, first) = list_view(
+            let (list, at) = list_view(
                 &shown,
                 selected,
                 SORTS[sort_at],
                 newest_first,
                 &needle,
                 w,
-                h,
                 fetched == 0.0,
                 &source_filter,
-                top,
-                board,
-                moved,
                 &p,
             );
-            board = first;
-            moved = false;
+            list_cursor = at.map(|at| top + at);
             rows.extend(list);
             vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
@@ -1994,9 +2012,10 @@ fn main() {
             .map(|l| format!(" {}", l))
             .collect();
         // A window onto the body rather than a cut of it, with the title
-        // pinned above: scrolled away, the detail screen stops saying which
-        // pull request it is describing. The list windows itself, so only
-        // the detail has anywhere to scroll to.
+        // pinned above: scrolled away, either screen stops saying what it is
+        // describing. Both screens work this way - the list's body is the
+        // stats and the whole list together, so the wheel moves the charts
+        // off the top instead of shuffling rows under them.
         let room = h.saturating_sub(footer.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
@@ -2016,7 +2035,9 @@ fn main() {
             dscroll
         } else {
             stack_moved = false;
-            0
+            board = scrolled(board, list_cursor.map(|at| at.saturating_sub(head.len())), moved, rest.len(), room_below);
+            moved = false;
+            board
         };
         let mut frame: Vec<String> = head.to_vec();
         frame.extend(rest.iter().skip(off).take(room_below).cloned());
@@ -2700,6 +2721,16 @@ fn stats_view(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Every row of the list, and where the selected row sits among them.
+///
+/// No window: the frame takes one onto the whole body, stats and list
+/// together, the way the detail screen does. A list that windowed itself
+/// under a stats block thirty rows tall left the wheel unable to move the
+/// charts out of the way, which is the case CLAUDE.md's scroll rule was
+/// written for - and it is why the row index comes back rather than an
+/// offset. The caller follows the cursor with it on the frame a key moved
+/// the selection, and leaves the view exactly where the wheel put it on
+/// every other frame.
 fn list_view(
     prs: &[serde_json::Value],
     selected: usize,
@@ -2707,14 +2738,10 @@ fn list_view(
     newest_first: bool,
     needle: &str,
     w: usize,
-    h: usize,
     waiting: bool,
     source_filter: &str,
-    top: usize,
-    from: usize,
-    chase: bool,
     p: &Palette,
-) -> (Vec<String>, usize) {
+) -> (Vec<String>, Option<usize>) {
     let mut rows = vec![String::new()];
     let arrow = if newest_first { "↓" } else { "↑" };
     rows.push(tc::seg(
@@ -2753,7 +2780,7 @@ fn list_view(
             "  no open PRs".to_string()
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
-        return (rows, 0);
+        return (rows, None);
     }
 
     // Columns are budgeted rather than guessed: the fixed ones are summed
@@ -2785,24 +2812,15 @@ fn list_view(
     }
     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
 
-    // `top` is what was drawn above this view. Without it the window is
-    // sized as though the list began at the top of the screen, so it renders
-    // far more rows than are visible, the caller truncates the overflow, and
-    // the selection scrolls off the bottom while `first` is still 0.
-    let room = h.saturating_sub(top + rows.len() + 3).max(1);
-    // Centred on the cursor on a frame a key moved it, and left exactly
-    // where it was on a frame the wheel did. Recentring every frame is what
-    // pulled the list straight back from wherever the wheel had put it.
-    let furthest = prs.len().saturating_sub(room);
-    let first = if !chase {
-        from.min(furthest)
-    } else if prs.len() > room {
-        selected.saturating_sub(room / 2).min(furthest)
-    } else {
-        0
-    };
-    for (i, pr) in prs.iter().enumerate().skip(first).take(room) {
+    // The header row is the last row before the PRs, and it scrolls with
+    // them: pinning it as well would be a second sticky region, which is
+    // the thing this removed.
+    let mut cursor = None;
+    for (i, pr) in prs.iter().enumerate() {
         let here = i == selected;
+        if here {
+            cursor = Some(rows.len());
+        }
         let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
         let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
@@ -2886,7 +2904,7 @@ fn list_view(
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    (rows, first)
+    (rows, cursor)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3423,6 +3441,102 @@ mod tests {
         }
         assert_eq!(sizes, vec![25, 12, 10]);
         assert_eq!(smaller(PAGE_FLOOR), None, "the floor is where it stops");
+    }
+
+    /// A list of open PRs that is longer than any pane, for the scroll
+    /// tests. Only the fields the list row reads.
+    fn a_long_list(n: usize) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "number": i + 1,
+                    "title": format!("a change worth reading about, number {}", i + 1),
+                    "url": format!("https://github.com/owner/repo/pull/{}", i + 1),
+                    "repository": { "nameWithOwner": "owner/repo" },
+                    "createdAt": "2026-09-01T00:00:00Z",
+                    "updatedAt": "2026-09-10T00:00:00Z",
+                    "additions": 12,
+                    "deletions": 3,
+                    "reviewDecision": "APPROVED",
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_wheel_moves_the_view_and_never_the_selection() {
+        // The body is longer than the pane, which is the only case where
+        // any of this is visible.
+        let (body, room) = (400usize, 20usize);
+
+        // A wheel-down is `board + 1` at the key, and this hands it back
+        // untouched. The selection is not an argument: it cannot move.
+        assert_eq!(scrolled(1, Some(0), false, body, room), 1);
+        // Three more, the selected row now well above the window, and the
+        // view stays exactly where the wheel left it.
+        assert_eq!(scrolled(4, Some(0), false, body, room), 4);
+
+        // An arrow-down past the fold brings the row into view, and only
+        // on the frame the key moved it: row 40 with room for 20 puts the
+        // window at 21 so the row is the last one drawn.
+        assert_eq!(scrolled(0, Some(40), true, body, room), 21);
+        // The frame after that is a frame nothing moved, so the window is
+        // left alone even though the cursor is at the very bottom of it.
+        assert_eq!(scrolled(21, Some(40), false, body, room), 21);
+        // And a wheel movement afterwards is not undone by the next frame -
+        // the failure this replaced, where the list re-centred on the
+        // cursor every frame and pulled itself straight back.
+        assert_eq!(scrolled(30, Some(40), false, body, room), 30);
+        assert_eq!(scrolled(30, Some(40), false, body, room), 30);
+
+        // Spun past the end, the scroll stops at the last screenful rather
+        // than banking wheel-ups nobody can see.
+        assert_eq!(scrolled(9_999, None, false, body, room), body - room);
+        // A body that fits has nowhere to go.
+        assert_eq!(scrolled(7, Some(3), false, 10, room), 0);
+    }
+
+    #[test]
+    fn a_short_pane_scrolls_the_stats_rather_than_hiding_them() {
+        let p = palette();
+        let prs = a_long_list(40);
+        // Every row, whatever the pane: a blank, the section head, the
+        // column head, and one row per PR.
+        let (list, cursor) = list_view(&prs, 7, "created", true, "", 80, false, "all", &p);
+        assert_eq!(list.len(), 3 + prs.len(), "the list is built whole");
+        assert_eq!(cursor, Some(3 + 7), "the selected row is where it says");
+
+        // The body a twenty-row pane draws through: the stats block and the
+        // whole list, with the title pinned above it. The stats used to
+        // stand down below thirty rows, which looked exactly like a board
+        // with nothing to say about itself.
+        let stats = stats_view(&prs, 40, false, None, "", 80, 0, &p);
+        assert!(stats.len() > 8, "the stats block is the tall part");
+        let body: Vec<String> = stats.iter().chain(list.iter()).cloned().collect();
+        let room = 20usize - 1 - 2;
+        assert!(body.len() > room, "a body worth scrolling");
+
+        // At the top, the pane is the stats. Not the list alone.
+        let at = scrolled(0, cursor, false, body.len(), room);
+        let seen: Vec<&String> = body.iter().skip(at).take(room).collect();
+        assert!(
+            seen.iter().any(|r| r.contains("STATE")),
+            "a twenty-row pane still opens on the stats"
+        );
+
+        // Scrolled far enough, they are gone and the list has the pane -
+        // which is what the wheel could never do while they were pinned.
+        let at = scrolled(stats.len() + 3, cursor, false, body.len(), room);
+        let seen: Vec<&String> = body.iter().skip(at).take(room).collect();
+        assert!(
+            !seen.iter().any(|r| r.contains("STATE")),
+            "the wheel has to be able to move the charts off the top"
+        );
+        assert!(
+            seen.iter().any(|r| r.contains("#5")),
+            "and the list is what is left: {:?}",
+            seen.last()
+        );
     }
 
     #[test]

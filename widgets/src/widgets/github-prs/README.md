@@ -66,8 +66,10 @@ Open one and it becomes a dashboard:
 
 Four sections above the list. Three are computed from data already fetched and
 cost nothing; the merge figures are the exception and cost one request, which
-is described below. `t` toggles them, and they stand down on their own below
-thirty rows rather than leaving the list too short to be a list.
+is described below. `t` toggles them, and nothing else does: they used to
+stand down on their own below thirty rows, which looked exactly like a board
+with nothing to say about itself. The pane scrolls instead — the wheel moves
+the stats off the top and gives the list the whole pane.
 
 **They describe every open pull request, not the filtered list.** Typing in the
 filter is a search of the board, not a redefinition of it: watching the age
@@ -253,7 +255,7 @@ two disagreed by years on the same PR.
 | `↵` | in a PR view, open the stack row under the cursor |
 | `c` | copy the PR's URL |
 | `r` | refetch now |
-| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the whole widget a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
 | `q` | quit |
 
