@@ -93,8 +93,9 @@ store, transcripts). `[+]` only ranks a live (or last-session) quota lane from
 the vendor, so a busy tab and an empty summary row can both be true. Claude
 needs a signed-in token and Anthropic's usage endpoint; Cursor needs
 `~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
-in `~/.copilot/config.json`; Grok needs either `creditUsagePercent` in
-`~/.grok/logs/unified.jsonl` or `agent_usage.grok_ping` to poll x.ai. Each of those
+in `~/.copilot/config.json`; Grok needs a billing reading in
+`~/.grok/logs/unified.jsonl` (`creditUsagePercent` or `onDemandCap`) or
+`agent_usage.grok_ping` to poll x.ai. Each of those
 is a different missing step, so each quiet agent says which one it is.
 
 A lane whose reading came from a cache rather than a live call says `cached`
@@ -180,8 +181,8 @@ only when it is enabled.
 **Cursor** — both quota and authorship.
 
 The quota is the same three lanes `cursor-agent`'s own in-session Usage view
-shows — total, cursor models, other models — plus spend against the plan
-limit and the billing cycle reset. It is **not** the documented
+shows — total, cursor models, other models — plus what the plan includes,
+what has been spent beyond it, and the billing cycle reset. It is **not** the documented
 `cursor.com/api/usage-summary`: that one wants a browser cookie and returns
 401 to everything this machine holds. The CLI instead speaks Connect to
 
@@ -201,17 +202,93 @@ still applies, and the sentence is written into that slot afterwards.
 
 **The percentages and the dollars have different denominators**, which is
 Cursor's own doing and worth stating. The three lanes are the server's
-`totalPercentUsed` / `autoPercentUsed` / `apiPercentUsed` verbatim; the spend
-line is `totalSpend` against `limit`. On this account those read 2% and
-`$48.80 of $400.00` — which is 12% — at the same moment.
+`totalPercentUsed` / `autoPercentUsed` / `apiPercentUsed` verbatim. Under them
+sit two dollar lines, each against a denominator of its own:
+
+```
+  spend        $400.00 of $400.00 included
+  extra usage   $9.64 of $50.00 limit · $40.36 left · resets 12 Sep
+```
+
+The first is `planUsage.includedSpend` of `planUsage.limit`. It used to read
+`totalSpend` against the same limit, and on this account that said **$1794.80
+of $400.00** — a figure that cannot be true. `totalSpend` carries `bonusSpend`
+beside it, which is spend Cursor granted *past* the included amount and is not
+against the limit at all; the pair that is against the limit is the included
+spend. `remaining` joins the line only when the server sends one, which it
+does not when `remainingBonus` is false.
 
 The lanes match what `cursor-agent` itself draws: its bundle computes each bar
 as `percentage !== undefined ? percentage : used/limit*100`, and since the
-server sends every percentage, the fallback never fires. The response also
-carries a `displayMessage` — *"You've used 12% of your included usage"* — which
-is the spend figure in a sentence. Both numbers are real and neither is
-rewritten here; the spend line stays in dollars rather than becoming a fourth
-bar, so 12% and 2% are never put on one scale.
+server sends every percentage, the fallback never fires. Nothing is rewritten
+here, and the dollar lines stay dollars rather than becoming two more bars, so
+51% and 19% are never put on one scale. The response also carries a
+`displayMessage` — *"You've used 91% of your included usage"* — which agrees
+with no figure the tab draws (`totalPercentUsed` said 51.3% in the same
+response, the included spend 100% of the limit), so it is not shown: a
+sentence that contradicts the numbers beside it is worse than no sentence.
+
+### Extra usage (the spend limit)
+
+Everything past the plan's included amount is **on-demand spend**, billed, and
+capped by a monthly spend limit the account sets on cursor.com. CodexBar shows
+it as *Extra usage → Monthly: $12.34 / $100.00*; the response the widget
+already fetched carried it all along in a block it never read:
+
+```
+"spendLimitUsage": {
+  "totalSpend": 964, "individualLimit": 5000,
+  "individualUsed": 964, "individualRemaining": 4036,
+  "limitType": "user"
+}
+```
+
+Cents, like everything else on this service. A user cap (`limitType: "user"`)
+reads `individualUsed` against `individualLimit`; a shared team budget reads
+`totalSpend` against the same limit and is labelled `team pool`, since that is
+the population the ceiling belongs to. Each figure is the other's fallback
+when proto3 omits a field at zero. The remainder is worked out from the pair
+rather than read from `individualRemaining`, because a cap lowered below what
+is already spent makes that field negative and *"-$9.00 left"* is arithmetic
+where a reader needs a fact. `resets` is `billingCycleEnd`, the date the
+cycle already carries.
+
+On `[+]` it becomes a lane labelled `extra $50`, on the plan's own cycle —
+extra usage resets when the cycle does — ranked with everything else. The
+label carries the cap because a percentage of an unnamed limit is not a number
+anyone can act on: 19% says nothing until the reader knows it is 19% of fifty
+dollars. The percentage itself is **not clamped**: a cap set below what is
+already spent is a real number over 100, and the summary draws a full bar
+beside the true figure, with the cap in the label to make it legible without
+opening the tab.
+
+**The limit has three states, and the account can change it mid-cycle**, so
+all three have to be drawable from whatever the next response says — plus a
+fourth for a response the parser does not recognise, which must never be drawn
+as one of the other three.
+
+| state | the line reads |
+|---|---|
+| fixed, under the cap | `$9.64 of $50.00 limit · $40.36 left · resets 12 Sep`, and a lane on `[+]` |
+| fixed, over the cap | `$10.00 of $1.00 limit · $9.00 over` — the real figures, the overage rather than a negative remainder, and a lane the summary draws full |
+| unlimited | `$9.64 · no limit` — dollars with no denominator, and **no lane**: a bar needs a ceiling, which is the refusal the Grok Bot allowance already makes |
+| disabled, nothing spent | `extra usage  disabled` |
+| disabled, spent earlier in the cycle | `$10.00 · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
+| block absent, or a shape not recognised | `extra usage  not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
+
+Only the **fixed** state has been measured on a real account. Proto3 omits a
+field sitting at its default, so a cap that is switched off and a cap that was
+never set both arrive with no `individualLimit` — which is why
+`DashboardService/GetHardLimit` is fetched beside the usage call. It answered
+`{"hardLimit": 50}` here, the same $50 the usage block states in cents, and
+cursor.com's own version of the call carries `noUsageBasedAllowed` and
+`hardLimitPerUser` beside it. `noUsageBasedAllowed` is the only field that can
+say extra usage is *forbidden* rather than merely uncapped, so it is what the
+disabled state rests on. Both assumptions are named in the test that covers
+them, to be replaced with a captured response when the setting is toggled.
+Best-effort like the Bot allowance: the cap in the usage block answers the
+state this account is actually in, so a refusal from `GetHardLimit` leaves
+every other line exactly as it was.
 
 `GetAggregatedUsageEvents` on the same service supplies a **spend** section:
 per-model input, output and cache tokens with Cursor's own `totalCents` — not
@@ -861,7 +938,7 @@ some tabs already finish on a blank and would otherwise leave two.
 | **Cursor** | `GetPlanInfo` on the same Connect service | plan name, price, included amount, who bills it |
 | **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
 | **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
-| **Grok** | the client log | tier, billing period, on-demand and prepaid balances |
+| **Grok** | the client log | tier, billing period, on-demand cap and prepaid balance |
 | **Antigravity** | `loadCodeAssist` | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
 
 Grok's tier moved out of its quota heading to join them, so no agent states
@@ -1230,9 +1307,50 @@ The screen says which state it is in, in both places it appears:
  live · polled x.ai just now, every 5m
 
  3%   ██┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  credits used
+ 12%  ████┃░░░░░░░░░░░░░░░░░░░░  on-demand $3 of $25
  window 26 Aug → 2 Sep
  by product GrokBuild 3.0% · GrokChat 0% · GrokImagine 0%
 ```
+
+### On-demand is the allowance that costs money
+
+Beside the included credits the billing answer carries the paid usage, and
+the widget parsed it from the start:
+
+```json
+"onDemandUsed": {"val": 3}, "onDemandCap": {"val": 25},
+"prepaidBalance": {"val": 0}
+```
+
+Dollars, not cents. It used to draw as a fragment on the window line —
+`on-demand 3/25` — which meant the summary that ranks every allowance on the
+wall said nothing about the only one that is billed. It now gets the credits
+row's treatment on the tab, and a lane on `[+]` labelled **`on-demand $25`**:
+`used / cap`, on the credits lane's own window so the two pace against one
+clock, and marked stale exactly as the credits lane is, since both come out
+of one reading. The cap rides in the label because a percentage of an unnamed
+ceiling is not a number anyone can act on.
+
+The lane draws **only where a cap is set**. `onDemandCap` of nought is the
+state of this account rather than a zero to plot, and a 0% bar would say
+there is an allowance sitting untouched when what is true is that there is
+none — the refusal the Grok Bot allowance and Cursor's spend limit both make.
+The tab says `no on-demand cap set` in its place, so an absent bar cannot be
+read as an absent reading. Spend past the cap has not been seen from x.ai,
+and if it arrives the figure is drawn as it came: full bar, real numbers, no
+clamp.
+
+The credit percentage and the cap are read independently, which matters for
+unified-billing accounts: those get no `creditUsagePercent` at all, and Grok
+used to drop off the summary entirely for that. An absent credit figure now
+takes only the credit lane with it. The same omission on a log line used to
+drop the whole reading when the live ask was off or failed; the log parser
+now accepts a named period with an `onDemandCap` the same way the live path
+does.
+
+`prepaidBalance` is **a balance, not an allowance** — money on the account,
+with no ceiling to be a percentage of — so it has no bar and stays as text
+beside the window.
 
 When asking is on and the figure still is not the server's, the row says
 which of the reasons applies rather than leaving `not live` to cover all of

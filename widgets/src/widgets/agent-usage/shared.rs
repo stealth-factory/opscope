@@ -211,6 +211,65 @@ pub struct Lane {
     pub apart: bool,
 }
 
+/// How much of a lane label the cap after it may take.
+///
+/// The summary's label column is shared by every agent and capped at 16
+/// cells, and the longest bare label that carries a cap is `on-demand` at
+/// nine - so seven, including the `$` and the space before it. Past that
+/// the column would grow at the bar's expense on a narrow pane.
+pub const CAP_TAG_ROOM: usize = 7;
+
+/// A ceiling, short enough to ride on a lane label.
+///
+/// A percentage of an unnamed limit is not a number anyone can act on: 19%
+/// says nothing until the reader knows it is 19% of fifty dollars. So the
+/// label says the cap and the bar stays the percentage.
+///
+/// Written as exactly as it fits and never truncated, because `$10,0` is a
+/// number that does not exist: whole dollars where the cap is whole, cents
+/// where they fit, a rounded whole where they do not, and thousands folded
+/// to `$10k` above that. `seg` would clip a label that overflowed and clip
+/// is what this exists to avoid.
+pub fn cap_tag(dollars: f64) -> String {
+    let grouped = |n: f64| {
+        let digits = (n.abs().round() as i64).to_string();
+        let mut out = String::new();
+        for (i, ch) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(ch);
+        }
+        out
+    };
+    let whole = (dollars - dollars.round()).abs() < 0.005;
+    let mut tries: Vec<String> = Vec::new();
+    if whole {
+        tries.push(format!(" ${}", grouped(dollars)));
+    } else {
+        tries.push(format!(" ${}.{:02}", grouped(dollars.trunc()), ((dollars.fract() * 100.0).round() as i64).abs()));
+        tries.push(format!(" ${}", grouped(dollars)));
+    }
+    // Folded rather than cut. One decimal while it fits, because $12.3k and
+    // $12k are different claims about the ceiling.
+    for (unit, div) in [("k", 1_000.0), ("m", 1_000_000.0), ("b", 1_000_000_000.0)] {
+        let scaled = dollars / div;
+        if scaled >= 1.0 {
+            // No ".0" on a round one: $10.0k spends a cell to say nothing.
+            if (scaled - scaled.round()).abs() >= 0.05 {
+                tries.push(format!(" ${:.1}{}", scaled, unit));
+            }
+            tries.push(format!(" ${:.0}{}", scaled, unit));
+        }
+    }
+    tries
+        .into_iter()
+        .find(|t| t.chars().count() <= CAP_TAG_ROOM)
+        // Nothing left to fold: better an honest long label than a clipped
+        // one, and no real cap reaches here.
+        .unwrap_or_else(|| format!(" ${:.0}", dollars))
+}
+
 /// What a refused request said, in words a reader can act on.
 ///
 /// `tc::get` returns curl's own message, which for `--fail` names the status
@@ -277,6 +336,35 @@ pub fn post_json_said(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cap_on_a_label_fits_the_column_it_was_given() {
+        // The label column is shared by every agent on the summary and
+        // capped at sixteen cells, so a cap that overran it would take the
+        // width off the bar beside it - and `seg` would clip the label,
+        // which is how you get a ceiling of `$10,0`.
+        for cap in [5.0, 50.0, 1000.0, 10000.0, 12.5] {
+            let tag = cap_tag(cap);
+            assert!(
+                tag.chars().count() <= CAP_TAG_ROOM,
+                "{} took {} cells: {:?}",
+                cap,
+                tag.chars().count(),
+                tag
+            );
+            assert!(tag.starts_with(" $"), "{:?}", tag);
+        }
+        // Whole dollars where the cap is whole, cents where they fit, and
+        // thousands folded rather than cut.
+        assert_eq!(cap_tag(5.0), " $5");
+        assert_eq!(cap_tag(50.0), " $50");
+        assert_eq!(cap_tag(1000.0), " $1,000");
+        assert_eq!(cap_tag(12.5), " $12.50");
+        assert_eq!(cap_tag(10000.0), " $10k");
+        // And a figure with cents too long to spell keeps its magnitude
+        // rather than its pennies.
+        assert_eq!(cap_tag(1234.56), " $1,235");
+    }
 
     /// The string this was built from is the one curl actually produced
     /// against api.anthropic.com while three widgets shared a token.

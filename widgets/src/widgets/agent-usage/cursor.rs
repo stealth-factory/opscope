@@ -100,6 +100,11 @@ pub struct Data {
     live_why: String,
     /// GetPlanInfo: the plan the percentages are percentages of.
     plan: Option<serde_json::Value>,
+    /// GetHardLimit: the extra-usage cap in dollars, and - on the
+    /// dashboard's own version of the call - whether extra usage is
+    /// allowed at all. The second opinion that tells an absent cap from a
+    /// forbidden one.
+    hard: Option<serde_json::Value>,
     /// The per-day summary folded out of GetFilteredUsageEvents.
     events: Option<serde_json::Value>,
     /// GetAggregatedUsageEvents: per-model cents over the window.
@@ -128,6 +133,25 @@ pub struct Data {
 /// error - the kind of silent zero this widget exists to avoid.
 fn loose(v: &serde_json::Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str()?.trim().parse().ok())
+}
+
+/// Cents as dollars. Every money field on this service is cents, and the
+/// one that is not - GetHardLimit's `hardLimit` - is turned into cents
+/// before it reaches here.
+fn money(cents: f64) -> String {
+    format!("${:.2}", cents / 100.0)
+}
+
+/// A billing-cycle timestamp as the day it falls on, in this machine's zone.
+///
+/// A date rather than a countdown, because this sits at the end of a
+/// sentence about money, and "resets 8 Oct" is something a reader can hold
+/// against a statement in a way "in 22h" is not.
+fn day_month(ms: f64) -> String {
+    match Local.timestamp_millis_opt(ms as i64).single() {
+        Some(at) => format!("{} {}", at.day(), MONTHS[at.month0() as usize]),
+        None => String::new(),
+    }
 }
 
 /// Thousands separators: "1,482,113 lines" is readable, "1482113" is not.
@@ -244,6 +268,280 @@ fn sand_lane(v: &serde_json::Value) -> Option<(f64, Option<f64>, Option<f64>)> {
         _ => None,
     };
     Some((pct.clamp(0.0, 100.0), secs, reset))
+}
+
+/// The extra-usage cap Cursor's dashboard reports, in dollars.
+///
+/// `GetCurrentPeriodUsage` states a cap only when one is set, and proto3
+/// omits a field sitting at its default - so an account with no cap and an
+/// account forbidden from spending beyond the plan arrive there looking
+/// identical. This call is the second opinion that tells them apart. It
+/// answered `{"hardLimit": 50}` on the measured account, the same $50 the
+/// usage block states in cents, and cursor.com's own version of it carries
+/// `noUsageBasedAllowed` and `hardLimitPerUser` beside that.
+///
+/// Best-effort, like the Bot allowance: the cap in the usage block is
+/// enough on its own for the state this machine is actually in, so a
+/// refusal here must leave everything else exactly as it was.
+fn cursor_hard_limit() -> Option<serde_json::Value> {
+    cursor_rpc("GetHardLimit", &serde_json::json!({}))
+}
+
+/// What Cursor's monthly spend limit is set to, and what has gone against
+/// it this cycle. Cents throughout, because that is what the API speaks.
+///
+/// Extra usage is on-demand spend past the plan's included amount: real
+/// money, billed, and capped by a limit the account sets on cursor.com.
+/// That setting has three states there and can be changed mid-cycle, so
+/// all three have to be drawable from whatever the next response says -
+/// plus a fourth for a response this parser does not recognise, which is
+/// never allowed to masquerade as one of the other three.
+#[derive(Debug, Clone, PartialEq)]
+enum ExtraState {
+    /// A dollar cap. `used` may exceed `limit`: lowering the cap below what
+    /// has already been spent is something the account can do at any time,
+    /// and the figures then have to stay the real ones.
+    Fixed {
+        used: f64,
+        limit: f64,
+        /// A shared team budget rather than this account's own cap.
+        shared: bool,
+    },
+    /// Extra usage allowed with no ceiling. A percentage of nothing, so no
+    /// bar - the refusal `sand_lane` already makes for an allowance that
+    /// does not exist.
+    Unlimited { used: f64 },
+    /// No extra usage allowed. Anything spent before it was turned off is
+    /// still billable and stays on screen.
+    Disabled { used: f64 },
+    /// No spend-limit block at all, or a shape this parser has not seen.
+    /// The keys it did see ride along, so the tab can name them instead of
+    /// reading a state into them.
+    NotReported { keys: Vec<String> },
+}
+
+/// Which state the spend limit is in, from the usage block and the hard
+/// limit beside it.
+///
+/// Only the fixed state has been measured on a real account. The other two
+/// rest on assumptions, each named in the test that covers it: proto3 omits
+/// a field at its default, so a cap that is off and a cap that was never
+/// set both arrive with no `individualLimit`, and `noUsageBasedAllowed` -
+/// which cursor.com's dashboard carries beside `hardLimit` - is the only
+/// field that can say extra usage is forbidden rather than merely uncapped.
+/// Anything matching none of the three is `NotReported` carrying its keys,
+/// because an admitted gap is worth more than a guessed state.
+fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> ExtraState {
+    let nothing = serde_json::Value::Null;
+    let hard = hard.unwrap_or(&nothing);
+    let Some(blk) = live.get("spendLimitUsage").filter(|v| v.is_object()) else {
+        return ExtraState::NotReported { keys: Vec::new() };
+    };
+    // An absent `limitType` is proto3's empty string, which is no
+    // evidence of a pool. Only a stated type other than `user` is.
+    let shared = !matches!(text(blk, "limitType").as_str(), "" | "user");
+    // A user cap is this account's spend; a shared pool is the pool's.
+    // `individualUsed` against a team ceiling is a partial presented as a
+    // total. Each is the other's fallback: proto3 omits a field at zero,
+    // and on the measured user account the two figures were the same.
+    let used = if shared {
+        loose(&blk["totalSpend"]).or_else(|| loose(&blk["individualUsed"]))
+    } else {
+        loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]))
+    };
+    if hard["noUsageBasedAllowed"].as_bool() == Some(true) {
+        return ExtraState::Disabled { used: used.unwrap_or(0.0) };
+    }
+    // Cents in the usage block, dollars in the hard limit. The two agreed
+    // at $50 on the measured account, and confusing them is a hundredfold
+    // error in a figure about money.
+    let capped = loose(&blk["individualLimit"]).filter(|l| *l > 0.0).or_else(|| {
+        loose(&hard["hardLimit"])
+            .or_else(|| loose(&hard["hardLimitPerUser"]))
+            .filter(|d| *d > 0.0)
+            .map(|d| d * 100.0)
+    });
+    if let Some(limit) = capped {
+        return ExtraState::Fixed {
+            // A block carrying a cap and no spend is proto3 omitting a
+            // zero, not a spend nobody knows - Cursor answered the call.
+            used: used.unwrap_or(0.0),
+            limit,
+            shared,
+        };
+    }
+    match used {
+        // A spend, no cap from either call, and nothing saying extra usage
+        // is forbidden: uncapped. Assumed, not measured.
+        Some(used) => ExtraState::Unlimited { used },
+        None => ExtraState::NotReported {
+            keys: blk.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default(),
+        },
+    }
+}
+
+/// The percentage the summary draws for extra usage, where there is one.
+///
+/// Only the fixed state has a ceiling to be a percentage of, and the figure
+/// is deliberately not clamped: a cap lowered below what is already spent
+/// is a real number over 100, and the summary draws a full bar and the true
+/// figure for it.
+fn extra_lane_pct(state: &ExtraState) -> Option<f64> {
+    match state {
+        ExtraState::Fixed { used, limit, .. } if *limit > 0.0 => Some(100.0 * used / limit),
+        _ => None,
+    }
+}
+
+/// The two dollar lines under the bars: what the plan includes, and what
+/// has been spent beyond it.
+///
+/// Deliberately dollars rather than two more bars. Both are spend against a
+/// denominator of their own - the plan's included amount, and the account's
+/// own monthly cap - and neither is the population the three percentages
+/// above are percentages of, so putting them on that scale would invite
+/// reading 12% and 2% as the same kind of number.
+///
+/// The plan pair is `includedSpend` of `limit`, not `totalSpend`:
+/// `totalSpend` carries `bonusSpend` beside it, which is spend Cursor
+/// granted past the included amount and is not against the limit at all.
+/// Read the other way it said `$1794.80 of $400.00` on the measured
+/// account, which is not a thing that can be true.
+fn spend_rows(live: &serde_json::Value, hard: Option<&serde_json::Value>, w: usize, p: &Palette) -> Vec<String> {
+    let plan = &live["planUsage"];
+    let state = extra_state(live, hard);
+    // A stated limit with no `includedSpend` is proto3 omitting a zero,
+    // not a plan nobody read - the same reading `individualLimit` gets.
+    let plan_pair = loose(&plan["limit"])
+        .filter(|v| *v != 0.0)
+        .map(|limit| (limit, loose(&plan["includedSpend"]).unwrap_or(0.0)));
+    // One column for both labels, so the two amounts line up under each
+    // other and the pair reads as a pair.
+    let label_w = ["spend", "extra usage"].iter().map(|l| l.chars().count()).max().unwrap();
+    let extra_used = match &state {
+        ExtraState::Fixed { used, .. }
+        | ExtraState::Unlimited { used }
+        | ExtraState::Disabled { used } => Some(*used),
+        ExtraState::NotReported { .. } => None,
+    };
+    // Right-aligned money: $9.64 under $400.00 keeps the decimal points in
+    // one column, and the `of` after them too.
+    let amt_w = plan_pair
+        .map(|(_, inc)| money(inc).chars().count())
+        .unwrap_or(0)
+        .max(extra_used.map(|u| money(u).chars().count()).unwrap_or(0));
+    let lbl = |name: &str| format!("  {} ", tc::pad(name, label_w));
+    let mut rows: Vec<String> = Vec::new();
+    if let Some((limit, included)) = plan_pair {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), lbl("spend")),
+                (p.txt.as_str(), format!("{:>1$}", money(included), amt_w)),
+                (p.dim.as_str(), " of ".into()),
+                (p.txt.as_str(), money(limit)),
+                (p.dim.as_str(), " included".into()),
+                // Only when the server states one. `remainingBonus` was
+                // false on the measured account and no `remaining` came
+                // with it, and a remainder worked out from a pair that
+                // already states itself is a third number saying nothing.
+                (
+                    p.dim.as_str(),
+                    match loose(&plan["remaining"]).filter(|v| *v >= 0.0) {
+                        Some(v) => format!(" · {} left", money(v)),
+                        None => String::new(),
+                    },
+                ),
+            ],
+            w - 1,
+        ));
+    }
+    rows.push(extra_row(&state, live, label_w, amt_w, w, p));
+    rows
+}
+
+/// The extra-usage line, in whichever of the four states the account is in.
+///
+/// Every state says the same two things: what has been spent, and what is
+/// allowed. An absent limit is not zero and a forbidden limit is not an
+/// absent one, so the four read differently on purpose - `$0.00 of $0.00`
+/// for any of them would be a cap of nothing rather than no cap.
+fn extra_row(
+    state: &ExtraState,
+    live: &serde_json::Value,
+    label_w: usize,
+    amt_w: usize,
+    w: usize,
+    p: &Palette,
+) -> String {
+    let lbl = format!("  {} ", tc::pad("extra usage", label_w));
+    let amt = |cents: f64| format!("{:>1$}", money(cents), amt_w);
+    let mut line: Vec<(String, String)> = vec![(p.dim.clone(), lbl)];
+    // What the row can do without on a narrow pane, in the order it gives
+    // them up. Both are derivable from the figures already on the line, and
+    // a row wider than its pane is worse than one that ends sooner.
+    let mut tails: Vec<String> = Vec::new();
+    match state {
+        ExtraState::Fixed { used, limit, shared } => {
+            line.push((p.txt.clone(), amt(*used)));
+            line.push((p.dim.clone(), " of ".into()));
+            line.push((p.txt.clone(), money(*limit)));
+            line.push((
+                p.dim.clone(),
+                if *shared { " team pool".into() } else { " limit".to_string() },
+            ));
+            // Over the cap states the overage, never a negative remainder:
+            // "-$9.00 left" is arithmetic where a reader needs a fact. And
+            // the overage is not droppable - it is the one thing on this
+            // row that is news.
+            if used > limit {
+                line.push((p.bad.clone(), format!(" · {} over", money(used - limit))));
+            } else {
+                tails.push(format!(" · {} left", money(limit - used)));
+            }
+        }
+        // No denominator, because there is none. The dollars are still real.
+        ExtraState::Unlimited { used } => {
+            line.push((p.txt.clone(), amt(*used)));
+            line.push((p.dim.clone(), " · no limit".into()));
+        }
+        // Spend already made under a limit since switched off is billable
+        // and stays on screen; with nothing spent there is no figure to
+        // show and the state is the whole of it.
+        ExtraState::Disabled { used } => {
+            if *used > 0.0 {
+                line.push((p.txt.clone(), amt(*used)));
+                line.push((p.dim.clone(), " · disabled".into()));
+            } else {
+                line.push((p.dim.clone(), " disabled".into()));
+            }
+        }
+        ExtraState::NotReported { keys } => {
+            line.push((p.warn.clone(), " not reported".into()));
+            // The keys that did arrive, so an unrecognised shape can be
+            // read off the pane and mapped rather than guessed at here.
+            if !keys.is_empty() {
+                line.push((p.dim.clone(), format!(" · keys: {}", keys.join(", "))));
+            }
+        }
+    }
+    // The cycle end belongs to every state that carries a figure, and is
+    // the first thing dropped when the pane is too narrow for all of it -
+    // a date is worth less than the money it is a date for.
+    let when = loose(&live["billingCycleEnd"]).map(day_month).unwrap_or_default();
+    if !when.is_empty() && !matches!(state, ExtraState::NotReported { .. }) {
+        tails.push(format!(" · resets {}", when));
+    }
+    let mut room: usize = w.saturating_sub(1);
+    room = room.saturating_sub(line.iter().map(|(_, t)| t.chars().count()).sum::<usize>());
+    for tail in tails {
+        let n = tail.chars().count();
+        if n <= room {
+            room -= n;
+            line.push((p.dim.clone(), tail));
+        }
+    }
+    let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+    tc::seg(&refs, w - 1)
 }
 
 /// Per-model tokens and real cost over a window.
@@ -458,6 +756,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         remember_refusal(caches, "cursor", &refuse);
     }
     d.plan = cached(caches, "cursor-plan", PLAN_TTL, cursor_plan);
+    // Best-effort beside the usage call, and never able to take it down:
+    // the cap in the usage block answers the state this account is in, and
+    // this only tells an absent cap from a forbidden one.
+    //
+    // Held for as long as the usage call and no longer, because the two are
+    // read together: the account can switch the limit off mid-cycle, and a
+    // spend block refreshed every two minutes against an hour-old
+    // `noUsageBasedAllowed` would draw the old state for the rest of that
+    // hour. One small POST on the same schedule as the reading it qualifies.
+    d.hard = cached(caches, "cursor-hard", LIVE_TTL, cursor_hard_limit);
     d.events = cached(caches, "cursor-events", EVENTS_TTL, || cursor_events(30));
     d.spend = cached(caches, "cursor-spend", LIVE_TTL, || cursor_spend(30));
     // Deliberately last of the four and deliberately unable to affect them:
@@ -552,6 +860,30 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
                     apart: false,
+        });
+    }
+    // Extra usage is monthly like the three above it and resets with
+    // them, so it takes the billing cycle's window rather than one of its
+    // own. A lane only where there is a ceiling to be a percentage of:
+    // unlimited and disabled draw dollars on the tab and nothing here.
+    //
+    // The label carries the cap, because 19% of an unnamed limit is not
+    // something a reader of the summary alone can act on - and over the
+    // cap it is what makes a full red bar legible without the tab.
+    let state = extra_state(live, d.hard.as_ref());
+    if let Some(pct) = extra_lane_pct(&state) {
+        let cap = match &state {
+            ExtraState::Fixed { limit, .. } => cap_tag(limit / 100.0),
+            _ => String::new(),
+        };
+        out.push(Lane {
+            label: format!("extra{}", cap),
+            pct,
+            window_secs: secs,
+            reset,
+            stale: false,
+            projected: false,
+            apart: false,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes
@@ -723,31 +1055,7 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             w - 1,
         ));
     }
-    if let Some(limit) = loose(&plan["limit"]).filter(|v| *v != 0.0) {
-        // Deliberately dollars rather than a fourth bar. This is spend
-        // against the plan limit - a different denominator from the three
-        // lanes above, which are the server's own percentages - and drawing
-        // it as a bar beside them would invite reading 12% and 2% as the
-        // same scale.
-        let spent = loose(&plan["totalSpend"]).unwrap_or(0.0);
-        let left = loose(&plan["remaining"]);
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), "  spend ".into()),
-                (p.txt.as_str(), format!("${:.2}", spent / 100.0)),
-                (p.dim.as_str(), " of ".into()),
-                (p.txt.as_str(), format!("${:.2}", limit / 100.0)),
-                (
-                    p.dim.as_str(),
-                    match left {
-                        Some(v) => format!("   ${:.2} left", v / 100.0),
-                        None => String::new(),
-                    },
-                ),
-            ],
-            w - 1,
-        ));
-    }
+    rows.extend(spend_rows(live, d.hard.as_ref(), w, p));
     rows.push(String::new());
     rows
 }
@@ -1265,7 +1573,13 @@ mod tests {
         // can take the tab down with it is worse than no extra.
         let d = Data {
             live: Some(serde_json::json!({
-                "planUsage": { "totalPercentUsed": 9.5, "limit": 40000.0, "totalSpend": 33099.0 },
+                "planUsage": {
+                    "totalPercentUsed": 9.5, "limit": 40000.0,
+                    // The honest pair, and beside it the one the line used
+                    // to read: totalSpend carries bonusSpend, so it is not
+                    // spend against the limit and must not be drawn as it.
+                    "includedSpend": 33099.0, "totalSpend": 172364.0,
+                },
                 "billingCycleStart": "1700000000000",
                 "billingCycleEnd": "1702592000000",
             })),
@@ -1278,6 +1592,7 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("total"), "plan bar lost: {}", joined);
         assert!(joined.contains("$330.99"), "spend lost: {}", joined);
+        assert!(!joined.contains("$1723.64"), "bonus spend drawn as plan spend: {}", joined);
         assert!(joined.contains("did not answer"), "reason not shown: {}", joined);
     }
 
@@ -1363,7 +1678,11 @@ mod tests {
                 "planUsage": {
                     "totalPercentUsed": 41.0, "autoPercentUsed": 12.0,
                     "apiPercentUsed": 3.0,
-                    "limit": "40000", "totalSpend": "16400", "remaining": "23600",
+                    // Strings, as Connect writes int64 - and includedSpend
+                    // rather than totalSpend, which is inflated by the
+                    // bonus Cursor granted past the included amount.
+                    "limit": "40000", "includedSpend": "16400",
+                    "totalSpend": "99999", "remaining": "23600",
                 },
                 "billingCycleStart": start.to_string(),
                 "billingCycleEnd": end.to_string(),
@@ -1373,11 +1692,28 @@ mod tests {
         let joined = cursor_quota(&d, 100, &p).join("\n");
         for want in [
             "total", "cursor models", "other models",
-            "$164.00", "$400.00", "$236.00",
+            "$164.00", "$400.00", "$236.00", "included",
             "of the cycle gone", "resets in",
         ] {
             assert!(joined.contains(want), "missing {}", want);
         }
+        assert!(!joined.contains("$999.99"), "totalSpend drawn against the limit: {}", joined);
+    }
+
+    #[test]
+    fn an_omitted_included_spend_is_nought_against_the_limit() {
+        // Proto3 omits a field sitting at its default. A cycle that has
+        // not spent against the included amount yet still has a limit,
+        // and zip-ing the pair used to drop the whole row for that.
+        let mut v = measured();
+        v["planUsage"].as_object_mut().unwrap().remove("includedSpend");
+        let joined = spend_rows(&v, None, 100, &palette())
+            .iter()
+            .map(|r| strip(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("$0.00 of $400.00 included"), "{}", joined);
+        assert!(!joined.contains("$1792.80"), "bonus spend filled the gap: {}", joined);
     }
 
     /// A drawn row without its colour escapes, so a column index means
@@ -1564,5 +1900,292 @@ mod tests {
         let note = why_no_lane(&refused);
         assert!(note.contains("did not answer"), "{note}");
         assert!(lanes(&refused).is_empty());
+    }
+    /// The response measured on this account, trimmed to the block under
+    /// test. Every number is cents, as the service sends them.
+    fn measured() -> serde_json::Value {
+        serde_json::json!({
+            "billingCycleStart": "1786518073000",
+            "billingCycleEnd": "1789196473000",
+            "planUsage": {
+                "totalSpend": 179265, "includedSpend": 40000, "bonusSpend": 139265,
+                "limit": 40000, "remainingBonus": false,
+                "autoPercentUsed": 43.0, "apiPercentUsed": 100, "totalPercentUsed": 51.2
+            },
+            "spendLimitUsage": {
+                "totalSpend": 964, "individualLimit": 5000,
+                "individualUsed": 964, "individualRemaining": 4036,
+                "limitType": "user"
+            },
+            "enabled": true,
+        })
+    }
+
+    /// Just the extra-usage row, without its colour escapes - the row the
+    /// state table is about.
+    fn extra_line(live: &serde_json::Value, hard: Option<&serde_json::Value>, w: usize) -> String {
+        strip(spend_rows(live, hard, w, &palette()).last().expect("an extra row"))
+    }
+
+    /// GetHardLimit as it answered here: dollars, and nothing else set,
+    /// which is proto3 leaving every other field at its default.
+    fn hard_fifty() -> serde_json::Value {
+        serde_json::json!({ "hardLimit": 50 })
+    }
+
+    #[test]
+    fn the_measured_account_is_a_fixed_fifty_dollar_cap() {
+        assert_eq!(
+            extra_state(&measured(), Some(&hard_fifty())),
+            ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: false }
+        );
+        // 9.64 of 50 is 19.28%, and the lane says so rather than rounding
+        // to a number that could be anything.
+        let pct = extra_lane_pct(&extra_state(&measured(), Some(&hard_fifty()))).unwrap();
+        assert!((pct - 19.28).abs() < 1e-9, "{pct}");
+        // And the same state without the second call, because the cap is in
+        // the usage block and the hard limit is only ever a second opinion.
+        assert_eq!(
+            extra_state(&measured(), None),
+            ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: false }
+        );
+    }
+
+    #[test]
+    fn the_cap_is_read_whether_it_arrives_as_a_number_or_a_string() {
+        // Connect writes int64 as JSON strings, and which fields come
+        // through as strings is not something this end controls. A cap read
+        // with a plain as_f64 would be silently absent, and an absent cap
+        // is a different state from a cap of $50.
+        let mut v = measured();
+        v["spendLimitUsage"] = serde_json::json!({
+            "totalSpend": "964", "individualLimit": "5000",
+            "individualUsed": "964", "individualRemaining": "4036",
+            "limitType": "user"
+        });
+        assert_eq!(
+            extra_state(&v, None),
+            ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: false }
+        );
+    }
+
+    #[test]
+    fn a_limit_type_that_is_not_user_is_a_shared_pool() {
+        // CodexBar's mapping: a team account without a personal cap draws
+        // on the team's on-demand budget instead, which is a different
+        // population and has to be labelled as one.
+        let mut v = measured();
+        v["spendLimitUsage"]["limitType"] = serde_json::json!("team");
+        assert_eq!(
+            extra_state(&v, None),
+            ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: true }
+        );
+        assert!(extra_line(&v, None, 100).contains("of $50.00 team pool"), "pool not labelled");
+
+        // The pool's spend, not this account's. On the measured user account
+        // the two figures were equal; a team with other spenders is the
+        // case the label is for, and individualUsed against a team ceiling
+        // is a partial presented as a total.
+        v["spendLimitUsage"]["individualUsed"] = serde_json::json!(964);
+        v["spendLimitUsage"]["totalSpend"] = serde_json::json!(4000);
+        assert_eq!(
+            extra_state(&v, None),
+            ExtraState::Fixed { used: 4000.0, limit: 5000.0, shared: true }
+        );
+        let line = extra_line(&v, None, 100);
+        assert!(line.contains("$40.00 of $50.00 team pool"), "{}", line);
+        assert!(!line.contains("$9.64"), "this account's spend drawn as the pool: {}", line);
+        assert_eq!(extra_lane_pct(&extra_state(&v, None)), Some(80.0));
+
+        // An absent limitType is proto3's empty string and says nothing
+        // about a pool, so it must not be read as one.
+        let mut bare = measured();
+        bare["spendLimitUsage"] = serde_json::json!({ "individualUsed": 964, "individualLimit": 5000 });
+        assert_eq!(
+            extra_state(&bare, None),
+            ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: false }
+        );
+    }
+
+    #[test]
+    fn a_cap_lowered_under_what_is_spent_states_the_overage() {
+        // The account can set the cap to $1 after spending $10, and then
+        // both figures are real. Never a negative remainder, never a
+        // percentage clamped in the text, and a lane the summary can draw
+        // full - the bar clamps, the number does not.
+        let mut v = measured();
+        v["spendLimitUsage"] = serde_json::json!({
+            "totalSpend": 1000, "individualLimit": 100,
+            "individualUsed": 1000, "individualRemaining": -900,
+            "limitType": "user"
+        });
+        let state = extra_state(&v, None);
+        assert_eq!(state, ExtraState::Fixed { used: 1000.0, limit: 100.0, shared: false });
+        assert_eq!(extra_lane_pct(&state), Some(1000.0));
+        let line = extra_line(&v, None, 100);
+        assert!(line.contains("$10.00 of $1.00 limit"), "{}", line);
+        assert!(line.contains("$9.00 over"), "overage not stated: {}", line);
+        assert!(!line.contains("left"), "a negative remainder was drawn: {}", line);
+        assert!(!line.contains("-$"), "a negative figure was drawn: {}", line);
+    }
+
+    #[test]
+    fn a_cap_raised_mid_cycle_is_a_percentage_of_the_new_one() {
+        // Nothing is cached against the old cap: the percentage is computed
+        // from whatever the response says on the read that follows the
+        // change, which is the only way a mid-cycle change can be honest.
+        let mut v = measured();
+        let pct = |v: &serde_json::Value| extra_lane_pct(&extra_state(v, None)).unwrap();
+        assert!((pct(&v) - 19.28).abs() < 1e-9, "{}", pct(&v));
+        v["spendLimitUsage"]["individualLimit"] = serde_json::json!(10000);
+        assert!((pct(&v) - 9.64).abs() < 1e-9, "{}", pct(&v));
+    }
+
+    #[test]
+    fn an_unlimited_cap_draws_dollars_and_no_lane() {
+        // ASSUMED WIRE SHAPE, not measured. Only the fixed state has been
+        // seen on a real account. Proto3 omits a field at its default, so
+        // unlimited is taken to arrive as the block with a spend in it and
+        // no individualLimit, with nothing in GetHardLimit forbidding extra
+        // usage. Replace this fixture with a captured response when the
+        // account owner toggles the setting.
+        let mut v = measured();
+        v["spendLimitUsage"] = serde_json::json!({
+            "totalSpend": 964, "individualUsed": 964, "limitType": "user"
+        });
+        let state = extra_state(&v, Some(&serde_json::json!({})));
+        assert_eq!(state, ExtraState::Unlimited { used: 964.0 });
+        // A bar needs a ceiling. This one has none, so there is no lane -
+        // the refusal sand_lane makes for an allowance nobody granted.
+        assert_eq!(extra_lane_pct(&state), None);
+        let line = extra_line(&v, None, 100);
+        assert!(line.contains("$9.64 · no limit"), "{}", line);
+        assert!(!line.contains(" of "), "a denominator was invented: {}", line);
+    }
+
+    #[test]
+    fn extra_usage_switched_off_keeps_what_was_already_spent() {
+        // ASSUMED WIRE SHAPE, not measured. noUsageBasedAllowed is the
+        // field cursor.com's dashboard carries beside hardLimit, and the
+        // only one that can say extra usage is forbidden rather than
+        // merely uncapped; the RPC answered hardLimit alone here, which is
+        // consistent with it sitting at its false default.
+        let off = serde_json::json!({ "hardLimit": 0, "noUsageBasedAllowed": true });
+        // Something spent before it was switched off is billable money and
+        // stays on screen. It is not a percentage of anything any more, so
+        // the lane goes.
+        let mut spent = measured();
+        spent["spendLimitUsage"] = serde_json::json!({
+            "totalSpend": 1000, "individualUsed": 1000, "limitType": "user"
+        });
+        let state = extra_state(&spent, Some(&off));
+        assert_eq!(state, ExtraState::Disabled { used: 1000.0 });
+        assert_eq!(extra_lane_pct(&state), None);
+        // Without the flag the same block is an uncapped spend, which is
+        // the point of the flag: it is the only thing that says forbidden.
+        assert_eq!(extra_state(&spent, None), ExtraState::Unlimited { used: 1000.0 });
+        let line = extra_line(&spent, Some(&off), 100);
+        assert!(line.contains("$10.00 · disabled"), "{}", line);
+
+        // Nothing spent: the state is the whole of it, and no figure is
+        // drawn because $0.00 of $0.00 would be a cap of nothing.
+        let mut clean = measured();
+        clean["spendLimitUsage"] = serde_json::json!({ "individualUsed": 0, "limitType": "user" });
+        assert_eq!(extra_state(&clean, Some(&off)), ExtraState::Disabled { used: 0.0 });
+        let line = extra_line(&clean, Some(&off), 100);
+        assert!(line.contains("extra usage  disabled"), "{:?}", line);
+        assert!(!line.contains("$"), "a zero cap was drawn: {:?}", line);
+    }
+
+    #[test]
+    fn a_block_that_is_absent_or_unrecognised_says_so_and_guesses_nothing() {
+        // Four states, and the fourth is the one that matters most: a shape
+        // this parser has not seen must never be drawn as one of the three
+        // it has. An absent block is not a cap of zero, and not "no limit"
+        // either - it is a thing not reported.
+        let mut v = measured();
+        v.as_object_mut().unwrap().remove("spendLimitUsage");
+        assert_eq!(extra_state(&v, Some(&hard_fifty())), ExtraState::NotReported { keys: Vec::new() });
+        let line = extra_line(&v, Some(&hard_fifty()), 100);
+        assert!(line.contains("extra usage  not reported"), "{:?}", line);
+        assert!(!line.contains("$"), "the hard limit was drawn as a cap: {:?}", line);
+        assert_eq!(extra_lane_pct(&extra_state(&v, None)), None);
+
+        // A block carrying neither a spend nor a cap: the keys go on the
+        // line, so an unmapped shape can be read off the pane.
+        let mut odd = measured();
+        odd["spendLimitUsage"] = serde_json::json!({ "somethingNew": 12, "limitType": "user" });
+        match extra_state(&odd, None) {
+            ExtraState::NotReported { keys } => {
+                assert!(keys.contains(&"somethingNew".to_string()), "{:?}", keys)
+            }
+            other => panic!("guessed a state from a shape it has not seen: {:?}", other),
+        }
+        let line = extra_line(&odd, None, 100);
+        assert!(line.contains("somethingNew"), "keys not named: {:?}", line);
+
+        // A zero cap is no cap. It must not draw as $0.00 of $0.00.
+        let mut zero = measured();
+        zero["spendLimitUsage"] = serde_json::json!({ "individualLimit": 0, "limitType": "user" });
+        assert_eq!(extra_state(&zero, None), ExtraState::NotReported {
+            keys: vec!["individualLimit".into(), "limitType".into()]
+        });
+        let line = extra_line(&zero, None, 100);
+        assert!(!line.contains("of $0.00"), "a cap of nothing was drawn: {:?}", line);
+    }
+
+    #[test]
+    fn the_extra_lane_joins_the_plan_lanes_on_the_summary() {
+        // On [+] it is ranked with everything else, on the plan's own
+        // cycle, because extra usage resets when the cycle does.
+        let d = Data {
+            live: Some(measured()),
+            hard: Some(hard_fifty()),
+            ..Data::default()
+        };
+        let got = lanes(&d);
+        let extra = got.iter().find(|l| l.label.starts_with("extra")).expect("an extra lane");
+        assert!((extra.pct - 19.28).abs() < 1e-9, "{}", extra.pct);
+        assert_eq!(extra.window_secs, Some(2_678_400.0));
+        assert_eq!(extra.reset, Some(1_789_196_473.0));
+        assert!(!extra.apart, "extra usage is part of the monthly group");
+        assert_eq!(extra.label, "extra $50", "the lane does not name its ceiling");
+        // And it is an addition, not a replacement: the three plan lanes
+        // are still there beside it.
+        assert_eq!(got.len(), 4);
+    }
+
+    #[test]
+    fn both_dollar_lines_line_up_and_neither_wraps() {
+        // The two sit together and are read as a pair, so the amounts share
+        // a column. And the pane this runs in is 58 cells wide: a row
+        // wider than its pane is worse than one that was cut, so the date
+        // stands down before the money does.
+        let p = palette();
+        let d = Data {
+            live: Some(measured()),
+            hard: Some(hard_fifty()),
+            ..Data::default()
+        };
+        for w in [40usize, 58, 80, 120] {
+            let rows = spend_rows(d.live.as_ref().unwrap(), d.hard.as_ref(), w, &p);
+            assert_eq!(rows.len(), 2, "a line went missing at {}", w);
+            let plain: Vec<String> = rows.iter().map(|r| strip(r)).collect();
+            for row in &plain {
+                assert!(row.chars().count() <= w - 1, "row {} wide at {}: {:?}", row.chars().count(), w, row);
+            }
+            // Right-aligned money lines up the decimal points and the
+            // `of` after them - not the dollar signs, which sit where each
+            // figure's own length puts them.
+            let at = |row: &str| row.find(" of ").expect("a denominator");
+            assert_eq!(at(&plain[0]), at(&plain[1]), "the amounts stepped at {}: {:?}", w, plain);
+        }
+        // Wide enough, and the cycle end is there; narrow, and it is not -
+        // rather than being cut in half by the clip.
+        let wide = spend_rows(d.live.as_ref().unwrap(), d.hard.as_ref(), 100, &p).join("\n");
+        assert!(wide.contains("resets "), "{}", wide);
+        let narrow = spend_rows(d.live.as_ref().unwrap(), d.hard.as_ref(), 58, &p).join("\n");
+        assert!(!narrow.contains("resets"), "a date was clipped rather than dropped: {}", narrow);
+        assert!(narrow.contains("$40.36 left"), "the money stood down first: {}", narrow);
     }
 }

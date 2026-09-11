@@ -203,31 +203,34 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
     for line in lines {
         // Rejected on a substring first: almost every line of this log is
         // something else, and parsing two megabytes of them to find the
-        // few that carry a credit reading costs more than the read.
-        if !line.contains("creditUsagePercent") {
+        // few that carry a billing reading costs more than the read.
+        // Unified-billing accounts omit `creditUsagePercent` entirely, so
+        // the paid-allowance keys have to count on their own or a valid
+        // on-demand lane never leaves the log.
+        if !line.contains("creditUsagePercent") && !line.contains("onDemandCap") {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let cfg = &d["ctx"]["config"];
-        // The key has to be there, but it does not have to hold a number:
-        // a reading the server sent with a null percentage still names the
-        // tier and the billing period, and those rows are real.
-        if !cfg
-            .as_object()
-            .is_some_and(|o| o.contains_key("creditUsagePercent"))
-        {
+        let period = &cfg["currentPeriod"];
+        // The period is what makes this a reading, same as quota_from.
+        // An omitted percentage is not a missing reading: the on-demand
+        // cap can still be there, and a null percentage still names the
+        // tier and the billing period.
+        let start = text(period, "start");
+        let end = text(period, "end");
+        if start.is_empty() || end.is_empty() {
             continue;
         }
-        let period = &cfg["currentPeriod"];
         let got = Quota {
             pct: val_of(&cfg["creditUsagePercent"]),
             products: products_of(cfg),
             taken: iso_epoch(&text(&d, "ts")),
             kind: text(period, "type"),
-            start: text(period, "start"),
-            end: text(period, "end"),
+            start,
+            end,
             tier: text(&d["ctx"], "subscriptionTier"),
             on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
             on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
@@ -765,6 +768,38 @@ fn reading_is_old(taken: Option<f64>) -> bool {
     taken.is_none_or(|t| now() - t > GROK_FRESH_FOR)
 }
 
+/// A dollar figure as x.ai states it: whole where it is whole.
+///
+/// These are dollars, not cents - `onDemandCap {val: 25}` is $25 - and
+/// "$25.00" spends two cells saying the same thing as "$25".
+fn dollars(v: f64) -> String {
+    if (v - v.round()).abs() < 0.005 {
+        format!("${}", v.round() as i64)
+    } else {
+        format!("${:.2}", v)
+    }
+}
+
+/// The paid allowance as a percentage, with the cap it is a percentage of -
+/// or nothing, where the account has set no cap.
+///
+/// Nothing is the account's state rather than a zero, and the difference
+/// matters: a 0% bar would say there is an on-demand allowance sitting
+/// untouched, when what is true is that there is none. The same refusal
+/// `sand_lane` makes for a Bot allowance nobody granted, and Cursor's
+/// extra usage for a spend limit nobody set.
+///
+/// Spend with no cap beside it is proto3 omitting the default, which on
+/// this endpoint means nought - the same reading the credit percentage
+/// gets three screens up, for the same documented reason.
+///
+/// Not clamped: x.ai has not been seen to report spend past the cap, and
+/// if it ever does, the real figure is the one worth drawing.
+fn on_demand_lane(q: &Quota) -> Option<(f64, f64)> {
+    let cap = q.on_demand_cap.filter(|c| *c > 0.0)?;
+    Some((100.0 * q.on_demand_used.unwrap_or(0.0) / cap, cap))
+}
+
 /// The week split by product, in the order the server lists them.
 ///
 /// A product with nothing spent omits `usagePercent` exactly as the total
@@ -806,8 +841,8 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
     // shown as current while the server's own answer, naming the window we
     // are actually in, was thrown away.
     //
-    // The log parser has always accepted a reading whose percentage is
-    // absent, for exactly this reason. The two are consistent now.
+    // The log parser accepts a reading whose percentage is absent, for
+    // exactly this reason. The two are consistent now.
     let start = text(period, "start");
     let end = text(period, "end");
     if start.is_empty() || end.is_empty() {
@@ -880,9 +915,6 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     let Some(q) = d.quota.as_ref() else {
         return Vec::new();
     };
-    let Some(pct) = q.pct else {
-        return Vec::new();
-    };
     let (begin, end) = (iso_epoch(&q.start), iso_epoch(&q.end));
     // A live reading is of the window we are in, so there is nothing to roll
     // forward and nothing to qualify. Only the log needs either.
@@ -891,21 +923,47 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     } else {
         window_now(begin, end, now())
     };
-    vec![Lane {
-        label: "credits".into(),
-        pct,
-        window_secs: match (begin, end) {
-            (Some(b), Some(e)) if e > b => Some(e - b),
-            _ => None,
-        },
-        reset,
-        // By age, not by source. A figure the server sent four minutes ago
-        // and one the log recorded thirty seconds ago are both current; a
-        // live fetch of a reading taken days earlier is not.
-        stale: reading_is_old(q.taken),
-        projected,
+    let window_secs = match (begin, end) {
+        (Some(b), Some(e)) if e > b => Some(e - b),
+        _ => None,
+    };
+    // By age, not by source. A figure the server sent four minutes ago
+    // and one the log recorded thirty seconds ago are both current; a
+    // live fetch of a reading taken days earlier is not.
+    let stale = reading_is_old(q.taken);
+    let mut out = Vec::new();
+    // The credit percentage is optional and the on-demand cap is optional,
+    // and they are optional independently: a unified-billing account gets
+    // no `creditUsagePercent` at all, which used to take the whole of Grok
+    // off the summary and would now take the paid allowance with it.
+    if let Some(pct) = q.pct {
+        out.push(Lane {
+            label: "credits".into(),
+            pct,
+            window_secs,
+            reset,
+            stale,
+            projected,
             apart: false,
-    }]
+        });
+    }
+    // The allowance that costs money, on the same window as the credits
+    // beside it so the two pace against one clock. Its label carries the
+    // cap: a percentage of an unnamed ceiling is not a number anyone can
+    // act on, and this one is dollars.
+    if let Some((pct, cap)) = on_demand_lane(q) {
+        out.push(Lane {
+            label: format!("on-demand{}", cap_tag(cap)),
+            pct,
+            window_secs,
+            reset,
+            // The same reading, so the same age.
+            stale,
+            projected,
+            apart: false,
+        });
+    }
+    out
 }
 
 /// True when nothing is asking the server on the reader's behalf, so the
@@ -1153,6 +1211,40 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 w - 1,
             )),
         }
+        // On-demand gets the credits row's treatment rather than a tail on
+        // the window line, so the tab and the summary say the same thing
+        // about the allowance that is billed. Without a cap it says so in
+        // words: an empty gauge here would read as an untouched allowance,
+        // and there is not one.
+        match on_demand_lane(q) {
+            Some((pct, cap)) => {
+                let tail = format!(
+                    "  on-demand {} of {}",
+                    dollars(q.on_demand_used.unwrap_or(0.0)),
+                    dollars(cap)
+                );
+                let mut line: Vec<(String, String)> = vec![(
+                    pct_colour(pct, hue, p),
+                    format!(" {:<5}", format!("{:.0}%", pct)),
+                )];
+                line.extend(paced_bar(
+                    (pct / 100.0).clamp(0.0, 1.0),
+                    elapsed_of(span, reset),
+                    // Measured against the tail actually being drawn, so a
+                    // longer cap cannot quietly start clipping the row.
+                    w.saturating_sub(15 + tail.chars().count()).max(8),
+                    hue,
+                    p,
+                ));
+                line.push((p.dim.clone(), tail));
+                line.push(pace_cell(lead(pct, span, reset), p));
+                rows.push(seg_of(&line, w));
+            }
+            None => rows.push(tc::seg(
+                &[(p.dim.as_str(), "  no on-demand cap set".into())],
+                w - 1,
+            )),
+        }
 
         let (from, to) = (short_day(&q.start), short_day(&q.end));
         let window = if from.is_empty() || to.is_empty() {
@@ -1160,16 +1252,12 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         } else {
             format!("{} → {}", from, to)
         };
+        // On-demand has a row of its own above; what is left here is the
+        // prepaid balance, which is money on the account rather than an
+        // allowance and so has no percentage to be a bar of.
         let mut extras: Vec<String> = Vec::new();
-        if let Some(cap) = q.on_demand_cap.filter(|v| *v != 0.0) {
-            extras.push(format!(
-                "on-demand {}/{}",
-                q.on_demand_used.unwrap_or(0.0),
-                cap
-            ));
-        }
         if let Some(prepaid) = q.prepaid.filter(|v| *v != 0.0) {
-            extras.push(format!("prepaid {}", prepaid));
+            extras.push(format!("prepaid {}", dollars(prepaid)));
         }
         rows.push(tc::seg(
             &[
@@ -1320,16 +1408,26 @@ fn plan_block(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     if !kind.is_empty() {
         pairs.push(("billing period".into(), kind));
     }
-    // A cap of zero is still a cap the account has, so this asks whether
-    // the server sent one rather than whether it is spendable.
+    // A cap of nought is not a cap, and this row said so as "0 of 0 used" -
+    // an allowance fully unspent, which is the opposite reading. The
+    // quota block above draws no bar for the same reason and says which
+    // state it is in; this says the same thing in the same words.
     if let Some(cap) = q.on_demand_cap {
         pairs.push((
             "on-demand".into(),
-            format!("{} of {} used", q.on_demand_used.unwrap_or(0.0), cap),
+            if cap > 0.0 {
+                format!(
+                    "{} of {} used",
+                    dollars(q.on_demand_used.unwrap_or(0.0)),
+                    dollars(cap)
+                )
+            } else {
+                "no cap set".into()
+            },
         ));
     }
     if let Some(prepaid) = q.prepaid {
-        pairs.push(("prepaid balance".into(), format!("{}", prepaid)));
+        pairs.push(("prepaid balance".into(), dollars(prepaid)));
     }
     plan_rows(&q.tier, &pairs, w, "", None, "", p)
 }
@@ -1361,6 +1459,31 @@ mod tests {
         r#""onDemandUsed":{"val":"3"},"onDemandCap":{"val":25},"#,
         r#""prepaidBalance":{"val":0}}}}"#
     );
+
+    /// A drawn row without its colour escapes, so a width is cells on
+    /// screen rather than bytes in the string.
+    fn visible(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// The same log line from an account that has set no on-demand cap,
+    /// for the tests whose subject is the credit lane alone.
+    fn no_cap_line() -> String {
+        LOG_LINE.replace(r#""onDemandCap":{"val":25}"#, r#""onDemandCap":{"val":0}"#)
+    }
 
     #[test]
     fn the_quota_comes_off_the_log_not_the_transcript() {
@@ -1464,7 +1587,9 @@ mod tests {
             ..Default::default()
         };
         let got = lanes(&d);
-        assert_eq!(got.len(), 1);
+        // The fixture's account has a $25 on-demand cap, so it publishes
+        // two: the credits and the allowance that is billed.
+        assert_eq!(got.len(), 2);
         assert_eq!(got[0].label, "credits");
         assert_eq!(got[0].pct, 42.5);
         assert_eq!(got[0].window_secs, Some(7.0 * 86400.0));
@@ -1519,9 +1644,11 @@ mod tests {
             ..Default::default()
         };
         let got = lanes(&d);
-        assert_eq!(got.len(), 1);
-        assert!(!got[0].stale, "a minute-old reading is current");
-        assert!(!got[0].projected, "a live window was read, not worked out");
+        assert_eq!(got.len(), 2);
+        // One reading, so one age: the on-demand lane is marked exactly as
+        // the credits lane is, because they came out of the same answer.
+        assert!(got.iter().all(|l| !l.stale), "a minute-old reading is current");
+        assert!(got.iter().all(|l| !l.projected), "a live window was read, not worked out");
         assert_eq!(
             got[0].reset,
             iso_epoch("2026-08-17T00:00:00.000000+00:00"),
@@ -1557,6 +1684,152 @@ mod tests {
             ..Default::default()
         };
         assert!(lanes(&d)[0].stale, "an undateable reading passed as current");
+    }
+
+    #[test]
+    fn the_paid_allowance_is_a_lane_that_names_its_cap() {
+        // The figures were parsed all along and drawn only as a tail on the
+        // window line, so the summary that ranks every other allowance on
+        // the wall said nothing about the one that costs money.
+        let d = Data {
+            ok: true,
+            quota: newest_quota([LOG_LINE].into_iter()),
+            ..Default::default()
+        };
+        let got = lanes(&d);
+        let paid = got
+            .iter()
+            .find(|l| l.label.starts_with("on-demand"))
+            .expect("an on-demand lane");
+        // $3 of $25, and the label says which $25 it is - a percentage of
+        // an unnamed ceiling is not a number anyone can act on.
+        assert_eq!(paid.label, "on-demand $25");
+        assert_eq!(paid.pct, 12.0);
+        // The credits lane's own window, so the two pace on one clock.
+        let credits = got.iter().find(|l| l.label == "credits").expect("a credits lane");
+        assert_eq!(paid.window_secs, credits.window_secs);
+        assert_eq!(paid.reset, credits.reset);
+        assert_eq!(paid.stale, credits.stale);
+        assert_eq!(paid.projected, credits.projected);
+        assert!(!paid.apart, "it belongs to the same window as the credits");
+        // And the tab agrees with it, figures and all.
+        let rows = grok_tab(&d, 90, &palette()).join(" ");
+        assert!(rows.contains("on-demand $3 of $25"), "{}", rows);
+    }
+
+    #[test]
+    fn an_account_with_no_on_demand_cap_gets_no_bar_and_is_told_why() {
+        // Nought is the state of this account today: no cap set. A 0% bar
+        // would say there is an allowance sitting untouched, which is the
+        // opposite of what is true - the refusal sand_lane makes for a Bot
+        // allowance nobody granted.
+        let d = Data {
+            ok: true,
+            quota: newest_quota([no_cap_line().as_str()].into_iter()),
+            ..Default::default()
+        };
+        assert_eq!(lanes(&d).len(), 1, "a cap of nought invented a lane");
+        assert_eq!(lanes(&d)[0].label, "credits");
+        let rows = grok_tab(&d, 90, &palette()).join(" ");
+        assert!(rows.contains("no on-demand cap set"), "{}", rows);
+        assert!(!rows.contains("on-demand $0 of $0"), "{}", rows);
+        // And the subscription block agrees. It read "0 of 0 used" here,
+        // which is an allowance untouched rather than an allowance absent.
+        let plan = plan_block(&d, 90, &palette()).join(" ");
+        assert!(plan.contains("no cap set"), "{}", plan);
+        assert!(!plan.contains("0 of 0"), "{}", plan);
+    }
+
+    #[test]
+    fn spend_past_the_cap_keeps_the_real_figures() {
+        // Not seen from x.ai yet, and the shape is the same one Cursor's
+        // lowered spend limit produces: the figure stays real and unclamped,
+        // and the summary draws the bar full and coloured as over.
+        let over = LOG_LINE.replace(r#""onDemandUsed":{"val":"3"}"#, r#""onDemandUsed":{"val":"30"}"#);
+        let d = Data {
+            ok: true,
+            quota: newest_quota([over.as_str()].into_iter()),
+            ..Default::default()
+        };
+        let paid = lanes(&d)
+            .into_iter()
+            .find(|l| l.label.starts_with("on-demand"))
+            .expect("an on-demand lane");
+        assert_eq!(paid.pct, 120.0, "the percentage was clamped");
+        assert_eq!(paid.label, "on-demand $25");
+        let rows = grok_tab(&d, 90, &palette()).join(" ");
+        assert!(rows.contains("on-demand $30 of $25"), "{}", rows);
+    }
+
+    #[test]
+    fn a_cap_with_no_credit_figure_still_publishes_its_lane() {
+        // Unified-billing accounts get no creditUsagePercent at all. The
+        // whole of Grok used to drop off the summary for that, which would
+        // now take the billed allowance down with an unrelated absence.
+        // Substituting null still leaves the key, which the log used to
+        // require; the live path omits it, so the fallback has to as well.
+        let omitted = LOG_LINE.replace(r#""creditUsagePercent":42.5,"#, "");
+        let d = Data {
+            ok: true,
+            quota: newest_quota([omitted.as_str()].into_iter()),
+            ..Default::default()
+        };
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(|l| &l.label).collect::<Vec<_>>());
+        assert_eq!(got[0].label, "on-demand $25");
+        assert_eq!(got[0].pct, 12.0);
+        assert!(d.quota.as_ref().unwrap().pct.is_none(), "an omitted key was invented as nought");
+
+        // A null percentage is the other shape: key present, no number.
+        let null = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        let d = Data {
+            ok: true,
+            quota: newest_quota([null.as_str()].into_iter()),
+            ..Default::default()
+        };
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(|l| &l.label).collect::<Vec<_>>());
+        assert_eq!(got[0].label, "on-demand $25");
+        assert_eq!(got[0].pct, 12.0);
+    }
+
+    #[test]
+    fn the_grok_rows_fit_the_pane_they_were_built_for() {
+        // 58 columns is the pane this is read in, and the on-demand row is
+        // the widest thing on the quota block now: the label, the bar, the
+        // figures and the pace cell all have to sit on one row.
+        let p = palette();
+        let d = Data {
+            ok: true,
+            quota: newest_quota([LOG_LINE].into_iter()),
+            ..Default::default()
+        };
+        for w in [40usize, 58, 80, 120] {
+            let rows = grok_tab(&d, w, &p);
+            for row in &rows {
+                let plain = visible(row);
+                assert!(
+                    plain.chars().count() <= w - 1,
+                    "a {}-cell row at width {}: {:?}",
+                    plain.chars().count(),
+                    w,
+                    plain
+                );
+            }
+            // And the bar stands down for the figures rather than the other
+            // way round: `seg` clips, so a bar sized without measuring the
+            // tail beside it takes the cap off the end of the row instead
+            // of overflowing where a width check would catch it.
+            if w >= 58 {
+                let joined: String = rows.iter().map(|r| visible(r)).collect::<Vec<_>>().join(" ");
+                assert!(
+                    joined.contains("on-demand $3 of $25"),
+                    "the figures were clipped at {}: {:?}",
+                    w,
+                    joined
+                );
+            }
+        }
     }
 
     #[test]
@@ -1631,10 +1904,11 @@ mod tests {
     #[test]
     fn an_agent_with_no_quota_publishes_no_lane() {
         assert!(lanes(&Data::default()).is_empty());
-        // Present but percentless: there is no lane to rank, and yet the
-        // tier and the billing period are still known, so the reading is
-        // kept for the SUBSCRIPTION block rather than thrown away.
-        let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        // Present but percentless, on an account with no on-demand cap
+        // either: there is no lane to rank, and yet the tier and the
+        // billing period are still known, so the reading is kept for the
+        // SUBSCRIPTION block rather than thrown away.
+        let bare = no_cap_line().replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
         let d = Data {
             ok: true,
             quota: newest_quota([bare.as_str()].into_iter()),
@@ -1821,23 +2095,6 @@ mod tests {
         assert!(!joined.contains(" · the"), "invented a reason: {}", joined);
     }
 
-    fn visible(row: &str) -> String {
-        let mut out = String::new();
-        let mut chars = row.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
     #[test]
     fn a_narrow_not_live_badge_keeps_the_settings_clause() {
         // Width 20 used to floor the wrap budget, so agent_usage.grok_ping
@@ -1906,9 +2163,11 @@ mod tests {
         assert!(rows.contains("QUOTA"), "{}", rows);
         assert!(rows.contains("42%") || rows.contains("43%"), "{}", rows);
         assert!(rows.contains("No Grok sessions"), "{}", rows);
-        // And it publishes a lane, so the summary does not disagree with
-        // the tab about whether Grok has a quota.
-        assert_eq!(lanes(&d).len(), 1);
+        // And it publishes both lanes, so the summary does not disagree
+        // with the tab about what Grok has: credits, and the paid
+        // allowance the tab now draws a bar for.
+        assert_eq!(lanes(&d).len(), 2);
+        assert!(rows.contains("on-demand $3 of $25"), "{}", rows);
     }
 
     #[test]
@@ -1970,7 +2229,7 @@ mod tests {
         assert!(off.contains("creditUsagePercent"), "{off}");
         assert!(off.contains(tc::SET_IN_SETTINGS), "{off}");
 
-        let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        let bare = no_cap_line().replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
         let live_blank = Data {
             quota: newest_quota([bare.as_str()].into_iter()),
             quota_live: true,
