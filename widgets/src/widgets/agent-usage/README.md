@@ -1085,26 +1085,26 @@ accounts does not show the old one's figures — the usage response itself
 carries no account, so the marker is borrowed. A machine whose Claude Code
 never wrote the key has no marker, and then the guard is simply not applied.
 
-### Grok is the fourth, and it is off by default
+### Grok is the fourth, and it is on by default
 
 Grok publishes no quota this widget can read without asking for it. The other
 five agents each answer a host — `api.anthropic.com`, `chatgpt.com`,
-`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. Grok makes
-no call at all: its figures come from `~/.grok/logs/unified.jsonl`, the log its
-own CLI writes, so they move **only when you use Grok on this machine**.
+`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. With the ask
+off, its figures come from `~/.grok/logs/unified.jsonl`, the log its own CLI
+writes, so they move **only when you use Grok on this machine**.
 
 That failed quietly. A log left alone for nine days had the widget showing 23%
 of a credit window that had closed on the 19th, while the account had spent 57%
 of the window it was actually in. More than double, with nothing on screen to
 say the figure was old.
 
-Three settings, all off or hourly by default:
+Four settings, all on by default except the interval:
 
 | key | default | what it does |
 |---|---|---|
 | `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
-| `grok_ping` | `false` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
+| `grok_ping` | `true` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
 ### Grok Bot (Cursor's weekly allowance)
@@ -1150,9 +1150,10 @@ about to lapse, whatever the last session was, subject to the same two guards:
 It is attempted once per expiry value, so a login that has genuinely run out
 costs one attempt rather than one every five minutes.
 
-**Off by default**, because it does two things a widget that reads has no
-business doing unasked: it talks to a vendor, and it starts somebody else's
-program.
+**On by default**, because the request is the same shape `antigravity_remote`
+already accepts: the reader's own CLI, already signed in, asked at the
+endpoint it bills through with its own token. A quota nobody can act on is
+not the safer default. Off stays one key away and the tab names it.
 
 **Cached or live is a question about age, not about source.** A reading is
 shown as current when it was taken within the last half hour, whatever

@@ -1401,9 +1401,15 @@ struct Config {
     plan_cost: HashMap<String, f64>,
     refresh: f64,
     /// Grok is the only agent with no live quota unless it is asked for one.
-    /// Off by default: asking means a request to x.ai carrying the token its
-    /// CLI left on disk, and a widget that reads should not start talking to
-    /// a vendor because it was launched.
+    /// On by default, as of 0.14: the request goes to the endpoint the Grok
+    /// CLI itself bills through, carrying the token that CLI left on disk,
+    /// which is the same shape as `antigravity_remote` and was on from the
+    /// start. It was off for a release on the principle that a widget
+    /// which reads should not start talking to a vendor because it was
+    /// launched - and the figure it showed instead was a log line that
+    /// moves only when Grok is used on this machine, drawn with a `cached`
+    /// mark that read as a fault. A quota nobody can act on is not the
+    /// safer default. Off is still one key away, and the tab says so.
     ///
     /// Turning it on also permits running the Grok CLI once after a session
     /// goes quiet, because that is what refreshes the token the request
@@ -1415,9 +1421,7 @@ struct Config {
     /// Whether Antigravity's quota may be asked of Google when nothing is
     /// serving it locally.
     ///
-    /// On by default, unlike `grok_ping`, and the difference is what the
-    /// request is. Grok's asks a vendor for a reading nothing on this
-    /// machine has. This one asks for the same reading the app already
+    /// On by default: it asks for the same reading the app already
     /// serves over localhost, from the same host and with the same
     /// credential the tier is already fetched with. Turning it off costs
     /// the quota whenever Antigravity is closed and spares nothing that the
@@ -1450,6 +1454,13 @@ struct Config {
 
 fn read_config() -> Config {
     let (raw, legacy_section) = load_agent_usage_config();
+    config_from(&raw, legacy_section)
+}
+
+/// The settings a section holds, with the widget's defaults filling in
+/// whatever it does not. Split from the file read so a default can be
+/// pinned by a test rather than by a comment.
+fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
     let table = |key: &str| -> HashMap<String, Rate> {
         raw[key]
             .as_object()
@@ -1481,7 +1492,7 @@ fn read_config() -> Config {
         grok_ping: raw
             .get("grok_ping")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+            .unwrap_or(true),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
         antigravity_remote: raw
             .get("antigravity_remote")
@@ -2495,6 +2506,18 @@ mod tests {
         assert_eq!(cal.best, Some(day("2026-08-01")));
         // Seven weekday rows plus the month strip.
         assert_eq!(cal.rows.len(), 8);
+    }
+
+    #[test]
+    fn grok_is_asked_for_its_quota_unless_told_not_to() {
+        // On by default as of 0.14. Before that a fresh install showed a
+        // `cached` figure that moved only when Grok was used here, and the
+        // one key that fixed it sat in a file the widget had stopped
+        // reading. Off remains one key away.
+        let bare = config_from(&serde_json::json!({}), false);
+        assert!(bare.grok_ping, "a section with nothing in it asks x.ai");
+        let off = config_from(&serde_json::json!({"grok_ping": false}), false);
+        assert!(!off.grok_ping, "an explicit false is still honoured");
     }
 
     #[test]
