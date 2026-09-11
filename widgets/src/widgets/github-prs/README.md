@@ -392,9 +392,10 @@ by accident.
 
 ## Cost
 
-Three requests per round of the list — the search, then the two enrichment
-passes over what it returned — plus one detail query when you open a PR and
-one more to reconstruct an inferred stack.
+One search request per page of the list, then one request per fifty
+returned pull requests for each of the two enrichment passes, plus one
+detail query when you open a PR and one more to reconstruct an inferred
+stack.
 
 The round costs what it always did, around eight seconds per fifty pull
 requests. What changed is where: the search is 2.2–2.8s of it instead of

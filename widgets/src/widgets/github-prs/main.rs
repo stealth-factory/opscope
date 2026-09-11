@@ -1156,8 +1156,9 @@ fn fetch_list(
     let mut counted: Vec<(i64, usize)> = vec![(0, 0); pairs.len()];
     let mut cursors: Vec<Option<String>> = vec![None; pairs.len()];
     let mut live: Vec<usize> = (0..pairs.len()).collect();
-    // Why paging stopped early, when it did. Kept apart from `err` so a
-    // partial list is not dressed up as a failed fetch.
+    // Why paging stopped early, when it did. A gateway refusal after
+    // pages have landed is a ceiling, not a failed fetch, and stays out
+    // of `err`. A 401 is not: that reason has to reach the banner.
     let mut deepened: Option<String> = None;
     // The smallest page any round had to fall back to, when one did, and
     // what every later round in this pass starts from. A shorter page is
@@ -1167,6 +1168,11 @@ fn fetch_list(
     // reaches the banner: a pane that says nothing about it looks like a
     // pane that simply got slower.
     let mut served: Option<usize> = None;
+    // The note describes *this* pass. Left over from the last one it
+    // qualifies counts that are already moving under it.
+    if let Ok(mut g) = state.lock() {
+        begin_pass(&mut g);
+    }
 
     while !live.is_empty() {
         let round: Vec<String> = live.iter().map(|i| queries[*i].clone()).collect();
@@ -1309,7 +1315,7 @@ fn fetch_list(
                 format!("{} · {}", said, note)
             };
         }
-        settle(&mut g, nodes, &counted, served, deepened.is_some(), said);
+        settle(&mut g, nodes, &counted, served, deepened.as_deref(), said);
     }
     Ok(())
 }
@@ -1318,29 +1324,62 @@ fn fetch_list(
 ///
 /// Its own function so a pass that fell back or stopped short can be
 /// tested without a network: the two facts about *how* the pass went go in
-/// their own fields and `err` carries only what `warnings` brought - the
-/// config notes, which really are things to fix. A page size GitHub would
-/// not serve and paging that stopped at a ceiling are neither. Folded into
-/// `err` they drew the `!` banner in the warning colour and read, to
-/// anyone looking at the pane, as a widget that had failed: the list was
-/// real, the count was honestly a floor, and a minute later it was gone.
+/// their own fields and `err` carries only what is actually broken. A page
+/// size GitHub would not serve and paging that stopped at a gateway
+/// ceiling are neither — those are the refusals `worth_retrying` already
+/// knows mean "later". Folded into `err` they drew the `!` banner in the
+/// warning colour and read, to anyone looking at the pane, as a widget
+/// that had failed: the list was real, the count was honestly a floor,
+/// and a minute later it was gone.
+///
+/// A 401, a 500, a query GitHub will not accept, is the other case. Those
+/// used to vanish into the same `stopped` flag, so a credential failure
+/// after the first page drew `GitHub is slow` and left the reason nowhere.
+/// The list still stays — what landed is real — but the reason reaches
+/// `err`, which is the banner it belongs in.
 fn settle(
     g: &mut State,
     nodes: Vec<serde_json::Value>,
     counted: &[(i64, usize)],
     served: Option<usize>,
-    stopped: bool,
+    deepened: Option<&str>,
     warnings: String,
 ) {
     let (total, capped) = union_total(counted, nodes.len());
     g.total = total;
-    // Paging that stopped short is capped whatever the arithmetic says.
-    g.capped = capped || stopped;
+    // Paging that stopped short is capped whatever the arithmetic says,
+    // including a hard failure: we did not finish, so the total is a floor.
+    g.capped = capped || deepened.is_some();
     g.prs = nodes;
     g.fetched = tc::now();
     g.served = served;
-    g.stopped = stopped;
-    g.err = warnings;
+    // Only a refusal that means "later" is a slow spell. Everything else
+    // that stopped paging is an error, and the note must not say otherwise.
+    g.stopped = deepened.map(worth_retrying).unwrap_or(false);
+    g.err = match deepened {
+        Some(reason) if !worth_retrying(reason) => {
+            if warnings.is_empty() {
+                reason.to_string()
+            } else {
+                format!("{} · {}", warnings, reason)
+            }
+        }
+        _ => warnings,
+    };
+}
+
+/// A new pass is under way: drop the last one's note.
+///
+/// `publish` updates the list as pages land and does not touch `served`
+/// or `stopped`, and the render loop draws `partial_note` every frame
+/// with no refresh guard. Clearing both here, before paging starts, is
+/// what keeps a leftover "GitHub is slow" from qualifying numbers that
+/// are already moving. The list stays until the new pages replace it —
+/// emptying the board while paging starts would look like a source with
+/// nothing in it.
+fn begin_pass(g: &mut State) {
+    g.served = None;
+    g.stopped = false;
 }
 
 /// Where the window onto the body sits after a frame's worth of input.
@@ -3720,7 +3759,14 @@ mod tests {
             .collect();
         // One source saying it matched 686 and having handed over 302 is a
         // capped source, so the total is a floor.
-        settle(&mut g, nodes, &[(686, 302)], Some(10), true, String::new());
+        settle(
+            &mut g,
+            nodes,
+            &[(686, 302)],
+            Some(10),
+            Some("GitHub returned 502 - the search was too slow to serve"),
+            String::new(),
+        );
 
         assert!(
             g.err.is_empty(),
@@ -3735,10 +3781,72 @@ mod tests {
 
         // What `err` is still for: the config notes the caller composes.
         let mut g = State::default();
-        settle(&mut g, Vec::new(), &[(0, 0)], None, false, "token in config".into());
+        settle(&mut g, Vec::new(), &[(0, 0)], None, None, "token in config".into());
         assert_eq!(g.err, "token in config");
         assert_eq!(g.served, None, "an ordinary pass has nothing to say");
         assert!(!g.stopped);
+    }
+
+    #[test]
+    fn a_hard_failure_after_pages_landed_is_still_an_error() {
+        // Pages 1-4 answered and page 5 came back 401. The list is real;
+        // the reason is not a slow spell. Folding it into `stopped` is
+        // the failure: the banner said "GitHub is slow" and the 401
+        // went nowhere.
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            None,
+            Some("GitHub returned 401: Bad credentials"),
+            String::new(),
+        );
+        assert!(
+            g.err.contains("401"),
+            "the reason has to reach the banner: {}",
+            g.err
+        );
+        assert!(!g.stopped, "a credential failure is not a slow spell");
+        assert!(g.capped, "paging stopped, so the total is a floor");
+        assert_eq!(g.prs.len(), 1, "what landed stays");
+
+        // A 500 is the same class: the search backend is broken, not
+        // shedding load, and a smaller page will not change its mind.
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            None,
+            Some("GitHub returned 500"),
+            "token in config".into(),
+        );
+        assert!(g.err.contains("token in config"), "{}", g.err);
+        assert!(g.err.contains("500"), "composed with the config note: {}", g.err);
+        assert!(!g.stopped);
+    }
+
+    #[test]
+    fn a_new_pass_does_not_keep_the_last_pass_note() {
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            Some(10),
+            Some("GitHub returned 502 - the search was too slow to serve"),
+            String::new(),
+        );
+        assert_eq!(g.served, Some(10));
+        assert!(g.stopped);
+
+        begin_pass(&mut g);
+        assert_eq!(g.served, None, "the leftover page size does not qualify this pass");
+        assert!(!g.stopped, "the leftover ceiling does not either");
+        // The list stays until the new pages replace it: an empty board
+        // while paging starts would look like a source with nothing in it.
+        assert_eq!(g.prs.len(), 1);
     }
 
     #[test]
