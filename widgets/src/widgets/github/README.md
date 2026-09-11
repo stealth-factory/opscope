@@ -87,6 +87,15 @@ and longest streak, today's count, how many days of the year were active, the
 single busiest day, and which weekday carries the most work. They lay out in
 three columns, two, or one as the width allows.
 
+Everything else on this board is scoped to the configured accounts. This section
+is not, and the heading says so — `yours, everywhere`.
+`contributionsCollection` is per-viewer
+rather than per-org, so the calendar counts your own activity across all of
+GitHub, including repositories in orgs this board does not list, and excluding
+everyone else's work in the orgs it does. It is the calendar github.com draws on
+your profile. The qualifier is the first thing to go when the pane narrows,
+because the figures beside it matter more than the wording.
+
 A streak counts consecutive days with at least one contribution, the way
 github.com does it — a day that has scored nothing *so far* does not break the
 current streak, because it is not over yet.
