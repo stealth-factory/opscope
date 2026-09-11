@@ -19,6 +19,7 @@ navigation, not itself a widget.
 | [`vercel-deployments`](../widgets/src/widgets/vercel-deployments/README.md) | Vercel deployments — how they are going over time, not just what shipped last. |
 | [`tailnet`](../widgets/src/widgets/tailnet/README.md) | Tailscale peers, and — the part plain `tailscale status` buries — *how* you are reaching each one. |
 | [`herdr-panes`](../widgets/src/widgets/herdr-panes/README.md) | Everything running under [Herdr](https://herdr.dev), across every workspace — and one keypress to get to any of it. |
+| [`luvus-panes`](../widgets/src/widgets/luvus-panes/README.md) | Everything running under a [Luvus](https://luvus.dev) session, read over UHP 1.0 — agents by who needs a human, plus the tasks and path leases they coordinate with. |
 | [`github`](../widgets/src/widgets/github/README.md) | Pull requests across every org you work in — not what shipped, but whether work is actually moving. |
 | [`github-actions`](../widgets/src/widgets/github-actions/README.md) | GitHub Actions across those same accounts — what is running, what is failing, and how long it sat in the queue. |
 | [`github-prs`](../widgets/src/widgets/github-prs/README.md) | The pull requests you have to follow up on, and a dashboard for whichever one you open. |

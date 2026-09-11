@@ -47,6 +47,7 @@ pub enum Tool {
     Ifconfig,
     Ip,
     Lsof,
+    Luvus,
     Netstat,
     Nettop,
     Ping,
@@ -67,6 +68,7 @@ impl Tool {
             "ifconfig" => Some(Self::Ifconfig),
             "ip" => Some(Self::Ip),
             "lsof" => Some(Self::Lsof),
+            "luvus" => Some(Self::Luvus),
             "netstat" => Some(Self::Netstat),
             "nettop" => Some(Self::Nettop),
             "ping" => Some(Self::Ping),
@@ -88,6 +90,7 @@ impl Tool {
             Self::Ifconfig => "ifconfig",
             Self::Ip => "ip",
             Self::Lsof => "lsof",
+            Self::Luvus => "luvus",
             Self::Netstat => "netstat",
             Self::Nettop => "/usr/bin/nettop",
             Self::Ping => "ping",
@@ -103,6 +106,7 @@ impl Tool {
         match self {
             Self::Tailscale => Some("https://tailscale.com/download"),
             Self::Herdr => Some("https://herdr.dev"),
+            Self::Luvus => Some("https://luvus.dev"),
             Self::Cloudflared => Some(
                 "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
             ),
@@ -112,7 +116,7 @@ impl Tool {
 
     fn version_args(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Cloudflared | Self::Curl | Self::Herdr => Some(&["--version"]),
+            Self::Cloudflared | Self::Curl | Self::Herdr | Self::Luvus => Some(&["--version"]),
             Self::Ip | Self::Ss | Self::Ping => Some(&["-V"]),
             Self::Tailscale => Some(&["version"]),
             _ => None,

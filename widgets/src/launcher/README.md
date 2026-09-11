@@ -23,7 +23,7 @@ The front door: every widget, what it does, and a preview before it runs.
  ↑↓ select  ↵ launch  [,] settings  [q]uit
 ```
 
-Fifteen widget binaries in a directory are a list you have to already know. Pick one
+Sixteen widget binaries in a directory are a list you have to already know. Pick one
 and it runs; quit it and you are back here.
 
 ## Nothing is described twice
@@ -131,7 +131,7 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-All fifteen binaries check the same owned file, including `matrix` and
+All sixteen binaries check the same owned file, including `matrix` and
 `months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
 those declarations across the full registry, reports which widgets use each
 tool, checks declared versions, and prints host-specific installation guidance:

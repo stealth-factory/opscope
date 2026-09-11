@@ -16,8 +16,8 @@ manual smoke test, and release handoff.
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
-Fifteen widget binaries plus the `opscope` launcher share `opscope-core`;
-build all sixteen with `cargo build --release` from the root.
+Sixteen widget binaries plus the `opscope` launcher share `opscope-core`;
+build all seventeen with `cargo build --release` from the root.
 
 They began as Python scripts and were ported widget by widget; the Python is
 gone, and `docs/port-decisions.md` records what the port changed and why.

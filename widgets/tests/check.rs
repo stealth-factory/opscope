@@ -370,7 +370,7 @@ fn every_widget_owns_its_complete_folder() {
 fn only_core_draws_the_settings_screen() {
     // The division this whole feature rests on: a widget declares what it
     // has to configure, and core decides what that looks like and how it
-    // behaves. Fifteen widgets each with their own idea of what enter does
+    // behaves. Sixteen widgets each with their own idea of what enter does
     // to a boolean is the thing being prevented, and it is the kind of drift
     // that arrives one reasonable-looking exception at a time.
     //
@@ -1685,9 +1685,10 @@ fn every_widget_answers_the_wheel() {
     //
     // Every widget, not "every widget that looks like it scrolls". The
     // obvious marker is a call to `follow(`, which the issue proposed and
-    // which six of the fifteen scrolling widgets do not use - latency,
-    // netwatch, herdr-panes, clocks, agent-usage and github-prs all keep
-    // their offset by hand. A check built on it would have passed all six
+    // which seven of the sixteen scrolling widgets do not use - latency,
+    // netwatch, herdr-panes, luvus-panes, clocks, agent-usage and github-prs
+    // all keep their offset by hand. A check built on it would have passed
+    // all seven
     // while they answered nothing.
     // Not `src.contains("wheel-up")`: that passes on the word appearing in
     // a comment, and a comment saying the wheel scrolls is the thing this

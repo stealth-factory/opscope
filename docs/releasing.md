@@ -127,7 +127,7 @@ downloads the Linux binaries; an unsupported platform fails at install
 with a sentence naming the three that exist.
 
 **Every platform artefact contains every binary.** Each release tarball and
-each platform-specific npm package carries `opscope` plus all fifteen widgets;
+each platform-specific npm package carries `opscope` plus all sixteen widgets;
 there are no per-widget downloads and no platform package may publish only the
 widgets that happen to work there. `npm/pack.js` reads the authoritative
 `[[bin]]` list from `widgets/Cargo.toml` and refuses a tarball missing any one

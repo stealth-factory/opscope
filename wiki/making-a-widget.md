@@ -347,8 +347,8 @@ is registered as a widget, while `the_list_is_in_a_settled_order`
 enforces the alphabetical launcher order.
 
 Bump the expected `[[bin]]` count in `npm/test.js` (`the packer takes every
-[[bin]], including opscope`). That number is sixteen today — the launcher
-plus fifteen widgets — and it is a gate, not a reading of the manifest:
+[[bin]], including opscope`). That number is seventeen today — the launcher
+plus sixteen widgets — and it is a gate, not a reading of the manifest:
 `cargo test` runs it whenever Node is on PATH, and CI always does. Skip
 it and the new binary builds while the packer still expects the old
 inventory.

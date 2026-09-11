@@ -1,0 +1,41 @@
+Everything running under a Luvus session, and who needs a human.
+
+Four sections. AGENTS lists the coding agents Luvus recognises with the
+lifecycle state it reports, ordered so the ones wanting a human come first.
+TASKS and LEASES are the coordination Luvus does and Herdr has no equivalent
+for: claimable units of work, and the file paths an unfinished task has
+reserved. PANES lists every other pane doing something, then IDLE lists the
+panes sitting at a prompt.
+
+A Luvus client, not a general agent monitor. Every figure comes from the
+session's own Universal Harness Protocol 1.0 answers: the pane inventory from
+`luvus uhp snapshot`, the agents from `luvus agent list`, and the two
+coordination sections from `luvus task list` and `luvus lease list`.
+
+On a machine hosting several workspaces, agents finish or get stuck in places
+you are not currently looking. This lists every agent with the state Luvus
+reports, worst first:
+
+    blocked   waiting on an approval or a question, right now
+    done      finished work you have not looked at yet
+    working   busy
+    idle      ready for input
+    unknown   an agent is present and Luvus classified it as none of those
+
+Each agent also carries how long it has held that state, and how the state was
+decided - an integration's report and a reading off screen text are different
+strengths of claim and the screen does not flatten them into one word. A
+duration is prefixed with the greater-or-equal sign when the state was already
+in place before this tool started, since then it is only a lower bound.
+
+Zero tasks and zero leases are the normal state of most sessions and read as
+an answer. A source that did not come back says so instead, on its own row.
+
+    luvus-panes [-n SECONDS]
+
+Keys: arrows select, and tab jumps to the head of the next section. ctrl-y and
+ctrl-e scroll the window a row at a time, as does the mouse wheel, and neither
+touches the selection. enter focuses the selected pane so you jump straight to
+whatever needs you, i shows or hides the idle section,
+r refreshes now, comma opens settings, q quits.
+Requires the `luvus` command; it reads a running session over UHP.
