@@ -45,8 +45,13 @@ const CLI: &str = ".grok/bin/grok";
 const PING_KEY: &str = "grok:billing";
 /// Cache key for the last session-end refresh, so one ending refreshes once.
 const SEEN_KEY: &str = "grok:session-seen";
-/// Cache key for the last expiry a refresh was attempted against.
+/// Cache key for the last expiry a refresh was attempted against, and
+/// whether that attempt was made before or after the lapse.
 const EXPIRY_KEY: &str = "grok:token-expiry";
+/// Cache key for the last reading the server actually gave, kept apart
+/// from `PING_KEY` because that slot is overwritten by every refusal and
+/// emptied by every token refresh. This one only ever holds a success.
+const LIVE_KEY: &str = "grok:last-live";
 /// Refresh this long before the token actually lapses, so the ask that
 /// follows is not the one that discovers it has.
 const TOKEN_MARGIN: f64 = 600.0;
@@ -253,9 +258,27 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     if !cfg.grok_ping {
         return (from_log(), false, 0.0, String::new());
     }
+    // What to show when the server cannot be asked or does not answer: the
+    // fresher of the last thing it said and the last thing the log
+    // recorded. The log used to win outright, and on this machine that
+    // put a figure from twenty-seven days back over one from two hours
+    // back, with nothing on the row to say which was which.
+    let held = last_live(caches);
+    let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
     let key = match usable_token() {
         Ok(k) => k,
-        Err(why) => return (from_log(), false, 0.0, why),
+        Err(why) => {
+            // The widget's own refresh has already been tried after the
+            // lapse and did not move the expiry: the CLI needs a real
+            // sign-in, and saying "the CLI refreshes it" again would send
+            // the reader to the thing that just failed.
+            let why = if refresh_gave_up(caches) {
+                format!("{} - it did not; run grok to sign in again", why)
+            } else {
+                why
+            };
+            return (fresher(held, from_log()), false, held_at, why);
+        }
     };
     let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
     let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
@@ -263,10 +286,20 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // time. The tab reports it, so it has to be the fetch and not the read.
     let at = caches.live.get(PING_KEY).map(|(when, _, _)| *when).unwrap_or(0.0);
     match got.as_ref() {
-        None => (from_log(), false, at, "x.ai did not answer".to_string()),
+        None => (
+            fresher(held, from_log()),
+            false,
+            at,
+            "x.ai did not answer".to_string(),
+        ),
         Some(body) => match quota_from(body) {
             Some(mut q) => {
                 let why = String::new();
+                q.taken = Some(at);
+                caches.live.insert(
+                    LIVE_KEY.to_string(),
+                    (at, Some(body.clone()), f64::MAX),
+                );
                 if q.pct.is_none() {
                     // The server named the window but not the spend. The log
                     // may still hold a percentage, and it is usable only if
@@ -288,9 +321,86 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                 }
                 (Some(q), true, at, why)
             }
-            None => (from_log(), false, at, "x.ai sent no usable reading".to_string()),
+            None => (
+                fresher(held, from_log()),
+                false,
+                at,
+                "x.ai sent no usable reading".to_string(),
+            ),
         },
     }
+}
+
+/// The last reading the server gave, dated by when it was fetched.
+fn last_live(caches: &Caches) -> Option<Quota> {
+    let (at, body, _) = caches.live.get(LIVE_KEY)?;
+    let mut q = quota_from(body.as_ref()?)?;
+    q.taken = Some(*at);
+    Some(q)
+}
+
+/// The more recent of two readings, by when each was taken.
+///
+/// A reading with no date loses to one with any date: unknown age is not
+/// evidence of youth, and the log's lines are dated while a fetch is dated
+/// here by the fetch. Ties go to the first, which callers pass the
+/// server's reading as.
+fn fresher(a: Option<Quota>, b: Option<Quota>) -> Option<Quota> {
+    match (a, b) {
+        (None, b) => b,
+        (a, None) => a,
+        (Some(a), Some(b)) => {
+            if b.taken.unwrap_or(f64::MIN) > a.taken.unwrap_or(f64::MIN) {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+    }
+}
+
+/// Which refresh, if any, the token on disk is due: `Some(false)` for the
+/// one made shortly before it lapses, `Some(true)` for the one made after.
+///
+/// Two, because the CLI only renews a token that has already run out - its
+/// refresh is made ahead of a request, on finding the token expired, and a
+/// token with ten minutes left is not expired. Measured on 1.0.25: started
+/// ten minutes before the lapse it bootstrapped, logged no refresh and
+/// left `auth.json` alone; started two hours after, it renewed at once.
+/// The early attempt is kept for a CLI that may one day renew ahead of
+/// time, and costs one start. The late one is the one that works today.
+///
+/// `tried` is the last attempt made, as (expiry, after). Each is made once
+/// per expiry value and never again, so a login that has genuinely run out
+/// costs two starts over the life of its token rather than one every poll.
+/// A renewed token has a new expiry and starts the count afresh.
+fn refresh_due(expiry: f64, at: f64, tried: Option<(f64, bool)>) -> Option<bool> {
+    let after = expiry <= at;
+    let before = expiry <= at + TOKEN_MARGIN;
+    let done = |phase: bool| tried.is_some_and(|(e, p)| e == expiry && (p == phase || p));
+    if after && !done(true) {
+        Some(true)
+    } else if before && !after && !done(false) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The last refresh attempt recorded, as (expiry, after).
+fn refresh_tried(caches: &Caches) -> Option<(f64, bool)> {
+    let (_, v, _) = caches.live.get(EXPIRY_KEY)?;
+    let v = v.as_ref()?;
+    Some((v["expiry"].as_f64()?, v["after"].as_bool().unwrap_or(false)))
+}
+
+/// True when the token on disk has lapsed and the widget has already run
+/// the CLI since it did, to no effect. What is left is a sign-in.
+fn refresh_gave_up(caches: &Caches) -> bool {
+    let Some(expiry) = token_expiry() else {
+        return false;
+    };
+    expiry <= now() && refresh_tried(caches).is_some_and(|(e, after)| e == expiry && after)
 }
 
 /// Run the Grok CLI once, for its side effect: it refreshes the token in
@@ -422,27 +532,27 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // using it. What is dropped is the upper bound on how long ago they
     // last did.
     //
-    // Deduped on the expiry value, not on time. A refresh that does not
-    // move the expiry - a login that has genuinely run out - must be tried
-    // once and then left alone; a CLI respawned every five minutes for ever
+    // Deduped on the expiry value and the phase, not on time - see
+    // `refresh_due`. A refresh that does not move the expiry - a login
+    // that has genuinely run out - is tried once before the lapse and once
+    // after, then left alone; a CLI respawned every five minutes for ever
     // is a worse failure than the stale row it was trying to fix.
     if cfg.grok_ping {
         let quiet = if newest > 0.0 { now() - newest } else { f64::MAX };
-        let expiry = token_expiry();
-        if let Some(expiry) = expiry {
-            let tried = caches
-                .live
-                .get(EXPIRY_KEY)
-                .and_then(|(_, v, _)| v.as_ref())
-                .and_then(|v| v.as_f64())
-                .unwrap_or(f64::NAN);
-            if quiet > SESSION_QUIET && expiry <= now() + TOKEN_MARGIN && tried != expiry {
-                refresh_token();
-                caches.live.insert(
-                    EXPIRY_KEY.to_string(),
-                    (now(), Some(serde_json::json!(expiry)), f64::MAX),
-                );
-                caches.live.remove(PING_KEY);
+        if let Some(expiry) = token_expiry() {
+            if quiet > SESSION_QUIET {
+                if let Some(after) = refresh_due(expiry, now(), refresh_tried(caches)) {
+                    refresh_token();
+                    caches.live.insert(
+                        EXPIRY_KEY.to_string(),
+                        (
+                            now(),
+                            Some(serde_json::json!({"expiry": expiry, "after": after})),
+                            f64::MAX,
+                        ),
+                    );
+                    caches.live.remove(PING_KEY);
+                }
             }
         }
     }
@@ -1442,6 +1552,47 @@ mod tests {
         assert!(lanes(&d).is_empty());
         assert_eq!(d.quota.as_ref().map(|q| q.tier.as_str()), Some("Test Premium"));
         assert!(!plan_block(&d, 80, &palette()).is_empty());
+    }
+
+    #[test]
+    fn the_refresh_is_tried_once_before_the_lapse_and_once_after() {
+        let expiry = 1_000_000.0;
+        // Long before: nothing to do.
+        assert_eq!(refresh_due(expiry, expiry - 3600.0, None), None);
+        // Inside the margin: the early attempt, once.
+        assert_eq!(refresh_due(expiry, expiry - 300.0, None), Some(false));
+        assert_eq!(refresh_due(expiry, expiry - 100.0, Some((expiry, false))), None);
+        // Lapsed: the late attempt, once - even though the early one was
+        // made. This is the one the CLI acts on, and it was never reached.
+        assert_eq!(refresh_due(expiry, expiry + 60.0, Some((expiry, false))), Some(true));
+        assert_eq!(refresh_due(expiry, expiry + 7200.0, Some((expiry, true))), None);
+        // A late attempt on record also settles the early phase.
+        assert_eq!(refresh_due(expiry, expiry - 100.0, Some((expiry, true))), None);
+        // A renewed token has a new expiry and the count starts over.
+        let renewed = expiry + 21600.0;
+        assert_eq!(refresh_due(renewed, renewed + 1.0, Some((expiry, true))), Some(true));
+    }
+
+    #[test]
+    fn a_lapse_shows_the_last_live_reading_not_an_older_log_line() {
+        // What happened: the server had said 12% two hours earlier, the
+        // token lapsed, and the row drew 23% from a log line written
+        // twenty-seven days before, with a star beside it and a trend
+        // computed from it.
+        let mut live = Quota { pct: Some(12.0), taken: Some(1_000_000.0), ..Quota::default() };
+        let log = Quota { pct: Some(23.0), taken: Some(1_000_000.0 - 27.0 * 86400.0), ..Quota::default() };
+        assert_eq!(fresher(Some(live.clone()), Some(log.clone())).and_then(|q| q.pct), Some(12.0));
+        // The other way round the log wins: a session since the last ask
+        // is newer information.
+        let newer_log = Quota { taken: Some(1_000_000.0 + 60.0), ..log.clone() };
+        assert_eq!(fresher(Some(live.clone()), Some(newer_log)).and_then(|q| q.pct), Some(23.0));
+        // An undated reading never beats a dated one.
+        live.taken = None;
+        assert_eq!(fresher(Some(live.clone()), Some(log.clone())).and_then(|q| q.pct), Some(23.0));
+        // And either alone is better than nothing.
+        assert!(fresher(None, Some(log.clone())).is_some());
+        assert!(fresher(Some(live), None).is_some());
+        assert!(fresher(None, None).is_none());
     }
 
     #[test]

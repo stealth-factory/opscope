@@ -1104,7 +1104,7 @@ Four settings, all on by default except the interval:
 |---|---|---|
 | `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
-| `grok_ping` | `true` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, and once when the token is within ten minutes of lapsing |
+| `grok_ping` | `true` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, once when the token is within ten minutes of lapsing, and once after it has |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
 
 ### Grok Bot (Cursor's weekly allowance)
@@ -1147,8 +1147,21 @@ about six hours too — so anyone who had not run Grok since yesterday was in th
 failure above with the fix switched on. It now also fires when the token is
 about to lapse, whatever the last session was, subject to the same two guards:
 `grok_ping` is on, and nothing is running that the CLI would start underneath.
-It is attempted once per expiry value, so a login that has genuinely run out
-costs one attempt rather than one every five minutes.
+It is attempted twice per expiry value — once shortly before the lapse and
+once after — so a login that has genuinely run out costs two starts over the
+life of its token rather than one every five minutes. Two, because the CLI
+only renews a token that has already run out: measured on 1.0.25, started ten
+minutes early it bootstrapped and left `auth.json` alone; started two hours
+late it renewed at once. The early attempt is kept for a CLI that may one day
+renew ahead of time. When both have been made and the token is still lapsed,
+the row says so and asks for a sign-in rather than pointing at the CLI again.
+
+**A lapse shows the last live reading, not an older log line.** The server's
+last answer is kept apart from the poll slot, which every refusal overwrites,
+and on a lapse or a refusal the row draws whichever is fresher — that or the
+newest log line. Before this the log won outright, and on the machine this was
+found on it put a figure from twenty-seven days back over one from two hours
+back, with nothing but the cached mark to tell them apart.
 
 **Off by default**, because it does two things a widget that reads has no
 business doing unasked: it talks to a vendor, and it starts somebody else's
