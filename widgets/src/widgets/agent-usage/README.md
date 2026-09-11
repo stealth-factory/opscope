@@ -1085,13 +1085,13 @@ accounts does not show the old one's figures — the usage response itself
 carries no account, so the marker is borrowed. A machine whose Claude Code
 never wrote the key has no marker, and then the guard is simply not applied.
 
-### Grok is the fourth, and it is off by default
+### Grok is the fourth, and it is on by default
 
 Grok publishes no quota this widget can read without asking for it. The other
 five agents each answer a host — `api.anthropic.com`, `chatgpt.com`,
-`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. Grok makes
-no call at all: its figures come from `~/.grok/logs/unified.jsonl`, the log its
-own CLI writes, so they move **only when you use Grok on this machine**.
+`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. With the ask
+off, its figures come from `~/.grok/logs/unified.jsonl`, the log its own CLI
+writes, so they move **only when you use Grok on this machine**.
 
 That failed quietly. A log left alone for nine days had the widget showing 23%
 of a credit window that had closed on the 19th, while the account had spent 57%
@@ -1159,13 +1159,16 @@ the row says so and asks for a sign-in rather than pointing at the CLI again.
 **A lapse shows the last live reading, not an older log line.** The server's
 last answer is kept apart from the poll slot, which every refusal overwrites,
 and on a lapse or a refusal the row draws whichever is fresher — that or the
-newest log line. Before this the log won outright, and on the machine this was
-found on it put a figure from twenty-seven days back over one from two hours
-back, with nothing but the cached mark to tell them apart.
+newest log line. The retained success is tagged with the token file's account
+key, so a sign-in as someone else does not keep showing the previous account's
+figure. Before this the log won outright, and on the machine this was found on
+it put a figure from twenty-seven days back over one from two hours back, with
+nothing but the cached mark to tell them apart.
 
-**Off by default**, because it does two things a widget that reads has no
-business doing unasked: it talks to a vendor, and it starts somebody else's
-program.
+**On by default**, because the request is the same shape `antigravity_remote`
+already accepts: the reader's own CLI, already signed in, asked at the
+endpoint it bills through with its own token. A quota nobody can act on is
+not the safer default. Off stays one key away and the tab names it.
 
 **Cached or live is a question about age, not about source.** A reading is
 shown as current when it was taken within the last half hour, whatever

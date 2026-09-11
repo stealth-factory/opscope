@@ -50,7 +50,9 @@ const SEEN_KEY: &str = "grok:session-seen";
 const EXPIRY_KEY: &str = "grok:token-expiry";
 /// Cache key for the last reading the server actually gave, kept apart
 /// from `PING_KEY` because that slot is overwritten by every refusal and
-/// emptied by every token refresh. This one only ever holds a success.
+/// emptied by every token refresh. This one only ever holds a success,
+/// tagged with the token's account so a sign-in as someone else does not
+/// keep showing the previous account's figure.
 const LIVE_KEY: &str = "grok:last-live";
 /// Refresh this long before the token actually lapses, so the ask that
 /// follows is not the one that discovers it has.
@@ -263,7 +265,8 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // recorded. The log used to win outright, and on this machine that
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
-    let held = last_live(caches);
+    let account = token_account();
+    let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
     let key = match usable_token() {
         Ok(k) => k,
@@ -277,7 +280,16 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
             } else {
                 why
             };
-            return (fresher(held, from_log()), false, held_at, why);
+            // "polled x.ai" is when we last asked, not when a success
+            // last landed. A failed poll still updates PING_KEY; a
+            // refresh that has just run clears it, and then the last
+            // live reading's time is what remains.
+            let at = caches
+                .live
+                .get(PING_KEY)
+                .map(|(when, _, _)| *when)
+                .unwrap_or(held_at);
+            return (fresher(held, from_log()), false, at, why);
         }
     };
     let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
@@ -298,7 +310,14 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                 q.taken = Some(at);
                 caches.live.insert(
                     LIVE_KEY.to_string(),
-                    (at, Some(body.clone()), f64::MAX),
+                    (
+                        at,
+                        Some(serde_json::json!({
+                            "account": account.unwrap_or_default(),
+                            "billing": body.clone(),
+                        })),
+                        f64::MAX,
+                    ),
                 );
                 if q.pct.is_none() {
                     // The server named the window but not the spend. The log
@@ -331,10 +350,24 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     }
 }
 
-/// The last reading the server gave, dated by when it was fetched.
-fn last_live(caches: &Caches) -> Option<Quota> {
+/// The last reading the server gave, dated by when it was fetched, and
+/// belonging to the account now on disk.
+///
+/// Claude Code already guards its cache this way. The billing body names
+/// no account, so the marker is borrowed from the token file's map key -
+/// issuer and account, which a refresh keeps and a different sign-in
+/// does not. A missing marker is not a mismatch: the guard is simply not
+/// applied, the same as on a machine whose Claude Code never wrote the uuid.
+fn last_live_of(caches: &Caches, account: Option<&str>) -> Option<Quota> {
     let (at, body, _) = caches.live.get(LIVE_KEY)?;
-    let mut q = quota_from(body.as_ref()?)?;
+    let body = body.as_ref()?;
+    let held = text(body, "account");
+    if let (false, Some(now_acct)) = (held.is_empty(), account) {
+        if held != now_acct {
+            return None;
+        }
+    }
+    let mut q = quota_from(&body["billing"])?;
     q.taken = Some(*at);
     Some(q)
 }
@@ -435,6 +468,65 @@ fn refresh_token() {
     let _ = child.wait();
 }
 
+/// Which expiry-keyed refresh should run, on a clock the tests can hold
+/// still, after the session-quiet gate.
+///
+/// `newest` is the newest session mtime, or 0 when there are none. No
+/// sessions is treated as quiet: the alternative is never refreshing a
+/// signed-in machine that has not used Grok here, which is the path a
+/// fresh install takes now that asking is on by default.
+fn refresh_phase(
+    newest: f64,
+    expiry: f64,
+    tried: Option<(f64, bool)>,
+    at: f64,
+) -> Option<bool> {
+    let quiet = if newest > 0.0 { at - newest } else { f64::MAX };
+    if quiet <= SESSION_QUIET {
+        return None;
+    }
+    refresh_due(expiry, at, tried)
+}
+
+/// Refresh the token when it is about to lapse, even if no session just ended.
+///
+/// The session-end gate fires only in the six hours after a session ends,
+/// and the token lapses on its own clock about that often. So anyone who
+/// has not run Grok since yesterday — or who signed in and never has — had
+/// the asking silently switched off. Reaching it needs a gate keyed on
+/// the token rather than on a session.
+///
+/// Both of the original guards are kept: nothing happens unless asking was
+/// turned on, and nothing starts the CLI underneath somebody who is using
+/// it. What is dropped is the upper bound on how long ago they last did.
+///
+/// Deduped on the expiry value and the phase, not on time - see
+/// `refresh_due`. A refresh that does not move the expiry - a login that
+/// has genuinely run out - is tried once before the lapse and once after,
+/// then left alone; a CLI respawned every five minutes for ever is a worse
+/// failure than the stale row it was trying to fix.
+fn refresh_if_token_lapsing(caches: &mut Caches, cfg: &Config, newest: f64) {
+    if !cfg.grok_ping {
+        return;
+    }
+    let Some(expiry) = token_expiry() else {
+        return;
+    };
+    let Some(after) = refresh_phase(newest, expiry, refresh_tried(caches), now()) else {
+        return;
+    };
+    refresh_token();
+    caches.live.insert(
+        EXPIRY_KEY.to_string(),
+        (
+            now(),
+            Some(serde_json::json!({"expiry": expiry, "after": after})),
+            f64::MAX,
+        ),
+    );
+    caches.live.remove(PING_KEY);
+}
+
 pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     use std::os::unix::fs::MetadataExt;
     let mut files = Vec::new();
@@ -445,6 +537,11 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // missing is the failure this repo keeps paying for. ok stays false,
         // so the tab says there are no sessions - under the quota, not
         // instead of it.
+        //
+        // The expiry refresh still runs: a machine that has auth.json and
+        // no session files is the fresh-install path, and returning here
+        // used to skip the only refresh that can keep the ask working.
+        refresh_if_token_lapsing(caches, cfg, 0.0);
         let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg);
         return Data {
             quota,
@@ -500,6 +597,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     // and nobody is waiting on the pane. Refreshing the token then keeps the
     // asking working; refreshing while a session is still running would mean
     // starting the CLI under somebody who is using it.
+    let mut refreshed = false;
     if cfg.grok_ping && newest > 0.0 {
         let quiet = now() - newest;
         let handled = caches
@@ -510,6 +608,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             .unwrap_or(0.0);
         if (SESSION_QUIET..SESSION_STALE).contains(&quiet) && newest > handled {
             refresh_token();
+            refreshed = true;
             caches.live.insert(
                 SEEN_KEY.to_string(),
                 (now(), Some(serde_json::json!(newest)), f64::MAX),
@@ -519,42 +618,13 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             caches.live.remove(PING_KEY);
         }
     }
-    // The gate above fires only in the six hours after a session ends, and
-    // the token lapses on its own clock about that often - measured at six
-    // hours on the machine this was found on. So anyone who has not run
-    // Grok since yesterday had the asking silently switched off, which is
-    // the exact failure the refresh above exists to prevent and says so in
-    // its own comment. Reaching it needs a gate keyed on the token rather
-    // than on a session.
-    //
-    // Both of the original guards are kept: nothing happens unless asking
-    // was turned on, and nothing starts the CLI underneath somebody who is
-    // using it. What is dropped is the upper bound on how long ago they
-    // last did.
-    //
-    // Deduped on the expiry value and the phase, not on time - see
-    // `refresh_due`. A refresh that does not move the expiry - a login
-    // that has genuinely run out - is tried once before the lapse and once
-    // after, then left alone; a CLI respawned every five minutes for ever
-    // is a worse failure than the stale row it was trying to fix.
-    if cfg.grok_ping {
-        let quiet = if newest > 0.0 { now() - newest } else { f64::MAX };
-        if let Some(expiry) = token_expiry() {
-            if quiet > SESSION_QUIET {
-                if let Some(after) = refresh_due(expiry, now(), refresh_tried(caches)) {
-                    refresh_token();
-                    caches.live.insert(
-                        EXPIRY_KEY.to_string(),
-                        (
-                            now(),
-                            Some(serde_json::json!({"expiry": expiry, "after": after})),
-                            f64::MAX,
-                        ),
-                    );
-                    caches.live.remove(PING_KEY);
-                }
-            }
-        }
+    // One read, one spawn. The expiry helper re-reads auth.json, so a
+    // session-end refresh that actually moved the token already no-ops
+    // it; this skip is for the case that did not, which would otherwise
+    // start the CLI a second time in the same frame. The next poll still
+    // reaches the expiry gate.
+    if !refreshed {
+        refresh_if_token_lapsing(caches, cfg, newest);
     }
     let quota_read = quota_now(caches, cfg);
     Data {
@@ -607,6 +677,27 @@ fn token_entry() -> Result<serde_json::Value, String> {
         })
         .cloned()
         .ok_or_else(|| "the token file names no account".to_string())
+}
+
+/// The map key the CLI stored this token under, which names the issuer
+/// and the account. A token refresh keeps the same key; signing in as
+/// someone else does not. Pure over the file body so the tests do not
+/// need a token on disk.
+fn parse_token_account(raw: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    parsed.as_object().and_then(|o| {
+        o.iter()
+            .find(|(_, v)| {
+                v.get("key")
+                    .and_then(|k| k.as_str())
+                    .is_some_and(|k| !k.is_empty())
+            })
+            .map(|(k, _)| k.clone())
+    })
+}
+
+fn token_account() -> Option<String> {
+    parse_token_account(&std::fs::read_to_string(under_home(AUTH)).ok()?)
 }
 
 /// When the token on disk lapses, as epoch seconds.
@@ -1596,6 +1687,49 @@ mod tests {
     }
 
     #[test]
+    fn a_held_live_reading_is_dropped_when_the_account_changes() {
+        // The billing body names no account, so the retained success is
+        // tagged with the token file's map key. Switching accounts while
+        // the pane is open, then failing the first ask, used to keep
+        // drawing the previous account's figure.
+        let billing = serde_json::json!({
+            "config": {
+                "creditUsagePercent": 12.0,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-08-10T00:00:00.000000+00:00",
+                    "end": "2026-08-17T00:00:00.000000+00:00"
+                }
+            }
+        });
+        let mut caches = Caches::default();
+        caches.live.insert(
+            LIVE_KEY.to_string(),
+            (
+                1_000_000.0,
+                Some(serde_json::json!({"account": "issuer|acct-a", "billing": billing})),
+                f64::MAX,
+            ),
+        );
+        assert_eq!(
+            last_live_of(&caches, Some("issuer|acct-a")).and_then(|q| q.pct),
+            Some(12.0)
+        );
+        assert!(
+            last_live_of(&caches, Some("issuer|acct-b")).is_none(),
+            "a different account must not inherit the previous reading"
+        );
+        // A missing marker is not a mismatch - same rule as Claude's.
+        assert_eq!(last_live_of(&caches, None).and_then(|q| q.pct), Some(12.0));
+        assert_eq!(
+            parse_token_account(r#"{"issuer|acct-a":{"key":"k"}}"#).as_deref(),
+            Some("issuer|acct-a")
+        );
+        assert_eq!(parse_token_account("{}"), None);
+        assert_eq!(parse_token_account(r#"{"other":{"no":"key"}}"#), None);
+    }
+
+    #[test]
     fn a_lapsed_token_is_reported_as_lapsed_not_as_missing() {
         // These were one answer - None - and the tab said "not live" for
         // both. Only one of them is the reader's to fix, so they have to
@@ -1624,6 +1758,42 @@ mod tests {
         // No key is a different reason again.
         let why = token_of(&serde_json::json!({"expires_at": "x"}), at).unwrap_err();
         assert!(why.contains("no account"), "{}", why);
+    }
+
+    #[test]
+    fn a_signed_in_machine_with_no_sessions_still_refreshes_a_lapsing_token() {
+        // The empty-session return used to skip the expiry gate, so a
+        // fresh install with auth.json and no transcripts asked until the
+        // token lapsed and then silently stopped. newest = 0 is that path.
+        let at = 1_000_000_000.0;
+        let lapsing = at + 60.0;
+        assert_eq!(
+            refresh_phase(0.0, lapsing, None, at),
+            Some(false),
+            "no sessions, token inside the margin"
+        );
+        assert_eq!(
+            refresh_phase(0.0, lapsing, Some((lapsing, false)), at),
+            None,
+            "the same before-phase is not tried twice"
+        );
+        assert_eq!(
+            refresh_phase(0.0, at + 3600.0, None, at),
+            None,
+            "a token an hour out is left alone"
+        );
+        // After the lapse the late attempt is still due, even with no
+        // transcripts - that is the attempt the CLI actually acts on.
+        let gone = at - 1.0;
+        assert_eq!(
+            refresh_phase(0.0, gone, Some((gone, false)), at),
+            Some(true),
+            "no sessions, token already lapsed, early attempt on record"
+        );
+        // A session that is still running keeps the CLI from starting
+        // underneath it, same as when transcripts exist.
+        assert_eq!(refresh_phase(at - 30.0, lapsing, None, at), None);
+        assert_eq!(refresh_phase(at - 200.0, lapsing, None, at), Some(false));
     }
 
     #[test]
