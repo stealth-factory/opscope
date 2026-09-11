@@ -936,7 +936,7 @@ some tabs already finish on a blank and would otherwise leave two.
 | **Cursor** | `GetPlanInfo` on the same Connect service | plan name, price, included amount, who bills it |
 | **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
 | **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
-| **Grok** | the client log | tier, billing period, on-demand and prepaid balances |
+| **Grok** | the client log | tier, billing period, on-demand cap and prepaid balance |
 | **Antigravity** | `loadCodeAssist` | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
 
 Grok's tier moved out of its quota heading to join them, so no agent states
@@ -1305,9 +1305,47 @@ The screen says which state it is in, in both places it appears:
  live · polled x.ai just now, every 5m
 
  3%   ██┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  credits used
+ 12%  ████┃░░░░░░░░░░░░░░░░░░░░  on-demand $3 of $25
  window 26 Aug → 2 Sep
  by product GrokBuild 3.0% · GrokChat 0% · GrokImagine 0%
 ```
+
+### On-demand is the allowance that costs money
+
+Beside the included credits the billing answer carries the paid usage, and
+the widget parsed it from the start:
+
+```json
+"onDemandUsed": {"val": 3}, "onDemandCap": {"val": 25},
+"prepaidBalance": {"val": 0}
+```
+
+Dollars, not cents. It used to draw as a fragment on the window line —
+`on-demand 3/25` — which meant the summary that ranks every allowance on the
+wall said nothing about the only one that is billed. It now gets the credits
+row's treatment on the tab, and a lane on `[+]` labelled **`on-demand $25`**:
+`used / cap`, on the credits lane's own window so the two pace against one
+clock, and marked stale exactly as the credits lane is, since both come out
+of one reading. The cap rides in the label because a percentage of an unnamed
+ceiling is not a number anyone can act on.
+
+The lane draws **only where a cap is set**. `onDemandCap` of nought is the
+state of this account rather than a zero to plot, and a 0% bar would say
+there is an allowance sitting untouched when what is true is that there is
+none — the refusal the Grok Bot allowance and Cursor's spend limit both make.
+The tab says `no on-demand cap set` in its place, so an absent bar cannot be
+read as an absent reading. Spend past the cap has not been seen from x.ai,
+and if it arrives the figure is drawn as it came: full bar, real numbers, no
+clamp.
+
+The credit percentage and the cap are read independently, which matters for
+unified-billing accounts: those get no `creditUsagePercent` at all, and Grok
+used to drop off the summary entirely for that. An absent credit figure now
+takes only the credit lane with it.
+
+`prepaidBalance` is **a balance, not an allowance** — money on the account,
+with no ceiling to be a percentage of — so it has no bar and stays as text
+beside the window.
 
 When asking is on and the figure still is not the server's, the row says
 which of the reasons applies rather than leaving `not live` to cover all of
