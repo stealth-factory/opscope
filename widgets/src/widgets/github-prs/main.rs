@@ -1787,8 +1787,12 @@ fn main() {
             if !shown.is_empty() && selected >= shown.len() {
                 selected = shown.len() - 1;
             }
-            // The stats cost eight rows; below thirty they would leave the
-            // list too short to be a list, so they stand down without asking.
+            // Two day charts plus state and age, so the block is a board of
+            // its own. Raising this gate to match that height would hide the
+            // new charts on a pane that can scroll, which is the reading the
+            // scroll rule forbids. The body is a window onto whatever they
+            // need, and `t` hides them when the list should have the first
+            // screen.
             if show_stats && h >= 30 {
                 // Every open PR, not `shown`: the filter is a search of the
                 // board, not a redefinition of it.
@@ -1981,8 +1985,8 @@ const FIGURE_DIGITS: usize = 11;
 /// - room for both, and the label sits on one line beside the axis;
 /// - room for the digits only, and the label wraps onto two lines under
 ///   them - `merged` over `last 24h`, which still says what it is;
-/// - room for neither, and the number goes into the caption as plain
-///   text. A narrow pane loses the size of the number, never the number.
+/// - room for neither, and the number sits on its own row under the
+///   caption. A narrow pane loses the size of the number, never the number.
 fn split_halves(w: usize) -> (usize, usize) {
     let row = w.saturating_sub(1);
     let wide = FIGURE_LABELS
@@ -2103,18 +2107,31 @@ fn day_chart(
     let mut cap: Vec<(String, String)> =
         vec![(p.lbl.clone(), format!(" ── {} ── ", heading))];
     cap.extend(caption);
+    rows.push(seg_owned(&cap, w - 1));
     if right == 0 {
-        cap.push((p.dim.clone(), " · ".to_string()));
+        // The figure cannot sit after the caption: that line is already
+        // the heading plus peak and totals, and `seg` clips from the
+        // right, so the number would be the first thing to go. A pane too
+        // narrow for the right half keeps it on its own row, where it
+        // cannot lose the fight for width. The number first, so even a
+        // twenty-column pane still has the figure.
+        let mut fig: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
         match figure {
             Some(v) => {
-                cap.push((p.txt.clone(), v.to_string()));
-                cap.push((p.dim.clone(), format!(" {}", label)));
+                fig.push((p.txt.clone(), v.to_string()));
+                fig.push((p.dim.clone(), format!(" {}", label)));
             }
-            None if stalled => cap.push((p.warn.clone(), format!("{} not counted", label))),
-            None => cap.push((p.dim.clone(), format!("{} loading", label))),
+            None if stalled => {
+                fig.push((p.warn.clone(), "not counted".to_string()));
+                fig.push((p.dim.clone(), format!(" {}", label)));
+            }
+            None => {
+                fig.push((p.dim.clone(), "loading".to_string()));
+                fig.push((p.dim.clone(), format!(" {}", label)));
+            }
         }
+        rows.push(seg_owned(&fig, w - 1));
     }
-    rows.push(seg_owned(&cap, w - 1));
 
     let days = OPENED_DAYS as usize;
     let avail = left.saturating_sub(2).max(10);
@@ -2205,147 +2222,12 @@ fn stats_view(
     p: &Palette,
 ) -> Vec<String> {
     let mut rows = vec![String::new()];
-    if prs.is_empty() {
-        return rows;
-    }
-    let n = prs.len();
-    let mut review: HashMap<&str, usize> = HashMap::new();
-    let mut checks: HashMap<&str, usize> = HashMap::new();
-    let (mut drafts, mut conflicts, mut ready) = (0usize, 0usize, 0usize);
-    for pr in prs {
-        let decision = text(pr, "reviewDecision");
-        let slot = match decision.as_str() {
-            "APPROVED" => "APPROVED",
-            "CHANGES_REQUESTED" => "CHANGES_REQUESTED",
-            "REVIEW_REQUIRED" => "REVIEW_REQUIRED",
-            _ => "",
-        };
-        *review.entry(slot).or_insert(0) += 1;
-        let state = rollup(pr);
-        let slot = match state.as_str() {
-            "SUCCESS" => "SUCCESS",
-            "FAILURE" => "FAILURE",
-            "PENDING" => "PENDING",
-            _ => "other",
-        };
-        *checks.entry(slot).or_insert(0) += 1;
-        if pr["isDraft"].as_bool().unwrap_or(false) {
-            drafts += 1;
-        }
-        if text(pr, "mergeable") == "CONFLICTING" {
-            conflicts += 1;
-        }
-        if ready_to_merge(pr) {
-            ready += 1;
-        }
-    }
-
-    rows.push(tc::seg(
-        &[
-            (p.lbl.as_str(), " ── STATE ── ".into()),
-            (p.txt.as_str(), format!("{}", n)),
-            // Everything after this counts the PRs in hand. When a source
-            // filled its page they are a sample of the board rather than
-            // the board, and the line has to say which it is describing.
-            (
-                p.dim.as_str(),
-                if capped {
-                    format!(" fetched of at least {} open · ", total)
-                } else {
-                    " open · ".to_string()
-                },
-            ),
-            (p.dim.as_str(), format!("{} draft", drafts)),
-            (p.dim.as_str(), " · ".into()),
-            (
-                if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
-                format!("{} conflicting", conflicts),
-            ),
-            (p.dim.as_str(), " · ".into()),
-            (
-                if ready > 0 { p.ok.as_str() } else { p.dim.as_str() },
-                format!("{} ready to merge", ready),
-            ),
-        ],
-        w - 1,
-    ));
-    let order: Vec<(&str, &str)> = vec![
-        ("APPROVED", p.ok.as_str()),
-        ("CHANGES_REQUESTED", p.bad.as_str()),
-        ("REVIEW_REQUIRED", p.warn.as_str()),
-        ("", p.dim.as_str()),
-    ];
-    let parts: Vec<(f64, String)> = order
-        .iter()
-        .filter_map(|(k, c)| {
-            let got = review.get(k).copied().unwrap_or(0);
-            if got == 0 {
-                return None;
-            }
-            Some((got as f64 / n as f64, c.to_string()))
-        })
-        .collect();
-    let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
-    let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
-    for (colour, txt) in &bar {
-        line.push((colour.as_str(), txt.clone()));
-    }
-    rows.push(tc::seg(&line, w - 1));
-    let mut key: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
-    for (k, colour) in &order {
-        let got = review.get(k).copied().unwrap_or(0);
-        if got == 0 {
-            continue;
-        }
-        key.push((colour, "▇ ".into()));
-        key.push((p.txt.as_str(), review_label(k, p).0.into()));
-        key.push((p.dim.as_str(), format!(" {}   ", got)));
-    }
-    for (k, colour, label) in [
-        ("SUCCESS", p.ok.as_str(), "checks pass"),
-        ("FAILURE", p.bad.as_str(), "checks FAIL"),
-        ("PENDING", p.warn.as_str(), "running"),
-    ] {
-        let got = checks.get(k).copied().unwrap_or(0);
-        if got == 0 {
-            continue;
-        }
-        key.push((colour, "· ".into()));
-        key.push((p.txt.as_str(), label.into()));
-        key.push((p.dim.as_str(), format!(" {}   ", got)));
-    }
-    rows.push(tc::seg(&key, w - 1));
-
-    let mut ages: Vec<(f64, &serde_json::Value)> = prs
-        .iter()
-        .filter_map(|pr| hours_since(&text(pr, "createdAt")).map(|h| (h, pr)))
-        .collect();
-    ages.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let idles: Vec<(f64, &serde_json::Value)> = prs
-        .iter()
-        .filter_map(|pr| hours_since(&text(pr, "updatedAt")).map(|h| (h, pr)))
-        .collect();
-
-    // When the open ones arrived, and how many were merged on each of the
-    // same thirty days. The first is counted from the pool; the second
-    // cannot be, because the pool is `is:open` throughout, so it comes
-    // from GitHub's own aggregates in `counts`.
-    let days = chart_days();
-    let mut per_day: HashMap<&String, i64> = days.iter().map(|d| (d, 0)).collect();
-    let mut inside = 0i64;
-    for pr in prs {
-        let key: String = text(pr, "createdAt").chars().take(10).collect();
-        if let Some(slot) = days.iter().find(|d| **d == key) {
-            *per_day.get_mut(slot).unwrap() += 1;
-            inside += 1;
-        }
-    }
-    let opened: Vec<(String, i64)> = days
-        .iter()
-        .map(|d| (d.clone(), per_day.get(d).copied().unwrap_or(0)))
-        .collect();
-    let peak = opened.iter().map(|(_, v)| *v).max().unwrap_or(0);
     let stalled = !counts_err.is_empty();
+    // The merged series and both rolling figures come from `counts`, not
+    // from the open pool. An empty board is exactly when merge activity is
+    // the only signal left, so that row is built before anything that
+    // needs a PR, and STATE / OPENED / DAY / AGE stay behind the guard.
+    let days = chart_days();
     // A day the counts do not carry is not a day with nothing in it, so the
     // series is only handed over when every day on the axis is accounted
     // for; otherwise the bars shimmer and the caption says why.
@@ -2359,31 +2241,159 @@ fn stats_view(
             })
             .collect()
     });
-    let mut opened_cap: Vec<(String, String)> = vec![
-        (p.dim.clone(), format!("last {}d · ", OPENED_DAYS)),
-        (p.txt.clone(), format!("{}", inside)),
-        // The bars and the figure beside them count different populations -
-        // the bars only PRs that are still open, the figure everything
-        // opened including what has since been merged or closed - so the
-        // caption keeps saying which one it describes.
-        (p.dim.clone(), format!(" of {} still open · ", n)),
-        (p.dim.clone(), format!("peak {}/day", peak)),
-    ];
-    if stalled {
-        opened_cap.push((p.warn.clone(), " · 24h count stale".to_string()));
+    if !prs.is_empty() {
+        let n = prs.len();
+        let mut review: HashMap<&str, usize> = HashMap::new();
+        let mut checks: HashMap<&str, usize> = HashMap::new();
+        let (mut drafts, mut conflicts, mut ready) = (0usize, 0usize, 0usize);
+        for pr in prs {
+            let decision = text(pr, "reviewDecision");
+            let slot = match decision.as_str() {
+                "APPROVED" => "APPROVED",
+                "CHANGES_REQUESTED" => "CHANGES_REQUESTED",
+                "REVIEW_REQUIRED" => "REVIEW_REQUIRED",
+                _ => "",
+            };
+            *review.entry(slot).or_insert(0) += 1;
+            let state = rollup(pr);
+            let slot = match state.as_str() {
+                "SUCCESS" => "SUCCESS",
+                "FAILURE" => "FAILURE",
+                "PENDING" => "PENDING",
+                _ => "other",
+            };
+            *checks.entry(slot).or_insert(0) += 1;
+            if pr["isDraft"].as_bool().unwrap_or(false) {
+                drafts += 1;
+            }
+            if text(pr, "mergeable") == "CONFLICTING" {
+                conflicts += 1;
+            }
+            if ready_to_merge(pr) {
+                ready += 1;
+            }
+        }
+
+        rows.push(tc::seg(
+            &[
+                (p.lbl.as_str(), " ── STATE ── ".into()),
+                (p.txt.as_str(), format!("{}", n)),
+                // Everything after this counts the PRs in hand. When a source
+                // filled its page they are a sample of the board rather than
+                // the board, and the line has to say which it is describing.
+                (
+                    p.dim.as_str(),
+                    if capped {
+                        format!(" fetched of at least {} open · ", total)
+                    } else {
+                        " open · ".to_string()
+                    },
+                ),
+                (p.dim.as_str(), format!("{} draft", drafts)),
+                (p.dim.as_str(), " · ".into()),
+                (
+                    if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
+                    format!("{} conflicting", conflicts),
+                ),
+                (p.dim.as_str(), " · ".into()),
+                (
+                    if ready > 0 { p.ok.as_str() } else { p.dim.as_str() },
+                    format!("{} ready to merge", ready),
+                ),
+            ],
+            w - 1,
+        ));
+        let order: Vec<(&str, &str)> = vec![
+            ("APPROVED", p.ok.as_str()),
+            ("CHANGES_REQUESTED", p.bad.as_str()),
+            ("REVIEW_REQUIRED", p.warn.as_str()),
+            ("", p.dim.as_str()),
+        ];
+        let parts: Vec<(f64, String)> = order
+            .iter()
+            .filter_map(|(k, c)| {
+                let got = review.get(k).copied().unwrap_or(0);
+                if got == 0 {
+                    return None;
+                }
+                Some((got as f64 / n as f64, c.to_string()))
+            })
+            .collect();
+        let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
+        let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (colour, txt) in &bar {
+            line.push((colour.as_str(), txt.clone()));
+        }
+        rows.push(tc::seg(&line, w - 1));
+        let mut key: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (k, colour) in &order {
+            let got = review.get(k).copied().unwrap_or(0);
+            if got == 0 {
+                continue;
+            }
+            key.push((colour, "▇ ".into()));
+            key.push((p.txt.as_str(), review_label(k, p).0.into()));
+            key.push((p.dim.as_str(), format!(" {}   ", got)));
+        }
+        for (k, colour, label) in [
+            ("SUCCESS", p.ok.as_str(), "checks pass"),
+            ("FAILURE", p.bad.as_str(), "checks FAIL"),
+            ("PENDING", p.warn.as_str(), "running"),
+        ] {
+            let got = checks.get(k).copied().unwrap_or(0);
+            if got == 0 {
+                continue;
+            }
+            key.push((colour, "· ".into()));
+            key.push((p.txt.as_str(), label.into()));
+            key.push((p.dim.as_str(), format!(" {}   ", got)));
+        }
+        rows.push(tc::seg(&key, w - 1));
+
+        // When the open ones arrived. Counted from the pool; the merged
+        // series cannot be, because the pool is `is:open` throughout, so it
+        // comes from GitHub's own aggregates in `counts` and is drawn
+        // whether this block ran or not.
+        let mut per_day: HashMap<&String, i64> = days.iter().map(|d| (d, 0)).collect();
+        let mut inside = 0i64;
+        for pr in prs {
+            let key: String = text(pr, "createdAt").chars().take(10).collect();
+            if let Some(slot) = days.iter().find(|d| **d == key) {
+                *per_day.get_mut(slot).unwrap() += 1;
+                inside += 1;
+            }
+        }
+        let opened: Vec<(String, i64)> = days
+            .iter()
+            .map(|d| (d.clone(), per_day.get(d).copied().unwrap_or(0)))
+            .collect();
+        let peak = opened.iter().map(|(_, v)| *v).max().unwrap_or(0);
+        let mut opened_cap: Vec<(String, String)> = vec![
+            (p.dim.clone(), format!("last {}d · ", OPENED_DAYS)),
+            (p.txt.clone(), format!("{}", inside)),
+            // The bars and the figure beside them count different populations -
+            // the bars only PRs that are still open, the figure everything
+            // opened including what has since been merged or closed - so the
+            // caption keeps saying which one it describes.
+            (p.dim.clone(), format!(" of {} still open · ", n)),
+            (p.dim.clone(), format!("peak {}/day", peak)),
+        ];
+        if stalled {
+            opened_cap.push((p.warn.clone(), " · 24h count stale".to_string()));
+        }
+        rows.extend(day_chart(
+            "OPENED / DAY",
+            opened_cap,
+            Some(&opened),
+            &p.pr,
+            counts.map(|c| c.opened_24h),
+            stalled,
+            FIGURE_LABELS[1],
+            w,
+            tick,
+            &p,
+        ));
     }
-    rows.extend(day_chart(
-        "OPENED / DAY",
-        opened_cap,
-        Some(&opened),
-        &p.pr,
-        counts.map(|c| c.opened_24h),
-        stalled,
-        FIGURE_LABELS[1],
-        w,
-        tick,
-        &p,
-    ));
 
     let mut merged_cap: Vec<(String, String)> =
         vec![(p.dim.clone(), format!("last {}d · ", OPENED_DAYS))];
@@ -2426,6 +2436,20 @@ fn stats_view(
         tick,
         &p,
     ));
+
+    if prs.is_empty() {
+        return rows;
+    }
+
+    let mut ages: Vec<(f64, &serde_json::Value)> = prs
+        .iter()
+        .filter_map(|pr| hours_since(&text(pr, "createdAt")).map(|h| (h, pr)))
+        .collect();
+    ages.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let idles: Vec<(f64, &serde_json::Value)> = prs
+        .iter()
+        .filter_map(|pr| hours_since(&text(pr, "updatedAt")).map(|h| (h, pr)))
+        .collect();
 
     let at = |pairs: &[(f64, &serde_json::Value)], frac: f64| -> Option<f64> {
         if pairs.is_empty() {
@@ -3628,7 +3652,10 @@ mod tests {
                 for series in [Some(series.as_slice()), None] {
                     let rows = day_chart(
                         "MERGED / DAY",
-                        vec![(p.dim.clone(), "last 30d · 12 merged".to_string())],
+                        vec![(
+                            p.dim.clone(),
+                            "last 30d · 216 merged · peak 33/day".to_string(),
+                        )],
                         series,
                         &p.ok,
                         figure,
@@ -3652,6 +3679,38 @@ mod tests {
                         );
                     }
                     if right == 0 {
+                        // The fallback row is the only place the number can
+                        // live once the right half is gone, and the heading
+                        // plus peak already fill a 45-column caption, so
+                        // this is what would vanish if it sat at the end
+                        // of that line.
+                        let cap: String = rows
+                            .iter()
+                            .take(3)
+                            .map(|r| plain(r))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        match figure {
+                            Some(0) => assert!(
+                                cap.split_whitespace().any(|word| word == "0"),
+                                "w={} drew zero as something else: {:?}",
+                                w,
+                                cap
+                            ),
+                            Some(v) => assert!(
+                                cap.contains(&v.to_string()),
+                                "w={} lost the fallback figure {}: {:?}",
+                                w,
+                                v,
+                                cap
+                            ),
+                            None => assert!(
+                                cap.contains("loading"),
+                                "w={} pending figure vanished: {:?}",
+                                w,
+                                cap
+                            ),
+                        }
                         continue;
                     }
                     // Every word of the label survives, on one line or two,
@@ -3737,5 +3796,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn merge_activity_still_draws_when_nothing_is_open() {
+        let p = palette();
+        let days = chart_days();
+        let counts = Counts {
+            days: days.iter().map(|d| (d.clone(), 2)).collect(),
+            merged_24h: 4,
+            opened_24h: 9,
+            at: tc::now(),
+        };
+        let rows = stats_view(&[], 0, false, Some(&counts), "", 80, 0, &p);
+        let drawn: Vec<String> = rows.iter().map(|r| plain(r)).collect();
+        let body = drawn.join("\n");
+        assert!(
+            drawn.iter().any(|r| r.contains("MERGED / DAY")),
+            "empty board hid merge activity: {:?}",
+            body
+        );
+        assert!(
+            drawn.iter().any(|r| r.contains("merged")),
+            "empty board lost the 24h figure: {:?}",
+            body
+        );
+        for gone in ["STATE", "OPENED / DAY", "AGE"] {
+            assert!(
+                !drawn.iter().any(|r| r.contains(gone)),
+                "pool section {} leaked onto an empty board: {:?}",
+                gone,
+                body
+            );
+        }
+        let waiting = stats_view(&[], 0, false, None, "", 80, 0, &p);
+        let wait_body = waiting.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
+        assert!(
+            wait_body.contains("MERGED / DAY"),
+            "unfetched counts hid the row: {:?}",
+            wait_body
+        );
+        assert!(
+            wait_body.contains("loading") || wait_body.contains("counting"),
+            "unfetched counts drew as zero: {:?}",
+            wait_body
+        );
     }
 }

@@ -107,10 +107,15 @@ they would contradict each other; they are not one series.
 
 The figure's half is as wide as its label when there is room for both. Narrower,
 the label wraps onto two lines under the digits rather than being cut, and
-narrower still the number goes into the caption as plain text. A narrow pane
-loses the size of the number, never the number. The digits themselves are drawn
-on **half blocks, two pixel rows to a cell**, which is how three rows of text
+narrower still the number sits on its own line under the caption, so the
+heading and the peak cannot push it off the pane. A narrow pane loses the
+size of the number, never the number. The digits themselves are drawn on
+**half blocks, two pixel rows to a cell**, which is how three rows of text
 carry a 3x5 glyph — core has no large-digit font.
+
+When nothing is open, STATE, OPENED / DAY and AGE have nothing to say and
+stand down. MERGED / DAY still draws: that is the one remaining signal, and
+the count request has already been spent on it.
 
 **Age** — median, p95 and max, then **one bar per open PR, youngest on the left
 and oldest on the right**. The x axis is *rank, not time*: neighbouring bars are
