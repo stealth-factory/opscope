@@ -405,8 +405,17 @@ the heaviest requests first: measured during one, every size from 25 up
 returned 502 at about 10.7s while 20 and below answered in three, and an
 hour later 50 answered in five with nothing changed at this end. So a round
 that is refused — a gateway 502, 503 or 504, or curl running out of its
-45 seconds — asks again at half the size, down to a floor of ten, and the
-pane says when it had to.
+45 seconds — asks again at half the size, down to a floor of ten. A round
+still refused at the floor is asked once more after a three-second pause,
+because a slow spell is usually one bad request rather than a bad minute;
+only then does the pass stop paging and report the list as a floor.
+
+None of that is an error, and it is not drawn as one. A pass that fell back
+or stopped short leaves a dim line under the count — `GitHub is slow ·
+served 10/page · 302 of at least 686` — naming the page size it was served
+and how far it got, with `next pass in 34s` on the end when the pane is wide
+enough to hold it. The `!` banner stays for a pass that produced nothing and
+for a refusal that really is one.
 
 Leave `token` empty and the variable `token_env` names is read instead,
 defaulting to `GITHUB_TOKEN`. Its value is the variable's name, not a

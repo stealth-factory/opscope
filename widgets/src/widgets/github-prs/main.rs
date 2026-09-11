@@ -539,6 +539,18 @@ struct State {
     /// whatever the last good one left. Kept apart from `err` so a count
     /// GitHub would not serve cannot make the list look broken.
     counts_err: String,
+    /// The page size the last pass was served, when a round had to fall
+    /// back from the size it asked for. `None` is the ordinary case.
+    served: Option<usize>,
+    /// Set when the last pass stopped paging before its sources were
+    /// exhausted, so the list is every result GitHub served rather than
+    /// every result there is.
+    ///
+    /// This and `served` describe how the pass went, not that it went
+    /// wrong, and they are drawn as a dim note under the header. They are
+    /// deliberately not in `err`: the `!` banner is for a pass that
+    /// produced nothing and for a refusal that really is one.
+    stopped: bool,
 }
 
 /// Merge and arrival counts over the span the day charts plot.
@@ -891,6 +903,32 @@ fn fetch_round(
     }
 }
 
+/// How long to wait before asking a refused round one more time.
+///
+/// Long enough that whatever shed the request has finished shedding it -
+/// measured, page one at ten per page answered in 1.3s through the same
+/// spell that refused the round - and short enough that the pass is still
+/// the pass a reader is waiting on rather than a new one.
+const RETRY_PAUSE: Duration = Duration::from_secs(3);
+
+/// Whether a round that `fetch_round` gave up on is worth one more try.
+///
+/// `fetch_round` halves the page size within the round and stops at the
+/// floor; this is the round itself asked again, once, after a pause. Once,
+/// because the thing it is built for is a single bad request in an
+/// otherwise answering minute: measured during a slow spell, ten per page
+/// answered in 1.3s three times running and one later round came back 502
+/// anyway. A second retry would be a loop, and a loop against a search
+/// that is actually down spends the rate limit to reprint the message.
+///
+/// `tried` is how many retries this round has already had, so the answer
+/// can only be true on the first. The reason is read as well, because
+/// `worth_retrying` already knows which refusals mean "later" and which
+/// mean "no": bad credentials say the same thing three seconds from now.
+fn retry_again(tried: usize, said: &str) -> bool {
+    tried == 0 && worth_retrying(said)
+}
+
 /// The next page size to try, or `None` at the floor.
 ///
 /// Its own function so the walk can be tested rather than reimplemented in
@@ -1028,7 +1066,25 @@ fn fetch_list(
         // and it is the per-node subqueries that cost it, not the depth.
         // Everything already pooled is real and stays on screen, and
         // `capped` below already says the total is a lower bound.
-        let d = match fetch_round(&round, &round_cursors, served.unwrap_or(limit), tok) {
+        // Asked again once, after a pause, before the pass is cut short.
+        // The retry starts at the floor rather than at the size the round
+        // started from: the walk inside `fetch_round` has just established
+        // that the larger pages are being refused, and re-spending that
+        // walk costs two ten-second refusals to relearn it.
+        let mut tried = 0usize;
+        let outcome = loop {
+            let start = served.unwrap_or(limit);
+            let start = if tried == 0 { start } else { start.min(PAGE_FLOOR) };
+            match fetch_round(&round, &round_cursors, start, tok) {
+                Ok(got) => break Ok(got),
+                Err(said) if retry_again(tried, &said) => {
+                    tried += 1;
+                    std::thread::sleep(RETRY_PAUSE);
+                }
+                Err(said) => break Err(said),
+            }
+        };
+        let d = match outcome {
             Ok((d, size)) => {
                 if size < limit {
                     served = served.map_or(Some(size), |had: usize| Some(had.min(size)));
@@ -1132,12 +1188,6 @@ fn fetch_list(
             .map(|(n, _)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        let (total, capped) = union_total(&counted, nodes.len());
-        g.total = total;
-        // Paging that stopped short is capped whatever the arithmetic says.
-        g.capped = capped || deepened.is_some();
-        g.prs = nodes;
-        g.fetched = tc::now();
         let mut said = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
         } else {
@@ -1153,30 +1203,98 @@ fn fetch_list(
                 format!("{} · {}", said, note)
             };
         }
-        if let Some(size) = served {
-            // Said plainly, because the list is whole and the only thing
-            // that changed is how many rounds it took to get here.
-            let note = format!("GitHub refused {} per page; served {}", limit, size);
-            said = if said.is_empty() {
-                note
-            } else {
-                format!("{} · {}", said, note)
-            };
-        }
-        if deepened.is_some() {
-            // Named as a ceiling rather than as the raw 502, because that
-            // is what it is: GitHub stops serving these pages, the list is
-            // as long as it can be, and nothing here is broken.
-            let note = "GitHub stopped paging this search; showing every result it served";
-            said = if said.is_empty() {
-                note.to_string()
-            } else {
-                format!("{} · {}", said, note)
-            };
-        }
-        g.err = said;
+        settle(&mut g, nodes, &counted, served, deepened.is_some(), said);
     }
     Ok(())
+}
+
+/// What a finished pass leaves on the pane.
+///
+/// Its own function so a pass that fell back or stopped short can be
+/// tested without a network: the two facts about *how* the pass went go in
+/// their own fields and `err` carries only what `warnings` brought - the
+/// config notes, which really are things to fix. A page size GitHub would
+/// not serve and paging that stopped at a ceiling are neither. Folded into
+/// `err` they drew the `!` banner in the warning colour and read, to
+/// anyone looking at the pane, as a widget that had failed: the list was
+/// real, the count was honestly a floor, and a minute later it was gone.
+fn settle(
+    g: &mut State,
+    nodes: Vec<serde_json::Value>,
+    counted: &[(i64, usize)],
+    served: Option<usize>,
+    stopped: bool,
+    warnings: String,
+) {
+    let (total, capped) = union_total(counted, nodes.len());
+    g.total = total;
+    // Paging that stopped short is capped whatever the arithmetic says.
+    g.capped = capped || stopped;
+    g.prs = nodes;
+    g.fetched = tc::now();
+    g.served = served;
+    g.stopped = stopped;
+    g.err = warnings;
+}
+
+/// The dim line under the header when a pass fell back or stopped short.
+///
+/// One line, or nothing at all. The sentence this replaced was two
+/// sentences long - `GitHub refused 25 per page; served 10 · GitHub
+/// stopped paging this search; showing every result it served` - and in a
+/// wall pane it wrapped three rows in the `!` slot, which is most of what
+/// made a slow minute look like a broken widget.
+///
+/// Built to a width rather than to a fixed wording, because the three
+/// things worth saying do not fit fifty-eight columns together: the page
+/// size served and how far the pass got come first, and *when the next
+/// pass is* is dropped when the pane cannot hold it. Dropped, not cut -
+/// half a hint about a countdown is worse than no countdown.
+///
+/// `next_in` is seconds until the next pass and is expected to be
+/// recomputed every frame; a countdown frozen into a string at the end of
+/// the pass would be wrong before anyone read it.
+fn partial_note(
+    served: Option<usize>,
+    got: usize,
+    total: usize,
+    capped: bool,
+    stopped: bool,
+    next_in: Option<u64>,
+    w: usize,
+) -> String {
+    if served.is_none() && !stopped {
+        return String::new();
+    }
+    let mut parts: Vec<String> = vec!["GitHub is slow".to_string()];
+    if let Some(size) = served {
+        parts.push(format!("served {}/page", size));
+    }
+    if stopped {
+        // "of at least", for the reason the header says it: the sources
+        // overlap and one that filled its page has more behind it, so the
+        // total is a floor and this is a count against a floor.
+        parts.push(format!(
+            "{} of {}{}",
+            got,
+            if capped { "at least " } else { "" },
+            total
+        ));
+    }
+    if let Some(secs) = next_in {
+        parts.push(format!("next pass in {}s", secs));
+    }
+    // Everything after the first piece is dropped from the tail until the
+    // line fits. The first piece is short enough to fit any pane a widget
+    // is drawn in at all, so this always terminates with something.
+    while parts.len() > 1 {
+        let line = format!(" {}", parts.join(" · "));
+        if line.chars().count() <= w.saturating_sub(1) {
+            return line;
+        }
+        parts.pop();
+    }
+    format!(" {}", parts[0])
 }
 
 struct Palette {
@@ -1466,6 +1584,8 @@ fn main() {
             stack_rows,
             loading,
             err,
+            served,
+            stopped,
             fetched,
             stages,
             target,
@@ -1481,6 +1601,8 @@ fn main() {
                     g.stack_rows.clone(),
                     g.loading,
                     g.err.clone(),
+                    g.served,
+                    g.stopped,
                     g.fetched,
                     g.stages.clone(),
                     g.target.clone(),
@@ -1739,6 +1861,18 @@ fn main() {
             ));
         }
         rows.push(tc::seg(&count, w - 1));
+        // How the last pass went, when it went unusually: dim, one line,
+        // under the count it qualifies. Recomputed here rather than stored
+        // because the countdown moves - and because the width it has to fit
+        // is only known here.
+        let next_in = (fetched > 0.0 && !loading)
+            .then(|| fetched + refresh - tc::now())
+            .filter(|left| *left > 0.0)
+            .map(|left| left.round() as u64);
+        let note = partial_note(served, prs.len(), total, capped, stopped, next_in, w);
+        if !note.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), note)], w - 1));
+        }
         if !err.is_empty() {
             rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
@@ -3289,6 +3423,111 @@ mod tests {
         }
         assert_eq!(sizes, vec![25, 12, 10]);
         assert_eq!(smaller(PAGE_FLOOR), None, "the floor is where it stops");
+    }
+
+    #[test]
+    fn a_round_refused_at_the_floor_is_asked_again_once() {
+        let refused = "GitHub returned 502 - the search was too slow to serve";
+        // Once, which is the whole point: the round the walk gave up on is
+        // usually one bad request in a minute that is otherwise answering.
+        assert!(retry_again(0, refused), "the first refusal earns a retry");
+        // And never twice. A second retry is a loop, and a loop against a
+        // search that is genuinely down spends rate limit reprinting the
+        // same message.
+        assert!(!retry_again(1, refused), "one retry, not a loop");
+        assert!(!retry_again(2, refused));
+
+        // The pause is a pause, not a poll: long enough for whatever shed
+        // the request to have finished, short enough that the pass a reader
+        // is waiting on is still that pass.
+        assert!(
+            (2..=3).contains(&RETRY_PAUSE.as_secs()),
+            "the pause is seconds, not minutes: {:?}",
+            RETRY_PAUSE
+        );
+
+        // A refusal that means "no" rather than "later" is not slept on.
+        // Bad credentials say the same thing three seconds from now.
+        assert!(!retry_again(0, "GitHub returned 401: Bad credentials"));
+        assert!(!retry_again(0, "GitHub returned 500"));
+    }
+
+    #[test]
+    fn a_partial_pass_is_a_note_and_not_an_error() {
+        // The end of a pass that fell back to ten per page and stopped
+        // paging at a ceiling - built here rather than fetched, because
+        // what is being tested is what such a pass leaves on the pane.
+        let mut g = State::default();
+        let nodes: Vec<serde_json::Value> = (0..302)
+            .map(|n| serde_json::json!({ "url": format!("u{}", n) }))
+            .collect();
+        // One source saying it matched 686 and having handed over 302 is a
+        // capped source, so the total is a floor.
+        settle(&mut g, nodes, &[(686, 302)], Some(10), true, String::new());
+
+        assert!(
+            g.err.is_empty(),
+            "a slow pass is not a failure and must not draw the ! banner: {}",
+            g.err
+        );
+        assert_eq!(g.served, Some(10), "the page size served is carried");
+        assert!(g.stopped, "paging that stopped short says so");
+        assert!(g.capped, "a pass that stopped short reports a floor");
+        assert_eq!(g.total, 686);
+        assert_eq!(g.prs.len(), 302);
+
+        // What `err` is still for: the config notes the caller composes.
+        let mut g = State::default();
+        settle(&mut g, Vec::new(), &[(0, 0)], None, false, "token in config".into());
+        assert_eq!(g.err, "token in config");
+        assert_eq!(g.served, None, "an ordinary pass has nothing to say");
+        assert!(!g.stopped);
+    }
+
+    #[test]
+    fn the_note_is_one_line_in_a_fifty_eight_column_pane() {
+        // The wall pane the reported banner wrapped three rows in.
+        let w = 58;
+        let note = partial_note(Some(10), 302, 686, true, true, Some(34), w);
+        assert_eq!(note.lines().count(), 1, "one line: {}", note);
+        assert!(
+            note.chars().count() <= w - 1,
+            "{} chars in a {}-column pane: {}",
+            note.chars().count(),
+            w,
+            note
+        );
+        // The two facts that cannot be dropped: the page size served and
+        // how far the pass got, against a total that is a floor.
+        assert!(note.contains("served 10/page"), "{}", note);
+        assert!(note.contains("302 of at least 686"), "{}", note);
+
+        // The countdown is what the narrow pane gives up, and it comes
+        // back when there is room for it. Dropped whole rather than cut:
+        // half a countdown teaches a reader nothing.
+        assert!(!note.contains("next pass"), "no room for it at 58: {}", note);
+        let wide = partial_note(Some(10), 302, 686, true, true, Some(34), 100);
+        assert!(wide.contains("next pass in 34s"), "{}", wide);
+        assert!(wide.chars().count() <= 99);
+
+        // An uncapped total is a total and is not dressed up as a floor.
+        let whole = partial_note(None, 302, 302, false, true, None, 100);
+        assert!(whole.contains("302 of 302"), "{}", whole);
+
+        // Nothing unusual happened, so there is no note and no row.
+        assert_eq!(partial_note(None, 302, 302, false, false, Some(34), 100), "");
+
+        // Every width a pane can be drawn at keeps it on one line.
+        for w in 20..=200 {
+            let note = partial_note(Some(10), 1302, 16860, true, true, Some(340), w);
+            assert!(
+                note.chars().count() <= w.saturating_sub(1).max(1),
+                "{} chars at width {}: {}",
+                note.chars().count(),
+                w,
+                note
+            );
+        }
     }
 
     #[test]
