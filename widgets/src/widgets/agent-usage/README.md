@@ -93,8 +93,9 @@ store, transcripts). `[+]` only ranks a live (or last-session) quota lane from
 the vendor, so a busy tab and an empty summary row can both be true. Claude
 needs a signed-in token and Anthropic's usage endpoint; Cursor needs
 `~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
-in `~/.copilot/config.json`; Grok needs either `creditUsagePercent` in
-`~/.grok/logs/unified.jsonl` or `agent_usage.grok_ping` to poll x.ai. Each of those
+in `~/.copilot/config.json`; Grok needs a billing reading in
+`~/.grok/logs/unified.jsonl` (`creditUsagePercent` or `onDemandCap`) or
+`agent_usage.grok_ping` to poll x.ai. Each of those
 is a different missing step, so each quiet agent says which one it is.
 
 A lane whose reading came from a cache rather than a live call says `cached`
@@ -242,13 +243,14 @@ already fetched carried it all along in a block it never read:
 }
 ```
 
-Cents, like everything else on this service. `individualUsed` against
-`individualLimit` is the line; the remainder is worked out from the pair
+Cents, like everything else on this service. A user cap (`limitType: "user"`)
+reads `individualUsed` against `individualLimit`; a shared team budget reads
+`totalSpend` against the same limit and is labelled `team pool`, since that is
+the population the ceiling belongs to. Each figure is the other's fallback
+when proto3 omits a field at zero. The remainder is worked out from the pair
 rather than read from `individualRemaining`, because a cap lowered below what
 is already spent makes that field negative and *"-$9.00 left"* is arithmetic
-where a reader needs a fact. `limitType: "user"` is the account's own cap; any
-other stated type is a shared team budget and is labelled `team pool`, since
-it is a different population. `resets` is `billingCycleEnd`, the date the
+where a reader needs a fact. `resets` is `billingCycleEnd`, the date the
 cycle already carries.
 
 On `[+]` it becomes a lane labelled `extra $50`, on the plan's own cycle —
@@ -1341,7 +1343,10 @@ clamp.
 The credit percentage and the cap are read independently, which matters for
 unified-billing accounts: those get no `creditUsagePercent` at all, and Grok
 used to drop off the summary entirely for that. An absent credit figure now
-takes only the credit lane with it.
+takes only the credit lane with it. The same omission on a log line used to
+drop the whole reading when the live ask was off or failed; the log parser
+now accepts a named period with an `onDemandCap` the same way the live path
+does.
 
 `prepaidBalance` is **a balance, not an allowance** — money on the account,
 with no ceiling to be a percentage of — so it has no bar and stays as text

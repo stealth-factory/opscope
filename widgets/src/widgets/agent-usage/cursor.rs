@@ -337,10 +337,18 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     let Some(blk) = live.get("spendLimitUsage").filter(|v| v.is_object()) else {
         return ExtraState::NotReported { keys: Vec::new() };
     };
-    // `individualUsed` is this account's own spend against the cap;
-    // `totalSpend` is the same figure here and is the one a shared pool
-    // need carry, so it is a fallback rather than a second reading.
-    let used = loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]));
+    // An absent `limitType` is proto3's empty string, which is no
+    // evidence of a pool. Only a stated type other than `user` is.
+    let shared = !matches!(text(blk, "limitType").as_str(), "" | "user");
+    // A user cap is this account's spend; a shared pool is the pool's.
+    // `individualUsed` against a team ceiling is a partial presented as a
+    // total. Each is the other's fallback: proto3 omits a field at zero,
+    // and on the measured user account the two figures were the same.
+    let used = if shared {
+        loose(&blk["totalSpend"]).or_else(|| loose(&blk["individualUsed"]))
+    } else {
+        loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]))
+    };
     if hard["noUsageBasedAllowed"].as_bool() == Some(true) {
         return ExtraState::Disabled { used: used.unwrap_or(0.0) };
     }
@@ -359,9 +367,7 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
             // zero, not a spend nobody knows - Cursor answered the call.
             used: used.unwrap_or(0.0),
             limit,
-            // An absent `limitType` is proto3's empty string, which is no
-            // evidence of a pool. Only a stated type other than `user` is.
-            shared: !matches!(text(blk, "limitType").as_str(), "" | "user"),
+            shared,
         };
     }
     match used {
@@ -404,9 +410,11 @@ fn extra_lane_pct(state: &ExtraState) -> Option<f64> {
 fn spend_rows(live: &serde_json::Value, hard: Option<&serde_json::Value>, w: usize, p: &Palette) -> Vec<String> {
     let plan = &live["planUsage"];
     let state = extra_state(live, hard);
+    // A stated limit with no `includedSpend` is proto3 omitting a zero,
+    // not a plan nobody read - the same reading `individualLimit` gets.
     let plan_pair = loose(&plan["limit"])
         .filter(|v| *v != 0.0)
-        .zip(loose(&plan["includedSpend"]));
+        .map(|limit| (limit, loose(&plan["includedSpend"]).unwrap_or(0.0)));
     // One column for both labels, so the two amounts line up under each
     // other and the pair reads as a pair.
     let label_w = ["spend", "extra usage"].iter().map(|l| l.chars().count()).max().unwrap();
@@ -1692,6 +1700,22 @@ mod tests {
         assert!(!joined.contains("$999.99"), "totalSpend drawn against the limit: {}", joined);
     }
 
+    #[test]
+    fn an_omitted_included_spend_is_nought_against_the_limit() {
+        // Proto3 omits a field sitting at its default. A cycle that has
+        // not spent against the included amount yet still has a limit,
+        // and zip-ing the pair used to drop the whole row for that.
+        let mut v = measured();
+        v["planUsage"].as_object_mut().unwrap().remove("includedSpend");
+        let joined = spend_rows(&v, None, 100, &palette())
+            .iter()
+            .map(|r| strip(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("$0.00 of $400.00 included"), "{}", joined);
+        assert!(!joined.contains("$1792.80"), "bonus spend filled the gap: {}", joined);
+    }
+
     /// A drawn row without its colour escapes, so a column index means
     /// cells on screen rather than bytes in the string.
     fn strip(row: &str) -> String {
@@ -1957,6 +1981,21 @@ mod tests {
             ExtraState::Fixed { used: 964.0, limit: 5000.0, shared: true }
         );
         assert!(extra_line(&v, None, 100).contains("of $50.00 team pool"), "pool not labelled");
+
+        // The pool's spend, not this account's. On the measured user account
+        // the two figures were equal; a team with other spenders is the
+        // case the label is for, and individualUsed against a team ceiling
+        // is a partial presented as a total.
+        v["spendLimitUsage"]["individualUsed"] = serde_json::json!(964);
+        v["spendLimitUsage"]["totalSpend"] = serde_json::json!(4000);
+        assert_eq!(
+            extra_state(&v, None),
+            ExtraState::Fixed { used: 4000.0, limit: 5000.0, shared: true }
+        );
+        let line = extra_line(&v, None, 100);
+        assert!(line.contains("$40.00 of $50.00 team pool"), "{}", line);
+        assert!(!line.contains("$9.64"), "this account's spend drawn as the pool: {}", line);
+        assert_eq!(extra_lane_pct(&extra_state(&v, None)), Some(80.0));
 
         // An absent limitType is proto3's empty string and says nothing
         // about a pool, so it must not be read as one.

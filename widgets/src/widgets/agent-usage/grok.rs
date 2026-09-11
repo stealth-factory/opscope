@@ -203,31 +203,34 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
     for line in lines {
         // Rejected on a substring first: almost every line of this log is
         // something else, and parsing two megabytes of them to find the
-        // few that carry a credit reading costs more than the read.
-        if !line.contains("creditUsagePercent") {
+        // few that carry a billing reading costs more than the read.
+        // Unified-billing accounts omit `creditUsagePercent` entirely, so
+        // the paid-allowance keys have to count on their own or a valid
+        // on-demand lane never leaves the log.
+        if !line.contains("creditUsagePercent") && !line.contains("onDemandCap") {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let cfg = &d["ctx"]["config"];
-        // The key has to be there, but it does not have to hold a number:
-        // a reading the server sent with a null percentage still names the
-        // tier and the billing period, and those rows are real.
-        if !cfg
-            .as_object()
-            .is_some_and(|o| o.contains_key("creditUsagePercent"))
-        {
+        let period = &cfg["currentPeriod"];
+        // The period is what makes this a reading, same as quota_from.
+        // An omitted percentage is not a missing reading: the on-demand
+        // cap can still be there, and a null percentage still names the
+        // tier and the billing period.
+        let start = text(period, "start");
+        let end = text(period, "end");
+        if start.is_empty() || end.is_empty() {
             continue;
         }
-        let period = &cfg["currentPeriod"];
         let got = Quota {
             pct: val_of(&cfg["creditUsagePercent"]),
             products: products_of(cfg),
             taken: iso_epoch(&text(&d, "ts")),
             kind: text(period, "type"),
-            start: text(period, "start"),
-            end: text(period, "end"),
+            start,
+            end,
             tier: text(&d["ctx"], "subscriptionTier"),
             on_demand_used: val_of(&cfg["onDemandUsed"]["val"]),
             on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
@@ -838,8 +841,8 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
     // shown as current while the server's own answer, naming the window we
     // are actually in, was thrown away.
     //
-    // The log parser has always accepted a reading whose percentage is
-    // absent, for exactly this reason. The two are consistent now.
+    // The log parser accepts a reading whose percentage is absent, for
+    // exactly this reason. The two are consistent now.
     let start = text(period, "start");
     let end = text(period, "end");
     if start.is_empty() || end.is_empty() {
@@ -1459,18 +1462,18 @@ mod tests {
 
     /// A drawn row without its colour escapes, so a width is cells on
     /// screen rather than bytes in the string.
-    fn plain_of(row: &str) -> String {
+    fn visible(row: &str) -> String {
         let mut out = String::new();
         let mut chars = row.chars();
         while let Some(c) = chars.next() {
-            if c != '' {
-                out.push(c);
-                continue;
-            }
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
+            } else {
+                out.push(c);
             }
         }
         out
@@ -1763,10 +1766,25 @@ mod tests {
         // Unified-billing accounts get no creditUsagePercent at all. The
         // whole of Grok used to drop off the summary for that, which would
         // now take the billed allowance down with an unrelated absence.
-        let bare = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        // Substituting null still leaves the key, which the log used to
+        // require; the live path omits it, so the fallback has to as well.
+        let omitted = LOG_LINE.replace(r#""creditUsagePercent":42.5,"#, "");
         let d = Data {
             ok: true,
-            quota: newest_quota([bare.as_str()].into_iter()),
+            quota: newest_quota([omitted.as_str()].into_iter()),
+            ..Default::default()
+        };
+        let got = lanes(&d);
+        assert_eq!(got.len(), 1, "{:?}", got.iter().map(|l| &l.label).collect::<Vec<_>>());
+        assert_eq!(got[0].label, "on-demand $25");
+        assert_eq!(got[0].pct, 12.0);
+        assert!(d.quota.as_ref().unwrap().pct.is_none(), "an omitted key was invented as nought");
+
+        // A null percentage is the other shape: key present, no number.
+        let null = LOG_LINE.replace(r#""creditUsagePercent":42.5"#, r#""creditUsagePercent":null"#);
+        let d = Data {
+            ok: true,
+            quota: newest_quota([null.as_str()].into_iter()),
             ..Default::default()
         };
         let got = lanes(&d);
@@ -1789,7 +1807,7 @@ mod tests {
         for w in [40usize, 58, 80, 120] {
             let rows = grok_tab(&d, w, &p);
             for row in &rows {
-                let plain = plain_of(row);
+                let plain = visible(row);
                 assert!(
                     plain.chars().count() <= w - 1,
                     "a {}-cell row at width {}: {:?}",
@@ -1803,7 +1821,7 @@ mod tests {
             // tail beside it takes the cap off the end of the row instead
             // of overflowing where a width check would catch it.
             if w >= 58 {
-                let joined: String = rows.iter().map(|r| plain_of(r)).collect::<Vec<_>>().join(" ");
+                let joined: String = rows.iter().map(|r| visible(r)).collect::<Vec<_>>().join(" ");
                 assert!(
                     joined.contains("on-demand $3 of $25"),
                     "the figures were clipped at {}: {:?}",
@@ -2075,23 +2093,6 @@ mod tests {
         let joined = freshness(&ok, 110, &p).join("\n");
         assert!(joined.contains("live"), "{}", joined);
         assert!(!joined.contains(" · the"), "invented a reason: {}", joined);
-    }
-
-    fn visible(row: &str) -> String {
-        let mut out = String::new();
-        let mut chars = row.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
     }
 
     #[test]
