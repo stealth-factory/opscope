@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.14.0] - 2026-09-11
+
+### Bug Fixes
+
+- **agent-usage**: Renew Grok's token after it lapses, and keep the last live reading across the lapse (#162)
+
+### Features
+
+- **agent-usage**: Ask x.ai for Grok's quota by default (#160)
+
 ## [0.13.1] - 2026-09-09
 
 ### Bug Fixes
