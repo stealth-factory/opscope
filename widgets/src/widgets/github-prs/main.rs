@@ -623,6 +623,14 @@ struct State {
     /// whatever the last good one left. Kept apart from `err` so a count
     /// GitHub would not serve cannot make the list look broken.
     counts_err: String,
+    /// Arrivals per day, from the second count request. `None` until it
+    /// has answered once, for the same reason as `counts`.
+    created: Option<Created>,
+    /// Why the arrival request failed. Its own field, not `counts_err`,
+    /// because the two requests fail independently and each chart says so
+    /// on its own caption: a refused arrival count must leave the MERGED
+    /// row, the list and the banner exactly as they were.
+    created_err: String,
     /// The page size the last pass was served, when a round had to fall
     /// back from the size it asked for. `None` is the ordinary case.
     served: Option<usize>,
@@ -637,7 +645,8 @@ struct State {
     stopped: bool,
 }
 
-/// Merge and arrival counts over the span the day charts plot.
+/// Merge counts over the span the MERGED chart plots, and both rolling
+/// figures.
 ///
 /// The pool behind this board is `is:open` throughout, so nothing merged
 /// is ever in hand and nothing here can be counted from it. GitHub answers
@@ -655,6 +664,27 @@ struct Counts {
     /// because it describes this set of figures and no other: a later pass
     /// that fails leaves both untouched together, where two fields could
     /// end up saying the counts are fresher than they are.
+    at: f64,
+}
+
+/// Arrival counts over the span the OPENED chart plots.
+///
+/// Its own struct and its own request, not extra aliases on `Counts`.
+/// Measured against the live API: thirty-two merge aliases answer in
+/// 4.0-4.3s, sixty-two merge-and-created aliases in one request take
+/// 8.0-8.1s - at the gateway's ~10s cliff that OPS-84, OPS-91 and OPS-92
+/// have all been fighting - and thirty-one created aliases on their own
+/// take 4.1-4.4s. Two requests on the same cadence cost about 15 more
+/// rate-limit points a refresh against 5000 an hour, and neither can take
+/// the other down.
+///
+/// One struct per request is also what keeps `at` honest: a pass that
+/// fails leaves this set of figures and its timestamp untouched together.
+#[derive(Clone, Default, Debug)]
+struct Created {
+    /// One entry per calendar day, oldest first, keyed by `%Y-%m-%d` for
+    /// the same reason as `Counts::days`.
+    days: Vec<(String, i64)>,
     at: f64,
 }
 
@@ -709,9 +739,10 @@ fn searches(
 
 /// The calendar days both charts plot, oldest first.
 ///
-/// UTC, because GitHub reads a bare `merged:YYYY-MM-DD` in UTC and the
-/// arrival chart already bins `createdAt` on a UTC date. An axis built in
-/// local time would label bins it does not describe.
+/// UTC, because GitHub reads a bare `merged:YYYY-MM-DD` and a bare
+/// `created:YYYY-MM-DD` in UTC. An axis built in local time would label
+/// bins it does not describe, and both charts are served the same list so
+/// the two rows always plot the same thirty days.
 fn chart_days() -> Vec<String> {
     let today = Utc::now().date_naive();
     (0..OPENED_DAYS)
@@ -812,6 +843,82 @@ fn fetch_counts(
     if let Ok(mut g) = state.lock() {
         g.counts = Some(counts);
         g.counts_err = String::new();
+    }
+    Ok(())
+}
+
+/// How many pull requests were opened on each day, whatever became of
+/// them.
+///
+/// `is:pr created:YYYY-MM-DD` with no state qualifier, so a PR opened and
+/// merged the same afternoon is still counted on the day it arrived -
+/// which is the whole point: the pool is `is:open`, so bucketing it by
+/// `createdAt` counted only the arrivals that are still sitting there, 26
+/// of 677 on the board this was measured against. Drafts carry no
+/// qualifier either way and stay in, as they always have.
+///
+/// Its own request rather than more aliases on `count_query`, for the
+/// timings recorded on `Created`.
+fn created_query(scope: &str, days: &[String]) -> String {
+    let mut parts = vec!["{".to_string()];
+    for (n, day) in days.iter().enumerate() {
+        parts.push(format!(
+            "\n  c{n}: search(query:\"{scope} is:pr created:{day}\", type:ISSUE) \
+             {{ issueCount }}"
+        ));
+    }
+    parts.push("\n  rateLimit { remaining limit }\n}".to_string());
+    parts.join("")
+}
+
+/// Read the arrival aliases back, refusing to invent a figure for a
+/// missing one - for the reason spelled out on `read_counts`.
+fn read_created(d: &serde_json::Value, days: &[String]) -> Result<Created, String> {
+    let mut out = Created::default();
+    for (n, day) in days.iter().enumerate() {
+        let alias = format!("c{}", n);
+        let got = d[&alias]["issueCount"]
+            .as_i64()
+            .ok_or_else(|| format!("GitHub left {} out of the answer", alias))?;
+        out.days.push((day.clone(), got));
+    }
+    Ok(out)
+}
+
+/// The arrival request, on its own so a refusal cannot cost the list or
+/// the merge counts.
+///
+/// Same cadence and same day list as `fetch_counts`, so the two rows plot
+/// one axis, and reports through `created_err` so each chart can say on
+/// its own caption whether its own figures landed.
+fn fetch_created(
+    tok: &str,
+    days: &[String],
+    state: &Arc<Mutex<State>>,
+    rate: &Arc<Mutex<Rate>>,
+) -> Result<(), String> {
+    let (viewer, orgs) = state
+        .lock()
+        .map(|g| (g.viewer.clone(), g.orgs.clone()))
+        .unwrap_or_default();
+    let scope = mine_scope(&viewer, &orgs);
+    if scope.is_empty() {
+        return Err("no account to count over yet".to_string());
+    }
+    let d = graphql(&created_query(&scope, days), tok, serde_json::json!({}))?;
+    if let Some(left) = d["rateLimit"]["remaining"].as_i64() {
+        if let Ok(mut g) = rate.lock() {
+            g.remaining = Some(left);
+            if let Some(limit) = d["rateLimit"]["limit"].as_i64() {
+                g.limit = Some(limit);
+            }
+        }
+    }
+    let mut created = read_created(&d, days)?;
+    created.at = tc::now();
+    if let Ok(mut g) = state.lock() {
+        g.created = Some(created);
+        g.created_err = String::new();
     }
     Ok(())
 }
@@ -1674,6 +1781,17 @@ fn main() {
                         g.counts_err = said;
                     }
                 }
+                // The arrivals, in a second request over the same day
+                // list: sixty-two aliases in one request take twice as
+                // long and land on the gateway's ~10s cliff, where
+                // thirty-one on their own take what the merge counts take.
+                // Its own failure, so a refused arrival count leaves the
+                // MERGED row and the list untouched.
+                if let Err(said) = fetch_created(&poll_tok, &count_days, &poller, &poller_rate) {
+                    if let Ok(mut g) = poller.lock() {
+                        g.created_err = said;
+                    }
+                }
             }
             if failed.is_none() {
                 if let Err(said) = fetch_list(
@@ -1747,6 +1865,8 @@ fn main() {
             capped,
             counts,
             counts_err,
+            created,
+            created_err,
             detail,
             stack_rows,
             loading,
@@ -1764,6 +1884,8 @@ fn main() {
                     g.capped,
                     g.counts.clone(),
                     g.counts_err.clone(),
+                    g.created.clone(),
+                    g.created_err.clone(),
                     g.detail.clone(),
                     g.stack_rows.clone(),
                     g.loading,
@@ -2104,6 +2226,8 @@ fn main() {
                     capped,
                     counts.as_ref(),
                     &counts_err,
+                    created.as_ref(),
+                    &created_err,
                     w,
                     tick,
                     &p,
@@ -2505,6 +2629,66 @@ fn day_chart(
     rows
 }
 
+/// The figures for the axis, or nothing at all.
+///
+/// A day the answer does not carry is not a day with nothing in it, so
+/// either every day on the axis is accounted for or the chart shimmers.
+/// Both rows go through this, which is what keeps the "look a day up by
+/// its date, not by its position" rule from drifting between them: a set
+/// of counts fetched before midnight would otherwise slide every bar one
+/// day along once the axis had moved on.
+fn series_for(days: &[String], have: &[(String, i64)]) -> Option<Vec<(String, i64)>> {
+    days.iter()
+        .map(|d| {
+            have.iter()
+                .find(|(had, _)| had == d)
+                .map(|(_, v)| (d.clone(), *v))
+        })
+        .collect()
+}
+
+/// One chart's caption: what its thirty bars add up to, or why there are
+/// none yet.
+///
+/// Both rows now draw the same shape with a different noun, and both come
+/// from their own request, so both say for themselves whether their own
+/// figures landed. `err` is what that request last refused with and `at`
+/// when the figures still on screen were read, because "stale" on its own
+/// does not say whether that is a minute or an afternoon. Minutes, because
+/// a count rides the list's refresh and one that has missed a round is
+/// minutes old - `span()` would round every one of those to "0h".
+fn count_caption(
+    series: Option<&[(String, i64)]>,
+    noun: &str,
+    err: &str,
+    at: Option<f64>,
+    p: &Palette,
+) -> Vec<(String, String)> {
+    let mut cap: Vec<(String, String)> =
+        vec![(p.dim.clone(), format!("last {}d · ", OPENED_DAYS))];
+    match series {
+        Some(series) => {
+            let total: i64 = series.iter().map(|(_, v)| *v).sum();
+            let peak = series.iter().map(|(_, v)| *v).max().unwrap_or(0);
+            cap.push((p.txt.clone(), format!("{}", total)));
+            cap.push((p.dim.clone(), format!(" {} · ", noun)));
+            cap.push((p.dim.clone(), format!("peak {}/day", peak)));
+        }
+        // Nothing drawn and nothing coming, against nothing drawn yet.
+        None if !err.is_empty() => cap.push((p.dim.clone(), "not counted".to_string())),
+        None => cap.push((p.dim.clone(), "counting".to_string())),
+    }
+    if !err.is_empty() {
+        // The list is whole and only this request failed, so it is said as
+        // a count that did not land rather than as a broken board.
+        let age = at
+            .map(|at| format!(" · counted {}m ago", ((tc::now() - at) / 60.0).max(0.0) as i64))
+            .unwrap_or_default();
+        cap.push((p.warn.clone(), format!(" · count failed: {}{}", err, age)));
+    }
+    cap
+}
+
 /// Deliberately not the filtered set. Typing in the filter is a search, and
 /// a search should not move the backlog it is searching: watching the age
 /// median and the state bar lurch on every keystroke made them unreadable
@@ -2517,30 +2701,25 @@ fn stats_view(
     capped: bool,
     counts: Option<&Counts>,
     counts_err: &str,
+    created: Option<&Created>,
+    created_err: &str,
     w: usize,
     tick: usize,
     p: &Palette,
 ) -> Vec<String> {
     let mut rows = vec![String::new()];
+    // Both large figures are the merge request's two rolling windows, so
+    // this governs the figure on either row - including the OPENED one,
+    // whose bars come from the other request entirely.
     let stalled = !counts_err.is_empty();
-    // The merged series and both rolling figures come from `counts`, not
-    // from the open pool. An empty board is exactly when merge activity is
-    // the only signal left, so that row is built before anything that
-    // needs a PR, and STATE / OPENED / DAY / AGE stay behind the guard.
+    // Neither day series can be counted from the open pool: it is
+    // `is:open` throughout, so nothing merged is ever in hand and an
+    // arrival that has since merged is gone from it. GitHub answers both,
+    // which is why both rows draw whether there is a PR in hand or not and
+    // only STATE and AGE stay behind the guard.
     let days = chart_days();
-    // A day the counts do not carry is not a day with nothing in it, so the
-    // series is only handed over when every day on the axis is accounted
-    // for; otherwise the bars shimmer and the caption says why.
-    let merged: Option<Vec<(String, i64)>> = counts.and_then(|c| {
-        days.iter()
-            .map(|d| {
-                c.days
-                    .iter()
-                    .find(|(had, _)| had == d)
-                    .map(|(_, v)| (d.clone(), *v))
-            })
-            .collect()
-    });
+    let merged = counts.and_then(|c| series_for(&days, &c.days));
+    let opened = created.and_then(|c| series_for(&days, &c.days));
     if !prs.is_empty() {
         let n = prs.len();
         let mut review: HashMap<&str, usize> = HashMap::new();
@@ -2662,84 +2841,52 @@ fn stats_view(
             key.push((p.dim.as_str(), format!(" {}   ", got)));
         }
         rows.push(tc::seg(&key, w - 1));
-
-        // When the open ones arrived. Counted from the pool; the merged
-        // series cannot be, because the pool is `is:open` throughout, so it
-        // comes from GitHub's own aggregates in `counts` and is drawn
-        // whether this block ran or not.
-        let mut per_day: HashMap<&String, i64> = days.iter().map(|d| (d, 0)).collect();
-        let mut inside = 0i64;
-        for pr in prs {
-            let key: String = text(pr, "createdAt").chars().take(10).collect();
-            if let Some(slot) = days.iter().find(|d| **d == key) {
-                *per_day.get_mut(slot).unwrap() += 1;
-                inside += 1;
-            }
-        }
-        let opened: Vec<(String, i64)> = days
-            .iter()
-            .map(|d| (d.clone(), per_day.get(d).copied().unwrap_or(0)))
-            .collect();
-        let peak = opened.iter().map(|(_, v)| *v).max().unwrap_or(0);
-        let mut opened_cap: Vec<(String, String)> = vec![
-            (p.dim.clone(), format!("last {}d · ", OPENED_DAYS)),
-            (p.txt.clone(), format!("{}", inside)),
-            // The bars and the figure beside them count different populations -
-            // the bars only PRs that are still open, the figure everything
-            // opened including what has since been merged or closed - so the
-            // caption keeps saying which one it describes.
-            (p.dim.clone(), format!(" of {} still open · ", n)),
-            (p.dim.clone(), format!("peak {}/day", peak)),
-        ];
-        if stalled {
-            opened_cap.push((p.warn.clone(), " · 24h count stale".to_string()));
-        }
-        rows.extend(day_chart(
-            "OPENED / DAY",
-            opened_cap,
-            Some(&opened),
-            &p.pr,
-            counts.map(|c| c.opened_24h),
-            stalled,
-            FIGURE_LABELS[1],
-            w,
-            tick,
-            &p,
-        ));
     }
 
-    let mut merged_cap: Vec<(String, String)> =
-        vec![(p.dim.clone(), format!("last {}d · ", OPENED_DAYS))];
-    match &merged {
-        Some(series) => {
-            let total: i64 = series.iter().map(|(_, v)| *v).sum();
-            let peak = series.iter().map(|(_, v)| *v).max().unwrap_or(0);
-            merged_cap.push((p.txt.clone(), format!("{}", total)));
-            merged_cap.push((p.dim.clone(), " merged · ".to_string()));
-            merged_cap.push((p.dim.clone(), format!("peak {}/day", peak)));
-        }
-        None if stalled => merged_cap.push((p.dim.clone(), "not counted".to_string())),
-        None => merged_cap.push((p.dim.clone(), "counting".to_string())),
-    }
+    // How many arrived each day, whatever became of them - GitHub's own
+    // per-day `created:` counts, the same population as the figure beside
+    // them. Bucketing the open pool by `createdAt` counted only the
+    // arrivals still sitting in it, which was 26 of 677 on the board this
+    // was measured against and drew a quiet month over a busy one.
+    //
+    // The figure still comes from the merge request's rolling window, so
+    // its "not counted" is `stalled` while the bars answer to
+    // `created_err`.
+    let mut opened_cap = count_caption(
+        opened.as_deref(),
+        "opened",
+        created_err,
+        created.map(|c| c.at),
+        p,
+    );
     if stalled {
-        // The list is whole and only the count request failed, so this is
-        // said as a count that did not land rather than as a broken board -
-        // and with the age of what is still on screen, because "stale" on
-        // its own does not say whether that is a minute or an afternoon.
-        // Minutes, because the count rides the list's refresh and a figure
-        // that has missed one round is minutes old, not hours - `span()`
-        // would round every one of those to "0h".
-        let age = counts
-            .map(|c| format!(" · counted {}m ago", ((tc::now() - c.at) / 60.0).max(0.0) as i64))
-            .unwrap_or_default();
-        merged_cap.push((
-            p.warn.clone(),
-            format!(" · count failed: {}{}", counts_err, age),
-        ));
+        // The bars landed and the figure beside them did not. It is the
+        // last good one and still a real reading of a window that has
+        // moved on, so the caption says so rather than leaving it to be
+        // read as this minute's.
+        opened_cap.push((p.warn.clone(), " \u{b7} 24h count stale".to_string()));
     }
     rows.extend(day_chart(
+        "OPENED / DAY",
+        opened_cap,
+        opened.as_deref(),
+        &p.pr,
+        counts.map(|c| c.opened_24h),
+        stalled,
+        FIGURE_LABELS[1],
+        w,
+        tick,
+        p,
+    ));
+    rows.extend(day_chart(
         "MERGED / DAY",
-        merged_cap,
+        count_caption(
+            merged.as_deref(),
+            "merged",
+            counts_err,
+            counts.map(|c| c.at),
+            p,
+        ),
         merged.as_deref(),
         &p.ok,
         counts.map(|c| c.merged_24h),
@@ -2747,7 +2894,7 @@ fn stats_view(
         FIGURE_LABELS[0],
         w,
         tick,
-        &p,
+        p,
     ));
 
     if prs.is_empty() {
@@ -2775,7 +2922,11 @@ fn stats_view(
     rows.push(String::new());
     rows.push(tc::seg(
         &[
-            (p.lbl.as_str(), " ── AGE ── ".into()),
+            // Whose age. Every other section on the board now describes
+            // what GitHub counted over the last thirty days; this is the
+            // only one still describing the open pool, which makes saying
+            // so matter more rather than less.
+            (p.lbl.as_str(), " ── AGE OF OPEN PRs ── ".into()),
             (p.dim.as_str(), "median ".into()),
             (p.txt.as_str(), span(at(&ages, 0.5))),
             (p.dim.as_str(), "  p95 ".into()),
@@ -3692,7 +3843,7 @@ mod tests {
         // whole list, with the title pinned above it. The stats used to
         // stand down below thirty rows, which looked exactly like a board
         // with nothing to say about itself.
-        let stats = stats_view(&prs, 40, false, None, "", 80, 0, &p);
+        let stats = stats_view(&prs, 40, false, None, "", None, "", 80, 0, &p);
         assert!(stats.len() > 8, "the stats block is the tall part");
         let body: Vec<String> = stats.iter().chain(list.iter()).cloned().collect();
         let room = 20usize - 1 - 2;
@@ -4003,7 +4154,7 @@ mod tests {
         let p = palette();
         let waiting = awaiting_the_second_pass(40);
         let state = |prs: &[serde_json::Value]| -> String {
-            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+            stats_view(prs, prs.len(), false, None, "", None, "", 100, 0, &p)
                 .iter()
                 .map(|r| plain(r))
                 .find(|r| r.contains("STATE"))
@@ -4092,7 +4243,7 @@ mod tests {
     fn the_biggest_pr_is_not_picked_from_figures_nobody_read() {
         let p = palette();
         let line = |prs: &[serde_json::Value]| -> String {
-            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+            stats_view(prs, prs.len(), false, None, "", None, "", 100, 0, &p)
                 .iter()
                 .map(|r| plain(r))
                 .find(|r| r.contains("biggest"))
@@ -4568,8 +4719,103 @@ mod tests {
         }
     }
 
+    /// The rows one chart's heading owns, up to the next heading.
+    fn block(rows: &[String], heading: &str) -> String {
+        let drawn: Vec<String> = rows.iter().map(|r| plain(r)).collect();
+        let from = drawn
+            .iter()
+            .position(|r| r.contains(heading))
+            .unwrap_or_else(|| panic!("{} was not drawn in {:?}", heading, drawn));
+        let rest = &drawn[from + 1..];
+        let to = rest
+            .iter()
+            .position(|r| r.contains(" \u{2500}\u{2500} "))
+            .map(|k| from + 1 + k)
+            .unwrap_or(drawn.len());
+        drawn[from..to].join("\n")
+    }
+
     #[test]
-    fn merge_activity_still_draws_when_nothing_is_open() {
+    fn the_arrival_query_asks_for_every_day_in_its_own_request() {
+        let days: Vec<String> = (0..OPENED_DAYS)
+            .map(|k| format!("2026-09-{:02}", k + 1))
+            .collect();
+        let q = created_query("org:acme user:w", &days);
+        for (n, day) in days.iter().enumerate() {
+            assert!(q.contains(&format!("c{}: search(", n)), "no alias c{}", n);
+            // `created:` and no state qualifier: a PR opened and merged the
+            // same afternoon still arrived that day, and counting only the
+            // ones still open is the bug this fixes.
+            assert!(
+                q.contains(&format!("is:pr created:{}\"", day)),
+                "no arrivals for {} in {}",
+                day,
+                q
+            );
+        }
+        assert!(!q.contains(&format!("c{}: search(", OPENED_DAYS)));
+        assert!(!q.contains("is:merged"), "the arrivals are not a merge count");
+        assert!(!q.contains("is:open"), "the arrivals are not the open pool");
+        // Its own request, thirty aliases and no more: sixty-two in one
+        // request measured at 8.0-8.1s against the gateway's ~10s cliff.
+        assert_eq!(q.matches("search(").count(), OPENED_DAYS as usize);
+        assert_eq!(
+            q.matches("org:acme user:w is:pr").count(),
+            OPENED_DAYS as usize
+        );
+        assert!(q.contains("rateLimit { remaining limit }"));
+        assert!(q.starts_with('{') && q.trim_end().ends_with('}'));
+    }
+
+    #[test]
+    fn a_day_the_arrivals_do_not_carry_is_not_a_quiet_day() {
+        let p = palette();
+        let days = chart_days();
+        // An alias GitHub did not answer fails the read outright, for the
+        // reason `read_counts` gives: a zero in its place is a bar chart
+        // asserting a quiet day that may have been the busiest of the month.
+        let two = vec!["2026-09-09".to_string(), "2026-09-10".to_string()];
+        let full: serde_json::Value =
+            serde_json::from_str(r#"{"c0": {"issueCount": 37}, "c1": {"issueCount": 0}}"#).unwrap();
+        let got = read_created(&full, &two).unwrap();
+        assert_eq!(got.days, vec![(two[0].clone(), 37), (two[1].clone(), 0)]);
+        for gone in ["c0", "c1"] {
+            let mut short = full.clone();
+            short.as_object_mut().unwrap().remove(gone);
+            let said = read_created(&short, &two).unwrap_err();
+            assert!(said.contains(gone), "{} went missing and got {:?}", gone, said);
+        }
+        // And a set that is short of a day the axis holds is not plotted at
+        // all: the bars shimmer and the caption says the count is still
+        // coming.
+        let short = Created {
+            days: days[1..].iter().map(|d| (d.clone(), 3)).collect(),
+            at: tc::now(),
+        };
+        let drawn = stats_view(&[], 0, false, None, "", Some(&short), "", 80, 0, &p);
+        let opened = block(&drawn, "OPENED / DAY");
+        assert!(opened.contains("counting"), "a short set was plotted: {:?}", opened);
+        assert!(
+            !opened.contains("opened \u{b7} peak"),
+            "a missing day was drawn as zero: {:?}",
+            opened
+        );
+        // A day with nothing in it is a real reading and looks nothing like
+        // one that has not arrived.
+        let quiet = Created {
+            days: days.iter().map(|d| (d.clone(), 0)).collect(),
+            at: tc::now(),
+        };
+        let zeros = block(
+            &stats_view(&[], 0, false, None, "", Some(&quiet), "", 80, 0, &p),
+            "OPENED / DAY",
+        );
+        assert!(zeros.contains("0 opened \u{b7} peak 0/day"), "{:?}", zeros);
+        assert!(!zeros.contains("counting"), "{:?}", zeros);
+    }
+
+    #[test]
+    fn either_count_request_can_fail_without_the_other() {
         let p = palette();
         let days = chart_days();
         let counts = Counts {
@@ -4578,20 +4824,172 @@ mod tests {
             opened_24h: 9,
             at: tc::now(),
         };
-        let rows = stats_view(&[], 0, false, Some(&counts), "", 80, 0, &p);
+        let created = Created {
+            days: days.iter().map(|d| (d.clone(), 3)).collect(),
+            at: tc::now(),
+        };
+        // The arrivals were refused and the merges were not. The OPENED
+        // caption says so and nothing else on the board is touched.
+        let rows = stats_view(
+            &[],
+            0,
+            false,
+            Some(&counts),
+            "",
+            Some(&created),
+            "HTTP 502",
+            80,
+            0,
+            &p,
+        );
+        let opened = block(&rows, "OPENED / DAY");
+        let merged = block(&rows, "MERGED / DAY");
+        assert!(opened.contains("count failed: HTTP 502"), "{:?}", opened);
+        assert!(
+            !merged.contains("count failed"),
+            "an arrival refusal reached the merges: {:?}",
+            merged
+        );
+        assert!(merged.contains("60 merged"), "{:?}", merged);
+        // The large figure is the merge request's rolling window, which
+        // landed, so it is still a figure.
+        assert!(
+            !opened.contains("not counted"),
+            "an arrival refusal took the 24h figure with it: {:?}",
+            opened
+        );
+        // And the other way round.
+        let rows = stats_view(
+            &[],
+            0,
+            false,
+            Some(&counts),
+            "HTTP 403",
+            Some(&created),
+            "",
+            80,
+            0,
+            &p,
+        );
+        let opened = block(&rows, "OPENED / DAY");
+        let merged = block(&rows, "MERGED / DAY");
+        assert!(merged.contains("count failed: HTTP 403"), "{:?}", merged);
+        assert!(
+            !opened.contains("count failed"),
+            "a merge refusal reached the arrivals: {:?}",
+            opened
+        );
+        assert!(opened.contains("90 opened"), "{:?}", opened);
+        // Its bars are real and its figure is the last good one, which the
+        // caption says rather than leaving it to be read as this minute's.
+        assert!(opened.contains("24h count stale"), "{:?}", opened);
+    }
+
+    #[test]
+    fn the_opened_caption_says_what_the_bars_count() {
+        let p = palette();
+        let days = chart_days();
+        let created = Created {
+            days: days
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.clone(), if i == 12 { 37 } else { 2 }))
+                .collect(),
+            at: tc::now(),
+        };
+        let counts = Counts {
+            days: days.iter().map(|d| (d.clone(), 2)).collect(),
+            merged_24h: 4,
+            opened_24h: 27,
+            at: tc::now(),
+        };
+        let prs: Vec<serde_json::Value> = vec![serde_json::json!({
+            "number": 1,
+            "title": "t",
+            "createdAt": "2020-01-01T00:00:00Z",
+            "updatedAt": "2020-01-01T00:00:00Z",
+            "repository": {"name": "r"},
+            "author": {"login": "a"},
+        })];
+        // The widths the wall uses. The bars are no longer a subset of the
+        // open pool, so the caption may not describe them as one.
+        for w in [58usize, 80, 120] {
+            let rows = stats_view(
+                &prs,
+                1,
+                false,
+                Some(&counts),
+                "",
+                Some(&created),
+                "",
+                w,
+                0,
+                &p,
+            );
+            let opened = block(&rows, "OPENED / DAY");
+            assert!(
+                opened.contains("last 30d \u{b7} 95 opened \u{b7} peak 37/day"),
+                "w={} {:?}",
+                w,
+                opened
+            );
+            let body: String = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
+            assert!(
+                !body.contains("still open"),
+                "w={} still claims the bars are the open pool: {:?}",
+                w,
+                body
+            );
+            // The one section that does describe the pool names it.
+            assert!(
+                body.contains("AGE OF OPEN PRs"),
+                "w={} the age heading does not say whose age: {:?}",
+                w,
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn both_day_charts_still_draw_when_nothing_is_open() {
+        let p = palette();
+        let days = chart_days();
+        let counts = Counts {
+            days: days.iter().map(|d| (d.clone(), 2)).collect(),
+            merged_24h: 4,
+            opened_24h: 9,
+            at: tc::now(),
+        };
+        let created = Created {
+            days: days.iter().map(|d| (d.clone(), 3)).collect(),
+            at: tc::now(),
+        };
+        let rows = stats_view(&[], 0, false, Some(&counts), "", Some(&created), "", 80, 0, &p);
         let drawn: Vec<String> = rows.iter().map(|r| plain(r)).collect();
         let body = drawn.join("\n");
-        assert!(
-            drawn.iter().any(|r| r.contains("MERGED / DAY")),
-            "empty board hid merge activity: {:?}",
-            body
-        );
+        // Neither row is counted from the pool, so an empty board is
+        // exactly when they are the only signal left. An afternoon of PRs
+        // opened and merged again is a real reading of a board with
+        // nothing open.
+        for kept in ["MERGED / DAY", "OPENED / DAY"] {
+            assert!(
+                drawn.iter().any(|r| r.contains(kept)),
+                "empty board hid {}: {:?}",
+                kept,
+                body
+            );
+        }
         assert!(
             drawn.iter().any(|r| r.contains("merged")),
             "empty board lost the 24h figure: {:?}",
             body
         );
-        for gone in ["STATE", "OPENED / DAY", "AGE"] {
+        assert!(
+            body.contains("90 opened"),
+            "empty board lost the arrivals: {:?}",
+            body
+        );
+        for gone in ["STATE", "AGE"] {
             assert!(
                 !drawn.iter().any(|r| r.contains(gone)),
                 "pool section {} leaked onto an empty board: {:?}",
@@ -4599,7 +4997,7 @@ mod tests {
                 body
             );
         }
-        let waiting = stats_view(&[], 0, false, None, "", 80, 0, &p);
+        let waiting = stats_view(&[], 0, false, None, "", None, "", 80, 0, &p);
         let wait_body = waiting.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
         assert!(
             wait_body.contains("MERGED / DAY"),
