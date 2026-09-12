@@ -100,8 +100,9 @@ A streak counts consecutive days with at least one contribution, the way
 github.com does it — a day that has scored nothing *so far* does not break the
 current streak, because it is not over yet.
 
-This is the one decorative section, so it is skipped entirely in a short pane to
-leave the account table its rows.
+This is the one decorative section. It is drawn whenever the calendar has data; a
+short pane scrolls to it rather than hiding it, because a grid that is not there
+looks like an account with no contributions.
 
 **By account** — one row per org, **busiest first**: open PRs decide the order,
 merged-in-window breaks ties so an idle backlog ranks below an account of the
