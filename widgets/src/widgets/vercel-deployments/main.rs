@@ -51,10 +51,16 @@ const FILTERS: &[&str] = &["all", "failed", "production"];
 /// opposite things. One line covered all three here - "(nothing matches the
 /// current filter)" - so an account with no deployments blamed a filter
 /// nobody had set, which is the founding hazard pointing the other way.
+///
+/// Four, counting the fetch that failed: "no deployments" is a fact the
+/// failed request never established, and drawn under the error row it
+/// contradicts it. There the error is the answer and this line says
+/// nothing at all.
 fn nothing_shown(held: usize, filters: &[String], fetched: f64, err: &str) -> String {
     match tc::filtered_to_nothing(held, filters) {
         Some(said) => said,
-        None if fetched == 0.0 && err.is_empty() => "waiting for Vercel…".to_string(),
+        None if !err.is_empty() => String::new(),
+        None if fetched == 0.0 => "waiting for Vercel…".to_string(),
         None => "no deployments".to_string(),
     }
 }
@@ -1677,13 +1683,10 @@ fn main() {
             }
         }
         if shown.is_empty() {
-            rows.push(tc::seg(
-                &[(
-                    p.dim.as_str(),
-                    format!("   {}", nothing_shown(deps.len(), &filters, fetched, &err)),
-                )],
-                w - 1,
-            ));
+            let said = nothing_shown(deps.len(), &filters, fetched, &err);
+            if !said.is_empty() {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", said))], w - 1));
+            }
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -1743,11 +1746,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_list_says_which_of_the_three_it_is() {
+    fn an_empty_list_says_which_of_the_four_it_is() {
         let none: Vec<String> = Vec::new();
         let failed = vec!["failed only".to_string()];
         // Nothing fetched yet, and no complaint: that is a wait.
         assert_eq!(nothing_shown(0, &none, 0.0, ""), "waiting for Vercel…");
+        // A fetch that failed establishes nothing about the account, and
+        // the error row above already says what happened.
+        assert_eq!(nothing_shown(0, &none, 0.0, "HTTP 401: Bad credentials"), "");
         // Vercel answered with nothing. No filter is set, so nothing may be
         // blamed for it - this is an account with no deployments.
         let said = nothing_shown(0, &none, 1.0, "");
