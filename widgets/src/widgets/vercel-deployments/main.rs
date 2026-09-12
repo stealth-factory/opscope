@@ -54,12 +54,17 @@ const FILTERS: &[&str] = &["all", "failed", "production"];
 ///
 /// Four, counting the fetch that failed: "no deployments" is a fact the
 /// failed request never established, and drawn under the error row it
-/// contradicts it. There the error is the answer and this line says
-/// nothing at all.
+/// contradicts it. A failed *refresh* keeps the last good list, so the
+/// error has to be read first: otherwise a filter that hid those retained
+/// rows would say "nothing matches" beside the error, as if Vercel had
+/// answered. There the error is the answer and this line says nothing
+/// at all. The count line still names the filter.
 fn nothing_shown(held: usize, filters: &[String], fetched: f64, err: &str) -> String {
+    if !err.is_empty() {
+        return String::new();
+    }
     match tc::filtered_to_nothing(held, filters) {
         Some(said) => said,
-        None if !err.is_empty() => String::new(),
         None if fetched == 0.0 => "waiting for Vercel…".to_string(),
         None => "no deployments".to_string(),
     }
@@ -1767,6 +1772,13 @@ mod tests {
         assert!(said.contains("nothing matches"), "{said}");
         assert!(said.contains("200 hidden by the filter"), "{said}");
         assert!(said.contains("failed only"), "{said}");
+        // A failed refresh keeps those 200. The filter still hides them,
+        // but the error row is the answer — "nothing matches" would present
+        // the cached empty-filter reading as the current Vercel state.
+        assert_eq!(
+            nothing_shown(200, &failed, 1.0, "HTTP 401: Bad credentials"),
+            ""
+        );
     }
 
     #[test]

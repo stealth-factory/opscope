@@ -496,6 +496,36 @@ fn idle_filter(show_idle: bool, resting: usize) -> Vec<String> {
     vec![format!("{} idle pane{} hidden", resting, plural(resting))]
 }
 
+/// Give a short pane its body back without dropping an applied filter.
+///
+/// The header pops from the bottom until the body has [`HEAD_FLOOR`] rows
+/// to scroll. The idle-filter line is pushed last-but-the-blank, so that
+/// loop would take the blank and then the filter — a filtered list with
+/// nothing saying so, which is the quiet-session reading the line exists
+/// to prevent. The filter is held out of the prune and put back after.
+fn prune_head(
+    mut head: Vec<String>,
+    filter: Option<String>,
+    footer_len: usize,
+    h: usize,
+) -> Vec<String> {
+    const HEAD_FLOOR: usize = 3;
+    let keep = usize::from(filter.is_some());
+    while head.len() > 2 && h.saturating_sub(head.len() + keep + footer_len + 1) < HEAD_FLOOR {
+        head.pop();
+    }
+    if let Some(line) = filter {
+        if head.last().is_some_and(String::is_empty) {
+            let blank = head.pop().expect("last row is the trailing blank");
+            head.push(line);
+            head.push(blank);
+        } else {
+            head.push(line);
+        }
+    }
+    head
+}
+
 /// The one line that stands in for a section with nothing in it.
 ///
 /// An empty reading and a failed one are different sentences, and this is
@@ -1152,12 +1182,14 @@ fn main() {
         // `others`, not `panes`: a pane holding a recognised agent is in
         // AGENTS rather than in this list, and counting it here would
         // report it as something the filter had hidden.
-        if let Some(said) = tc::filter_row(busy.len(), others.len(), &hidden_idle) {
-            head.push(tc::seg(
+        // Held out of `head` until after the prune: that loop pops from
+        // the bottom, and this row would be the first content it took.
+        let filter_line = tc::filter_row(busy.len(), others.len(), &hidden_idle).map(|said| {
+            tc::seg(
                 &[(p.dim.as_str(), format!(" {}", said))],
                 w.saturating_sub(1),
-            ));
-        }
+            )
+        });
         head.push(String::new());
 
         // ---- the footer, built before the body ----
@@ -2097,11 +2129,7 @@ fn main() {
         // nothing in it. So the header gives its last lines back, from the
         // bottom, until there is something to scroll. The title and the
         // counts never go: those two are the widget.
-        let mut head = head;
-        const FLOOR: usize = 3;
-        while head.len() > 2 && h.saturating_sub(head.len() + footer.len() + 1) < FLOOR {
-            head.pop();
-        }
+        let head = prune_head(head, filter_line, footer.len(), h);
         let reserve = head.len() + footer.len() + 1; // +1 for the note line
         let room = h.saturating_sub(reserve).max(1);
         let want = spans
@@ -2172,6 +2200,46 @@ mod tests {
         assert_eq!(idle_filter(false, 1), vec!["1 idle pane hidden"]);
         let said = tc::filter_row(5, 9, &idle_filter(false, 4)).expect("a filter is on");
         assert_eq!(said, "5 of 9 shown · 4 idle panes hidden");
+    }
+
+    #[test]
+    fn a_short_pane_keeps_the_idle_filter() {
+        // Title and counts never go; everything after can. On a pane that
+        // has to give the body three rows, the old pop would take the
+        // blank and then the filter — the list stays filtered and nothing
+        // says so.
+        let head = vec![
+            "title".into(),
+            "counts".into(),
+            "session".into(),
+            "waiting".into(),
+            "checkout".into(),
+            String::new(),
+        ];
+        let filter = Some(" 5 of 9 shown · 4 idle panes hidden".into());
+        // 6 header + 2 footer + 1 note = 9; FLOOR 3 wants h >= 12 to skip
+        // the prune. Ten rows is the short pane Codex named.
+        let kept = prune_head(head, filter, 2, 10);
+        assert!(
+            kept.iter().any(|row| row.contains("idle panes hidden")),
+            "the filter was pruned: {kept:?}"
+        );
+        assert_eq!(kept[0], "title");
+        assert_eq!(kept[1], "counts");
+        // Without a filter the same pane still gives lines back.
+        let bare = vec![
+            "title".into(),
+            "counts".into(),
+            "session".into(),
+            "checkout".into(),
+            String::new(),
+        ];
+        let pruned = prune_head(bare, None, 2, 10);
+        assert!(
+            pruned.len() < 5,
+            "an unfiltered header still prunes: {pruned:?}"
+        );
+        assert!(!pruned.iter().any(|row| row.contains("idle")));
     }
 
     #[test]
