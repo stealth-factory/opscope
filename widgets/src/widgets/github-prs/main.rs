@@ -222,17 +222,18 @@ fn graphql(
     Ok(data["data"].clone())
 }
 
-/// What a search can hand over at any depth.
+/// What a search can hand over at any depth, cheaply.
 ///
-/// Everything here is a plain field on the pull request. Measured against
-/// the live API: with these alone a search of 665 pages out in full, in
-/// fourteen rounds, and never refuses.
+/// Everything here is a plain stored field on the pull request - nothing
+/// GitHub has to compute to answer. Measured against the live API: with
+/// these alone a search of 665 pages out in full, in fourteen rounds, and
+/// never refuses, and one page costs 2.2-2.8s at 25 against 3.3-9.8s when
+/// the computed fields below ride along.
 const PR_FIELDS: &str = "
       id number title url isDraft createdAt updatedAt
-      additions deletions changedFiles
       author { login }
       repository { nameWithOwner }
-      headRefName baseRefName reviewDecision mergeable";
+      headRefName baseRefName reviewDecision";
 
 /// The two fields a search cannot page deeply with, fetched by node id.
 ///
@@ -247,6 +248,24 @@ const PR_HEAVY_FIELDS: &str = "
       id
       stackEntry { position stack { number size } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+
+/// The four fields GitHub has to compute, fetched by node id.
+///
+/// A different complaint from the one above: a search serves these at any
+/// depth, it just serves them slowly. `mergeable` makes GitHub run a trial
+/// merge and the diff counts make it total a diff, and together they about
+/// double the search - measured at 25 per page, 2.2-2.8s without them
+/// against 3.3-9.8s with, one run of which was the 9.8. That is what
+/// carries a slow minute over the gateway's ten seconds, on the one
+/// request whose failure ends the whole pass.
+///
+/// Asked for by node id instead they cost 2.3-3.3s per fifty and fail on
+/// their own. And kept apart from `PR_HEAVY_FIELDS` rather than folded
+/// into it: the two groups together in one node query is a 502 as readily
+/// as the search was - measured, three runs, one refusal - and a stack
+/// lookup that failed should not also cost the conflicting count.
+const PR_COMPUTED_FIELDS: &str = "
+      id mergeable additions deletions changedFiles";
 
 /// Fill in the fields a search would not serve, for results already held.
 ///
@@ -280,6 +299,43 @@ fn enrich(pool: &mut HashMap<String, serde_json::Value>, by_id: &HashMap<String,
             let Some(entry) = pool.get_mut(url) else { continue };
             entry["stackEntry"] = node["stackEntry"].clone();
             entry["commits"] = node["commits"].clone();
+        }
+    }
+}
+
+/// The same again for the fields the search stopped carrying.
+///
+/// Fifty at a time, and a failed chunk leaves them absent - which is the
+/// whole point of the split. The checks above needed a flag on failure
+/// because a missing rollup read as a repository with no CI; here absence
+/// already means *not read yet* to every reader, because `mergeable_state`
+/// and `diff_of` hand back `None` rather than a happy default. So a chunk
+/// that fails costs a SIZE column that stays blank and a conflicting count
+/// that says how many it was over, and nothing claims anything it did not
+/// see.
+fn enrich_computed(
+    pool: &mut HashMap<String, serde_json::Value>,
+    by_id: &HashMap<String, String>,
+    tok: &str,
+) {
+    let ids: Vec<String> = by_id.keys().cloned().collect();
+    for chunk in ids.chunks(50) {
+        let query = format!(
+            "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on PullRequest {{ {} }} }} }}",
+            PR_COMPUTED_FIELDS
+        );
+        let Ok(d) = graphql(&query, tok, serde_json::json!({ "ids": chunk })) else {
+            continue;
+        };
+        for node in d["nodes"].as_array().into_iter().flatten() {
+            let id = text(node, "id");
+            let Some(url) = by_id.get(&id) else { continue };
+            let Some(entry) = pool.get_mut(url) else { continue };
+            for key in ["mergeable", "additions", "deletions", "changedFiles"] {
+                if !node[key].is_null() {
+                    entry[key] = node[key].clone();
+                }
+            }
         }
     }
 }
@@ -451,10 +507,38 @@ fn rollup(pr: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a trial merge has been read for this PR, and what it said.
+///
+/// `None` covers both halves of not knowing: the second enrichment pass
+/// has not reached this row yet or was refused, and GitHub's own `UNKNOWN`,
+/// which is what it answers while the trial merge is still running. Either
+/// way nobody has been told whether this branch conflicts, and the readers
+/// below have to say so rather than pick the pleasant answer.
+fn mergeable_state(pr: &serde_json::Value) -> Option<String> {
+    match text(pr, "mergeable").as_str() {
+        "MERGEABLE" => Some("MERGEABLE".into()),
+        "CONFLICTING" => Some("CONFLICTING".into()),
+        _ => None,
+    }
+}
+
+/// The diff figures, or `None` while they have not arrived.
+///
+/// A pull request that adds nothing and deletes nothing is a real answer
+/// and `number()` cannot tell it from an absent field, which is why this
+/// goes through `as_i64` instead. Both halves have to be there: half a
+/// size is not a size.
+fn diff_of(pr: &serde_json::Value) -> Option<(i64, i64)> {
+    Some((pr["additions"].as_i64()?, pr["deletions"].as_i64()?))
+}
+
 /// Approved, green, no conflict, not a draft - the actionable count.
 ///
 /// Everything else on this board describes work in flight; this is the one
-/// number that says something can be done right now.
+/// number that says something can be done right now. Which is exactly why
+/// nothing unread may fall into it: an unknown rollup and an unread trial
+/// merge both keep a PR out, because "you can merge this now" is a claim
+/// and the other rows are only descriptions.
 fn ready_to_merge(pr: &serde_json::Value) -> bool {
     if pr["checksUnknown"].as_bool().unwrap_or(false) {
         return false;
@@ -462,7 +546,7 @@ fn ready_to_merge(pr: &serde_json::Value) -> bool {
     let checks = rollup(pr);
     text(pr, "reviewDecision") == "APPROVED"
         && (checks == "SUCCESS" || checks.is_empty())
-        && text(pr, "mergeable") != "CONFLICTING"
+        && mergeable_state(pr).is_some_and(|m| m != "CONFLICTING")
         && !pr["isDraft"].as_bool().unwrap_or(false)
 }
 
@@ -539,6 +623,18 @@ struct State {
     /// whatever the last good one left. Kept apart from `err` so a count
     /// GitHub would not serve cannot make the list look broken.
     counts_err: String,
+    /// The page size the last pass was served, when a round had to fall
+    /// back from the size it asked for. `None` is the ordinary case.
+    served: Option<usize>,
+    /// Set when the last pass stopped paging before its sources were
+    /// exhausted, so the list is every result GitHub served rather than
+    /// every result there is.
+    ///
+    /// This and `served` describe how the pass went, not that it went
+    /// wrong, and they are drawn as a dim note under the header. They are
+    /// deliberately not in `err`: the `!` banner is for a pass that
+    /// produced nothing and for a refusal that really is one.
+    stopped: bool,
 }
 
 /// Merge and arrival counts over the span the day charts plot.
@@ -891,6 +987,32 @@ fn fetch_round(
     }
 }
 
+/// How long to wait before asking a refused round one more time.
+///
+/// Long enough that whatever shed the request has finished shedding it -
+/// measured, page one at ten per page answered in 1.3s through the same
+/// spell that refused the round - and short enough that the pass is still
+/// the pass a reader is waiting on rather than a new one.
+const RETRY_PAUSE: Duration = Duration::from_secs(3);
+
+/// Whether a round that `fetch_round` gave up on is worth one more try.
+///
+/// `fetch_round` halves the page size within the round and stops at the
+/// floor; this is the round itself asked again, once, after a pause. Once,
+/// because the thing it is built for is a single bad request in an
+/// otherwise answering minute: measured during a slow spell, ten per page
+/// answered in 1.3s three times running and one later round came back 502
+/// anyway. A second retry would be a loop, and a loop against a search
+/// that is actually down spends the rate limit to reprint the message.
+///
+/// `tried` is how many retries this round has already had, so the answer
+/// can only be true on the first. The reason is read as well, because
+/// `worth_retrying` already knows which refusals mean "later" and which
+/// mean "no": bad credentials say the same thing three seconds from now.
+fn retry_again(tried: usize, said: &str) -> bool {
+    tried == 0 && worth_retrying(said)
+}
+
 /// The next page size to try, or `None` at the floor.
 ///
 /// Its own function so the walk can be tested rather than reimplemented in
@@ -979,6 +1101,34 @@ fn discover_owners(tok: &str, state: &Arc<Mutex<State>>) -> Result<(), String> {
     Ok(())
 }
 
+/// Put what has landed on screen, without waiting for the rest.
+///
+/// Called after each enrichment pass of each round, so the board fills as
+/// the pages arrive rather than staying empty until the last source is
+/// exhausted, and the count in the header is the count on screen at every
+/// moment in between.
+fn publish(
+    state: &Arc<Mutex<State>>,
+    pool: &HashMap<String, serde_json::Value>,
+    order: &[String],
+    counted: &[(i64, usize)],
+    more_to_come: bool,
+) {
+    if let Ok(mut g) = state.lock() {
+        g.stages.count("pull requests", order.len(), None);
+        let partial: Vec<serde_json::Value> = order
+            .iter()
+            .filter_map(|url| pool.get(url).cloned())
+            .collect();
+        let (total, capped) = union_total(counted, partial.len());
+        g.total = total;
+        // Still fetching is still capped, whatever the counts say: the
+        // sources that remain live have more behind them.
+        g.capped = capped || more_to_come;
+        g.prs = partial;
+    }
+}
+
 fn fetch_list(
     tok: &str,
     source: &str,
@@ -1006,8 +1156,9 @@ fn fetch_list(
     let mut counted: Vec<(i64, usize)> = vec![(0, 0); pairs.len()];
     let mut cursors: Vec<Option<String>> = vec![None; pairs.len()];
     let mut live: Vec<usize> = (0..pairs.len()).collect();
-    // Why paging stopped early, when it did. Kept apart from `err` so a
-    // partial list is not dressed up as a failed fetch.
+    // Why paging stopped early, when it did. A gateway refusal after
+    // pages have landed is a ceiling, not a failed fetch, and stays out
+    // of `err`. A 401 is not: that reason has to reach the banner.
     let mut deepened: Option<String> = None;
     // The smallest page any round had to fall back to, when one did, and
     // what every later round in this pass starts from. A shorter page is
@@ -1017,6 +1168,11 @@ fn fetch_list(
     // reaches the banner: a pane that says nothing about it looks like a
     // pane that simply got slower.
     let mut served: Option<usize> = None;
+    // The note describes *this* pass. Left over from the last one it
+    // qualifies counts that are already moving under it.
+    if let Ok(mut g) = state.lock() {
+        begin_pass(&mut g);
+    }
 
     while !live.is_empty() {
         let round: Vec<String> = live.iter().map(|i| queries[*i].clone()).collect();
@@ -1028,7 +1184,25 @@ fn fetch_list(
         // and it is the per-node subqueries that cost it, not the depth.
         // Everything already pooled is real and stays on screen, and
         // `capped` below already says the total is a lower bound.
-        let d = match fetch_round(&round, &round_cursors, served.unwrap_or(limit), tok) {
+        // Asked again once, after a pause, before the pass is cut short.
+        // The retry starts at the floor rather than at the size the round
+        // started from: the walk inside `fetch_round` has just established
+        // that the larger pages are being refused, and re-spending that
+        // walk costs two ten-second refusals to relearn it.
+        let mut tried = 0usize;
+        let outcome = loop {
+            let start = served.unwrap_or(limit);
+            let start = if tried == 0 { start } else { start.min(PAGE_FLOOR) };
+            match fetch_round(&round, &round_cursors, start, tok) {
+                Ok(got) => break Ok(got),
+                Err(said) if retry_again(tried, &said) => {
+                    tried += 1;
+                    std::thread::sleep(RETRY_PAUSE);
+                }
+                Err(said) => break Err(said),
+            }
+        };
+        let d = match outcome {
             Ok((d, size)) => {
                 if size < limit {
                     served = served.map_or(Some(size), |had: usize| Some(had.min(size)));
@@ -1100,26 +1274,20 @@ fn fetch_list(
             }
         }
         live = next_live;
+        // Checks first, and published only once they are in. A round's
+        // rows could go up a second earlier than this, but `ready_to_merge`
+        // reads an absent rollup as a repository with no CI, so the board
+        // would count approved PRs as ready and then take it back - and
+        // "ready to merge" is the one figure anybody acts on.
         enrich(&mut pool, &fresh_ids, tok);
-
-        // Publish what has landed before asking for the next page. The
-        // board fills as the pages arrive rather than staying empty until
-        // the last source is exhausted, and the count in the header is the
-        // count on screen at every moment in between.
-        if let Ok(mut g) = state.lock() {
-            g.stages
-                .count("pull requests", order.len(), None);
-            let partial: Vec<serde_json::Value> = order
-                .iter()
-                .filter_map(|url| pool.get(url).cloned())
-                .collect();
-            let (total, capped) = union_total(&counted, partial.len());
-            g.total = total;
-            // Still fetching is still capped, whatever the counts say: the
-            // sources that remain live have more behind them.
-            g.capped = capped || !live.is_empty();
-            g.prs = partial;
-        }
+        publish(state, &pool, &order, &counted, !live.is_empty());
+        // The computed fields after, and published again. These do not
+        // need holding back: until they land the SIZE column is blank and
+        // the conflicting count says what it was over, so the board is
+        // visibly waiting rather than quietly wrong, and the rows are on
+        // screen two and a half seconds sooner for it.
+        enrich_computed(&mut pool, &fresh_ids, tok);
+        publish(state, &pool, &order, &counted, !live.is_empty());
     }
 
     let nodes: Vec<serde_json::Value> = order
@@ -1132,12 +1300,6 @@ fn fetch_list(
             .map(|(n, _)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        let (total, capped) = union_total(&counted, nodes.len());
-        g.total = total;
-        // Paging that stopped short is capped whatever the arithmetic says.
-        g.capped = capped || deepened.is_some();
-        g.prs = nodes;
-        g.fetched = tc::now();
         let mut said = if source == "config" {
             tc::config_token_warning().unwrap_or_default()
         } else {
@@ -1153,30 +1315,153 @@ fn fetch_list(
                 format!("{} · {}", said, note)
             };
         }
-        if let Some(size) = served {
-            // Said plainly, because the list is whole and the only thing
-            // that changed is how many rounds it took to get here.
-            let note = format!("GitHub refused {} per page; served {}", limit, size);
-            said = if said.is_empty() {
-                note
-            } else {
-                format!("{} · {}", said, note)
-            };
-        }
-        if deepened.is_some() {
-            // Named as a ceiling rather than as the raw 502, because that
-            // is what it is: GitHub stops serving these pages, the list is
-            // as long as it can be, and nothing here is broken.
-            let note = "GitHub stopped paging this search; showing every result it served";
-            said = if said.is_empty() {
-                note.to_string()
-            } else {
-                format!("{} · {}", said, note)
-            };
-        }
-        g.err = said;
+        settle(&mut g, nodes, &counted, served, deepened.as_deref(), said);
     }
     Ok(())
+}
+
+/// What a finished pass leaves on the pane.
+///
+/// Its own function so a pass that fell back or stopped short can be
+/// tested without a network: the two facts about *how* the pass went go in
+/// their own fields and `err` carries only what is actually broken. A page
+/// size GitHub would not serve and paging that stopped at a gateway
+/// ceiling are neither — those are the refusals `worth_retrying` already
+/// knows mean "later". Folded into `err` they drew the `!` banner in the
+/// warning colour and read, to anyone looking at the pane, as a widget
+/// that had failed: the list was real, the count was honestly a floor,
+/// and a minute later it was gone.
+///
+/// A 401, a 500, a query GitHub will not accept, is the other case. Those
+/// used to vanish into the same `stopped` flag, so a credential failure
+/// after the first page drew `GitHub is slow` and left the reason nowhere.
+/// The list still stays — what landed is real — but the reason reaches
+/// `err`, which is the banner it belongs in.
+fn settle(
+    g: &mut State,
+    nodes: Vec<serde_json::Value>,
+    counted: &[(i64, usize)],
+    served: Option<usize>,
+    deepened: Option<&str>,
+    warnings: String,
+) {
+    let (total, capped) = union_total(counted, nodes.len());
+    g.total = total;
+    // Paging that stopped short is capped whatever the arithmetic says,
+    // including a hard failure: we did not finish, so the total is a floor.
+    g.capped = capped || deepened.is_some();
+    g.prs = nodes;
+    g.fetched = tc::now();
+    g.served = served;
+    // Only a refusal that means "later" is a slow spell. Everything else
+    // that stopped paging is an error, and the note must not say otherwise.
+    g.stopped = deepened.map(worth_retrying).unwrap_or(false);
+    g.err = match deepened {
+        Some(reason) if !worth_retrying(reason) => {
+            if warnings.is_empty() {
+                reason.to_string()
+            } else {
+                format!("{} · {}", warnings, reason)
+            }
+        }
+        _ => warnings,
+    };
+}
+
+/// A new pass is under way: drop the last one's note.
+///
+/// `publish` updates the list as pages land and does not touch `served`
+/// or `stopped`, and the render loop draws `partial_note` every frame
+/// with no refresh guard. Clearing both here, before paging starts, is
+/// what keeps a leftover "GitHub is slow" from qualifying numbers that
+/// are already moving. The list stays until the new pages replace it —
+/// emptying the board while paging starts would look like a source with
+/// nothing in it.
+fn begin_pass(g: &mut State) {
+    g.served = None;
+    g.stopped = false;
+}
+
+/// Where the window onto the body sits after a frame's worth of input.
+///
+/// The wheel writes `at` and nothing else, and this hands it straight
+/// back: the whole point of the rule is that scrolling to look at
+/// something never changes what `↵` opens, and a view that re-centred on
+/// the cursor every frame dragged itself back from wherever the wheel had
+/// just put it. Only on the frame a key moved the selection - `chase` -
+/// does the window follow the cursor.
+///
+/// Its own function so the composition can be tested. `tc::follow` is
+/// already tested; what has been wrong here is when it is called.
+fn scrolled(at: usize, cursor: Option<usize>, chase: bool, body: usize, room: usize) -> usize {
+    let at = match cursor.filter(|_| chase) {
+        Some(row) => tc::follow(at, row, room),
+        None => at,
+    };
+    // Clamped last, and written back by the caller: without that a wheel
+    // spun past the end leaves a scroll nobody can see, and the same
+    // number of wheel-ups to undo.
+    at.min(body.saturating_sub(room))
+}
+
+/// The dim line under the header when a pass fell back or stopped short.
+///
+/// One line, or nothing at all. The sentence this replaced was two
+/// sentences long - `GitHub refused 25 per page; served 10 · GitHub
+/// stopped paging this search; showing every result it served` - and in a
+/// wall pane it wrapped three rows in the `!` slot, which is most of what
+/// made a slow minute look like a broken widget.
+///
+/// Built to a width rather than to a fixed wording, because the three
+/// things worth saying do not fit fifty-eight columns together: the page
+/// size served and how far the pass got come first, and *when the next
+/// pass is* is dropped when the pane cannot hold it. Dropped, not cut -
+/// half a hint about a countdown is worse than no countdown.
+///
+/// `next_in` is seconds until the next pass and is expected to be
+/// recomputed every frame; a countdown frozen into a string at the end of
+/// the pass would be wrong before anyone read it.
+fn partial_note(
+    served: Option<usize>,
+    got: usize,
+    total: usize,
+    capped: bool,
+    stopped: bool,
+    next_in: Option<u64>,
+    w: usize,
+) -> String {
+    if served.is_none() && !stopped {
+        return String::new();
+    }
+    let mut parts: Vec<String> = vec!["GitHub is slow".to_string()];
+    if let Some(size) = served {
+        parts.push(format!("served {}/page", size));
+    }
+    if stopped {
+        // "of at least", for the reason the header says it: the sources
+        // overlap and one that filled its page has more behind it, so the
+        // total is a floor and this is a count against a floor.
+        parts.push(format!(
+            "{} of {}{}",
+            got,
+            if capped { "at least " } else { "" },
+            total
+        ));
+    }
+    if let Some(secs) = next_in {
+        parts.push(format!("next pass in {}s", secs));
+    }
+    // Everything after the first piece is dropped from the tail until the
+    // line fits. The first piece is short enough to fit any pane a widget
+    // is drawn in at all, so this always terminates with something.
+    while parts.len() > 1 {
+        let line = format!(" {}", parts.join(" · "));
+        if line.chars().count() <= w.saturating_sub(1) {
+            return line;
+        }
+        parts.pop();
+    }
+    format!(" {}", parts[0])
 }
 
 struct Palette {
@@ -1466,6 +1751,8 @@ fn main() {
             stack_rows,
             loading,
             err,
+            served,
+            stopped,
             fetched,
             stages,
             target,
@@ -1481,6 +1768,8 @@ fn main() {
                     g.stack_rows.clone(),
                     g.loading,
                     g.err.clone(),
+                    g.served,
+                    g.stopped,
                     g.fetched,
                     g.stages.clone(),
                     g.target.clone(),
@@ -1739,11 +2028,26 @@ fn main() {
             ));
         }
         rows.push(tc::seg(&count, w - 1));
+        // How the last pass went, when it went unusually: dim, one line,
+        // under the count it qualifies. Recomputed here rather than stored
+        // because the countdown moves - and because the width it has to fit
+        // is only known here.
+        let next_in = (fetched > 0.0 && !loading)
+            .then(|| fetched + refresh - tc::now())
+            .filter(|left| *left > 0.0)
+            .map(|left| left.round() as u64);
+        let note = partial_note(served, prs.len(), total, capped, stopped, next_in, w);
+        if !note.is_empty() {
+            rows.push(tc::seg(&[(p.dim.as_str(), note)], w - 1));
+        }
         if !err.is_empty() {
             rows.extend(tc::error_rows(p.bad.as_str(), &err, w));
         }
 
         let mut stack_cursor: Option<usize> = None;
+        // Where the selected PR ended up in the body, so the window can be
+        // brought to it on the frame a key moved the selection.
+        let mut list_cursor: Option<usize> = None;
         let hints: Vec<Vec<(&str, String)>> = if detail.is_some() || loading {
             let mut stack_sel_clamped = stack_sel;
             if !stack_rows.is_empty() {
@@ -1787,13 +2091,11 @@ fn main() {
             if !shown.is_empty() && selected >= shown.len() {
                 selected = shown.len() - 1;
             }
-            // Two day charts plus state and age, so the block is a board of
-            // its own. Raising this gate to match that height would hide the
-            // new charts on a pane that can scroll, which is the reading the
-            // scroll rule forbids. The body is a window onto whatever they
-            // need, and `t` hides them when the list should have the first
-            // screen.
-            if show_stats && h >= 30 {
+            // No height gate. A section that is not drawn looks exactly
+            // like a section with nothing in it, and with the whole widget
+            // scrolling there is nothing left to gain by hiding the stats
+            // on a short pane - `[t]stats` is the reader's own choice.
+            if show_stats {
                 // Every open PR, not `shown`: the filter is a search of the
                 // board, not a redefinition of it.
                 rows.extend(stats_view(
@@ -1808,23 +2110,18 @@ fn main() {
                 ));
             }
             let top = rows.len();
-            let (list, first) = list_view(
+            let (list, at) = list_view(
                 &shown,
                 selected,
                 SORTS[sort_at],
                 newest_first,
                 &needle,
                 w,
-                h,
                 fetched == 0.0,
                 &source_filter,
-                top,
-                board,
-                moved,
                 &p,
             );
-            board = first;
-            moved = false;
+            list_cursor = at.map(|at| top + at);
             rows.extend(list);
             vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
@@ -1860,9 +2157,10 @@ fn main() {
             .map(|l| format!(" {}", l))
             .collect();
         // A window onto the body rather than a cut of it, with the title
-        // pinned above: scrolled away, the detail screen stops saying which
-        // pull request it is describing. The list windows itself, so only
-        // the detail has anywhere to scroll to.
+        // pinned above: scrolled away, either screen stops saying what it is
+        // describing. Both screens work this way - the list's body is the
+        // stats and the whole list together, so the wheel moves the charts
+        // off the top instead of shuffling rows under them.
         let room = h.saturating_sub(footer.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
@@ -1882,7 +2180,9 @@ fn main() {
             dscroll
         } else {
             stack_moved = false;
-            0
+            board = scrolled(board, list_cursor.map(|at| at.saturating_sub(head.len())), moved, rest.len(), room_below);
+            moved = false;
+            board
         };
         let mut frame: Vec<String> = head.to_vec();
         frame.extend(rest.iter().skip(off).take(room_below).cloned());
@@ -2246,6 +2546,12 @@ fn stats_view(
         let mut review: HashMap<&str, usize> = HashMap::new();
         let mut checks: HashMap<&str, usize> = HashMap::new();
         let (mut drafts, mut conflicts, mut ready) = (0usize, 0usize, 0usize);
+        // How many trial merges have actually been read. The second
+        // enrichment pass lands a round behind the rows, so for a few
+        // seconds on every refresh this is short of `n` - and a bare
+        // "0 conflicting" over readings nobody has taken is a claim about
+        // the board rather than a count of it.
+        let mut merge_read = 0usize;
         for pr in prs {
             let decision = text(pr, "reviewDecision");
             let slot = match decision.as_str() {
@@ -2266,8 +2572,11 @@ fn stats_view(
             if pr["isDraft"].as_bool().unwrap_or(false) {
                 drafts += 1;
             }
-            if text(pr, "mergeable") == "CONFLICTING" {
-                conflicts += 1;
+            if let Some(m) = mergeable_state(pr) {
+                merge_read += 1;
+                if m == "CONFLICTING" {
+                    conflicts += 1;
+                }
             }
             if ready_to_merge(pr) {
                 ready += 1;
@@ -2293,7 +2602,11 @@ fn stats_view(
                 (p.dim.as_str(), " · ".into()),
                 (
                     if conflicts > 0 { p.bad.as_str() } else { p.dim.as_str() },
-                    format!("{} conflicting", conflicts),
+                    if merge_read < n {
+                        format!("{} conflicting of {} read", conflicts, merge_read)
+                    } else {
+                        format!("{} conflicting", conflicts)
+                    },
                 ),
                 (p.dim.as_str(), " · ".into()),
                 (
@@ -2532,8 +2845,18 @@ fn stats_view(
             w - 1,
         ));
     }
-    if let Some(fattest) = prs.iter().max_by_key(|p| number(p, "additions") + number(p, "deletions"))
     {
+        // Only over the PRs whose diff has actually been counted. Ranking
+        // by `number()` would hand the title to whichever unread row came
+        // first, at `+0/-0`, and call it the biggest change on the board.
+        // The other two figures on this line are computed from fields the
+        // search itself carries, so they draw either way - the line loses
+        // its third cell for a moment, not the row.
+        let fattest = prs
+            .iter()
+            .filter_map(|p| diff_of(p).map(|(add, del)| (add + del, p)))
+            .max_by_key(|(bulk, _)| *bulk)
+            .map(|(_, p)| p);
         let worst = |pairs: &[(f64, &serde_json::Value)]| -> String {
             match pairs.iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
                 Some((hours, pr)) => {
@@ -2550,13 +2873,13 @@ fn stats_view(
                 (p.warn.as_str(), tc::pad(&worst(&idles), 12)),
                 (p.dim.as_str(), "  biggest ".into()),
                 (
-                    p.txt.as_str(),
-                    format!(
-                        "#{} +{}/-{}",
-                        number(fattest, "number"),
-                        number(fattest, "additions"),
-                        number(fattest, "deletions")
-                    ),
+                    if fattest.is_some() { p.txt.as_str() } else { p.dim.as_str() },
+                    match fattest.and_then(|f| diff_of(f).map(|d| (f, d))) {
+                        Some((f, (add, del))) => {
+                            format!("#{} +{}/-{}", number(f, "number"), add, del)
+                        }
+                        None => "…".into(),
+                    },
                 ),
             ],
             w - 1,
@@ -2566,6 +2889,16 @@ fn stats_view(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Every row of the list, and where the selected row sits among them.
+///
+/// No window: the frame takes one onto the whole body, stats and list
+/// together, the way the detail screen does. A list that windowed itself
+/// under a stats block thirty rows tall left the wheel unable to move the
+/// charts out of the way, which is the case CLAUDE.md's scroll rule was
+/// written for - and it is why the row index comes back rather than an
+/// offset. The caller follows the cursor with it on the frame a key moved
+/// the selection, and leaves the view exactly where the wheel put it on
+/// every other frame.
 fn list_view(
     prs: &[serde_json::Value],
     selected: usize,
@@ -2573,14 +2906,10 @@ fn list_view(
     newest_first: bool,
     needle: &str,
     w: usize,
-    h: usize,
     waiting: bool,
     source_filter: &str,
-    top: usize,
-    from: usize,
-    chase: bool,
     p: &Palette,
-) -> (Vec<String>, usize) {
+) -> (Vec<String>, Option<usize>) {
     let mut rows = vec![String::new()];
     let arrow = if newest_first { "↓" } else { "↑" };
     rows.push(tc::seg(
@@ -2619,7 +2948,7 @@ fn list_view(
             "  no open PRs".to_string()
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
-        return (rows, 0);
+        return (rows, None);
     }
 
     // Columns are budgeted rather than guessed: the fixed ones are summed
@@ -2651,24 +2980,15 @@ fn list_view(
     }
     rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
 
-    // `top` is what was drawn above this view. Without it the window is
-    // sized as though the list began at the top of the screen, so it renders
-    // far more rows than are visible, the caller truncates the overflow, and
-    // the selection scrolls off the bottom while `first` is still 0.
-    let room = h.saturating_sub(top + rows.len() + 3).max(1);
-    // Centred on the cursor on a frame a key moved it, and left exactly
-    // where it was on a frame the wheel did. Recentring every frame is what
-    // pulled the list straight back from wherever the wheel had put it.
-    let furthest = prs.len().saturating_sub(room);
-    let first = if !chase {
-        from.min(furthest)
-    } else if prs.len() > room {
-        selected.saturating_sub(room / 2).min(furthest)
-    } else {
-        0
-    };
-    for (i, pr) in prs.iter().enumerate().skip(first).take(room) {
+    // The header row is the last row before the PRs, and it scrolls with
+    // them: pinning it as well would be a second sticky region, which is
+    // the thing this removed.
+    let mut cursor = None;
+    for (i, pr) in prs.iter().enumerate() {
         let here = i == selected;
+        if here {
+            cursor = Some(rows.len());
+        }
         let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
         let c = |colour: &str| {
                 // Any colour that would not clear AA on this tint is swapped
@@ -2737,11 +3057,19 @@ fn list_view(
             ),
         ));
         if size_w > 0 {
+            // Blank until the figures arrive, never `+0/-0`. The column is
+            // filled by the second enrichment pass a moment after the row
+            // appears, and a zero drawn in the meantime is a wrong number
+            // rather than a missing one - it would say this PR changes
+            // nothing, which is a thing a PR can genuinely be.
             line.push((
                 c(&p.dim),
                 format!(
                     "{:>width$}",
-                    format!("+{}/-{}", number(pr, "additions"), number(pr, "deletions")),
+                    match diff_of(pr) {
+                        Some((add, del)) => format!("+{}/-{}", add, del),
+                        None => String::new(),
+                    },
                     width = size_w
                 ),
             ));
@@ -2752,7 +3080,7 @@ fn list_view(
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    (rows, first)
+    (rows, cursor)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2870,12 +3198,18 @@ fn detail_view(
         ),
         (
             "size".into(),
-            format!(
-                "+{}/-{} in {} files",
-                number(pr, "additions"),
-                number(pr, "deletions"),
-                number(pr, "changedFiles")
-            ),
+            // The detail query asks for all three itself, so this is
+            // normally just there - but it says "not counted" rather than
+            // zero for the same reason the list column goes blank.
+            match diff_of(pr) {
+                Some((add, del)) => format!(
+                    "+{}/-{} in {} files",
+                    add,
+                    del,
+                    number(pr, "changedFiles")
+                ),
+                None => "not counted".into(),
+            },
             p.txt.as_str(),
         ),
         (
@@ -3291,6 +3625,276 @@ mod tests {
         assert_eq!(smaller(PAGE_FLOOR), None, "the floor is where it stops");
     }
 
+    /// A list of open PRs that is longer than any pane, for the scroll
+    /// tests. Only the fields the list row reads.
+    fn a_long_list(n: usize) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "number": i + 1,
+                    "title": format!("a change worth reading about, number {}", i + 1),
+                    "url": format!("https://github.com/owner/repo/pull/{}", i + 1),
+                    "repository": { "nameWithOwner": "owner/repo" },
+                    "createdAt": "2026-09-01T00:00:00Z",
+                    "updatedAt": "2026-09-10T00:00:00Z",
+                    "additions": 12,
+                    "deletions": 3,
+                    "reviewDecision": "APPROVED",
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_wheel_moves_the_view_and_never_the_selection() {
+        // The body is longer than the pane, which is the only case where
+        // any of this is visible.
+        let (body, room) = (400usize, 20usize);
+
+        // A wheel-down is `board + 1` at the key, and this hands it back
+        // untouched. The selection is not an argument: it cannot move.
+        assert_eq!(scrolled(1, Some(0), false, body, room), 1);
+        // Three more, the selected row now well above the window, and the
+        // view stays exactly where the wheel left it.
+        assert_eq!(scrolled(4, Some(0), false, body, room), 4);
+
+        // An arrow-down past the fold brings the row into view, and only
+        // on the frame the key moved it: row 40 with room for 20 puts the
+        // window at 21 so the row is the last one drawn.
+        assert_eq!(scrolled(0, Some(40), true, body, room), 21);
+        // The frame after that is a frame nothing moved, so the window is
+        // left alone even though the cursor is at the very bottom of it.
+        assert_eq!(scrolled(21, Some(40), false, body, room), 21);
+        // And a wheel movement afterwards is not undone by the next frame -
+        // the failure this replaced, where the list re-centred on the
+        // cursor every frame and pulled itself straight back.
+        assert_eq!(scrolled(30, Some(40), false, body, room), 30);
+        assert_eq!(scrolled(30, Some(40), false, body, room), 30);
+
+        // Spun past the end, the scroll stops at the last screenful rather
+        // than banking wheel-ups nobody can see.
+        assert_eq!(scrolled(9_999, None, false, body, room), body - room);
+        // A body that fits has nowhere to go.
+        assert_eq!(scrolled(7, Some(3), false, 10, room), 0);
+    }
+
+    #[test]
+    fn a_short_pane_scrolls_the_stats_rather_than_hiding_them() {
+        let p = palette();
+        let prs = a_long_list(40);
+        // Every row, whatever the pane: a blank, the section head, the
+        // column head, and one row per PR.
+        let (list, cursor) = list_view(&prs, 7, "created", true, "", 80, false, "all", &p);
+        assert_eq!(list.len(), 3 + prs.len(), "the list is built whole");
+        assert_eq!(cursor, Some(3 + 7), "the selected row is where it says");
+
+        // The body a twenty-row pane draws through: the stats block and the
+        // whole list, with the title pinned above it. The stats used to
+        // stand down below thirty rows, which looked exactly like a board
+        // with nothing to say about itself.
+        let stats = stats_view(&prs, 40, false, None, "", 80, 0, &p);
+        assert!(stats.len() > 8, "the stats block is the tall part");
+        let body: Vec<String> = stats.iter().chain(list.iter()).cloned().collect();
+        let room = 20usize - 1 - 2;
+        assert!(body.len() > room, "a body worth scrolling");
+
+        // At the top, the pane is the stats. Not the list alone.
+        let at = scrolled(0, cursor, false, body.len(), room);
+        let seen: Vec<&String> = body.iter().skip(at).take(room).collect();
+        assert!(
+            seen.iter().any(|r| r.contains("STATE")),
+            "a twenty-row pane still opens on the stats"
+        );
+
+        // Scrolled far enough, they are gone and the list has the pane -
+        // which is what the wheel could never do while they were pinned.
+        let at = scrolled(stats.len() + 3, cursor, false, body.len(), room);
+        let seen: Vec<&String> = body.iter().skip(at).take(room).collect();
+        assert!(
+            !seen.iter().any(|r| r.contains("STATE")),
+            "the wheel has to be able to move the charts off the top"
+        );
+        assert!(
+            seen.iter().any(|r| r.contains("#5")),
+            "and the list is what is left: {:?}",
+            seen.last()
+        );
+    }
+
+    #[test]
+    fn a_round_refused_at_the_floor_is_asked_again_once() {
+        let refused = "GitHub returned 502 - the search was too slow to serve";
+        // Once, which is the whole point: the round the walk gave up on is
+        // usually one bad request in a minute that is otherwise answering.
+        assert!(retry_again(0, refused), "the first refusal earns a retry");
+        // And never twice. A second retry is a loop, and a loop against a
+        // search that is genuinely down spends rate limit reprinting the
+        // same message.
+        assert!(!retry_again(1, refused), "one retry, not a loop");
+        assert!(!retry_again(2, refused));
+
+        // The pause is a pause, not a poll: long enough for whatever shed
+        // the request to have finished, short enough that the pass a reader
+        // is waiting on is still that pass.
+        assert!(
+            (2..=3).contains(&RETRY_PAUSE.as_secs()),
+            "the pause is seconds, not minutes: {:?}",
+            RETRY_PAUSE
+        );
+
+        // A refusal that means "no" rather than "later" is not slept on.
+        // Bad credentials say the same thing three seconds from now.
+        assert!(!retry_again(0, "GitHub returned 401: Bad credentials"));
+        assert!(!retry_again(0, "GitHub returned 500"));
+    }
+
+    #[test]
+    fn a_partial_pass_is_a_note_and_not_an_error() {
+        // The end of a pass that fell back to ten per page and stopped
+        // paging at a ceiling - built here rather than fetched, because
+        // what is being tested is what such a pass leaves on the pane.
+        let mut g = State::default();
+        let nodes: Vec<serde_json::Value> = (0..302)
+            .map(|n| serde_json::json!({ "url": format!("u{}", n) }))
+            .collect();
+        // One source saying it matched 686 and having handed over 302 is a
+        // capped source, so the total is a floor.
+        settle(
+            &mut g,
+            nodes,
+            &[(686, 302)],
+            Some(10),
+            Some("GitHub returned 502 - the search was too slow to serve"),
+            String::new(),
+        );
+
+        assert!(
+            g.err.is_empty(),
+            "a slow pass is not a failure and must not draw the ! banner: {}",
+            g.err
+        );
+        assert_eq!(g.served, Some(10), "the page size served is carried");
+        assert!(g.stopped, "paging that stopped short says so");
+        assert!(g.capped, "a pass that stopped short reports a floor");
+        assert_eq!(g.total, 686);
+        assert_eq!(g.prs.len(), 302);
+
+        // What `err` is still for: the config notes the caller composes.
+        let mut g = State::default();
+        settle(&mut g, Vec::new(), &[(0, 0)], None, None, "token in config".into());
+        assert_eq!(g.err, "token in config");
+        assert_eq!(g.served, None, "an ordinary pass has nothing to say");
+        assert!(!g.stopped);
+    }
+
+    #[test]
+    fn a_hard_failure_after_pages_landed_is_still_an_error() {
+        // Pages 1-4 answered and page 5 came back 401. The list is real;
+        // the reason is not a slow spell. Folding it into `stopped` is
+        // the failure: the banner said "GitHub is slow" and the 401
+        // went nowhere.
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            None,
+            Some("GitHub returned 401: Bad credentials"),
+            String::new(),
+        );
+        assert!(
+            g.err.contains("401"),
+            "the reason has to reach the banner: {}",
+            g.err
+        );
+        assert!(!g.stopped, "a credential failure is not a slow spell");
+        assert!(g.capped, "paging stopped, so the total is a floor");
+        assert_eq!(g.prs.len(), 1, "what landed stays");
+
+        // A 500 is the same class: the search backend is broken, not
+        // shedding load, and a smaller page will not change its mind.
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            None,
+            Some("GitHub returned 500"),
+            "token in config".into(),
+        );
+        assert!(g.err.contains("token in config"), "{}", g.err);
+        assert!(g.err.contains("500"), "composed with the config note: {}", g.err);
+        assert!(!g.stopped);
+    }
+
+    #[test]
+    fn a_new_pass_does_not_keep_the_last_pass_note() {
+        let mut g = State::default();
+        settle(
+            &mut g,
+            vec![serde_json::json!({ "url": "u1" })],
+            &[(10, 1)],
+            Some(10),
+            Some("GitHub returned 502 - the search was too slow to serve"),
+            String::new(),
+        );
+        assert_eq!(g.served, Some(10));
+        assert!(g.stopped);
+
+        begin_pass(&mut g);
+        assert_eq!(g.served, None, "the leftover page size does not qualify this pass");
+        assert!(!g.stopped, "the leftover ceiling does not either");
+        // The list stays until the new pages replace it: an empty board
+        // while paging starts would look like a source with nothing in it.
+        assert_eq!(g.prs.len(), 1);
+    }
+
+    #[test]
+    fn the_note_is_one_line_in_a_fifty_eight_column_pane() {
+        // The wall pane the reported banner wrapped three rows in.
+        let w = 58;
+        let note = partial_note(Some(10), 302, 686, true, true, Some(34), w);
+        assert_eq!(note.lines().count(), 1, "one line: {}", note);
+        assert!(
+            note.chars().count() <= w - 1,
+            "{} chars in a {}-column pane: {}",
+            note.chars().count(),
+            w,
+            note
+        );
+        // The two facts that cannot be dropped: the page size served and
+        // how far the pass got, against a total that is a floor.
+        assert!(note.contains("served 10/page"), "{}", note);
+        assert!(note.contains("302 of at least 686"), "{}", note);
+
+        // The countdown is what the narrow pane gives up, and it comes
+        // back when there is room for it. Dropped whole rather than cut:
+        // half a countdown teaches a reader nothing.
+        assert!(!note.contains("next pass"), "no room for it at 58: {}", note);
+        let wide = partial_note(Some(10), 302, 686, true, true, Some(34), 100);
+        assert!(wide.contains("next pass in 34s"), "{}", wide);
+        assert!(wide.chars().count() <= 99);
+
+        // An uncapped total is a total and is not dressed up as a floor.
+        let whole = partial_note(None, 302, 302, false, true, None, 100);
+        assert!(whole.contains("302 of 302"), "{}", whole);
+
+        // Nothing unusual happened, so there is no note and no row.
+        assert_eq!(partial_note(None, 302, 302, false, false, Some(34), 100), "");
+
+        // Every width a pane can be drawn at keeps it on one line.
+        for w in 20..=200 {
+            let note = partial_note(Some(10), 1302, 16860, true, true, Some(340), w);
+            assert!(
+                note.chars().count() <= w.saturating_sub(1).max(1),
+                "{} chars at width {}: {}",
+                note.chars().count(),
+                w,
+                note
+            );
+        }
+    }
+
     #[test]
     fn a_search_that_cannot_be_paged_is_a_search_capped_at_one_page() {
         let qs = vec!["is:open is:pr".to_string(), "author:@me".to_string()];
@@ -3304,6 +3908,13 @@ mod tests {
         assert!(first.contains("hasNextPage"), "{}", first);
         assert!(first.contains("endCursor"), "{}", first);
         assert!(!first.contains("after:"), "no cursor yet: {}", first);
+        // And nothing GitHub has to compute to answer. A trial merge and
+        // a diff total about double the request, which is what carried it
+        // over the gateway's budget on a slow minute; they are fetched by
+        // node id afterwards instead.
+        for costly in ["mergeable", "additions", "deletions", "changedFiles"] {
+            assert!(!first.contains(costly), "{} is not a search field: {}", costly, first);
+        }
         assert_eq!(first.matches("search(").count(), 2);
 
         // A cursor reaches the source it belongs to, and only that one.
@@ -3346,6 +3957,165 @@ mod tests {
         assert!(!ready_to_merge(&pr(
             r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "checksUnknown": true}"#
         )));
+    }
+
+    /// The same list with the second enrichment pass not yet landed - the
+    /// state every row is in for a couple of seconds after it appears, and
+    /// the state it stays in when that pass is refused.
+    fn awaiting_the_second_pass(n: usize) -> Vec<serde_json::Value> {
+        a_long_list(n)
+            .into_iter()
+            .map(|mut pr| {
+                let obj = pr.as_object_mut().unwrap();
+                obj.remove("additions");
+                obj.remove("deletions");
+                obj.remove("changedFiles");
+                obj.remove("mergeable");
+                pr
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unread_trial_merge_is_never_ready_to_merge() {
+        let pr = |json: &str| -> serde_json::Value { serde_json::from_str(json).unwrap() };
+        // Approved, green, not a draft - and nobody has asked GitHub
+        // whether it conflicts. The search no longer carries `mergeable`,
+        // so this is every row for as long as the second pass takes, and
+        // `!= "CONFLICTING"` on an absent field waved all of them through.
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED",
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}"#
+        )));
+        // GitHub's own answer while the trial merge is still running is a
+        // reading nobody took either.
+        assert!(!ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "UNKNOWN"}"#
+        )));
+        // And the reading itself, once it lands, still decides.
+        assert!(ready_to_merge(&pr(
+            r#"{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE"}"#
+        )));
+    }
+
+    #[test]
+    fn the_state_line_counts_conflicts_over_what_was_read() {
+        let p = palette();
+        let waiting = awaiting_the_second_pass(40);
+        let state = |prs: &[serde_json::Value]| -> String {
+            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+                .iter()
+                .map(|r| plain(r))
+                .find(|r| r.contains("STATE"))
+                .expect("a board with PRs on it has a STATE line")
+        };
+
+        // Nought conflicting out of nought read is not "no conflicts".
+        let line = state(&waiting);
+        assert!(
+            line.contains("0 conflicting of 0 read"),
+            "the count has to say what it is over: {}",
+            line
+        );
+        assert!(
+            line.contains("0 ready to merge"),
+            "and nothing is ready while the readings are out: {}",
+            line
+        );
+
+        // Every reading in, and the line stops qualifying itself.
+        let read: Vec<serde_json::Value> = waiting
+            .iter()
+            .enumerate()
+            .map(|(i, pr)| {
+                let mut pr = pr.clone();
+                pr["mergeable"] =
+                    serde_json::json!(if i < 3 { "CONFLICTING" } else { "MERGEABLE" });
+                pr
+            })
+            .collect();
+        let line = state(&read);
+        assert!(line.contains("3 conflicting"), "{}", line);
+        assert!(
+            !line.contains("conflicting of"),
+            "nothing left to qualify: {}",
+            line
+        );
+
+        // Half of them in, and it says half.
+        let mut partial = read.clone();
+        for pr in partial.iter_mut().skip(20) {
+            pr.as_object_mut().unwrap().remove("mergeable");
+        }
+        let line = state(&partial);
+        assert!(line.contains("3 conflicting of 20 read"), "{}", line);
+    }
+
+    #[test]
+    fn the_size_column_is_blank_until_the_figures_arrive() {
+        let p = palette();
+        let rows = |prs: &[serde_json::Value]| -> Vec<String> {
+            list_view(prs, 0, "created", true, "", 100, false, "all", &p)
+                .0
+                .iter()
+                .map(|r| plain(r))
+                .collect()
+        };
+
+        // A hundred columns is wide enough for SIZE, which is the only
+        // width where any of this is visible.
+        let drawn = rows(&a_long_list(4));
+        assert!(drawn.iter().any(|r| r.contains("SIZE")), "the column is there");
+        assert!(drawn.iter().any(|r| r.contains("+12/-3")), "and it fills");
+
+        // Nothing read yet: blank, not a figure of nought. `+0/-0` says
+        // this PR changes nothing, which is a thing a PR can really be.
+        let waiting = rows(&awaiting_the_second_pass(4));
+        assert!(waiting.iter().any(|r| r.contains("SIZE")), "the column stays");
+        assert!(
+            !waiting.iter().any(|r| r.contains("+0/-0")),
+            "a blank column, not a zero: {:?}",
+            waiting
+        );
+
+        // And a PR that genuinely changes nothing still says so.
+        let mut empty = a_long_list(1);
+        empty[0]["additions"] = serde_json::json!(0);
+        empty[0]["deletions"] = serde_json::json!(0);
+        assert!(
+            rows(&empty).iter().any(|r| r.contains("+0/-0")),
+            "a real nought is a real answer"
+        );
+    }
+
+    #[test]
+    fn the_biggest_pr_is_not_picked_from_figures_nobody_read() {
+        let p = palette();
+        let line = |prs: &[serde_json::Value]| -> String {
+            stats_view(prs, prs.len(), false, None, "", 100, 0, &p)
+                .iter()
+                .map(|r| plain(r))
+                .find(|r| r.contains("biggest"))
+                .expect("the reckoning line draws whenever anything is open")
+        };
+
+        // Ranked on nothing, every PR ties at nought and the first one
+        // wins - a wrong winner rather than a missing one. The other two
+        // figures on the line come from fields the search still carries,
+        // so they draw either way.
+        let waiting = line(&awaiting_the_second_pass(4));
+        assert!(waiting.contains("oldest"), "the rest of the line stays: {}", waiting);
+        assert!(
+            !waiting.contains("+0/-0") && !waiting.contains("biggest #"),
+            "no winner from nothing: {}",
+            waiting
+        );
+
+        // One figure lands and it is the only candidate there is.
+        let mut some = awaiting_the_second_pass(4);
+        some[2]["additions"] = serde_json::json!(9);
+        some[2]["deletions"] = serde_json::json!(1);
+        assert!(line(&some).contains("biggest #3 +9/-1"), "{}", line(&some));
     }
 
     #[test]

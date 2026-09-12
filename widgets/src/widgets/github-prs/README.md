@@ -66,8 +66,10 @@ Open one and it becomes a dashboard:
 
 Four sections above the list. Three are computed from data already fetched and
 cost nothing; the merge figures are the exception and cost one request, which
-is described below. `t` toggles them, and they stand down on their own below
-thirty rows rather than leaving the list too short to be a list.
+is described below. `t` toggles them, and nothing else does: they used to
+stand down on their own below thirty rows, which looked exactly like a board
+with nothing to say about itself. The pane scrolls instead — the wheel moves
+the stats off the top and gives the list the whole pane.
 
 **They describe every open pull request, not the filtered list.** Typing in the
 filter is a search of the board, not a redefinition of it: watching the age
@@ -82,7 +84,11 @@ filter did, while the sections above say what the board is.
 **State** — a bar over the review decisions, with drafts, conflicts, and
 **ready to merge** called out. That last one is approved, green, unconflicted
 and not a draft: everything else on the board describes work in flight, and
-this is the one number that says something can be done right now.
+this is the one number that says something can be done right now. Which is
+why nothing unread falls into it — a check rollup that was never fetched and
+a trial merge that has not come back both hold a PR out of the count, and
+the conflicting figure beside it reads `9 conflicting of 34 read` whenever
+it is over less than the whole board.
 
 **Opened / day** — when the *still-open* PRs arrived, over the last 30 days.
 Not a throughput chart: it is the shape of the backlog's arrival, so a spike
@@ -217,15 +223,38 @@ Rows are published as each round lands, so the board fills while it works
 rather than staying empty until the last source is done, and the count in
 the header is the count on screen throughout.
 
-**What a search will not serve at depth is fetched afterwards.** A search
-carrying `stackEntry` and the check rollup stops being served after four
-pages — measured: page five is a 502, whether it is one query over ten
+**The search carries plain fields only. Everything else arrives in two
+passes afterwards, by node id, fifty at a time.** Both passes exist because
+of what asking inside the search costs, but they are two rather than one
+because the reasons are different and so are the failures.
+
+*Stack and checks* — `stackEntry` and the check rollup — stop being served
+after four pages: page five is a 502, whether it is one query over ten
 owners or one query per owner, and splitting does not help. Without those
-two subqueries the same search pages out in full: 665 of 665 in fourteen
-rounds. So the search asks for plain fields only, and those two are fetched
-by node id, fifty at a time, which answers every time. A lookup that fails
-leaves the checks unknown rather than reporting a state nobody read — a
-dash is honest, a green tick would not be.
+two subqueries the same search pages out in full, 665 of 665 in fourteen
+rounds.
+
+*The trial merge and the diff counts* — `mergeable`, `additions`,
+`deletions`, `changedFiles` — are served at any depth, just slowly: GitHub
+runs a trial merge and totals a diff to answer them, which about doubles
+the request. Measured at 25 per page, three runs each: 2.2–2.8s without
+them, 3.3–9.8s with — and the 9.8 is a slow minute landing on the request
+that cannot fail without ending the pass. By node id the same four fields
+cost 2.3–3.3s per fifty. The wall time is the same; the risk is not.
+
+The two are kept apart because asking for both groups in one node query is
+a 502 as readily as the search was, and because a stack lookup that failed
+should not also cost the conflicting count.
+
+A failed lookup never becomes an answer. The first pass marks the checks
+unknown rather than reporting a state nobody read — a dash is honest, a
+green tick would not be. The second needs no marker: the SIZE column stays
+blank rather than drawing `+0/-0`, the STATE line says how many trial
+merges its conflicting count is over, the reckoning line's *biggest* waits
+for a figure to rank on, and nothing with an unread trial merge is counted
+**ready to merge**. Which is also what the board looks like for the second
+or so between the rows appearing and the figures landing: filling in, not
+claiming.
 
 ## The list
 
@@ -253,7 +282,7 @@ two disagreed by years on the same PR.
 | `↵` | in a PR view, open the stack row under the cursor |
 | `c` | copy the PR's URL |
 | `r` | refetch now |
-| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the whole widget a line at a time — the pane moves, the selection stays where it is |
 | `,` | open settings |
 | `q` | quit |
 
@@ -363,11 +392,16 @@ by accident.
 
 ## Cost
 
-One search per refresh for the list, one detail query when you open a PR, and
-one more to reconstruct an inferred stack. The list query is the expensive one
-at around 7 seconds for the search itself; the check rollup adds about a
-second, which is why checks are worth carrying in the list rather than
-deferring.
+Each paging round is one search, then two enrichment passes over that
+round's new rows, fifty ids at a time. Opening a PR costs one detail
+query. Reconstructing an inferred stack pages the repository, a hundred
+open pull requests at a time.
+
+The round costs what it always did, around eight seconds per fifty pull
+requests. What changed is where: the search is 2.2–2.8s of it instead of
+3.3–9.8s, and the two passes, whose failure is non-fatal by design, carry
+the rest. No single request sits near GitHub's ten-second gateway budget,
+which is the one that used to come back as a raw 502 page.
 
 Detail is fetched only on demand — 33 PRs are not worth pre-fetching for the
 one you open — so the view paints a loading shimmer and fills in.
@@ -405,8 +439,17 @@ the heaviest requests first: measured during one, every size from 25 up
 returned 502 at about 10.7s while 20 and below answered in three, and an
 hour later 50 answered in five with nothing changed at this end. So a round
 that is refused — a gateway 502, 503 or 504, or curl running out of its
-45 seconds — asks again at half the size, down to a floor of ten, and the
-pane says when it had to.
+45 seconds — asks again at half the size, down to a floor of ten. A round
+still refused at the floor is asked once more after a three-second pause,
+because a slow spell is usually one bad request rather than a bad minute;
+only then does the pass stop paging and report the list as a floor.
+
+None of that is an error, and it is not drawn as one. A pass that fell back
+or stopped short leaves a dim line under the count — `GitHub is slow ·
+served 10/page · 302 of at least 686` — naming the page size it was served
+and how far it got, with `next pass in 34s` on the end when the pane is wide
+enough to hold it. The `!` banner stays for a pass that produced nothing and
+for a refusal that really is one.
 
 Leave `token` empty and the variable `token_env` names is read instead,
 defaulting to `GITHUB_TOKEN`. Its value is the variable's name, not a
