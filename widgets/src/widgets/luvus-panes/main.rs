@@ -55,7 +55,7 @@ const RUN_TIMEOUT: u64 = 15;
 fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
     let mut argv = vec!["luvus", "--session", session];
     argv.extend_from_slice(args);
-    tc::run(&argv, RUN_TIMEOUT)
+    tc::run(&argv, RUN_TIMEOUT).map_err(|why| parse::sanitize_error(&why))
 }
 
 /// Focus a pane. `pane focus` jumps to the pane's workspace and tab too,
@@ -176,8 +176,8 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         .and_then(|text| parse::parse_sessions(&text, &open));
     let git =
         luvus_text(session, &["git", "status"]).and_then(|text| parse::parse_git_status(&text));
-    let worktrees = luvus_text(session, &["worktree", "list"])
-        .and_then(|text| parse::parse_worktrees(&text));
+    let worktrees =
+        luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
     let agents = agents.map(|listed| {
@@ -227,6 +227,11 @@ struct Detail {
     what: String,
     explain: Result<Explanation, String>,
     screen: Result<String, String>,
+    /// False until the worker that fetched this has answered, so the
+    /// panel can open on the keystroke rather than after both calls
+    /// return. An empty panel and a panel still loading are opposite
+    /// readings of the same screen.
+    ready: bool,
 }
 
 /// Ask the server about one agent. Bounded like every other call.
@@ -240,9 +245,50 @@ fn explain_agent(session: &str, pane: &str, what: &str) -> Detail {
         what: what.to_string(),
         explain: luvus_text(session, &["agent", "explain", pane])
             .and_then(|t| parse::parse_explanation(&t)),
-        screen: luvus_text(session, &["agent", "read", pane, "--lines", "60", "--source", "visible"])
-            .and_then(|t| parse::parse_screen(&t)),
+        screen: luvus_text(
+            session,
+            &[
+                "agent", "read", pane, "--lines", "60", "--source", "visible",
+            ],
+        )
+        .and_then(|t| parse::parse_screen(&t)),
+        ready: true,
     }
+}
+
+/// Fetch one agent's evidence off the input loop.
+///
+/// `luvus_text` waits up to `RUN_TIMEOUT` per call, and two of those in
+/// sequence would freeze redraw and keys — including `esc` and `q` — for
+/// half a minute if the socket stopped answering. The panel opens at
+/// once; this thread publishes the finished `Detail` when both calls
+/// return. A panic is recorded as a failed read rather than leaving the
+/// panel on "reading…" forever.
+fn ask_explain(
+    session: String,
+    pane: String,
+    what: String,
+    gen: u64,
+    inbox: Arc<Mutex<Option<(u64, Detail)>>>,
+) {
+    std::thread::spawn(move || {
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explain_agent(&session, &pane, &what)
+        }));
+        let detail = match step {
+            Ok(d) => d,
+            Err(_) => Detail {
+                pane,
+                what,
+                explain: Err("explain stopped - see the pane it was started from".into()),
+                screen: Err("explain stopped - see the pane it was started from".into()),
+                ready: true,
+            },
+        };
+        if let Ok(mut guard) = inbox.lock() {
+            *guard = Some((gen, detail));
+        }
+    });
 }
 
 /// Where a row points, so `↵` knows which pane to focus.
@@ -351,6 +397,43 @@ fn mark_of(state: &str, tick: usize) -> char {
     }
 }
 
+/// Break a line at cell boundaries without collapsing spaces.
+///
+/// `wrap_words` is the right tool for prose, and the wrong one for a
+/// pane's screen: a prompt's leading spaces are the indent, and dropping
+/// them would make two different lines look the same. A word wider than
+/// the pane is still broken rather than handed to `seg` to clip.
+fn wrap_cells(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = 0usize;
+        for (at, ch) in rest.char_indices() {
+            let next = at + ch.len_utf8();
+            if tc::display_width(&rest[..next]) <= width {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch.to_string());
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        }
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// Where the window over the body should start.
 ///
 /// The body is built at whatever height it needs and the pane is a window
@@ -363,7 +446,13 @@ fn mark_of(state: &str, tick: usize) -> char {
 /// frame the wheel moved the view rather than a key moving the cursor:
 /// then `from` stands as given and the cursor may scroll out of sight. It
 /// is still where `↵` acts, and the next arrow brings the window back.
-fn window_from(total: usize, want: std::ops::Range<usize>, room: usize, from: usize, chase: bool) -> usize {
+fn window_from(
+    total: usize,
+    want: std::ops::Range<usize>,
+    room: usize,
+    from: usize,
+    chase: bool,
+) -> usize {
     let last = total.saturating_sub(room);
     let mut start = from.min(last);
     if chase {
@@ -504,9 +593,14 @@ fn main() {
     // every frame and drags itself back from wherever the wheel put it.
     let mut moved = false;
     let mut note: Option<(String, bool, f64)> = None;
-    /// The evidence panel, when one is open. Read-only, and it replaces the
-    /// body rather than covering it, so nothing is hidden behind it.
+    // The evidence panel, when one is open. Read-only, and it replaces the
+    // body rather than covering it, so nothing is hidden behind it.
     let mut detail: Option<Detail> = None;
+    // A generation so a late worker cannot write into a panel that has
+    // already been closed, or into a newer one opened for a different
+    // agent. Incremented on every open and every close.
+    let mut detail_gen = 0u64;
+    let inbox: Arc<Mutex<Option<(u64, Detail)>>> = Arc::new(Mutex::new(None));
     let mut rows_now: Vec<Row> = Vec::new();
     // Where each section starts in `rows_now`, read as one flat list, with
     // the empty ones left out. Written by the frame and read by tab on the
@@ -534,9 +628,11 @@ fn main() {
                     }
                 }
                 "i" | "I" => {
-                    show_idle = !show_idle;
-                    selected = 0;
-                    moved = true;
+                    if detail.is_none() {
+                        show_idle = !show_idle;
+                        selected = 0;
+                        moved = true;
+                    }
                 }
                 // The evidence behind the selected agent's row. Read-only:
                 // it says what the agent is waiting for and never answers
@@ -544,32 +640,60 @@ fn main() {
                 "e" | "E" => {
                     if detail.is_some() {
                         detail = None;
-                    } else if let Some(row) =
+                        detail_gen += 1;
+                    } else if let Some(Row::Agent(agent)) =
                         rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
-                        let pane = row.pane();
+                        let pane = agent.pane.clone();
                         if pane.is_empty() {
                             note = Some((
-                                format!("! {} is not in a pane to explain", row.what()),
+                                format!("! {} is not in a pane to explain", agent.name),
                                 false,
                                 tc::now() + 3.0,
                             ));
                         } else {
-                            detail = Some(explain_agent(&session, &pane, &row.what()));
+                            detail_gen += 1;
+                            detail = Some(Detail {
+                                pane: pane.clone(),
+                                what: agent.name.clone(),
+                                explain: Err(String::new()),
+                                screen: Err(String::new()),
+                                ready: false,
+                            });
                             scroll = 0;
+                            ask_explain(
+                                session.clone(),
+                                pane,
+                                agent.name.clone(),
+                                detail_gen,
+                                Arc::clone(&inbox),
+                            );
                         }
+                    } else if let Some(row) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    {
+                        note = Some((
+                            format!("! {} is not an agent to explain", row.what()),
+                            false,
+                            tc::now() + 3.0,
+                        ));
                     }
                 }
                 "esc" => {
                     detail = None;
+                    detail_gen += 1;
                 }
                 "up" | "k" | "K" => {
-                    selected = selected.saturating_sub(1);
-                    moved = true;
+                    if detail.is_none() {
+                        selected = selected.saturating_sub(1);
+                        moved = true;
+                    }
                 }
                 "down" | "j" | "J" => {
-                    selected += 1;
-                    moved = true;
+                    if detail.is_none() {
+                        selected += 1;
+                        moved = true;
+                    }
                 }
                 // The wheel moves the view and nothing else. Selection is
                 // the arrows' job, here as everywhere in the collection.
@@ -581,42 +705,54 @@ fn main() {
                 // dozen panes listed, reaching LEASES with the arrows is a
                 // lot of presses. Wraps, so it never dead-ends.
                 "tab" => {
-                    if let Some(next) = sections
-                        .iter()
-                        .find(|&&at| at > selected)
-                        .or_else(|| sections.first())
-                    {
-                        selected = *next;
-                        moved = true;
+                    if detail.is_none() {
+                        if let Some(next) = sections
+                            .iter()
+                            .find(|&&at| at > selected)
+                            .or_else(|| sections.first())
+                        {
+                            selected = *next;
+                            moved = true;
+                        }
                     }
                 }
                 "home" => {
-                    selected = 0;
-                    moved = true;
+                    if detail.is_none() {
+                        selected = 0;
+                        moved = true;
+                    }
                 }
                 "end" => {
-                    selected = rows_now.len().saturating_sub(1);
-                    moved = true;
+                    if detail.is_none() {
+                        selected = rows_now.len().saturating_sub(1);
+                        moved = true;
+                    }
                 }
                 "enter" | "f" | "F" => {
-                    if let Some(row) = rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    // While the panel is open it names one pane, and that
+                    // is the one `↵` focuses — not whichever row a hidden
+                    // selection or a refresh reordering would now pick.
+                    let (pane, what) = if let Some(d) = &detail {
+                        (d.pane.clone(), d.what.clone())
+                    } else if let Some(row) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
-                        let pane = row.pane();
+                        (row.pane(), row.what())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    if !what.is_empty() || !pane.is_empty() {
                         note = Some(if pane.is_empty() {
                             // A task nobody has claimed is in no pane, and
                             // focusing something else would be a lie about
                             // where the work is.
                             (
-                                format!("! {} is not in a pane to jump to", row.what()),
+                                format!("! {} is not in a pane to jump to", what),
                                 false,
                                 tc::now() + 3.0,
                             )
                         } else if focus_pane(&session, &pane) {
-                            (
-                                format!("→ focused pane {}", pane),
-                                true,
-                                tc::now() + 3.0,
-                            )
+                            (format!("→ focused pane {}", pane), true, tc::now() + 3.0)
                         } else {
                             (
                                 format!("! could not focus pane {}", pane),
@@ -629,25 +765,32 @@ fn main() {
                 _ => {}
             }
         }
+        if let Ok(mut guard) = inbox.lock() {
+            if let Some((gen, arrived)) = guard.take() {
+                if gen == detail_gen && detail.as_ref().is_some_and(|d| !d.ready) {
+                    detail = Some(arrived);
+                }
+            }
+        }
 
         let (w, h) = tc::size();
         let (snapshot, agents, tasks, leases, absent, err, read, next, sessions, git, worktrees) =
             match state.lock() {
-            Ok(g) => (
-                g.snapshot.clone(),
-                g.agents.clone(),
-                g.tasks.clone(),
-                g.leases.clone(),
-                g.absent.clone(),
-                g.err.clone(),
-                g.read,
-                g.next.clone(),
-                g.sessions.clone(),
-                g.git.clone(),
-                g.worktrees.clone(),
-            ),
-            Err(_) => return,
-        };
+                Ok(g) => (
+                    g.snapshot.clone(),
+                    g.agents.clone(),
+                    g.tasks.clone(),
+                    g.leases.clone(),
+                    g.absent.clone(),
+                    g.err.clone(),
+                    g.read,
+                    g.next.clone(),
+                    g.sessions.clone(),
+                    g.git.clone(),
+                    g.worktrees.clone(),
+                ),
+                Err(_) => return,
+            };
         let wide = w >= 76;
 
         // Rows for drawing. A failed source stays a failed source: these
@@ -687,8 +830,16 @@ fn main() {
             "idle" => 2,
             _ => 1,
         });
-        let busy: Vec<Pane> = others.iter().filter(|n| n.status != "idle").cloned().collect();
-        let resting: Vec<Pane> = others.iter().filter(|n| n.status == "idle").cloned().collect();
+        let busy: Vec<Pane> = others
+            .iter()
+            .filter(|n| n.status != "idle")
+            .cloned()
+            .collect();
+        let resting: Vec<Pane> = others
+            .iter()
+            .filter(|n| n.status == "idle")
+            .cloned()
+            .collect();
         let unstated = busy.iter().filter(|n| n.status.is_empty()).count();
         let running = busy.len() - unstated;
 
@@ -700,18 +851,15 @@ fn main() {
             .chain(lease_rows.iter().cloned().map(Row::Lease))
             .chain(resumable_rows.iter().cloned().map(Row::Resumable))
             .chain(busy.iter().cloned().map(Row::Pane))
-            .chain(
-                resting
-                    .iter()
-                    .filter(|_| show_idle)
-                    .cloned()
-                    .map(Row::Pane),
-            )
+            .chain(resting.iter().filter(|_| show_idle).cloned().map(Row::Pane))
             .collect();
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
-        if note.as_ref().is_some_and(|(_, _, until)| tc::now() >= *until) {
+        if note
+            .as_ref()
+            .is_some_and(|(_, _, until)| tc::now() >= *until)
+        {
             note = None;
         }
 
@@ -763,7 +911,10 @@ fn main() {
         ));
         for state_name in ["blocked", "done", "working", "idle"] {
             if let Some(n) = counts.get(state_name) {
-                summary.push((colour_of(state_name, &p), format!("   {} {}", n, state_name)));
+                summary.push((
+                    colour_of(state_name, &p),
+                    format!("   {} {}", n, state_name),
+                ));
             }
         }
         head.push(tc::seg(&summary, w.saturating_sub(1)));
@@ -867,7 +1018,11 @@ fn main() {
                 // directory as one entry and the count would be a lie.
                 said.push((
                     p.working.as_str(),
-                    format!(" · {} entr{} changed", g.dirty, if g.dirty == 1 { "y" } else { "ies" }),
+                    format!(
+                        " · {} entr{} changed",
+                        g.dirty,
+                        if g.dirty == 1 { "y" } else { "ies" }
+                    ),
                 ));
             }
             if g.stashes > 0 {
@@ -930,121 +1085,173 @@ fn main() {
                 w.saturating_sub(1),
             ));
             body.push(String::new());
-            match &d.explain {
-                Ok(e) => {
-                    // The hint first and in the warning colour, because it
-                    // is the answer to the question that opened this panel.
-                    if !e.blocked_hint.is_empty() {
-                        body.push(tc::seg(
-                            &[
-                                (p.blocked.as_str(), " ⚠ waiting on  ".into()),
-                                (p.txt.as_str(), e.blocked_hint.clone()),
-                            ],
-                            w.saturating_sub(1),
-                        ));
-                    } else if e.status == "blocked" {
-                        // Blocked with nothing to say about why is its own
-                        // reading, and drawing nothing would look like a
-                        // panel that failed to load.
-                        body.push(tc::seg(
-                            &[(
-                                p.unknown.as_str(),
-                                " ⚠ waiting on  luvus did not say what for".into(),
-                            )],
-                            w.saturating_sub(1),
-                        ));
-                    }
-                    let mut row = |label: &str, value: String, colour: &str| {
-                        body.push(tc::seg(
-                            &[
-                                (p.dim.as_str(), format!("   {}", tc::pad(label, 12))),
-                                (colour, value),
-                            ],
-                            w.saturating_sub(1),
-                        ));
-                    };
-                    row(
-                        "state",
-                        format!(
-                            "{} · via {}{}",
-                            e.status,
-                            if e.state_source.is_empty() { "—" } else { &e.state_source },
-                            if e.state_confidence.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {} confidence", e.state_confidence)
+            if !d.ready {
+                body.push(tc::seg(
+                    &[(p.dim.as_str(), "   reading the evidence…".into())],
+                    w.saturating_sub(1),
+                ));
+            } else {
+                match &d.explain {
+                    Ok(e) => {
+                        // The hint first and in the warning colour, because it
+                        // is the answer to the question that opened this panel.
+                        if !e.blocked_hint.is_empty() {
+                            // Wrapped, not clipped: this sentence is the
+                            // reason the panel exists, and `seg` would drop
+                            // the suffix that names the approval or the path.
+                            let prefix = " ⚠ waiting on  ";
+                            let budget = w
+                                .saturating_sub(1)
+                                .saturating_sub(tc::display_width(prefix))
+                                .max(1);
+                            for (i, line) in tc::wrap_words(&e.blocked_hint, budget)
+                                .into_iter()
+                                .enumerate()
+                            {
+                                let lead = if i == 0 {
+                                    prefix.to_string()
+                                } else {
+                                    " ".repeat(tc::display_width(prefix))
+                                };
+                                body.push(tc::seg(
+                                    &[(p.blocked.as_str(), lead), (p.txt.as_str(), line)],
+                                    w.saturating_sub(1),
+                                ));
                             }
-                        ),
-                        colour_of(&e.status, &p),
-                    );
-                    row(
-                        "identity",
-                        format!(
-                            "{} · via {}{}",
-                            if e.kind.is_empty() { "—" } else { &e.kind },
-                            if e.identity_source.is_empty() { "—" } else { &e.identity_source },
-                            if e.identity_confidence.is_empty() {
-                                String::new()
+                        } else if e.status == "blocked" {
+                            // Blocked with nothing to say about why is its own
+                            // reading, and drawing nothing would look like a
+                            // panel that failed to load.
+                            body.push(tc::seg(
+                                &[(
+                                    p.unknown.as_str(),
+                                    " ⚠ waiting on  luvus did not say what for".into(),
+                                )],
+                                w.saturating_sub(1),
+                            ));
+                        }
+                        let mut row = |label: &str, value: String, colour: &str| {
+                            body.push(tc::seg(
+                                &[
+                                    (p.dim.as_str(), format!("   {}", tc::pad(label, 12))),
+                                    (colour, value),
+                                ],
+                                w.saturating_sub(1),
+                            ));
+                        };
+                        row(
+                            "state",
+                            format!(
+                                "{} · via {}{}",
+                                e.status,
+                                if e.state_source.is_empty() {
+                                    "—"
+                                } else {
+                                    &e.state_source
+                                },
+                                if e.state_confidence.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {} confidence", e.state_confidence)
+                                }
+                            ),
+                            colour_of(&e.status, &p),
+                        );
+                        row(
+                            "identity",
+                            format!(
+                                "{} · via {}{}",
+                                if e.kind.is_empty() { "—" } else { &e.kind },
+                                if e.identity_source.is_empty() {
+                                    "—"
+                                } else {
+                                    &e.identity_source
+                                },
+                                if e.identity_confidence.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {}", e.identity_confidence)
+                                }
+                            ),
+                            p.txt.as_str(),
+                        );
+                        if !e.rule_region.is_empty() {
+                            row(
+                                "rule",
+                                format!(
+                                    "matched in the {}, priority {}",
+                                    e.rule_region, e.rule_priority
+                                ),
+                                p.dim.as_str(),
+                            );
+                        }
+                        // An integration reporting a state and a rule guessing
+                        // at one are different strengths of claim, and the row
+                        // that says "none" is the weaker one saying so.
+                        row(
+                            "authority",
+                            if e.authority.is_empty() {
+                                "none — the state was inferred, not reported".to_string()
                             } else {
-                                format!(" · {}", e.identity_confidence)
-                            }
-                        ),
-                        p.txt.as_str(),
-                    );
-                    if !e.rule_region.is_empty() {
-                        row(
-                            "rule",
-                            format!("matched in the {}, priority {}", e.rule_region, e.rule_priority),
-                            p.dim.as_str(),
+                                e.authority.clone()
+                            },
+                            if e.authority.is_empty() {
+                                p.dim.as_str()
+                            } else {
+                                p.idle_c.as_str()
+                            },
                         );
+                        if !e.available {
+                            row(
+                                "reachable",
+                                "no — the server cannot reach this pane".to_string(),
+                                p.blocked.as_str(),
+                            );
+                        }
                     }
-                    // An integration reporting a state and a rule guessing
-                    // at one are different strengths of claim, and the row
-                    // that says "none" is the weaker one saying so.
-                    row(
-                        "authority",
-                        if e.authority.is_empty() {
-                            "none — the state was inferred, not reported".to_string()
-                        } else {
-                            e.authority.clone()
-                        },
-                        if e.authority.is_empty() { p.dim.as_str() } else { p.idle_c.as_str() },
-                    );
-                    if !e.available {
-                        row(
-                            "reachable",
-                            "no — the server cannot reach this pane".to_string(),
-                            p.blocked.as_str(),
-                        );
+                    Err(why) => {
+                        let budget = w.saturating_sub(1).max(1);
+                        for line in tc::wrap_words(&format!(" ! agent explain: {}", why), budget) {
+                            body.push(tc::seg(&[(p.unknown.as_str(), line)], w.saturating_sub(1)));
+                        }
                     }
                 }
-                Err(why) => body.push(tc::seg(
-                    &[(p.unknown.as_str(), format!(" ! agent explain: {}", why))],
+                body.push(String::new());
+                body.push(tc::seg(
+                    &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ── ".into())],
                     w.saturating_sub(1),
-                )),
+                ));
+                match &d.screen {
+                    Ok(text) => {
+                        // Each pane line can be wider than this widget. Wrap
+                        // at cell boundaries so a prompt or an error on the
+                        // right of the pane is still here to read; `seg`
+                        // would drop that suffix and this view has no other
+                        // way to show it.
+                        let budget = w.saturating_sub(2).max(1);
+                        for line in text.lines() {
+                            for piece in wrap_cells(line, budget) {
+                                body.push(tc::seg(
+                                    &[(p.dim.as_str(), format!(" {}", piece))],
+                                    w.saturating_sub(1),
+                                ));
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        let budget = w.saturating_sub(1).max(1);
+                        for line in tc::wrap_words(&format!(" ! agent read: {}", why), budget) {
+                            body.push(tc::seg(&[(p.unknown.as_str(), line)], w.saturating_sub(1)));
+                        }
+                    }
+                }
             }
             body.push(String::new());
             body.push(tc::seg(
-                &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ── ".into())],
-                w.saturating_sub(1),
-            ));
-            match &d.screen {
-                Ok(text) => {
-                    for line in text.lines() {
-                        body.push(tc::seg(
-                            &[(p.dim.as_str(), format!(" {}", line))],
-                            w.saturating_sub(1),
-                        ));
-                    }
-                }
-                Err(why) => body.push(tc::seg(
-                    &[(p.unknown.as_str(), format!(" ! agent read: {}", why))],
-                    w.saturating_sub(1),
-                )),
-            }
-            body.push(String::new());
-            body.push(tc::seg(
-                &[(p.dim.as_str(), " esc closes this and puts the sections back".into())],
+                &[(
+                    p.dim.as_str(),
+                    " esc closes this and puts the sections back".into(),
+                )],
                 w.saturating_sub(1),
             ));
         } else if let Some(why) = &absent {
@@ -1150,7 +1357,10 @@ fn main() {
                 .max(8);
             let mut columns = format!(
                 " {:<name_w$} {:<8} {:<6} {:<14}",
-                "AGENT", "STATE", "FOR", "WORKSPACE",
+                "AGENT",
+                "STATE",
+                "FOR",
+                "WORKSPACE",
                 name_w = name_w
             );
             if wide {
@@ -1277,8 +1487,10 @@ fn main() {
                 if loud || here {
                     detail.push((tint.clone(), " ".repeat(w)));
                 }
-                let refs: Vec<(&str, String)> =
-                    detail.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                let refs: Vec<(&str, String)> = detail
+                    .iter()
+                    .map(|(c, t)| (c.as_str(), t.clone()))
+                    .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
                 spans.push(start..body.len());
                 at += 1;
@@ -1287,7 +1499,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&agents, "no agents under this session");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1307,10 +1523,9 @@ fn main() {
                         Ok(n) if n.none && !task_rows.is_empty() => {
                             (p.dim.as_str(), "   none ready to claim".to_string())
                         }
-                        Ok(n) if !n.none && !n.id.is_empty() => (
-                            p.done.as_str(),
-                            format!("   {} ready to claim", n.id),
-                        ),
+                        Ok(n) if !n.none && !n.id.is_empty() => {
+                            (p.done.as_str(), format!("   {} ready to claim", n.id))
+                        }
                         Err(why) if !why.starts_with("not read") => {
                             (p.unknown.as_str(), format!("   next: {}", why))
                         }
@@ -1322,7 +1537,11 @@ fn main() {
             for t in &task_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1365,7 +1584,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&tasks, "no tasks — nothing is being coordinated");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1384,7 +1607,11 @@ fn main() {
             for l in &lease_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1424,7 +1651,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&leases, "no leases — no paths are reserved");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1456,7 +1687,11 @@ fn main() {
             for r in &resumable_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1488,7 +1723,11 @@ fn main() {
                         c(&p.dim),
                         format!(
                             "  {}",
-                            if r.in_workspace { "in an open workspace" } else { "not open here" }
+                            if r.in_workspace {
+                                "in an open workspace"
+                            } else {
+                                "not open here"
+                            }
                         ),
                     ));
                 }
@@ -1506,7 +1745,11 @@ fn main() {
                     empty_or_why(&sessions, "no resumable sessions — every agent has a pane");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1537,7 +1780,10 @@ fn main() {
                     &[(
                         p.dim.as_str(),
                         tc::pad(
-                            &format!(" {:<12} {:<8} {:<14} {:<20}", "IN THE PANE", "STATE", "WORKSPACE", "DIRECTORY"),
+                            &format!(
+                                " {:<12} {:<8} {:<14} {:<20}",
+                                "IN THE PANE", "STATE", "WORKSPACE", "DIRECTORY"
+                            ),
                             w.saturating_sub(1),
                         ),
                     )],
@@ -1547,7 +1793,11 @@ fn main() {
             for n in &busy {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1591,19 +1841,13 @@ fn main() {
                         c(colour_of(&n.status, &p)),
                         format!(
                             " {}",
-                            tc::pad(
-                                if unstated_here { "no state" } else { &n.status },
-                                8
-                            )
+                            tc::pad(if unstated_here { "no state" } else { &n.status }, 8)
                         ),
                     ),
                     (c(&p.accent), format!(" {}", tc::pad(&n.workspace, 14))),
                 ];
                 if wide {
-                    line.push((
-                        c(&p.dim),
-                        format!(" {}", parse::homely(&n.cwd)),
-                    ));
+                    line.push((c(&p.dim), format!(" {}", parse::homely(&n.cwd))));
                 }
                 if here {
                     line.push((tint.clone(), " ".repeat(w)));
@@ -1629,7 +1873,11 @@ fn main() {
                 );
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1644,7 +1892,11 @@ fn main() {
                         (p.lbl.as_str(), " ── IDLE ── ".into()),
                         (
                             p.dim.as_str(),
-                            format!("{} pane{} at a prompt", resting.len(), plural(resting.len())),
+                            format!(
+                                "{} pane{} at a prompt",
+                                resting.len(),
+                                plural(resting.len())
+                            ),
                         ),
                     ],
                     w.saturating_sub(1),
@@ -1652,7 +1904,11 @@ fn main() {
                 for n in &resting {
                     let here = at == selected_row;
                     let start = body.len();
-                    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                    let tint = if here {
+                        tc::bg(38, 56, 76)
+                    } else {
+                        String::new()
+                    };
                     let c = |colour: &str| {
                         let colour = if tint.is_empty() {
                             colour
@@ -1729,7 +1985,11 @@ fn main() {
         rows.push(match note.as_ref() {
             Some((text, ok, _)) => tc::seg(
                 &[(
-                    if *ok { p.done.as_str() } else { p.blocked.as_str() },
+                    if *ok {
+                        p.done.as_str()
+                    } else {
+                        p.blocked.as_str()
+                    },
                     format!(" {}", text),
                 )],
                 w.saturating_sub(1),
@@ -1806,6 +2066,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_line_wider_than_the_widget_wraps_without_losing_spaces() {
+        assert_eq!(wrap_cells("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Leading spaces are the indent; collapsing them would make two
+        // different prompt lines look the same.
+        assert_eq!(wrap_cells("  keep", 4), vec!["  ke", "ep"]);
+        assert_eq!(wrap_cells("", 4), vec![""]);
+        // Width zero still has to say something: dropping the text is
+        // indistinguishable from a blank pane.
+        assert_eq!(wrap_cells("left intact", 0), vec!["left intact"]);
+    }
+
+    #[test]
     fn a_body_shorter_than_the_pane_starts_at_the_top() {
         assert_eq!(window_from(4, 0..1, 20, 0, true), 0);
         assert_eq!(window_from(4, 0..1, 20, 9, false), 0);
@@ -1867,5 +2139,4 @@ mod tests {
         let (returned, _) = measure_since(&mut seen, &a, "working", 100.0);
         assert_eq!(returned, 0.0);
     }
-
 }

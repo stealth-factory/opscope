@@ -87,8 +87,9 @@ least about. The row carries the state, how long it has held it, and how it
 was decided — but never *what the agent is asking*, which is the question that
 sends you out of the widget.
 
-**`e`** opens the evidence behind the selected row, from `luvus agent
-explain`:
+**`e`** opens the evidence behind the selected **agent**, from `luvus
+agent explain`. A task, a lease or a pane that is not an agent is told
+so rather than sent to a command that cannot explain it:
 
 ```text
  ── EXPLAIN ── codex · pane 4
@@ -114,8 +115,11 @@ there would look like a panel that failed to load rather than a server with
 nothing to add.
 
 The panel is **read-only**. It shows you the prompt; it never answers it. `↵`
-still focuses, unchanged, and nothing here prompts an agent, sends it keys,
-claims a task or releases a lease. `esc` closes it, as does a second `e`.
+still focuses the pane this panel is about — not whichever row a hidden
+selection would now pick — and nothing here prompts an agent, sends it keys,
+claims a task or releases a lease. The two calls run off the input loop, so
+`esc` and `q` still answer while they are in flight. `esc` closes it, as does
+a second `e`.
 
 ## Resumable sessions, and whose count it is
 

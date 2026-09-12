@@ -58,16 +58,28 @@ pub fn parse_failure(message: &str) -> Absence {
     // future `Error: pane not found` is luvus answering, not luvus being
     // absent, and drawing "no luvus on PATH" over it would send the reader
     // to install something they already have.
-    if said.starts_with("luvus:")
-        && (said.contains("no such file") || said.contains("os error 2"))
+    if said.starts_with("luvus:") && (said.contains("no such file") || said.contains("os error 2"))
     {
         return Absence::NoBinary;
     }
     // Luvus names its socket in the stopped-server message, and this
     // repository is public. Anything else it says is kept, up to that
     // parenthesis, so a screenshot cannot carry a path out of the machine.
-    let said = message.split(" (socket:").next().unwrap_or(message);
-    Absence::Other(said.trim().to_string())
+    Absence::Other(sanitize_error(message))
+}
+
+/// Drop the socket path Luvus names in a stopped-server message.
+///
+/// This repository is public and screenshots of the pane are not.
+/// Everything up to the parenthesis is kept, so the reason still
+/// reaches the row.
+pub fn sanitize_error(message: &str) -> String {
+    message
+        .split(" (socket:")
+        .next()
+        .unwrap_or(message)
+        .trim()
+        .to_string()
 }
 
 /// The `result` object out of one UHP answer, or why there is none.
@@ -197,7 +209,11 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
         let kind = text_at(entry, "agent");
         let named = text_at(entry, "name");
         found.push(Agent {
-            name: if named.is_empty() { kind.clone() } else { named },
+            name: if named.is_empty() {
+                kind.clone()
+            } else {
+                named
+            },
             kind,
             pane: id_at(entry, "pane"),
             workspace: text_at(entry, "workspace_name"),
@@ -383,7 +399,10 @@ pub fn tail_path(path: &str, n: usize) -> String {
     if chars.len() <= n || n < 2 {
         return path.to_string();
     }
-    format!("…{}", chars[chars.len() - (n - 1)..].iter().collect::<String>())
+    format!(
+        "…{}",
+        chars[chars.len() - (n - 1)..].iter().collect::<String>()
+    )
 }
 
 /// A duration as this widget says it.
@@ -447,11 +466,18 @@ pub struct NextTask {
 pub fn parse_next_task(text: &str) -> Result<NextTask, String> {
     let result = parse_result(text)?;
     if text_at(&result, "type") == "none" {
-        return Ok(NextTask { none: true, ..Default::default() });
+        return Ok(NextTask {
+            none: true,
+            ..Default::default()
+        });
     }
     // Never seen populated on a live session, so the same several-spellings
     // rule the task list uses applies here.
-    let task = if result["task"].is_object() { &result["task"] } else { &result };
+    let task = if result["task"].is_object() {
+        &result["task"]
+    } else {
+        &result
+    };
     Ok(NextTask {
         id: any_of(task, &["id", "task", "task_id"]),
         title: any_of(task, &["title", "name", "description"]),
@@ -838,13 +864,25 @@ mod tests {
             parse_failure("Error: something else (socket: /srv/run/luvus.sock)"),
             Absence::Other("Error: something else".into())
         );
+        assert_eq!(
+            sanitize_error("Error: no luvus server running (socket: /srv/run/luvus.sock)"),
+            "Error: no luvus server running"
+        );
+        // Already clean stays clean, so a second pass cannot invent a reason.
+        assert_eq!(
+            sanitize_error("luvus did not answer in 15s"),
+            "luvus did not answer in 15s"
+        );
     }
 
     #[test]
     fn the_ordering_puts_the_ones_wanting_a_human_first() {
         let mut states = vec!["idle", "working", "done", "blocked", "sideways"];
         states.sort_by_key(|s| rank_of(s));
-        assert_eq!(states, vec!["blocked", "done", "working", "idle", "sideways"]);
+        assert_eq!(
+            states,
+            vec!["blocked", "done", "working", "idle", "sideways"]
+        );
     }
 
     #[test]
@@ -971,7 +1009,9 @@ mod tests {
         assert!(is_not_a_repo(
             "fatal: not a git repository (or any of the parent directories): .git"
         ));
-        assert!(!is_not_a_repo("fatal: Unable to create index.lock: File exists"));
+        assert!(!is_not_a_repo(
+            "fatal: Unable to create index.lock: File exists"
+        ));
         assert!(!is_not_a_repo("no luvus server"));
     }
 
@@ -1006,7 +1046,8 @@ mod tests {
         assert!(!next.none);
         assert_eq!(next.id, "t-1");
         assert_eq!(next.title, "Port it");
-        let nested = r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
+        let nested =
+            r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
         let next = parse_next_task(nested).expect("next");
         assert_eq!(next.id, "t-2");
         assert_eq!(next.title, "Other");
