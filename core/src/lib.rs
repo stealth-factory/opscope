@@ -2155,13 +2155,20 @@ pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, Str
 /// the only route to the UHP methods the CLI does not wrap - the
 /// `workspace` argument on `git.status`, `events.wait`, `uhp.stats`.
 ///
-/// The write happens on this thread while the reader thread drains stdout
-/// and stderr, and that ordering is the whole point. A child answering
-/// with more than a pipe buffer holds until someone reads it; if this
-/// thread were doing the reading *after* the write, a large request and a
-/// large answer would wedge against each other and neither side would move.
-/// `session.snapshot` answers with about thirty kilobytes, which is far
-/// more than enough to find that bug in production rather than in a test.
+/// The write and the drain run on their own threads, and that concurrency
+/// is the whole point. A child answering with more than a pipe buffer
+/// holds until someone reads it; if this thread were doing the reading
+/// *after* the write, a large request and a large answer would wedge
+/// against each other and neither side would move. `session.snapshot`
+/// answers with about thirty kilobytes, which is far more than enough to
+/// find that bug in production rather than in a test.
+///
+/// The write cannot sit on this thread ahead of `recv_timeout` either. A
+/// child that never reads fills the pipe and `write_all` blocks; the
+/// timeout and SIGKILL would never run, and a widget poller would freeze
+/// with no error — the same invisible-thread failure this helper exists
+/// to not have. Putting the write on a third thread is what lets the
+/// deadline start at spawn rather than after the last byte is accepted.
 ///
 /// The three `curl` helpers above also write stdin and do **not** use this.
 /// They are not copies waiting to be folded in: each passes curl a
@@ -2199,13 +2206,19 @@ pub fn run_with_input(
         let _ = tx.send(child.wait_with_output());
     });
     if let Some(mut sink) = sink {
-        // A child that has already refused and died takes the pipe with
-        // it, and that is EPIPE rather than a reason to fail here -
-        // whatever it managed to say first is the answer worth reporting,
-        // and the status below says it failed. Dropping `sink` at the end
-        // of this block is what closes stdin.
-        let _ = sink.write_all(input.as_bytes());
-        let _ = sink.flush();
+        // Copied so the write can leave this thread. A child that never
+        // reads fills the pipe and `write_all` blocks; if that sat here,
+        // `recv_timeout` below would never run.
+        let payload = input.as_bytes().to_vec();
+        std::thread::spawn(move || {
+            // A child that has already refused and died takes the pipe with
+            // it, and that is EPIPE rather than a reason to fail here -
+            // whatever it managed to say first is the answer worth reporting,
+            // and the status below says it failed. Dropping `sink` at the
+            // end of this thread is what closes stdin.
+            let _ = sink.write_all(&payload);
+            let _ = sink.flush();
+        });
     }
     match rx.recv_timeout(std::time::Duration::from_secs(seconds)) {
         Ok(Ok(out)) => Ok(out),
@@ -3267,6 +3280,24 @@ mod tests {
             .expect_err("a sleeping child is a timeout");
         assert!(why.contains("did not answer in 1s"), "{:?}", why);
         // And it actually gave up rather than waiting the full thirty.
+        assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
+    }
+
+    /// The timeout must cover the write, not just the wait after it.
+    ///
+    /// A pipe buffer is 64KB on Linux and smaller on macOS. A child that
+    /// never reads (`sleep`) leaves that buffer full, and `write_all` of a
+    /// payload past both sizes blocks until someone kills the child. If
+    /// that write ran on this thread, `recv_timeout` would never be
+    /// entered and the helper would hang for as long as the child lived.
+    #[test]
+    fn a_child_that_never_reads_is_given_up_on() {
+        const SH: &str = "/bin/sh";
+        let big = "x".repeat(200_000);
+        let began = std::time::Instant::now();
+        let why = run_input(&[SH, "-c", "sleep 30"], &big, 1)
+            .expect_err("a child that never reads is a timeout");
+        assert!(why.contains("did not answer in 1s"), "{:?}", why);
         assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
     }
 }
