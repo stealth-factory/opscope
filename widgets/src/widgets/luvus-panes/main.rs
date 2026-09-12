@@ -286,7 +286,12 @@ fn ask_explain(
             },
         };
         if let Ok(mut guard) = inbox.lock() {
-            *guard = Some((gen, detail));
+            // A slower worker from an older panel must not replace a
+            // newer worker's finished read, or the open panel stays on
+            // "reading…" after the current result has already arrived.
+            if guard.as_ref().is_none_or(|(had, _)| *had < gen) {
+                *guard = Some((gen, detail));
+            }
         }
     });
 }
@@ -641,6 +646,8 @@ fn main() {
                     if detail.is_some() {
                         detail = None;
                         detail_gen += 1;
+                        scroll = 0;
+                        moved = true;
                     } else if let Some(Row::Agent(agent)) =
                         rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
@@ -682,6 +689,8 @@ fn main() {
                 "esc" => {
                     detail = None;
                     detail_gen += 1;
+                    scroll = 0;
+                    moved = true;
                 }
                 "up" | "k" | "K" => {
                     if detail.is_none() {
