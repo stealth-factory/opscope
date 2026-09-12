@@ -168,7 +168,7 @@ have been a hundred round trips for two numbers.
 
 **Two requests, not one.** The temptation is to put all sixty-two aliases in
 one round trip, and it was measured: thirty-two merge aliases answer in
-4.0–4.3s, thirty-one arrival aliases on their own in 4.1–4.4s, and the two
+4.0–4.3s, thirty arrival aliases on their own in 4.1–4.4s, and the two
 together in one request take 8.0–8.1s — sitting on the ~10s gateway cliff this
 widget has already spent three issues climbing away from. Split, they cost
 about 15 more rate-limit points a refresh against 5000 an hour, and neither

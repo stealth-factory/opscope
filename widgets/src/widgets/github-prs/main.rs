@@ -673,7 +673,7 @@ struct Counts {
 /// Measured against the live API: thirty-two merge aliases answer in
 /// 4.0-4.3s, sixty-two merge-and-created aliases in one request take
 /// 8.0-8.1s - at the gateway's ~10s cliff that OPS-84, OPS-91 and OPS-92
-/// have all been fighting - and thirty-one created aliases on their own
+/// have all been fighting - and thirty created aliases on their own
 /// take 4.1-4.4s. Two requests on the same cadence cost about 15 more
 /// rate-limit points a refresh against 5000 an hour, and neither can take
 /// the other down.
@@ -1784,7 +1784,7 @@ fn main() {
                 // The arrivals, in a second request over the same day
                 // list: sixty-two aliases in one request take twice as
                 // long and land on the gateway's ~10s cliff, where
-                // thirty-one on their own take what the merge counts take.
+                // thirty on their own take what the merge counts take.
                 // Its own failure, so a refused arrival count leaves the
                 // MERGED row and the list untouched.
                 if let Err(said) = fetch_created(&poll_tok, &count_days, &poller, &poller_rate) {
