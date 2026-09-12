@@ -31,7 +31,10 @@ use opscope_core as tc;
 #[path = "parse.rs"]
 mod parse;
 
-use parse::{Absence, Agent, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task, Worktree};
+use parse::{
+    Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
+    Worktree,
+};
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "luvus-panes",
@@ -212,6 +215,34 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         guard.read = true;
     }
     seen.first_poll = false;
+}
+
+/// One agent's evidence, fetched when asked for rather than every poll.
+///
+/// Two calls, kept apart, because they fail for different reasons and the
+/// screen says which: an agent the server cannot explain is a different
+/// answer from a pane it cannot read.
+struct Detail {
+    pane: String,
+    what: String,
+    explain: Result<Explanation, String>,
+    screen: Result<String, String>,
+}
+
+/// Ask the server about one agent. Bounded like every other call.
+///
+/// Done on the keystroke rather than in the poller: it is one agent's
+/// evidence asked for once, and putting it in the four-second round would
+/// make every refresh pay for a panel nobody has open.
+fn explain_agent(session: &str, pane: &str, what: &str) -> Detail {
+    Detail {
+        pane: pane.to_string(),
+        what: what.to_string(),
+        explain: luvus_text(session, &["agent", "explain", pane])
+            .and_then(|t| parse::parse_explanation(&t)),
+        screen: luvus_text(session, &["agent", "read", pane, "--lines", "60", "--source", "visible"])
+            .and_then(|t| parse::parse_screen(&t)),
+    }
 }
 
 /// Where a row points, so `↵` knows which pane to focus.
@@ -473,6 +504,9 @@ fn main() {
     // every frame and drags itself back from wherever the wheel put it.
     let mut moved = false;
     let mut note: Option<(String, bool, f64)> = None;
+    /// The evidence panel, when one is open. Read-only, and it replaces the
+    /// body rather than covering it, so nothing is hidden behind it.
+    let mut detail: Option<Detail> = None;
     let mut rows_now: Vec<Row> = Vec::new();
     // Where each section starts in `rows_now`, read as one flat list, with
     // the empty ones left out. Written by the frame and read by tab on the
@@ -503,6 +537,31 @@ fn main() {
                     show_idle = !show_idle;
                     selected = 0;
                     moved = true;
+                }
+                // The evidence behind the selected agent's row. Read-only:
+                // it says what the agent is waiting for and never answers
+                // it. `esc` and a second press both close it.
+                "e" | "E" => {
+                    if detail.is_some() {
+                        detail = None;
+                    } else if let Some(row) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    {
+                        let pane = row.pane();
+                        if pane.is_empty() {
+                            note = Some((
+                                format!("! {} is not in a pane to explain", row.what()),
+                                false,
+                                tc::now() + 3.0,
+                            ));
+                        } else {
+                            detail = Some(explain_agent(&session, &pane, &row.what()));
+                            scroll = 0;
+                        }
+                    }
+                }
+                "esc" => {
+                    detail = None;
                 }
                 "up" | "k" | "K" => {
                     selected = selected.saturating_sub(1);
@@ -839,6 +898,7 @@ fn main() {
                 (p.accent.as_str(), "tab".into()),
                 (p.dim.as_str(), " section".into()),
             ],
+            vec![(p.dim.as_str(), "[e]xplain".into())],
             vec![(p.dim.as_str(), "[i]dle".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -855,7 +915,139 @@ fn main() {
         // selected one without counting rows a second time and disagreeing.
         let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
 
-        if let Some(why) = &absent {
+        if let Some(d) = &detail {
+            // Replaces the body rather than covering it: a panel drawn over
+            // the rows would hide however many it covered, and a section
+            // that is not drawn looks exactly like a section with nothing
+            // in it. Nothing is selectable here, so `spans` stays empty and
+            // the window scrolls on `scroll` alone.
+            body.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── EXPLAIN ── ".into()),
+                    (p.txt.as_str(), d.what.clone()),
+                    (p.dim.as_str(), format!(" · pane {}", d.pane)),
+                ],
+                w.saturating_sub(1),
+            ));
+            body.push(String::new());
+            match &d.explain {
+                Ok(e) => {
+                    // The hint first and in the warning colour, because it
+                    // is the answer to the question that opened this panel.
+                    if !e.blocked_hint.is_empty() {
+                        body.push(tc::seg(
+                            &[
+                                (p.blocked.as_str(), " ⚠ waiting on  ".into()),
+                                (p.txt.as_str(), e.blocked_hint.clone()),
+                            ],
+                            w.saturating_sub(1),
+                        ));
+                    } else if e.status == "blocked" {
+                        // Blocked with nothing to say about why is its own
+                        // reading, and drawing nothing would look like a
+                        // panel that failed to load.
+                        body.push(tc::seg(
+                            &[(
+                                p.unknown.as_str(),
+                                " ⚠ waiting on  luvus did not say what for".into(),
+                            )],
+                            w.saturating_sub(1),
+                        ));
+                    }
+                    let mut row = |label: &str, value: String, colour: &str| {
+                        body.push(tc::seg(
+                            &[
+                                (p.dim.as_str(), format!("   {}", tc::pad(label, 12))),
+                                (colour, value),
+                            ],
+                            w.saturating_sub(1),
+                        ));
+                    };
+                    row(
+                        "state",
+                        format!(
+                            "{} · via {}{}",
+                            e.status,
+                            if e.state_source.is_empty() { "—" } else { &e.state_source },
+                            if e.state_confidence.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {} confidence", e.state_confidence)
+                            }
+                        ),
+                        colour_of(&e.status, &p),
+                    );
+                    row(
+                        "identity",
+                        format!(
+                            "{} · via {}{}",
+                            if e.kind.is_empty() { "—" } else { &e.kind },
+                            if e.identity_source.is_empty() { "—" } else { &e.identity_source },
+                            if e.identity_confidence.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", e.identity_confidence)
+                            }
+                        ),
+                        p.txt.as_str(),
+                    );
+                    if !e.rule_region.is_empty() {
+                        row(
+                            "rule",
+                            format!("matched in the {}, priority {}", e.rule_region, e.rule_priority),
+                            p.dim.as_str(),
+                        );
+                    }
+                    // An integration reporting a state and a rule guessing
+                    // at one are different strengths of claim, and the row
+                    // that says "none" is the weaker one saying so.
+                    row(
+                        "authority",
+                        if e.authority.is_empty() {
+                            "none — the state was inferred, not reported".to_string()
+                        } else {
+                            e.authority.clone()
+                        },
+                        if e.authority.is_empty() { p.dim.as_str() } else { p.idle_c.as_str() },
+                    );
+                    if !e.available {
+                        row(
+                            "reachable",
+                            "no — the server cannot reach this pane".to_string(),
+                            p.blocked.as_str(),
+                        );
+                    }
+                }
+                Err(why) => body.push(tc::seg(
+                    &[(p.unknown.as_str(), format!(" ! agent explain: {}", why))],
+                    w.saturating_sub(1),
+                )),
+            }
+            body.push(String::new());
+            body.push(tc::seg(
+                &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ── ".into())],
+                w.saturating_sub(1),
+            ));
+            match &d.screen {
+                Ok(text) => {
+                    for line in text.lines() {
+                        body.push(tc::seg(
+                            &[(p.dim.as_str(), format!(" {}", line))],
+                            w.saturating_sub(1),
+                        ));
+                    }
+                }
+                Err(why) => body.push(tc::seg(
+                    &[(p.unknown.as_str(), format!(" ! agent read: {}", why))],
+                    w.saturating_sub(1),
+                )),
+            }
+            body.push(String::new());
+            body.push(tc::seg(
+                &[(p.dim.as_str(), " esc closes this and puts the sections back".into())],
+                w.saturating_sub(1),
+            ));
+        } else if let Some(why) = &absent {
             // One of three sentences, never a blank board. The distinction
             // is the whole reason this widget declares luvus a dependency
             // and probes at run time as well.

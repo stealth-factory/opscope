@@ -54,6 +54,14 @@ Keys: arrows select, and tab jumps to the head of the next section, wrapping
 through IDLE when that section is on screen. ctrl-y and ctrl-e scroll the
 window a row at a time, as does the mouse wheel, and neither touches the
 selection. enter focuses the selected pane so you jump straight to whatever
-needs you, i shows or hides the idle section (and with it, whether tab can
-land there), r refreshes now, comma opens settings, q quits.
+needs you, e explains the selected agent, i shows or hides the idle section
+(and with it, whether tab can land there), r refreshes now, comma opens
+settings, q quits.
+Pressing e opens the evidence behind the selected agent's row: how its
+identity and its state were decided, how strong each of those claims is,
+and - when it is blocked - what luvus says it is waiting for. That last one
+is the question a blocked row cannot answer on its own. It also shows what
+the pane currently has on screen. The panel is read-only; it never answers
+the prompt it is showing you. esc closes it, as does a second e.
+
 Requires the `luvus` command; it reads a running session over UHP.

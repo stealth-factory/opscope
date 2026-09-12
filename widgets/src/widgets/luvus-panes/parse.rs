@@ -602,6 +602,17 @@ pub struct Explanation {
     pub blocked_hint: String,
 }
 
+/// What a pane currently shows, out of `luvus agent read`.
+pub fn parse_screen(text: &str) -> Result<String, String> {
+    let result = parse_result(text)?;
+    match result.get("text") {
+        Some(Value::String(t)) => Ok(t.clone()),
+        // An answer with no text is not a blank screen. The caller draws
+        // the difference, so it has to survive the parse.
+        _ => Err("luvus answered with no screen text".into()),
+    }
+}
+
 /// One agent's evidence, out of `luvus agent explain`.
 pub fn parse_explanation(text: &str) -> Result<Explanation, String> {
     let result = parse_result(text)?;
