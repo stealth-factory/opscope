@@ -401,7 +401,7 @@ cargo build --workspace --bins
 `cargo test` compiles every parser on the current target, runs widget and core
 unit tests, runs the source-contract checks below, and runs the npm packaging
 tests. CI repeats it on Linux and macOS. `cargo build --workspace --bins`
-separately proves all sixteen executable targets build as binaries.
+separately proves all seventeen executable targets build as binaries.
 
 ### 8. Smoke-test the built widget
 

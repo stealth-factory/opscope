@@ -178,7 +178,7 @@ xattr -dr com.apple.quarantine opscope-*-apple-darwin
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + fifteen widgets in ./target/release
+cargo build --release   # launcher + sixteen widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
