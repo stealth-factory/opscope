@@ -67,15 +67,36 @@ test('every release target has an npm platform, and no extra ones', () => {
   );
 });
 
+// Every directory under widgets/src/widgets that holds a main.rs. Read off
+// the filesystem so the expectation below never needs bumping by hand.
+function widgetFolders() {
+  const dir = path.join(repoRoot, 'widgets/src/widgets');
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'main.rs')))
+    .map((e) => e.name)
+    .sort();
+}
+
 test('the packer takes every [[bin]], including opscope', () => {
   const bins = platform.binsFromManifest(repoRoot);
   assert.ok(bins.includes('opscope'));
   assert.ok(!bins.includes('config'));
-  assert.equal(bins.length, 17);
+  // Checked against the folders on disk, which is a *different* source from
+  // the manifest the packer itself reads. A hardcoded number was a gate that
+  // had to be bumped by hand; asserting the manifest against itself would be
+  // no gate at all. This still fails on a widget folder with no [[bin]], and
+  // on a [[bin]] with no folder, and it names which.
+  const expected = [...widgetFolders(), 'opscope'].sort();
+  assert.deepEqual(
+    bins,
+    expected,
+    'widgets/Cargo.toml [[bin]] entries and widgets/src/widgets folders have drifted',
+  );
   assert.deepEqual(bins, [...bins].sort());
 });
 
-test('the launcher exposes one bin name, not seventeen', () => {
+test('the launcher exposes one bin name, not one per widget', () => {
   const manifest = require('./package.json');
   assert.deepEqual(Object.keys(manifest.bin), ['opscope']);
 });

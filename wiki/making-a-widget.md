@@ -346,12 +346,23 @@ ships; `every_binary_is_on_the_menu` and
 is registered as a widget, while `the_list_is_in_a_settled_order`
 enforces the alphabetical launcher order.
 
-Bump the expected `[[bin]]` count in `npm/test.js` (`the packer takes every
-[[bin]], including opscope`). That number is seventeen today — the launcher
-plus sixteen widgets — and it is a gate, not a reading of the manifest:
-`cargo test` runs it whenever Node is on PATH, and CI always does. Skip
-it and the new binary builds while the packer still expects the old
-inventory.
+Nothing to bump. `npm/test.js` (`the packer takes every [[bin]], including
+opscope`) counts the folders under `widgets/src/widgets` and expects one
+`[[bin]]` for each, plus `opscope`. That is still a gate rather than a
+reading of the manifest, because the folders are a *different* source from
+the manifest the packer itself reads: a widget folder with no `[[bin]]`, or
+a `[[bin]]` with no folder, fails and is named. `cargo test` runs it
+whenever Node is on PATH, and CI always does.
+
+The sentences that say how many widgets or binaries there are get checked
+too, by `every_stated_count_of_widgets_or_binaries_is_the_real_one` in
+`check.rs`. It reads the files that make a present-tense claim — this one
+among them — with the whitespace flattened first, because those sentences
+wrap and a line-by-line reader sees neither half. It matches both the
+spelled count and the digits, and fails if the live inventory is past
+what it can spell. It deliberately does not read `CHANGELOG.md`,
+`check.rs`'s own header or `core/src/settings.rs`, each of which
+truthfully describes a past with fewer widgets in it.
 
 Add the widget to the root `README.md` table and to `docs/README.md`. The
 repository checks both indexes. Do not add a second copy of the summary or

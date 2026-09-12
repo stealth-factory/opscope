@@ -6,7 +6,7 @@ The front door: every widget, what it does, and a preview before it runs.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 15 widgets   ↵ or → starts one, q leaves
+ 16 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
    clocks       Server clock, countdowns, a pomodoro…
@@ -131,7 +131,7 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-All sixteen binaries check the same owned file, including `matrix` and
+All sixteen widgets check the same owned file, including `matrix` and
 `months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
 those declarations across the full registry, reports which widgets use each
 tool, checks declared versions, and prints host-specific installation guidance:

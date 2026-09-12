@@ -234,7 +234,7 @@ which the compiler now makes impossible. It went with the Python.
   rebuild - it made it rebuild almost never, and `--version` reported a
   four-commit-old sha with a stale `-dirty` while the tree was clean. A
   full thirty-second rebuild did not move it. Watching nothing and watching
-  everything are both wrong: unconditional reruns relink all fourteen
+  everything are both wrong: unconditional reruns relink all seventeen
   binaries on every no-op build, measured at 28s against 0.04s. Watch the
   git files `git rev-parse --git-path` resolves - the only form that works
   in a linked worktree, where `.git` is a file - plus the source trees.
