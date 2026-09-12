@@ -580,6 +580,35 @@ fn palette() -> Palette {
     }
 }
 
+/// The filter `[o]` applies, named, or nothing when it holds nothing back.
+///
+/// Hiding the offline machines is a filter like any other, and an unstated
+/// one leaves a short list reading as a tailnet with little on it. It is
+/// only a filter while there is something behind it: with every peer
+/// online, hidden and shown are the same screen, and `0 offline machines
+/// hidden` would be a filter announcing itself for nothing.
+fn offline_filter(hide_offline: bool, offline: usize) -> Vec<String> {
+    if !hide_offline || offline == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "{} offline machine{} hidden",
+        offline,
+        if offline == 1 { "" } else { "s" }
+    )]
+}
+
+/// A two-way toggle's hint: the label, then what the next press does.
+///
+/// `showing` is whether the thing named is on screen now, so the word is
+/// always the other state. Written once because both of this widget's
+/// toggles want it and one of them stores the flag the other way round -
+/// `show_graph` against `hide_offline` - which is exactly the place a hint
+/// gets built backwards.
+fn toggle_hint(label: &str, showing: bool) -> String {
+    format!("{} {}", label, if showing { "hide" } else { "show" })
+}
+
 /// Live throughput for peers that are actually moving data.
 fn activity_rows(
     rates: &HashMap<String, Vec<(f64, f64)>>,
@@ -998,6 +1027,15 @@ fn main() {
             ],
             w - 1,
         ));
+        // Hiding the offline machines is a filter, and now that the footer
+        // names what the next press does this is the only place the pane
+        // says the filter is on. Self is in neither count, the same way it
+        // is in neither count above: those describe connections out of
+        // here, and this describes the subset of them on screen.
+        let offline_hidden = offline_filter(hide_offline, peers.len() - online.len());
+        if let Some(said) = tc::filter_row(online.len(), peers.len(), &offline_hidden) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", said))], w - 1));
+        }
         rows.push(String::new());
 
         if let (Some(which), false) = (view, listed.is_empty()) {
@@ -1222,6 +1260,17 @@ fn main() {
             rows.push(tc::seg(&refs, w - 1));
         }
 
+        // This machine is always in the list, so a filter that hides every
+        // peer leaves one row standing and the board reads as a tailnet
+        // with nothing else on it. Only the filter's doing is blamed on
+        // the filter: with no peers at all `filtered_to_nothing` says
+        // nothing, because that is a tailnet of one and not a hidden one.
+        if listed.len() <= usize::from(!me.is_null()) {
+            if let Some(said) = tc::filtered_to_nothing(peers.len(), &offline_hidden) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", said))], w - 1));
+            }
+        }
+
         while rows.len() < h.saturating_sub(2) {
             rows.push(String::new());
         }
@@ -1251,8 +1300,14 @@ fn main() {
                 (p.dim.as_str(), "/↵ info".into()),
             ],
             vec![(p.dim.as_str(), "[c]opy".into())],
-            vec![(p.dim.as_str(), "[g]raph".into())],
-            vec![(p.dim.as_str(), "[o]ffline".into())],
+            // Both name the state the next press moves to, like the
+            // interval below them: these three sit in one footer, and a
+            // bare `[g]raph` beside `[i]nterval 10s` is the same shape
+            // saying nothing. What is in force is on screen either way -
+            // the graph is a section you can see, and the filter is the
+            // count line under the header.
+            vec![(p.dim.as_str(), toggle_hint("[g]raph", show_graph))],
+            vec![(p.dim.as_str(), toggle_hint("[o]ffline", !hide_offline))],
             // The interval the next press moves to, like every other
             // stateful hint in the collection. Nothing is lost by not
             // naming the current one: the header line three rows up says
@@ -1728,6 +1783,46 @@ fn copy_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hiding_the_offline_machines_is_a_filter_the_pane_states() {
+        assert!(offline_filter(false, 9).is_empty(), "nothing is hidden");
+        assert!(
+            offline_filter(true, 0).is_empty(),
+            "a filter holding nothing back is not worth a row"
+        );
+        assert_eq!(offline_filter(true, 9), vec!["9 offline machines hidden"]);
+        assert_eq!(offline_filter(true, 1), vec!["1 offline machine hidden"]);
+        // And the row it produces says the count is a subset.
+        let said = tc::filter_row(12, 21, &offline_filter(true, 9)).expect("a filter is on");
+        assert_eq!(said, "12 of 21 shown · 9 offline machines hidden");
+        // A board the filter emptied says the filter emptied it, rather
+        // than leaving the one row that is always there - this machine -
+        // reading as a tailnet with nothing else on it.
+        let emptied = tc::filtered_to_nothing(21, &offline_filter(true, 21))
+            .expect("the filter is holding all of them");
+        assert_eq!(
+            emptied,
+            "nothing matches · all 21 hidden by the filter · 21 offline machines hidden"
+        );
+        // A tailnet of one is not the filter's doing.
+        assert_eq!(tc::filtered_to_nothing(0, &offline_filter(true, 0)), None);
+    }
+
+    #[test]
+    fn the_toggle_hints_name_the_state_the_next_press_moves_to() {
+        // The footer calls this with the flag the widget keeps, and the
+        // two flags run opposite ways: `show_graph` is what is on screen,
+        // `hide_offline` is what is not, which is where a hint gets built
+        // backwards.
+        let (show_graph, hide_offline) = (true, false);
+        assert_eq!(toggle_hint("[g]raph", show_graph), "[g]raph hide");
+        assert_eq!(toggle_hint("[g]raph", !show_graph), "[g]raph show");
+        // Offline machines on screen: pressing it hides them. Hidden
+        // already: pressing it brings them back.
+        assert_eq!(toggle_hint("[o]ffline", !hide_offline), "[o]ffline hide");
+        assert_eq!(toggle_hint("[o]ffline", hide_offline), "[o]ffline show");
+    }
 
     #[test]
     fn a_name_comes_from_magicdns_not_the_device() {

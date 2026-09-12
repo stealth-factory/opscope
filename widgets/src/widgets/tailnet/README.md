@@ -64,7 +64,7 @@ the tailnet and matches the admin console.
 
 ## Info view
 
-`Enter` or `i` opens everything known about the selected machine: MagicDNS name,
+`→` or `Enter` opens everything known about the selected machine: MagicDNS name,
 the self-reported hostname when it differs, owner, tags, direct-or-relayed path,
 handshake and enrolment times, its **home DERP region as a location hint**
 (`hkg — Hong Kong`, read from the local DERP map so no address is sent to a
@@ -95,11 +95,12 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a peer |
-| `→` / `Enter` | machine info view — `i` in the Python, which is being retired |
+| `→` / `Enter` | machine info view |
 | `←` / `esc` | back out of the info or copy view |
-| `c` | copy addresses |
+| `c` | copy addresses — `1`–`5` copy one |
+| `pgup` `pgdn` `home` `end` | move the selection a page, or to either end |
 | `g` | show/hide the live throughput graphs |
-| `o` | hide offline peers |
+| `o` | show/hide offline peers — the count line names the filter while it is on |
 | `i` | poll interval — 1 / 2 / 5 / 10 / 30s |
 | `r` | refresh now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
