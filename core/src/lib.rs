@@ -2147,6 +2147,96 @@ pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, Str
     }
 }
 
+/// The same, with something written to the child's standard input.
+///
+/// `run_full` gives the child `Stdio::null()`, which is right for every
+/// command that takes its whole request in argv. `luvus uhp proxy` does
+/// not: it reads one newline-delimited JSON request from stdin, and it is
+/// the only route to the UHP methods the CLI does not wrap - the
+/// `workspace` argument on `git.status`, `events.wait`, `uhp.stats`.
+///
+/// The write happens on this thread while the reader thread drains stdout
+/// and stderr, and that ordering is the whole point. A child answering
+/// with more than a pipe buffer holds until someone reads it; if this
+/// thread were doing the reading *after* the write, a large request and a
+/// large answer would wedge against each other and neither side would move.
+/// `session.snapshot` answers with about thirty kilobytes, which is far
+/// more than enough to find that bug in production rather than in a test.
+///
+/// The three `curl` helpers above also write stdin and do **not** use this.
+/// They are not copies waiting to be folded in: each passes curl a
+/// `--config -` precisely so a token in a header never reaches argv, where
+/// `ps` would show it to every user on the box; each already bounds itself
+/// with curl's own `--max-time`; and each returns curl's stderr verbatim
+/// rather than the collapsed, truncated form `run_input` produces, which
+/// is what their callers parse. Moving them would change three widgets'
+/// error text to buy nothing, so they stay as they are.
+pub fn run_with_input(
+    args: &[&str],
+    input: &str,
+    seconds: u64,
+) -> Result<std::process::Output, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    let Some((program, rest)) = args.split_first() else {
+        return Err("no command given".into());
+    };
+    let mut child = Command::new(program)
+        .args(rest)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {}", program, e))?;
+    let pid = child.id() as i32;
+    // Taken before the child moves: `wait_with_output` consumes the child,
+    // and a stdin left open is a child that never reaches end of file and
+    // so never answers.
+    let sink = child.stdin.take();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    if let Some(mut sink) = sink {
+        // A child that has already refused and died takes the pipe with
+        // it, and that is EPIPE rather than a reason to fail here -
+        // whatever it managed to say first is the answer worth reporting,
+        // and the status below says it failed. Dropping `sink` at the end
+        // of this block is what closes stdin.
+        let _ = sink.write_all(input.as_bytes());
+        let _ = sink.flush();
+    }
+    match rx.recv_timeout(std::time::Duration::from_secs(seconds)) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(format!("{}: {}", program, e)),
+        Err(_) => {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            Err(format!("{} did not answer in {}s", program, seconds))
+        }
+    }
+}
+
+/// The stdout of a command that was given `input` and succeeded.
+///
+/// The same relation to [`run_with_input`] that [`run`] has to
+/// [`run_full`], and the same treatment of a command that ran and failed:
+/// an error naming what it said, not empty output.
+pub fn run_input(args: &[&str], input: &str, seconds: u64) -> Result<String, String> {
+    let out = run_with_input(args, input, seconds)?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
+        Err(if why.is_empty() {
+            format!("{} exited {}", args[0], out.status)
+        } else {
+            why.chars().take(200).collect()
+        })
+    }
+}
+
 /// The same, reduced to the stdout of a command that succeeded.
 ///
 /// A command that ran and failed is an error here, not empty output: the
@@ -3136,5 +3226,47 @@ mod tests {
         assert!(why.contains("needs an operator"), "{:?}", why);
         // Capturing stderr must not cost stdout on the way past.
         assert_eq!(run(&[SH, "-c", "echo fine"], 5).unwrap().trim(), "fine");
+    }
+
+    /// The bug this helper exists to not have.
+    ///
+    /// Writing stdin and reading stdout from one thread wedges as soon as
+    /// the child's answer outgrows a pipe buffer - the child stops to have
+    /// its output read, the writer stops to have its input taken, and
+    /// neither moves again. A pipe buffer is 64KB on Linux and smaller on
+    /// macOS, so the payload here is deliberately past both. `cat` is the
+    /// smallest child that answers with exactly what it was given, and it
+    /// needs no shell to do it.
+    #[test]
+    fn a_large_answer_does_not_wedge_against_a_large_request() {
+        const CAT: &str = "/bin/cat";
+        let big = "x".repeat(200_000);
+        let out = run_input(&[CAT], &big, 20).expect("cat answered");
+        assert_eq!(out.len(), big.len(), "cat gave back {} bytes", out.len());
+        assert_eq!(out, big);
+    }
+
+    #[test]
+    fn input_reaches_the_child_and_stdin_is_closed_after_it() {
+        const SH: &str = "/bin/sh";
+        // `wc -l` answers only at end of file, so a non-zero count is also
+        // proof that stdin was closed rather than merely written to.
+        let out = run_input(&[SH, "-c", "wc -l"], "one\ntwo\nthree\n", 5).expect("wc ran");
+        assert_eq!(out.trim(), "3");
+        // The same failure contract as `run`: what it complained, not empty.
+        let why = run_input(&[SH, "-c", "echo 'no such method' >&2; exit 1"], "{}\n", 5)
+            .expect_err("exit 1 is an error");
+        assert!(why.contains("no such method"), "{:?}", why);
+    }
+
+    #[test]
+    fn a_child_that_never_answers_is_given_up_on() {
+        const SH: &str = "/bin/sh";
+        let began = std::time::Instant::now();
+        let why = run_input(&[SH, "-c", "sleep 30"], "ignored\n", 1)
+            .expect_err("a sleeping child is a timeout");
+        assert!(why.contains("did not answer in 1s"), "{:?}", why);
+        // And it actually gave up rather than waiting the full thirty.
+        assert!(began.elapsed().as_secs() < 10, "took {:?}", began.elapsed());
     }
 }
