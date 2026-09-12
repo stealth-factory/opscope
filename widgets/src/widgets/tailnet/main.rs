@@ -1253,10 +1253,14 @@ fn main() {
             vec![(p.dim.as_str(), "[c]opy".into())],
             vec![(p.dim.as_str(), "[g]raph".into())],
             vec![(p.dim.as_str(), "[o]ffline".into())],
-            // The current value is worth the three cells: this key cycles
-            // rather than toggles, so "[i]nterval" alone would not say what
-            // pressing it is about to change from.
-            vec![(p.dim.as_str(), format!("[i]nterval {}s", interval))],
+            // The interval the next press moves to, like every other
+            // stateful hint in the collection. Nothing is lost by not
+            // naming the current one: the header line three rows up says
+            // `every {interval}s` and is always drawn.
+            vec![(
+                p.dim.as_str(),
+                format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
+            )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],

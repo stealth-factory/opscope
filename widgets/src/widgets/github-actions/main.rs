@@ -50,6 +50,25 @@ const GQL: &str = "https://api.github.com/graphql";
 const REST: &str = "https://api.github.com";
 const WINDOWS: &[i64] = &[12, 24, 48, 168];
 const FILTERS: &[&str] = &["all", "failed", "running"];
+
+/// Which filters are narrowing the list, named for the reader.
+///
+/// `all` is not a filter and neither is an empty needle. The order is the
+/// order the count line and the emptied-board line read them in. The
+/// window is not a filter: it is what the whole pane is about, it is
+/// labelled in the heading, and calling it one would put a line on screen
+/// that never comes off.
+fn active_filters(state: &str, needle: &str) -> Vec<String> {
+    let mut filters = Vec::new();
+    if state != "all" {
+        filters.push(format!("{} only", state));
+    }
+    if !needle.is_empty() {
+        filters.push(format!("/{}", needle));
+    }
+    filters
+}
+
 /// How many recently-pushed repos to inspect per GraphQL page.
 /// The cap is what is asked for runs; this is only how far one page looks.
 const DISCOVER_EACH: usize = 40;
@@ -2005,17 +2024,26 @@ fn main() {
         if !err.is_empty() {
             rows.extend(tc::error_rows(p.fail.as_str(), &err, w));
         }
-        let mut bits: Vec<String> = Vec::new();
-        if FILTERS[filter] != "all" {
-            bits.push(FILTERS[filter].to_string());
-        }
-        if !needle.is_empty() {
-            bits.push(format!("/{}", needle));
-        }
-        if !bits.is_empty() || typing {
+        // The filters, named, with the count saying it is a subset. This is
+        // the only place the state filter is stated now that the footer
+        // names what the next press does instead, so it is drawn whenever
+        // anything is narrowing the list - and nothing is drawn when
+        // nothing is, because a pane announcing "no filters" is noise.
+        let filters = active_filters(FILTERS[filter], &needle);
+        let filtered = tc::filter_row(shown.len(), runs.len(), &filters);
+        if filtered.is_some() || typing {
             rows.push(tc::seg(
                 &[
-                    (p.run.as_str(), format!(" filter: {}", bits.join(" + "))),
+                    (
+                        p.run.as_str(),
+                        match &filtered {
+                            Some(said) => format!(" {}", said),
+                            // Only reachable while typing: an empty needle
+                            // filters nothing yet, and the word plus the
+                            // cursor is the widget saying it is listening.
+                            None => " filter: ".to_string(),
+                        },
+                    ),
                     (p.run.as_str(), if typing { "▏".into() } else { String::new() }),
                     (
                         p.dim.as_str(),
@@ -2251,12 +2279,11 @@ fn main() {
                     &p.dim,
                 ));
             } else {
-                let said = if !needle.is_empty() || FILTERS[filter] != "all" {
-                    "   (nothing matches the current filter)"
-                } else {
-                    "   no runs in this window"
+                let said = match tc::filtered_to_nothing(runs.len(), &filters) {
+                    Some(said) => format!("   {}", said),
+                    None => "   no runs in this window".to_string(),
                 };
-                rows.push(tc::seg(&[(p.dim.as_str(), said.into())], w - 1));
+                rows.push(tc::seg(&[(p.dim.as_str(), said)], w - 1));
             }
         }
 
@@ -2266,9 +2293,19 @@ fn main() {
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
             ],
-            vec![(p.dim.as_str(), format!("[s]tate {}", FILTERS[filter]))],
+            // Both name what the next press moves to, not what is in
+            // force: the state filter is on the count line whenever it is
+            // narrowing anything, and the window is in the ACTIVITY
+            // heading and the figures under it.
+            vec![(
+                p.dim.as_str(),
+                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
+            )],
             vec![(p.dim.as_str(), "[/]filter".into())],
-            vec![(p.dim.as_str(), format!("[w]indow {}", window_label(hours)))],
+            vec![(
+                p.dim.as_str(),
+                format!("[w]indow {}", window_label(tc::cycle(WINDOWS, hours))),
+            )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
@@ -2296,6 +2333,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_filters_are_named_and_neither_all_nor_the_window_is_one() {
+        assert!(active_filters("all", "").is_empty());
+        assert_eq!(active_filters("failed", ""), vec!["failed only"]);
+        assert_eq!(
+            active_filters("running", "deploy"),
+            vec!["running only".to_string(), "/deploy".to_string()]
+        );
+        // A board of 430 runs with nothing failed in it says the filter did
+        // it, not the window - which is what the heading above is for.
+        let said = tc::filtered_to_nothing(430, &active_filters("failed", ""))
+            .expect("a filter is on");
+        assert!(said.contains("430 hidden by the filter"), "{said}");
+        assert!(!said.contains("window"), "{said}");
+    }
+
+    #[test]
+    fn the_window_hint_names_the_window_the_next_press_asks_for() {
+        // The footer reads the same cycle the key does, so 48h offers 7d.
+        assert_eq!(window_label(tc::cycle(WINDOWS, 48)), "7d");
+        assert_eq!(window_label(tc::cycle(WINDOWS, 168)), "12h", "it wraps");
+    }
 
     fn run_json(
         status: &str,

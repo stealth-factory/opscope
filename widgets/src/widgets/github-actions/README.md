@@ -28,7 +28,7 @@ to, drawn the way `deployments` draws Vercel.
    Nightly release · the build that broke
  ● success      8s  17m  alice/toy
    CI · fix: the thing
- ↑↓ select  →/↵ details  [s]tate all  [/]filter  [w]indow 48h  [r]efresh  [,] settings  [q]uit
+ ↑↓ select  →/↵ details  [s]tate failed  [/]filter  [w]indow 7d  [r]efresh  [,] settings  [q]uit
 ```
 
 `github` counts PRs. `github-prs` rolls up one PR's checks as a letter. Neither

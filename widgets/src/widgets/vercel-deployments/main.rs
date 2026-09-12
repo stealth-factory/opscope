@@ -43,6 +43,47 @@ const EVENT_LIMIT: usize = 200;
 /// running build's log grows while it is being read.
 const DETAIL_TTL: f64 = 60.0;
 const FILTERS: &[&str] = &["all", "failed", "production"];
+
+/// What a list with nothing in it says, and it is three different things.
+///
+/// A fetch that has not answered yet, a filter that hid everything, and an
+/// an account with nothing deployed read identically on screen and mean
+/// opposite things. One line covered all three here - "(nothing matches the
+/// current filter)" - so an account with no deployments blamed a filter
+/// nobody had set, which is the founding hazard pointing the other way.
+///
+/// Four, counting the fetch that failed: "no deployments" is a fact the
+/// failed request never established, and drawn under the error row it
+/// contradicts it. A failed *refresh* keeps the last good list, so the
+/// error has to be read first: otherwise a filter that hid those retained
+/// rows would say "nothing matches" beside the error, as if Vercel had
+/// answered. There the error is the answer and this line says nothing
+/// at all. The count line still names the filter.
+fn nothing_shown(held: usize, filters: &[String], fetched: f64, err: &str) -> String {
+    if !err.is_empty() {
+        return String::new();
+    }
+    match tc::filtered_to_nothing(held, filters) {
+        Some(said) => said,
+        None if fetched == 0.0 => "waiting for Vercel…".to_string(),
+        None => "no deployments".to_string(),
+    }
+}
+
+/// Which filters are narrowing the list, named for the reader.
+///
+/// `all` is not a filter and neither is an empty needle. The order is the
+/// order the count line and the emptied-board line read them in.
+fn active_filters(state: &str, needle: &str) -> Vec<String> {
+    let mut filters = Vec::new();
+    if state != "all" {
+        filters.push(format!("{} only", state));
+    }
+    if !needle.is_empty() {
+        filters.push(format!("/{}", needle));
+    }
+    filters
+}
 /// The states that mean something is happening right now.
 const LIVE: &[&str] = &["BUILDING", "QUEUED", "INITIALIZING"];
 
@@ -1468,20 +1509,26 @@ fn main() {
                 rows.push(tc::seg(&[(p.error.as_str(), format!("{lead}{line}"))], w - 1));
             }
         }
-        let mut bits: Vec<String> = Vec::new();
-        if FILTERS[filter] != "all" {
-            bits.push(FILTERS[filter].to_string());
-        }
-        if !needle.is_empty() {
-            bits.push(format!("/{}", needle));
-        }
-        if !bits.is_empty() || typing {
+        // The filters, named, with the count saying it is a subset. This is
+        // the only place the state filter is stated now that the footer
+        // names what the next press does instead.
+        let filters = active_filters(FILTERS[filter], &needle);
+        let filtered = tc::filter_row(shown.len(), deps.len(), &filters);
+        if filtered.is_some() || typing {
             // The cursor is the widget saying it is still listening: without
             // it an empty filter and a filter you are halfway through typing
             // look identical.
             rows.push(tc::seg(
                 &[
-                    (p.build.as_str(), format!(" filter: {}", bits.join(" + "))),
+                    (
+                        p.build.as_str(),
+                        match &filtered {
+                            Some(said) => format!(" {}", said),
+                            // Only reachable while typing, before the
+                            // needle narrows anything.
+                            None => " filter: ".to_string(),
+                        },
+                    ),
                     (p.build.as_str(), if typing { "▏".into() } else { String::new() }),
                     (
                         p.dim.as_str(),
@@ -1641,10 +1688,10 @@ fn main() {
             }
         }
         if shown.is_empty() {
-            rows.push(tc::seg(
-                &[(p.dim.as_str(), "   (nothing matches the current filter)".into())],
-                w - 1,
-            ));
+            let said = nothing_shown(deps.len(), &filters, fetched, &err);
+            if !said.is_empty() {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", said))], w - 1));
+            }
         }
 
         let hints: Vec<Vec<(&str, String)>> = vec![
@@ -1653,7 +1700,12 @@ fn main() {
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " details".into()),
             ],
-            vec![(p.dim.as_str(), format!("[s]tate {}", FILTERS[filter]))],
+            // The state the next press moves to, not the one in force -
+            // which the count line names whenever it is narrowing the list.
+            vec![(
+                p.dim.as_str(),
+                format!("[s]tate {}", FILTERS[(filter + 1) % FILTERS.len()]),
+            )],
             vec![(p.dim.as_str(), "[/]filter".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -1697,6 +1749,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_list_says_which_of_the_four_it_is() {
+        let none: Vec<String> = Vec::new();
+        let failed = vec!["failed only".to_string()];
+        // Nothing fetched yet, and no complaint: that is a wait.
+        assert_eq!(nothing_shown(0, &none, 0.0, ""), "waiting for Vercel…");
+        // A fetch that failed establishes nothing about the account, and
+        // the error row above already says what happened.
+        assert_eq!(nothing_shown(0, &none, 0.0, "HTTP 401: Bad credentials"), "");
+        // Vercel answered with nothing. No filter is set, so nothing may be
+        // blamed for it - this is an account with no deployments.
+        let said = nothing_shown(0, &none, 1.0, "");
+        assert_eq!(said, "no deployments");
+        // The same empty account with a filter on. Still not the filter's
+        // doing: it had nothing to hide.
+        assert_eq!(nothing_shown(0, &failed, 1.0, ""), "no deployments");
+        // 200 deployments, none of them failed. Now it is the filter, and
+        // the line has to say so or the pane reads as an empty account.
+        let said = nothing_shown(200, &failed, 1.0, "");
+        assert!(said.contains("nothing matches"), "{said}");
+        assert!(said.contains("200 hidden by the filter"), "{said}");
+        assert!(said.contains("failed only"), "{said}");
+        // A failed refresh keeps those 200. The filter still hides them,
+        // but the error row is the answer — "nothing matches" would present
+        // the cached empty-filter reading as the current Vercel state.
+        assert_eq!(
+            nothing_shown(200, &failed, 1.0, "HTTP 401: Bad credentials"),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_state_filter_is_named_and_all_is_not_a_filter() {
+        assert!(active_filters("all", "").is_empty());
+        assert_eq!(active_filters("production", ""), vec!["production only"]);
+        assert_eq!(
+            active_filters("failed", "auth"),
+            vec!["failed only".to_string(), "/auth".to_string()]
+        );
+    }
 
     /// A 403 means two different things and they need opposite answers.
     ///

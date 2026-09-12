@@ -48,6 +48,34 @@ const SORTS: &[&str] = &["updated", "created"];
 /// Width of the per-day charts, in days.
 const OPENED_DAYS: i64 = 30;
 
+/// Which filters are narrowing the list, named for the reader.
+///
+/// The order is the order they are applied in, and it is the order the
+/// count line and the emptied-board line both read them in. `all` is not a
+/// filter and an empty needle is not one either.
+fn active_filters(source_filter: &str, needle: &str) -> Vec<String> {
+    let mut filters = Vec::new();
+    if source_filter != "all" {
+        filters.push(format!("from {}", source_filter));
+    }
+    if !needle.is_empty() {
+        filters.push(format!("/{}", needle));
+    }
+    filters
+}
+
+/// The source `[f]` moves to next, which is what the hint names.
+///
+/// One function so the footer and the key cannot drift: the hint promising
+/// a source the key does not go to is worse than no hint at all.
+fn next_source(names: &[String], current: &str) -> String {
+    if names.is_empty() {
+        return "all".to_string();
+    }
+    let at = names.iter().position(|n| n == current).unwrap_or(0);
+    names[(at + 1) % names.len()].clone()
+}
+
 /// The rolling window the two large figures count over.
 ///
 /// Rolling, not a calendar day: at nine in the morning "today" is three
@@ -2168,11 +2196,7 @@ fn main() {
                 "f" | "F" => {
                     // Every PR remembers which sources found it, so
                     // narrowing to one is instant and costs no request.
-                    let at = filter_names
-                        .iter()
-                        .position(|n| *n == source_filter)
-                        .unwrap_or(0);
-                    source_filter = filter_names[(at + 1) % filter_names.len()].clone();
+                    source_filter = next_source(&filter_names, &source_filter);
                     moved = true;
                 }
                 "s" | "S" => sort_at = (sort_at + 1) % SORTS.len(),
@@ -2242,25 +2266,29 @@ fn main() {
         // "at least", because a source that filled its page has more behind
         // it and the sources overlap, so the union cannot be added up - only
         // bounded from below.
-        let mut count = vec![
-            (
-                p.dim.as_str(),
-                format!(
-                    " {} of {}{}",
-                    shown.len(),
-                    if capped { "at least " } else { "" },
-                    total
+        //
+        // With a filter on, the line is the shared one every widget that
+        // filters draws, and it counts against what the board holds rather
+        // than against the search total: `shown of prs` is the only pair
+        // whose difference is what the filter is hiding, and a subset
+        // claim measured against a number the filter never saw is not a
+        // subset claim. `partial_note` below keeps the "at least" story.
+        let filters = active_filters(&source_filter, &needle);
+        let mut count = match tc::filter_row(shown.len(), prs.len(), &filters) {
+            Some(said) => vec![(p.dim.as_str(), format!(" {}", said))],
+            None => vec![
+                (
+                    p.dim.as_str(),
+                    format!(
+                        " {} of {}{}",
+                        shown.len(),
+                        if capped { "at least " } else { "" },
+                        total
+                    ),
                 ),
-            ),
-            (
-                p.dim.as_str(),
-                if !needle.is_empty() || source_filter != "all" {
-                    " shown".to_string()
-                } else {
-                    " open".to_string()
-                },
-            ),
-        ];
+                (p.dim.as_str(), " open".to_string()),
+            ],
+        };
         if !copied.0.is_empty() && tc::now() - copied.1 < 4.0 {
             count.push((p.ok.as_str(), "   copied ".into()));
             count.push((
@@ -2362,6 +2390,7 @@ fn main() {
                 w,
                 fetched == 0.0,
                 &source_filter,
+                prs.len(),
                 &p,
             );
             list_cursor = at.map(|at| top + at);
@@ -2370,15 +2399,27 @@ fn main() {
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
                 vec![(p.dim.as_str(), "[↵] open".into())],
                 vec![(p.dim.as_str(), "[/]filter".into())],
-                vec![(p.dim.as_str(), format!("[s]ort {}", SORTS[sort_at]))],
+                // Every stateful hint names the state the next press moves
+                // to, not the one in force: a footer is a list of things
+                // you can do, and `[t]stats on` read equally well as
+                // "stats are on". What is in force is in the body - the
+                // list heading says the sort, the order arrow and the
+                // source, and the count line says the filter.
                 vec![(
                     p.dim.as_str(),
-                    format!("[o]rder {}", if newest_first { "newest" } else { "oldest" }),
+                    format!("[s]ort {}", SORTS[(sort_at + 1) % SORTS.len()]),
                 )],
-                vec![(p.dim.as_str(), format!("[f]rom {}", source_filter))],
                 vec![(
                     p.dim.as_str(),
-                    format!("[t]stats {}", if show_stats { "on" } else { "off" }),
+                    format!("[o]rder {}", if newest_first { "oldest" } else { "newest" }),
+                )],
+                vec![(
+                    p.dim.as_str(),
+                    format!("[f]rom {}", next_source(&filter_names, &source_filter)),
+                )],
+                vec![(
+                    p.dim.as_str(),
+                    format!("[t]stats {}", if show_stats { "hide" } else { "show" }),
                 )],
                 vec![(p.dim.as_str(), "[c]opy url".into())],
                 vec![(p.dim.as_str(), "[r]efresh".into())],
@@ -3178,6 +3219,10 @@ fn list_view(
     w: usize,
     waiting: bool,
     source_filter: &str,
+    // How many the board holds before the filters were applied, so an
+    // empty list can say which of the two it is: a filter that hid
+    // everything, or a board with nothing on it.
+    held: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
     let mut rows = vec![String::new()];
@@ -3207,15 +3252,15 @@ fn list_view(
     ));
     if prs.is_empty() {
         // "collecting" is only true before the first fetch: an empty filter
-        // or an empty source is a result, not a wait.
-        let why = if !needle.is_empty() {
-            format!("  nothing matches /{}", needle)
-        } else if source_filter != "all" {
-            format!("  no open PRs from {}", source_filter)
-        } else if waiting {
-            "  collecting…".to_string()
-        } else {
-            "  no open PRs".to_string()
+        // or an empty source is a result, not a wait. The filter case is
+        // said in the shared wording, and only when there was something for
+        // a filter to hide - a board with no open PRs at all is an empty
+        // source whichever keys are pressed, and blaming the filter for it
+        // would be the same lie pointing the other way.
+        let why = match tc::filtered_to_nothing(held, &active_filters(source_filter, needle)) {
+            Some(said) => format!("  {}", said),
+            None if waiting => "  collecting…".to_string(),
+            None => "  no open PRs".to_string(),
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
         return (rows, None);
@@ -3820,6 +3865,63 @@ fn detail_view(
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_from_hint_names_the_source_the_next_press_goes_to() {
+        // The hint and the key read the same function, because a hint
+        // promising a source the key does not go to is worse than none.
+        let names: Vec<String> = ["all", "orgs", "authored"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(next_source(&names, "all"), "orgs");
+        assert_eq!(next_source(&names, "orgs"), "authored");
+        assert_eq!(next_source(&names, "authored"), "all", "it wraps");
+        // A source that has gone from the config since it was selected.
+        assert_eq!(next_source(&names, "deleted"), "orgs");
+        // The wrap has to be the wrap and not a fallback that happens to
+        // spell "all": a list whose first entry is something else wraps
+        // onto that, and the first version of this passed by coincidence.
+        let odd: Vec<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(next_source(&odd, "two"), "one", "it wraps onto the first");
+    }
+
+    #[test]
+    fn the_filters_are_named_and_all_is_not_one() {
+        assert!(active_filters("all", "").is_empty());
+        assert_eq!(active_filters("orgs", ""), vec!["from orgs"]);
+        assert_eq!(
+            active_filters("orgs", "auth"),
+            vec!["from orgs".to_string(), "/auth".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_list_a_filter_emptied_says_so_and_an_empty_board_does_not_blame_it() {
+        let p = palette();
+        let said = |held: usize, needle: &str, source: &str| -> String {
+            list_view(&[], 0, "updated", true, needle, 80, false, source, held, &p)
+                .0
+                .iter()
+                .map(|r| plain(r))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // 40 open PRs and a needle that matches none of them: the filter
+        // did this, and the row has to say so or the board reads as empty.
+        let filtered = said(40, "nope", "all");
+        assert!(filtered.contains("nothing matches"), "{filtered}");
+        assert!(filtered.contains("40 hidden by the filter"), "{filtered}");
+        assert!(filtered.contains("/nope"), "{filtered}");
+        // The same needle against a board with nothing on it. The filter
+        // hid nothing, so blaming it would be the same lie reversed.
+        let empty = said(0, "nope", "all");
+        assert!(empty.contains("no open PRs"), "{empty}");
+        assert!(!empty.contains("hidden by the filter"), "{empty}");
+        // And a source filter is stated the same way as a needle.
+        let sourced = said(40, "", "authored");
+        assert!(sourced.contains("from authored"), "{sourced}");
+    }
+
     /// Word for word what `post_json` hands back when curl hits `--max-time`.
     /// Exit 28 is curl's timeout; `run_full`'s "did not answer in Ns" is a
     /// different helper and never sits on this path.
@@ -3954,7 +4056,8 @@ mod tests {
         let prs = a_long_list(40);
         // Every row, whatever the pane: a blank, the section head, the
         // column head, and one row per PR.
-        let (list, cursor) = list_view(&prs, 7, "created", true, "", 80, false, "all", &p);
+        let (list, cursor) =
+            list_view(&prs, 7, "created", true, "", 80, false, "all", prs.len(), &p);
         assert_eq!(list.len(), 3 + prs.len(), "the list is built whole");
         assert_eq!(cursor, Some(3 + 7), "the selected row is where it says");
 
@@ -4325,7 +4428,7 @@ mod tests {
     fn the_size_column_is_blank_until_the_figures_arrive() {
         let p = palette();
         let rows = |prs: &[serde_json::Value]| -> Vec<String> {
-            list_view(prs, 0, "created", true, "", 100, false, "all", &p)
+            list_view(prs, 0, "created", true, "", 100, false, "all", prs.len(), &p)
                 .0
                 .iter()
                 .map(|r| plain(r))

@@ -40,7 +40,7 @@ you open.
  #501   web-app           test(analytics): guard the GA4 r       approved    pass    4d     +48/-12
  #213   cms               Bump the npm_and_yarn group acro    needs review    FAIL   51d  +1504/-902
  #712   tsup              feat: add tsup.confg.* file supp               —       —  274d      +9/-1
- ↑↓ select  [↵] open  [/]filter  [s]ort updated  [o]rder newest  [r]efresh  [,] settings  [q]uit
+ ↑↓ select  [↵] open  [/]filter  [s]ort created  [o]rder oldest  [r]efresh  [,] settings  [q]uit
 ```
 
 Open one and it becomes a dashboard:

@@ -88,6 +88,23 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   there was nothing for the wheel to reach.
 - **Never truncate a key hint.** `pack_hints()` wraps footers across lines
   without splitting a hint, because `[±]25` teaches a key that does not exist.
+- **A hint names the state the next press moves to; the body says what is in
+  force.** A footer is a list of things you can do, so `[t]stats on` read
+  equally well as *stats are on* and as *press to turn them on*, and nothing
+  on screen settled it. Two-way toggles name the other state and prefer verbs
+  (`hide`/`show` reads as an action where `on`/`off` reads as a state); a
+  cycle names the next value. These panes sit side by side, so one hint of
+  that shape meaning the opposite of its neighbour is worse than a consistent
+  ambiguity — the rule holds for the whole collection or not at all. The
+  other half is not optional, because the footer was the only place some
+  widgets said what they were filtering: **an applied filter belongs in the
+  body**, named, with the count showing it is a subset. `tc::filter_row()`
+  draws `302 of 685 shown · failed only · /auth` and says nothing at all
+  when nothing is filtered, since a pane announcing "no filters" is noise.
+  A filter that leaves nothing says so through `tc::filtered_to_nothing()`:
+  an empty list under an unstated filter is the founding hazard above
+  wearing different clothes, and `vercel-deployments` had the mirror of it,
+  blaming a filter nobody had set for an account with nothing deployed.
 - **Measure contrast, do not eyeball it.** Every text colour must clear WCAG AA
   against both the terminal background *and* the selected-row tint.
 - **Say what a number means when it is not obvious.** Label windows, note when
@@ -308,7 +325,9 @@ on a tinted row — `seg()` for clipping
 coloured segments to a cell budget, `pack_hints()`, `follow()` for a window
 that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
-`config_token_warning()` for widgets holding a secret, non-blocking
+`filter_row()` and `filtered_to_nothing()` for the one wording every pane
+says its filters in, `config_token_warning()` for widgets holding a secret,
+non-blocking
 `Keyboard`, OSC 52 `clipboard()`, and `unsupported()` /
 `cannot_start_because()` for a widget that has no source on this kernel.
 It also owns the shared per-widget settings screen; widgets provide only
