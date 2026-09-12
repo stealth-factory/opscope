@@ -27,7 +27,9 @@ screen, exactly like "there is no data".
 ## `opscope-core`
 
 `opscope-core` holds the shared pieces — terminal sizing, a full-frame `draw()`,
-24-bit colour, a green→amber→red `heat()` ramp, `seg()` for clipping coloured
+24-bit colour, a green→amber→red `heat()` / `health()` ramp and the
+`heat_on()` / `health_on()` pair that lift its hot end for any composed
+tint, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers, `follow()` for a
 window that keeps a cursor in view, non-blocking `Keyboard` input with
 arrow-key decoding, `clipboard()` over OSC 52, `unsupported()` /

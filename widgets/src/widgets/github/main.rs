@@ -1869,9 +1869,13 @@ fn main() {
             // while the ones behind it still shimmer.
             let old = s.window != want;
             // The same high-is-good ramp as the section above it, so one
-            // rate reads as one colour wherever it is drawn.
+            // rate reads as one colour wherever it is drawn - and the lifted
+            // form of it, because this one goes through the tint closure and
+            // the plain ramp's hot end measures 3.18 there. `health` sends a
+            // *low* rate to that end, so the unreadable colour was the
+            // struggling account rather than the healthy one.
             let hot = match s.rate {
-                Some(r) if !old => tc::health(r / 100.0),
+                Some(r) if !old => tc::health_on(r / 100.0, here),
                 _ => p.dim.clone(),
             };
             let mut line = vec![

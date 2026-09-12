@@ -481,12 +481,15 @@ quietly showed 3 projects instead of 21.
 
 ## Drawing
 
-`opscope-core` holds the shared kit: `rgb()`, `bg()`, `mix()`, `heat()`;
-`seg()` to clip a coloured segment to a cell budget and `pad()` to pad by
-*plain-text* length; `pack_hints()` for footers; `follow()` for a window that
-keeps a cursor in view; `vbars`, `vbars_down`, `stacked_bar`, `meter`,
-`skeleton`; `get()`/`post_json()` over `curl`; `run()`/`run_full()` for bounded
-commands; `clipboard()` over OSC 52.
+`opscope-core` holds the shared kit: `rgb()`, `bg()`, `mix()`, `heat()` /
+`health()` and `heat_on()` / `health_on()` — the `_on` pair lift the hot
+end for any composed tint (a selected row, and the blocked / finished
+tints a widget keeps of its own), and high-is-good values take `health` /
+`health_on`; `seg()` to clip a coloured segment to a cell budget and `pad()`
+to pad by *plain-text* length; `pack_hints()` for footers; `follow()` for a
+window that keeps a cursor in view; `vbars`, `vbars_down`, `stacked_bar`,
+`meter`, `skeleton`; `get()`/`post_json()` over `curl`; `run()`/`run_full()`
+for bounded commands; `clipboard()` over OSC 52.
 
 Use those shared helpers rather than copying them into one widget;
 `shared_helpers_are_not_redefined_by_widgets` enforces the helpers whose
