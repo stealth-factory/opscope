@@ -31,7 +31,7 @@ use opscope_core as tc;
 #[path = "parse.rs"]
 mod parse;
 
-use parse::{Absence, Agent, Lease, Pane, Snapshot, Task};
+use parse::{Absence, Agent, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task, Worktree};
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "luvus-panes",
@@ -72,6 +72,20 @@ struct State {
     agents: Result<Vec<Agent>, String>,
     tasks: Result<Vec<Task>, String>,
     leases: Result<Vec<Lease>, String>,
+    /// What is claimable right now, which `task list` cannot say: a list
+    /// with three tasks in it and nothing ready are both non-empty.
+    next: Result<NextTask, String>,
+    /// Every resumable session on the machine, each marked with whether
+    /// its directory is one this session has open.
+    sessions: Result<Vec<Resumable>, String>,
+    /// The focused workspace's checkout, and every checkout of its repo.
+    ///
+    /// One workspace, not all of them: the CLI's `git status` and
+    /// `worktree list` take no workspace argument and answer for whichever
+    /// workspace the session is focused on. The screen names that
+    /// workspace rather than implying the figures cover the session.
+    git: Result<GitState, String>,
+    worktrees: Result<Vec<Worktree>, String>,
     /// Set when there is no session to read at all, and which of the three
     /// reasons that is.
     absent: Option<Absence>,
@@ -92,6 +106,10 @@ impl Default for State {
             agents: Err(WAITING.into()),
             tasks: Err(WAITING.into()),
             leases: Err(WAITING.into()),
+            next: Err(WAITING.into()),
+            sessions: Err(WAITING.into()),
+            git: Err(WAITING.into()),
+            worktrees: Err(WAITING.into()),
             absent: None,
             err: String::new(),
             read: false,
@@ -124,7 +142,11 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
                 guard.snapshot = Err(why.clone());
                 guard.agents = Err(why.clone());
                 guard.tasks = Err(why.clone());
-                guard.leases = Err(why);
+                guard.leases = Err(why.clone());
+                guard.next = Err(why.clone());
+                guard.sessions = Err(why.clone());
+                guard.git = Err(why.clone());
+                guard.worktrees = Err(why);
                 guard.absent = Some(absent);
                 guard.read = true;
             }
@@ -138,6 +160,21 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["task", "list", "--json"]).and_then(|text| parse::parse_tasks(&text));
     let leases = luvus_text(session, &["lease", "list", "--json"])
         .and_then(|text| parse::parse_leases(&text));
+    let next =
+        luvus_text(session, &["task", "next"]).and_then(|text| parse::parse_next_task(&text));
+    // Marked against the session's own workspaces, because `agent sessions`
+    // answers for the whole machine: nine of ten on the box this was built
+    // against were in directories no open workspace covers.
+    let open: Vec<String> = snapshot
+        .as_ref()
+        .map(|s| s.spaces.iter().map(|w| w.cwd.clone()).collect())
+        .unwrap_or_default();
+    let sessions = luvus_text(session, &["agent", "sessions"])
+        .and_then(|text| parse::parse_sessions(&text, &open));
+    let git =
+        luvus_text(session, &["git", "status"]).and_then(|text| parse::parse_git_status(&text));
+    let worktrees = luvus_text(session, &["worktree", "list"])
+        .and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
     let agents = agents.map(|listed| {
@@ -167,6 +204,10 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         guard.agents = agents;
         guard.tasks = tasks;
         guard.leases = leases;
+        guard.next = next;
+        guard.sessions = sessions;
+        guard.git = git;
+        guard.worktrees = worktrees;
         guard.absent = None;
         guard.read = true;
     }
@@ -180,6 +221,9 @@ enum Row {
     Task(Task),
     Lease(Lease),
     Pane(Pane),
+    /// A session no pane is holding. It has nowhere to jump to, which is
+    /// the same shape as an unclaimed task and is answered the same way.
+    Resumable(Resumable),
 }
 
 impl Row {
@@ -192,6 +236,7 @@ impl Row {
             Row::Task(t) => t.pane.clone(),
             Row::Lease(l) => l.pane.clone(),
             Row::Pane(p) => p.pane_id.clone(),
+            Row::Resumable(_) => String::new(),
         }
     }
 
@@ -201,6 +246,7 @@ impl Row {
             Row::Task(t) => t.id.clone(),
             Row::Lease(l) => l.id.clone(),
             Row::Pane(p) => p.command.clone(),
+            Row::Resumable(r) => r.kind.clone(),
         }
     }
 }
@@ -526,7 +572,8 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (snapshot, agents, tasks, leases, absent, err, read) = match state.lock() {
+        let (snapshot, agents, tasks, leases, absent, err, read, next, sessions, git, worktrees) =
+            match state.lock() {
             Ok(g) => (
                 g.snapshot.clone(),
                 g.agents.clone(),
@@ -535,6 +582,10 @@ fn main() {
                 g.absent.clone(),
                 g.err.clone(),
                 g.read,
+                g.next.clone(),
+                g.sessions.clone(),
+                g.git.clone(),
+                g.worktrees.clone(),
             ),
             Err(_) => return,
         };
@@ -547,6 +598,15 @@ fn main() {
         let agent_rows: Vec<Agent> = agents.clone().unwrap_or_default();
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();
         let lease_rows: Vec<Lease> = leases.clone().unwrap_or_default();
+        // Worst first here too: a session left in a directory nobody has
+        // open is the one you are least likely to remember.
+        let mut resumable_rows: Vec<Resumable> = sessions.clone().unwrap_or_default();
+        resumable_rows.sort_by(|a, b| {
+            a.in_workspace
+                .cmp(&b.in_workspace)
+                .then(a.kind.cmp(&b.kind))
+                .then(a.cwd.cmp(&b.cwd))
+        });
         let panes: Vec<Pane> = match &snapshot {
             Ok(s) => s.panes.clone(),
             Err(_) => Vec::new(),
@@ -579,6 +639,7 @@ fn main() {
             .map(Row::Agent)
             .chain(task_rows.iter().cloned().map(Row::Task))
             .chain(lease_rows.iter().cloned().map(Row::Lease))
+            .chain(resumable_rows.iter().cloned().map(Row::Resumable))
             .chain(busy.iter().cloned().map(Row::Pane))
             .chain(
                 resting
@@ -602,10 +663,18 @@ fn main() {
             (agent_rows.len() + task_rows.len(), !lease_rows.is_empty()),
             (
                 agent_rows.len() + task_rows.len() + lease_rows.len(),
+                !resumable_rows.is_empty(),
+            ),
+            (
+                agent_rows.len() + task_rows.len() + lease_rows.len() + resumable_rows.len(),
                 !busy.is_empty(),
             ),
             (
-                agent_rows.len() + task_rows.len() + lease_rows.len() + busy.len(),
+                agent_rows.len()
+                    + task_rows.len()
+                    + lease_rows.len()
+                    + resumable_rows.len()
+                    + busy.len(),
                 idle_listed,
             ),
         ]
@@ -651,8 +720,8 @@ fn main() {
                             " session {} · uhp {} · {} workspace{} · seq {}",
                             s.session,
                             s.protocol,
-                            s.workspaces,
-                            plural(s.workspaces),
+                            s.spaces.len(),
+                            plural(s.spaces.len()),
                             s.sequence
                         ),
                     ),
@@ -708,6 +777,50 @@ fn main() {
                 w.saturating_sub(1),
             )
         });
+        // The checkout the session is looking at. One workspace, named, and
+        // not a total: the CLI's `git status` and `worktree list` take no
+        // workspace argument, so a figure here covers the focused workspace
+        // and saying otherwise would make four numbers into a claim about
+        // the session none of them support.
+        if let Ok(g) = &git {
+            let focused = snapshot
+                .as_ref()
+                .ok()
+                .and_then(|s| s.spaces.iter().find(|x| x.active))
+                .map(|x| x.name.clone())
+                .unwrap_or_default();
+            let mut said = vec![(
+                p.dim.as_str(),
+                if focused.is_empty() {
+                    format!(" ⑂ on {}", g.branch)
+                } else {
+                    format!(" ⑂ {} on {}", focused, g.branch)
+                },
+            )];
+            if g.behind > 0 {
+                said.push((p.blocked.as_str(), format!(" · {} behind", g.behind)));
+            }
+            if g.ahead > 0 {
+                said.push((p.done.as_str(), format!(" · {} ahead", g.ahead)));
+            }
+            if g.dirty > 0 {
+                // Entries, not files: git reports a wholly untracked
+                // directory as one entry and the count would be a lie.
+                said.push((
+                    p.working.as_str(),
+                    format!(" · {} entr{} changed", g.dirty, if g.dirty == 1 { "y" } else { "ies" }),
+                ));
+            }
+            if g.stashes > 0 {
+                said.push((p.dim.as_str(), format!(" · {} stashed", g.stashes)));
+            }
+            if let Ok(trees) = &worktrees {
+                if trees.len() > 1 {
+                    said.push((p.dim.as_str(), format!(" · {} worktrees", trees.len())));
+                }
+            }
+            head.push(tc::seg(&said, w.saturating_sub(1)));
+        }
         head.push(String::new());
 
         // ---- the footer, built before the body ----
@@ -995,6 +1108,22 @@ fn main() {
                 &[
                     (p.lbl.as_str(), " ── TASKS ── ".into()),
                     (p.dim.as_str(), shown_count(&tasks)),
+                    // A list with tasks in it and nothing claimable are
+                    // different sentences, and the count alone reads as
+                    // though something were ready to pick up.
+                    match &next {
+                        Ok(n) if n.none && !task_rows.is_empty() => {
+                            (p.dim.as_str(), "   none ready to claim".to_string())
+                        }
+                        Ok(n) if !n.none && !n.id.is_empty() => (
+                            p.done.as_str(),
+                            format!("   {} ready to claim", n.id),
+                        ),
+                        Err(why) if !why.starts_with("not read") => {
+                            (p.unknown.as_str(), format!("   next: {}", why))
+                        }
+                        _ => (p.dim.as_str(), String::new()),
+                    },
                 ],
                 w.saturating_sub(1),
             ));
@@ -1101,6 +1230,88 @@ fn main() {
             }
             if lease_rows.is_empty() {
                 let (said, bad) = empty_or_why(&leases, "no leases — no paths are reserved");
+                body.push(tc::seg(
+                    &[(
+                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        said,
+                    )],
+                    w.saturating_sub(1),
+                ));
+            }
+
+            // ---- RESUMABLE ----
+            // Sessions with no pane holding them. `agent sessions` answers
+            // for the machine and not for this session, so the heading says
+            // how many are in a workspace this session has open rather than
+            // presenting the whole count as though it were the session's.
+            body.push(String::new());
+            let inside = resumable_rows.iter().filter(|r| r.in_workspace).count();
+            body.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── RESUMABLE ── ".into()),
+                    (p.dim.as_str(), format!("{}", resumable_rows.len())),
+                    (
+                        p.dim.as_str(),
+                        if resumable_rows.is_empty() {
+                            String::new()
+                        } else {
+                            format!("   {} in an open workspace", inside)
+                        },
+                    ),
+                ],
+                w.saturating_sub(1),
+            ));
+            for r in &resumable_rows {
+                let here = at == selected_row;
+                let start = body.len();
+                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let c = |colour: &str| {
+                    let colour = if tint.is_empty() {
+                        colour
+                    } else if colour == p.dim {
+                        p.dim_lit.as_str()
+                    } else if colour == p.idle {
+                        p.idle_lit.as_str()
+                    } else if colour == p.unknown {
+                        p.unknown_lit.as_str()
+                    } else if colour == p.blocked {
+                        p.blocked_lit.as_str()
+                    } else if colour == p.idle_c {
+                        p.idle_c_lit.as_str()
+                    } else {
+                        colour
+                    };
+                    format!("{}{}", tint, colour)
+                };
+                let mut line = vec![
+                    (c(&p.accent), format!("{}◇ ", if here { "▸" } else { " " })),
+                    (c(&p.txt), tc::pad(&r.kind, 8)),
+                    (
+                        c(if r.in_workspace { &p.idle_c } else { &p.dim }),
+                        format!(" {}", parse::tail_path(&parse::homely(&r.cwd), 34)),
+                    ),
+                ];
+                if wide {
+                    line.push((
+                        c(&p.dim),
+                        format!(
+                            "  {}",
+                            if r.in_workspace { "in an open workspace" } else { "not open here" }
+                        ),
+                    ));
+                }
+                if here {
+                    line.push((tint.clone(), " ".repeat(w)));
+                }
+                let refs: Vec<(&str, String)> =
+                    line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                body.push(tc::seg(&refs, w.saturating_sub(1)));
+                spans.push(start..body.len());
+                at += 1;
+            }
+            if resumable_rows.is_empty() {
+                let (said, bad) =
+                    empty_or_why(&sessions, "no resumable sessions — every agent has a pane");
                 body.push(tc::seg(
                     &[(
                         if bad { p.unknown.as_str() } else { p.dim.as_str() },
