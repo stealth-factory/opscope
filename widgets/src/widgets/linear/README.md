@@ -93,8 +93,8 @@ decision.
 backlog / todo / in progress. Not windowed: it answers "how much is there right
 now", and does not move when you change the window.
 
-**Active cycles** — every team's running cycle, walked like everything else; one request while they fit a page. Progress
-bar, points completed against scope, and days remaining.
+**Active cycles** — every team's running cycle, walked like everything else.
+Progress bar, points completed against scope, and days remaining.
 
 `+175 added` is the number to watch: scope added *after* the cycle opened. A
 cycle can be worked hard and still slip, and this is the column that says which
@@ -260,40 +260,27 @@ They count the project across *every* team that shares it, because the screen is
 about the project rather than about whichever team's list it was opened from.
 
 Everything else — the burn-up, the milestones, the members, the description — is
-one request made when the screen opens, and again when what it fetched is older
-than the refresh interval. Fetching that for every project in the workspace
-every two minutes would be paying, continuously, for screens nobody has opened.
-While the request is out the screen says so; if it fails it says that instead,
-rather than reading "loading" for ever.
+fetched when the screen opens, and again when what it has is older than the
+refresh interval. Fetching that for every project in the workspace every two
+minutes would be paying, continuously, for screens nobody has opened. While it
+is on its way the screen says so; if it fails it says that instead, rather than
+reading "loading" for ever.
 
 ## Cost
 
-Linear allows **2,500 requests/hour** and 3,000,000 complexity points; a single
-query may not exceed 10,000. Complexity is 0.1 per property and 1 per object,
-multiplied by the page size, so the request count is the limit that binds and
-the field count barely matters.
+Linear's allowance is hourly, and what is left of it is Linear's own figure,
+shown in the header — `2490 req left/hr`. A full pass over a workspace of
+fourteen teams and a thousand-odd open issues at the default 120s refresh
+spends a fraction of it. A team's screen opens on data already in hand rather
+than showing nothing while it waits.
 
-A full pass over a workspace of 14 teams and ~1,200 open issues costs about
-**11 requests and 4 seconds** — one of them the whole workspace's projects, plus
-one more each time a project's own screen is opened,
-fetched with everything else so a team's screen opens on data already in hand
-rather than showing nothing while a request goes out, so the default 120s refresh uses roughly 300
-requests an hour — an eighth of the budget. Remaining quota is read from
-`X-RateLimit-Requests-Remaining` and shown in the header.
-
-Linear's connections expose no `totalCount`, so anything counted has to be
-paged through at 250 records a time. Pagination is capped at 12 pages per query
-and the header says `truncated` when the cap is reached, rather than quietly
-reporting a smaller number.
-
-The teams and the active cycles are walked the same way. A cycle walk that
-hits the cap makes the heading read `at least 600 running` rather than `600
-running`. Two nested connections are marked rather than walked, because
-walking them would re-fetch a whole project record per page to settle a
-question that is almost always already settled: a project's `members` row
-reads `21+` with a trailing `…`, and its MILESTONES heading `25+`, when
-Linear says the page it returned was not the last. Those rows show a page,
-not necessarily everything.
+Nothing Linear counts arrives with a total, so **anything counted here is
+walked**, and a walk that does not reach the end says so rather than quietly
+reporting a smaller number. The header reads `truncated`. A cycle walk that
+stopped short makes the heading `at least 600 running` rather than `600
+running`. A project's `members` row reads `21+` with a trailing `…`, and its
+MILESTONES heading `25+`, when Linear says the page it returned was not the
+last. Those rows show a page, not necessarily everything.
 
 ## Keys
 

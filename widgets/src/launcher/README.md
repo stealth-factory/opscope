@@ -32,23 +32,17 @@ The launcher writes none of this down twice. Every widget owns one folder
 under `widgets/src/widgets/`; the launcher compiles its maintained files
 rather than keeping another description:
 
-- **What each one does** — the same `help.txt` the binary itself answers
-  `--help` with, taken with `include_str!`.
+- **What each one does** — the same text the binary itself answers `--help`
+  with.
 - **What it looks like** — the opening preview in that folder's
   `README.md`, again embedded as the same bytes.
 - **Which widgets exist** — a list in the launcher's own source, one entry
   per binary. It is the one thing that is written down, because a binary
   cannot enumerate its siblings the way a directory of scripts could.
 
-`check.rs` enforces the folder contract: `main.rs`, `help.txt`, `README.md`,
-`CONFIGURE.md`, `dependencies.json`, and `settings.json` when the widget has
-settings. Adding a widget still adds one name to the compiled registry and
-Cargo manifest, but the contributor owns its full experience in that one
-folder.
-
-The launcher has the same maintained-file shape for its own help and docs.
-Its settings declaration and configuration guide cover only the shared
-`terminal` section, not any widget's settings.
+So a widget's description here and its own `--help` cannot disagree: they are
+the same words. The settings this screen opens are the shared `terminal`
+section only — a widget's own settings belong to the widget.
 
 ## The preview
 
@@ -82,18 +76,11 @@ nothing to keep in step.
 
 It also had side effects, and that is what settled it. Arrowing onto
 `latency` spawns `ping` and puts packets on the wire. Onto `github` or
-`github-prs`, GraphQL calls against a 5,000-an-hour quota. Onto `vercel-deployments` or `linear`,
-their APIs. Onto `agent-usage`, a walk of the entire agent transcript tree, which
-on this machine is 541 MB. **Browsing a menu should cost nothing**, and a
-menu that quietly spends your API budget as you scroll past a row is a menu
-with a trap in it.
-
-The live version also had to solve problems the static one does not have at
-all: decoding partial characters across read boundaries, stripping cursor
-control so a child could not move the real cursor, killing process groups on
-every selection change, and a carriage-return translation that made previews
-erase themselves. That is a hundred lines and three bugs bought with running
-processes nobody asked to run.
+`github-prs`, calls against an hourly API quota. Onto `vercel-deployments` or
+`linear`, their APIs. Onto `agent-usage`, a walk of every agent transcript on
+the machine, which can be hundreds of megabytes. **Browsing a menu should
+cost nothing**, and a menu that quietly spends your API budget as you scroll
+past a row is a menu with a trap in it.
 
 What is lost is colour, and the certainty that the picture matches today's
 build. The docs are checked by review rather than by machine, so a page that
@@ -104,14 +91,10 @@ falls behind its widget shows a stale picture here too.
 It used to. There was a column reporting whether each command was installed
 and each token set, and it was the wrong place for all of it.
 
-A widget that cannot run is the thing that knows why — which command and what
-it is for. Every widget owns a `dependencies.json` with two npm-shaped maps:
-`required` blocks launch and `recommended` only unlocks an enhancement. Each
-entry can carry a semver range, platform list, and optional `why` message.
-
-Package names do not belong to the widget. Core maps the command to Debian,
-Fedora, Arch, Alpine, or Homebrew and the widget that cannot start draws the
-shared warning screen:
+A widget that cannot run is the thing that knows why — which command, and what
+it is for. Each one says which of the tools it wants it cannot start without
+and which only unlock something extra, and the one that cannot start names the
+package to install for the system you are on:
 
 ```text
 ╺━ NETWATCH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -131,10 +114,9 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-All sixteen widgets check the same owned file, including `matrix` and
-`months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
-those declarations across the full registry, reports which widgets use each
-tool, checks declared versions, and prints host-specific installation guidance:
+Every widget declares this for itself, `matrix` and `months` included — they
+need nothing, and say so. `opscope doctor` gathers the lot: which widgets want
+each tool, whether the version on this machine will do, and what to install:
 
 ```sh
 opscope doctor
@@ -195,8 +177,7 @@ The suffix is stripped and the binary of the same stem runs.
 
 ## Cost
 
-Descriptions and previews are compiled into the launcher. Browsing performs
-no file discovery, starts no widget, calls no API, and polls nothing. It
-touches the filesystem only when you launch the selected sibling binary or
-open the settings screen, which reads the resolved config and writes only
-after you confirm a change.
+**Browsing costs nothing.** It starts no widget, calls no API, discovers no
+files and polls nothing. It touches the filesystem only when you launch the
+selected sibling binary or open the settings screen, which reads the resolved
+config and writes only after you confirm a change.

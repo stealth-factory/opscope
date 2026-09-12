@@ -132,35 +132,18 @@ reported for the selected window.
 
 ## How the per-day counts stay exact
 
-Worth recording, because the obvious implementation is wrong.
+Every day on the chart is **GitHub's own count of that day**, not a tally of
+pull requests read back and bucketed. Reading them back would mean paging
+through every one, and a pass that stopped short — which a busy account will
+make it do — draws a busy month as a quiet one while looking entirely
+plausible. A count GitHub computes is exact at any volume, and these are that,
+so the chart can be trusted on a busy account as readily as a slow one.
 
-The natural approach is to fetch PRs and bucket their timestamps. But a GitHub
-search connection returns **at most 100 nodes per page**, so any account merging
-more than 100 PRs in the window loses everything past the hundredth — and since
-the merged query sorted by update time, those hundred were not even the hundred
-most recently merged. The chart looked plausible and undercounted.
+## Loading state
 
-Instead each day is asked for its own count:
-
-```graphql
-m0: search(query:"org:acme is:pr is:merged merged:2026-08-01", type:ISSUE) { issueCount }
-c0: search(query:"org:acme is:pr created:2026-08-01",          type:ISSUE) { issueCount }
-```
-
-`issueCount` is a server-side aggregate — exact at any volume. Aliased searches
-cost **one rate-limit point per request** no matter how many are packed into it,
-so this is close to free; probing found the alias ceiling between 60 and 90, so
-days go out in chunks of 20.
-
-Verified across all nine accounts: 17 merged at 7d and 110 at 14d, counted both
-by summing the days and by the aggregate, identical each way.
-
-## Fetch order and loading state
-
-A cold 90-day window is around fifty requests, while the headline figures are
-one request per account. So **aggregates are fetched first, for every account,
-before any per-day work** — the merge rate and open state are live within
-seconds while the chart is still counting.
+**The headline figures land before the chart does** — the merge rate and open
+state are live within seconds while the chart is still counting, because the
+chart is ninety days of counting and they are not.
 
 The two therefore go stale independently, and each says so rather than showing a
 number it cannot justify:
@@ -189,23 +172,19 @@ a shorter axis on one side would mean the two halves no longer shared a scale.
 
 ## Cost
 
-Per refresh: one request per account for the aggregates, one per 20 days of
-history *not already cached*, and one for the contribution calendar. Each costs
-a single point against the 5000/hour GraphQL budget.
-
 A past day's counts cannot change — a PR merged on the 3rd stays merged on the
-3rd — so days are cached per account and only the trailing two are refetched.
+3rd — so days are held per account and only the trailing two are read again.
 **Widening the window costs only the days it adds; narrowing costs nothing.**
-Steady state across nine accounts is ~18 points per refresh, or ~540/hour at the
-default 120s. A cold 90d window is a one-time ~54.
+Even a cold ninety-day window is a small fraction of an hour's GraphQL
+allowance, and running this beside `github-prs` and `github-actions` does not
+starve any of them.
 
-`r` drops the day cache and re-reads everything, which is the escape hatch for
-the cases immutability does not cover — a repo deleted, transferred or made
+`r` re-reads every day from scratch, which is the escape hatch for the cases a
+past day's immutability does not cover — a repo deleted, transferred or made
 private. `w` has no need to.
 
-Accounts are fetched one at a time rather than batched: results appear as they
-arrive, and one bad account cannot blank the whole board. Batching every account
-into a single request returned HTTP 502 on the complexity limit.
+Accounts are read one at a time rather than together: rows appear as they
+arrive, and one bad account cannot blank the whole board.
 
 ## Keys
 
@@ -242,11 +221,9 @@ reason to open the screen: a queue growing in a single account is invisible
 in a total six others are also feeding.
 
 **OLDEST OPEN** lists the ten longest-waiting PRs, newest information the
-board cannot hold. Everything else on this widget is built from `issueCount`
-aggregates — exact at any volume, one rate-limit point per request rather
-than per alias, and unable to name anything at all. So this one asks for
-nodes, once per account when its screen is first opened, and keeps the
-answer.
+board cannot hold. Every other figure on this widget is a count, and a count
+cannot name anything; this is the one section that names individual pull
+requests, read when the screen is first opened and kept.
 
 `↑` `↓` move through that list and `c` copies the URL of the row under the
 cursor, the same key `pr` uses for the same job. The page scrolls to follow
@@ -275,15 +252,10 @@ Create it at Settings → Developer settings → Personal access tokens → Toke
 | `read:org` | enumerate the orgs you belong to | the account list comes back short, or empty |
 
 Nothing else is needed. In particular the **contribution calendar needs no
-`read:user`**, and no scope changes its total: the same account over the same
-52 weeks reported 6024 contributions through a token with `user` and through
-one without it. Work in private repositories is counted either way.
+`read:user`**, and no scope changes its total — work in private repositories is
+counted either way, so the calendar is the whole year's work however the token
+was made.
 
-(GraphQL's `restrictedContributionsCount` is tempting to read as "how many were
-private", and it is not — it counts contributions whose *details* the token
-cannot see, so it moved from 4722 to 2 between those two tokens while the total
-did not budge. It measures the token, not the work, so this widget does not
-show it.)
 `repo` is coarse (it grants write as well as read), but GitHub offers no
 read-only equivalent for classic tokens.
 

@@ -42,7 +42,7 @@ builds get a spinner and a running elapsed time.
 
 `Enter`, `i` or `c` opens the selected deployment in full — and this is where a
 failure finally explains itself. The list can only say `Error`; the detail view
-fetches the per-deployment endpoint and shows why:
+asks about the deployment itself and shows why:
 
 ```
  project    ferry-hk
@@ -94,11 +94,10 @@ press were then reliably scrolled off the screen you were pressing them from.
 
 ## The build log
 
-The detail view ends with the deployment's own build output, fetched from
-`/v3/deployments/{id}/events` on the same trip as the rest of the detail.
-`errorMessage` above it says a build failed and names a code; the log says
-which line of somebody's config did it, which is the thing you would
-otherwise open a browser for.
+The detail view ends with the deployment's own build output, which arrives
+with the rest of the detail. The line above it says a build failed and names
+a code; the log says which line of somebody's config did it, which is the
+thing you would otherwise open a browser for.
 
 What the build wrote to **stderr** is drawn in the error colour among the
 stdout lines, because on a failed build that is the one line worth finding
@@ -172,12 +171,9 @@ directly goes dark overnight. Create a token instead.
 file's permissions and says so if it is group- or world-readable; `chmod 600`
 it. The file is git-ignored, and the token is never printed.
 
-`vercel ls --all --format json` returns comparable data, but spawns a Node
-process per refresh — measured at 1433ms for 3 records against 756ms for 100
-over the REST API, since Node startup dominates. Hence the API.
-
-Fetching runs on a background thread, so a slow or failed poll keeps the last
-good data on screen behind an error banner rather than freezing the panel.
+A slow or failed poll keeps the last good data on screen behind an error
+banner rather than freezing the panel or blanking the list — a board that has
+gone quiet and a board nobody could reach are different readings.
 
 ## Configuration
 
@@ -196,7 +192,6 @@ An old `deployments` section is still read if `vercel_deployments` is
 absent.
 
 Empty `teams` discovers every team you can see; empty `projects` shows all.
-Polling every 15s is 4 requests/min per team.
 
 ```sh
 ./target/release/vercel-deployments                    # every project, 15s

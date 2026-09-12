@@ -108,11 +108,11 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 
 ## Throughput graphs
 
-Byte counters are cumulative, so differencing them across polls gives rates.
+The graphs are rates, worked out from Tailscale's own cumulative counters.
 Peers below 64 B/s are treated as keepalive noise and omitted, or the section
-fills with idle machines drawing flat lines. A tailscaled restart zeroes the
-counters, which would read as a large negative rate; those samples clamp to
-zero.
+fills with idle machines drawing flat lines. A `tailscaled` restart starts its
+counters again from nothing, which a rate would read as a large negative
+number, so those samples draw as zero rather than as a dip.
 
 The list and the info view scale differently on purpose: the list shares one
 peak across peers so machines are comparable at a glance, while the info view

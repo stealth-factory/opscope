@@ -42,8 +42,8 @@ already holds.
 
 **Headline** — first the github-ops meta line: how many accounts this look
 covers, when the last poll finished, and remaining/limit on GitHub's REST
-budget (`4840/5000 api`). GraphQL and REST are separate buckets; this
-widget's run fetches spend REST, so that is the number. Then run count and
+budget (`4840/5000 api`) — a separate allowance from the one `github` and
+`github-prs` spend, so this figure answers for this widget. Then run count and
 repo count (how many were asked for runs, including a quiet window), then
 success / failed / running, the same placement as `deployments`' ready /
 error / building. A missing poll stamp is `--`, not a fake now.
@@ -112,11 +112,10 @@ eat every slot.
   for Vercel teams. Naming `github_actions.accounts` instead fixes the set.
 - Repos pushed in the last `pushed_days` that have `.github/workflows`
   files, newest first, capped at `max_repos` *per owner*. Personal and
-  each org keep their own newest sixteen (by default). Discovery pages
-  each account forty repos at a time, newest first, until the page is
-  older than `pushed_days` or it has looked at 200. A look that stops
-  early is named on screen, so the eligible count is never presented as
-  complete when it is not.
+  each org keep their own newest sixteen (by default). Discovery stops at
+  the first repo older than `pushed_days`, and stops anyway at a couple of
+  hundred. A look that stops early is named on screen, so the eligible
+  count is never presented as complete when it is not.
 
 A cap that cuts is named under the headline (`16 of 40 org`), never drawn
 as the set. The 48 in `last 48h` is the window, not a run limit: GitHub is
@@ -171,8 +170,7 @@ that yielded no repos with workflows.
 | `max_repos` | `16` | cap on discovered repos *per owner*. Named on screen when it cuts. |
 | `pushed_days` | `14` | how recently a repo must have been pushed to be considered. |
 
-Discovery pages each account's recently-pushed repos. Runs are REST,
-`GET /repos/{owner}/{repo}/actions/runs`, one request per repo. Jobs are
-REST too, and only for the run you open. GraphQL and REST have separate
-rate-limit buckets, so the run fetches do not compete with `github` and
-`github-prs`, which already spend the GraphQL budget all day.
+Discovery walks each account's recently-pushed repos. A run's jobs are read
+only for the run you open. None of it touches the allowance `github` and
+`github-prs` spend all day, so running all three together starves none of
+them.

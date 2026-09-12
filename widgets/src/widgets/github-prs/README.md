@@ -64,12 +64,12 @@ Open one and it becomes a dashboard:
 
 ## The stats
 
-Four sections above the list. Two are computed from data already fetched and
-cost nothing; the two day charts are the exception and cost one request each,
-which is described below. `t` toggles them, and nothing else does: they used to
-stand down on their own below thirty rows, which looked exactly like a board
-with nothing to say about itself. The pane scrolls instead — the wheel moves
-the stats off the top and gives the list the whole pane.
+Four sections above the list. Two are read off the open pool already on screen;
+the two day charts come from GitHub's own counts instead, which is described
+below. `t` toggles them, and nothing else does: they used to stand down on
+their own below thirty rows, which looked exactly like a board with nothing to
+say about itself. The pane scrolls instead — the wheel moves the stats off the
+top and gives the list the whole pane.
 
 **They describe every open pull request, not the filtered list.** Typing in the
 filter is a search of the board, not a redefinition of it: watching the age
@@ -92,12 +92,11 @@ it is over less than the whole board.
 
 **Opened / day** — how many pull requests were **opened** on each of the last
 30 days, whatever became of them since: merged, closed again or still sitting
-there, they are all counted on the day they arrived. GitHub is asked for it,
-one `created:YYYY-MM-DD` count per day, because the pool behind this board is
-`is:open` throughout and bucketing it by `createdAt` counted only the arrivals
-that are still open — 26 of 677 on the board this was measured against, about
-4%, which drew a busy month as a quiet one. Drafts are counted, as they always
-have been; nothing here filters them.
+there, they are all counted on the day they arrived. It is GitHub's own count
+rather than anything read off the board, because the board is `is:open`
+throughout: counting arrivals from the pool would have counted only the ones
+still open, which is a small fraction of them and draws a busy month as a quiet
+one. Drafts are counted, as they always have been; nothing here filters them.
 
 **Merged / day** — the same 30 days, the same bar height and the same
 `30d ago … today` axis, directly underneath, so the two can be read against
@@ -157,46 +156,22 @@ with a log scale; this chart has not adopted one yet.
 
 Every search on this board is `is:open` throughout, so **nothing merged is ever
 in hand** and an arrival that has since merged is gone from the pool. No amount
-of reading it can produce either row. GitHub is asked instead, as counts rather
-than records: one aliased
-`search(query:"… is:pr is:merged merged:YYYY-MM-DD", type:ISSUE) { issueCount }`
-per day for the merges, plus one for each rolling window, and one
-`is:pr created:YYYY-MM-DD` per day for the arrivals. Measured against the live
-API at HTTP 200, and a whole pass including the account walk cost 15 of 5000
-rate-limit points. Paging the pull requests to count them would
-have been a hundred round trips for two numbers.
-
-**Two requests, not one.** The temptation is to put all sixty-two aliases in
-one round trip, and it was measured: thirty-two merge aliases answer in
-4.0–4.3s, thirty arrival aliases on their own in 4.1–4.4s, and the two
-together in one request take 8.0–8.1s — sitting on the ~10s gateway cliff this
-widget has already spent three issues climbing away from. Split, they cost
-about 15 more rate-limit points a refresh against 5000 an hour, and neither
-can take the other down.
-
-The rolling windows are asked for as full datetimes — `merged:>=2026-09-10T09:00:00Z`
-— which GitHub's search accepts. That was verified before it was relied on: the
-same query at a one-hour cut returns a smaller count than at 24, so the time
-part is read rather than ignored.
-
-**The counts are their own requests on the list's own cadence, and never folded
-into the list's paging.** A count GitHub refuses must not cost the list, which
-has its own hard-won resilience to GitHub's slow spells: the reason lands beside
-the figures rather than in the pane's error line, the last good counts stay on
-screen, and that chart's own caption says the count failed and how old what you
-are looking at is. **Each row answers for itself** — arrivals refused while the
-merges land says so on the OPENED caption and leaves the rest of the board
-exactly as it was, and the other way round. The one thing they share is the day
-list, built once a pass, so the two rows always plot the same thirty days.
+of reading it can produce either row. GitHub is asked for its own counts
+instead, which is why the two day charts can disagree with the list below them:
+they include pull requests that have since merged, and the list cannot.
 
 **A figure that has not arrived is not a figure of zero.** Nothing merged and
 nothing opened in a day are both real and unremarkable readings, so an unfetched
-count draws a shimmer and the word `loading` instead, and an alias GitHub leaves
-out of the answer fails the whole read rather than landing on a zero the chart
-would draw as a quiet day. A day missing from an answer takes the whole series
-with it: the bars shimmer and the caption says `counting`, because one invented
-zero in thirty bars is a claim about the day that may have been the busiest of
-the month.
+count draws a shimmer and the word `loading` instead, and a day missing from an
+answer takes the whole series with it: the bars shimmer and the caption says
+`counting`, because one invented zero in thirty bars is a claim about the day
+that may have been the busiest of the month.
+
+**Each row answers for itself.** A count GitHub refuses never costs the list,
+and never costs the other row: the last good figures stay on screen, that
+chart's own caption says the count failed and how old what you are looking at
+is, and arrivals refused while the merges land leaves the rest of the board
+exactly as it was. The two rows always plot the same thirty days.
 
 Both count over `@mine` — every org you belong to plus your own account, the
 same expansion the list's own scope uses. That is deliberate and it is worth
@@ -224,9 +199,9 @@ search covers all of them. That gives everything in your orgs and your personal
 repos. The other two reach outside those, for work that is yours wherever it
 lives.
 
-Measured on one account: `orgs` finds 50, `authored` 15, and the union is 55 —
-so **five PRs the author filed outside their own organisations** would have been
-missed by scoping alone, and are exactly what the extra searches are for.
+The extra two are what catch **the pull requests you filed, or were assigned,
+outside your own organisations** — work that is yours and that scoping alone
+would have missed.
 
 The earlier default was a single `involves:@me`, which is the widest
 relationship qualifier there is — author, assignee, mentioned, *or commented on
@@ -234,52 +209,25 @@ once*. That is how a pull request in a stranger's repository, commented on 274
 days ago, ended up on the board. It has no scope attached, so nothing confined
 it to code you have a stake in.
 
-`f` cycles which source is shown — `all`, then each by name. It is instant and
-costs no request, because the pooling already recorded the answer.
+`f` cycles which source is shown — `all`, then each by name. It is instant: the
+pooling already knows which sources found each PR.
 
-**Page size is 25 per source, and every source is paged to exhaustion.**
-Three searches of 100 return HTTP 502; three of 50 do not, so more results
-come from more rounds and never from a bigger page. The shipped default is
-25 because a slow spell sheds larger pages first; a gateway 502/503/504
-or a curl timeout asks again at half the size, down to ten. Each source
-carries its own cursor and drops out of the round once GitHub says it has
-no next page.
-Rows are published as each round lands, so the board fills while it works
-rather than staying empty until the last source is done, and the count in
-the header is the count on screen throughout.
+**Every source is paged to exhaustion**, and rows are published as each round
+lands, so the board fills while it works rather than staying empty until the
+last source is done, and the count in the header is the count on screen
+throughout. GitHub's search backend goes through slow spells, and a round it
+refuses is asked again for less; a round it will not serve at all stops the
+paging, and the header then says `of at least` rather than a total, so a short
+board is never mistaken for a quiet one.
 
-**The search carries plain fields only. Everything else arrives in two
-passes afterwards, by node id, fifty at a time.** Both passes exist because
-of what asking inside the search costs, but they are two rather than one
-because the reasons are different and so are the failures.
-
-*Stack and checks* — `stackEntry` and the check rollup — stop being served
-after four pages: page five is a 502, whether it is one query over ten
-owners or one query per owner, and splitting does not help. Without those
-two subqueries the same search pages out in full, 665 of 665 in fourteen
-rounds.
-
-*The trial merge and the diff counts* — `mergeable`, `additions`,
-`deletions`, `changedFiles` — are served at any depth, just slowly: GitHub
-runs a trial merge and totals a diff to answer them, which about doubles
-the request. Measured at 25 per page, three runs each: 2.2–2.8s without
-them, 3.3–9.8s with — and the 9.8 is a slow minute landing on the request
-that cannot fail without ending the pass. By node id the same four fields
-cost 2.3–3.3s per fifty. The wall time is the same; the risk is not.
-
-The two are kept apart because asking for both groups in one node query is
-a 502 as readily as the search was, and because a stack lookup that failed
-should not also cost the conflicting count.
-
-A failed lookup never becomes an answer. The first pass marks the checks
-unknown rather than reporting a state nobody read — a dash is honest, a
-green tick would not be. The second needs no marker: the SIZE column stays
-blank rather than drawing `+0/-0`, the STATE line says how many trial
-merges its conflicting count is over, the reckoning line's *biggest* waits
-for a figure to rank on, and nothing with an unread trial merge is counted
-**ready to merge**. Which is also what the board looks like for the second
-or so between the rows appearing and the figures landing: filling in, not
-claiming.
+**The figures beside each row arrive after the row does**, and a lookup that
+failed never becomes an answer. The checks column shows a dash rather than a
+state nobody read — a green tick would not be honest. The SIZE column stays
+blank rather than drawing `+0/-0`, the STATE line says how many trial merges
+its conflicting count is over, the reckoning line's *biggest* waits for a
+figure to rank on, and nothing with an unread trial merge is counted **ready
+to merge**. Which is also what the board looks like for the second or so
+between the rows appearing and the figures landing: filling in, not claiming.
 
 ## The list
 
@@ -311,8 +259,7 @@ two disagreed by years on the same PR.
 | `,` | open settings |
 | `q` | quit |
 
-Sorting is done locally on the fetched set, so both keys are instant and cost
-no request.
+Sorting is done locally on the fetched set, so both keys are instant.
 
 `/` starts filtering and everything you type goes into the filter — including
 `q`, which is why the other keys stop working until you leave. `↵` keeps the
@@ -346,9 +293,9 @@ placeholder:
 ```
 
 A braille spinner sits on the stage in flight; finished stages get a tick and
-their actual duration. The stages are the real requests — the pull request
-query, then the repository sweep that reconstructs a stack — so a PR whose
-stack GitHub already knows shows `stack, from GitHub` and no second wait.
+their actual duration. The stages are the real work rather than a scripted
+animation, so a PR whose stack GitHub already knows shows `stack, from GitHub`
+and no second wait at all.
 
 This replaced a block of shimmering bars. A shimmer says "wait" and nothing
 else; a trace says what is being waited on, which is both more useful and more
@@ -376,16 +323,14 @@ view.
 When the PR belongs to a stack, the dashboard grows a stack map and states the
 merge order. There are two sources, and the heading says which was used.
 
-**`from GitHub`** — the API's own `PullRequestStack`, populated by
-[`gh stack`](https://github.com/github/gh-stack). `PullRequestStackEntry.position`
-is documented as "1 is the closest to the base", so the order is authoritative
-and needs no reconstruction. A native stack is a *line*, so it draws flat with
-its position numbers; eleven levels of indentation would be unreadable and
-would imply a branching that is not there.
+**`from GitHub`** — GitHub's own stack, as recorded by
+[`gh stack`](https://github.com/github/gh-stack). The order is GitHub's rather
+than anything worked out here, so it is authoritative. A native stack is a
+*line*, so it draws flat with its position numbers; eleven levels of
+indentation would be unreadable and would imply a branching that is not there.
 
 **`inferred from branches`** — for stacks made any other way. A PR whose base
-branch is another open PR's head branch is sitting on top of it. This costs one
-extra request, scoped to the PR's own repository.
+branch is another open PR's head branch is sitting on top of it.
 
 An inferred stack is a **tree**, not a line — one PR can have several branched
 off it — so it draws with real connectors:
@@ -417,16 +362,10 @@ by accident.
 
 ## Cost
 
-Each paging round is one search, then two enrichment passes over that
-round's new rows, fifty ids at a time. Opening a PR costs one detail
-query. Reconstructing an inferred stack pages the repository, a hundred
-open pull requests at a time.
-
-The round costs what it always did, around eight seconds per fifty pull
-requests. What changed is where: the search is 2.2–2.8s of it instead of
-3.3–9.8s, and the two passes, whose failure is non-fatal by design, carry
-the rest. No single request sits near GitHub's ten-second gateway budget,
-which is the one that used to come back as a raw 502 page.
+The header carries what is left of GitHub's GraphQL allowance for the hour —
+`4567/5000 api`. A full pass over a board this size spends a small fraction of
+it, and running this widget beside `github` and `github-actions` does not
+starve any of them.
 
 Detail is fetched only on demand — 33 PRs are not worth pre-fetching for the
 one you open — so the view paints a loading shimmer and fills in.
@@ -460,14 +399,9 @@ widget quietly ran on somebody else's credential.
 `limit` is the page size a search asks GitHub for, not a cap on what the
 pane shows — paging runs until every source is exhausted either way. It
 matters because GitHub's search backend goes through slow spells and sheds
-the heaviest requests first: measured during one, every size from 25 up
-returned 502 at about 10.7s while 20 and below answered in three, and an
-hour later 50 answered in five with nothing changed at this end. So a round
-that is refused — a gateway 502, 503 or 504, or curl running out of its
-45 seconds — asks again at half the size, down to a floor of ten. A round
-still refused at the floor is asked once more after a three-second pause,
-because a slow spell is usually one bad request rather than a bad minute;
-only then does the pass stop paging and report the list as a floor.
+the heaviest requests first, so a round GitHub refuses is asked again for
+less, down to a floor; only when it is refused there too does the pass stop
+paging and report the list as a floor.
 
 None of that is an error, and it is not drawn as one. A pass that fell back
 or stopped short leaves a dim line under the count — `GitHub is slow ·

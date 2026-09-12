@@ -88,15 +88,13 @@ resets to survive a 58-column pane.
 An agent that publishes no quota is **named at the bottom under its own heading**,
 with the reason the live bar is missing — not silently dropped, and not dumped
 into a `No quota published by: …` list. The agent's own tab can still be full:
-those numbers are **local spend** (stats cache, tracking database, session
-store, transcripts). `[+]` only ranks a live (or last-session) quota lane from
-the vendor, so a busy tab and an empty summary row can both be true. Claude
-needs a signed-in token and Anthropic's usage endpoint; Cursor needs
-`~/.config/cursor/auth.json` and `GetCurrentPeriodUsage`; Copilot needs a token
-in `~/.copilot/config.json`; Grok needs a billing reading in
-`~/.grok/logs/unified.jsonl` (`creditUsagePercent` or `onDemandCap`) or
-`agent_usage.grok_ping` to poll x.ai. Each of those
-is a different missing step, so each quiet agent says which one it is.
+those numbers are **local spend**, read from what the agent left on this
+machine. `[+]` only ranks a live (or last-session) quota lane from the vendor,
+so a busy tab and an empty summary row can both be true. Each of the agents
+wants something different before it can publish one — a signed-in credential,
+a billing reading in its own log, or `agent_usage.grok_ping` turned on — so
+each quiet agent says which step is the missing one rather than leaving the
+row blank.
 
 A lane whose reading came from a cache rather than a live call says `cached`
 instead of a countdown. Claude's fallback can describe windows that have since
@@ -150,30 +148,21 @@ The **quota block** answers a different question from everything below it —
 what is *left*, account-wide, rather than what this machine spent — and it is
 the same set of windows Claude Code's own `/usage` shows.
 
-```
-GET https://api.anthropic.com/api/oauth/usage
-Authorization: Bearer <accessToken from ~/.claude/.credentials.json>
-```
+The lanes are the ones Anthropic itself marks as worth showing, and each
+arrives already named — so a model-scoped weekly limit appears as **Fable**
+without this widget knowing that name, and any other scope would appear the
+same way. The limit that will stop you first is the lane drawn brightly, and a
+severity other than normal is printed as a word beside the reset, because a
+colour alone cannot say *why* a bar is red.
 
-The lanes come from the response's **`limits`** array, not from the top-level
-keys beside it. That array is the server's own curated list; the rest of the
-response carries a dozen mostly-null pools with names like `nimbus_quill` and
-`iguana_necktie` that `/usage` does not render either. Each entry names itself
-— `kind`, `group`, `percent`, `severity`, `resets_at` and a `scope` — so a
-model-scoped weekly limit arrives labelled **Fable** without this code knowing
-that name, and an Opus-scoped one would appear the same way.
-
-`is_active` marks the limit that will stop you first, and that lane is the one
-drawn brightly. A `severity` other than `normal` is printed as a word beside
-the reset, because a colour alone cannot say *why* a bar is red.
-
-**The fallback is where the care went.** Claude Code caches the same structure
-in `~/.claude.json` under `cachedUsageUtilization`, with a `fetchedAtMs`. It is
-used when the token has expired or the call fails — but it is labelled `cached
-10h ago`, and any window whose reset has already gone by says **`already
-reset`** instead of counting down. A stale five-hour window otherwise describes
-a period that has ended, which is precisely the kind of number this repo exists
-not to draw. Measured here, the cache read 11% while the live call read 22%.
+**The fallback is where the care went.** Claude Code keeps its own copy of the
+same reading, and that is what the tab falls back to when the credential has
+expired or the call fails — but it is labelled `cached 10h ago`, and any window
+whose reset has already gone by says **`already reset`** instead of counting
+down. A stale five-hour window otherwise describes a period that has ended,
+which is precisely the kind of number this repo exists not to draw. A cached
+reading can sit well under the live one, which is the whole reason it says it
+is cached rather than presenting it as what is left now.
 
 The `extra_usage` line is the monthly credit allowance and its currency, shown
 only when it is enabled.
@@ -182,76 +171,49 @@ only when it is enabled.
 
 The quota is the same three lanes `cursor-agent`'s own in-session Usage view
 shows — total, cursor models, other models — plus what the plan includes,
-what has been spent beyond it, and the billing cycle reset. It is **not** the documented
-`cursor.com/api/usage-summary`: that one wants a browser cookie and returns
-401 to everything this machine holds. The CLI instead speaks Connect to
-
-```
-POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
-Authorization: Bearer <accessToken from ~/.config/cursor/auth.json>
-```
-
-which is the credential the widget reuses. That endpoint is **undocumented**,
-discovered by reading the CLI bundle, and versioned only by it — so a failure
-used to be silent and the tab fell back to authorship alone, leaving `[+]` to
-list Cursor in a roll-call. The reason now rides with the refusal: no token,
-or the endpoint did not answer, on both the tab and `[+]`. A missing token is
-a local fact and is held like a reading; a silent endpoint stays a refusal,
-so the backoff that stops a rate limit from being poked every two minutes
-still applies, and the sentence is written into that slot afterwards.
+what has been spent beyond it, and the billing cycle reset. It reads them the
+same way the CLI does, on the credential the CLI has already signed in with —
+which is **not a documented interface**, and can therefore stop working on a
+day nothing here changed. So a failure says which failure it was, on the tab
+and on `[+]`: no credential to read, or Cursor did not answer. It used to go
+quiet and fall back to authorship alone, which read as a Cursor that had
+simply not been used.
 
 **The percentages and the dollars have different denominators**, which is
-Cursor's own doing and worth stating. The three lanes are the server's
-`totalPercentUsed` / `autoPercentUsed` / `apiPercentUsed` verbatim. Under them
-sit two dollar lines, each against a denominator of its own:
+Cursor's own doing and worth stating. The three lanes are Cursor's own
+percentages, unaltered. Under them sit two dollar lines, each against a
+denominator of its own:
 
 ```
   spend        $400.00 of $400.00 included
   extra usage   $9.64 of $50.00 limit · $40.36 left · resets 12 Sep
 ```
 
-The first is `planUsage.includedSpend` of `planUsage.limit`. It used to read
-`totalSpend` against the same limit, and on this account that said **$1794.80
-of $400.00** — a figure that cannot be true. `totalSpend` carries `bonusSpend`
-beside it, which is spend Cursor granted *past* the included amount and is not
-against the limit at all; the pair that is against the limit is the included
-spend. `remaining` joins the line only when the server sends one, which it
-does not when `remainingBonus` is false.
+The spend line is **the part that counts against your plan**, and only that.
+Cursor also reports spend it granted you past the included amount, which is
+not against the limit at all — putting the two together produced *$1794.80 of
+$400.00*, a sentence that cannot be true. What is left joins the line only when
+Cursor says what is left.
 
-The lanes match what `cursor-agent` itself draws: its bundle computes each bar
-as `percentage !== undefined ? percentage : used/limit*100`, and since the
-server sends every percentage, the fallback never fires. Nothing is rewritten
-here, and the dollar lines stay dollars rather than becoming two more bars, so
-51% and 19% are never put on one scale. The response also carries a
-`displayMessage` — *"You've used 91% of your included usage"* — which agrees
-with no figure the tab draws (`totalPercentUsed` said 51.3% in the same
-response, the included spend 100% of the limit), so it is not shown: a
-sentence that contradicts the numbers beside it is worse than no sentence.
+Nothing is rewritten here: the lanes are the bars `cursor-agent` itself draws,
+and the dollar lines stay dollars rather than becoming two more bars, so a
+percentage and a spend are never put on one scale. Cursor sends a summary
+sentence too — *"You've used 91% of your included usage"* — which agrees with
+no figure beside it, so it is not shown: a sentence that contradicts the
+numbers next to it is worse than no sentence.
 
 ### Extra usage (the spend limit)
 
 Everything past the plan's included amount is **on-demand spend**, billed, and
-capped by a monthly spend limit the account sets on cursor.com. CodexBar shows
-it as *Extra usage → Monthly: $12.34 / $100.00*; the response the widget
-already fetched carried it all along in a block it never read:
+capped by a monthly spend limit the account sets on cursor.com.
 
-```
-"spendLimitUsage": {
-  "totalSpend": 964, "individualLimit": 5000,
-  "individualUsed": 964, "individualRemaining": 4036,
-  "limitType": "user"
-}
-```
-
-Cents, like everything else on this service. A user cap (`limitType: "user"`)
-reads `individualUsed` against `individualLimit`; a shared team budget reads
-`totalSpend` against the same limit and is labelled `team pool`, since that is
-the population the ceiling belongs to. Each figure is the other's fallback
-when proto3 omits a field at zero. The remainder is worked out from the pair
-rather than read from `individualRemaining`, because a cap lowered below what
-is already spent makes that field negative and *"-$9.00 left"* is arithmetic
-where a reader needs a fact. `resets` is `billingCycleEnd`, the date the
-cycle already carries.
+A personal cap reads **your own** spend against your own limit. A shared team
+budget reads the pool's spend against the same limit and is labelled
+`team pool`, because that is the population the ceiling belongs to — the same
+percentage means a different thing in each case. What is left is worked out
+from the pair rather than taken as given, since a cap lowered below what is
+already spent would otherwise read *"-$9.00 left"*, which is arithmetic where
+a reader needs a fact.
 
 On `[+]` it becomes a lane labelled `extra $50`, on the plan's own cycle —
 extra usage resets when the cycle does — ranked with everything else. The
@@ -276,95 +238,63 @@ as one of the other three.
 | disabled, spent earlier in the cycle | `$10.00 · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
 | block absent, or a shape not recognised | `extra usage  not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
 
-Only the **fixed** state has been measured on a real account. Proto3 omits a
-field sitting at its default, so a cap that is switched off and a cap that was
-never set both arrive with no `individualLimit` — which is why
-`DashboardService/GetHardLimit` is fetched beside the usage call. It answered
-`{"hardLimit": 50}` here, the same $50 the usage block states in cents, and
-cursor.com's own version of the call carries `noUsageBasedAllowed` and
-`hardLimitPerUser` beside it. `noUsageBasedAllowed` is the only field that can
-say extra usage is *forbidden* rather than merely uncapped, so it is what the
-disabled state rests on. Both assumptions are named in the test that covers
-them, to be replaced with a captured response when the setting is toggled.
-Best-effort like the Bot allowance: the cap in the usage block answers the
-state this account is actually in, so a refusal from `GetHardLimit` leaves
-every other line exactly as it was.
+**Only the fixed state has been seen on a real account.** A cap switched off
+and a cap never set look alike from outside, so the disabled reading is the
+one to trust least; the rest is drawn from what Cursor actually sends, and a
+shape not recognised says `not reported` rather than being drawn as one of the
+others. Asking about the cap is best-effort: a refusal there leaves every
+other line exactly as it was.
 
-`GetAggregatedUsageEvents` on the same service supplies a **spend** section:
-per-model input, output and cache tokens with Cursor's own `totalCents` — not
-an estimate — over the last 30 days. It is what the plan percentages are made
-of, and answers which model actually spent the money.
+Cursor supplies a **spend** section too: per-model input, output and cache
+tokens with Cursor's own money figure — not an estimate — over the last 30
+days. It is what the plan percentages are made of, and answers which model
+actually spent the money.
 
 `ai-tracking/ai-code-tracking.db` supplies the authorship half: how many edits
 the agent made, across how many conversations, and how many lines in scored
 commits came from the agent rather than by hand. A different question from
 cost, and labelled as such.
 
-**Codex** — real, and it took a second look to find. `~/.codex/logs_2.sqlite`
-is diagnostics with no counters, which is where the first search stopped. The
-answer is in `~/.codex/sessions/**/*.jsonl`: every rollout carries
-`event_msg / token_count` events with both a running total and the last turn's
-usage, timestamped.
+**Codex** — real, and it took a second look to find. The counters are in the
+session transcripts under `~/.codex/sessions/`, which carry a running token
+total and the last turn's usage, timestamped.
 
-That gives totals *and* an **output rate** — output tokens divided by the
-wall-clock gap between turn boundaries. On this machine: 659.9M input, 1.3M
-output across 28 sessions, and a median of 30 tok/s in the newest one.
+That gives totals *and* an **output rate** — output tokens over the wall-clock
+gap between turn boundaries, which is why the figure is a rate for this machine
+rather than a benchmark of the model.
 
-The running total is repeated on every event, so only the tail of each rollout
-is read — some are 30MB and re-reading them every refresh to learn a number
-printed at the end would be daft.
+**Copilot** — it *does* keep usage locally, in `~/.copilot/`: per-turn input,
+output, cache and reasoning tokens, AI credits, and — uniquely among these
+agents — its own timings. It is the best-shaped usage data of the lot, and an
+empty tab here means no turns have been recorded rather than a reading that
+failed.
 
-**Copilot** — it *does* keep usage locally, in `~/.copilot/session-store.db`.
-The `assistant_usage_events` table carries per-turn input, output, cache and
-reasoning tokens, AI credits as `total_nano_aiu`, a `request_multiplier`, and —
-uniquely among these agents — `duration_ms`, `time_to_first_token_ms` and
-`inter_token_latency_ms`. It is the best-shaped usage data of the lot.
+**The quota half does not depend on it.** Copilot's remaining allowance is not
+in the local store at all; it is on the account, read on the credential the CLI
+signed in with. One machine can be signed in to github.com and an Enterprise
+host at once, and the right one is picked for the account on screen.
 
-It sat **empty** here for a long time — two sessions, zero turns — and now it
-is not: two turns, 60.8k in, 701 out, 9.211 AI units, and a measured 4,370 ms
-to first token. It really is the best-shaped data of the lot.
-
-**The quota half does not depend on it**, which is the point that took a second
-look. Copilot's remaining allowance is not in the session store at all; it is on
-the account, and the CLI reads it from
-
-```
-GET https://api.github.com/copilot_internal/user
-Authorization: token <copilotTokens from ~/.copilot/config.json>
-```
-
-That file is JSON with `//` comments at the top, so it has to be stripped
-before parsing, and the tokens are keyed by host and login because one machine
-can be signed in to github.com and an Enterprise host at once.
-
-The response carries `copilot_plan`, `quota_reset_date` and a
-`quota_snapshots` object — one entry per pool, each naming itself. On this
-account: **premium interactions 7,103 of 10,000 used**, with chat and
-completions `unlimited`.
+Each pool names itself, so the lanes are whatever the account has — premium
+interactions against a monthly figure, with chat and completions `unlimited`.
 
 An unlimited pool gets **no bar**. It has no denominator, and drawing one as an
 empty gauge would invent the limit the field explicitly denies. The pools are
 rendered from the list, so a new one appears without an edit, and the metered
 ones sort first — an unlimited pool is not news.
 
-The API reports `percent_remaining`; the pane shows what is *spent*, like every
-other tab, so that red always means the same thing across the wall.
+GitHub reports what is *remaining*; the pane shows what is **spent**, like
+every other tab, so red always means the same thing across the wall.
 
 **The window is derived, and only when it is safe to.** Copilot says when the
-quota resets and never how long the window is. `quota_reset_date_utc` lands on
-`2026-09-01T00:00:00.000Z` — midnight UTC on the first of a month — and that
-shape is what a calendar-month cycle looks like, so the span is worked back a
-month and shown as `window 1 Aug → 1 Sep · monthly`. A reset that does *not*
-land on a month boundary gets no window line at all, because then the cadence
-genuinely is not known.
+quota resets and never how long the window is. A reset landing on midnight UTC
+on the first of a month is what a calendar-month cycle looks like, so the span
+is worked back a month and shown as `window 1 Aug → 1 Sep · monthly`. A reset
+that does *not* land on a month boundary gets **no window line at all**,
+because then the cadence genuinely is not known and a guessed one would be
+read as a fact.
 
-Use `quota_reset_date_utc`, never the bare `quota_reset_date`: a date with no
-zone parses as local midnight, and the countdown then drifts by the machine's
-UTC offset. This server runs UTC, so that bug would have sat here unseen.
-
-Each pool also carries its own `quota_reset_at`. It is `0` on this account —
-every pool is on the account-wide cycle — but when one is set and differs, that
-lane prints its own reset instead of inheriting the header's.
+A pool with a reset of its own prints it rather than inheriting the one in the
+heading.
 
 **Antigravity** — a subscription, and no usage at all.
 
@@ -374,31 +304,9 @@ conversation is its own SQLite file whose `steps` table records what the agent
 did, so the tab reports conversations, agent steps and prompts — real work
 done, but not cost.
 
-Its quota never lands on disk, and getting it took a wrong turn worth
-recording. The log shows `quota_manager.go` refreshing one on a loop into
-memory, noting only that it happened. The binary — `~/.local/bin/agy`, 206MB
-of Go — carries a plausible-looking remote method:
-
-```
-POST https://businessaicode.googleapis.com/v1beta/{parent=projects/*/locations/*}:fetchQuotaStatus
-```
-
-That is a dead end. Called with the CLI's own token it answers **404 from a
-Google frontend**, and there is no `agy usage` subcommand to fall back on —
-the TUI's display is a slash command.
-
-**The quota was never a remote call to make.** The process already holding it
-serves an RPC on loopback, which is how CodexBar reads it:
-
-```
-POST http://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
-```
-
-The port is found by matching the running process — `agy`, the Antigravity
-app, or a `language_server` — and reading its listening sockets straight out of
-`/proc`. No `lsof`, no scanning a range. Note the **`http`**: the server's TLS
-listener answers with a wrong-version error, so plain HTTP is not a downgrade
-here, it is the protocol, and the request never leaves the machine.
+Its quota never lands on disk. The process that already holds it answers on
+loopback, so that is where the widget asks, and **the request never leaves the
+machine**.
 
 ```
  ── QUOTA ── live · account-wide, from the local language server
@@ -410,7 +318,7 @@ here, it is the protocol, and the request never leaves the machine.
    5h     ░░░░░░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
 ```
 
-Shown as **spent**, not the `remainingFraction` the RPC returns, so red means
+Shown as **spent**, where the source reports what is remaining, so red means
 the same thing here as on every other tab — and with the same pace column.
 Every plan reports every family it covers, so a Gemini-only account still gets
 a Claude/GPT pair at 0%; those are real limits and are left in.
@@ -418,59 +326,33 @@ a Claude/GPT pair at 0%; those are real limits and are left in.
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
 
-That was written here as *"the one agent with no account-wide quota endpoint
-at all"*, and it was wrong. Google serves the same summary the language
-server does:
-
-```
-POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
-```
-
-Same bearer token the tier already uses, and the reason it looked absent is
-the body: `loadCodeAssist` wants `{"metadata":{"pluginType":"GEMINI"}}`, and
-sending that here is a 400 naming `metadata` as an unknown field — which
-reads exactly like an endpoint that is not there. It takes `{}`. What comes
-back is the same shape group for group and bucket for bucket, so it needs no
-parser of its own.
-
-The local server is still preferred: it is the app's own answer and moves as
-the app is used, where Google's is a record. The remote one is asked only
-when there is no server to ask, held for an hour rather than two minutes,
-and the heading says which was read:
+Google will answer for the same quota when the app is closed, on the same
+account. The app's own answer is still preferred — it moves as the app is
+used, where Google's is a record — so Google is asked only when there is
+nothing running to ask, and **the heading says which was read**:
 
 ```
  ── QUOTA ── live · account-wide, from Google - the app is not running
 ```
 
-So the quota survives the app being closed — for as long as the token lasts,
-which is an hour, because the refresh token beside it is deliberately left
-alone. Running `agy` does not extend that: it refreshes in memory and writes
-nothing back, verified by backdating the `expiry` field, running `agy models`
-against it, and finding the file byte-identical afterwards, mtime included.
+So the quota survives the app being closed, for about an hour after it last
+ran — the credential Antigravity leaves behind lasts that long, and this widget
+deliberately does not renew it on Antigravity's behalf.
 
 **Three sources, cheapest first**, each of them optional:
 
-| order | source | costs | works when |
-|---|---|---|---|
-| 1 | a language server already running — the app's, or an `agy` you started | a socket read | Antigravity is open |
-| 2 | Google, `retrieveUserQuotaSummary` | one request | within an hour of the last run |
-| 3 | `agy`, started by the widget (`antigravity_start`) | a process, a few seconds | whenever the CLI is signed in |
+| order | source | works when |
+|---|---|---|
+| 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open |
+| 2 | Google | within an hour of the last run |
+| 3 | `agy`, started by the widget (`antigravity_start`) | whenever the CLI is signed in |
 
 Being last is not being disfavoured — it is being expensive. The third is the
 only one that always works, and the only one that runs another program.
 
-**The pty is not decoration.** Started with its input on `/dev/null` the CLI
-opens ports that answer nothing for as long as you wait; given a pseudo-terminal
-it serves the quota within seconds. Both were measured before this was written.
-The port that answers also belonged to a *child* of the process launched, so
-the search covers descendants — scoped to the pid alone it finds two ports that
-answer nothing and gives up.
-
-Nothing outlives the fetch: the child is killed by the pid `forkpty` returned
-and then reaped, never matched by name, so a CLI you started yourself can
-never be shut down by this — and it would have been found by source 1 long
-before source 3 ran. Verified by counting `agy` processes before and after a
-frame that used it: zero either side.
+Nothing that runs for the widget outlives the fetch, and **an `agy` you started
+yourself is never shut down by this** — it would have answered as source 1
+long before source 3 was reached.
 
 **Every step that can fail says which step it was**, on the tab and on `[+]`,
 because "no quota" covered four situations wanting different things from the
@@ -485,11 +367,10 @@ reader:
  no quota either: Google refused the Antigravity token: …
 ```
 
-The first three are decided before anything leaves the machine, and before
-the cache, so the sentence survives a held failure. A reason captured inside
-the fetch closure does not: `cached` holds a refusal without re-running it,
-so the row reverted to a generic "Google did not answer" about a token that
-had expired an hour earlier and was never sent.
+The first three are decided before anything leaves the machine, so the
+sentence keeps saying which it was even while the refusal is being held rather
+than retried — otherwise a held failure degrades into "Google did not answer"
+about a credential that expired an hour ago and was never sent.
 
 When neither source answers, `[+]` names the agent with the reason rather
 than sending the reader to open an app that would not have helped:
@@ -513,61 +394,30 @@ so the roll-call lists only a name we still have nothing to say about —
 vanishing entirely when they all have. An agent that is neither detected nor
 listed in `agent_usage.agents` is not on this screen at all.
 
-The tier comes from the endpoint the CLI authenticates against:
+The tier is read on the same credential, which lasts about an hour, so the
+section is simply **absent** between refreshes rather than stale.
 
-```
-POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist
-Authorization: Bearer <token.access_token from antigravity-oauth-token>
-```
+**Two plans are shown, not one**, and they can disagree: the Code Assist tier
+this project sits on, and the Google AI plan the account holds. Here that reads
+`free-tier` against `Google AI Ultra`, and neither is wrong — the paid Code
+Assist tier is a Cloud licensing arrangement, wanting Cloud terms accepted and
+your own project nominated, while the limits you actually run against come from
+the consumer subscription. Picking one as "the" plan would have hidden whichever
+question the reader was asking.
 
-Two things about that call are worth writing down. Its access token expires
-**hourly** — beside a refresh token that is deliberately left alone, as
-Claude's is — so the section is simply absent between refreshes rather than
-stale.
+Google's own upgrade pitch is left as it arrives, inconsistencies and all: it
+offers this account more requests per day beside a line saying it is already
+on the best plan available.
 
-And the response is **gated on the client string**. Sent as plain
-`opscope` it returns no tier at all, just an `ineligibleTiers` entry
-reading `UNSUPPORTED_CLIENT`. Sent as `opscope (antigravity-cli)` it
-answers properly — the parenthesised form names the client being spoken for
-while still saying who is calling, which is the honest version of what would
-otherwise be a plain impersonation.
+**Grok** — real too, and the third of these I first wrote off. The session
+transcripts under `~/.grok/` carry a running token total, timestamped, so each
+day on the calendar is **the tokens spent that day** rather than a whole
+session credited to whichever day it was read on. That drives a totals line and
+a calendar in a blue ramp.
 
-What it returns is worth reading carefully: `currentTier` is `free-tier`
-while `paidTier` is `Google AI Ultra`. Those are different questions — which
-Code Assist tier this project sits on, and which Google AI plan the account
-holds — and they disagree here, so **both are shown** rather than one being
-picked as "the" plan. The explanation lives here rather than on the pane: it
-is a paragraph, and a paragraph that never changes does not earn four lines on
-every frame.
-
-`free-tier` is not a downgrade, and the response says so itself. `allowedTiers`
-offers exactly two: `free-tier`, marked `isDefault`, and `standard-tier`, which
-carries `usesGcpTos: true` and `userDefinedCloudaicompanionProject: true`. The
-paid Code Assist tier is **GCP licensing** — it wants Cloud terms accepted and
-your own Cloud project nominated. This account is a consumer sign-in
-(`auth: consumer`, `gcpManaged: false`) on an auto-provisioned project, so it
-sits on the default, while the limits actually come from the consumer Ultra
-subscription in `paidTier`.
-
-One inconsistency is Google's rather than this pane's, and is left as it
-arrives: `currentTier.upgradeSubscriptionText` still advertises *"Upgrade to
-get 1,500 model requests per day"* with `upgradeSubscriptionType:
-GOOGLE_ONE_HELIUM`, pitching a Google One upgrade to an account whose
-`paidTier` already reads *"You are subscribed to the best Google AI plan."*
-
-**Grok** — real too, and the third of these I first wrote off. `~/.grok/sessions/**/updates.jsonl`
-carries a running `totalTokens` on each session event alongside an
-`agentTimestampMs`. Differencing consecutive events and bucketing by the
-event's own timestamp gives per-day figures; taking the running total alone
-would credit a whole session to whichever day it was read on. That drives a
-totals line and a calendar in a blue ramp.
-
-The weekly quota is real but is **not** in the session transcripts: it arrives
-on the client log at `~/.grok/logs/unified.jsonl`, as a `.ctx.config` carrying
-`creditUsagePercent` and a `currentPeriod` of `USAGE_PERIOD_TYPE_WEEKLY`.
-Looking only at `sessions/` is what made this tab say "no quota" for a while.
-`grok du` reports **disk** use — the name is a coincidence worth not falling
-for.
+The weekly quota is real but is not in the transcripts — it arrives on Grok's
+own client log, which is why the tab said "no quota" for a while. (`grok du`
+reports **disk** use; the name is a coincidence worth not falling for.)
 
 ## Pace: how far ahead of the clock you are
 
@@ -585,10 +435,7 @@ clock and will reach the reset with room to spare. Negative means this runs out
 before the window does — the Copilot line above is at −22%, which is the pane
 saying those premium interactions will not last the month at this rate.
 
-This is the quantity CodexBar calls **"in reserve"**, and it was worked out
-from its own numbers before its docs were read: 98% left with 11% in reserve at
-26d 23h remaining implies 13% of a 31-day cycle elapsed against 2% spent, and
-all three Cursor lanes reproduced to the percentage point.
+This is the quantity CodexBar calls **"in reserve"**.
 
 **The sign is deliberately the opposite of CodexBar's separate pace token**,
 where `+X%` means burning *too fast*. The cushion reading is the one that
@@ -596,10 +443,9 @@ matches the phrase "in reserve", so the column is labelled in the header rather
 than left to be guessed at.
 
 Nothing is fetched for it — the window length and the reset are already on
-screen — so it costs nothing on any tab. It is hidden for the first **3%** of a
-window, because ten minutes into a week every number looks like a catastrophe
-or a triumph. CodexBar gates it the same way, for the same reason: Codex's
-Spark lane shows no pace at 0.6% elapsed, and that is correct.
+screen. It is hidden for the first **3%** of a window, because ten minutes into
+a week every number looks like a catastrophe or a triumph, and a blank there
+means *too early to say* rather than *on track*.
 
 ## METERED: today, and the last thirty days
 
@@ -641,47 +487,21 @@ carries `cache_write` and the older families still do not. xAI publishes none
 at all, and Google bills context caching by storage — per million tokens per
 *hour* — which is not a per-request write and is deliberately not carried.
 
-Four pricing exceptions are worth knowing about. Fable 5.1 and Mythos 5.1 read cache at
-$0.25, a quarter of the $1 that Fable 5 and Mythos 5 charge and a smaller
-multiplier than every other Anthropic model. Each 5.1 id extends the
-5 id — so both need rows of their own, or prefix matching hands them the
-older reads at four times the price, which is what happened to Fable 5.1
-until its row went in. And
-`gpt-5.6-sol` is a promotional price, dated by OpenAI as running at least
-through 21 Nov 2026; it is carried because it is the only price published and
-the one the meter bills at.
-
-`gpt-6-astra` is the third. It carries OpenAI's short-context standard rates
-— 10 / 50 / 1 / 12.50 — and its long-context tier is 20 / 75 / 2 / 25, which
-this table cannot express for the reason given above. Two details are worth
-knowing: output rises only 1.5x above the line rather than the usual double,
-and that line is **272K** input tokens, named on the model page. There
-is also a trap in the id — `gpt-6-astra` is a substring of a hypothetical
-`gpt-6-astra-mini`, which would therefore inherit Astra's rate and price a
-cheaper model several times high. A test pins that inheritance as it behaves
-today; it fails when a mini row is added to the catalogue, not when OpenAI
-ships one.
-
-`gemini-3.8-flash` is the fourth. Its numbers are identical to
-`gemini-3.7-flash` — 0.75 / 3.75 / 0.075 — which makes the row look redundant
-and is precisely why it is not: matching is by substring, and no existing key
-is a substring of `gemini-3.8-flash`, so without its own line the model has no
-price and its tokens cost nothing. That is the 5.1 fault turned around. An
-inherited rate overstates and gets queried; an absent one understates the whole
-bill while every row on screen looks ordinary. Its price is also
-**introductory** — Google dates the end on the page, and input, output and
-cached input all double on 1 January 2027. The successor figures are in
-`wiki/model-prices.md`, so the row moves on the day rather than being
+A few prices are worth knowing about because they are not what a neighbouring
+model charges. Fable 5.1 and Mythos 5.1 read cache at a quarter of what Fable 5
+and Mythos 5 charge, a smaller multiplier than every other Anthropic model.
+`gpt-5.6-sol` is a **promotional** price, dated by OpenAI as running at least
+through 21 Nov 2026, and is carried because it is the only price published and
+the one the meter bills at. `gemini-3.8-flash` is **introductory**: input,
+output and cached input all double on 1 January 2027, and the successor figures
+are already written down, so the row moves on the day rather than being
 rediscovered after a month of half-price totals.
 
-Fifteen models are listed as having **no published price at all** — among
-them `gpt-5.3-codex-spark`, which is explicitly not on the API
-(`supported_in_api: false` in Codex's own model cache), `codex-auto-review`,
-`gemini-3.8-flash-lite` (never published; 3.8 ships as one model, but the
-new `gemini-3.8-flash` key is a substring of that id), and the retired and
-shut-down models. Without that, prefix matching would hand Spark
-`gpt-5.3-codex`'s rate — and would meter the unpublished Lite variant at
-Flash prices. They report as unpriced instead, and are named.
+Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
+which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
+published; and the retired and shut-down models. They report as unpriced and
+are **named** rather than quietly inheriting the family rate, because a
+plausible number nobody published is worse than an admitted gap.
 
 What the table cannot express is **long context**. Above the threshold — 272k
 for most OpenAI models, 200k for the 5.6 family, Grok and the Gemini Pros —
@@ -778,97 +598,57 @@ the CLI leaves nothing on this disk. On one account the dashboard read
 `$3,400.37` where this pane read `$225.33`; both are correct, and they are
 answers to different questions.
 
-**That account-wide breakdown is not fetchable with a token**, and reading
-CodexBar's source settles why rather than leaving it a guess. It gets those
-numbers by **being a browser**: `OpenAIDashboardBrowserCookieImporter` lifts
-session cookies out of WebView storage, `OpenAIDashboardFetcher` loads
-`chatgpt.com/codex/cloud/settings/analytics#usage` in a hidden web view, and
-`OpenAISubscriptionMetadata` injects JavaScript to intercept the page's own
-`fetch('/backend-api/subscriptions')` — falling back to scraping the rendered
-table when the API response is not enough.
-
-A terminal widget cannot follow it there. Reaching into a browser's cookie
-store is a different kind of program from one that reads an agent's own files,
-and this repo is not going to become that quietly.
-
-Probing the same endpoints with the CLI's OAuth token gives three different
-answers, and the differences are the useful part:
-
-| endpoint | with the CLI token |
-|---|---|
-| `wham/usage`, `wham/rate-limit-reset-credits` | **200** — quota, plan, credits |
-| `backend-api/me`, `backend-api/subscriptions` | **403 HTML** — a bot wall, not an auth error |
-| `accounts/<id>/spend-controls/current-user/monthly-usage` | **401 JSON**: *"Must use workspace account for this operation"* |
-
-That last one is the interesting one: a real API answer rather than a wall, so
-the endpoint **is** reachable by token — just not for a personal account. On a
-workspace account it would plausibly return account-wide monthly spend. Nothing
-here calls it, because there is no workspace account on this machine to see the
-response shape, and writing a parser for a payload nobody has seen is how
-plausible-looking wrong numbers get shipped.
+**That account-wide breakdown cannot be had honestly**, and it is worth saying
+why rather than leaving the gap unexplained. The tools that show it get there
+by being a browser — lifting a signed-in session out of one and loading the
+dashboard page. Reaching into a browser's cookie store is a different kind of
+program from one that reads an agent's own files, and this repo is not going to
+become that quietly. So this pane shows what is on this machine, and says so
+in the heading.
 
 ### Where each agent's numbers come from
 
-**Cursor** needs no rate card — it publishes both sides. The raw events carry
-their own vendor-rate cents, `GetAggregatedUsageEvents` says what Cursor
-actually metered, and the gap is the discount the plan applied. Its header
-reads `at vendor rates · Cursor meters $762.64 of it`.
+**Cursor** needs no rate card — it publishes both sides. Its own events carry
+vendor rates, Cursor says what it actually metered, and the gap is the discount
+the plan applied. Its header reads `at vendor rates · Cursor meters $762.64
+of it`.
 
-**Claude** is costed from the **transcripts**, not from `stats-cache.json`.
-The cache does have `dailyModelTokens` — per day, per model — but only one
-total per model per day, and input, output, cache reads and cache writes
-differ in price by up to fifty times, so a total cannot be costed at all. The
-transcripts carry the split, per message, with a timestamp and a model.
+**Claude** is costed from the **transcripts** rather than from Claude Code's
+own summary file. That file holds one total per model per day, and input,
+output, cache reads and cache writes differ in price by up to fifty times, so a
+total cannot be costed at all. The transcripts carry the split, per message,
+with a timestamp and a model — including the two cache durations, which are
+priced differently, so **neither is assumed**.
 
-They carry more than that. A usage block's top-level counters can all read
-zero while its `iterations` hold the real figures, so the iterations win where
-they exist. And `cache_creation` splits `ephemeral_5m_input_tokens` from
-`ephemeral_1h_input_tokens` — the two are priced differently, 1.25× input
-against 2× — so both rates are carried and **neither duration is assumed**.
+Two things about reading them are worth knowing, because both once made a
+figure too small or too large.
 
-Two things about reading that corpus were learned the hard way, both found by
-one question — *why is Haiku missing?*
+**Subagent work counts.** Subagent transcripts sit further down the tree, and
+that is where Haiku and most of Sonnet actually run — an agent that only ever
+appears as a subagent was missing from the costs entirely.
 
-**The glob has to recurse.** Subagent transcripts live two levels further down,
-in `<project>/<session>/subagents/`, and that is where Haiku and most of Sonnet
-actually run. A one-level glob found 38 files and silently skipped **257 more,
-277MB of them** — so an agent that only ever appears in subagents vanished from
-the costs entirely.
+**A message is counted once.** Resuming or forking a session replays its
+history into a new transcript, and a naive read bills the same turn twice; here
+that overstated two models by double figures of percent.
 
-**Records have to be de-duplicated on `uuid`.** The same message appears in
-more than one file: resuming or forking a session replays its history into the
-new transcript, and subagent turns are written twice over. There were 38,612
-duplicated `requestId`s here. Left raw, that inflated Fable by 29% and Opus 5
-by 13%.
+With both right, the transcript totals reconcile against Claude Code's own
+per-model figures. Where they differ it is because older transcripts have been
+rotated away and Claude Code's summary still counts them — so the pane can read
+a little under, never over.
 
-Both fixed, the transcript totals reconcile against Claude Code's own
-`modelUsage` — Haiku to the token, Fable and Opus 5 within a point, Sonnet
-within one, Opus 4.8 at 93% where older transcripts have been rotated away and
-the cache still counts them. That agreement is the check that the extraction is
-right; it is worth re-running after any change here.
+**Copilot** groups its own local records by day and model, the same shape from
+a much smaller source.
 
-The corpus is 520MB across 295 files. Each is parsed once and cached on
-`(mtime, size)`, exactly as the Codex rollouts are, because a finished
-transcript never changes. Cold, the whole set streams in about 2.6 seconds.
+**Codex** attributes them the hard way: the model is not recorded against the
+token counts, so each transcript is walked in order carrying the model forward
+from the turn that named it.
 
-**Copilot** groups its own `assistant_usage_events` by day and model, which is
-the same shape from a much smaller table.
-
-**Codex** attributes them the hard way. The model is not on the token counts:
-it arrives in a `turn_context` record, one per turn, and applies to the
-`token_count` events that follow it, so the rollout is walked in order
-carrying the model forward. Each event's `last_token_usage` is that turn's
-delta; within it `cached_input_tokens` is the cheaper subset of
-`input_tokens`, and the reasoning tokens are already inside `output_tokens`.
-
-Reading it that way turned up **a counting bug in this widget's own totals**.
-`total_token_usage` is cumulative for the *session*, and a session spans
-several files — thirty rollouts here hold only **eight sessions** — so summing
-one tail per file counted most of them two or three times over: 664.5M against
-a true 370.0M for the primary model. The totals now come from the
-de-duplicated per-turn deltas instead, which reproduce Codex's own cumulative
-figure **exactly** on four of those eight sessions, and pick up the review
-model besides, which the session total never included at all.
+That is also what makes the totals right. A Codex session spans several files,
+each carrying a running total for the whole session, so taking the tail of each
+file counts most sessions two or three times over. The figures here come from
+the per-turn deltas instead, which reproduce Codex's own cumulative figure
+exactly — and pick up the review model besides, which Codex's session total
+never included at all.
 
 **Grok** records no model against its tokens at all, so it can only be priced
 by a `"*"` entry.
@@ -903,14 +683,12 @@ simply absent.
  Jul 18                                                Aug 16
 ```
 
-`GetAggregatedUsageEvents` totals by model and carries **no timestamp at all**,
-so no per-day view can be built from it — which is why this took a second look.
-`GetFilteredUsageEvents` returns the individual events, newest first, each with
-a timestamp, a model and its cents, a thousand at a time. Paging stops as soon
-as a page reaches past the window, so the cost is proportional to the window
-rather than to the whole account: thirty days is five pages and about eleven
-seconds. Held for **half an hour**, because that is far too slow to repeat on
-a redraw.
+The chart is built from Cursor's **individual charge events**, each with its
+own timestamp and its own money figure, rather than from the per-model totals
+the tab above uses — those carry no timestamp at all, so no per-day view can
+be built from them. Only the window on screen is read, and it is refreshed on
+a slower cadence of its own, so the chart can be up to half an hour behind the
+figures above it.
 
 It is a bar chart rather than the calendar the token tabs use. Thirty days in a
 year-wide grid is six columns of colour in a field of dots; money over a month
@@ -934,34 +712,30 @@ some tabs already finish on a blank and would otherwise leave two.
 
 | | where it comes from | what it says |
 |---|---|---|
-| **Claude** | `api/oauth/profile` | plan, member since, subscription status, rate-limit tier, billing type |
-| **Cursor** | `GetPlanInfo` on the same Connect service | plan name, price, included amount, who bills it |
-| **Copilot** | the same `copilot_internal/user` call | plan, seat date, organisation, sku, billing mode, enabled features |
-| **Codex** | already in the usage response | plan type and credit balance — and that is genuinely all of it |
+| **Claude** | the account | plan, member since, subscription status, rate-limit tier, billing type |
+| **Cursor** | the account | plan name, price, included amount, who bills it |
+| **Copilot** | the same account call as the quota | plan, seat date, organisation, sku, billing mode, enabled features |
+| **Codex** | already in hand with the quota | plan type and credit balance — and that is genuinely all of it |
 | **Grok** | the client log | tier, billing period, on-demand cap and prepaid balance |
-| **Antigravity** | `loadCodeAssist` | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
+| **Antigravity** | the account | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
 
 Grok's tier moved out of its quota heading to join them, so no agent states
 its plan in two different shapes.
 
 Codex's section is three lines rather than six because three lines is all it
-publishes. Its `approx_local_messages` and `approx_cloud_messages` read zero
-here for a real reason — they are estimates derived from a credit balance, and
-the balance is zero.
+publishes. Its message estimates read zero here for a real reason — they are
+derived from a credit balance, and the balance is zero.
 
-A **success** is held for an hour, not the two minutes the quotas get: a plan
-does not change between refreshes, and the Claude usage endpoint answers `429`
-if you ask at quota cadence — which it did, during testing.
+A plan is held **for an hour**, not the two minutes the quotas get, because it
+does not change between refreshes. A **failure is never held that long**: a
+blanked subscription section looks exactly like an agent that publishes
+nothing, and one rate-limited reading held for the full hour is how that
+happened once.
 
-A **failure is never held that long**, whatever the caller asked for. That
-distinction had to be learned: one rate-limited profile call was cached for the
-full hour and blanked Claude's subscription section for that hour, which looks
-exactly like an agent that publishes nothing.
-
-Claude's section also degrades rather than disappearing. With the endpoint
-unreachable it falls back to `~/.claude/.credentials.json`, which needs no
-network and always carries `subscriptionType` and `rateLimitTier`, and says
-`from credentials` so it is never mistaken for the fuller reading.
+Claude's section also degrades rather than disappearing. With the account
+unreachable it falls back to what the local credential already says, which
+needs no network at all, and labels itself `from credentials` so it is never
+mistaken for the fuller reading.
 
 ## Empty tabs say two things and stop
 
@@ -1019,25 +793,18 @@ boundaries. That includes tool calls and thinking, so it is a *throughput*
 figure and not raw decode speed — the pane says so under the chart rather than
 letting the number imply more precision than it has.
 
-**Copilot** would be exact, once there is data: `inter_token_latency_ms` and
-`time_to_first_token_ms` are recorded per turn, so no inference is needed.
+**Copilot** would be exact, once there is data: it records its own timings per
+turn, so nothing has to be inferred.
 
-**Claude Code** is computed too, and getting it right took two attempts. A turn
-is a `user` record followed by an `assistant` one, and the rate is that
-assistant's output tokens over the gap between them. Measuring from *any*
-previous record instead inflates it wildly — two assistant records can be
-milliseconds apart while the second reports a whole turn's output, which
-produced a maximum of 21,183 tokens/second.
+**Claude Code** is computed too, from a turn's output tokens over the time that
+turn took. Even measured that way a few gaps come out impossible — timestamps
+that plainly do not bracket generation — so **only the median and p90 are
+shown, never a maximum**. The median barely moves however the outliers are
+trimmed, which is the reason to trust it; the maximum moves by a factor of
+twenty on the same data, which is the reason not to publish one.
 
-Even with the right boundary a few gaps remain impossible — 1,073 tokens in
-0.07 seconds among them — where the timestamps plainly do not bracket
-generation. So **only the median and p90 are shown, never a maximum**: the
-median sits at 74–75 however the outliers are trimmed, which is the reason to
-trust it, while the maximum moves from 15,328 to 800 on the same data, which is
-the reason not to publish one.
-
-Transcripts run to tens of megabytes, so it samples the tail of the three most
-recently touched.
+It reads the most recent transcripts rather than all of them, so the figure
+describes how the agent has been running lately.
 
 **Cursor and Grok** record no tokens at all, so there is nothing to divide.
 
@@ -1046,24 +813,12 @@ recently touched.
 Every other number here is local consumption. Codex publishes an actual
 **remaining quota**, and two ways to get it.
 
-The rollouts record a `rate_limits` snapshot the server sends back with each
-response — `used_percent`, the window length, and `resets_at`. That is real but
-only as fresh as the last time Codex ran.
+Codex leaves a quota snapshot behind in its own transcripts, which is real but
+only as fresh as the last time Codex ran. The widget prefers to ask the account
+directly, on the credential the CLI already holds, and **the header says `live`
+or `from the last session`** so it is never ambiguous which you are looking at.
 
-Better, and what the widget prefers: the same endpoint the Codex CLI itself
-uses. Read the OAuth token from `~/.codex/auth.json` and
-
-```
-GET https://chatgpt.com/backend-api/wham/usage
-Authorization: Bearer <token>
-```
-
-which returns `plan_type`, `credits`, and a `rate_limit` with primary and
-secondary windows. The header says `live` or `from the last session` so it is
-never ambiguous which you are looking at.
-
-**Some features meter separately**, and arrive in the same response under
-`additional_rate_limits` — each with its own `limit_name`, window and reset.
+**Some features meter separately**, each with its own window and reset.
 `GPT-5.3-Codex-Spark` is one: a second weekly allowance that the account-wide
 percentage says nothing about, so spending all of one leaves the other
 untouched.
@@ -1081,23 +836,18 @@ back to the last segment when it is not. `overall` labels the account-wide
 lanes **only** when a named one sits beside them; alone, the window tells them
 apart and the word would be noise.
 
-These extra limits are **live-only**. The snapshot recorded in the rollouts
-carries `primary`, `secondary` and `limit_name` but no `additional_rate_limits`,
-so a fallback reading shows the account-wide windows and nothing else — which
-is why the source label matters.
+These extra limits are **live-only**: the snapshot left behind in the
+transcripts carries the account-wide windows and nothing else, so a fallback
+reading is missing the separately-metered lanes entirely — which is why the
+source label matters. A lane reading 0% there is a **real zero from the
+account**, not an absent number drawn as one.
 
-Spark is a *model* (`gpt-5.3-codex-spark`, "ultra-fast coding model", 128k
-context, not on the API), and rollouts do record which model ran each turn in
-`payload.model`. Nothing on this machine has used it, so its lane reads 0% —
-a real zero, from the server, not an absent number drawn as one.
+The route to all this came from reading how
+[CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
+covers twenty-odd providers, and the obvious thing to reach for if this ever
+needs numbers that are not on disk.
 
-This method came from reading how [CodexBar](https://github.com/steipete/CodexBar)
-does it — a menu-bar app that does this for twenty-odd providers, and documents
-the endpoint. Its `codexbar-cli` would cover far more of them; it is not used
-here because the widget stays dependency-free, but it is the obvious thing to
-reach for if this ever needs to cover providers whose numbers are not on disk.
-
-## The three network calls, and the rule they follow
+## The live quotas, and the rule they follow
 
 Claude, Codex and Cursor each publish a live quota, and each is fetched with a
 credential the agent itself already holds — read-only, sent **only to that
@@ -1106,69 +856,42 @@ OAuth token sits beside a refresh token that is deliberately left alone:
 spending it would race Claude Code's own credential handling for a number that
 has a local cache anyway.
 
-Every one of them falls back rather than failing: Codex to the rollout
-snapshot, Claude to `cachedUsageUtilization`, Cursor to authorship alone. The
-header always says which you are looking at. When Codex has a snapshot
-without a usable `used_percent` and no live window, the reason is the
-live-fetch's own — a missing token, or an endpoint that did not answer —
-not a single sentence that blamed the service for a credential that was
-never sent.
+Every one of them falls back rather than failing: Codex to the snapshot in its
+own transcripts, Claude to a cached reading, Cursor to authorship alone. **The
+header always says which you are looking at**, and where a fallback is all
+there is, the reason the live reading is missing is the live reading's own —
+a credential that was not there, or a service that did not answer — rather
+than a sentence blaming a service that was never asked.
 
-A reading is held for **two minutes** (`LIVE_TTL`). The pane redraws every 30
-seconds and these windows move over hours, so the earlier code was making six
-requests a minute — three calls, twice a minute — to be told the same thing. A failure is cached too, so a dead
-endpoint is retried occasionally instead of on every frame.
+A reading is held for a couple of minutes, because these windows move over
+hours and the pane redraws every thirty seconds. A failure is held too, so
+something that is down is retried occasionally rather than on every frame.
 
 ### Claude's fallback is our own snapshot, not Claude Code's
 
-Claude Code keeps a usage cache in `~/.claude.json` under
-`cachedUsageUtilization`, and this widget read it whenever the live call
-failed. With no age check at all — which turned out to matter, because
-Claude Code's own reader has one:
-
-```js
-let r = Date.now() - n.data.fetchedAtMs;
-if (r < 0 || r > zNo) return null;      // zNo = 3600000
-```
-
-**It trusts that cache for one hour.** It writes it at most every five
-minutes (`BNo = 300000`) and discards it past sixty. On the machine this was
-found on, the entry was **9.6 days old** — Claude Code had been ignoring its
-own cache for nine days while this widget drew it as a current percentage.
-The block was byte-identical in a backup from the 16th, so it had not moved
-since the 15th, while `~/.claude.json` itself is rewritten every few seconds.
-
-Not a removal and not a regression: the key is present in every installed
-version, `2.1.243` references it more than the older ones, and the reader is
-the same logic in `2.1.233` and `2.1.243` with the same constant. Why the
-writer stopped firing on the 15th is unestablished — it is gated on an
-account match and fed from API response data, and finding out would mean
-instrumenting Claude Code.
+Claude Code keeps a usage cache of its own, and this widget used to read it
+whenever the live reading failed — with no age check, which turned out to
+matter. Claude Code trusts that cache for an hour and ignores it after that;
+on the machine this was found on the entry was **nine days old**, and the pane
+was drawing it as a current percentage.
 
 So there are two fallbacks now, newest wins:
 
-1. **Our own snapshot**, written to `$XDG_STATE_HOME/opscope/claude-usage.json`
-   every time the live call answers — minutes old on a machine in use, and
-   not dependent on another program's cache still being maintained.
-2. **Claude Code's**, but only inside the hour it trusts it for.
+1. **This widget's own snapshot**, written every time the live reading answers
+   — minutes old on a machine in use, and not dependent on another program's
+   cache still being maintained.
+2. **Claude Code's**, but only inside the hour Claude Code itself trusts it
+   for.
 
-CodexBar reached the same conclusion from the other end: its Claude sources
-are the API and the CLI, never that file, and when they all fail it keeps
-its own `history/claude.json` and shows the capture age rather than blanking
-the bars.
-
-The snapshot carries the `accountUuid` Claude Code records, so switching
-accounts does not show the old one's figures — the usage response itself
-carries no account, so the marker is borrowed. A machine whose Claude Code
-never wrote the key has no marker, and then the guard is simply not applied.
+Either way the age is on screen, so a held figure is never mistaken for a
+current one. The snapshot is marked with the account it was taken for, so
+switching accounts does not show the old one's figures.
 
 ### Grok is the fourth, and it is on by default
 
-Grok publishes no quota this widget can read without asking for it. The other
-five agents each answer a host — `api.anthropic.com`, `chatgpt.com`,
-`api.github.com`, `api2.cursor.sh`, `cloudcode-pa.googleapis.com`. With the ask
-off, its figures come from `~/.grok/logs/unified.jsonl`, the log its own CLI
-writes, so they move **only when you use Grok on this machine**.
+Grok publishes no quota this widget can read without asking for it. With the
+ask off, its figures come from the log its own CLI writes, so they move **only
+when you use Grok on this machine**.
 
 That failed quietly. A log left alone for nine days had the widget showing 23%
 of a credit window that had closed on the 19th, while the account had spent 57%
@@ -1180,9 +903,9 @@ Four settings, all on by default except the interval:
 | key | default | what it does |
 |---|---|---|
 | `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
-| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`) when no language server is running. Same host and same credential as the tier request. Off means no quota while the app is closed, and the tab says so |
-| `grok_ping` | `true` | GET `cli-chat-proxy.grok.com/v1/billing` with the bearer token the Grok CLI leaves in `~/.grok/auth.json`, **and** run `grok agent stdio` to refresh that token — once after a session goes quiet, once when the token is within ten minutes of lapsing, and once after it has |
-| `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable; one small GET twelve times an hour |
+| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off means no quota while the app is closed, and the tab says so |
+| `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
+| `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable |
 
 ### Grok Bot (Cursor's weekly allowance)
 
@@ -1191,32 +914,23 @@ the monthly plan. It is not part of `total` / `cursor models` / `other
 models` and does not share their reset, so it draws as a fourth bar carrying
 its own countdown, and appears on `[+]` as its own lane.
 
-It needs no configuration: `DashboardService/GetSandUsageStatus` is reached
-with the same bearer token, on the same RPC service, as the three plan lanes.
-
-That is worth stating, because the obvious route is a dead end. Cursor's own
-website calls this as `POST cursor.com/api/dashboard/get-sand-usage-status`,
-which is cookie-authenticated and answers the app's bearer token — and that
-same token sent as a cookie — with a redirect to the login provider. Reading
-only the website's route leads to putting a browser session cookie in
-`config.json`; the Connect service exposes the same call, and the token
-already on disk is enough.
+It needs no configuration — it comes on the same credential as the three plan
+lanes, so there is no browser session to paste into `config.json`.
 
 It is **best-effort by contract**: a missing, refused or unparseable answer
 leaves the three plan bars exactly as they were. An extra lane must never be
 able to take the tab down with it.
 
-The bar is drawn only when the account actually has an allowance —
-Cursor states that as `hasNonZeroIncludedLimit`, and a 0% bar for an account
-that was never granted one would invent a limit that does not exist. With a
-cookie set and the lane still absent, the row says why instead.
+The bar is drawn only when the account actually has an allowance, because
+Cursor says so — a 0% bar for an account that was never granted one would
+invent a limit that does not exist. When the lane is absent, the row says why
+instead.
 
 **One setting, not two.** The refresh was a second key for one release and
-should not have been. The token expires — mine had lapsed 8.6 days before I
-looked, on the same day the CLI last ran — so asking without refreshing works
-for a while and then silently stops, which is the failure the refresh exists to
-prevent. Nobody wants the first without the second, so turning on `grok_ping`
-turns on both.
+should not have been: the credential expires within days of the CLI last
+running, so asking without refreshing works for a while and then silently
+stops — the exact failure the refresh exists to prevent. Nobody wants the first
+without the second, so turning on `grok_ping` turns on both.
 
 **The refresh is keyed on the token, not on a session.** For a while it fired
 only in the six hours after a session ended, and the token turned out to last
@@ -1242,10 +956,10 @@ figure. Before this the log won outright, and on the machine this was found on
 it put a figure from twenty-seven days back over one from two hours back, with
 nothing but the cached mark to tell them apart.
 
-**On by default**, because the request is the same shape `antigravity_remote`
-already accepts: the reader's own CLI, already signed in, asked at the
-endpoint it bills through with its own token. A quota nobody can act on is
-not the safer default. Off stays one key away and the tab names it.
+**On by default**, because it is the same shape of ask `antigravity_remote`
+already accepts: your own CLI, already signed in, asked about your own
+account. A quota nobody can act on is not the safer default. Off stays one
+key away and the tab names it.
 
 **Cached or live is a question about age, not about source.** A reading is
 shown as current when it was taken within the last half hour, whatever
@@ -1255,28 +969,14 @@ four minutes old carried none, and here it was worse: the live answer was
 being discarded (below), so the row read `not live` whether the ping was
 working or not, and turning it on changed nothing a reader could see.
 
-**A period without a percentage means nought used, not unknown.** The
-credits endpoint omits `creditUsagePercent` when it is zero — proto3 leaves
-out a scalar sitting at its default. That was briefly mistaken here for the
-field having been withdrawn for accounts on unified billing, and the row
-said there was no figure when the true figure was nought.
-
-The answer settles it against itself. Alongside the credit percentage it
-returns `productUsage`, one entry per product:
-
-```json
-"productUsage": [{"product": "GrokBuild", "usagePercent": 3.0},
-                 {"product": "GrokChat"},
-                 {"product": "GrokImagine"}]
-```
-
-The product with usage carries the key; the two at nought omit it, in the
-same array of the same response. Watched over time as well: a weekly window
-that had just reset returned no percentage at all, and began reporting one
-once anything had been spent — same endpoint, same headers, same token. So
-nought here is the reading rather than a guess, which is the only reason it
-may be drawn. A response naming no period at all is still refused: nought
-is only knowable against a window the server stated.
+**A period without a percentage means nought used, not unknown.** Grok simply
+leaves the figure out when it is zero, and the same answer proves it against
+itself: the product that has been used carries a percentage while the two that
+have not omit theirs, in the same breath. A window that had just reset reported
+nothing and began reporting once anything had been spent. So nought here is the
+reading rather than a guess, which is the only reason it may be drawn — and an
+answer naming **no window at all** is still refused, because nought is only
+knowable against a window somebody stated.
 
 That split is drawn under the window, because the bar above is one number
 for three different things and which of them is spending is the part a
@@ -1293,7 +993,7 @@ The screen says which state it is in, in both places it appears:
 
 ```
 ── WEEKLY QUOTA ── resets in ~1.1 days
- not live · ~/.grok/logs/unified.jsonl · window closed 5d 21h ago
+ not live · from Grok's own log · window closed 5d 21h ago
  Only your own Grok sessions update it. agent_usage.grok_ping polls x.ai instead. — press `,` to set it here
 ```
 
@@ -1314,41 +1014,32 @@ The screen says which state it is in, in both places it appears:
 
 ### On-demand is the allowance that costs money
 
-Beside the included credits the billing answer carries the paid usage, and
-the widget parsed it from the start:
+Beside the included credits, Grok reports the **paid** usage: what has been
+spent on demand, the cap it is spent against, and any prepaid balance.
 
-```json
-"onDemandUsed": {"val": 3}, "onDemandCap": {"val": 25},
-"prepaidBalance": {"val": 0}
-```
-
-Dollars, not cents. It used to draw as a fragment on the window line —
-`on-demand 3/25` — which meant the summary that ranks every allowance on the
-wall said nothing about the only one that is billed. It now gets the credits
+It used to draw as a fragment on the window line — `on-demand 3/25` — which
+meant the summary that ranks every allowance on the wall said nothing about
+the only one that is billed. It now gets the credits
 row's treatment on the tab, and a lane on `[+]` labelled **`on-demand $25`**:
 `used / cap`, on the credits lane's own window so the two pace against one
 clock, and marked stale exactly as the credits lane is, since both come out
 of one reading. The cap rides in the label because a percentage of an unnamed
 ceiling is not a number anyone can act on.
 
-The lane draws **only where a cap is set**. `onDemandCap` of nought is the
-state of this account rather than a zero to plot, and a 0% bar would say
-there is an allowance sitting untouched when what is true is that there is
-none — the refusal the Grok Bot allowance and Cursor's spend limit both make.
-The tab says `no on-demand cap set` in its place, so an absent bar cannot be
-read as an absent reading. Spend past the cap has not been seen from x.ai,
-and if it arrives the figure is drawn as it came: full bar, real numbers, no
-clamp.
+The lane draws **only where a cap is set**. No cap is the state of this
+account rather than a zero to plot, and a 0% bar would say there is an
+allowance sitting untouched when what is true is that there is none — the
+refusal the Grok Bot allowance and Cursor's spend limit both make. The tab
+says `no on-demand cap set` in its place, so an absent bar cannot be read as
+an absent reading. Spend past the cap would be drawn as it came: full bar,
+real numbers, no clamp.
 
 The credit percentage and the cap are read independently, which matters for
-unified-billing accounts: those get no `creditUsagePercent` at all, and Grok
-used to drop off the summary entirely for that. An absent credit figure now
-takes only the credit lane with it. The same omission on a log line used to
-drop the whole reading when the live ask was off or failed; the log parser
-now accepts a named period with an `onDemandCap` the same way the live path
-does.
+accounts on unified billing: those publish no credit percentage at all, and
+Grok used to drop off the summary entirely for that. An absent credit figure
+now takes only the credit lane with it.
 
-`prepaidBalance` is **a balance, not an allowance** — money on the account,
+The prepaid balance is **a balance, not an allowance** — money on the account,
 with no ceiling to be a percentage of — so it has no bar and stays as text
 beside the window.
 
@@ -1362,11 +1053,11 @@ them — only some are the reader's to fix:
  not live · polled x.ai just now, every 5m · x.ai sent no percentage for this period
 ```
 
-The last of those is a 200 that names the billing period but sends a null
-percentage. The log's reading is kept, because it is the only percentage
-there is — but it belongs to an earlier window, so the row stays marked
-`not live` and its reset keeps the `~` that says the date is rolled forward
-rather than stated.
+The last of those is an answer that names the billing period but no figure
+for it. The log's reading is kept, because it is the only percentage there is
+— but it belongs to an earlier window, so the row stays marked `not live` and
+its reset keeps the `~` that says the date is rolled forward rather than
+stated.
 
 The age quoted is the **reading's**, not the file's. The CLI touches that log
 whenever it starts, so a file written minutes ago can still hold a credit
@@ -1380,10 +1071,6 @@ and a fortnightly window should not be guessed weekly. That is a calculation
 rather than a reading, so the countdown carries a `~`, and the **pace figure is
 suppressed**: pace is usage against time elapsed, and how much of the current
 window has been spent is exactly what nobody knows.
-
-CodexBar reaches the same endpoint and hits the same wall — it reads the cached
-credential and does not refresh it either, so an expired token drops it back to
-local session files, as this does to the log.
 
 ## The pace mark on every quota bar
 
@@ -1413,11 +1100,10 @@ beside five green ones read as *that agent's mark meaning something different*
 rather than that agent being behind. The relationship is already legible from
 the geometry, and the `-20%` column states it.
 
-Plain white would not do it — the agent hues are themselves light, so white
-foreground on a full bar manages **1.04:1** and disappears exactly where it
-matters. Giving the mark's own cell a dark background instead makes it read
-identically on a full bar, an empty track, or the boundary between them, at
-**17.7:1**, and costs no width.
+Plain white would not do it — the agent hues are themselves light, so a white
+mark disappears on a full bar, which is exactly where it matters. Giving the
+mark's own cell a dark background instead makes it read identically on a full
+bar, an empty track, or the boundary between them, and costs no width.
 
 No mark is drawn when the window is unknown, or when a reading is **cached**
 and its window may already have closed: a pace computed from a window that has
@@ -1442,11 +1128,10 @@ unrelated hues. They are still categories, not a ramp, so they stay
 distinguishable — but they now read as Cursor's, which three borrowed colours
 never did.
 
-The two stops of that ramp are measured rather than chosen: `0.51` keeps the
-dimmest filled cell at **3:1** against the terminal background for the darkest
-agent hue, and `0.34` leaves the empty track at least as visible as the flat
-grey it replaced (2.20:1 against 2.16:1). Cursor's dimmest lane clears WCAG AA
-at 4.99:1.
+Both ends of that ramp are measured rather than chosen, so the dimmest filled
+cell is still legible against the terminal background for even the darkest
+agent hue, and the empty track stays at least as visible as the flat grey it
+replaced.
 
 **Red still means something is wrong, and nothing else** — it just stopped
 being a gradient. The percentage is written in its agent's colour like the bar
@@ -1475,8 +1160,8 @@ is shown against that limit; where it does not, the tab says what was spent and
 stops. That is the whole point of the repo, and the reason an empty tab is
 empty rather than full of plausible zeros.
 
-Claude Code's `stats-cache.json` is still a spend-only file — it carries no
-limit and no reset. Its quota block comes from somewhere else entirely, above.
+Claude Code's own summary file is spend-only — it carries no limit and no
+reset. The quota block comes from somewhere else entirely, above.
 
 ## Scrolling
 
@@ -1520,19 +1205,15 @@ refresh makes a tab a row longer.
 
 ## Cost
 
-Small. Local files are read every 30 seconds; Codex rollouts are parsed once
-each and cached on mtime and size, because one is 29MB and a finished rollout
-never changes. There are five quota calls — Claude, Codex, Copilot and two for
-Cursor — each held for two minutes, three subscription reads (Claude, Cursor
-and Antigravity) held for an hour, and Cursor's five-page event fetch every
-half hour. A pane left open all day makes about 163 requests an hour between
-them, whichever tab is on screen.
+Small. Local files are read every 30 seconds, and a transcript is read once
+and then left alone, because a finished transcript never changes. A live quota
+is held for a couple of minutes and a plan for an hour, so what a pane left
+open all day asks of each agent is the same whichever tab is on screen.
 
-Two slow things block the first poll, so a freshly started widget takes
-roughly fifteen seconds to paint anything on any tab: Cursor's event fetch,
-and the first pass over Claude's 520MB of transcripts (about 2.6 seconds).
-Both are cached afterwards — the events half-hourly, the transcripts per file
-on mtime and size — and neither is paid again.
+The first paint is the slow one: a freshly started widget takes **roughly
+fifteen seconds** to put anything on any tab, because Claude's transcripts and
+Cursor's spend history are both read through before there is anything to draw.
+Neither is paid again.
 
 ## Which agents appear
 

@@ -379,8 +379,8 @@ fourth key that publishes a port a fourth way is not worth the surface. If
 you want one, `ssh -R` to a box you already own needs nothing installed at
 all.
 
-All three run on a thread. `tailscaled` and `cloudflared` take seconds to
-answer, which is far too long to hold a frame for.
+`tailscaled` and `cloudflared` take seconds to answer, so those columns fill
+in behind the rest of the row rather than holding the whole frame up.
 
 ### What about a public IP?
 
@@ -411,50 +411,24 @@ are on this screen rather than an IP.
 
 ## Cost
 
-Nothing measurable. `/proc/net/tcp` and a walk of `/proc/*/fd` every four
-seconds on Linux, or one listener `lsof`, one batched cwd `lsof` and one
-batched `ps` call on macOS; one `ss -tine` on Linux or one logging-mode
-`nettop` sample on macOS for byte counters; plus one `tailscale serve status`
-— no network, no root, no dependency beyond Tailscale for the exposure column,
-which is simply blank without it.
-
-The traffic sampling rides that same poll rather than a thread of its own. A
-second thread would buy a finer chart and would also have to be watched: a
-poller that dies is invisible, and its pane is indistinguishable from a source
-with nothing to say.
+Nothing measurable. Everything on screen is read from accounting the kernel
+was keeping anyway — no network of its own, no root, and nothing installed
+beyond Tailscale for the exposure column, which is simply blank without it.
 
 ## Platforms
 
-Linux reads `/proc/net/tcp` and walks `/proc/<pid>/fd`. macOS reads
-`lsof -nP -iTCP -sTCP:LISTEN -F`, `ps` and connection counters from `nettop`.
-The parsers for both take a
-`&str` and compile on every target, so a broken Linux decoder cannot sit
-behind a green macOS build. Only which file to open, or which command to
-spawn, is behind `cfg(target_os)`.
+Linux reads the kernel's own tables; macOS asks `lsof`, `ps` and `nettop`.
+Both are read the same way once the bytes are in, so a reading means the same
+thing on either system.
 
-Those files live in the widget's package folder, next to `main.rs`:
+Traffic needs `ss` on Linux and `nettop` on macOS. If the source it wants is
+missing, the columns and the chart stay off and the header names what is
+missing, rather than filling with dots that look like a quiet port. A kernel
+with neither source holds on `cannot start` and says which one it is, rather
+than drawing an empty table.
 
-```text
-widgets/src/widgets/ports/
-├── main.rs
-├── parse.rs      always compiled, always tested
-├── linux.rs      acquisition: open /proc
-├── macos.rs      acquisition: spawn lsof / ps / nettop
-└── help.txt
-```
-
-Another widget grows a second source by dropping the same three files
-beside its `main.rs`. There is no shared platform crate to import.
-
-Traffic uses `ss` on Linux and connection-level `nettop` rows on macOS. If the
-platform source is missing, the columns and chart stay off and the header names
-it, rather than filling with dots that look like a quiet port. Addresses come
-from `ip -j addr` when that is on `PATH`, and from `ifconfig -a` otherwise.
-
-A kernel with neither source — Windows, today — holds on
-`cannot start · does not run on windows` rather than drawing an empty
-table. That sentence is `unsupported()` in `opscope-core`, the same
-wording every widget uses.
+The addresses on the second screen come from whichever of the system's own
+tools is there — `ip` where it is, `ifconfig` otherwise.
 
 The source-by-source platform contract is recorded in
 [`docs/ports.md`](../../../../docs/ports.md).
