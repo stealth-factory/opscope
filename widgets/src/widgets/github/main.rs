@@ -803,6 +803,33 @@ fn heatmap(weeks: &serde_json::Value, w: usize) -> (Vec<String>, i64, i64) {
     )
 }
 
+const CONTRIB_LABEL: &str = " ── CONTRIBUTIONS ── ";
+
+/// The CONTRIBUTIONS heading, which has to say whose contributions these are.
+///
+/// Every other section on this board is scoped to the configured accounts;
+/// `contributionsCollection` is per-viewer, so this one is the reader's own
+/// activity across all of GitHub and reads as the board's unless it says so.
+/// The qualifier is what gives way when the pane is narrow - it steps from
+/// `yours, everywhere` to `yours` to nothing - because a heading that keeps
+/// the wording and loses `peak 241/day` is worse than the ambiguity.
+fn contributions_heading(total: i64, peak: i64, w: usize, lbl: &str, dim: &str) -> String {
+    let budget = (w.saturating_sub(1)).saturating_sub(tc::display_width(CONTRIB_LABEL));
+    let numbers = format!("{} in {} weeks, peak {}/day", total, CONTRIB_WEEKS, peak);
+    let sep = " · ";
+    let tail = ["yours, everywhere", "yours"]
+        .iter()
+        .find(|q| {
+            tc::display_width(q) + tc::display_width(sep) + tc::display_width(&numbers) <= budget
+        })
+        .map(|q| format!("{}{}{}", q, sep, numbers))
+        .unwrap_or_else(|| numbers.clone());
+    tc::seg(
+        &[(lbl, CONTRIB_LABEL.into()), (dim, tail)],
+        w.saturating_sub(1),
+    )
+}
+
 struct Palette {
     ok: String,
     warn: String,
@@ -1665,15 +1692,12 @@ fn main() {
         if let Some(cal) = calendar.as_ref() {
             let (grid, peak, total) = heatmap(&cal["weeks"], w);
             let total_c = cal["totalContributions"].as_i64().unwrap_or(total);
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── CONTRIBUTIONS ── ".into()),
-                    (
-                        p.dim.as_str(),
-                        format!("{} in {} weeks, peak {}/day", total_c, CONTRIB_WEEKS, peak),
-                    ),
-                ],
-                w - 1,
+            rows.push(contributions_heading(
+                total_c,
+                peak,
+                w,
+                p.lbl.as_str(),
+                p.dim.as_str(),
             ));
             for (r, line) in grid.iter().enumerate() {
                 // Rows are GitHub's own weekday index, where 0 is Sunday, so
@@ -2145,6 +2169,56 @@ mod tests {
         assert_eq!(cs.today, 0);
         assert_eq!(cs.active, 2);
         assert_eq!(cs.busiest.1, 5);
+    }
+
+    #[test]
+    fn the_contributions_qualifier_gives_way_before_the_numbers_do() {
+        // Colours are empty strings here, so what `seg` returns is exactly
+        // what lands on the screen, character for character.
+        for &(total, peak) in &[(6024i64, 241i64), (12345, 9), (7, 7)] {
+            let numbers = format!("{} in {} weeks, peak {}/day", total, CONTRIB_WEEKS, peak);
+            let mut widest_without = 0usize;
+            for w in 20..=200usize {
+                let with = contributions_heading(total, peak, w, "", "");
+                // What the heading would be with no qualifier at all: the
+                // numbers may only survive where they survived before.
+                let bare = tc::seg(
+                    &[("", CONTRIB_LABEL.into()), ("", numbers.clone())],
+                    w - 1,
+                );
+                assert_eq!(
+                    with.ends_with(&numbers),
+                    bare.ends_with(&numbers),
+                    "width {} cost the numbers: {:?}",
+                    w,
+                    with
+                );
+                assert!(tc::display_width(&with) <= w - 1, "width {}: {:?}", w, with);
+                if !with.contains("yours") {
+                    widest_without = w;
+                }
+            }
+            // And it does actually say it where there is room - a ladder
+            // that silently degrades to nothing everywhere would otherwise
+            // pass the clause above.
+            assert!(
+                contributions_heading(total, peak, 200, "", "").contains("yours, everywhere"),
+                "the full qualifier never appears"
+            );
+            assert!(
+                widest_without < 200,
+                "the qualifier is missing at every width"
+            );
+        }
+        // And the rungs themselves, for the figures on the board this was
+        // written against - so the widths quoted in the commit and the pull
+        // request are pinned by something rather than recomputed by hand.
+        let rung = |w: usize| contributions_heading(6024, 241, w, "", "");
+        assert!(rung(72).contains("yours, everywhere"));
+        assert!(!rung(71).contains("everywhere") && rung(71).contains("yours"));
+        assert!(!rung(59).contains("yours"));
+        assert!(rung(52).ends_with("6024 in 52 weeks, peak 241/day"));
+        assert!(!rung(51).ends_with("peak 241/day"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ is actually moving.
  ▀▀▀▀▀▀▀▀▀                                         █████████
  7d ago                                                          today
 
- ── CONTRIBUTIONS ── 6024 in 52 weeks, peak 241/day
+ ── CONTRIBUTIONS ── yours, everywhere · 6024 in 52 weeks, peak 241/day
  Mon   ░▒░▒░ ░▒░           ░     ░   ░ ░ ░ ░ ░░░░░░░▒░ ░░▒
        ░▒░░░ ▒▓         ░        ░░ ░░░ ░░ ░▒░ ░░░░░░░░░░░
  Wed  ░░▒░░▒░░▒░      ░    ░     ░░  ▒░░░░ ░░░░░░░░░░▒░░░
@@ -87,12 +87,22 @@ and longest streak, today's count, how many days of the year were active, the
 single busiest day, and which weekday carries the most work. They lay out in
 three columns, two, or one as the width allows.
 
+Everything else on this board is scoped to the configured accounts. This section
+is not, and the heading says so — `yours, everywhere`.
+`contributionsCollection` is per-viewer
+rather than per-org, so the calendar counts your own activity across all of
+GitHub, including repositories in orgs this board does not list, and excluding
+everyone else's work in the orgs it does. It is the calendar github.com draws on
+your profile. The qualifier is the first thing to go when the pane narrows,
+because the figures beside it matter more than the wording.
+
 A streak counts consecutive days with at least one contribution, the way
 github.com does it — a day that has scored nothing *so far* does not break the
 current streak, because it is not over yet.
 
-This is the one decorative section, so it is skipped entirely in a short pane to
-leave the account table its rows.
+This is the one decorative section. It is drawn whenever the calendar has data; a
+short pane scrolls to it rather than hiding it, because a grid that is not there
+looks like an account with no contributions.
 
 **By account** — one row per org, **busiest first**: open PRs decide the order,
 merged-in-window breaks ties so an idle backlog ranks below an account of the
