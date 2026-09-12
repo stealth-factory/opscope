@@ -1377,7 +1377,7 @@ fn main() {
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── RESUMABLE ── ".into()),
-                    (p.dim.as_str(), format!("{}", resumable_rows.len())),
+                    (p.dim.as_str(), shown_count(&sessions)),
                     (
                         if membership_unread {
                             p.unknown.as_str()
