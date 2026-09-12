@@ -5263,14 +5263,23 @@ mod tests {
         // must recover that PoisonError, not peek at is_poisoned()
         // and then `if let Ok` the lock - the peek is clean, the lock
         // is not, and the first reason would be dropped.
+        //
+        // The sibling must not die until the waiter is inside lock().
+        // A barrier that only says "I hold State" lets the sibling
+        // panic before the waiter is even spawned, and then this is
+        // the same "already poisoned" path as the test above.
         let state = Arc::new(Mutex::new(State::default()));
         let holding = Arc::new(std::sync::Barrier::new(2));
+        let panic_now = Arc::new(std::sync::Barrier::new(2));
+        let (entering_tx, entering_rx) = std::sync::mpsc::sync_channel(0);
         let poisoner = {
             let state = Arc::clone(&state);
             let holding = Arc::clone(&holding);
+            let panic_now = Arc::clone(&panic_now);
             std::thread::spawn(move || {
                 let _held = state.lock().expect("state");
                 holding.wait();
+                panic_now.wait();
                 panic!("sibling");
             })
         };
@@ -5278,14 +5287,21 @@ mod tests {
         let waiter = {
             let state = Arc::clone(&state);
             std::thread::spawn(move || {
+                entering_tx.send(()).expect("main is waiting");
                 record_count_err(&state, Count::Merges, "from the first count".to_string());
             })
         };
-        // The waiter has to be inside lock() before the sibling dies;
-        // otherwise is_poisoned() is already true and the old peek
-        // would also succeed. 50ms is a thread startup, not a wait
-        // for GitHub.
+        entering_rx.recv().expect("waiter started");
+        // The rendezvous released the waiter onto record_count_err
+        // while the sibling still holds State, so is_poisoned() is
+        // false and lock() will park. Yield until that park is the
+        // likely next step; a sleep here is a thread startup, not
+        // a wait for GitHub.
+        for _ in 0..64 {
+            std::thread::yield_now();
+        }
         std::thread::sleep(Duration::from_millis(50));
+        panic_now.wait();
         let _ = poisoner.join();
         waiter.join().expect("the first count's write panicked");
         let g = match state.lock() {
