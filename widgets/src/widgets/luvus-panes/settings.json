@@ -1,0 +1,12 @@
+{
+  "_comment": "What luvus-panes reads: one Luvus session's agents, tasks, leases and panes over UHP.",
+  "_schema": {
+    "refresh": {
+      "minimum": 0.5
+    }
+  },
+  "_session_comment": "Which Luvus server session to read. `luvus session list` names the ones on this machine; `default` is the one `luvus` starts on its own.",
+  "session": "default",
+  "_refresh_comment": "Seconds between reads of the session.",
+  "refresh": 4.0
+}

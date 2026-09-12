@@ -1,0 +1,9 @@
+{
+  "required": {
+    "luvus": {
+      "version": "*",
+      "why": "Every figure comes from the running Luvus session's own UHP answers, reached through its CLI."
+    }
+  },
+  "recommended": {}
+}

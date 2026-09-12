@@ -61,6 +61,7 @@ const WIDGETS: &[Widget] = &[
     widget!("latency"),
     widget!("linear"),
     widget!("link"),
+    widget!("luvus-panes"),
     widget!("matrix"),
     widget!("months"),
     widget!("netwatch"),

@@ -43,6 +43,7 @@ you are back. It is the launcher, not another widget.
 | **`vercel-deployments`** | Vercel deployments over time — activity per hour, build-time drift, and the build log of the one you open, so a failure explains itself instead of only naming a code. A copy page carries the dashboard, preview and PR URLs. | `curl`, a Vercel token | [read →](widgets/src/widgets/vercel-deployments/README.md) |
 | **`tailnet`** | Tailscale peers, and whether each is reached directly or through a relay. Live throughput, full machine info, copyable addresses. | `tailscale` | [read →](widgets/src/widgets/tailnet/README.md) |
 | **`herdr-panes`** | Every agent and process across all workspaces, ordered by which one needs a human. Enter jumps you there. | `herdr` | [read →](widgets/src/widgets/herdr-panes/README.md) |
+| **`luvus-panes`** | The same question asked of a Luvus session over UHP 1.0 — agents ordered by who needs a human, plus the tasks they are coordinating and the file paths those have reserved. Enter jumps you there. | `luvus` | [read →](widgets/src/widgets/luvus-panes/README.md) |
 | **`github`** | Pull requests across every org: merge rate, opened-vs-merged per day, review backlog and the contribution calendar — and `↵` for one account on a screen of its own, because a queue growing in one of them is invisible in a total the others are also feeding. | `curl`, a GitHub token | [read →](widgets/src/widgets/github/README.md) |
 | **`github-actions`** | GitHub Actions across your personal account and orgs: what is running or queued, which workflows are failing repeatedly, which job and step broke, and whether the pipeline is getting slower. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-actions/README.md) |
 | **`github-prs`** | The pull requests you have to follow up on: checks, reviews, mergeability, and a stack map with the order a stack has to merge in. | `curl`, a GitHub token | [read →](widgets/src/widgets/github-prs/README.md) |
@@ -55,7 +56,7 @@ you are back. It is the launcher, not another widget.
 | **`matrix`** | Nothing whatsoever. Digital rain, with truecolor fade trails. | — | [read →](widgets/src/widgets/matrix/README.md) |
 | **`months`** | A month grid you can page through: today marked, at least two weeks of context either side of it, ISO week numbers, and the zone the dates are reckoned in — `clocks` owns the time of day, this owns dates. | — | [read →](widgets/src/widgets/months/README.md) |
 
-All fifteen widgets run on Linux and macOS.
+All sixteen widgets run on Linux and macOS.
 
 Each is a single self-contained binary — every library it needs is compiled
 in and `ldd` shows only libc, libm and libgcc. Widgets that read host tools
@@ -79,7 +80,7 @@ sudo pacman -S curl iproute2 iputils            # Arch
 apk add curl iproute2 iputils                    # Alpine (normally as root)
 ```
 
-Tailscale and Herdr keep their own installers and are reported separately;
+Tailscale, Herdr and Luvus keep their own installers and are reported separately;
 optional integrations such as Cloudflare tunnels never block a widget that
 can otherwise run. On macOS, the core tools ship with the operating system;
 `doctor` can offer Homebrew packages for optional tools where one exists.
@@ -111,7 +112,7 @@ npx opscope clocks          # skip the menu; any widget name works
 npx opscope@latest clocks   # latest release, or pin with @0.3.0
 ```
 
-It fetches the launcher and fifteen widget binaries for this machine into
+It fetches the launcher and sixteen widget binaries for this machine into
 npm's cache and runs whichever you named — or the menu, if you named none.
 **Your `PATH` is not touched.** Only `opscope` is exposed as a command; the
 widgets sit inside the package beside it, which is why `link` never shadows
@@ -121,7 +122,7 @@ Published for Linux x86-64 (glibc 2.35 or newer), macOS Apple Silicon and
 macOS Intel.
 
 There is no Homebrew formula yet. You can also download three files, or
-build all sixteen binaries. Both take about a minute.
+build all seventeen binaries. Both take about a minute.
 
 ### Download a release
 
@@ -150,7 +151,7 @@ Or take them by hand from the
 [latest release](https://github.com/stealth-factory/opscope/releases/latest)
 — every tarball has a `.sha256` beside it.
 
-The sixteen binaries are right there, beside `config.example.json` and a
+The seventeen binaries are right there, beside `config.example.json` and a
 copy of the docs. Nothing else is needed to run them, so this folder can
 live wherever you like. Start them from it — do not copy `link` onto your
 `PATH`, it shadows the coreutils command of that name:
@@ -177,13 +178,13 @@ xattr -dr com.apple.quarantine opscope-*-apple-darwin
 Needs a Rust toolchain and nothing else:
 
 ```sh
-cargo build --release   # launcher + fifteen widgets in ./target/release
+cargo build --release   # launcher + sixteen widgets in ./target/release
 ./target/release/opscope # the menu, from the build tree
 ```
 
 ## Running them
 
-`opscope` is the front door — a menu of the fifteen widgets, with a live preview of
+`opscope` is the front door — a menu of the sixteen widgets, with a live preview of
 whichever is highlighted. Name a widget to skip the menu. The same shape
 works from `npx`, from an unpacked tarball, and from a build tree:
 
@@ -193,7 +194,7 @@ npx opscope clocks       # or name one and skip the menu
 npx opscope clocks -h    # flags after the name belong to the widget
 ```
 
-The launcher looks for each widget beside itself, so the launcher and fifteen
+The launcher looks for each widget beside itself, so the launcher and sixteen
 widget binaries have to stay together — `npx` keeps them that way for you.
 An unpacked tarball or a build tree is a setup method, not the usual way to
 run them, and lives under
@@ -251,7 +252,7 @@ There are two ways in, and they write the same file.
 
 Press `,` in any configurable widget, or in the launcher for the settings
 every widget shares. It is one screen, owned by `opscope-core` rather than
-written fifteen times, so it behaves the same everywhere.
+written sixteen times, so it behaves the same everywhere.
 
 The list shows every key that widget answers to, and for each one the value
 in force, the default it falls back to, and what the key means. The file
@@ -301,7 +302,7 @@ default, and a comment for each saying what it does:
 Copy the sections you want, drop the rest. `_comment` keys are ignored, so
 they can stay where they are as a reminder.
 
-**So you do not have to read fifteen widget pages to find out what you can
+**So you do not have to read sixteen widget pages to find out what you can
 set.** `cargo test` fails if a widget reads a key the example does not list,
 and fails again if the example lists a key no widget reads — the file is
 neither incomplete nor stale by construction, in both directions. The

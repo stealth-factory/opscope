@@ -97,3 +97,7 @@ path = "src/widgets/tailnet/main.rs"
 [[bin]]
 name = "agent-usage"
 path = "src/widgets/agent-usage/main.rs"
+
+[[bin]]
+name = "luvus-panes"
+path = "src/widgets/luvus-panes/main.rs"

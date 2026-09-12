@@ -190,6 +190,13 @@
       3600
     ]
   },
+  "luvus_panes": {
+    "_comment": "What luvus-panes reads: one Luvus session's agents, tasks, leases and panes over UHP.",
+    "_session_comment": "Which Luvus server session to read. `luvus session list` names the ones on this machine; `default` is the one `luvus` starts on its own.",
+    "session": "default",
+    "_refresh_comment": "Seconds between reads of the session.",
+    "refresh": 4.0
+  },
   "months": {
     "_week_start_comment": "Which day a week begins on. Sunday by default. It moves where the row breaks and nothing else: week numbers stay ISO 8601, which is Monday-reckoned whatever the grid does and says so on the pane, and the weekend stays Saturday and Sunday.",
     "week_start": "sunday",
