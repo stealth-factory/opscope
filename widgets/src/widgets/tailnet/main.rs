@@ -1155,7 +1155,45 @@ fn main() {
         if !listed.is_empty() && selected >= listed.len() {
             selected = listed.len() - 1;
         }
-        visible = h.saturating_sub(rows.len() + 2).max(1);
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→".into()),
+                (p.dim.as_str(), "/↵ info".into()),
+            ],
+            vec![(p.dim.as_str(), "[c]opy".into())],
+            // Both name the state the next press moves to, like the
+            // interval below them: these three sit in one footer, and a
+            // bare `[g]raph` beside `[i]nterval 10s` is the same shape
+            // saying nothing. What is in force is on screen either way -
+            // the graph is a section you can see, and the filter is the
+            // count line under the header.
+            vec![(p.dim.as_str(), toggle_hint("[g]raph", show_graph))],
+            vec![(p.dim.as_str(), toggle_hint("[o]ffline", !hide_offline))],
+            // The interval the next press moves to, like every other
+            // stateful hint in the collection. Nothing is lost by not
+            // naming the current one: the header line three rows up says
+            // `every {interval}s` and is always drawn.
+            vec![(
+                p.dim.as_str(),
+                format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
+            )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        // The footer is built before the body, not after it, because it
+        // wraps: how many rows it takes depends on the width, and nothing
+        // below can budget for itself until that is settled. Two was the
+        // guess, and a footer that wrapped onto a second line put the
+        // frame one row over the pane - which `draw` cuts from the bottom,
+        // taking `[q]uit` with it. A route row costs one more.
+        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
+            .into_iter()
+            .map(|line| format!(" {}", line))
+            .collect();
+        let tail = foot.len() + usize::from(routers.first().is_some());
+        visible = h.saturating_sub(rows.len() + tail).max(1);
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -1166,7 +1204,7 @@ fn main() {
         scroll = scroll.min(listed.len().saturating_sub(visible));
 
         for (idx, peer) in listed.iter().enumerate().skip(scroll).take(visible) {
-            if rows.len() >= h.saturating_sub(2) {
+            if rows.len() >= h.saturating_sub(tail) {
                 break;
             }
             let mine = peer["_self"].as_bool().unwrap_or(false);
@@ -1271,7 +1309,7 @@ fn main() {
             }
         }
 
-        while rows.len() < h.saturating_sub(2) {
+        while rows.len() < h.saturating_sub(tail) {
             rows.push(String::new());
         }
         if let Some(first) = routers.first() {
@@ -1293,36 +1331,7 @@ fn main() {
                 w - 1,
             ));
         }
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→".into()),
-                (p.dim.as_str(), "/↵ info".into()),
-            ],
-            vec![(p.dim.as_str(), "[c]opy".into())],
-            // Both name the state the next press moves to, like the
-            // interval below them: these three sit in one footer, and a
-            // bare `[g]raph` beside `[i]nterval 10s` is the same shape
-            // saying nothing. What is in force is on screen either way -
-            // the graph is a section you can see, and the filter is the
-            // count line under the header.
-            vec![(p.dim.as_str(), toggle_hint("[g]raph", show_graph))],
-            vec![(p.dim.as_str(), toggle_hint("[o]ffline", !hide_offline))],
-            // The interval the next press moves to, like every other
-            // stateful hint in the collection. Nothing is lost by not
-            // naming the current one: the header line three rows up says
-            // `every {interval}s` and is always drawn.
-            vec![(
-                p.dim.as_str(),
-                format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
-            )],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        for line in tc::pack_hints(&hints, w - 2, "  ") {
-            rows.push(format!(" {}", line));
-        }
+        rows.extend(foot);
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
