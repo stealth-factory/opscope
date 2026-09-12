@@ -26,8 +26,10 @@ directory as one entry.
 
 A Luvus client, not a general agent monitor. Every figure comes from the
 session's own Universal Harness Protocol 1.0 answers: the pane inventory from
-`luvus uhp snapshot`, the agents from `luvus agent list`, and the two
-coordination sections from `luvus task list` and `luvus lease list`.
+`luvus uhp snapshot`, the agents from `luvus agent list --json`, the two
+coordination sections from `luvus task list --json` and `luvus lease list --json`, claimable
+work from `luvus task next`, resumable sessions from `luvus agent sessions`,
+and the focused checkout from `luvus git status` and `luvus worktree list`.
 
 On a machine hosting several workspaces, agents finish or get stuck in places
 you are not currently looking. This lists every agent with the state Luvus

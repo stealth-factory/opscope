@@ -4,7 +4,7 @@ This is configuration guidance for people and AI assistants. It is documentation
 
 ## Real source
 
-A running [Luvus](https://luvus.dev) session, read over Universal Harness Protocol 1.0 through the local `luvus` command. Four read-only calls: `uhp snapshot`, `agent list --json`, `task list --json`, and `lease list --json`. Nothing else is asked for, and nothing is written except the pane focus `↵` performs.
+A running [Luvus](https://luvus.dev) session, read over Universal Harness Protocol 1.0 through the local `luvus` command. Eight read-only calls: `uhp snapshot`, `agent list --json`, `task list --json`, `lease list --json`, `task next`, `agent sessions`, `git status`, and `worktree list`. Nothing else is asked for, and nothing is written except the pane focus `↵` performs.
 
 ## Settings owned here
 
