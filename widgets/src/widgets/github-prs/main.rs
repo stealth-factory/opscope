@@ -806,11 +806,104 @@ fn read_counts(d: &serde_json::Value, days: &[String]) -> Result<Counts, String>
     Ok(out)
 }
 
+/// Which of the two counts a reason belongs to.
+///
+/// The two never share a field: a refused arrival count must leave the
+/// MERGED caption, the list and the banner exactly as they were.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Count {
+    Merges,
+    Arrivals,
+}
+
+/// Put a count's reason where its own caption will look for it - through
+/// a poisoned lock if that is what the panic left behind.
+///
+/// Every other write to the state here is guarded `if let Ok(g) =
+/// lock()`, which after a panic inside the lock does nothing at all: the
+/// reason for the panic would be dropped beside figures that go on
+/// looking like this minute's. The state is plain data with no invariant
+/// a half-finished write can break, so the poison is cleared and the
+/// reason recorded.
+fn record_count_err(state: &Arc<Mutex<State>>, which: Count, said: String) {
+    if state.is_poisoned() {
+        state.clear_poison();
+    }
+    if let Ok(mut g) = state.lock() {
+        match which {
+            Count::Merges => g.counts_err = said,
+            Count::Arrivals => g.created_err = said,
+        }
+    }
+}
+
+/// What a count thread has to say for itself, as the reason its own
+/// caption carries - or `None` when it has nothing to say.
+///
+/// Three outcomes, and only one of them is silence. A returned `Err` is
+/// GitHub's own refusal and is already words. An `Err` from the join is a
+/// panic, and it has to become words here or the figures beside it go on
+/// looking like this minute's reading while the thread that would have
+/// replaced them is gone - which is CLAUDE.md's central gotcha with a
+/// second thread added. Never `Some("")`: an empty reason is drawn
+/// everywhere as a count that landed.
+fn count_outcome(spawned: CountThread) -> Option<String> {
+    match spawned {
+        CountThread::Running(handle) => match handle.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(said)) => Some(said),
+            Err(panic) => Some(panic_reason(&*panic)),
+        },
+        CountThread::Unstarted(said) => Some(said),
+    }
+}
+
+/// A count thread, or the reason there is not one.
+///
+/// `Builder::spawn` answers with an error where `thread::spawn` panics,
+/// and a widget that cannot start a thread should say so on the row the
+/// count would have filled rather than take the poll loop down with it.
+enum CountThread {
+    Running(std::thread::JoinHandle<Result<(), String>>),
+    Unstarted(String),
+}
+
+/// Start a count on its own thread, naming it so `top` and a panic
+/// message both say which count it was.
+fn spawn_count<F>(what: &str, work: F) -> CountThread
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    match std::thread::Builder::new()
+        .name(what.to_string())
+        .spawn(work)
+    {
+        Ok(handle) => CountThread::Running(handle),
+        Err(e) => CountThread::Unstarted(format!("could not start the {} thread: {}", what, e)),
+    }
+}
+
+/// A panic payload, as words.
+///
+/// `join` hands back whatever was panicked with rather than a message, so
+/// this is where it becomes a reason. A payload of neither string type is
+/// still a thread that died, and says so: returning nothing here would
+/// draw the count as though it had landed.
+fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
+    let said = panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no reason given".to_string());
+    format!("thread stopped: {}", said)
+}
+
 /// The count request, on its own so a refusal cannot cost the list.
 ///
-/// Runs after `fetch_list` because the owner list `@mine` expands to is
-/// discovered there, and reports through `counts_err` rather than `err`
-/// for the reason OPS-84 exists: the board's own resilience to GitHub's
+/// Runs after the owner walk, because the list `@mine` expands to is
+/// discovered there, and before `fetch_list`, whose paging it must not
+/// wait on. Reports through `counts_err` rather than `err` for the reason
+/// OPS-84 exists: the board's own resilience to GitHub's
 /// slow spells must not be undone by a second request beside it.
 fn fetch_counts(
     tok: &str,
@@ -1762,35 +1855,51 @@ fn main() {
                     failed = Some(said);
                 }
             }
-            // Before the list, and its own request either way. Before,
-            // because the list pages for minutes on a large board and two
-            // figures that arrive only at the end of that are two figures
-            // nobody looks at. Its own request, because OPS-84 spent a day
-            // making the list survive GitHub's slow spells and a count
-            // refused beside it must not undo that: the reason lands in
-            // `counts_err` rather than `err`, the last good counts stay on
-            // screen, and the MERGED caption says they are the older ones.
+            // Before the list, and two requests either way, both in
+            // flight at once. Before, because the list pages for minutes
+            // on a large board and two figures that arrive only at the end
+            // of that are two figures nobody looks at. Two requests,
+            // because sixty-two aliases in one take twice as long and land
+            // on the gateway's ~10s cliff, where thirty on their own take
+            // about three and a half seconds - and because OPS-84 spent a
+            // day making the list survive GitHub's slow spells, which a
+            // count refused beside it must not undo: each reason lands in
+            // its own `counts_err` / `created_err` rather than in `err`,
+            // the last good figures stay on screen, and each caption says
+            // which of them are the older ones.
+            //
+            // At once, because the two are independent and run one after
+            // the other they cost the sum: 3.4s and 3.7s measured here
+            // came to 7.1s of wall time before the list even started
+            // paging. Joined, the slower of the two sets the latency and
+            // the small requests are kept.
+            //
+            // Each on its own thread rather than one here and one beside
+            // it, so a panic in either is a `join` that hands back a
+            // reason instead of a poll loop that has gone. Nothing else
+            // moves: the join is before `fetch_list`, so the counts still
+            // land before the list finishes.
             //
             // Skipped when the owner walk itself failed, because then the
             // scope is not known and `fetch_list` is about to report the
             // same failure where a reader will look for it.
             if failed.is_none() && discover_owners(&poll_tok, &poller).is_ok() {
                 let count_days = chart_days();
-                if let Err(said) = fetch_counts(&poll_tok, &count_days, &poller, &poller_rate) {
-                    if let Ok(mut g) = poller.lock() {
-                        g.counts_err = said;
-                    }
+                let merges = spawn_count("merge counts", {
+                    let (tok, days) = (poll_tok.clone(), count_days.clone());
+                    let (state, rate) = (Arc::clone(&poller), Arc::clone(&poller_rate));
+                    move || fetch_counts(&tok, &days, &state, &rate)
+                });
+                let arrivals = spawn_count("arrival counts", {
+                    let (tok, days) = (poll_tok.clone(), count_days.clone());
+                    let (state, rate) = (Arc::clone(&poller), Arc::clone(&poller_rate));
+                    move || fetch_created(&tok, &days, &state, &rate)
+                });
+                if let Some(said) = count_outcome(merges) {
+                    record_count_err(&poller, Count::Merges, said);
                 }
-                // The arrivals, in a second request over the same day
-                // list: sixty-two aliases in one request take twice as
-                // long and land on the gateway's ~10s cliff, where
-                // thirty on their own take what the merge counts take.
-                // Its own failure, so a refused arrival count leaves the
-                // MERGED row and the list untouched.
-                if let Err(said) = fetch_created(&poll_tok, &count_days, &poller, &poller_rate) {
-                    if let Ok(mut g) = poller.lock() {
-                        g.created_err = said;
-                    }
+                if let Some(said) = count_outcome(arrivals) {
+                    record_count_err(&poller, Count::Arrivals, said);
                 }
             }
             if failed.is_none() {
@@ -5009,5 +5118,131 @@ mod tests {
             "unfetched counts drew as zero: {:?}",
             wait_body
         );
+    }
+
+    /// Both counts on their own thread means `join` is now where a death
+    /// is heard, so that is what these read: what a dead thread says, and
+    /// that what it says reaches the row for its own count and no other.
+    #[test]
+    fn a_count_thread_that_dies_says_why_and_the_row_carries_it() {
+        // A panic is not a refusal GitHub sent, and nothing in the request
+        // path will have written a reason - `join` hands back the payload
+        // and this is the only place it can become words.
+        let said = count_outcome(spawn_count("merge counts", || panic!("boom")))
+            .expect("a thread that panicked had nothing to say");
+        assert!(said.contains("boom"), "the payload was dropped: {:?}", said);
+
+        // A payload of neither string type is still a thread that died.
+        // Returning nothing here would draw the count as one that landed.
+        let odd = count_outcome(spawn_count("arrival counts", || {
+            std::panic::panic_any(7u8)
+        }))
+        .expect("a panic with an odd payload said nothing at all");
+        // Not merely non-empty: the reason has to say the payload carried
+        // no words, because "thread stopped: " with nothing after it reads
+        // on the row as a caption that got cut off rather than as a
+        // thread that died saying nothing.
+        assert!(
+            odd.contains("no reason given"),
+            "an odd payload left the row with half a sentence: {:?}",
+            odd
+        );
+
+        // A thread that could not be started at all is the same silence,
+        // and says so rather than leaving the row to look counted.
+        let unstarted =
+            count_outcome(CountThread::Unstarted("could not start".to_string())).unwrap_or_default();
+        assert!(unstarted.contains("could not start"), "{:?}", unstarted);
+
+        // And nothing to say when there was nothing wrong.
+        assert_eq!(count_outcome(spawn_count("merge counts", || Ok(()))), None);
+
+        // The reason has to reach a row, which is the half `check.rs`
+        // learned to ask for: recording one nobody draws is the same
+        // silence with more code behind it.
+        let p = palette();
+        let days = chart_days();
+        let counts = Counts {
+            days: days.iter().map(|d| (d.clone(), 2)).collect(),
+            merged_24h: 4,
+            opened_24h: 9,
+            at: tc::now(),
+        };
+        // Read in a wide pane, because the caption is clipped to what is
+        // left of the row and a narrow one shows only the head of any
+        // reason, GitHub's own refusals included. What is checked here is
+        // that the reason is on the row at all - a dead thread must not
+        // draw as a count that landed.
+        let rows = stats_view(&[], 0, false, Some(&counts), &said, None, "", 160, 0, &p);
+        let merged = block(&rows, "MERGED / DAY");
+        assert!(
+            merged.contains("count failed") && merged.contains("boom"),
+            "a dead count thread drew as a count that landed: {:?}",
+            merged
+        );
+    }
+
+    #[test]
+    fn a_panic_in_one_count_does_not_touch_the_other() {
+        // The two threads are joined into two fields, and this is the
+        // property that must survive the concurrency: the arrivals died,
+        // the merges did not, and only the OPENED caption says anything.
+        let state = Arc::new(Mutex::new(State::default()));
+        let days = chart_days();
+        if let Ok(mut g) = state.lock() {
+            g.counts = Some(Counts {
+                days: days.iter().map(|d| (d.clone(), 2)).collect(),
+                merged_24h: 4,
+                opened_24h: 9,
+                at: tc::now(),
+            });
+            g.created = Some(Created {
+                days: days.iter().map(|d| (d.clone(), 3)).collect(),
+                at: tc::now(),
+            });
+        }
+        let died = count_outcome(spawn_count("arrival counts", || panic!("boom")))
+            .expect("a thread that panicked had nothing to say");
+        record_count_err(&state, Count::Arrivals, died);
+        let g = state.lock().expect("state");
+        assert!(g.created_err.contains("boom"), "{:?}", g.created_err);
+        assert!(
+            g.counts_err.is_empty(),
+            "an arrival panic reached the merges: {:?}",
+            g.counts_err
+        );
+        assert!(
+            g.err.is_empty(),
+            "a count panic reached the list: {:?}",
+            g.err
+        );
+        // The figures either request already landed are untouched, which
+        // is what OPS-84 and OPS-94 were both about.
+        assert!(g.counts.is_some() && g.created.is_some());
+    }
+
+    #[test]
+    fn a_reason_lands_even_through_the_lock_the_panic_poisoned() {
+        // A panic inside the fetch can leave the state mutex poisoned, and
+        // every ordinary `if let Ok(g) = lock()` then does nothing -
+        // dropping the reason beside figures that go on looking current.
+        let state = Arc::new(Mutex::new(State::default()));
+        let poisoner = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().expect("state");
+            panic!("boom");
+        })
+        .join();
+        assert!(
+            state.is_poisoned(),
+            "the lock was not poisoned to begin with"
+        );
+        record_count_err(
+            &state,
+            Count::Merges,
+            "thread stopped: boom".to_string(),
+        );
+        let g = state.lock().expect("the poison outlived the reason");
+        assert!(g.counts_err.contains("boom"), "{:?}", g.counts_err);
     }
 }
