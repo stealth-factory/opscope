@@ -3,6 +3,37 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.15.0] - 2026-09-12
+
+### Bug Fixes
+
+- **github-prs**: Stop the search from timing out, and scroll the whole widget (#174)
+- **github**: Say whose contributions the calendar counts (#178)
+- **github**: Colour the merge rate the way round it is read (#186)
+- **github-prs**: Count what was opened, and say whose age AGE is (#185)
+- **core**: Lift the ramp's hot end where it lands on a tinted row (#192)
+
+### Features
+
+- **github-prs**: Draw merged-per-day beside opened, and the last 24 hours large (#168)
+- **agent-usage**: Lanes on [+] for Cursor extra usage and Grok on-demand allowance (#169)
+- **luvus-panes**: Read a Luvus session over UHP 1.0 (#183)
+- **core**: Let a widget write a command's stdin (#191)
+- **luvus-panes**: Draw resumable sessions, what is claimable, and the checkout (#190)
+- **luvus-panes**: Say what a blocked agent is blocked on (#194)
+
+### Miscellaneous
+
+- **core**: Start OPS-101 — a stdin-capable run helper
+
+### Performance
+
+- **github-prs**: Put the two count requests in flight at once (#195)
+
+### Tests
+
+- Derive the widget count instead of restating it (#193)
+
 ## [0.14.0] - 2026-09-11
 
 ### Bug Fixes
