@@ -170,11 +170,9 @@ and finding a `●` chart reads as a different connection.
 
 ## Cost
 
-Linux: one or two `ss` invocations per refresh (two when `ports` is empty and
-at least one listener is found), default every two seconds, and one `who`.
-macOS: one persistent `nettop` sample per refresh, and one `who`.
 **No network traffic whatsoever** — every number is read from the kernel's
-existing accounting for sockets that already exist.
+existing accounting for sockets that already exist, so watching a connection
+never changes what it is measuring.
 
 ## Configuration
 

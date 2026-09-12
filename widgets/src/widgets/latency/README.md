@@ -107,8 +107,8 @@ three forms into the same empty samples. Replies, statistics, events and every
 part of the screen then use the same code on both systems.
 
 The 0.2-second minimum is accepted by the stock macOS ping without elevated
-permissions as well as by iputils. There is no hidden ten-second macOS refresh
-or platform-specific interval override.
+permissions as well as by iputils, so the interval you set is the interval
+used on either system.
 
 [Acquisition details and loss semantics →](../../../../docs/latency.md)
 

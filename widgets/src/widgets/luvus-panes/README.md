@@ -55,10 +55,9 @@ nobody is looking. **AGENTS is sorted by who needs a human**, not by name:
 | `idle` | ready for input |
 | `unknown` | an agent is present and Luvus classified it as none of those — **not** the same as idle |
 
-Those four are the states the protocol itself declares — they are defined
-on the UHP capabilities object, not fetched by a fifth widget call. The
-refresh still makes only the four calls above. `blocked` sits above `done`
-because blocked is waiting on you *now* while done is waiting to be noticed.
+Those four are the states the protocol itself declares, so they are Luvus's
+words rather than this widget's. `blocked` sits above `done` because blocked
+is waiting on you *now* while done is waiting to be noticed.
 
 A headline counts how many are waiting on you, so pressing `↵` on the top row
 is the whole workflow: the blocked agent surfaces, one key puts you in front of
@@ -117,20 +116,19 @@ nothing to add.
 The panel is **read-only**. It shows you the prompt; it never answers it. `↵`
 still focuses the pane this panel is about — not whichever row a hidden
 selection would now pick — and nothing here prompts an agent, sends it keys,
-claims a task or releases a lease. The two calls run off the input loop, so
-`esc` and `q` still answer while they are in flight. `esc` closes it, as does
-a second `e`.
+claims a task or releases a lease. It fills in off the input loop, so `esc`
+and `q` still answer while it is waiting. `esc` closes it, as does a second
+`e`.
 
 ## Resumable sessions, and whose count it is
 
-`luvus agent sessions` answers for the **machine**, not for this session. On
-the box this was written against it named ten sessions while the session had
-one workspace open that any of them were in — the other nine were agents left
-in directories nothing currently has open.
+RESUMABLE answers for the **machine**, not for this session: a machine with
+ten resumable sessions can easily have one workspace open that any of them
+are in, the other nine being agents left in directories not covered by any
+currently open workspace.
 
-`mission.snapshot` reports only the ones inside an open workspace, which is
-why it said one where `agent sessions` said ten. The two do not disagree;
-they answer different questions. RESUMABLE draws the full list, because an
+So the total and the in-a-workspace figure beside it count different
+populations, and neither is wrong. RESUMABLE draws the full list, because an
 agent you left somewhere is exactly the one you have forgotten, and its
 heading says how many are in a workspace this session has open so the total
 is never mistaken for the session's own. A session whose directory is under
@@ -186,7 +184,7 @@ this repository is public and screenshots of it are not.
 ## How it knows
 
 Everything comes from the session's own Universal Harness Protocol 1.0
-answers, through the `luvus` CLI. Eight read-only calls per refresh:
+answers, through the `luvus` CLI, and nothing here writes:
 
 - `luvus uhp snapshot` — the whole session in one call: workspaces (name, cwd,
   branch) → tabs → panes (id, cwd, focused, what is in it, its state and the
@@ -201,20 +199,15 @@ answers, through the `luvus` CLI. Eight read-only calls per refresh:
 - `luvus git status` — the focused workspace's checkout.
 - `luvus worktree list` — every checkout of that repository.
 
-**`agent list` is what decides who is an agent, and the snapshot is not.** Every
-pane in a snapshot carries an `agent` field, and a plain shell at a prompt
-arrives as `agent: "bash"` with `agent_authority: "command_fallback"` — so
-reading the snapshot for agents would turn every idle shell into an idle agent.
-PANES is what is left once the agent panes are joined out by pane id.
+**`agent list` is what decides who is an agent.** A plain shell sitting at a
+prompt looks enough like an agent from the outside that taking the wider
+reading would list every idle shell as an idle agent; PANES is what is left
+once the real agents are taken out of it.
 
 **Durations are marked `≥`** when the state was already in place before the
 widget started. UHP does not timestamp a state change, so a duration is
 measured here from the first poll that saw it, and one that began before we
 were looking is only a lower bound.
-
-Subscribing to the UHP event stream instead of polling is a follow-up, not this
-widget: polling the snapshot matches every other widget here and is right for a
-first cut.
 
 ## When it does not all fit
 

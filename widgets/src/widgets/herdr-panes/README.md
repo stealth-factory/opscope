@@ -134,7 +134,4 @@ Agents have a focus-by-id command; other panes do not, so those focus their
 "herdr_panes": { "refresh": 4 }
 ```
 
-Polling every pane is cheap: `process-info` costs about 5ms, so 25 panes add
-~125ms per refresh.
-
 Requires `HERDR_ENV`; reports plainly when the CLI is unavailable.

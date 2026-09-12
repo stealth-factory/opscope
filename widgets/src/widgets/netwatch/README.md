@@ -78,32 +78,24 @@ host as a compact one under the endpoint list, a single row each way.
 The pane states which of two genuinely different measurements it is showing.
 The complete platform contract is in [`docs/netwatch.md`](../../../../docs/netwatch.md).
 
-- **Linux** uses per-socket TCP payload counters from `ss -tine`, joined to
-  process owners through `/proc/<pid>/fd`. Peer filters and the endpoint and
-  connection detail sections are available.
-- **macOS** uses all-protocol, per-process cumulative byte counters from a
-  persistent `nettop -P -x -L 0 -s 1` feed. It has no peer or per-socket byte
-  attribution, so the pane says `process rows`, does not claim to apply the
-  internet-only filter, and marks endpoint and connection details unavailable
-  rather than empty.
+- **Linux** counts TCP payload bytes per socket, through `ss`, and knows which
+  process owns each one. Peer filters and the endpoint and connection detail
+  sections are available.
+- **macOS** counts all protocols per process, through `nettop`, and cannot
+  attribute bytes to a peer or a single socket — so the pane says
+  `process rows`, does not claim to apply the internet-only filter, and marks
+  endpoint and connection details unavailable rather than empty.
 
 Both sources are differenced from a first-sample baseline, so the totals on
 screen mean bytes observed since `netwatch` started or was rezeroed.
 
 ### Linux socket attribution
 
-Linux has the kernel's own per-socket accounting, which reaches process
-attribution without packet capture, a kernel module, or root.
-
-Two facts combine:
-
-- `ss -tine` reports `bytes_sent` and `bytes_received` for every TCP socket,
-  cumulative over that socket's life, along with its **inode**;
-- that inode appears as a `socket:[N]` symlink in `/proc/<pid>/fd`.
-
-So the inode is what ties bytes to a process. `ss -p` would name processes
-directly, but it needs root to name anyone else's; `/proc/<pid>/fd` needs
-nothing at all to name your own, which is the common case.
+The figures are the kernel's own per-socket accounting, which reaches a process
+name **without packet capture, a kernel module, or root** — so nothing on
+screen depends on the widget having been given privileges it should not need.
+The one thing root would buy is naming sockets that belong to other users;
+your own are named either way, which is the common case.
 
 ## What counts as leaving the machine
 
@@ -495,12 +487,12 @@ and `-n` is the row limit.
 
 ## Cost
 
-Linux runs one `ss -tine` and walks `/proc/*/fd` per interval. macOS keeps one
-logging-mode `nettop` feed alive and reads `netstat -ib` per interval; if that
-child exits the widget names the failure and starts it again. `ps` and `lsof`
-are used only on a process detail screen, and a failed `lsof` is named rather
-than drawn as an empty file list. No network traffic of its own, no root, no
-capture.
+**No network traffic of its own, no root, no capture** — every figure is read
+from accounting the kernel was keeping anyway. The open files on a process
+detail screen are the one thing fetched on demand, and when that fetch fails
+it is named rather than drawn as a process with no files open. On macOS, if
+the feed behind the figures dies the widget says so and starts it again rather
+than letting the rows go quiet.
 
 ## Configuration
 
