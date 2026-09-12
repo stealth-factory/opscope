@@ -1770,15 +1770,15 @@ fn the_lifted_ramp_clears_aa_on_a_selection_tint() {
 /// come before the block it is in - which is how `agent-usage`'s
 /// `pct_colour`, a bare `match` arm in a return position, would have been
 /// misread as belonging to the statement above the `if` around it.
+///
+/// `let mut heat` and `let heat: String =` bind the same as a plain
+/// `let heat =`. The first version walked both straight past, and a
+/// widget that took either up would have been unmeasured.
 fn bound_ramp_colour(lines: &[&str], at: usize) -> Option<String> {
     for i in (0..=at).rev() {
         let t = lines[i].trim();
-        if let Some(rest) = t.strip_prefix("let ") {
-            let ident: String =
-                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-            if !ident.is_empty() && rest[ident.len()..].trim_start().starts_with('=') {
-                return Some(ident);
-            }
+        if let Some(ident) = let_binding_ident(t) {
+            return Some(ident);
         }
         // Only lines strictly above the call end a statement; the call's own
         // line may perfectly well end in `;`.
@@ -1790,6 +1790,25 @@ fn bound_ramp_colour(lines: &[&str], at: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// The identifier a `let` on this line binds, if it is one.
+///
+/// `mut` and a type annotation sit between the name and `=`, so a
+/// prefix-up-to-`=` walk that demanded `=` next would miss both.
+fn let_binding_ident(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("let ")?;
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+    let ident: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if ident.is_empty() {
+        return None;
+    }
+    let after = rest[ident.len()..].trim_start();
+    if after.starts_with('=') || (after.starts_with(':') && after.contains('=')) {
+        Some(ident)
+    } else {
+        None
+    }
 }
 
 /// A ramp colour that reaches a tinted row has to be the lifted ramp.
@@ -1807,22 +1826,22 @@ fn bound_ramp_colour(lines: &[&str], at: usize) -> Option<String> {
 /// finished pane, and the plain ramp failed on both of those too, at 4.35
 /// and 3.85 - neither of which anyone had looked at.
 ///
-/// What it cannot see, in this file's tradition of saying so: a ramp call
-/// composed straight into a tint with no binding of its own, and a
-/// `heat_on(x, flag)` whose `flag` is false on a frame the row is tinted.
-/// Only a literal `false` is read as plain, and only a plain `let <ident> =`
-/// binds one - `let mut heat`, `let heat: String =` and a ramp handed back
-/// from a helper function are all walked straight past. Nothing here uses
-/// those shapes today; a widget that took one up would be unmeasured rather
-/// than flagged, which is the wrong way round for a check to fail.
-/// `github-prs` has the first
-/// shape - `&tc::heat(0.4)` inline - and it is drawn on an untinted chart
-/// row, which was confirmed by reading it rather than by this check. It can
-/// also over-reach: `widgets()` hands over every `.rs` in the folder joined
-/// end to end, so a colour bound in one file and a tint closure in the next
-/// are one text to this. No widget does that today; a widget that binds a
-/// ramp colour called `heat` in a second file would be blamed for the tint
-/// in its first.
+/// What it cannot see, in this file's tradition of saying so: a
+/// `heat_on(x, flag)` whose `flag` is false on a frame the row is tinted
+/// - only a literal `false` is read as plain - and a ramp colour handed
+/// back from a helper and then tinted, which has no binding this walk can
+/// attach to the call. A split `_on` call is joined through its close
+/// paren before the flag is read; if that join fails, or the second
+/// argument never appears, a composed site is flagged rather than
+/// measured as lifted. `let mut` and a typed `let` bind the same as a
+/// plain `let`. A ramp composed straight into `c` / `c_of` / `tinted` is
+/// measured on the call itself.
+/// `github-prs` still has `&tc::heat(0.4)` inline on an untinted chart
+/// row; it is not composed, so it is not flagged. It can also over-reach:
+/// `widgets()` hands over every `.rs` in the folder joined end to end, so
+/// a colour bound in one file and a tint closure in the next are one text
+/// to this. No widget does that today; a widget that binds a ramp colour
+/// called `heat` in a second file would be blamed for the tint in its first.
 #[test]
 fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
     let mut wrong = Vec::new();
@@ -1840,25 +1859,50 @@ fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
             if !plain && !lifted_call {
                 continue;
             }
-            // A `_on` call is only lifted if it is actually asked to be. A
-            // literal `false` is the plain ramp wearing the new name.
-            let lifted = lifted_call && !tinted_arg_is_false(line);
-            let Some(ident) = bound_ramp_colour(&lines, at) else { continue };
+            // Join a split `_on` through its close paren before reading the
+            // tint flag. The first line of
+            // `tc::heat_on(\n    frac,\n    false,\n)` has no second
+            // argument, and treating that as "not false" measured the
+            // lifted ramp - which clears AA - while the runtime call used
+            // the plain one.
+            let call = ramp_call_text(&lines, at);
+            let tint_arg = call.as_deref().and_then(tinted_arg);
+            let incomplete_on = lifted_call && tint_arg.is_none();
+            let lifted = matches!(tint_arg.as_deref(), Some(arg) if arg != "false");
+            let ident = bound_ramp_colour(&lines, at);
+            let inline = ramp_drawn_through_tint(line)
+                || call.as_deref().is_some_and(ramp_drawn_through_tint);
             // Does anything hand that colour to a tint closure? Forward only,
             // and only until the name is bound again - `github` binds `hot`
             // three times, and two of those are section rows that no
             // selection ever tints. A file-wide search for `c(&hot)` blamed
             // all three for the one that is.
-            let rebound = format!("let {} =", ident);
-            let composed = lines[at + 1..]
-                .iter()
-                .take_while(|l| !l.trim().starts_with(&rebound))
-                .any(|l| {
-                    l.contains(&format!("c(&{})", ident))
-                        || l.contains(&format!("c_of(&{})", ident))
-                        || l.contains(&format!("tinted(&{})", ident))
+            let composed = inline
+                || ident.as_ref().is_some_and(|ident| {
+                    let rebound = format!("let {} =", ident);
+                    lines[at + 1..]
+                        .iter()
+                        .take_while(|l| !l.trim().starts_with(&rebound))
+                        .any(|l| {
+                            l.contains(&format!("c(&{})", ident))
+                                || l.contains(&format!("c_of(&{})", ident))
+                                || l.contains(&format!("tinted(&{})", ident))
+                        })
                 });
             if !composed {
+                continue;
+            }
+            let shown = ident.as_deref().unwrap_or("ramp");
+            if incomplete_on {
+                wrong.push(format!(
+                    "{}: `{}` from `{}` is drawn on a tint, but the `_on` call's \
+                     tint flag never closed - a split `false` would have been \
+                     measured as the lifted ramp. Finish the call so the flag \
+                     can be read.",
+                    name,
+                    shown,
+                    line.trim()
+                ));
                 continue;
             }
             for (tint, _) in &tints {
@@ -1876,7 +1920,7 @@ fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
                          {:.3}, measuring {:.2} - under AA 4.5. Ask for \
                          tc::heat_on/tc::health_on.",
                         name,
-                        ident,
+                        shown,
                         line.trim(),
                         tint,
                         worst.2,
@@ -1892,26 +1936,86 @@ fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
     assert!(wrong.is_empty(), "the plain ramp on a tinted row:\n{}", wrong.join("\n"));
 }
 
-/// Whether a `heat_on`/`health_on` call passes a literal `false`.
+/// The `tc::heat` / `health` / `_on` call starting on `lines[at]`, joined
+/// through its matching close paren.
 ///
-/// The argument is found by counting parens from the call's own, because
-/// every site here nests one: `tc::heat_on((v / 100.0).min(1.0), here)`
-/// splits on the wrong comma if the parens are not counted.
-fn tinted_arg_is_false(line: &str) -> bool {
-    let Some(at) = line.find("_on(") else { return false };
+/// rustfmt will split a long `_on` across lines. The first line then has
+/// no second argument, and a reader that only saw that line treated the
+/// missing flag as "not a literal `false`" - i.e. as lifted. `None` if
+/// this line has no call, or the parens never close in a short window.
+fn ramp_call_text(lines: &[&str], at: usize) -> Option<String> {
+    let line = lines[at];
+    // `_on` first, or `heat(` matches inside `heat_on` the wrong way
+    // around... it does not (`heat(` is not a prefix of `heat_on(`), but
+    // the longer needle is the one we want the span of.
+    let start = ["tc::heat_on(", "tc::health_on(", "tc::heat(", "tc::health("]
+        .iter()
+        .find_map(|p| line.find(p))?;
+    let mut out = line[start..].to_string();
+    let mut depth = 0i32;
+    for ch in out.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        return Some(out);
+    }
+    for extra in lines[at + 1..].iter().take(12) {
+        out.push(' ');
+        out.push_str(extra.trim());
+        for ch in extra.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// A ramp composed straight into the tint helper, with no binding of its
+/// own: `c(&tc::heat(0.9))` and the `c_of` / `tinted` twins.
+fn ramp_drawn_through_tint(s: &str) -> bool {
+    const HELPERS: &[&str] = &[
+        "c(&tc::heat",
+        "c(&tc::health",
+        "c_of(&tc::heat",
+        "c_of(&tc::health",
+        "tinted(&tc::heat",
+        "tinted(&tc::health",
+    ];
+    HELPERS.iter().any(|h| s.contains(h))
+}
+
+/// The second argument of a `heat_on`/`health_on` call, if the call is
+/// closed and that argument is present.
+///
+/// Found by counting parens from the call's own, because every site here
+/// nests one: `tc::heat_on((v / 100.0).min(1.0), here)` splits on the
+/// wrong comma if the parens are not counted. A trailing comma left by
+/// rustfmt is stripped, or a split `false,` would not look like `false`.
+fn tinted_arg(call: &str) -> Option<String> {
+    let at = call.find("_on(")?;
     let open = at + 3;
     let mut depth = 0i32;
-    for (i, ch) in line[open..].char_indices() {
+    for (i, ch) in call[open..].char_indices() {
         match ch {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return false;
+                    return None;
                 }
             }
             ',' if depth == 1 => {
-                let rest = &line[open + i + 1..];
+                let rest = &call[open + i + 1..];
                 let arg: String = rest
                     .chars()
                     .scan(0i32, |d, c| {
@@ -1924,12 +2028,77 @@ fn tinted_arg_is_false(line: &str) -> bool {
                         Some(c)
                     })
                     .collect();
-                return arg.trim() == "false";
+                let arg = arg.trim().trim_end_matches(',').trim();
+                if arg.is_empty() {
+                    return None;
+                }
+                return Some(arg.to_string());
             }
             _ => {}
         }
     }
-    false
+    None
+}
+
+/// Whether a `heat_on`/`health_on` call passes a literal `false`.
+fn tinted_arg_is_false(call: &str) -> bool {
+    tinted_arg(call).as_deref() == Some("false")
+}
+
+#[test]
+fn tinted_arg_reads_a_complete_call_not_its_first_line() {
+    assert!(tinted_arg_is_false("tc::heat_on(frac, false)"));
+    assert!(tinted_arg_is_false("tc::heat_on((v / 100.0).min(1.0), false)"));
+    assert!(!tinted_arg_is_false("tc::heat_on(frac, true)"));
+    assert!(!tinted_arg_is_false("tc::heat_on(frac, here)"));
+    assert!(!tinted_arg_is_false(
+        "tc::heat_on((v / 100.0).min(1.0), !tint.is_empty())"
+    ));
+    // The first line of a split call has no second argument. Reading it
+    // alone must not invent a flag - that is the fail-open this caught.
+    let split = [
+        "            let hot = tc::heat_on(",
+        "                frac,",
+        "                false,",
+        "            );",
+    ];
+    assert!(
+        tinted_arg(split[0]).is_none(),
+        "an opener is not a complete call: {:?}",
+        tinted_arg(split[0])
+    );
+    let call = ramp_call_text(&split, 0).expect("the split call joins");
+    assert_eq!(tinted_arg(&call).as_deref(), Some("false"), "{call}");
+    assert!(tinted_arg_is_false(&call), "{call}");
+
+    let unclosed = ["            let hot = tc::heat_on("];
+    assert!(
+        ramp_call_text(&unclosed, 0).is_none(),
+        "an unclosed call must not be measured as lifted"
+    );
+}
+
+#[test]
+fn bound_ramp_colour_sees_mut_and_a_type() {
+    let plain = ["let heat = tc::heat(0.5);"];
+    assert_eq!(bound_ramp_colour(&plain, 0).as_deref(), Some("heat"));
+    let mutable = ["let mut heat = tc::heat(0.5);"];
+    assert_eq!(bound_ramp_colour(&mutable, 0).as_deref(), Some("heat"));
+    let typed = ["let heat: String = tc::heat(0.5);"];
+    assert_eq!(bound_ramp_colour(&typed, 0).as_deref(), Some("heat"));
+    let both = ["let mut heat: String = tc::heat(0.5);"];
+    assert_eq!(bound_ramp_colour(&both, 0).as_deref(), Some("heat"));
+}
+
+#[test]
+fn a_ramp_composed_inline_is_seen() {
+    assert!(ramp_drawn_through_tint("c(&tc::heat(0.9))"));
+    assert!(ramp_drawn_through_tint("c_of(&tc::health_on(frac, on))"));
+    assert!(ramp_drawn_through_tint("tinted(&tc::heat_on(frac, true))"));
+    // github-prs draws `&tc::heat(0.4)` on an untinted chart. That is a
+    // call, not a composition, and must stay unflagged.
+    assert!(!ramp_drawn_through_tint("&tc::heat(0.4)"));
+    assert!(!ramp_drawn_through_tint("let hot = tc::health_on(frac, on);"));
 }
 
 /// Widgets that answer neither wheel event, deliberately.
