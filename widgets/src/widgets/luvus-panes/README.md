@@ -92,7 +92,9 @@ why it said one where `agent sessions` said ten. The two do not disagree;
 they answer different questions. RESUMABLE draws the full list, because an
 agent you left somewhere is exactly the one you have forgotten, and its
 heading says how many are in a workspace this session has open so the total
-is never mistaken for the session's own.
+is never mistaken for the session's own. A session whose directory is under
+an open workspace counts as inside it. If the snapshot did not come back,
+membership is unknown rather than "not open here".
 
 ## The focused workspace's checkout
 
@@ -107,7 +109,9 @@ focused on. Drawing those figures without naming the workspace would make
 them read as a claim about the whole session that none of them support.
 
 *Entries*, not *files*: git reports a wholly untracked directory as a single
-entry, so the count is of what git listed rather than of what is on disk.
+entry, so the count is of what git listed rather than of what is on disk. A
+source that did not come back says so on this line, and a directory that is
+not a repository is a dash rather than a failure.
 
 ## Tasks and leases
 
@@ -141,7 +145,7 @@ this repository is public and screenshots of it are not.
 ## How it knows
 
 Everything comes from the session's own Universal Harness Protocol 1.0
-answers, through the `luvus` CLI. Four read-only calls per refresh:
+answers, through the `luvus` CLI. Eight read-only calls per refresh:
 
 - `luvus uhp snapshot` — the whole session in one call: workspaces (name, cwd,
   branch) → tabs → panes (id, cwd, focused, what is in it, its state and the
@@ -150,6 +154,11 @@ answers, through the `luvus` CLI. Four read-only calls per refresh:
   project, worktree flag and `state_source` the snapshot does not carry.
 - `luvus task list --json` — the tasks.
 - `luvus lease list --json` — the leases.
+- `luvus task next` — whether anything is ready to claim.
+- `luvus agent sessions` — resumable sessions on the machine, not just this
+  session.
+- `luvus git status` — the focused workspace's checkout.
+- `luvus worktree list` — every checkout of that repository.
 
 **`agent list` is what decides who is an agent, and the snapshot is not.** Every
 pane in a snapshot carries an `agent` field, and a plain shell at a prompt

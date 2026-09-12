@@ -63,7 +63,7 @@ fn focus_pane(session: &str, pane: &str) -> bool {
 
 /// Everything one poll established, each source answering for itself.
 ///
-/// Four `Result`s rather than one shared error, because a `task list` that
+/// Eight `Result`s rather than one shared error, because a `task list` that
 /// failed and a session with no tasks in it are opposite readings and the
 /// screen has to be able to say which. A single error field would have made
 /// the failed one draw as `0 tasks`.
@@ -128,7 +128,7 @@ struct Seen {
 fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
-    // the same for all four.
+    // the same for every reading.
     let snapshot = match luvus_text(session, &["uhp", "snapshot"]) {
         Ok(text) => parse::parse_snapshot(&text),
         Err(why) => {
@@ -164,17 +164,19 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         luvus_text(session, &["task", "next"]).and_then(|text| parse::parse_next_task(&text));
     // Marked against the session's own workspaces, because `agent sessions`
     // answers for the whole machine: nine of ten on the box this was built
-    // against were in directories no open workspace covers.
-    let open: Vec<String> = snapshot
+    // against were in directories no open workspace covers. A snapshot
+    // that did not come back is not an empty list — that would mark every
+    // session "not open here" when membership was never established.
+    let open: Option<Vec<String>> = snapshot
         .as_ref()
-        .map(|s| s.spaces.iter().map(|w| w.cwd.clone()).collect())
-        .unwrap_or_default();
+        .ok()
+        .map(|s| s.spaces.iter().map(|w| w.cwd.clone()).collect());
     let sessions = luvus_text(session, &["agent", "sessions"])
-        .and_then(|text| parse::parse_sessions(&text, &open));
+        .and_then(|text| parse::parse_sessions(&text, open.as_deref()));
     let git =
         luvus_text(session, &["git", "status"]).and_then(|text| parse::parse_git_status(&text));
-    let worktrees = luvus_text(session, &["worktree", "list"])
-        .and_then(|text| parse::parse_worktrees(&text));
+    let worktrees =
+        luvus_text(session, &["worktree", "list"]).and_then(|text| parse::parse_worktrees(&text));
 
     let at = tc::now();
     let agents = agents.map(|listed| {
@@ -332,7 +334,13 @@ fn mark_of(state: &str, tick: usize) -> char {
 /// frame the wheel moved the view rather than a key moving the cursor:
 /// then `from` stands as given and the cursor may scroll out of sight. It
 /// is still where `↵` acts, and the next arrow brings the window back.
-fn window_from(total: usize, want: std::ops::Range<usize>, room: usize, from: usize, chase: bool) -> usize {
+fn window_from(
+    total: usize,
+    want: std::ops::Range<usize>,
+    room: usize,
+    from: usize,
+    chase: bool,
+) -> usize {
     let last = total.saturating_sub(room);
     let mut start = from.min(last);
     if chase {
@@ -399,6 +407,121 @@ fn shown_count<T>(reading: &Result<Vec<T>, String>) -> String {
     match reading {
         Ok(rows) => rows.len().to_string(),
         Err(_) => "unread".into(),
+    }
+}
+
+/// Away first: a session left in a directory nobody has open is the one
+/// you are least likely to remember. Unknown membership is not "away".
+fn membership_rank(inside: Option<bool>) -> u8 {
+    match inside {
+        Some(false) => 0,
+        None => 1,
+        Some(true) => 2,
+    }
+}
+
+/// What a resumable row says about workspace membership.
+///
+/// Narrow panes get a compact word; colour alone is not a label. Wide
+/// panes keep the longer sentence.
+fn membership_label(inside: Option<bool>, wide: bool) -> &'static str {
+    match (inside, wide) {
+        (Some(true), true) => "in an open workspace",
+        (Some(false), true) => "not open here",
+        (None, true) => "workspace unread",
+        (Some(true), false) => "open",
+        (Some(false), false) => "away",
+        (None, false) => "?",
+    }
+}
+
+/// The checkout line under the session. Each source speaks for itself.
+///
+/// A git failure, a worktree failure, and a directory that is not a
+/// repository are different sentences. Omitting the row would make an
+/// unread source look like a checkout with nothing to say.
+fn checkout_line<'a>(
+    git: &'a Result<GitState, String>,
+    worktrees: &'a Result<Vec<Worktree>, String>,
+    focused: &str,
+    p: &'a Palette,
+) -> Vec<(&'a str, String)> {
+    match git {
+        Ok(g) => {
+            let mut said = vec![(
+                p.dim.as_str(),
+                if focused.is_empty() {
+                    format!(" ⑂ on {}", g.branch)
+                } else {
+                    format!(" ⑂ {} on {}", focused, g.branch)
+                },
+            )];
+            if g.behind > 0 {
+                said.push((p.blocked.as_str(), format!(" · {} behind", g.behind)));
+            }
+            if g.ahead > 0 {
+                said.push((p.done.as_str(), format!(" · {} ahead", g.ahead)));
+            }
+            if g.dirty > 0 {
+                // Entries, not files: git reports a wholly untracked
+                // directory as one entry and the count would be a lie.
+                said.push((
+                    p.working.as_str(),
+                    format!(
+                        " · {} entr{} changed",
+                        g.dirty,
+                        if g.dirty == 1 { "y" } else { "ies" }
+                    ),
+                ));
+            }
+            if g.stashes > 0 {
+                said.push((p.dim.as_str(), format!(" · {} stashed", g.stashes)));
+            }
+            match worktrees {
+                Ok(trees) if trees.len() > 1 => {
+                    said.push((p.dim.as_str(), format!(" · {} worktrees", trees.len())));
+                }
+                Ok(_) => {}
+                Err(why) => {
+                    said.push((p.unknown.as_str(), format!(" · worktrees unread — {}", why)));
+                }
+            }
+            said
+        }
+        Err(why) if parse::is_not_a_repo(why) => {
+            vec![(
+                p.dim.as_str(),
+                if focused.is_empty() {
+                    " ⑂ not a repository".into()
+                } else {
+                    format!(" ⑂ {} — not a repository", focused)
+                },
+            )]
+        }
+        Err(why) => {
+            let mut said = vec![(
+                p.unknown.as_str(),
+                if focused.is_empty() {
+                    format!(" ⑂ checkout unread — {}", why)
+                } else {
+                    format!(" ⑂ {} · checkout unread — {}", focused, why)
+                },
+            )];
+            match worktrees {
+                Ok(trees) if trees.len() > 1 => {
+                    said.push((p.dim.as_str(), format!(" · {} worktrees", trees.len())));
+                }
+                Ok(_) => {}
+                Err(wwhy) if parse::is_not_a_repo(wwhy) => {}
+                Err(wwhy) => {
+                    said.push((
+                        p.unknown.as_str(),
+                        format!(" · worktrees unread — {}", wwhy),
+                    ));
+                }
+            }
+            said
+        }
     }
 }
 
@@ -553,11 +676,7 @@ fn main() {
                                 tc::now() + 3.0,
                             )
                         } else if focus_pane(&session, &pane) {
-                            (
-                                format!("→ focused pane {}", pane),
-                                true,
-                                tc::now() + 3.0,
-                            )
+                            (format!("→ focused pane {}", pane), true, tc::now() + 3.0)
                         } else {
                             (
                                 format!("! could not focus pane {}", pane),
@@ -574,21 +693,21 @@ fn main() {
         let (w, h) = tc::size();
         let (snapshot, agents, tasks, leases, absent, err, read, next, sessions, git, worktrees) =
             match state.lock() {
-            Ok(g) => (
-                g.snapshot.clone(),
-                g.agents.clone(),
-                g.tasks.clone(),
-                g.leases.clone(),
-                g.absent.clone(),
-                g.err.clone(),
-                g.read,
-                g.next.clone(),
-                g.sessions.clone(),
-                g.git.clone(),
-                g.worktrees.clone(),
-            ),
-            Err(_) => return,
-        };
+                Ok(g) => (
+                    g.snapshot.clone(),
+                    g.agents.clone(),
+                    g.tasks.clone(),
+                    g.leases.clone(),
+                    g.absent.clone(),
+                    g.err.clone(),
+                    g.read,
+                    g.next.clone(),
+                    g.sessions.clone(),
+                    g.git.clone(),
+                    g.worktrees.clone(),
+                ),
+                Err(_) => return,
+            };
         let wide = w >= 76;
 
         // Rows for drawing. A failed source stays a failed source: these
@@ -602,8 +721,8 @@ fn main() {
         // open is the one you are least likely to remember.
         let mut resumable_rows: Vec<Resumable> = sessions.clone().unwrap_or_default();
         resumable_rows.sort_by(|a, b| {
-            a.in_workspace
-                .cmp(&b.in_workspace)
+            membership_rank(a.in_workspace)
+                .cmp(&membership_rank(b.in_workspace))
                 .then(a.kind.cmp(&b.kind))
                 .then(a.cwd.cmp(&b.cwd))
         });
@@ -628,8 +747,16 @@ fn main() {
             "idle" => 2,
             _ => 1,
         });
-        let busy: Vec<Pane> = others.iter().filter(|n| n.status != "idle").cloned().collect();
-        let resting: Vec<Pane> = others.iter().filter(|n| n.status == "idle").cloned().collect();
+        let busy: Vec<Pane> = others
+            .iter()
+            .filter(|n| n.status != "idle")
+            .cloned()
+            .collect();
+        let resting: Vec<Pane> = others
+            .iter()
+            .filter(|n| n.status == "idle")
+            .cloned()
+            .collect();
         let unstated = busy.iter().filter(|n| n.status.is_empty()).count();
         let running = busy.len() - unstated;
 
@@ -641,18 +768,15 @@ fn main() {
             .chain(lease_rows.iter().cloned().map(Row::Lease))
             .chain(resumable_rows.iter().cloned().map(Row::Resumable))
             .chain(busy.iter().cloned().map(Row::Pane))
-            .chain(
-                resting
-                    .iter()
-                    .filter(|_| show_idle)
-                    .cloned()
-                    .map(Row::Pane),
-            )
+            .chain(resting.iter().filter(|_| show_idle).cloned().map(Row::Pane))
             .collect();
         if !rows_now.is_empty() && selected >= rows_now.len() {
             selected = rows_now.len() - 1;
         }
-        if note.as_ref().is_some_and(|(_, _, until)| tc::now() >= *until) {
+        if note
+            .as_ref()
+            .is_some_and(|(_, _, until)| tc::now() >= *until)
+        {
             note = None;
         }
 
@@ -704,7 +828,10 @@ fn main() {
         ));
         for state_name in ["blocked", "done", "working", "idle"] {
             if let Some(n) = counts.get(state_name) {
-                summary.push((colour_of(state_name, &p), format!("   {} {}", n, state_name)));
+                summary.push((
+                    colour_of(state_name, &p),
+                    format!("   {} {}", n, state_name),
+                ));
             }
         }
         head.push(tc::seg(&summary, w.saturating_sub(1)));
@@ -781,46 +908,19 @@ fn main() {
         // not a total: the CLI's `git status` and `worktree list` take no
         // workspace argument, so a figure here covers the focused workspace
         // and saying otherwise would make four numbers into a claim about
-        // the session none of them support.
-        if let Ok(g) = &git {
-            let focused = snapshot
-                .as_ref()
-                .ok()
-                .and_then(|s| s.spaces.iter().find(|x| x.active))
-                .map(|x| x.name.clone())
-                .unwrap_or_default();
-            let mut said = vec![(
-                p.dim.as_str(),
-                if focused.is_empty() {
-                    format!(" ⑂ on {}", g.branch)
-                } else {
-                    format!(" ⑂ {} on {}", focused, g.branch)
-                },
-            )];
-            if g.behind > 0 {
-                said.push((p.blocked.as_str(), format!(" · {} behind", g.behind)));
-            }
-            if g.ahead > 0 {
-                said.push((p.done.as_str(), format!(" · {} ahead", g.ahead)));
-            }
-            if g.dirty > 0 {
-                // Entries, not files: git reports a wholly untracked
-                // directory as one entry and the count would be a lie.
-                said.push((
-                    p.working.as_str(),
-                    format!(" · {} entr{} changed", g.dirty, if g.dirty == 1 { "y" } else { "ies" }),
-                ));
-            }
-            if g.stashes > 0 {
-                said.push((p.dim.as_str(), format!(" · {} stashed", g.stashes)));
-            }
-            if let Ok(trees) = &worktrees {
-                if trees.len() > 1 {
-                    said.push((p.dim.as_str(), format!(" · {} worktrees", trees.len())));
-                }
-            }
-            head.push(tc::seg(&said, w.saturating_sub(1)));
-        }
+        // the session none of them support. Each Result is drawn even when
+        // it failed: omitting the row would make an unread source look like
+        // a checkout with nothing to say.
+        let focused = snapshot
+            .as_ref()
+            .ok()
+            .and_then(|s| s.spaces.iter().find(|x| x.active))
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        head.push(tc::seg(
+            &checkout_line(&git, &worktrees, &focused, &p),
+            w.saturating_sub(1),
+        ));
         head.push(String::new());
 
         // ---- the footer, built before the body ----
@@ -958,7 +1058,10 @@ fn main() {
                 .max(8);
             let mut columns = format!(
                 " {:<name_w$} {:<8} {:<6} {:<14}",
-                "AGENT", "STATE", "FOR", "WORKSPACE",
+                "AGENT",
+                "STATE",
+                "FOR",
+                "WORKSPACE",
                 name_w = name_w
             );
             if wide {
@@ -1085,8 +1188,10 @@ fn main() {
                 if loud || here {
                     detail.push((tint.clone(), " ".repeat(w)));
                 }
-                let refs: Vec<(&str, String)> =
-                    detail.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+                let refs: Vec<(&str, String)> = detail
+                    .iter()
+                    .map(|(c, t)| (c.as_str(), t.clone()))
+                    .collect();
                 body.push(tc::seg(&refs, w.saturating_sub(1)));
                 spans.push(start..body.len());
                 at += 1;
@@ -1095,7 +1200,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&agents, "no agents under this session");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1115,10 +1224,9 @@ fn main() {
                         Ok(n) if n.none && !task_rows.is_empty() => {
                             (p.dim.as_str(), "   none ready to claim".to_string())
                         }
-                        Ok(n) if !n.none && !n.id.is_empty() => (
-                            p.done.as_str(),
-                            format!("   {} ready to claim", n.id),
-                        ),
+                        Ok(n) if !n.none && !n.id.is_empty() => {
+                            (p.done.as_str(), format!("   {} ready to claim", n.id))
+                        }
                         Err(why) if !why.starts_with("not read") => {
                             (p.unknown.as_str(), format!("   next: {}", why))
                         }
@@ -1130,7 +1238,11 @@ fn main() {
             for t in &task_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1173,7 +1285,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&tasks, "no tasks — nothing is being coordinated");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1192,7 +1308,11 @@ fn main() {
             for l in &lease_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1232,7 +1352,11 @@ fn main() {
                 let (said, bad) = empty_or_why(&leases, "no leases — no paths are reserved");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1245,15 +1369,25 @@ fn main() {
             // how many are in a workspace this session has open rather than
             // presenting the whole count as though it were the session's.
             body.push(String::new());
-            let inside = resumable_rows.iter().filter(|r| r.in_workspace).count();
+            let inside = resumable_rows
+                .iter()
+                .filter(|r| r.in_workspace == Some(true))
+                .count();
+            let membership_unread = resumable_rows.iter().any(|r| r.in_workspace.is_none());
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── RESUMABLE ── ".into()),
                     (p.dim.as_str(), format!("{}", resumable_rows.len())),
                     (
-                        p.dim.as_str(),
+                        if membership_unread {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         if resumable_rows.is_empty() {
                             String::new()
+                        } else if membership_unread {
+                            "   cannot say which are in an open workspace".into()
                         } else {
                             format!("   {} in an open workspace", inside)
                         },
@@ -1264,7 +1398,11 @@ fn main() {
             for r in &resumable_rows {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1287,19 +1425,26 @@ fn main() {
                     (c(&p.accent), format!("{}◇ ", if here { "▸" } else { " " })),
                     (c(&p.txt), tc::pad(&r.kind, 8)),
                     (
-                        c(if r.in_workspace { &p.idle_c } else { &p.dim }),
+                        c(if r.in_workspace == Some(true) {
+                            &p.idle_c
+                        } else if r.in_workspace.is_none() {
+                            &p.unknown
+                        } else {
+                            &p.dim
+                        }),
                         format!(" {}", parse::tail_path(&parse::homely(&r.cwd), 34)),
                     ),
+                    (
+                        c(if r.in_workspace == Some(true) {
+                            &p.idle_c
+                        } else if r.in_workspace.is_none() {
+                            &p.unknown
+                        } else {
+                            &p.dim
+                        }),
+                        format!("  {}", membership_label(r.in_workspace, wide)),
+                    ),
                 ];
-                if wide {
-                    line.push((
-                        c(&p.dim),
-                        format!(
-                            "  {}",
-                            if r.in_workspace { "in an open workspace" } else { "not open here" }
-                        ),
-                    ));
-                }
                 if here {
                     line.push((tint.clone(), " ".repeat(w)));
                 }
@@ -1314,7 +1459,11 @@ fn main() {
                     empty_or_why(&sessions, "no resumable sessions — every agent has a pane");
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1345,7 +1494,10 @@ fn main() {
                     &[(
                         p.dim.as_str(),
                         tc::pad(
-                            &format!(" {:<12} {:<8} {:<14} {:<20}", "IN THE PANE", "STATE", "WORKSPACE", "DIRECTORY"),
+                            &format!(
+                                " {:<12} {:<8} {:<14} {:<20}",
+                                "IN THE PANE", "STATE", "WORKSPACE", "DIRECTORY"
+                            ),
                             w.saturating_sub(1),
                         ),
                     )],
@@ -1355,7 +1507,11 @@ fn main() {
             for n in &busy {
                 let here = at == selected_row;
                 let start = body.len();
-                let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                let tint = if here {
+                    tc::bg(38, 56, 76)
+                } else {
+                    String::new()
+                };
                 let c = |colour: &str| {
                     let colour = if tint.is_empty() {
                         colour
@@ -1399,19 +1555,13 @@ fn main() {
                         c(colour_of(&n.status, &p)),
                         format!(
                             " {}",
-                            tc::pad(
-                                if unstated_here { "no state" } else { &n.status },
-                                8
-                            )
+                            tc::pad(if unstated_here { "no state" } else { &n.status }, 8)
                         ),
                     ),
                     (c(&p.accent), format!(" {}", tc::pad(&n.workspace, 14))),
                 ];
                 if wide {
-                    line.push((
-                        c(&p.dim),
-                        format!(" {}", parse::homely(&n.cwd)),
-                    ));
+                    line.push((c(&p.dim), format!(" {}", parse::homely(&n.cwd))));
                 }
                 if here {
                     line.push((tint.clone(), " ".repeat(w)));
@@ -1437,7 +1587,11 @@ fn main() {
                 );
                 body.push(tc::seg(
                     &[(
-                        if bad { p.unknown.as_str() } else { p.dim.as_str() },
+                        if bad {
+                            p.unknown.as_str()
+                        } else {
+                            p.dim.as_str()
+                        },
                         said,
                     )],
                     w.saturating_sub(1),
@@ -1452,7 +1606,11 @@ fn main() {
                         (p.lbl.as_str(), " ── IDLE ── ".into()),
                         (
                             p.dim.as_str(),
-                            format!("{} pane{} at a prompt", resting.len(), plural(resting.len())),
+                            format!(
+                                "{} pane{} at a prompt",
+                                resting.len(),
+                                plural(resting.len())
+                            ),
                         ),
                     ],
                     w.saturating_sub(1),
@@ -1460,7 +1618,11 @@ fn main() {
                 for n in &resting {
                     let here = at == selected_row;
                     let start = body.len();
-                    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+                    let tint = if here {
+                        tc::bg(38, 56, 76)
+                    } else {
+                        String::new()
+                    };
                     let c = |colour: &str| {
                         let colour = if tint.is_empty() {
                             colour
@@ -1537,7 +1699,11 @@ fn main() {
         rows.push(match note.as_ref() {
             Some((text, ok, _)) => tc::seg(
                 &[(
-                    if *ok { p.done.as_str() } else { p.blocked.as_str() },
+                    if *ok {
+                        p.done.as_str()
+                    } else {
+                        p.blocked.as_str()
+                    },
                     format!(" {}", text),
                 )],
                 w.saturating_sub(1),
@@ -1645,6 +1811,58 @@ mod tests {
         assert_ne!(shown_count(&failed), "0");
     }
 
+    fn said_of(line: &[(&str, String)]) -> String {
+        line.iter().map(|(_, t)| t.as_str()).collect()
+    }
+
+    #[test]
+    fn a_failed_checkout_is_a_row_not_a_silence() {
+        let p = palette();
+        let git: Result<GitState, String> = Err("luvus did not answer in 15s".into());
+        let trees: Result<Vec<Worktree>, String> = Ok(Vec::new());
+        let said = said_of(&checkout_line(&git, &trees, "opscope", &p));
+        assert!(said.contains("checkout unread"));
+        assert!(said.contains("did not answer"));
+        assert!(said.contains("opscope"));
+        let trees: Result<Vec<Worktree>, String> = Err("luvus did not answer in 15s".into());
+        let said = said_of(&checkout_line(&git, &trees, "opscope", &p));
+        assert!(said.contains("worktrees unread"));
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repository_is_a_dash() {
+        let p = palette();
+        let git: Result<GitState, String> =
+            Err("fatal: not a git repository (or any of the parent directories): .git".into());
+        let trees: Result<Vec<Worktree>, String> = Err("fatal: not a git repository".into());
+        let said = said_of(&checkout_line(&git, &trees, "home", &p));
+        assert!(said.contains("not a repository"));
+        assert!(!said.contains("unread"));
+    }
+
+    #[test]
+    fn a_worktree_failure_stays_on_the_checkout_line() {
+        let p = palette();
+        let git = Ok(GitState {
+            branch: "main".into(),
+            ..Default::default()
+        });
+        let trees: Result<Vec<Worktree>, String> = Err("luvus did not answer in 15s".into());
+        let said = said_of(&checkout_line(&git, &trees, "opscope", &p));
+        assert!(said.contains("worktrees unread"));
+        assert!(said.contains("on main"));
+        assert!(said.contains("opscope"));
+    }
+
+    #[test]
+    fn a_narrow_row_still_says_whether_the_workspace_is_open() {
+        assert_eq!(membership_label(Some(true), false), "open");
+        assert_eq!(membership_label(Some(false), false), "away");
+        assert_eq!(membership_label(None, false), "?");
+        assert_eq!(membership_label(Some(true), true), "in an open workspace");
+        assert_eq!(membership_label(None, true), "workspace unread");
+    }
+
     #[test]
     fn duration_follows_the_agent_not_only_the_pane() {
         let mut seen = Seen {
@@ -1675,5 +1893,4 @@ mod tests {
         let (returned, _) = measure_since(&mut seen, &a, "working", 100.0);
         assert_eq!(returned, 0.0);
     }
-
 }

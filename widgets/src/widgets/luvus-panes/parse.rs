@@ -58,8 +58,7 @@ pub fn parse_failure(message: &str) -> Absence {
     // future `Error: pane not found` is luvus answering, not luvus being
     // absent, and drawing "no luvus on PATH" over it would send the reader
     // to install something they already have.
-    if said.starts_with("luvus:")
-        && (said.contains("no such file") || said.contains("os error 2"))
+    if said.starts_with("luvus:") && (said.contains("no such file") || said.contains("os error 2"))
     {
         return Absence::NoBinary;
     }
@@ -197,7 +196,11 @@ pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
         let kind = text_at(entry, "agent");
         let named = text_at(entry, "name");
         found.push(Agent {
-            name: if named.is_empty() { kind.clone() } else { named },
+            name: if named.is_empty() {
+                kind.clone()
+            } else {
+                named
+            },
             kind,
             pane: id_at(entry, "pane"),
             workspace: text_at(entry, "workspace_name"),
@@ -383,7 +386,10 @@ pub fn tail_path(path: &str, n: usize) -> String {
     if chars.len() <= n || n < 2 {
         return path.to_string();
     }
-    format!("…{}", chars[chars.len() - (n - 1)..].iter().collect::<String>())
+    format!(
+        "…{}",
+        chars[chars.len() - (n - 1)..].iter().collect::<String>()
+    )
 }
 
 /// A duration as this widget says it.
@@ -407,6 +413,20 @@ pub fn ago(seconds: f64) -> String {
 /// The home-relative form of a directory, which is how a person names it.
 pub fn homely(path: &str) -> String {
     shorten_home(path, &std::env::var("HOME").unwrap_or_default())
+}
+
+/// Whether `cwd` is the workspace root or a directory under it.
+///
+/// Component-aware, so a sibling whose name merely starts with the
+/// workspace path is not claimed as inside it. Agents are often started
+/// in a crate under the repo, and exact equality would call those away.
+pub fn cwd_is_inside(cwd: &str, root: &str) -> bool {
+    if root.is_empty() {
+        return false;
+    }
+    let cwd = std::path::Path::new(cwd);
+    let root = std::path::Path::new(root);
+    cwd == root || cwd.starts_with(root)
 }
 
 /// HOME is replaced only on a path-component boundary, so a sibling whose
@@ -447,11 +467,18 @@ pub struct NextTask {
 pub fn parse_next_task(text: &str) -> Result<NextTask, String> {
     let result = parse_result(text)?;
     if text_at(&result, "type") == "none" {
-        return Ok(NextTask { none: true, ..Default::default() });
+        return Ok(NextTask {
+            none: true,
+            ..Default::default()
+        });
     }
     // Never seen populated on a live session, so the same several-spellings
     // rule the task list uses applies here.
-    let task = if result["task"].is_object() { &result["task"] } else { &result };
+    let task = if result["task"].is_object() {
+        &result["task"]
+    } else {
+        &result
+    };
     Ok(NextTask {
         id: any_of(task, &["id", "task", "task_id"]),
         title: any_of(task, &["title", "name", "description"]),
@@ -502,24 +529,29 @@ pub struct Resumable {
     pub kind: String,
     pub cwd: String,
     pub session_id: String,
-    /// The directory is one the session currently has open.
-    pub in_workspace: bool,
+    /// Whether the directory is one the session currently has open.
+    ///
+    /// `None` when the workspace list was never established: a failed
+    /// snapshot is not an empty list of workspaces, and treating it as
+    /// one would mark every session "not open here".
+    pub in_workspace: Option<bool>,
 }
 
 /// Every resumable session, marked with whether the session has its
 /// directory open.
 ///
-/// `open` is the workspace cwd list. Taking it as an argument rather than
-/// reading the workspaces here keeps this pure and lets the marking be
-/// tested without a server.
-pub fn parse_sessions(text: &str, open: &[String]) -> Result<Vec<Resumable>, String> {
+/// `open` is the workspace cwd list when the snapshot answered, and
+/// `None` when it did not. Taking it as an argument rather than reading
+/// the workspaces here keeps this pure and lets the marking be tested
+/// without a server.
+pub fn parse_sessions(text: &str, open: Option<&[String]>) -> Result<Vec<Resumable>, String> {
     let result = parse_result(text)?;
     let mut found = Vec::new();
     for entry in array_at(&result, "sessions")? {
         let cwd = text_at(entry, "cwd");
         found.push(Resumable {
             kind: text_at(entry, "agent"),
-            in_workspace: open.iter().any(|w| *w == cwd),
+            in_workspace: open.map(|ws| ws.iter().any(|w| cwd_is_inside(&cwd, w))),
             cwd,
             session_id: any_of(entry, &["session_id", "session", "id"]),
         });
@@ -545,14 +577,21 @@ pub struct GitState {
 /// The checkout state out of `luvus git status`.
 pub fn parse_git_status(text: &str) -> Result<GitState, String> {
     let result = parse_result(text)?;
-    let count = |key: &str| result[key].as_array().map(|a| a.len()).unwrap_or(0);
+    // Lengths, not unique paths: a path that is staged and then edited
+    // again is two entries git reported, and the screen says entries.
+    // An omitted or non-array list is not an empty one — that is how a
+    // partial payload would draw as a cleaner tree than it is.
+    let staged = array_at(&result, "staged")?;
+    let unstaged = array_at(&result, "unstaged")?;
+    let untracked = array_at(&result, "untracked")?;
+    let stashes = array_at(&result, "stashes")?;
     Ok(GitState {
         branch: text_at(&result, "branch"),
         upstream: text_at(&result, "upstream"),
         ahead: result["ahead"].as_u64().unwrap_or(0),
         behind: result["behind"].as_u64().unwrap_or(0),
-        dirty: count("staged") + count("unstaged") + count("untracked"),
-        stashes: count("stashes"),
+        dirty: staged.len() + unstaged.len() + untracked.len(),
+        stashes: stashes.len(),
     })
 }
 
@@ -685,6 +724,17 @@ mod tests {
     }
 
     #[test]
+    fn a_crate_under_the_workspace_is_inside_it() {
+        assert!(cwd_is_inside("/srv/work/thing/crate", "/srv/work/thing"));
+        assert!(cwd_is_inside("/srv/work/thing", "/srv/work/thing"));
+        assert!(cwd_is_inside("/srv/work/thing/", "/srv/work/thing"));
+        // A sibling whose name merely starts with the workspace path is
+        // not inside it — string prefix would get this wrong.
+        assert!(!cwd_is_inside("/srv/work/thing-other", "/srv/work/thing"));
+        assert!(!cwd_is_inside("/srv/work/thing", ""));
+    }
+
+    #[test]
     fn a_shell_at_a_prompt_is_not_an_agent() {
         // Every pane carries an `agent` field, and two of the three panes in
         // the snapshot hold a plain shell. `agent list` names one agent, and
@@ -779,7 +829,10 @@ mod tests {
     fn the_ordering_puts_the_ones_wanting_a_human_first() {
         let mut states = vec!["idle", "working", "done", "blocked", "sideways"];
         states.sort_by_key(|s| rank_of(s));
-        assert_eq!(states, vec!["blocked", "done", "working", "idle", "sideways"]);
+        assert_eq!(
+            states,
+            vec!["blocked", "done", "working", "idle", "sideways"]
+        );
     }
 
     #[test]
@@ -896,6 +949,24 @@ mod tests {
         let clean = parse_git_status(clean).expect("clean");
         assert_eq!(clean.dirty, 0);
         assert_eq!(clean.stashes, 0);
+        // The same path in staged and unstaged is two entries git
+        // reported, not one file counted twice.
+        let both = r#"{"id":"1","result":{"ahead":0,"behind":0,"branch":"main",
+          "staged":[{"code":"M","path":"a.rs"}],"stashes":[],
+          "unstaged":[{"code":"M","path":"a.rs"}],"untracked":[],"type":"git_status"}}"#;
+        assert_eq!(parse_git_status(both).expect("both").dirty, 2);
+        // An omitted list is not an empty one: a partial payload must
+        // not draw as a cleaner tree than the source could support.
+        assert!(parse_git_status(
+            r#"{"id":"1","result":{"ahead":0,"behind":0,"branch":"main",
+              "unstaged":[],"untracked":[],"stashes":[],"type":"git_status"}}"#
+        )
+        .is_err());
+        assert!(parse_git_status(
+            r#"{"id":"1","result":{"ahead":0,"behind":0,"branch":"main",
+              "staged":"nope","unstaged":[],"untracked":[],"stashes":[],"type":"git_status"}}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -906,7 +977,9 @@ mod tests {
         assert!(is_not_a_repo(
             "fatal: not a git repository (or any of the parent directories): .git"
         ));
-        assert!(!is_not_a_repo("fatal: Unable to create index.lock: File exists"));
+        assert!(!is_not_a_repo(
+            "fatal: Unable to create index.lock: File exists"
+        ));
         assert!(!is_not_a_repo("no luvus server"));
     }
 
@@ -915,17 +988,36 @@ mod tests {
         // Ten sessions and one open workspace was the live reading: the
         // count that matters is not the length of the list.
         let open = vec!["/srv/work/thing".to_string()];
-        let found = parse_sessions(SESSIONS, &open).expect("sessions");
+        let found = parse_sessions(SESSIONS, Some(&open)).expect("sessions");
         assert_eq!(found.len(), 3);
-        assert_eq!(found.iter().filter(|s| s.in_workspace).count(), 1);
-        assert!(found[0].in_workspace);
-        assert!(!found[1].in_workspace);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|s| s.in_workspace == Some(true))
+                .count(),
+            1
+        );
+        assert_eq!(found[0].in_workspace, Some(true));
+        assert_eq!(found[1].in_workspace, Some(false));
         assert_eq!(found[0].kind, "claude");
         assert_eq!(found[2].session_id, "s-3");
+        // A crate under an open workspace is inside it, not away.
+        let nested = r#"{"id":"1","result":{"sessions":[
+          {"agent":"claude","cwd":"/srv/work/thing/crate","session_id":"s-n"}]}}"#;
+        let under = parse_sessions(nested, Some(&open)).expect("nested");
+        assert_eq!(under[0].in_workspace, Some(true));
         // No workspaces open at all is zero inside, not zero sessions.
-        let none = parse_sessions(SESSIONS, &[]).expect("sessions");
+        let none = parse_sessions(SESSIONS, Some(&[])).expect("sessions");
         assert_eq!(none.len(), 3);
-        assert_eq!(none.iter().filter(|s| s.in_workspace).count(), 0);
+        assert_eq!(
+            none.iter().filter(|s| s.in_workspace == Some(true)).count(),
+            0
+        );
+        // A snapshot that did not come back is not an empty workspace
+        // list: membership is unknown rather than "not open here".
+        let unread = parse_sessions(SESSIONS, None).expect("unread");
+        assert_eq!(unread.len(), 3);
+        assert!(unread.iter().all(|s| s.in_workspace.is_none()));
     }
 
     #[test]
@@ -941,7 +1033,8 @@ mod tests {
         assert!(!next.none);
         assert_eq!(next.id, "t-1");
         assert_eq!(next.title, "Port it");
-        let nested = r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
+        let nested =
+            r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
         let next = parse_next_task(nested).expect("next");
         assert_eq!(next.id, "t-2");
         assert_eq!(next.title, "Other");
