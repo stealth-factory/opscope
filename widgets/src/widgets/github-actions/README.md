@@ -171,6 +171,7 @@ that yielded no repos with workflows.
 | `pushed_days` | `14` | how recently a repo must have been pushed to be considered. |
 
 Discovery walks each account's recently-pushed repos. A run's jobs are read
-only for the run you open. None of it touches the allowance `github` and
-`github-prs` spend all day, so running all three together starves none of
-them.
+only for the run you open. The header figure is the REST allowance those
+jobs spend, which is not the GraphQL one `github` and `github-prs` show —
+but discovery itself uses GraphQL, so a shared token can still contend
+there even while this REST figure stays high.

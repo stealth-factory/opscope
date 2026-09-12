@@ -176,8 +176,8 @@ A past day's counts cannot change — a PR merged on the 3rd stays merged on the
 3rd — so days are held per account and only the trailing two are read again.
 **Widening the window costs only the days it adds; narrowing costs nothing.**
 Even a cold ninety-day window is a small fraction of an hour's GraphQL
-allowance, and running this beside `github-prs` and `github-actions` does not
-starve any of them.
+allowance. The REST figure `github-actions` shows is a different one; this
+allowance is shared with `github-prs` when they use the same token.
 
 `r` re-reads every day from scratch, which is the escape hatch for the cases a
 past day's immutability does not cover — a repo deleted, transferred or made

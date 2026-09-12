@@ -78,7 +78,7 @@ It also had side effects, and that is what settled it. Arrowing onto
 `latency` spawns `ping` and puts packets on the wire. Onto `github` or
 `github-prs`, calls against an hourly API quota. Onto `vercel-deployments` or
 `linear`, their APIs. Onto `agent-usage`, a walk of every agent transcript on
-the machine, which can be hundreds of megabytes. **Browsing a menu should
+the machine. **Browsing a menu should
 cost nothing**, and a menu that quietly spends your API budget as you scroll
 past a row is a menu with a trap in it.
 

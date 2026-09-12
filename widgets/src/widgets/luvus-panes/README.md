@@ -124,8 +124,8 @@ and `q` still answer while it is waiting. `esc` closes it, as does a second
 
 RESUMABLE answers for the **machine**, not for this session: a machine with
 ten resumable sessions can easily have one workspace open that any of them
-are in, the other nine being agents left in directories nothing currently has
-open.
+are in, the other nine being agents left in directories not covered by any
+currently open workspace.
 
 So the total and the in-a-workspace figure beside it count different
 populations, and neither is wrong. RESUMABLE draws the full list, because an

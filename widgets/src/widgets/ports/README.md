@@ -411,9 +411,10 @@ are on this screen rather than an IP.
 
 ## Cost
 
-Nothing measurable. Everything on screen is read from accounting the kernel
-was keeping anyway — no network of its own, no root, and nothing installed
-beyond Tailscale for the exposure column, which is simply blank without it.
+Nothing measurable on the poll. Listener and traffic figures come from
+accounting the kernel was keeping anyway — no network of its own, no root.
+The exposure column asks Tailscale what it is already serving, and is
+simply blank without it.
 
 ## Platforms
 
@@ -423,9 +424,9 @@ thing on either system.
 
 Traffic needs `ss` on Linux and `nettop` on macOS. If the source it wants is
 missing, the columns and the chart stay off and the header names what is
-missing, rather than filling with dots that look like a quiet port. A kernel
-with neither source holds on `cannot start` and says which one it is, rather
-than drawing an empty table.
+missing, rather than filling with dots that look like a quiet port. Other
+operating systems are unsupported: the widget holds on `cannot start`, names
+the operating system, and does not draw an empty table.
 
 The addresses on the second screen come from whichever of the system's own
 tools is there — `ip` where it is, `ifconfig` otherwise.

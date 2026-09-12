@@ -364,8 +364,8 @@ by accident.
 
 The header carries what is left of GitHub's GraphQL allowance for the hour —
 `4567/5000 api`. A full pass over a board this size spends a small fraction of
-it, and running this widget beside `github` and `github-actions` does not
-starve any of them.
+it. The REST figure `github-actions` shows is a different allowance; this
+one is shared with `github` when they use the same token.
 
 Detail is fetched only on demand — 33 PRs are not worth pre-fetching for the
 one you open — so the view paints a loading shimmer and fills in.
@@ -399,9 +399,10 @@ widget quietly ran on somebody else's credential.
 `limit` is the page size a search asks GitHub for, not a cap on what the
 pane shows — paging runs until every source is exhausted either way. It
 matters because GitHub's search backend goes through slow spells and sheds
-the heaviest requests first, so a round GitHub refuses is asked again for
-less, down to a floor; only when it is refused there too does the pass stop
-paging and report the list as a floor.
+the heaviest requests first. A refusal that looks like a slow spell is
+asked again for less, down to a floor; only when it is refused there too
+does the pass stop paging and report the list as a floor. A refusal that
+is not a slow spell stops at the size it already had.
 
 None of that is an error, and it is not drawn as one. A pass that fell back
 or stopped short leaves a dim line under the count — `GitHub is slow ·

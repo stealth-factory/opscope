@@ -903,7 +903,7 @@ Four settings, all on by default except the interval:
 | key | default | what it does |
 |---|---|---|
 | `antigravity_start` | `true` | may the widget start the `agy` CLI to read the quota it serves, when nothing else has one. Started under a pty, killed by pid and reaped as soon as the reading is taken. Never touches a CLI you started |
-| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off means no quota while the app is closed, and the tab says so |
+| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `5` | how often. The window moves over days, but the spend inside it moves while you work, so five minutes keeps the figure actionable |
 
@@ -956,10 +956,9 @@ figure. Before this the log won outright, and on the machine this was found on
 it put a figure from twenty-seven days back over one from two hours back, with
 nothing but the cached mark to tell them apart.
 
-**On by default**, because it is the same shape of ask `antigravity_remote`
-already accepts: your own CLI, already signed in, asked about your own
-account. A quota nobody can act on is not the safer default. Off stays one
-key away and the tab names it.
+**On by default**, because `grok_ping` is your own CLI, already signed in,
+asked about your own account. A quota nobody can act on is not the safer
+default. Off stays one key away and the tab names it.
 
 **Cached or live is a question about age, not about source.** A reading is
 shown as current when it was taken within the last half hour, whatever
