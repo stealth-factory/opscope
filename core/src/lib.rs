@@ -661,7 +661,9 @@ fn base64(data: &[u8]) -> String {
 /// fraction where high means *good* belongs in [`health`] instead.
 ///
 /// Its hot end is unreadable on a tinted row, which is what [`heat_on`] is
-/// for. Anything drawn on a row that can be selected calls that instead.
+/// for. Anything drawn through a composed tint - selected, blocked,
+/// finished - calls that instead. A fraction where high is good belongs
+/// on [`health`] / [`health_on`].
 pub fn heat(frac: f64) -> String {
     let frac = frac.clamp(0.0, 1.0);
     if frac < 0.5 {
