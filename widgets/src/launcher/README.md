@@ -131,7 +131,7 @@ explanation with it — and in a tiled wall, or started from this menu, a line
 on stderr has nowhere to go. So it draws the reason and waits, answering `q`
 like everything else.
 
-All sixteen binaries check the same owned file, including `matrix` and
+All sixteen widgets check the same owned file, including `matrix` and
 `months`, whose two tiers are explicitly empty. `opscope doctor` aggregates
 those declarations across the full registry, reports which widgets use each
 tool, checks declared versions, and prints host-specific installation guidance:

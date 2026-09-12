@@ -2540,3 +2540,104 @@ fn every_array_declares_what_it_holds() {
     wrong.sort();
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+/// Every sentence that says how many widgets or binaries there are, against
+/// how many there are.
+///
+/// The commit that took the collection from fifteen widgets to sixteen swept
+/// the counts through eleven sentences and missed four, and each of those
+/// then contradicted a corrected sentence in the same file - one of them in
+/// the build command people actually run. Nothing here was enforced.
+///
+/// Only files that make a *present-tense* claim are read. `CHANGELOG.md`
+/// records "Fourteen widgets" as the release that had fourteen, this file's
+/// own header remembers when there were fourteen binaries, and
+/// `core/src/settings.rs` argues against "fourteen half-implementations" -
+/// every one of them a true sentence about the past. A checker that flagged
+/// those would be turned off inside a day, which is the failure mode this
+/// file has already paid for once.
+///
+/// The text is whitespace-normalised before it is read, because these
+/// sentences wrap: "the launcher and sixteen" ends one line of README.md and
+/// "widget binaries" begins the next, and a reader that went line by line
+/// would see neither.
+#[test]
+fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
+    const WORDS: &[(&str, usize)] = &[
+        ("thirteen", 13),
+        ("fourteen", 14),
+        ("fifteen", 15),
+        ("sixteen", 16),
+        ("seventeen", 17),
+        ("eighteen", 18),
+        ("nineteen", 19),
+    ];
+    // A widget's own README talks about its own subject - ports counts
+    // listening ports, link counts readings - so none of them are here.
+    const SAYS_SO: &[&str] = &[
+        "README.md",
+        "AGENTS.md",
+        "docs/design.md",
+        "docs/releasing.md",
+        "npm/README.md",
+        "core/build.rs",
+        "core/src/lib.rs",
+        "widgets/src/launcher/README.md",
+        "widgets/src/launcher/help.txt",
+        "wiki/making-a-widget.md",
+    ];
+    let widgets = widgets().len();
+    let manifest = std::fs::read_to_string(root().join("widgets/Cargo.toml"))
+        .expect("the widget manifest");
+    let bins = manifest.lines().filter(|l| l.trim() == "[[bin]]").count();
+    assert!(
+        widgets > 0 && bins == widgets + 1,
+        "the two counts this test measures against disagree: {} widget folders, \
+         {} [[bin]] entries. Expected one binary per widget plus opscope - fix \
+         that before trusting anything below",
+        widgets,
+        bins
+    );
+
+    // "widget binaries" is the widgets, not the binaries: the launcher is a
+    // binary and is not a widget binary. Longest phrase first is not needed
+    // here because each pattern carries its own count word, so "sixteen
+    // binaries" cannot match inside "sixteen widget binaries".
+    let nouns: &[(&str, usize)] = &[
+        ("widget binaries", widgets),
+        ("widget pages", widgets),
+        ("widgets", widgets),
+        ("binaries", bins),
+        ("executable targets", bins),
+    ];
+
+    let mut wrong = Vec::new();
+    for file in SAYS_SO {
+        let text = match std::fs::read_to_string(root().join(file)) {
+            Ok(t) => t,
+            Err(_) => {
+                wrong.push(format!("{}: named here and not in the tree", file));
+                continue;
+            }
+        };
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        for (word, said) in WORDS {
+            for (noun, should) in nouns {
+                let phrase = format!("{} {}", word, noun);
+                let found = flat.matches(&phrase).count();
+                if found > 0 && said != should {
+                    wrong.push(format!(
+                        "{}: says \"{}\" {} time{}, and there are {} {}",
+                        file,
+                        phrase,
+                        found,
+                        if found == 1 { "" } else { "s" },
+                        should,
+                        noun
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "counts that have gone stale:\n  {}", wrong.join("\n  "));
+}
