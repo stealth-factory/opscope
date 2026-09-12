@@ -1073,8 +1073,12 @@ fn main() {
             } else {
                 a.state.clone()
             };
+            // `heat_on`, because this cell goes through the tint closure and
+            // the plain ramp's hot end cannot be read on any of the three
+            // tints above: 3.18 on the selection blue, 4.35 on blocked, 3.85
+            // on done. A pane at 100% CPU is the row you selected it to read.
             let heat = match a.cpu {
-                Some(v) if v > 0.0 => tc::heat((v / 100.0).min(1.0)),
+                Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
                 _ => p.dim.clone(),
             };
             let mut line = vec![
@@ -1198,8 +1202,11 @@ fn main() {
                 };
                 format!("{}{}", tint, colour)
             };
+            // The lifted ramp, for the same reason as the agent table above:
+            // a tinted row is where the number is least readable and most
+            // looked at.
             let heat = match n.cpu {
-                Some(v) if v > 0.0 => tc::heat((v / 100.0).min(1.0)),
+                Some(v) if v > 0.0 => tc::heat_on((v / 100.0).min(1.0), !tint.is_empty()),
                 _ => p.dim.clone(),
             };
             // An unread pane says so in words where a command would go. A

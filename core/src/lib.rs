@@ -659,6 +659,9 @@ fn base64(data: &[u8]) -> String {
 /// number is to a limit - so the same load reads the same colour whichever
 /// widget is showing it. High means bad: that is the contract, and a
 /// fraction where high means *good* belongs in [`health`] instead.
+///
+/// Its hot end is unreadable on a tinted row, which is what [`heat_on`] is
+/// for. Anything drawn on a row that can be selected calls that instead.
 pub fn heat(frac: f64) -> String {
     let frac = frac.clamp(0.0, 1.0);
     if frac < 0.5 {
@@ -668,6 +671,41 @@ pub fn heat(frac: f64) -> String {
         let t = (frac - 0.5) / 0.5;
         rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
     }
+}
+
+/// [`heat`] with its hot end lifted far enough to be read on a tinted row.
+///
+/// `heat`'s hot stop is `rgb(255, 40, 30)`, which measures 3.18 against the
+/// selected-row tint `bg(38, 56, 76)` - well under the AA 4.5 CLAUDE.md
+/// asks for, with the failing band running from about `frac` 0.81 upward.
+/// Nothing saw it for as long as the ramp has existed, because `check.rs`
+/// measures the colours a palette *declares* and a ramp computed at run
+/// time declares none. The two tints herdr-panes keeps for a blocked and a
+/// finished pane failed too, at 4.35 and 3.85.
+///
+/// Only the hot half moves, and only when `tinted`: green runs 240 down to
+/// 130 instead of down to 40. The worst step of the lifted ramp then
+/// measures 4.83 on the selection tint, 6.60 and 5.85 on the other two.
+/// The cool half is left alone because green is 255 across all of it and it
+/// already clears every tint here.
+///
+/// **Green is the lift because green is the only lever.** Red is already
+/// 255 at the hot end, and blue carries a weight of 0.0722 in the relative
+/// luminance sum against green's 0.7152 - pushing blue from 26 to 120, all
+/// the way to pink, buys about two units of green and costs the ramp its
+/// saturation for nothing. So the price is paid in hue: the lifted hot end
+/// is a strong orange rather than a red. The alternative was a red that
+/// cannot be read, on the one row the reader is looking at.
+///
+/// `heat_on(frac, false)` is `heat` itself rather than a copy of its
+/// arithmetic, so the ramp everyone recognises cannot drift from this one.
+pub fn heat_on(frac: f64, tinted: bool) -> String {
+    let frac = frac.clamp(0.0, 1.0);
+    if !tinted || frac < 0.5 {
+        return heat(frac);
+    }
+    let t = (frac - 0.5) / 0.5;
+    rgb(255, (240.0 - 110.0 * t) as u8, (20.0 + 10.0 * t) as u8)
 }
 
 /// The same ramp as [`heat`], for a fraction where **high is good**.
@@ -686,6 +724,18 @@ pub fn heat(frac: f64) -> String {
 /// only the ends say which way round it is.
 pub fn health(frac: f64) -> String {
     heat(1.0 - frac.clamp(0.0, 1.0))
+}
+
+/// [`health`] on a tinted row - still inverted, and lifted by [`heat_on`].
+///
+/// The subtraction is why the unreadable end matters more here than it does
+/// for a temperature. `heat` sends a *high* load to the hot stop, which is
+/// a machine already in trouble; `health` sends a *low* rate there, so the
+/// steps that cannot be read on a selected row are a struggling account and
+/// a cycle that has finished almost nothing - the two readings someone
+/// selects a row in order to read.
+pub fn health_on(frac: f64, tinted: bool) -> String {
+    heat_on(1.0 - frac.clamp(0.0, 1.0), tinted)
 }
 
 /// The clause every "set this config key" message ends with.

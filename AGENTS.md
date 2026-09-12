@@ -141,6 +141,20 @@ screen, exactly like "there is no data":
   substitution inside the tint closure and the light grey sits in the palette
   measuring beautifully while the dark one goes back on the tint, so the
   substitutions are counted instead, one per closure that composes a tint.
+- **a step of the colour ramp that measures under AA 4.5 on a tint**, and
+  separately **a ramp colour handed to a tint closure that did not ask for
+  the lifted ramp** — the contrast check reads the colours a palette
+  *declares*, and `heat()` declares none: it is arithmetic. So the ramp
+  passed that check by being invisible to it, and its hot stop
+  `rgb(255, 40, 30)` sat at 3.18 on `bg(38, 56, 76)` for as long as the ramp
+  has existed, with everything above about `frac` 0.81 under 4.5. `health()`
+  is `heat(1 - frac)`, which moved the unreadable end onto a *low* merge rate
+  and a *low* cycle completion — the readings someone selects a row to read.
+  Two checks, because they fail apart: one walks the ramp and measures every
+  step, the other reads which form each call site asks for, against every
+  tint the widget composes — herdr-panes keeps two of its own for a blocked
+  and a finished pane, and the plain ramp failed on both of those too, at
+  4.35 and 3.85, which nobody had looked at.
 - **a parser or a test gated by `cfg(target_os)`** — CI runs `cargo test` on
   the macOS runners. Anything behind `cfg(target_os = "linux")`, including
   its tests, does not compile there, so it is not merely unrun, it is
@@ -288,7 +302,9 @@ which the compiler now makes impossible. It went with the Python.
 ## Layout of the code
 
 `opscope-core` holds everything shared: terminal sizing, full-frame `draw()`,
-24-bit `rgb()` and the green→amber→red `heat()` ramp, `seg()` for clipping
+24-bit `rgb()` and the green→amber→red `heat()` ramp — with `heat_on()`
+and `health_on()`, the same ramp with its hot end lifted for anything drawn
+on a tinted row — `seg()` for clipping
 coloured segments to a cell budget, `pack_hints()`, `follow()` for a window
 that keeps a cursor in view, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,

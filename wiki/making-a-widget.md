@@ -470,7 +470,8 @@ quietly showed 3 projects instead of 21.
 
 ## Drawing
 
-`opscope-core` holds the shared kit: `rgb()`, `bg()`, `mix()`, `heat()`;
+`opscope-core` holds the shared kit: `rgb()`, `bg()`, `mix()`, `heat()` and
+`heat_on()` — the second for a ramp colour that lands on a selected row;
 `seg()` to clip a coloured segment to a cell budget and `pad()` to pad by
 *plain-text* length; `pack_hints()` for footers; `follow()` for a window that
 keeps a cursor in view; `vbars`, `vbars_down`, `stacked_bar`, `meter`,

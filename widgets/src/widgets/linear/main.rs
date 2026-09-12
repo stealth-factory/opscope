@@ -2392,7 +2392,10 @@ fn main() {
             // A share of scope completed is high-is-good, so it takes the
             // inverted ramp: `heat` drew a cycle finishing its work in the
             // same red it uses for a machine running out of memory.
-            let hot = tc::health(frac);
+            // Lifted on a selected row: `c_of` puts the tint behind this,
+            // and the plain ramp's hot end measures 3.18 on it. A cycle that
+            // has completed almost nothing is what lands there.
+            let hot = tc::health_on(frac, on);
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),

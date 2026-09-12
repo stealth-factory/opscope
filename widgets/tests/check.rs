@@ -1667,6 +1667,271 @@ fn a_widget_with_a_lighter_grey_uses_it_on_every_tint() {
     assert!(wrong.is_empty(), "a lighter grey nobody draws:\n{}", wrong.join("\n"));
 }
 
+/// The channels back out of a truecolor escape.
+fn channels(esc: &str) -> (f64, f64, f64) {
+    let body = esc.trim_start_matches("\x1b[38;2;").trim_end_matches('m');
+    let n: Vec<f64> = body.split(';').filter_map(|x| x.parse().ok()).collect();
+    assert_eq!(n.len(), 3, "not a truecolor escape: {:?}", esc);
+    (n[0], n[1], n[2])
+}
+
+/// Every step of a ramp, walked finely enough that no step is skipped.
+///
+/// 1001 samples over a domain whose widest channel moves 200 units: every
+/// value a channel can take is visited, so "the worst step" is the worst
+/// step and not the worst of a sample. `lifted` picks which form of the
+/// ramp is measured - the one the call site actually asks for.
+fn ramp_steps(lifted: bool) -> Vec<(f64, (f64, f64, f64))> {
+    (0..=1000)
+        .map(|i| {
+            let frac = i as f64 / 1000.0;
+            (frac, channels(&opscope_core::heat_on(frac, lifted)))
+        })
+        .collect()
+}
+
+/// The colour ramp is computed, so the contrast check above never saw it.
+///
+/// `text_on_a_selection_tint_clears_aa` reads the colours a palette
+/// *declares*. `tc::heat` declares none: it is arithmetic, run once per
+/// frame per cell, and it passed that check by being invisible to it rather
+/// than by measuring. Its hot stop `rgb(255, 40, 30)` is 3.18 against
+/// `bg(38, 56, 76)`, and everything above about `frac` 0.81 is under 4.5 -
+/// which is a number on a selected row that cannot be read, and reads on
+/// screen as a row with nothing useful in it.
+///
+/// `health` made it worse rather than revealing it: `health(frac)` is
+/// `heat(1 - frac)`, so the unreadable end became where a *low* merge rate
+/// and a *low* cycle completion land.
+///
+/// This walks the ramp itself and measures every step, which is the half
+/// that stops it recurring - a later retune of the stops is measured here
+/// the same day it is written, rather than by eye two releases later.
+#[test]
+fn the_lifted_ramp_clears_aa_on_a_selection_tint() {
+    let tint = (38.0, 56.0, 76.0);
+    let mut wrong = Vec::new();
+    for (frac, c) in ramp_steps(true) {
+        let r = contrast(c, tint);
+        if r < 4.5 {
+            wrong.push(format!(
+                "heat_on({:.3}, true) is {:?} and measures {:.2} on the tint, under AA 4.5",
+                frac, c, r
+            ));
+        }
+    }
+    // `health_on` is the same ramp reparameterised, and saying so here is
+    // cheaper than trusting that it still is. A `health_on` that stopped
+    // forwarding `tinted` would put the plain ramp back on a tinted row
+    // with nothing else complaining.
+    for i in 0..=1000 {
+        let frac = i as f64 / 1000.0;
+        let c = channels(&opscope_core::health_on(frac, true));
+        let r = contrast(c, tint);
+        if r < 4.5 {
+            wrong.push(format!(
+                "health_on({:.3}, true) is {:?} and measures {:.2} on the tint, under AA 4.5",
+                frac, c, r
+            ));
+        }
+    }
+    // Keep at most the first few: a failing ramp fails at hundreds of steps
+    // and a thousand-line panic says less than five do.
+    wrong.truncate(5);
+    assert!(wrong.is_empty(), "the lifted ramp on a tinted row:\n{}", wrong.join("\n"));
+
+    // The untinted ramp is the colour everyone recognises and it passes as
+    // it stands, so the lifted form must not have moved it. Not the three
+    // stops - the whole domain, because a lift applied unconditionally
+    // would still hit all three.
+    for i in 0..=1000 {
+        let frac = i as f64 / 1000.0;
+        assert_eq!(
+            opscope_core::heat_on(frac, false),
+            opscope_core::heat(frac),
+            "heat_on({:.3}, false) has drifted from heat",
+            frac
+        );
+    }
+}
+
+/// The identifier a ramp call's colour is bound to, if any.
+///
+/// A statement at a time, because the `let` and the `tc::heat(` are on
+/// different lines wherever the ramp sits inside a `match`:
+///
+/// ```ignore
+/// let heat = match a.cpu {
+///     Some(v) if v > 0.0 => tc::heat((v / 100.0).min(1.0)),
+/// ```
+///
+/// The walk back stops at a `;` or at a closing brace, so a ramp deep
+/// inside an expression does not get blamed on whatever `let` happened to
+/// come before the block it is in - which is how `agent-usage`'s
+/// `pct_colour`, a bare `match` arm in a return position, would have been
+/// misread as belonging to the statement above the `if` around it.
+fn bound_ramp_colour(lines: &[&str], at: usize) -> Option<String> {
+    for i in (0..=at).rev() {
+        let t = lines[i].trim();
+        if let Some(rest) = t.strip_prefix("let ") {
+            let ident: String =
+                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if !ident.is_empty() && rest[ident.len()..].trim_start().starts_with('=') {
+                return Some(ident);
+            }
+        }
+        // Only lines strictly above the call end a statement; the call's own
+        // line may perfectly well end in `;`.
+        if i < at && (t.ends_with(';') || t.starts_with('}')) {
+            return None;
+        }
+        if t.starts_with("fn ") || t.starts_with("pub fn ") {
+            return None;
+        }
+    }
+    None
+}
+
+/// A ramp colour that reaches a tinted row has to be the lifted ramp.
+///
+/// The check above measures the ramp; this one measures the wiring, the same
+/// split as `text_on_a_selection_tint_clears_aa` and the lighter-grey check
+/// beside it. `heat_on` can be perfect and every call site can still ask for
+/// the plain one, which is exactly the state this found: four sites across
+/// three widgets handed `tc::heat`/`tc::health` straight into a tint
+/// closure - herdr-panes twice, github's per-account `RATE`, linear's cycle
+/// completion - and the worst step of what they drew measured 3.18.
+///
+/// It measures against every tint the widget composes, not only the
+/// selection blue. herdr-panes keeps a tint of its own for a blocked and a
+/// finished pane, and the plain ramp failed on both of those too, at 4.35
+/// and 3.85 - neither of which anyone had looked at.
+///
+/// What it cannot see, in this file's tradition of saying so: a ramp call
+/// composed straight into a tint with no binding of its own, and a
+/// `heat_on(x, flag)` whose `flag` is false on a frame the row is tinted.
+/// Only a literal `false` is read as plain, and only a plain `let <ident> =`
+/// binds one - `let mut heat`, `let heat: String =` and a ramp handed back
+/// from a helper function are all walked straight past. Nothing here uses
+/// those shapes today; a widget that took one up would be unmeasured rather
+/// than flagged, which is the wrong way round for a check to fail.
+/// `github-prs` has the first
+/// shape - `&tc::heat(0.4)` inline - and it is drawn on an untinted chart
+/// row, which was confirmed by reading it rather than by this check. It can
+/// also over-reach: `widgets()` hands over every `.rs` in the folder joined
+/// end to end, so a colour bound in one file and a tint closure in the next
+/// are one text to this. No widget does that today; a widget that binds a
+/// ramp colour called `heat` in a second file would be blamed for the tint
+/// in its first.
+#[test]
+fn a_ramp_colour_on_a_tint_asks_for_the_lifted_ramp() {
+    let mut wrong = Vec::new();
+    for (name, whole) in widgets() {
+        let src = without_tests(&whole);
+        let tints = tints_of(&src);
+        if tints.is_empty() {
+            continue;
+        }
+        let lines: Vec<&str> = src.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            // The paren keeps `tc::heat_on(` out of the plain arm.
+            let plain = line.contains("tc::heat(") || line.contains("tc::health(");
+            let lifted_call = line.contains("tc::heat_on(") || line.contains("tc::health_on(");
+            if !plain && !lifted_call {
+                continue;
+            }
+            // A `_on` call is only lifted if it is actually asked to be. A
+            // literal `false` is the plain ramp wearing the new name.
+            let lifted = lifted_call && !tinted_arg_is_false(line);
+            let Some(ident) = bound_ramp_colour(&lines, at) else { continue };
+            // Does anything hand that colour to a tint closure? Forward only,
+            // and only until the name is bound again - `github` binds `hot`
+            // three times, and two of those are section rows that no
+            // selection ever tints. A file-wide search for `c(&hot)` blamed
+            // all three for the one that is.
+            let rebound = format!("let {} =", ident);
+            let composed = lines[at + 1..]
+                .iter()
+                .take_while(|l| !l.trim().starts_with(&rebound))
+                .any(|l| {
+                    l.contains(&format!("c(&{})", ident))
+                        || l.contains(&format!("c_of(&{})", ident))
+                        || l.contains(&format!("tinted(&{})", ident))
+                });
+            if !composed {
+                continue;
+            }
+            for (tint, _) in &tints {
+                let worst = ramp_steps(lifted)
+                    .into_iter()
+                    .map(|(frac, c)| (contrast(c, *tint), frac, c))
+                    .fold((f64::MAX, 0.0, (0.0, 0.0, 0.0)), |a, b| if b.0 < a.0 { b } else { a });
+                if worst.0 < 4.5 {
+                    // The call's own text, not a line number: `widgets()`
+                    // concatenates every `.rs` in the folder in readdir
+                    // order, so a line number counted off that blob names
+                    // the wrong line and moves between runs.
+                    wrong.push(format!(
+                        "{}: `{}` from `{}` is drawn on tint {:?}, and its ramp is {:?} at frac \
+                         {:.3}, measuring {:.2} - under AA 4.5. Ask for \
+                         tc::heat_on/tc::health_on.",
+                        name,
+                        ident,
+                        line.trim(),
+                        tint,
+                        worst.2,
+                        worst.1,
+                        worst.0
+                    ));
+                }
+            }
+        }
+    }
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "the plain ramp on a tinted row:\n{}", wrong.join("\n"));
+}
+
+/// Whether a `heat_on`/`health_on` call passes a literal `false`.
+///
+/// The argument is found by counting parens from the call's own, because
+/// every site here nests one: `tc::heat_on((v / 100.0).min(1.0), here)`
+/// splits on the wrong comma if the parens are not counted.
+fn tinted_arg_is_false(line: &str) -> bool {
+    let Some(at) = line.find("_on(") else { return false };
+    let open = at + 3;
+    let mut depth = 0i32;
+    for (i, ch) in line[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            ',' if depth == 1 => {
+                let rest = &line[open + i + 1..];
+                let arg: String = rest
+                    .chars()
+                    .scan(0i32, |d, c| {
+                        match c {
+                            '(' => *d += 1,
+                            ')' if *d == 0 => return None,
+                            ')' => *d -= 1,
+                            _ => {}
+                        }
+                        Some(c)
+                    })
+                    .collect();
+                return arg.trim() == "false";
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Widgets that answer neither wheel event, deliberately.
 ///
 /// `matrix` computes nothing and has no list, so there is nothing under a
