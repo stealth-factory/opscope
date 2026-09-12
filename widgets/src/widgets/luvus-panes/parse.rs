@@ -65,8 +65,21 @@ pub fn parse_failure(message: &str) -> Absence {
     // Luvus names its socket in the stopped-server message, and this
     // repository is public. Anything else it says is kept, up to that
     // parenthesis, so a screenshot cannot carry a path out of the machine.
-    let said = message.split(" (socket:").next().unwrap_or(message);
-    Absence::Other(said.trim().to_string())
+    Absence::Other(sanitize_error(message))
+}
+
+/// Drop the socket path Luvus names in a stopped-server message.
+///
+/// This repository is public and screenshots of the pane are not.
+/// Everything up to the parenthesis is kept, so the reason still
+/// reaches the row.
+pub fn sanitize_error(message: &str) -> String {
+    message
+        .split(" (socket:")
+        .next()
+        .unwrap_or(message)
+        .trim()
+        .to_string()
 }
 
 /// The `result` object out of one UHP answer, or why there is none.
@@ -609,6 +622,71 @@ pub fn is_not_a_repo(message: &str) -> bool {
     said.contains("not a git repository") || said.contains("not a working tree")
 }
 
+/// How the server decided an agent's identity and state, and what it thinks
+/// the agent is waiting for.
+///
+/// The AGENTS row already carries the two one-word authorities. This is the
+/// rest of the same answer, and `blocked_hint` is the part the pane has
+/// never been able to show: a blocked row says that it is blocked and never
+/// what it is blocked on, which is the one question that sends the reader
+/// out of the widget.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Explanation {
+    pub kind: String,
+    pub status: String,
+    /// The server can still reach the pane. False is worth drawing: an
+    /// agent it cannot reach is not an agent that is idle.
+    pub available: bool,
+    /// The integration holding authority over this state, when one does.
+    /// Empty when the state was inferred rather than reported, which is a
+    /// weaker claim and says so.
+    pub authority: String,
+    pub identity_source: String,
+    pub identity_confidence: String,
+    pub state_source: String,
+    pub state_confidence: String,
+    /// Where the rule matched - `title`, `body`. Empty when the state did
+    /// not come from reading the screen at all.
+    pub rule_region: String,
+    pub rule_priority: i64,
+    /// What the agent is waiting for, in the server's words. Empty when it
+    /// is not waiting, and empty is not the same as "nothing is wrong".
+    pub blocked_hint: String,
+}
+
+/// What a pane currently shows, out of `luvus agent read`.
+pub fn parse_screen(text: &str) -> Result<String, String> {
+    let result = parse_result(text)?;
+    match result.get("text") {
+        Some(Value::String(t)) => Ok(t.clone()),
+        // An answer with no text is not a blank screen. The caller draws
+        // the difference, so it has to survive the parse.
+        _ => Err("luvus answered with no screen text".into()),
+    }
+}
+
+/// One agent's evidence, out of `luvus agent explain`.
+pub fn parse_explanation(text: &str) -> Result<Explanation, String> {
+    let result = parse_result(text)?;
+    let identity = &result["identity"];
+    let state = &result["state_evidence"];
+    Ok(Explanation {
+        kind: text_at(&result, "agent"),
+        status: text_at(&result, "status"),
+        // Absent is not false: a server that did not say is not a server
+        // saying the pane is gone. Only an explicit false draws as gone.
+        available: result["available"].as_bool().unwrap_or(true),
+        authority: text_at(&result, "authority"),
+        identity_source: text_at(identity, "source"),
+        identity_confidence: text_at(identity, "confidence"),
+        state_source: text_at(state, "source"),
+        state_confidence: text_at(state, "confidence"),
+        rule_region: text_at(state, "rule_region"),
+        rule_priority: state["rule_priority"].as_i64().unwrap_or(0),
+        blocked_hint: any_of(state, &["blocked_hint", "hint", "reason"]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,6 +900,15 @@ mod tests {
         assert_eq!(
             parse_failure("Error: something else (socket: /srv/run/luvus.sock)"),
             Absence::Other("Error: something else".into())
+        );
+        assert_eq!(
+            sanitize_error("Error: no luvus server running (socket: /srv/run/luvus.sock)"),
+            "Error: no luvus server running"
+        );
+        // Already clean stays clean, so a second pass cannot invent a reason.
+        assert_eq!(
+            sanitize_error("luvus did not answer in 15s"),
+            "luvus did not answer in 15s"
         );
     }
 
@@ -1039,5 +1126,70 @@ mod tests {
         assert_eq!(next.id, "t-2");
         assert_eq!(next.title, "Other");
         assert!(parse_next_task(r#"{"id":"1","error":{"message":"nope"}}"#).is_err());
+    }
+
+    /// Shaped from a live `luvus agent explain`, with the paths replaced.
+    const EXPLAIN: &str = r#"{
+      "id": "1",
+      "result": {
+        "agent": "claude", "authority": null, "available": true,
+        "identity": { "confidence": "authoritative", "source": "process_tree" },
+        "pane": "2", "revision": 202138, "session": null,
+        "state_evidence": {
+          "blocked_hint": null, "confidence": "high", "rule_priority": 120,
+          "rule_region": "title", "source": "manifest_rule"
+        },
+        "status": "working", "type": "agent_explanation"
+      }
+    }"#;
+
+    #[test]
+    fn an_explanation_carries_the_evidence_the_row_has_no_room_for() {
+        let e = parse_explanation(EXPLAIN).expect("explanation");
+        assert_eq!(e.kind, "claude");
+        assert_eq!(e.status, "working");
+        assert!(e.available);
+        assert_eq!(e.identity_source, "process_tree");
+        assert_eq!(e.identity_confidence, "authoritative");
+        assert_eq!(e.state_source, "manifest_rule");
+        assert_eq!(e.state_confidence, "high");
+        assert_eq!(e.rule_region, "title");
+        assert_eq!(e.rule_priority, 120);
+        // Not blocked, so nothing to say about why - and a null hint must
+        // arrive as empty rather than as the four characters "null".
+        assert_eq!(e.blocked_hint, "");
+        // No integration is holding this state; it was inferred. The screen
+        // says so rather than leaving the field looking answered.
+        assert_eq!(e.authority, "");
+    }
+
+    #[test]
+    fn a_blocked_agent_says_what_it_is_waiting_for() {
+        let blocked = r#"{"id":"1","result":{
+          "agent":"codex","authority":"integration_report","available":true,
+          "identity":{"confidence":"authoritative","source":"integration_report"},
+          "state_evidence":{"blocked_hint":"approve edit to src/main.rs?",
+            "confidence":"high","rule_priority":200,"rule_region":"body",
+            "source":"integration_report"},
+          "status":"blocked","type":"agent_explanation"}}"#;
+        let e = parse_explanation(blocked).expect("explanation");
+        assert_eq!(e.status, "blocked");
+        assert_eq!(e.blocked_hint, "approve edit to src/main.rs?");
+        assert_eq!(e.authority, "integration_report");
+    }
+
+    #[test]
+    fn a_pane_the_server_cannot_reach_is_not_an_idle_one() {
+        let gone = r#"{"id":"1","result":{"agent":"claude","available":false,
+          "identity":{},"state_evidence":{},"status":"unknown",
+          "type":"agent_explanation"}}"#;
+        let e = parse_explanation(gone).expect("explanation");
+        assert!(!e.available);
+        // A server that simply did not mention it is not a server saying
+        // the pane is gone, so an absent field stays available.
+        let quiet = r#"{"id":"1","result":{"agent":"claude","identity":{},
+          "state_evidence":{},"status":"idle","type":"agent_explanation"}}"#;
+        assert!(parse_explanation(quiet).expect("explanation").available);
+        assert!(parse_explanation(r#"{"id":"1","error":{"message":"no such agent"}}"#).is_err());
     }
 }

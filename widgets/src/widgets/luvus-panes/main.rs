@@ -31,7 +31,10 @@ use opscope_core as tc;
 #[path = "parse.rs"]
 mod parse;
 
-use parse::{Absence, Agent, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task, Worktree};
+use parse::{
+    Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
+    Worktree,
+};
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "luvus-panes",
@@ -52,7 +55,7 @@ const RUN_TIMEOUT: u64 = 15;
 fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
     let mut argv = vec!["luvus", "--session", session];
     argv.extend_from_slice(args);
-    tc::run(&argv, RUN_TIMEOUT)
+    tc::run(&argv, RUN_TIMEOUT).map_err(|why| parse::sanitize_error(&why))
 }
 
 /// Focus a pane. `pane focus` jumps to the pane's workspace and tab too,
@@ -216,6 +219,85 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     seen.first_poll = false;
 }
 
+/// One agent's evidence, fetched when asked for rather than every poll.
+///
+/// Two calls, kept apart, because they fail for different reasons and the
+/// screen says which: an agent the server cannot explain is a different
+/// answer from a pane it cannot read.
+struct Detail {
+    pane: String,
+    what: String,
+    explain: Result<Explanation, String>,
+    screen: Result<String, String>,
+    /// False until the worker that fetched this has answered, so the
+    /// panel can open on the keystroke rather than after both calls
+    /// return. An empty panel and a panel still loading are opposite
+    /// readings of the same screen.
+    ready: bool,
+}
+
+/// Ask the server about one agent. Bounded like every other call.
+///
+/// Done on the keystroke rather than in the poller: it is one agent's
+/// evidence asked for once, and putting it in the four-second round would
+/// make every refresh pay for a panel nobody has open.
+fn explain_agent(session: &str, pane: &str, what: &str) -> Detail {
+    Detail {
+        pane: pane.to_string(),
+        what: what.to_string(),
+        explain: luvus_text(session, &["agent", "explain", pane])
+            .and_then(|t| parse::parse_explanation(&t)),
+        screen: luvus_text(
+            session,
+            &[
+                "agent", "read", pane, "--lines", "60", "--source", "visible",
+            ],
+        )
+        .and_then(|t| parse::parse_screen(&t)),
+        ready: true,
+    }
+}
+
+/// Fetch one agent's evidence off the input loop.
+///
+/// `luvus_text` waits up to `RUN_TIMEOUT` per call, and two of those in
+/// sequence would freeze redraw and keys — including `esc` and `q` — for
+/// half a minute if the socket stopped answering. The panel opens at
+/// once; this thread publishes the finished `Detail` when both calls
+/// return. A panic is recorded as a failed read rather than leaving the
+/// panel on "reading…" forever.
+fn ask_explain(
+    session: String,
+    pane: String,
+    what: String,
+    gen: u64,
+    inbox: Arc<Mutex<Option<(u64, Detail)>>>,
+) {
+    std::thread::spawn(move || {
+        let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explain_agent(&session, &pane, &what)
+        }));
+        let detail = match step {
+            Ok(d) => d,
+            Err(_) => Detail {
+                pane,
+                what,
+                explain: Err("explain stopped - see the pane it was started from".into()),
+                screen: Err("explain stopped - see the pane it was started from".into()),
+                ready: true,
+            },
+        };
+        if let Ok(mut guard) = inbox.lock() {
+            // A slower worker from an older panel must not replace a
+            // newer worker's finished read, or the open panel stays on
+            // "reading…" after the current result has already arrived.
+            if guard.as_ref().is_none_or(|(had, _)| *had < gen) {
+                *guard = Some((gen, detail));
+            }
+        }
+    });
+}
+
 /// Where a row points, so `↵` knows which pane to focus.
 #[derive(Clone)]
 enum Row {
@@ -320,6 +402,43 @@ fn mark_of(state: &str, tick: usize) -> char {
         "idle" => '·',
         _ => '?',
     }
+}
+
+/// Break a line at cell boundaries without collapsing spaces.
+///
+/// `wrap_words` is the right tool for prose, and the wrong one for a
+/// pane's screen: a prompt's leading spaces are the indent, and dropping
+/// them would make two different lines look the same. A word wider than
+/// the pane is still broken rather than handed to `seg` to clip.
+fn wrap_cells(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = 0usize;
+        for (at, ch) in rest.char_indices() {
+            let next = at + ch.len_utf8();
+            if tc::display_width(&rest[..next]) <= width {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch.to_string());
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        }
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 /// Where the window over the body should start.
@@ -596,6 +715,14 @@ fn main() {
     // every frame and drags itself back from wherever the wheel put it.
     let mut moved = false;
     let mut note: Option<(String, bool, f64)> = None;
+    // The evidence panel, when one is open. Read-only, and it replaces the
+    // body rather than covering it, so nothing is hidden behind it.
+    let mut detail: Option<Detail> = None;
+    // A generation so a late worker cannot write into a panel that has
+    // already been closed, or into a newer one opened for a different
+    // agent. Incremented on every open and every close.
+    let mut detail_gen = 0u64;
+    let inbox: Arc<Mutex<Option<(u64, Detail)>>> = Arc::new(Mutex::new(None));
     let mut rows_now: Vec<Row> = Vec::new();
     // Where each section starts in `rows_now`, read as one flat list, with
     // the empty ones left out. Written by the frame and read by tab on the
@@ -623,17 +750,76 @@ fn main() {
                     }
                 }
                 "i" | "I" => {
-                    show_idle = !show_idle;
-                    selected = 0;
+                    if detail.is_none() {
+                        show_idle = !show_idle;
+                        selected = 0;
+                        moved = true;
+                    }
+                }
+                // The evidence behind the selected agent's row. Read-only:
+                // it says what the agent is waiting for and never answers
+                // it. `esc` and a second press both close it.
+                "e" | "E" => {
+                    if detail.is_some() {
+                        detail = None;
+                        detail_gen += 1;
+                        scroll = 0;
+                        moved = true;
+                    } else if let Some(Row::Agent(agent)) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    {
+                        let pane = agent.pane.clone();
+                        if pane.is_empty() {
+                            note = Some((
+                                format!("! {} is not in a pane to explain", agent.name),
+                                false,
+                                tc::now() + 3.0,
+                            ));
+                        } else {
+                            detail_gen += 1;
+                            detail = Some(Detail {
+                                pane: pane.clone(),
+                                what: agent.name.clone(),
+                                explain: Err(String::new()),
+                                screen: Err(String::new()),
+                                ready: false,
+                            });
+                            scroll = 0;
+                            ask_explain(
+                                session.clone(),
+                                pane,
+                                agent.name.clone(),
+                                detail_gen,
+                                Arc::clone(&inbox),
+                            );
+                        }
+                    } else if let Some(row) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    {
+                        note = Some((
+                            format!("! {} is not an agent to explain", row.what()),
+                            false,
+                            tc::now() + 3.0,
+                        ));
+                    }
+                }
+                "esc" => {
+                    detail = None;
+                    detail_gen += 1;
+                    scroll = 0;
                     moved = true;
                 }
                 "up" | "k" | "K" => {
-                    selected = selected.saturating_sub(1);
-                    moved = true;
+                    if detail.is_none() {
+                        selected = selected.saturating_sub(1);
+                        moved = true;
+                    }
                 }
                 "down" | "j" | "J" => {
-                    selected += 1;
-                    moved = true;
+                    if detail.is_none() {
+                        selected += 1;
+                        moved = true;
+                    }
                 }
                 // The wheel moves the view and nothing else. Selection is
                 // the arrows' job, here as everywhere in the collection.
@@ -645,33 +831,49 @@ fn main() {
                 // dozen panes listed, reaching LEASES with the arrows is a
                 // lot of presses. Wraps, so it never dead-ends.
                 "tab" => {
-                    if let Some(next) = sections
-                        .iter()
-                        .find(|&&at| at > selected)
-                        .or_else(|| sections.first())
-                    {
-                        selected = *next;
-                        moved = true;
+                    if detail.is_none() {
+                        if let Some(next) = sections
+                            .iter()
+                            .find(|&&at| at > selected)
+                            .or_else(|| sections.first())
+                        {
+                            selected = *next;
+                            moved = true;
+                        }
                     }
                 }
                 "home" => {
-                    selected = 0;
-                    moved = true;
+                    if detail.is_none() {
+                        selected = 0;
+                        moved = true;
+                    }
                 }
                 "end" => {
-                    selected = rows_now.len().saturating_sub(1);
-                    moved = true;
+                    if detail.is_none() {
+                        selected = rows_now.len().saturating_sub(1);
+                        moved = true;
+                    }
                 }
                 "enter" | "f" | "F" => {
-                    if let Some(row) = rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
+                    // While the panel is open it names one pane, and that
+                    // is the one `↵` focuses — not whichever row a hidden
+                    // selection or a refresh reordering would now pick.
+                    let (pane, what) = if let Some(d) = &detail {
+                        (d.pane.clone(), d.what.clone())
+                    } else if let Some(row) =
+                        rows_now.get(selected.min(rows_now.len().saturating_sub(1)))
                     {
-                        let pane = row.pane();
+                        (row.pane(), row.what())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    if !what.is_empty() || !pane.is_empty() {
                         note = Some(if pane.is_empty() {
                             // A task nobody has claimed is in no pane, and
                             // focusing something else would be a lie about
                             // where the work is.
                             (
-                                format!("! {} is not in a pane to jump to", row.what()),
+                                format!("! {} is not in a pane to jump to", what),
                                 false,
                                 tc::now() + 3.0,
                             )
@@ -687,6 +889,13 @@ fn main() {
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Ok(mut guard) = inbox.lock() {
+            if let Some((gen, arrived)) = guard.take() {
+                if gen == detail_gen && detail.as_ref().is_some_and(|d| !d.ready) {
+                    detail = Some(arrived);
+                }
             }
         }
 
@@ -939,6 +1148,7 @@ fn main() {
                 (p.accent.as_str(), "tab".into()),
                 (p.dim.as_str(), " section".into()),
             ],
+            vec![(p.dim.as_str(), "[e]xplain".into())],
             vec![(p.dim.as_str(), "[i]dle".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -955,7 +1165,191 @@ fn main() {
         // selected one without counting rows a second time and disagreeing.
         let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
 
-        if let Some(why) = &absent {
+        if let Some(d) = &detail {
+            // Replaces the body rather than covering it: a panel drawn over
+            // the rows would hide however many it covered, and a section
+            // that is not drawn looks exactly like a section with nothing
+            // in it. Nothing is selectable here, so `spans` stays empty and
+            // the window scrolls on `scroll` alone.
+            body.push(tc::seg(
+                &[
+                    (p.lbl.as_str(), " ── EXPLAIN ── ".into()),
+                    (p.txt.as_str(), d.what.clone()),
+                    (p.dim.as_str(), format!(" · pane {}", d.pane)),
+                ],
+                w.saturating_sub(1),
+            ));
+            body.push(String::new());
+            if !d.ready {
+                body.push(tc::seg(
+                    &[(p.dim.as_str(), "   reading the evidence…".into())],
+                    w.saturating_sub(1),
+                ));
+            } else {
+                match &d.explain {
+                    Ok(e) => {
+                        // The hint first and in the warning colour, because it
+                        // is the answer to the question that opened this panel.
+                        if !e.blocked_hint.is_empty() {
+                            // Wrapped, not clipped: this sentence is the
+                            // reason the panel exists, and `seg` would drop
+                            // the suffix that names the approval or the path.
+                            let prefix = " ⚠ waiting on  ";
+                            let budget = w
+                                .saturating_sub(1)
+                                .saturating_sub(tc::display_width(prefix))
+                                .max(1);
+                            for (i, line) in tc::wrap_words(&e.blocked_hint, budget)
+                                .into_iter()
+                                .enumerate()
+                            {
+                                let lead = if i == 0 {
+                                    prefix.to_string()
+                                } else {
+                                    " ".repeat(tc::display_width(prefix))
+                                };
+                                body.push(tc::seg(
+                                    &[(p.blocked.as_str(), lead), (p.txt.as_str(), line)],
+                                    w.saturating_sub(1),
+                                ));
+                            }
+                        } else if e.status == "blocked" {
+                            // Blocked with nothing to say about why is its own
+                            // reading, and drawing nothing would look like a
+                            // panel that failed to load.
+                            body.push(tc::seg(
+                                &[(
+                                    p.unknown.as_str(),
+                                    " ⚠ waiting on  luvus did not say what for".into(),
+                                )],
+                                w.saturating_sub(1),
+                            ));
+                        }
+                        let mut row = |label: &str, value: String, colour: &str| {
+                            body.push(tc::seg(
+                                &[
+                                    (p.dim.as_str(), format!("   {}", tc::pad(label, 12))),
+                                    (colour, value),
+                                ],
+                                w.saturating_sub(1),
+                            ));
+                        };
+                        row(
+                            "state",
+                            format!(
+                                "{} · via {}{}",
+                                e.status,
+                                if e.state_source.is_empty() {
+                                    "—"
+                                } else {
+                                    &e.state_source
+                                },
+                                if e.state_confidence.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {} confidence", e.state_confidence)
+                                }
+                            ),
+                            colour_of(&e.status, &p),
+                        );
+                        row(
+                            "identity",
+                            format!(
+                                "{} · via {}{}",
+                                if e.kind.is_empty() { "—" } else { &e.kind },
+                                if e.identity_source.is_empty() {
+                                    "—"
+                                } else {
+                                    &e.identity_source
+                                },
+                                if e.identity_confidence.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {}", e.identity_confidence)
+                                }
+                            ),
+                            p.txt.as_str(),
+                        );
+                        if !e.rule_region.is_empty() {
+                            row(
+                                "rule",
+                                format!(
+                                    "matched in the {}, priority {}",
+                                    e.rule_region, e.rule_priority
+                                ),
+                                p.dim.as_str(),
+                            );
+                        }
+                        // An integration reporting a state and a rule guessing
+                        // at one are different strengths of claim, and the row
+                        // that says "none" is the weaker one saying so.
+                        row(
+                            "authority",
+                            if e.authority.is_empty() {
+                                "none — the state was inferred, not reported".to_string()
+                            } else {
+                                e.authority.clone()
+                            },
+                            if e.authority.is_empty() {
+                                p.dim.as_str()
+                            } else {
+                                p.idle_c.as_str()
+                            },
+                        );
+                        if !e.available {
+                            row(
+                                "reachable",
+                                "no — the server cannot reach this pane".to_string(),
+                                p.blocked.as_str(),
+                            );
+                        }
+                    }
+                    Err(why) => {
+                        let budget = w.saturating_sub(1).max(1);
+                        for line in tc::wrap_words(&format!(" ! agent explain: {}", why), budget) {
+                            body.push(tc::seg(&[(p.unknown.as_str(), line)], w.saturating_sub(1)));
+                        }
+                    }
+                }
+                body.push(String::new());
+                body.push(tc::seg(
+                    &[(p.lbl.as_str(), " ── WHAT THE PANE SHOWS ── ".into())],
+                    w.saturating_sub(1),
+                ));
+                match &d.screen {
+                    Ok(text) => {
+                        // Each pane line can be wider than this widget. Wrap
+                        // at cell boundaries so a prompt or an error on the
+                        // right of the pane is still here to read; `seg`
+                        // would drop that suffix and this view has no other
+                        // way to show it.
+                        let budget = w.saturating_sub(2).max(1);
+                        for line in text.lines() {
+                            for piece in wrap_cells(line, budget) {
+                                body.push(tc::seg(
+                                    &[(p.dim.as_str(), format!(" {}", piece))],
+                                    w.saturating_sub(1),
+                                ));
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        let budget = w.saturating_sub(1).max(1);
+                        for line in tc::wrap_words(&format!(" ! agent read: {}", why), budget) {
+                            body.push(tc::seg(&[(p.unknown.as_str(), line)], w.saturating_sub(1)));
+                        }
+                    }
+                }
+            }
+            body.push(String::new());
+            body.push(tc::seg(
+                &[(
+                    p.dim.as_str(),
+                    " esc closes this and puts the sections back".into(),
+                )],
+                w.saturating_sub(1),
+            ));
+        } else if let Some(why) = &absent {
             // One of three sentences, never a blank board. The distinction
             // is the whole reason this widget declares luvus a dependency
             // and probes at run time as well.
@@ -1777,6 +2171,18 @@ mod tests {
         assert_eq!(window_from(100, 18..19, 10, 8, true), 9);
         // Off the top: it moves to the cursor rather than past it.
         assert_eq!(window_from(100, 3..4, 10, 8, true), 3);
+    }
+
+    #[test]
+    fn a_pane_line_wider_than_the_widget_wraps_without_losing_spaces() {
+        assert_eq!(wrap_cells("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Leading spaces are the indent; collapsing them would make two
+        // different prompt lines look the same.
+        assert_eq!(wrap_cells("  keep", 4), vec!["  ke", "ep"]);
+        assert_eq!(wrap_cells("", 4), vec![""]);
+        // Width zero still has to say something: dropping the text is
+        // indistinguishable from a blank pane.
+        assert_eq!(wrap_cells("left intact", 0), vec!["left intact"]);
     }
 
     #[test]

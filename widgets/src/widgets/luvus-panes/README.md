@@ -80,6 +80,47 @@ is how the *state* was decided (`state_source`), the right half is how the
 *identity* was (`agent_authority`). The right half appears once the pane is
 wide enough for it.
 
+## What a blocked agent is waiting for
+
+`blocked` is the row the widget sorts to the top and the one it used to say
+least about. The row carries the state, how long it has held it, and how it
+was decided — but never *what the agent is asking*, which is the question that
+sends you out of the widget.
+
+**`e`** opens the evidence behind the selected **agent**, from `luvus
+agent explain`. A task, a lease or a pane that is not an agent is told
+so rather than sent to a command that cannot explain it:
+
+```text
+ ── EXPLAIN ── codex · pane 4
+
+ ⚠ waiting on  approve edit to src/main.rs?
+   state       blocked · via integration_report · high confidence
+   identity    codex · via integration_report · authoritative
+   rule        matched in the body, priority 200
+   authority   integration_report
+
+ ── WHAT THE PANE SHOWS ──
+ …the tail of the pane, from `luvus agent read`
+```
+
+The `authority` row is the one worth reading twice. An integration
+*reporting* a state and a rule *guessing* at one from screen text are
+different strengths of claim, and where nothing holds authority the row says
+`none — the state was inferred, not reported` rather than leaving the field
+looking answered.
+
+An agent that is blocked with no hint to give says so too — drawing nothing
+there would look like a panel that failed to load rather than a server with
+nothing to add.
+
+The panel is **read-only**. It shows you the prompt; it never answers it. `↵`
+still focuses the pane this panel is about — not whichever row a hidden
+selection would now pick — and nothing here prompts an agent, sends it keys,
+claims a task or releases a lease. The two calls run off the input loop, so
+`esc` and `q` still answer while they are in flight. `esc` closes it, as does
+a second `e`.
+
 ## Resumable sessions, and whose count it is
 
 `luvus agent sessions` answers for the **machine**, not for this session. On
