@@ -1,12 +1,28 @@
 Everything running under a Luvus session, and who needs a human.
 
-Four sections are always there, and IDLE is a fifth when idle panes are
+Five sections are always there, and IDLE is a sixth when idle panes are
 shown and present. AGENTS lists the coding agents Luvus recognises with the
 lifecycle state it reports, ordered so the ones wanting a human come first.
 TASKS and LEASES are the coordination Luvus does and Herdr has no equivalent
 for: claimable units of work, and the file paths an unfinished task has
-reserved. PANES lists every other pane doing something. IDLE, when [i] has
-not hidden it and the session has panes at a prompt, is its own section.
+reserved; the TASKS heading also says whether anything is ready to claim,
+because a list with three tasks in it and nothing claimable are different
+sentences. RESUMABLE lists agent sessions no pane is holding. PANES lists
+every other pane doing something. IDLE, when [i] has not hidden it and the
+session has panes at a prompt, is its own section.
+
+RESUMABLE counts the whole machine, not this session: `luvus agent sessions`
+answers for every session on the box, and most of them are usually in
+directories no workspace has open. The heading says how many are in a
+workspace this session has open, and each row says which it is.
+
+The line under the session says what the focused workspace's checkout looks
+like - its branch, how far it is from its upstream, how many entries are
+changed, and how many worktrees the repository has. It covers that one
+workspace and names it, because `luvus git status` and `luvus worktree list`
+take no workspace argument and answer for whichever workspace the session is
+focused on. Entries rather than files: git reports a wholly untracked
+directory as one entry.
 
 A Luvus client, not a general agent monitor. Every figure comes from the
 session's own Universal Harness Protocol 1.0 answers: the pane inventory from

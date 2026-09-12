@@ -80,6 +80,35 @@ is how the *state* was decided (`state_source`), the right half is how the
 *identity* was (`agent_authority`). The right half appears once the pane is
 wide enough for it.
 
+## Resumable sessions, and whose count it is
+
+`luvus agent sessions` answers for the **machine**, not for this session. On
+the box this was written against it named ten sessions while the session had
+one workspace open that any of them were in — the other nine were agents left
+in directories nothing currently has open.
+
+`mission.snapshot` reports only the ones inside an open workspace, which is
+why it said one where `agent sessions` said ten. The two do not disagree;
+they answer different questions. RESUMABLE draws the full list, because an
+agent you left somewhere is exactly the one you have forgotten, and its
+heading says how many are in a workspace this session has open so the total
+is never mistaken for the session's own.
+
+## The focused workspace's checkout
+
+The line under the session says what the checkout looks like: branch, how far
+from upstream, how many entries are changed, how many stashes, and how many
+worktrees the repository has.
+
+It covers **one** workspace and names it. `luvus git status` and
+`luvus worktree list` take no workspace argument — only the UHP methods
+behind them do — so they answer for whichever workspace the session is
+focused on. Drawing those figures without naming the workspace would make
+them read as a claim about the whole session that none of them support.
+
+*Entries*, not *files*: git reports a wholly untracked directory as a single
+entry, so the count is of what git listed rather than of what is on disk.
+
 ## Tasks and leases
 
 Luvus coordinates work across agents in a way Herdr has no equivalent for, and

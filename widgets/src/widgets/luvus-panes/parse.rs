@@ -238,13 +238,28 @@ pub struct Pane {
     pub focused: bool,
 }
 
+/// One workspace of the session, as the snapshot describes it.
+///
+/// `index` is what the per-workspace calls take: `git status` and
+/// `worktree list` both answer for one workspace and reject a directory
+/// that is not a checkout, so the index has to survive the snapshot or
+/// every one of those calls needs a second round trip to find it.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Workspace {
+    pub index: String,
+    pub name: String,
+    pub cwd: String,
+    pub branch: String,
+    pub active: bool,
+}
+
 /// A whole session, as one `luvus uhp snapshot` describes it.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Snapshot {
     pub session: String,
     pub protocol: String,
     pub sequence: u64,
-    pub workspaces: usize,
+    pub spaces: Vec<Workspace>,
     pub panes: Vec<Pane>,
 }
 
@@ -256,10 +271,18 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
         _ => String::new(),
     };
     let mut panes = Vec::new();
+    let mut spaces = Vec::new();
     let listed = array_at(&result, "workspaces")?;
     for workspace in listed {
         let name = text_at(workspace, "name");
         let branch = text_at(workspace, "branch");
+        spaces.push(Workspace {
+            index: id_at(workspace, "index"),
+            name: name.clone(),
+            cwd: text_at(workspace, "cwd"),
+            branch: branch.clone(),
+            active: workspace["active"].as_bool().unwrap_or(false),
+        });
         for tab in workspace["tabs"].as_array().into_iter().flatten() {
             let tab_id = id_at(tab, "index");
             for pane in tab["panes"].as_array().into_iter().flatten() {
@@ -282,7 +305,7 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
         session: text_at(&result, "session"),
         protocol,
         sequence: result["event_sequence"].as_u64().unwrap_or(0),
-        workspaces: listed.len(),
+        spaces,
         panes,
     })
 }
@@ -404,6 +427,147 @@ fn shorten_home(path: &str, home: &str) -> String {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.to_string_lossy().into_owned(),
     }
+}
+
+/// What `task next` answers: the one task an agent could claim right now.
+///
+/// `task list` says what exists; this says what is not waiting on anything
+/// else. Both can be non-empty at once with nothing claimable, and a header
+/// that showed only a count would read as though something were ready.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct NextTask {
+    pub id: String,
+    pub title: String,
+    /// Luvus answered `type: "none"` — nothing is ready. An answer, not an
+    /// absence, and the only shape this has been seen in on a live session.
+    pub none: bool,
+}
+
+/// The claimable task out of `luvus task next`.
+pub fn parse_next_task(text: &str) -> Result<NextTask, String> {
+    let result = parse_result(text)?;
+    if text_at(&result, "type") == "none" {
+        return Ok(NextTask { none: true, ..Default::default() });
+    }
+    // Never seen populated on a live session, so the same several-spellings
+    // rule the task list uses applies here.
+    let task = if result["task"].is_object() { &result["task"] } else { &result };
+    Ok(NextTask {
+        id: any_of(task, &["id", "task", "task_id"]),
+        title: any_of(task, &["title", "name", "description"]),
+        none: false,
+    })
+}
+
+/// One checkout of a repository, as `worktree list` reports it.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Worktree {
+    pub path: String,
+    pub branch: String,
+    pub head: String,
+    /// The primary checkout. The others are linked worktrees, where `.git`
+    /// is a file rather than a directory.
+    pub main: bool,
+}
+
+/// Every checkout of the workspace's repository.
+///
+/// An empty list is a reading: a workspace whose directory is not a
+/// repository has no worktrees, and that is not a failure. The caller tells
+/// the two apart with [`is_not_a_repo`].
+pub fn parse_worktrees(text: &str) -> Result<Vec<Worktree>, String> {
+    let result = parse_result(text)?;
+    let mut found = Vec::new();
+    for entry in array_at(&result, "worktrees")? {
+        found.push(Worktree {
+            path: text_at(entry, "path"),
+            branch: text_at(entry, "branch"),
+            head: text_at(entry, "head"),
+            main: entry["main"].as_bool().unwrap_or(false),
+        });
+    }
+    Ok(found)
+}
+
+/// An agent with a session on this machine that no pane is holding.
+///
+/// `agent sessions` answers for the whole machine, not for the session:
+/// nine of the ten on the box this was written against were in directories
+/// no open workspace covers. `mission.snapshot` reports only the ones
+/// inside an open workspace, which is why the two counts differ — they
+/// answer different questions rather than disagreeing. Both numbers are
+/// kept so the screen can say which it means.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Resumable {
+    pub kind: String,
+    pub cwd: String,
+    pub session_id: String,
+    /// The directory is one the session currently has open.
+    pub in_workspace: bool,
+}
+
+/// Every resumable session, marked with whether the session has its
+/// directory open.
+///
+/// `open` is the workspace cwd list. Taking it as an argument rather than
+/// reading the workspaces here keeps this pure and lets the marking be
+/// tested without a server.
+pub fn parse_sessions(text: &str, open: &[String]) -> Result<Vec<Resumable>, String> {
+    let result = parse_result(text)?;
+    let mut found = Vec::new();
+    for entry in array_at(&result, "sessions")? {
+        let cwd = text_at(entry, "cwd");
+        found.push(Resumable {
+            kind: text_at(entry, "agent"),
+            in_workspace: open.iter().any(|w| *w == cwd),
+            cwd,
+            session_id: any_of(entry, &["session_id", "session", "id"]),
+        });
+    }
+    Ok(found)
+}
+
+/// What one workspace's checkout looks like right now.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct GitState {
+    pub branch: String,
+    pub upstream: String,
+    pub ahead: u64,
+    pub behind: u64,
+    /// Staged, unstaged and untracked entries added together. Untracked
+    /// arrives as a directory when the whole directory is untracked, so
+    /// this counts entries git reported and not files on disk — which is
+    /// why the screen says `entries` and never `files`.
+    pub dirty: usize,
+    pub stashes: usize,
+}
+
+/// The checkout state out of `luvus git status`.
+pub fn parse_git_status(text: &str) -> Result<GitState, String> {
+    let result = parse_result(text)?;
+    let count = |key: &str| result[key].as_array().map(|a| a.len()).unwrap_or(0);
+    Ok(GitState {
+        branch: text_at(&result, "branch"),
+        upstream: text_at(&result, "upstream"),
+        ahead: result["ahead"].as_u64().unwrap_or(0),
+        behind: result["behind"].as_u64().unwrap_or(0),
+        dirty: count("staged") + count("unstaged") + count("untracked"),
+        stashes: count("stashes"),
+    })
+}
+
+/// Whether a git failure is a permanent property of the directory rather
+/// than a reading that failed this time.
+///
+/// Three shapes wear the same `git_error` code and they are not the same
+/// news: a workspace that is not a repository at all will never be one and
+/// should draw a dash, a repository whose index was locked mid-poll should
+/// draw the failure on its own row and try again, and a clean repository
+/// reporting zeroes is an answer. Only the first is settled, so only the
+/// first is cached.
+pub fn is_not_a_repo(message: &str) -> bool {
+    let said = message.to_ascii_lowercase();
+    said.contains("not a git repository") || said.contains("not a working tree")
 }
 
 #[cfg(test)]
@@ -562,7 +726,10 @@ mod tests {
         assert_eq!(snapshot.session, "default");
         assert_eq!(snapshot.protocol, "1.0");
         assert_eq!(snapshot.sequence, 2094);
-        assert_eq!(snapshot.workspaces, 2);
+        assert_eq!(snapshot.spaces.len(), 2);
+        assert_eq!(snapshot.spaces[1].index, "2");
+        assert_eq!(snapshot.spaces[1].cwd, "/srv/work/thing");
+        assert!(snapshot.spaces[1].active);
         // The workspace's branch reaches every pane in it, so a pane row can
         // say which checkout it is looking at without a second call.
         let two = snapshot.panes.iter().find(|p| p.pane_id == "2").unwrap();
@@ -575,7 +742,7 @@ mod tests {
         let bare = r#"{"id":"1","result":{"session":"scratch","event_sequence":1,
           "protocol":{"major":1,"minor":0},"workspaces":[]}}"#;
         let snapshot = parse_snapshot(bare).expect("snapshot");
-        assert_eq!(snapshot.workspaces, 0);
+        assert_eq!(snapshot.spaces.len(), 0);
         assert!(snapshot.panes.is_empty());
         assert_eq!(snapshot.session, "scratch");
     }
@@ -657,5 +824,127 @@ mod tests {
         .expect("leases");
         assert_eq!(leases[0].paths.len(), 2);
         assert_eq!(leases[0].task, "t1");
+    }
+
+    /// Shaped from a live `luvus worktree list`, with the paths replaced.
+    /// A fixture naming a real directory is a fixture that leaks one.
+    const WORKTREES: &str = r#"{
+      "id": "1",
+      "result": {
+        "revision": 44, "type": "worktree_list",
+        "worktrees": [
+          { "branch": "main", "head": "aaaa111", "main": true,
+            "path": "/srv/work/thing" },
+          { "branch": "feature/thing", "head": "bbbb222", "main": false,
+            "path": "/srv/work/thing/.worktrees/one" }
+        ]
+      }
+    }"#;
+
+    const SESSIONS: &str = r#"{
+      "id": "1",
+      "result": {
+        "revision": 44, "type": "agent_sessions",
+        "sessions": [
+          { "agent": "claude", "cwd": "/srv/work/thing", "session_id": "s-1" },
+          { "agent": "codex",  "cwd": "/srv/work/other", "session_id": "s-2" },
+          { "agent": "claude", "cwd": "/srv/work/gone",  "session_id": "s-3" }
+        ]
+      }
+    }"#;
+
+    const GIT: &str = r#"{
+      "id": "1",
+      "result": {
+        "ahead": 1, "behind": 2, "branch": "feature/thing", "revision": 44,
+        "staged": [{ "code": "M", "path": "a.rs" }],
+        "stashes": ["stash@{0}: wip"],
+        "type": "git_status",
+        "unstaged": [{ "code": "M", "path": "b.rs" }, { "code": "M", "path": "c.rs" }],
+        "untracked": ["d/"],
+        "upstream": "origin/feature/thing"
+      }
+    }"#;
+
+    #[test]
+    fn a_worktree_list_names_every_checkout_and_which_is_primary() {
+        let found = parse_worktrees(WORKTREES).expect("worktrees");
+        assert_eq!(found.len(), 2);
+        assert!(found[0].main);
+        assert!(!found[1].main);
+        assert_eq!(found[1].branch, "feature/thing");
+        // Two agents on one repo in different checkouts are the reading
+        // this exists for, so the branch has to survive the parse.
+        assert_eq!(found[0].branch, "main");
+    }
+
+    #[test]
+    fn a_dirty_count_adds_the_three_lists_git_reports_separately() {
+        let state = parse_git_status(GIT).expect("git status");
+        assert_eq!(state.branch, "feature/thing");
+        assert_eq!(state.upstream, "origin/feature/thing");
+        assert_eq!(state.ahead, 1);
+        assert_eq!(state.behind, 2);
+        // One staged, two unstaged, one untracked. Counting only `unstaged`
+        // would call a tree with four changes in it two.
+        assert_eq!(state.dirty, 4);
+        assert_eq!(state.stashes, 1);
+        // A clean tree reports the lists as empty rather than omitting
+        // them, and that is zero rather than unknown.
+        let clean = r#"{"id":"1","result":{"ahead":0,"behind":0,"branch":"main",
+          "staged":[],"stashes":[],"unstaged":[],"untracked":[],"type":"git_status"}}"#;
+        let clean = parse_git_status(clean).expect("clean");
+        assert_eq!(clean.dirty, 0);
+        assert_eq!(clean.stashes, 0);
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_a_repository_is_not_a_failed_reading() {
+        // Both wear `git_error`. Only one of them will still be true next
+        // poll, and drawing the settled one as a failure would put a red
+        // row on a home directory for ever.
+        assert!(is_not_a_repo(
+            "fatal: not a git repository (or any of the parent directories): .git"
+        ));
+        assert!(!is_not_a_repo("fatal: Unable to create index.lock: File exists"));
+        assert!(!is_not_a_repo("no luvus server"));
+    }
+
+    #[test]
+    fn a_resumable_session_knows_whether_its_directory_is_open() {
+        // Ten sessions and one open workspace was the live reading: the
+        // count that matters is not the length of the list.
+        let open = vec!["/srv/work/thing".to_string()];
+        let found = parse_sessions(SESSIONS, &open).expect("sessions");
+        assert_eq!(found.len(), 3);
+        assert_eq!(found.iter().filter(|s| s.in_workspace).count(), 1);
+        assert!(found[0].in_workspace);
+        assert!(!found[1].in_workspace);
+        assert_eq!(found[0].kind, "claude");
+        assert_eq!(found[2].session_id, "s-3");
+        // No workspaces open at all is zero inside, not zero sessions.
+        let none = parse_sessions(SESSIONS, &[]).expect("sessions");
+        assert_eq!(none.len(), 3);
+        assert_eq!(none.iter().filter(|s| s.in_workspace).count(), 0);
+    }
+
+    #[test]
+    fn nothing_ready_to_claim_is_an_answer() {
+        let none = r#"{"id":"1","result":{"message":"no ready tasks","revision":7,"type":"none"}}"#;
+        let next = parse_next_task(none).expect("next");
+        assert!(next.none);
+        assert!(next.id.is_empty());
+        // And a real one is read whichever spelling arrives, as the task
+        // list is, because neither has been seen on a live session.
+        let ready = r#"{"id":"1","result":{"type":"task","id":"t-1","title":"Port it"}}"#;
+        let next = parse_next_task(ready).expect("next");
+        assert!(!next.none);
+        assert_eq!(next.id, "t-1");
+        assert_eq!(next.title, "Port it");
+        let nested = r#"{"id":"1","result":{"type":"task","task":{"task_id":"t-2","name":"Other"}}}"#;
+        let next = parse_next_task(nested).expect("next");
+        assert_eq!(next.id, "t-2");
+        assert_eq!(next.title, "Other");
+        assert!(parse_next_task(r#"{"id":"1","error":{"message":"nope"}}"#).is_err());
     }
 }
