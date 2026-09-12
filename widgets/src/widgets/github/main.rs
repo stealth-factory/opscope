@@ -260,12 +260,16 @@ fn account_detail(
     }
     if let Some(rate) = a.rate {
         let bar = tc::meter(rate / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24));
+        // The board's ramp, not a flat green: a screen where every account's
+        // merge rate is the same colour whatever it is cannot warn at all,
+        // and it disagreed with the figure two screens up.
+        let hot = tc::health(rate / 100.0);
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!("  {}", tc::pad("merge rate", label_w))),
-                (p.ok.as_str(), format!("{:>6.0}%", rate)),
+                (hot.as_str(), format!("{:>6.0}%", rate)),
                 (p.dim.as_str(), "   ".into()),
-                (p.ok.as_str(), bar),
+                (hot.as_str(), bar),
             ],
             w - 1,
         ));
@@ -1497,8 +1501,10 @@ fn main() {
             line.push((p.dim.as_str(), format!("  loading {}d…", want)));
             rows.push(tc::seg(&line, w - 1));
         } else {
+            // `health`, not `heat`: a merge rate is high-is-good, and the
+            // ramp handed the raw fraction drew 97% merged in alarm red.
             let hot = match rate_pct {
-                Some(v) => tc::heat(v / 100.0),
+                Some(v) => tc::health(v / 100.0),
                 None => p.dim.clone(),
             };
             rows.push(tc::seg(
@@ -1862,8 +1868,10 @@ fn main() {
             // account already refetched for the new window shows real numbers
             // while the ones behind it still shimmer.
             let old = s.window != want;
+            // The same high-is-good ramp as the section above it, so one
+            // rate reads as one colour wherever it is drawn.
             let hot = match s.rate {
-                Some(r) if !old => tc::heat(r / 100.0),
+                Some(r) if !old => tc::health(r / 100.0),
                 _ => p.dim.clone(),
             };
             let mut line = vec![
