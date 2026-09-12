@@ -28,7 +28,7 @@ and one keypress to get to any of it.
  ▫ work/site                  site
  ▫ …/another-monorepo         monorepo
 
- ↑↓ select   ↵ switch to this pane   [i]dle [l]abels [r]efresh [q]uit
+ ↑↓ select   ↵ switch to this pane   [i]dle hide [l]abels [r]efresh [q]uit
 ```
 
 ## Why it is ordered this way

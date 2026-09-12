@@ -7,7 +7,7 @@ Vercel deployments — how they are going over time, not just what shipped last.
 ```
 ╺━ VERCEL DEPLOYMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
  200 deploys · 20 proj  179 ready  21 error   0s ago
- ↑↓ select · →/↵ details · [s]tate all · [/]filter · [r]efresh · [q]uit
+ ↑↓ select · →/↵ details · [s]tate failed · [/]filter · [r]efresh · [q]uit
 
  ── ACTIVITY ── deploys/hour, last 48h
  ····▂▂·▃▃▄▄···················▂▄▆▄▃▃▃▄▂▃▃············▂▃·▃▂▂▄·▂▄█▃▂▃

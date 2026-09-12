@@ -482,6 +482,20 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
+/// The filter `[i]` applies, named, or nothing when it is holding nothing.
+///
+/// Hiding the idle panes is a filter like any other and an unstated one
+/// leaves a short list looking like a quiet session. It is only a filter
+/// while there is something behind it: with no pane at a prompt, hidden and
+/// shown are the same screen, and a line saying `0 idle panes hidden` would
+/// be a filter announcing itself for nothing.
+fn idle_filter(show_idle: bool, resting: usize) -> Vec<String> {
+    if show_idle || resting == 0 {
+        return Vec::new();
+    }
+    vec![format!("{} idle pane{} hidden", resting, plural(resting))]
+}
+
 /// The one line that stands in for a section with nothing in it.
 ///
 /// An empty reading and a failed one are different sentences, and this is
@@ -1130,6 +1144,20 @@ fn main() {
             &checkout_line(&git, &worktrees, &focused, &p),
             w.saturating_sub(1),
         ));
+        // Hiding the idle panes is a filter, and an unstated filter leaves
+        // a short list looking like a quiet session. It goes in the pinned
+        // header so it cannot scroll away from the list it qualifies, and
+        // it is drawn only while it is holding something back.
+        let hidden_idle = idle_filter(show_idle, resting.len());
+        // `others`, not `panes`: a pane holding a recognised agent is in
+        // AGENTS rather than in this list, and counting it here would
+        // report it as something the filter had hidden.
+        if let Some(said) = tc::filter_row(busy.len(), others.len(), &hidden_idle) {
+            head.push(tc::seg(
+                &[(p.dim.as_str(), format!(" {}", said))],
+                w.saturating_sub(1),
+            ));
+        }
         head.push(String::new());
 
         // ---- the footer, built before the body ----
@@ -1149,7 +1177,14 @@ fn main() {
                 (p.dim.as_str(), " section".into()),
             ],
             vec![(p.dim.as_str(), "[e]xplain".into())],
-            vec![(p.dim.as_str(), "[i]dle".into())],
+            // What the next press does, not what is in force: `[i]dle`
+            // alone said neither, and the hint beside it on the wall reads
+            // as a state. What is in force is the count line in the
+            // header, which says how many the filter is holding back.
+            vec![(
+                p.dim.as_str(),
+                format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
+            )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
@@ -2125,6 +2160,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hiding_the_idle_panes_is_a_filter_the_pane_states() {
+        assert!(idle_filter(true, 4).is_empty(), "nothing is hidden");
+        assert!(
+            idle_filter(false, 0).is_empty(),
+            "a filter holding nothing back is not worth a row"
+        );
+        assert_eq!(idle_filter(false, 4), vec!["4 idle panes hidden"]);
+        assert_eq!(idle_filter(false, 1), vec!["1 idle pane hidden"]);
+        let said = tc::filter_row(5, 9, &idle_filter(false, 4)).expect("a filter is on");
+        assert_eq!(said, "5 of 9 shown · 4 idle panes hidden");
+    }
 
     #[test]
     fn the_window_holds_the_selected_entry_whatever_it_costs() {

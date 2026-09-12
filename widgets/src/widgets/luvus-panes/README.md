@@ -39,7 +39,7 @@ get to any of it.
  ▫ work/docs                      docs
  ▫ ~                              home
 
- ↑↓ select  ↵ focus  tab section  [i]dle  [r]efresh  [,] settings  [q]uit
+ ↑↓ select  ↵ focus  tab section  [i]dle hide  [r]efresh  [,] settings  [q]uit
 ```
 
 ## Why it is ordered this way

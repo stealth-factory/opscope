@@ -769,6 +769,50 @@ pub fn error_rows(colour: &str, said: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
+/// What the pane says about the filters it is applying, or `None`.
+///
+/// One wording for every widget that filters, because these panes sit side
+/// by side: `302 of 685 shown · failed only · /auth`. The count says it is a
+/// subset and each active filter is named, in the order the widget lists
+/// them. `None` when nothing is filtered — a pane that announces "no
+/// filters" is noise, and the widget keeps its own unfiltered count line.
+///
+/// No leading space: the caller adds the lead its other rows use, and hands
+/// the result to [`seg`], which clips. The filters come last so that the
+/// half a narrow pane cuts is the least load-bearing half.
+///
+/// With nothing on the board at all the count is dropped and the filters
+/// are named on their own: `0 of 0 shown` describes no subset and reads,
+/// on a pane still fetching, as a figure about something.
+pub fn filter_row(shown: usize, of: usize, filters: &[String]) -> Option<String> {
+    if filters.is_empty() {
+        return None;
+    }
+    if of == 0 {
+        return Some(filters.join(" · "));
+    }
+    Some(format!("{} of {} shown · {}", shown, of, filters.join(" · ")))
+}
+
+/// What a board a filter emptied says, or `None` when no filter emptied it.
+///
+/// The founding hazard: a section that is not drawn looks exactly like a
+/// section with nothing in it, and an empty list under an unstated filter is
+/// the same reading — *there is nothing* against *you cannot see whether
+/// there is*. So the count of what the filter is holding back comes before
+/// the filters themselves, and a source that is genuinely empty (`of == 0`)
+/// gets `None`: the filter did not empty that, and the widget's own wording
+/// for an empty source is the honest one.
+pub fn filtered_to_nothing(of: usize, filters: &[String]) -> Option<String> {
+    (!filters.is_empty() && of > 0).then(|| {
+        format!(
+            "nothing matches · all {} hidden by the filter · {}",
+            of,
+            filters.join(" · ")
+        )
+    })
+}
+
 /// Draw the reason a widget cannot run, and hold until q.
 ///
 /// Exiting with a message loses it: a widget lives in a pane that is not
@@ -2416,6 +2460,57 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unfiltered_pane_says_nothing_about_filters() {
+        // A pane that always announces "no filters" is noise, and the
+        // widget's own count line already reads correctly without help.
+        assert_eq!(super::filter_row(685, 685, &[]), None);
+        assert_eq!(super::filtered_to_nothing(685, &[]), None);
+    }
+
+    #[test]
+    fn a_filtered_pane_says_the_count_is_a_subset_and_names_each_filter() {
+        let filters = vec!["failed only".to_string(), "/auth".to_string()];
+        let said = super::filter_row(302, 685, &filters).expect("a filter is on");
+        assert_eq!(said, "302 of 685 shown · failed only · /auth");
+        // The subset reading has to survive a narrow pane, so the counts
+        // come before the filter names: at 26 columns this is what is left.
+        let clipped = super::seg(&[("", said)], 26);
+        assert!(clipped.contains("302 of 685"), "{clipped}");
+    }
+
+    #[test]
+    fn an_empty_board_names_the_filter_without_a_count_of_nothing() {
+        // `0 of 0 shown` is a figure about nothing, and a pane still
+        // fetching drew it for a second as though it meant something.
+        let filters = vec!["failed only".to_string()];
+        assert_eq!(super::filter_row(0, 0, &filters).as_deref(), Some("failed only"));
+    }
+
+    #[test]
+    fn a_board_a_filter_emptied_says_the_filter_emptied_it() {
+        let filters = vec!["production only".to_string()];
+        let said = super::filtered_to_nothing(685, &filters).expect("a filter is on");
+        assert!(said.contains("nothing matches"), "{said}");
+        assert!(
+            said.contains("685 hidden by the filter"),
+            "an empty list under an unstated filter reads as an empty source: {said}"
+        );
+        assert!(said.contains("production only"), "{said}");
+        // Narrow panes clip the tail, so the reason has to lead.
+        let clipped = super::seg(&[("", said)], 20);
+        assert!(clipped.contains("nothing matches"), "{clipped}");
+    }
+
+    #[test]
+    fn an_empty_source_is_not_reported_as_emptied_by_a_filter() {
+        // A filter cannot have hidden anything when there was nothing to
+        // hide: an account with no deployments is an empty source, and
+        // blaming the filter for it is the same lie in the other direction.
+        let filters = vec!["failed only".to_string()];
+        assert_eq!(super::filtered_to_nothing(0, &filters), None);
+    }
+
     #[test]
     fn a_missing_config_line_names_the_settings_key() {
         // One product, one clause. A widget that built its own wording
