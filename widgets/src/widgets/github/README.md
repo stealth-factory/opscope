@@ -23,7 +23,7 @@ is actually moving.
  ▀▀▀▀▀▀▀▀▀                                         █████████
  7d ago                                                          today
 
- ── CONTRIBUTIONS ── 6024 in 52 weeks, peak 241/day
+ ── CONTRIBUTIONS ── yours, everywhere · 6024 in 52 weeks, peak 241/day
  Mon   ░▒░▒░ ░▒░           ░     ░   ░ ░ ░ ░ ░░░░░░░▒░ ░░▒
        ░▒░░░ ▒▓         ░        ░░ ░░░ ░░ ░▒░ ░░░░░░░░░░░
  Wed  ░░▒░░▒░░▒░      ░    ░     ░░  ▒░░░░ ░░░░░░░░░░▒░░░
