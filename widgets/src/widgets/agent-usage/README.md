@@ -956,9 +956,9 @@ figure. Before this the log won outright, and on the machine this was found on
 it put a figure from twenty-seven days back over one from two hours back, with
 nothing but the cached mark to tell them apart.
 
-**On by default**, because `grok_ping` is your own CLI, already signed in,
-asked about your own account. A quota nobody can act on is not the safer
-default. Off stays one key away and the tab names it.
+**On by default**, because polling uses the credential the Grok CLI already
+left, asked about your own account. A quota nobody can act on is not the
+safer default. Off stays one key away and the tab names it.
 
 **Cached or live is a question about age, not about source.** A reading is
 shown as current when it was taken within the last half hour, whatever
