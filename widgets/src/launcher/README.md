@@ -6,7 +6,7 @@ The front door: every widget, what it does, and a preview before it runs.
 
 ```
 ╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
- 15 widgets   ↵ or → starts one, q leaves
+ 16 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
    clocks       Server clock, countdowns, a pomodoro…

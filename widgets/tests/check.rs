@@ -2541,6 +2541,77 @@ fn every_array_declares_what_it_holds() {
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
 
+/// English cardinal for 1..=99. None outside that — the inventory check
+/// fails closed rather than silently dropping a count it cannot spell.
+fn english_count(n: usize) -> Option<String> {
+    const ONES: [&str; 10] =
+        ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+    const TEENS: [&str; 10] = [
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    Some(match n {
+        1..=9 => ONES[n].to_string(),
+        10..=19 => TEENS[n - 10].to_string(),
+        20..=99 if n % 10 == 0 => TENS[n / 10].to_string(),
+        20..=99 => format!("{}-{}", TENS[n / 10], ONES[n % 10]),
+        _ => return None,
+    })
+}
+
+/// How many times `phrase` occurs in flattened text, with a digit or letter
+/// immediately before not counting — so "16 widgets" is not also "6 widgets".
+fn stated_count_hits(flat: &str, phrase: &str) -> usize {
+    let mut found = 0;
+    let mut from = 0;
+    while let Some(rel) = flat[from..].find(phrase) {
+        let at = from + rel;
+        let before_ok = at == 0 || {
+            let b = flat.as_bytes()[at - 1];
+            !b.is_ascii_alphanumeric()
+        };
+        if before_ok {
+            found += 1;
+        }
+        from = at + 1;
+    }
+    found
+}
+
+/// Every form the inventory check will look for.
+///
+/// Digits from 1, words from thirteen. "two widgets" / "four widgets" are
+/// true sentences about a pair of accidents and a layout bug, not a claim
+/// that the collection has two or four members — the same class as
+/// CHANGELOG.md, and the reason the first version of this list started at
+/// thirteen. The live inventory is asserted to stay inside 1..=99 so a
+/// twentieth widget cannot walk past the end of the word list unnoticed.
+fn stated_count_tokens() -> Vec<(String, usize)> {
+    let mut tokens = Vec::new();
+    for n in 1..=99 {
+        tokens.push((n.to_string(), n));
+        if n >= 13 {
+            let word = english_count(n).expect("13..=99 is inside what english_count spells");
+            tokens.push((word.clone(), n));
+            if word.contains('-') {
+                tokens.push((word.replace('-', " "), n));
+            }
+        }
+    }
+    tokens
+}
+
 /// Every sentence that says how many widgets or binaries there are, against
 /// how many there are.
 ///
@@ -2561,17 +2632,12 @@ fn every_array_declares_what_it_holds() {
 /// sentences wrap: "the launcher and sixteen" ends one line of README.md and
 /// "widget binaries" begins the next, and a reader that went line by line
 /// would see neither.
+///
+/// Both the spelled count (from thirteen) and the digits are matched. The
+/// live inventory must fall in 1..=99 — past that `english_count` returns
+/// none and this test fails, instead of quietly stopping at nineteen.
 #[test]
 fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
-    const WORDS: &[(&str, usize)] = &[
-        ("thirteen", 13),
-        ("fourteen", 14),
-        ("fifteen", 15),
-        ("sixteen", 16),
-        ("seventeen", 17),
-        ("eighteen", 18),
-        ("nineteen", 19),
-    ];
     // A widget's own README talks about its own subject - ports counts
     // listening ports, link counts readings - so none of them are here.
     const SAYS_SO: &[&str] = &[
@@ -2586,6 +2652,9 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
         "widgets/src/launcher/help.txt",
         "wiki/making-a-widget.md",
     ];
+    // True sentences about a grep that cried wolf, not a claim that there
+    // are forty-eight widgets. Same class as CHANGELOG.md.
+    const NOT_A_PRESENT_COUNT: &[&str] = &["48 widgets broken"];
     let widgets = widgets().len();
     let manifest = std::fs::read_to_string(root().join("widgets/Cargo.toml"))
         .expect("the widget manifest");
@@ -2595,6 +2664,13 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
         "the two counts this test measures against disagree: {} widget folders, \
          {} [[bin]] entries. Expected one binary per widget plus opscope - fix \
          that before trusting anything below",
+        widgets,
+        bins
+    );
+    assert!(
+        english_count(widgets).is_some() && english_count(bins).is_some(),
+        "the live inventory is {} widgets / {} binaries; this check only spells \
+         1..=99. Extend english_count before adding the hundredth.",
         widgets,
         bins
     );
@@ -2610,6 +2686,7 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
         ("binaries", bins),
         ("executable targets", bins),
     ];
+    let tokens = stated_count_tokens();
 
     let mut wrong = Vec::new();
     for file in SAYS_SO {
@@ -2620,11 +2697,14 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
                 continue;
             }
         };
-        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-        for (word, said) in WORDS {
+        let mut flat = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        for skip in NOT_A_PRESENT_COUNT {
+            flat = flat.replace(skip, &" ".repeat(skip.len()));
+        }
+        for (word, said) in &tokens {
             for (noun, should) in nouns {
                 let phrase = format!("{} {}", word, noun);
-                let found = flat.matches(&phrase).count();
+                let found = stated_count_hits(&flat, &phrase);
                 if found > 0 && said != should {
                     wrong.push(format!(
                         "{}: says \"{}\" {} time{}, and there are {} {}",
@@ -2640,4 +2720,19 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
         }
     }
     assert!(wrong.is_empty(), "counts that have gone stale:\n  {}", wrong.join("\n  "));
+}
+
+#[test]
+fn inventory_count_tokens_include_digits_and_do_not_match_a_suffix() {
+    assert_eq!(english_count(16).as_deref(), Some("sixteen"));
+    assert_eq!(english_count(21).as_deref(), Some("twenty-one"));
+    assert_eq!(english_count(99).as_deref(), Some("ninety-nine"));
+    assert_eq!(english_count(100), None);
+    assert_eq!(stated_count_hits("there are 16 widgets here", "6 widgets"), 0);
+    assert_eq!(stated_count_hits("there are 16 widgets here", "16 widgets"), 1);
+    assert_eq!(stated_count_hits("15 widgets and 16 widgets", "15 widgets"), 1);
+    let tokens = stated_count_tokens();
+    assert!(tokens.iter().any(|(w, n)| w == "15" && *n == 15));
+    assert!(tokens.iter().any(|(w, n)| w == "twenty-one" && *n == 21));
+    assert!(tokens.iter().any(|(w, n)| w == "twenty one" && *n == 21));
 }
