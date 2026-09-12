@@ -823,17 +823,27 @@ enum Count {
 /// lock()`, which after a panic inside the lock does nothing at all: the
 /// reason for the panic would be dropped beside figures that go on
 /// looking like this minute's. The state is plain data with no invariant
-/// a half-finished write can break, so the poison is cleared and the
-/// reason recorded.
+/// a half-finished write can break, so this write recovers the guard
+/// from the lock it just took and clears the poison so later `if let
+/// Ok` writes can still land.
+///
+/// Recover from *this* `lock()`, not from a peek at `is_poisoned()`
+/// first. The two count threads overlap: one can have already returned
+/// an ordinary error while the sibling is still running, and the sibling
+/// can panic while holding `State` after a peek said the lock was clean.
+/// That `lock()` then returns `PoisonError`, and an `if let Ok` drops
+/// the first count's reason, leaving its chart stale with no caption.
 fn record_count_err(state: &Arc<Mutex<State>>, which: Count, said: String) {
-    if state.is_poisoned() {
-        state.clear_poison();
-    }
-    if let Ok(mut g) = state.lock() {
-        match which {
-            Count::Merges => g.counts_err = said,
-            Count::Arrivals => g.created_err = said,
+    let mut g = match state.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            state.clear_poison();
+            poisoned.into_inner()
         }
+    };
+    match which {
+        Count::Merges => g.counts_err = said,
+        Count::Arrivals => g.created_err = said,
     }
 }
 
@@ -5244,5 +5254,48 @@ mod tests {
         );
         let g = state.lock().expect("the poison outlived the reason");
         assert!(g.counts_err.contains("boom"), "{:?}", g.counts_err);
+    }
+
+    #[test]
+    fn a_reason_lands_when_the_sibling_poisons_during_the_lock() {
+        // The first count has already returned an ordinary error; the
+        // sibling still holds State and will panic. record_count_err
+        // must recover that PoisonError, not peek at is_poisoned()
+        // and then `if let Ok` the lock - the peek is clean, the lock
+        // is not, and the first reason would be dropped.
+        let state = Arc::new(Mutex::new(State::default()));
+        let holding = Arc::new(std::sync::Barrier::new(2));
+        let poisoner = {
+            let state = Arc::clone(&state);
+            let holding = Arc::clone(&holding);
+            std::thread::spawn(move || {
+                let _held = state.lock().expect("state");
+                holding.wait();
+                panic!("sibling");
+            })
+        };
+        holding.wait();
+        let waiter = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                record_count_err(&state, Count::Merges, "from the first count".to_string());
+            })
+        };
+        // The waiter has to be inside lock() before the sibling dies;
+        // otherwise is_poisoned() is already true and the old peek
+        // would also succeed. 50ms is a thread startup, not a wait
+        // for GitHub.
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = poisoner.join();
+        waiter.join().expect("the first count's write panicked");
+        let g = match state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(
+            g.counts_err.contains("from the first count"),
+            "the first count's reason was dropped when the sibling poisoned the lock: {:?}",
+            g.counts_err
+        );
     }
 }
