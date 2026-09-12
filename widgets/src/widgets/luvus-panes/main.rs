@@ -22,7 +22,7 @@
 //! agents from `agent list`, and the two things Herdr has no equivalent
 //! for — claimable tasks and the file-path leases they hold.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -142,19 +142,18 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     let at = tc::now();
     let agents = agents.map(|listed| {
         let mut listed: Vec<Agent> = listed;
+        let mut live = HashSet::new();
         for agent in &mut listed {
-            let key = agent.pane.clone();
-            let was = seen.since.get(&key);
-            if was.is_none_or(|(had, _, _)| *had != agent.state) {
-                // A state already in place when we started is only a lower
-                // bound — we did not see it begin.
-                seen.since
-                    .insert(key.clone(), (agent.state.clone(), at, !seen.first_poll));
-            }
-            let (_, began, exact) = seen.since[&key].clone();
-            agent.since = at - began;
+            let key = duration_key(&agent.pane, &agent.name);
+            let (since, exact) = measure_since(seen, &key, &agent.state, at);
+            agent.since = since;
             agent.exact = exact;
+            live.insert(key);
         }
+        // A successful poll is the only moment it is safe to forget a
+        // vanished agent: a failed one must not wipe history and then
+        // hand the next success a fresh clock.
+        keep_live(seen, &live);
         listed.sort_by(|a, b| {
             parse::rank_of(&a.state)
                 .cmp(&parse::rank_of(&b.state))
@@ -320,6 +319,40 @@ fn empty_or_why<T>(reading: &Result<Vec<T>, String>, empty: &str) -> (String, bo
     match reading {
         Ok(_) => (format!("   {}", empty), false),
         Err(why) => (format!("   ⚠ could not be read — {}", why), true),
+    }
+}
+
+/// Who this duration belongs to: the pane, and the agent in it.
+///
+/// Pane id alone is empty when `agent list` omits `pane`, and two agents
+/// without one would then share a clock. A replacement in the same pane
+/// keeps the old start time if only the pane is the key.
+fn duration_key(pane: &str, name: &str) -> String {
+    format!("{}\0{}", pane, name)
+}
+
+/// How long `state` has been held, measured from the first poll that saw it.
+///
+/// A state already in place when we started is only a lower bound — we
+/// did not see it begin.
+fn measure_since(seen: &mut Seen, key: &str, state: &str, at: f64) -> (f64, bool) {
+    if seen.since.get(key).is_none_or(|(had, _, _)| *had != state) {
+        seen.since
+            .insert(key.to_string(), (state.to_string(), at, !seen.first_poll));
+    }
+    let (_, began, exact) = seen.since[key].clone();
+    (at - began, exact)
+}
+
+fn keep_live(seen: &mut Seen, live: &HashSet<String>) {
+    seen.since.retain(|k, _| live.contains(k));
+}
+
+/// The count a heading may print. A failed source has no number.
+fn shown_count<T>(reading: &Result<Vec<T>, String>) -> String {
+    match reading {
+        Ok(rows) => rows.len().to_string(),
+        Err(_) => "unread".into(),
     }
 }
 
@@ -507,6 +540,10 @@ fn main() {
         };
         let wide = w >= 76;
 
+        // Rows for drawing. A failed source stays a failed source: these
+        // vectors are empty, but the Result beside them is what the
+        // header and the empty-section lines read, so a timeout cannot
+        // draw as zero.
         let agent_rows: Vec<Agent> = agents.clone().unwrap_or_default();
         let task_rows: Vec<Task> = tasks.clone().unwrap_or_default();
         let lease_rows: Vec<Lease> = leases.clone().unwrap_or_default();
@@ -579,19 +616,23 @@ fn main() {
         // ---- the pinned header ----
         let mut head = vec![tc::title("luvus panes", w, &p.accent)];
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for a in &agent_rows {
-            *counts.entry(a.state.as_str()).or_insert(0) += 1;
+        if let Ok(listed) = &agents {
+            for a in listed {
+                *counts.entry(a.state.as_str()).or_insert(0) += 1;
+            }
         }
-        let mut summary = vec![
-            (
+        let mut summary = Vec::new();
+        match &agents {
+            Ok(listed) => summary.push((
                 p.dim.as_str(),
-                format!(" {} agent{}", agent_rows.len(), plural(agent_rows.len())),
-            ),
-            (
-                p.dim.as_str(),
-                format!(" · {} pane{}", panes.len(), plural(panes.len())),
-            ),
-        ];
+                format!(" {} agent{}", listed.len(), plural(listed.len())),
+            )),
+            Err(_) => summary.push((p.unknown.as_str(), " agents unread".into())),
+        }
+        summary.push((
+            p.dim.as_str(),
+            format!(" · {} pane{}", panes.len(), plural(panes.len())),
+        ));
         for state_name in ["blocked", "done", "working", "idle"] {
             if let Some(n) = counts.get(state_name) {
                 summary.push((colour_of(state_name, &p), format!("   {} {}", n, state_name)));
@@ -641,7 +682,15 @@ fn main() {
         }
         let wants =
             counts.get("blocked").copied().unwrap_or(0) + counts.get("done").copied().unwrap_or(0);
-        head.push(if wants > 0 {
+        head.push(if agents.is_err() {
+            tc::seg(
+                &[(
+                    p.unknown.as_str(),
+                    " cannot say who is waiting — agents unread".into(),
+                )],
+                w.saturating_sub(1),
+            )
+        } else if wants > 0 {
             tc::seg(
                 &[(
                     if counts.contains_key("blocked") {
@@ -737,13 +786,15 @@ fn main() {
 
             // The third of the three absences, and the one that has no
             // error behind it: the server answered, and there is nothing
-            // open in it. Said in words above the sections, because five
-            // headings each reporting zero is the same picture as five
-            // sources that failed.
+            // coordinated under it and no pane doing work. Idle shells at
+            // a prompt are not that work — they are listed under IDLE —
+            // but a busy non-agent pane is, and calling the session empty
+            // while PANES names it would be two readings of the same screen.
             let nothing_under_it = snapshot.is_ok()
                 && agents.as_ref().is_ok_and(|a| a.is_empty())
                 && tasks.as_ref().is_ok_and(|t| t.is_empty())
-                && leases.as_ref().is_ok_and(|l| l.is_empty());
+                && leases.as_ref().is_ok_and(|l| l.is_empty())
+                && busy.is_empty();
             if nothing_under_it {
                 let (said, next) = if panes.is_empty() {
                     (
@@ -782,11 +833,21 @@ fn main() {
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── AGENTS ── ".into()),
-                    (p.dim.as_str(), format!("{}", agent_rows.len())),
+                    (p.dim.as_str(), shown_count(&agents)),
                 ],
                 w.saturating_sub(1),
             ));
-            let mut columns = format!(" {:<8} {:<8} {:<6} {:<14}", "AGENT", "STATE", "FOR", "WORKSPACE");
+            let name_w = agent_rows
+                .iter()
+                .map(|a| tc::display_width(&a.name))
+                .max()
+                .unwrap_or(5)
+                .max(8);
+            let mut columns = format!(
+                " {:<name_w$} {:<8} {:<6} {:<14}",
+                "AGENT", "STATE", "FOR", "WORKSPACE",
+                name_w = name_w
+            );
             if wide {
                 columns += " BRANCH";
             }
@@ -844,7 +905,7 @@ fn main() {
                             "{}{} {}",
                             if here { "▸" } else { " " },
                             mark_of(&a.state, tick),
-                            tc::pad(&a.name, 8)
+                            tc::pad(&a.name, name_w)
                         ),
                     ),
                     (c(colour), format!(" {:<8}", state_cell)),
@@ -933,7 +994,7 @@ fn main() {
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── TASKS ── ".into()),
-                    (p.dim.as_str(), format!("{}", task_rows.len())),
+                    (p.dim.as_str(), shown_count(&tasks)),
                 ],
                 w.saturating_sub(1),
             ));
@@ -995,7 +1056,7 @@ fn main() {
             body.push(tc::seg(
                 &[
                     (p.lbl.as_str(), " ── LEASES ── ".into()),
-                    (p.dim.as_str(), format!("{}", lease_rows.len())),
+                    (p.dim.as_str(), shown_count(&leases)),
                 ],
                 w.saturating_sub(1),
             ));
@@ -1360,6 +1421,48 @@ mod tests {
         assert!(said.contains("did not answer"));
         assert!(!said.contains("no tasks"));
         assert!(bad);
+    }
+
+    #[test]
+    fn a_failed_source_has_no_count_to_print() {
+        let empty: Result<Vec<u8>, String> = Ok(Vec::new());
+        assert_eq!(shown_count(&empty), "0");
+        let listed: Result<Vec<u8>, String> = Ok(vec![1, 2]);
+        assert_eq!(shown_count(&listed), "2");
+        let failed: Result<Vec<u8>, String> = Err("timeout".into());
+        assert_eq!(shown_count(&failed), "unread");
+        assert_ne!(shown_count(&failed), "0");
+    }
+
+    #[test]
+    fn duration_follows_the_agent_not_only_the_pane() {
+        let mut seen = Seen {
+            first_poll: false,
+            ..Default::default()
+        };
+        let a = duration_key("2", "claude");
+        let b = duration_key("2", "codex");
+        let empty_one = duration_key("", "claude");
+        let empty_two = duration_key("", "codex");
+        let (first, exact) = measure_since(&mut seen, &a, "working", 10.0);
+        assert_eq!(first, 0.0);
+        assert!(exact);
+        let (later, _) = measure_since(&mut seen, &a, "working", 18.0);
+        assert_eq!(later, 8.0);
+        // A different agent in the same pane starts its own clock.
+        let (other, _) = measure_since(&mut seen, &b, "working", 18.0);
+        assert_eq!(other, 0.0);
+        // Agents whose pane id never arrived stay distinct from each other.
+        measure_since(&mut seen, &empty_one, "idle", 20.0);
+        measure_since(&mut seen, &empty_two, "working", 20.0);
+        let (still, _) = measure_since(&mut seen, &empty_one, "idle", 25.0);
+        assert_eq!(still, 5.0);
+        // A vanished agent is forgotten, so a later return is not hours old.
+        let mut live = HashSet::new();
+        live.insert(b.clone());
+        keep_live(&mut seen, &live);
+        let (returned, _) = measure_since(&mut seen, &a, "working", 100.0);
+        assert_eq!(returned, 0.0);
     }
 
 }

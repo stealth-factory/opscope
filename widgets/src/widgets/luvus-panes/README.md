@@ -55,9 +55,10 @@ nobody is looking. **AGENTS is sorted by who needs a human**, not by name:
 | `idle` | ready for input |
 | `unknown` | an agent is present and Luvus classified it as none of those — **not** the same as idle |
 
-Those four are the states the protocol itself declares, read straight out of
-`uhp capabilities`. `blocked` sits above `done` because blocked is waiting on
-you *now* while done is waiting to be noticed.
+Those four are the states the protocol itself declares — they are defined
+on the UHP capabilities object, not fetched by a fifth widget call. The
+refresh still makes only the four calls above. `blocked` sits above `done`
+because blocked is waiting on you *now* while done is waiting to be noticed.
 
 A headline counts how many are waiting on you, so pressing `↵` on the top row
 is the whole workflow: the blocked agent surfaces, one key puts you in front of
@@ -103,7 +104,7 @@ so each one is named:
 |---|---|
 | no `luvus` on `PATH` | `cannot start · needs luvus`, with where to get it — the shared dependency screen, before the terminal is taken over |
 | a binary, no server for this session | `⚠ no luvus server` / `nothing is serving the session named <name>` / `start one with luvus, or name another session with ,` |
-| a server with nothing under it | `▪ session <name> is open and empty` / how many panes it does hold / `start one with luvus agent start` |
+| a server with nothing under it | `▪ session <name> is open and empty` / how many panes it does hold / `start one with luvus agent start` — only when there are no agents, tasks, leases, *or* busy non-agent panes; a running shell is listed under PANES, not called empty |
 
 The second never shows the socket path Luvus names in its own error, because
 this repository is public and screenshots of it are not.
@@ -154,11 +155,11 @@ readings of the same screen. The title and the counts never go.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `j` `k` `Home` `End` | select, across all four sections; the window follows |
-| `Tab` | jump to the head of the next section, wrapping past the last |
+| `↑` `↓` `j` `k` `Home` `End` | select, across the four sections and IDLE when it is shown; the window follows |
+| `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
 | `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — focus the selected pane |
-| `i` | show/hide the idle section |
+| `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |
 | `,` | open settings |
 | `q` | quit |

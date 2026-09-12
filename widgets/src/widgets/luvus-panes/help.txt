@@ -1,11 +1,12 @@
 Everything running under a Luvus session, and who needs a human.
 
-Four sections. AGENTS lists the coding agents Luvus recognises with the
+Four sections are always there, and IDLE is a fifth when idle panes are
+shown and present. AGENTS lists the coding agents Luvus recognises with the
 lifecycle state it reports, ordered so the ones wanting a human come first.
 TASKS and LEASES are the coordination Luvus does and Herdr has no equivalent
 for: claimable units of work, and the file paths an unfinished task has
-reserved. PANES lists every other pane doing something, then IDLE lists the
-panes sitting at a prompt.
+reserved. PANES lists every other pane doing something. IDLE, when [i] has
+not hidden it and the session has panes at a prompt, is its own section.
 
 A Luvus client, not a general agent monitor. Every figure comes from the
 session's own Universal Harness Protocol 1.0 answers: the pane inventory from
@@ -33,9 +34,10 @@ an answer. A source that did not come back says so instead, on its own row.
 
     luvus-panes [-n SECONDS]
 
-Keys: arrows select, and tab jumps to the head of the next section. ctrl-y and
-ctrl-e scroll the window a row at a time, as does the mouse wheel, and neither
-touches the selection. enter focuses the selected pane so you jump straight to
-whatever needs you, i shows or hides the idle section,
-r refreshes now, comma opens settings, q quits.
+Keys: arrows select, and tab jumps to the head of the next section, wrapping
+through IDLE when that section is on screen. ctrl-y and ctrl-e scroll the
+window a row at a time, as does the mouse wheel, and neither touches the
+selection. enter focuses the selected pane so you jump straight to whatever
+needs you, i shows or hides the idle section (and with it, whether tab can
+land there), r refreshes now, comma opens settings, q quits.
 Requires the `luvus` command; it reads a running session over UHP.

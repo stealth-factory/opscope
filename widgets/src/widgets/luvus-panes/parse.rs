@@ -144,6 +144,19 @@ fn list_at(value: &Value, keys: &[&str]) -> Vec<String> {
     Vec::new()
 }
 
+/// The named list in a successful envelope, or why it is not a list.
+///
+/// An omitted or non-array field is not an empty reading. Zero agents and
+/// a response that never named them are opposite answers, and treating
+/// the second as the first is how a malformed source draws as a quiet one.
+fn array_at<'a>(result: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
+    match result.get(key) {
+        Some(Value::Array(items)) => Ok(items),
+        Some(_) => Err(format!("luvus answered with {} that is not a list", key)),
+        None => Err(format!("luvus answered with no {}", key)),
+    }
+}
+
 /// A coding agent under the session, as `agent list` reports it.
 ///
 /// `since` and `exact` are not in the answer: UHP does not timestamp a
@@ -180,7 +193,7 @@ pub struct Agent {
 pub fn parse_agents(text: &str) -> Result<Vec<Agent>, String> {
     let result = parse_result(text)?;
     let mut found = Vec::new();
-    for entry in result["agents"].as_array().into_iter().flatten() {
+    for entry in array_at(&result, "agents")? {
         let kind = text_at(entry, "agent");
         let named = text_at(entry, "name");
         found.push(Agent {
@@ -243,8 +256,8 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
         _ => String::new(),
     };
     let mut panes = Vec::new();
-    let listed = result["workspaces"].as_array().cloned().unwrap_or_default();
-    for workspace in &listed {
+    let listed = array_at(&result, "workspaces")?;
+    for workspace in listed {
         let name = text_at(workspace, "name");
         let branch = text_at(workspace, "branch");
         for tab in workspace["tabs"].as_array().into_iter().flatten() {
@@ -292,7 +305,7 @@ pub struct Task {
 pub fn parse_tasks(text: &str) -> Result<Vec<Task>, String> {
     let result = parse_result(text)?;
     let mut found = Vec::new();
-    for entry in result["tasks"].as_array().into_iter().flatten() {
+    for entry in array_at(&result, "tasks")? {
         found.push(Task {
             id: any_of(entry, &["id", "task", "task_id"]),
             title: any_of(entry, &["title", "name", "description"]),
@@ -319,7 +332,7 @@ pub struct Lease {
 pub fn parse_leases(text: &str) -> Result<Vec<Lease>, String> {
     let result = parse_result(text)?;
     let mut found = Vec::new();
-    for entry in result["leases"].as_array().into_iter().flatten() {
+    for entry in array_at(&result, "leases")? {
         found.push(Lease {
             id: any_of(entry, &["id", "lease", "lease_id"]),
             task: any_of(entry, &["task", "task_id"]),
@@ -370,18 +383,26 @@ pub fn ago(seconds: f64) -> String {
 
 /// The home-relative form of a directory, which is how a person names it.
 pub fn homely(path: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
+    shorten_home(path, &std::env::var("HOME").unwrap_or_default())
+}
+
+/// HOME is replaced only on a path-component boundary, so a sibling whose
+/// name merely starts with the home path is not claimed as under it.
+fn shorten_home(path: &str, home: &str) -> String {
     if home.is_empty() {
         return path.to_string();
     }
-    let projects = format!("{}/projects/", home);
-    if let Some(rest) = path.strip_prefix(&projects) {
-        return rest.to_string();
+    let path = std::path::Path::new(path);
+    let home = std::path::Path::new(home);
+    if let Ok(rest) = path.strip_prefix(home.join("projects")) {
+        if !rest.as_os_str().is_empty() {
+            return rest.to_string_lossy().into_owned();
+        }
     }
-    match path.strip_prefix(&home) {
-        Some(rest) if rest.is_empty() => "~".to_string(),
-        Some(rest) => format!("~{}", rest),
-        None => path.to_string(),
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_string_lossy().into_owned(),
     }
 }
 
@@ -464,6 +485,39 @@ mod tests {
         assert_eq!(parse_leases(empty), Ok(Vec::new()));
         // And a failure is still a failure, which is the other half.
         assert!(parse_tasks(r#"{"id":"1","error":{"message":"nope"}}"#).is_err());
+    }
+
+    #[test]
+    fn a_missing_list_is_not_an_empty_reading() {
+        // A successful envelope that never named the collection is not
+        // the same as one that named it and put nothing in it.
+        assert!(parse_agents(r#"{"id":"1","result":{"revision":1}}"#).is_err());
+        assert!(parse_agents(r#"{"id":"1","result":{"agents":{}}}"#).is_err());
+        assert!(parse_tasks(r#"{"id":"1","result":{"type":"task_list"}}"#).is_err());
+        assert!(parse_leases(r#"{"id":"1","result":{"leases":null}}"#).is_err());
+        assert!(parse_snapshot(r#"{"id":"1","result":{"session":"x"}}"#).is_err());
+        assert_eq!(
+            parse_agents(r#"{"id":"1","result":{"agents":[]}}"#),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn homely_only_shortens_on_a_directory_boundary() {
+        assert_eq!(shorten_home("/home/alice/proj", "/home/alice"), "~/proj");
+        assert_eq!(shorten_home("/home/alice", "/home/alice"), "~");
+        assert_eq!(
+            shorten_home("/home/alice-other/proj", "/home/alice"),
+            "/home/alice-other/proj"
+        );
+        assert_eq!(
+            shorten_home("/home/alice/projects/opscope", "/home/alice"),
+            "opscope"
+        );
+        assert_eq!(
+            shorten_home("/home/alice/projects-other/x", "/home/alice"),
+            "~/projects-other/x"
+        );
     }
 
     #[test]
