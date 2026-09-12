@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.15.1] - 2026-09-12
+
+### Bug Fixes
+
+- **widgets**: Hints name the next press, and the pane names its filters (#199)
+
+### Documentation
+
+- Take the plumbing out of the widget pages (#198)
+
 ## [0.15.0] - 2026-09-12
 
 ### Bug Fixes
