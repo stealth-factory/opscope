@@ -657,7 +657,8 @@ fn base64(data: &[u8]) -> String {
 ///
 /// Used wherever a fraction is a temperature - CPU, memory, how close a
 /// number is to a limit - so the same load reads the same colour whichever
-/// widget is showing it.
+/// widget is showing it. High means bad: that is the contract, and a
+/// fraction where high means *good* belongs in [`health`] instead.
 pub fn heat(frac: f64) -> String {
     let frac = frac.clamp(0.0, 1.0);
     if frac < 0.5 {
@@ -667,6 +668,24 @@ pub fn heat(frac: f64) -> String {
         let t = (frac - 0.5) / 0.5;
         rgb(255, (240.0 - 200.0 * t) as u8, (20.0 + 10.0 * t) as u8)
     }
+}
+
+/// The same ramp as [`heat`], for a fraction where **high is good**.
+///
+/// A success rate, a pass rate, a share merged, a share completed: the
+/// healthy end of those is 100%, which is the opposite of a temperature.
+/// The fraction is subtracted from one before it reaches `heat`, so a high
+/// rate draws green and a low one draws red, and the two kinds of number
+/// still share one ramp - the reason `heat` lives in core at all.
+///
+/// **The subtraction is the point, not a slip.** Delete it and the scale
+/// runs backwards end to end: a board that merged 97% of its pull requests
+/// draws bright red while one that dropped 95% of them draws green, which
+/// is exactly the bug this was written to fix. `health(0.5)` and
+/// `heat(0.5)` are the same yellow, so the midpoint gives nothing away and
+/// only the ends say which way round it is.
+pub fn health(frac: f64) -> String {
+    heat(1.0 - frac.clamp(0.0, 1.0))
 }
 
 /// The clause every "set this config key" message ends with.
@@ -2702,6 +2721,35 @@ mod tests {
         // 100% on a multicore box must not come back green.
         assert_eq!(heat(2.0), heat(1.0));
         assert_eq!(heat(-1.0), heat(0.0));
+    }
+
+    #[test]
+    fn a_healthy_rate_is_greener_than_a_poor_one() {
+        // The channels rather than the strings, so the palette can be
+        // retuned without touching this - but the *direction* cannot be
+        // flipped without failing here. Drop the subtraction in `health`
+        // and a 97% merge rate goes back to drawing bright red.
+        let channels = |esc: &str| -> (u16, u16, u16) {
+            let body = esc.trim_start_matches("\x1b[38;2;").trim_end_matches('m');
+            let n: Vec<u16> = body.split(';').map(|x| x.parse().unwrap()).collect();
+            (n[0], n[1], n[2])
+        };
+        let (good_r, good_g, _) = channels(&health(0.97));
+        let (poor_r, poor_g, _) = channels(&health(0.05));
+        // Strictly, both ways round: an inversion that clamped both ends
+        // to the same colour would slip past a `>=`.
+        assert!(good_g > poor_g, "97% is not greener than 5%");
+        assert!(good_r < poor_r, "97% is not less red than 5%");
+        // The ends are the ramp's own ends, just swapped, and the midpoint
+        // is the same yellow either way round - which is why the midpoint
+        // cannot be the thing that pins the direction.
+        assert_eq!(health(1.0), heat(0.0));
+        assert_eq!(health(0.0), heat(1.0));
+        assert_eq!(health(0.5), heat(0.5));
+        // Out of range is clamped, as in `heat`: a rate computed from a
+        // count that has not settled yet must not wrap round to red.
+        assert_eq!(health(2.0), health(1.0));
+        assert_eq!(health(-1.0), health(0.0));
     }
 
     #[test]

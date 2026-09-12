@@ -2389,7 +2389,10 @@ fn main() {
                 };
                 format!("{}{}", tint, colour)
             };
-            let hot = tc::heat(frac);
+            // A share of scope completed is high-is-good, so it takes the
+            // inverted ramp: `heat` drew a cycle finishing its work in the
+            // same red it uses for a machine running out of memory.
+            let hot = tc::health(frac);
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),

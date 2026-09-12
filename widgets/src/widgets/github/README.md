@@ -67,7 +67,10 @@ falling merge rate. It leads the board because it is the question asked most
 often.
 
 **Merge rate** — of the PRs that *closed* in the window, the share that merged,
-on the same green→amber→red ramp as everything else. `dropped` means closed
+on the same green→amber→red ramp as everything else — read the other way up,
+because here a high number is the healthy one: a rate near 100% draws green and
+a rate near zero draws red. The per-account column uses the identical ramp, so
+the same rate is the same colour on both screens. `dropped` means closed
 without merging; GitHub's `is:closed` includes merged ones, which is why the two
 are counted separately rather than subtracted.
 
