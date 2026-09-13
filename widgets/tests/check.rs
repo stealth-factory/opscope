@@ -660,12 +660,17 @@ const MIN_LUVUS_VERSION: &str = "0.8.3";
 /// manifest: a pane id may not contain one.
 const MODULE_ID: &str = "opscope.widgets";
 
-/// A Luvus pane id: lowercase, digits, hyphens, and no dot.
+/// A Luvus pane id: lowercase, digits, hyphens, no dot, and at most 120
+/// characters.
 ///
 /// The module id is `opscope.widgets`. A folder named `foo.v2` would
 /// regenerate cleanly and produce a manifest Luvus rejects, so the
-/// generator stops before writing one.
+/// generator stops before writing one. Local ids are also capped at 120
+/// characters; see https://luvus.dev/docs/extend/writing-modules/.
 fn is_valid_pane_id(stem: &str) -> bool {
+    if stem.len() > 120 {
+        return false;
+    }
     let mut chars = stem.chars();
     match chars.next() {
         Some(c) if c.is_ascii_lowercase() => {}
@@ -680,11 +685,13 @@ fn pane_ids_match_the_luvus_grammar() {
     assert!(is_valid_pane_id("herdr-panes"));
     assert!(is_valid_pane_id("github-prs"));
     assert!(is_valid_pane_id("vercel-deployments"));
+    assert!(is_valid_pane_id(&format!("a{}", "b".repeat(119))));
     assert!(!is_valid_pane_id("foo.v2"));
     assert!(!is_valid_pane_id("opscope.widgets"));
     assert!(!is_valid_pane_id("Menu"));
     assert!(!is_valid_pane_id(""));
     assert!(!is_valid_pane_id("-leading"));
+    assert!(!is_valid_pane_id(&format!("a{}", "b".repeat(120))));
 }
 
 /// The workspace version, which the module manifest has to carry.

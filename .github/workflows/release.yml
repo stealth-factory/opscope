@@ -486,7 +486,13 @@ jobs:
           echo "$said"
           # `opscope 0.16.0 (abc1234, 2026-09-13)` - the version is the
           # second field, and it has to be the one this tag published.
-          got=$(printf '%s' "$said" | awk 'NR==1{print $2}')
+          # stderr is folded into said, so an npx warning can sit on
+          # line 1; take the banner, not the first line.
+          got=$(printf '%s' "$said" | awk '/^opscope / { print $2; exit }')
+          if [ -z "$got" ]; then
+            echo "npx did not print an opscope version line" >&2
+            exit 1
+          fi
           if [ "$got" != "$version" ]; then
             echo "npx gave ${got}, this tag is ${version}" >&2
             exit 1
