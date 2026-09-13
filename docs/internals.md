@@ -92,6 +92,28 @@ Register every frame. The footer moves when the pane resizes and wraps onto
 a second line when it narrows, and a placement kept from an older frame
 sends whatever key used to be under the pointer.
 
+**A hint that got a spot is underlined**, and only those. Some hints are
+clickable and some are not — `↑↓ select` names two keys and answers to
+neither — so without a mark the reader who clicks one and gets nothing
+concludes clicking is broken rather than seeing that one is not a button.
+Underline rather than a background tint: a new tint would put every hint
+colour in the tree up for re-measurement against it, and there is a check
+that fails the build when text on a tint misses AA. `RMUL` is `24`, not `0`,
+so turning the underline off does not also drop the hint's colour.
+
+The marks are escapes, so they cannot move a wrap — every width in the
+packer is measured from the hint's *text*, never from the string carrying
+its colours. `display_width` on a composed row is a different matter: it
+counts the escapes as characters, which is what made a fourteen-cell footer
+line measure twenty-one in tailnet's test.
+
+Marked only when the terminal is actually reporting — `mouse_on()`, cached,
+and the same answer `claim_screen` acts on, so the two cannot disagree. With
+`terminal.mouse` off nothing is underlined, because advertising a click that
+cannot happen is worse than not advertising one that can. `pack_hints` never
+marks at all: `months` wraps prose through it a word at a time, and a
+sentence is not a row of buttons.
+
 **Rows cost one hit-test.** Which rows are selectable is widget state and
 nothing in core can see it, so core provides only the arithmetic.
 

@@ -603,6 +603,12 @@ left alone on purpose: guessing which word was the key would sometimes fire
 the wrong one, and a hint that fires the wrong key is worse than one that
 fires none.
 
+**You get the underline for free.** `pack_hints_placed` underlines the hints
+that got a spot and leaves the rest alone, so a reader can see which ones are
+buttons — and nothing is marked when `terminal.mouse` is off. You do not have
+to do anything for this, but do not measure a composed footer row with
+`display_width` afterwards: it counts escapes as characters.
+
 **Call `footer_at` every frame**, beside the draw. The footer moves when the
 pane resizes and wraps onto a second line when it narrows; a placement kept
 from an older frame sends whatever key used to be under the pointer.

@@ -63,6 +63,21 @@ pub const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 /// terminal that only understood one of them is left as it was found.
 pub const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
+/// Underline on and off, which is how a clickable hint says so.
+///
+/// Not a background tint: a new tint would put every hint colour in the
+/// tree up for re-measurement against it, and there is a check that fails
+/// the build when text on a tint misses AA. An underline adds no colour at
+/// all, so it cannot fail that check, and it layers over the accent-for-key
+/// and dim-for-label coding already in a footer rather than competing with
+/// it. It is also the one mark a reader already reads as "you can click
+/// this".
+///
+/// `24` rather than `0`: turning underline off must not also drop the
+/// colour the hint is being drawn in.
+pub const SMUL: &str = "\x1b[4m";
+pub const RMUL: &str = "\x1b[24m";
+
 /// Eight levels used by compact bar charts across the widgets.
 pub const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -326,7 +341,7 @@ pub fn setup() {
 /// turn reporting off, and without this the menu comes back unable to
 /// scroll even though the setting never changed.
 pub fn claim_screen() {
-    let mouse = if mouse_wanted() { MOUSE_ON } else { "" };
+    let mouse = if mouse_on() { MOUSE_ON } else { "" };
     out(&format!("{}{}{}{}", mouse, HIDE, CLEAR, HOME));
     flush();
 }
@@ -342,6 +357,20 @@ fn mouse_wanted() -> bool {
         .get("mouse")
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
+}
+
+/// The same answer, read once.
+///
+/// `mouse_wanted` opens and parses the config file, which is fine for the
+/// one call `claim_screen` makes and not fine for a footer packed three
+/// times a second. Cached rather than re-read, and that is the honest
+/// semantics as well as the cheap one: tracking is asked for at start and
+/// the terminal is in that state until the widget restarts, so a footer
+/// marking its hints clickable has to answer for the state the terminal is
+/// actually in rather than for what the file says now.
+pub(crate) fn mouse_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(mouse_wanted)
 }
 
 /// The bytes `handle_signal` writes. Built as a constant so the handler
@@ -426,7 +455,7 @@ pub fn restore_screen() {
 /// two cannot drift: a footer that is clickable in the wrong places would
 /// be worse than one that is not clickable at all.
 pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec<String> {
-    pack_hints_placed(hints, width, sep).lines
+    pack(hints, width, sep, false).lines
 }
 
 /// The four glyphs the control standard leans on, and the keys they mean.
@@ -564,6 +593,15 @@ fn hint_key(plain: &str) -> Option<String> {
 /// added to the footer later: the widget registers the footer, not the
 /// hints, so there is nothing per-hint to forget.
 pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Footer {
+    // Marked only when the terminal is actually reporting. With
+    // `terminal.mouse` off, underlining a hint would advertise something
+    // that cannot happen - and the plain packer never marks at all, because
+    // `months` wraps prose through it a word at a time and a sentence is
+    // not a row of buttons.
+    pack(hints, width, sep, mouse_on())
+}
+
+fn pack(hints: &[Vec<(&str, String)>], width: usize, sep: &str, mark: bool) -> Footer {
     let mut lines: Vec<String> = Vec::new();
     let mut spots: Vec<HintSpot> = Vec::new();
     let mut current: Vec<String> = Vec::new();
@@ -584,7 +622,7 @@ pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str)
             current = Vec::new();
             used = 0;
         }
-        let piece: String = hint
+        let mut piece: String = hint
             .iter()
             .map(|(c, t)| format!("{}{}", c, t))
             .collect::<Vec<_>>()
@@ -602,6 +640,19 @@ pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str)
                 col,
                 width: plain,
             });
+            // Only the hints that got a spot, which is exactly the ones a
+            // click reaches. `↑↓ select` names two keys and answers to
+            // neither, so leaving it unmarked is the difference between a
+            // reader thinking clicking is broken and seeing that one is
+            // not a button.
+            //
+            // The escapes go on the drawn piece and never near `plain`, so
+            // the wrapping cannot move: every width in here is measured
+            // from the hint's text, never from the string that carries its
+            // colours.
+            if mark {
+                piece = format!("{}{}{}", SMUL, piece, RMUL);
+            }
         }
         used = col + plain;
         current.push(piece);
@@ -3695,7 +3746,7 @@ mod tests {
         // another seven and needs 7 + 2 + 7 = 16, which fits exactly, so
         // it starts at column 9; `[c]harlie` would need 16 + 2 + 9 and
         // wraps to a line of its own.
-        let wide = pack_hints_placed(&hints(()), 16, "  ");
+        let wide = pack(&hints(()), 16, "  ", false);
         assert_eq!(wide.lines, vec!["[a]lpha  [b]ravo", "[c]harlie"]);
         assert_eq!(
             wide.spots,
@@ -3710,7 +3761,7 @@ mod tests {
         // described: a placement that did not move when the pane did would
         // be sending the key that used to be under the pointer, and a
         // hint firing the wrong key is worse than one firing none.
-        let narrow = pack_hints_placed(&hints(()), 15, "  ");
+        let narrow = pack(&hints(()), 15, "  ", false);
         assert_eq!(narrow.lines, vec!["[a]lpha", "[b]ravo", "[c]harlie"]);
         assert_eq!(
             narrow.spots,
@@ -3720,6 +3771,48 @@ mod tests {
                 HintSpot { key: "c".into(), line: 2, col: 0, width: 9 },
             ]
         );
+    }
+
+    #[test]
+    fn a_clickable_hint_is_underlined_and_the_others_are_not() {
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![("\x1b[36m", "\u{2191}\u{2193}".into()), ("\x1b[90m", " select".into())],
+            vec![("\x1b[90m", "[q]uit".into())],
+            vec![("\x1b[90m", "esc cancel".into())],
+        ];
+        let marked = pack(&hints, 80, "  ", true);
+        let line = &marked.lines[0];
+        // The two that answer a click say so; `↑↓ select` names two keys
+        // and answers to neither, so it stays plain. A reader who clicks it
+        // and gets nothing should be able to see why.
+        assert_eq!(line.matches(SMUL).count(), 2, "in {line:?}");
+        assert_eq!(line.matches(RMUL).count(), 2, "in {line:?}");
+        assert!(line.contains(&format!("{SMUL}\x1b[90m[q]uit{RMUL}")), "{line:?}");
+        assert!(!line.contains(&format!("{SMUL}\x1b[36m\u{2191}")), "{line:?}");
+        // One mark per spot, which is what says the two cannot drift.
+        assert_eq!(marked.spots.len(), line.matches(SMUL).count());
+
+        // The marks are escapes, so they cannot move a wrap. Same lines as
+        // the unmarked packer once they are taken back out, at every width
+        // - including the ones where a hint is about to wrap.
+        for width in 1..60 {
+            let plain = pack(&hints, width, "  ", false);
+            let marked = pack(&hints, width, "  ", true);
+            let stripped: Vec<String> = marked
+                .lines
+                .iter()
+                .map(|l| l.replace(SMUL, "").replace(RMUL, ""))
+                .collect();
+            assert_eq!(plain.lines, stripped, "marking moved a wrap at width {width}");
+            assert_eq!(plain.spots, marked.spots, "marking moved a spot at width {width}");
+        }
+
+        // And with the mouse off nothing is marked, because underlining a
+        // hint that cannot be clicked advertises something that will not
+        // happen. `pack_hints` never marks either - `months` wraps prose
+        // through it a word at a time.
+        assert!(!pack(&hints, 80, "  ", false).lines[0].contains(SMUL));
+        assert!(!pack_hints(&hints, 80, "  ")[0].contains(SMUL));
     }
 
     #[test]
@@ -3862,7 +3955,7 @@ mod tests {
             for width in 1..80 {
                 assert_eq!(
                     shipped_pack_hints(hints, width, "  "),
-                    pack_hints_placed(hints, width, "  ").lines,
+                    pack(hints, width, "  ", false).lines,
                     "footer {} wraps differently at width {}",
                     which,
                     width
@@ -3871,7 +3964,7 @@ mod tests {
                 // footers here use.
                 assert_eq!(
                     shipped_pack_hints(hints, width, " \u{b7} "),
-                    pack_hints_placed(hints, width, " \u{b7} ").lines,
+                    pack(hints, width, " \u{b7} ", false).lines,
                     "footer {} wraps differently at width {} with a dot separator",
                     which,
                     width

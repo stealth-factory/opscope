@@ -1929,6 +1929,27 @@ mod tests {
         assert_eq!(toggle_hint("[o]ffline", hide_offline), "[o]ffline show");
     }
 
+    /// A row with its escape sequences taken out, which is what the reader
+    /// actually gets cells for.
+    fn visible(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // CSI: ESC [ then parameters then a final letter. Every escape
+            // a footer carries is one of these.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn a_fourteen_column_footer_does_not_wrap_the_offline_toggle() {
         // `[o]ffline hide` is fourteen cells. A leading space on top of it
@@ -1941,10 +1962,16 @@ mod tests {
         ];
         let foot = pack_footer(&hints, 14).0.lines;
         for line in &foot {
+            // Measured on what a reader sees. `display_width` counts every
+            // character it is given, escapes included, so a composed row is
+            // not something to hand it - these hints carry no colour, but a
+            // clickable one is wrapped in the underline that says so, and
+            // that alone made this read 21 cells for a fourteen-cell line.
+            let seen = visible(line);
             assert!(
-                tc::display_width(line) <= 14,
-                "{line:?} is {} cells",
-                tc::display_width(line)
+                tc::display_width(&seen) <= 14,
+                "{seen:?} is {} cells",
+                tc::display_width(&seen)
             );
         }
         assert!(
