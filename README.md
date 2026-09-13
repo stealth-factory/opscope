@@ -254,10 +254,6 @@ double-click: the terminal never says how many times you clicked, and the
 selected row is tinted anyway — you can see that the next click will open it,
 where a double-click shows nothing before it fires.
 
-**A hint you can click is underlined.** Not all of them are: `↑↓ select`
-names two keys and answers to neither, and a mark is how you tell without
-clicking to find out. Nothing is underlined when mouse reporting is off.
-
 Every widget with a cursor answers a click, and every footer is clickable —
 two checks in `cargo test` fail the build when one is not. Turning mouse
 reporting off is now in **every** widget's settings screen under `,`, not
