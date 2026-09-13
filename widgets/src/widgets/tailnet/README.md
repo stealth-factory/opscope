@@ -64,7 +64,7 @@ the tailnet and matches the admin console.
 
 ## Info view
 
-`Enter` or `i` opens everything known about the selected machine: MagicDNS name,
+`→` or `Enter` opens everything known about the selected machine: MagicDNS name,
 the self-reported hostname when it differs, owner, tags, direct-or-relayed path,
 handshake and enrolment times, its **home DERP region as a location hint**
 (`hkg — Hong Kong`, read from the local DERP map so no address is sent to a
@@ -79,8 +79,10 @@ peer so returning to one still shows its earlier samples.
 
 ## Copying addresses
 
-`c` opens a copy sheet: Tailscale IP, MagicDNS name, public IP, LAN IP and
-IPv6, on keys `1`–`5`, copied via OSC 52 so they reach your local clipboard.
+`c` opens a copy sheet of whichever addresses this machine has: Tailscale
+IPv4 and IPv6, MagicDNS name, public IP, and up to two private IPs. Each
+row is numbered from `1`; that number copies it via OSC 52 so it reaches
+your local clipboard.
 
 Peer LAN addresses come from `tailscale debug netmap`, which needs root — it is
 attempted with `sudo -n` so it fails instantly rather than prompting, and is
@@ -95,11 +97,12 @@ advertises wins over a docker or virtual bridge: a NAS was otherwise reporting
 | Key | Action |
 |---|---|
 | `↑` `↓` | select a peer |
-| `→` / `Enter` | machine info view — `i` in the Python, which is being retired |
+| `→` / `Enter` | machine info view |
 | `←` / `esc` | back out of the info or copy view |
-| `c` | copy addresses |
+| `c` | copy addresses — numbered keys (`1` and up) copy one |
+| `pgup` `pgdn` `home` `end` | move the selection a page, or to either end |
 | `g` | show/hide the live throughput graphs |
-| `o` | hide offline peers |
+| `o` | show/hide offline peers — the count line names the filter while it is on |
 | `i` | poll interval — 1 / 2 / 5 / 10 / 30s |
 | `r` | refresh now |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |

@@ -970,7 +970,14 @@ fn main() {
                 p.dim.as_str(),
                 format!("[i]dle {}", if show_idle { "hide" } else { "show" }),
             )],
-            vec![(p.dim.as_str(), "[l]abels".into())],
+            // A column rather than rows, so no body line - the same call
+            // `[t]stats` got - but the wording is the wording: a bare
+            // `[l]abels` beside `[i]dle hide` is the same shape saying
+            // nothing.
+            vec![(
+                p.dim.as_str(),
+                format!("[l]abels {}", if show_labels { "hide" } else { "show" }),
+            )],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
