@@ -1913,6 +1913,12 @@ fn main() {
     // it was last drawn - the keys run before the frame that answers them.
     let mut board = 0usize;
     let mut board_len = 0usize;
+    // The board now on screen: every row's slot, what each slot selects,
+    // and how many rows stay pinned above the window. A click is answered
+    // against the frame the reader was looking at when they clicked.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
+    let mut click_targets: Vec<(usize, usize)> = Vec::new();
+    let mut list_head = 0usize;
     // Set by a key that moved a cursor, and cleared once the window has
     // followed it. The wheel writes a scroll and never this, so a turn
     // past the selected row is not pulled back on the next frame.
@@ -2144,7 +2150,22 @@ fn main() {
                         moved = true;
                     }
                 }
-                _ => {}
+                // A click picks the row under it and focuses the section
+                // it is in - both halves, because walking into a section
+                // with the arrows does both, and a click that moved a
+                // cursor in an unfocused section would leave the arrows
+                // somewhere else entirely.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(slot) = tc::item_at(y, list_head, board, &placed) {
+                            if let Some(&(pane, at)) = click_targets.get(slot) {
+                                focus = Some(pane);
+                                sel[pane] = at;
+                                moved = true;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2163,6 +2184,14 @@ fn main() {
         // Where the focused section's cursor landed, so the board can be
         // scrolled to keep it on screen.
         let mut cursor: Option<usize> = None;
+        // And where every row of every section landed, so a click can be
+        // read back into one. The board has three sections with a cursor
+        // each, so a row identifies a pane *and* an index - `item_at`
+        // answers with a slot into `targets`, which carries the pair.
+        // Clicking into a section focuses it as well as moving its cursor,
+        // because that is what walking into it with the arrows does.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
+        let mut targets: Vec<(usize, usize)> = Vec::new();
         let mut head = vec![
             (
                 p.dim.as_str(),
@@ -2194,6 +2223,10 @@ fn main() {
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
+            // The board's placements describe a frame that is no longer
+            // on screen. Leaving them would answer a click here with
+            // whichever row happened to be drawn behind it.
+            placed.clear();
             let foot_top = rows.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
@@ -2352,6 +2385,8 @@ fn main() {
             ));
         }
         for (ci, c) in ranked_cycles.iter().enumerate() {
+            let (from, slot) = (rows.len(), targets.len());
+            targets.push((cycles_pane, ci));
             if here_now && ci == sel[cycles_pane] {
                 cursor = Some(rows.len());
             }
@@ -2443,6 +2478,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, slot)));
         }
 
         // Arrivals against departures.
@@ -2636,6 +2672,8 @@ fn main() {
             w - 1,
         ));
         for (i, (key, name)) in ranked.iter().enumerate() {
+            let (from, slot) = (rows.len(), targets.len());
+            targets.push((teams_pane, i));
             if on_teams && i == sel[teams_pane] {
                 cursor = Some(rows.len());
             }
@@ -2689,6 +2727,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, slot)));
         }
         // Every project that is still going, whichever team owns it. The
         // board reaches them without going through a team first, the way
@@ -2763,6 +2802,8 @@ fn main() {
             let base = 2 + team_w + 2 + name_w + 5;
             let (label_cost, bar_w, room) = project_columns(w, base, label_w, full);
             for (i, (q, aside)) in live.iter().zip(&asides).enumerate() {
+                let (from, slot) = (rows.len(), targets.len());
+                targets.push((projects_pane, i));
                 let here = on_projects && i == sel[projects_pane];
                 if here {
                     cursor = Some(rows.len());
@@ -2826,6 +2867,7 @@ fn main() {
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
+                rows_at.extend((from..rows.len()).map(|row| (row, slot)));
             }
         }
 
@@ -3014,6 +3056,7 @@ fn main() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
                 }
+                placed.clear();
                 let foot_top = out.len();
                 out.extend(foot);
                 tc::draw(&out, w, h);
@@ -3078,6 +3121,7 @@ fn main() {
         // list, so it shifts by the header when it moves into the body.
         let (head, body) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        (placed, click_targets, list_head) = (rows_at, targets, head.len());
         if moved {
             if let Some(at) = cursor {
                 board = tc::follow(board, at.saturating_sub(head.len()), room_below);

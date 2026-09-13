@@ -1808,6 +1808,11 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // Where each process's row landed on the frame now on screen, and how
+    // many rows stay pinned above the window. A click is answered against
+    // the frame the reader was looking at when they clicked, which is the
+    // one built on the previous pass.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // Where the process table is scrolled to, and whether a key has just
     // moved the cursor. The wheel writes the first and never the second, so
     // the table stops re-centring on the selection the moment it is turned.
@@ -2010,7 +2015,18 @@ fn main() {
                     selected = 0;
                     moved = true;
                 }
-                _ => {}
+                // A click picks the process under it, which is what the
+                // arrows do. Only on the list: the detail screen clears
+                // the placements as it draws, because it keeps a cursor
+                // per section of its own.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, 0, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -2206,6 +2222,10 @@ fn main() {
                     shown.push(String::new());
                 }
             }
+            // The detail screen keeps a cursor per section of its own. The
+            // list's placements describe a frame that is no longer on
+            // screen, so they come off rather than answering for it.
+            placed.clear();
             let foot_top = shown.len();
             shown.extend(foot);
             tc::draw(&shown, w, h);
@@ -2226,6 +2246,7 @@ fn main() {
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
         let mut out = vec![tc::title("netwatch", w, &p.accent)];
+        let mut placed_now: Vec<(usize, usize)> = Vec::new();
         // Held open. What this line has to say depends on how many rows fit,
         // which is not known until the chart above the table has been built -
         // but the line is one row tall whatever it ends up saying, so nothing
@@ -2417,6 +2438,14 @@ fn main() {
                 w - 1,
             ));
         } else {
+            // One heading, then a row per process, in window order - so the
+            // nth drawn row is process `first + n`. Recorded here rather
+            // than worked out at the click, because by then the body has
+            // been windowed and the heading's row is gone.
+            let from = out.len() + 1;
+            placed_now = (0..last.saturating_sub(first))
+                .map(|n| (from + n, first + n))
+                .collect();
             out.extend(table(&rows, w, first, show, selected, &p));
         }
 
@@ -2445,6 +2474,10 @@ fn main() {
         drop(guard);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // Nothing is pinned on this screen - the whole frame is built to
+        // the pane and the table windows itself - so the head is zero and
+        // a frame row is a body row.
+        (placed, list_head) = (placed_now, 0);
         while out.len() < h.saturating_sub(foot.len()) {
             out.push(String::new());
         }
