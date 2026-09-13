@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use chrono::{Duration as Days, NaiveDate, Utc};
+use chrono::{DateTime, Duration as Days, NaiveDate, Utc};
 use opscope_core as tc;
 
 /// The environment variable a GitHub token is read from when `token_env`
@@ -44,6 +44,210 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     schema: include_str!("settings.json"),
     catalogues: &[],
 };
+
+/// The two figures beside PR FLOW, and the only place their wording is
+/// written down.
+///
+/// `last 24h` rather than `today`, because the window is rolling: at nine
+/// in the morning a calendar day is three hours of evidence and reads as a
+/// collapse in throughput. Opened first, merged second, so the column
+/// repeats the chart's own grammar - opened above the axis, merged below.
+const FIG_LABELS: [&str; 2] = ["opened · last 24h", "merged · last 24h"];
+
+/// A chart narrower than this is a smudge rather than a chart, so the
+/// figures stand down before it gets there. The chart is the section; the
+/// figures are the addition.
+const MIN_CHART: usize = 20;
+
+/// The width to reserve on the right of PR FLOW, or zero to stand down.
+///
+/// PR FLOW spreads its days across the whole pane, so this is taken out of
+/// `avail` *before* the days are spread - a column claimed afterwards would
+/// land on top of bars already drawn. The figures come off where the chart
+/// would have to lose days or fall under [`MIN_CHART`] to pay for them.
+fn figure_col(avail: usize, days: usize) -> usize {
+    let want = FIG_LABELS
+        .iter()
+        .map(|l| tc::display_width(l))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    if avail >= want + days.max(MIN_CHART) {
+        want
+    } else {
+        0
+    }
+}
+
+/// How a pane divides between the chart and the figures: the columns the
+/// days are spread across, then the columns reserved to their right.
+///
+/// One function for both PR FLOWs, and the only place the subtraction
+/// happens - a chart that takes the column without giving up the width
+/// draws bars the figures then sit on top of.
+fn chart_split(w: usize, days: usize) -> (usize, usize) {
+    let full = w.saturating_sub(3).max(10);
+    let figw = figure_col(full, days);
+    ((full - figw).max(10), figw)
+}
+
+/// Three text rows tall, five pixel rows deep - the top half and the bottom
+/// half of a cell are used as two pixel rows, so three rows of text carry
+/// six and the digits stand exactly as tall as the three rows of bars they
+/// sit beside.
+///
+/// Copied from `github-prs` rather than moved to core, on the same line
+/// that keeps `latency` and `link` each holding their own braille canvas:
+/// if the two diverge later, that is the point of keeping them apart.
+const DIGITS: [[&str; 5]; 10] = [
+    ["###", "# #", "# #", "# #", "###"],
+    ["  #", "  #", "  #", "  #", "  #"],
+    ["###", "  #", "###", "#  ", "###"],
+    ["###", "  #", "###", "  #", "###"],
+    ["# #", "# #", "###", "  #", "  #"],
+    ["###", "#  ", "###", "  #", "###"],
+    ["###", "#  ", "###", "# #", "###"],
+    ["###", "  #", "  #", "  #", "  #"],
+    ["###", "# #", "###", "# #", "###"],
+    ["###", "# #", "###", "  #", "###"],
+];
+
+/// One number, three text rows tall. Every row is the same width.
+fn big_digits(value: i64) -> Vec<String> {
+    let shown = value.to_string();
+    let mut rows = vec![String::new(); 3];
+    for (i, ch) in shown.chars().enumerate() {
+        let glyph = ch
+            .to_digit(10)
+            .map(|d| DIGITS[d as usize])
+            .unwrap_or(["   ", "   ", "   ", "   ", "   "]);
+        for (r, row) in rows.iter_mut().enumerate() {
+            if i > 0 {
+                row.push(' ');
+            }
+            for c in 0..3 {
+                let lit = |pixels: Option<&&str>| {
+                    pixels
+                        .and_then(|line| line.as_bytes().get(c).copied())
+                        .unwrap_or(b' ')
+                        == b'#'
+                };
+                // The sixth pixel row does not exist, which is the gap that
+                // keeps two stacked figures from touching.
+                row.push(match (lit(glyph.get(r * 2)), lit(glyph.get(r * 2 + 1))) {
+                    (true, true) => '█',
+                    (true, false) => '▀',
+                    (false, true) => '▄',
+                    (false, false) => ' ',
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// The eight rows of the figure column, to sit against the eight rows of
+/// the chart - three of bars, the axis rule, three of bars, the axis
+/// labels.
+///
+/// A figure that has not arrived shimmers rather than drawing a zero. This
+/// is the one place that difference is easy to lose: nothing opened in a
+/// day is a real and unremarkable reading, and a pane still counting has to
+/// look like a pane still counting.
+fn figure_rows(
+    opened: Option<i64>,
+    merged: Option<i64>,
+    width: usize,
+    tick: usize,
+    p: &Palette,
+) -> Vec<Vec<(String, String)>> {
+    let inner = width.saturating_sub(2);
+    let gutter = || (tc::RST.to_string(), "  ".to_string());
+    let mut out: Vec<Vec<(String, String)>> = Vec::new();
+    for (n, value) in [opened, merged].into_iter().enumerate() {
+        let colour = if n == 0 { p.pr.clone() } else { p.ok.clone() };
+        match value {
+            Some(v) => {
+                let digits = big_digits(v);
+                if digits.first().map(|r| r.chars().count()).unwrap_or(0) <= inner {
+                    for line in digits {
+                        out.push(vec![gutter(), (colour.clone(), line)]);
+                    }
+                } else {
+                    // More digits than the column is wide. A truncated
+                    // number is a wrong number, so it drops to plain text
+                    // rather than being cut.
+                    out.push(Vec::new());
+                    out.push(vec![gutter(), (colour.clone(), v.to_string())]);
+                    out.push(Vec::new());
+                }
+            }
+            None => {
+                out.push(Vec::new());
+                let mut line = vec![gutter()];
+                line.extend(tc::skeleton(inner.min(11).max(4), tick * 2, 5));
+                out.push(line);
+                out.push(Vec::new());
+            }
+        }
+        out.push(vec![gutter(), (p.dim.clone(), FIG_LABELS[n].to_string())]);
+    }
+    out
+}
+
+/// One rolling-day figure off a payload, `None` where the alias did not
+/// arrive.
+///
+/// Deliberately not `count_at`, which lands a missing alias on zero: a zero
+/// is a reading, and the whole point of the skeleton beside it is that a
+/// reading and an absence do not look alike.
+fn figure_at(d: &serde_json::Value, key: &str) -> Option<i64> {
+    d[key]["issueCount"].as_i64()
+}
+
+/// The board's figure: the sum across accounts, or `None`.
+///
+/// `watched` is how many accounts are configured, and it is the check that
+/// matters, because `stats` carries only the accounts that have *arrived*.
+/// Counting its rows is not the same as counting the accounts: on the first
+/// pass it holds one row of ten with every field of it present, and summing
+/// that would draw a tenth of the board as the whole of it. A sum missing a
+/// member is a smaller number wearing the same label.
+fn board_24h(stats: &[Account], watched: usize, pick: fn(&Account) -> Option<i64>) -> Option<i64> {
+    if watched == 0 || stats.len() != watched || stats.iter().any(|s| pick(s).is_none()) {
+        return None;
+    }
+    Some(stats.iter().filter_map(pick).sum())
+}
+
+/// `tc::seg` over segments that own their colours.
+fn seg_owned(parts: &[(String, String)], w: usize) -> String {
+    let borrowed: Vec<(&str, String)> =
+        parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+    tc::seg(&borrowed, w)
+}
+
+/// One chart row with its figure fragment beside it.
+///
+/// Padded to `pad_to` first: the axis-label row is shorter than the bars
+/// above it whenever `Nd ago` and `today` do not reach across the chart,
+/// and without the pad the figure column would step sideways on that one
+/// row.
+fn with_figure(
+    mut parts: Vec<(String, String)>,
+    fig: Option<&Vec<(String, String)>>,
+    pad_to: usize,
+    w: usize,
+) -> String {
+    if let Some(fig) = fig {
+        let have: usize = parts.iter().map(|(_, t)| tc::display_width(t)).sum();
+        if have < pad_to {
+            parts.push((tc::RST.to_string(), " ".repeat(pad_to - have)));
+        }
+        parts.extend(fig.iter().cloned());
+    }
+    seg_owned(&parts, w)
+}
 
 /// How many of the longest-open PRs an account's own screen names.
 /// How long ago an ISO-8601 stamp was, coarse on purpose: "47d" answers the
@@ -158,6 +362,7 @@ fn account_detail(
     oldest: Option<&serde_json::Value>,
     pick: usize,
     w: usize,
+    tick: usize,
     p: &Palette,
 ) -> (Vec<String>, Option<usize>) {
     // Where the cursor over the oldest list ended up, so the caller can
@@ -417,7 +622,9 @@ fn account_detail(
         .rev()
         .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
         .collect();
-    let avail = w.saturating_sub(3).max(10);
+    // The figure column comes out of the width before the days are spread,
+    // exactly as on the board, and stands down at the same point.
+    let (avail, figw) = chart_split(w, want as usize);
     if days.len() > avail {
         days = days[days.len() - avail..].to_vec();
     }
@@ -463,32 +670,47 @@ fn account_detail(
             ],
             w - 1,
         ));
-        for line in tc::vbars(&up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(), 3, hi) {
-            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        let figs = (figw > 0)
+            .then(|| figure_rows(a.opened_24h, a.merged_24h, figw, tick, p));
+        let fig = |n: usize| figs.as_ref().and_then(|f| f.get(n));
+        let pad_to = 1 + up.len();
+        for (n, line) in
+            tc::vbars(&up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(), 3, hi)
+                .into_iter()
+                .enumerate()
+        {
+            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
             for (colour, ch) in &line {
-                parts.push((colour.as_str(), ch.clone()));
+                parts.push((colour.clone(), ch.clone()));
             }
-            rows.push(tc::seg(&parts, w - 1));
+            rows.push(with_figure(parts, fig(n), pad_to, w - 1));
         }
-        rows.push(tc::seg(
-            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(up.len()))],
+        rows.push(with_figure(
+            vec![
+                (tc::RST.to_string(), " ".into()),
+                (p.grid.clone(), "─".repeat(up.len())),
+            ],
+            fig(3),
+            pad_to,
             w - 1,
         ));
-        for line in
+        for (n, line) in
             tc::vbars_down(&down.iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(), 3, hi)
+                .into_iter()
+                .enumerate()
         {
-            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
             for (colour, ch) in &line {
-                parts.push((colour.as_str(), ch.clone()));
+                parts.push((colour.clone(), ch.clone()));
             }
-            rows.push(tc::seg(&parts, w - 1));
+            rows.push(with_figure(parts, fig(4 + n), pad_to, w - 1));
         }
         let left = format!("{}d ago", days.len());
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!(" {}", left)),
+        rows.push(with_figure(
+            vec![
+                (p.dim.clone(), format!(" {}", left)),
                 (
-                    p.dim.as_str(),
+                    p.dim.clone(),
                     format!(
                         "{:>width$}",
                         "today",
@@ -496,6 +718,8 @@ fn account_detail(
                     ),
                 ),
             ],
+            fig(7),
+            pad_to,
             w - 1,
         ));
     }
@@ -604,14 +828,28 @@ fn build_day_query(q: &str, dates: &[String]) -> String {
 
 /// Metrics for one account in one request.
 ///
-/// Six aliased searches per account keeps each request within GitHub's
+/// Eight aliased searches per account keeps each request within GitHub's
 /// complexity limit - asking for seven accounts at once returned HTTP 502 -
-/// while still being far fewer round trips than one query per metric.
-fn build_query(acc: &str, days: i64, viewer: &str) -> String {
+/// while still being far fewer round trips than one query per metric. Six
+/// was the measured ceiling; eight was re-measured against the largest
+/// configured account before the two rolling-day aliases were added, and
+/// an `issueCount` costs one rate-limit point per *request* however many
+/// aliases ride in it.
+///
+/// `now` is a parameter rather than read inside, so the rolling
+/// twenty-four-hour cut can be pinned by a test.
+fn build_query(acc: &str, days: i64, viewer: &str, now: DateTime<Utc>) -> String {
     // N days *ending today*, so this spans exactly the dates the per-day
     // charts plot - `days` rather than `days - 1` would cover one day more
     // and quietly disagree with the chart drawn directly beneath it.
     let since = (today() - Days::days(days - 1)).format("%Y-%m-%d").to_string();
+    // A rolling day, carrying its time of day. GitHub's search reads the
+    // time part, so this cuts twenty-four hours back from now rather than
+    // at the last midnight - a calendar day would read as a collapse in
+    // throughput every morning.
+    let day = (now - Days::hours(24))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
     let q = scope_of(acc, viewer);
     format!(
         r#"{{
@@ -621,10 +859,13 @@ fn build_query(acc: &str, days: i64, viewer: &str) -> String {
   o0_merged:  search(query:"{q} is:pr is:merged merged:>={s}", type:ISSUE) {{ issueCount }}
   o0_dropped: search(query:"{q} is:pr is:unmerged is:closed closed:>={s}", type:ISSUE) {{ issueCount }}
   o0_issues:  search(query:"{q} is:issue is:open", type:ISSUE) {{ issueCount }}
+  o0_o24:     search(query:"{q} is:pr created:>={d}", type:ISSUE) {{ issueCount }}
+  o0_m24:     search(query:"{q} is:pr is:merged merged:>={d}", type:ISSUE) {{ issueCount }}
   rateLimit {{ remaining limit }}
 }}"#,
         q = q,
-        s = since
+        s = since,
+        d = day
     )
 }
 
@@ -674,6 +915,12 @@ struct Account {
     hist: HashMap<String, i64>,
     opened_hist: HashMap<String, i64>,
     hist_window: Option<i64>,
+    /// The rolling twenty-four hours, `None` until the alias that carries
+    /// it has arrived. Not an `i64` defaulting to zero: nothing opened in
+    /// a day is a real reading, and a pane still counting has to look
+    /// different from a quiet one.
+    opened_24h: Option<i64>,
+    merged_24h: Option<i64>,
 }
 
 #[derive(Default)]
@@ -1008,7 +1255,7 @@ fn one_pass(
     // can cost fifty requests on a cold 90d window and would otherwise hold
     // the whole board grey for minutes.
     for acc in &accounts {
-        let data = match graphql(&build_query(acc, days_now, viewer), tok, scopes) {
+        let data = match graphql(&build_query(acc, days_now, viewer, Utc::now()), tok, scopes) {
             Ok(d) => d,
             Err(e) => {
                 // Fifty characters, which is what the branch below used to
@@ -1045,6 +1292,12 @@ fn one_pass(
                 hist: prev.hist,
                 opened_hist: prev.opened_hist,
                 hist_window: prev.hist_window,
+                // Read straight off the payload rather than through
+                // `count_at`, which lands a missing alias on zero - and a
+                // zero here is a claim the skeleton exists to avoid
+                // making.
+                opened_24h: figure_at(d, "o0_o24"),
+                merged_24h: figure_at(d, "o0_m24"),
             },
         );
         publish(state, &accounts, &by_acc, rate);
@@ -1546,10 +1799,13 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
-        // The chart always fills the pane. Where there is room to spare a day
-        // takes several columns; where there is not, the oldest days are
-        // cropped rather than the whole chart squeezed into a corner.
-        let avail = w.saturating_sub(3).max(10);
+        // The chart fills what is left of the pane. Where there is room to
+        // spare a day takes several columns; where there is not, the oldest
+        // days are cropped rather than the whole chart squeezed into a
+        // corner. The figure column comes out *first*, before the days are
+        // spread, or it would land on bars already drawn - and it stands
+        // down rather than costing the chart days it cannot spare.
+        let (avail, figw) = chart_split(w, want as usize);
         if days.len() > avail {
             days = days[days.len() - avail..].to_vec();
         }
@@ -1576,6 +1832,22 @@ fn main() {
             .collect();
         let (up, down) = (spread(&opened_day), spread(&merged_day));
         let chart_cols = up.len();
+        let figs = (figw > 0).then(|| {
+            figure_rows(
+                board_24h(&stats, watched, |s| s.opened_24h),
+                board_24h(&stats, watched, |s| s.merged_24h),
+                figw,
+                tick,
+                &p,
+            )
+        });
+        // Where the figure column starts: one for the chart's left margin,
+        // then the bars. Every chart row is padded to it, because the axis
+        // labels below are shorter than the bars above whenever `Nd ago`
+        // and `today` do not reach across, and the column would otherwise
+        // step sideways on that one row.
+        let pad_to = 1 + chart_cols;
+        let fig = |n: usize| figs.as_ref().and_then(|f| f.get(n));
         // One scale both ways, or the comparison lies.
         let span_hi = up
             .iter()
@@ -1655,37 +1927,51 @@ fn main() {
                 _ => (real_u, real_d, p.pr.clone(), p.ok.clone()),
             }
         };
-        for line in tc::vbars(&hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0) {
-            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+        for (n, line) in
+            tc::vbars(&hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0)
+                .into_iter()
+                .enumerate()
+        {
+            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
             for (colour, ch) in &line {
-                parts.push((colour.as_str(), ch.clone()));
+                parts.push((colour.clone(), ch.clone()));
             }
-            rows.push(tc::seg(&parts, w - 1));
+            rows.push(with_figure(parts, fig(n), pad_to, w - 1));
         }
         // An explicit baseline: without it the two series abut and the eye
         // cannot tell which row the bars grow from.
-        rows.push(tc::seg(
-            &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(chart_cols))],
+        rows.push(with_figure(
+            vec![
+                (tc::RST.to_string(), " ".into()),
+                (p.grid.clone(), "─".repeat(chart_cols)),
+            ],
+            fig(3),
+            pad_to,
             w - 1,
         ));
-        for line in tc::vbars_down(&hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0)
+        for (n, line) in
+            tc::vbars_down(&hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0)
+                .into_iter()
+                .enumerate()
         {
-            let mut parts: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
+            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
             for (colour, ch) in &line {
-                parts.push((colour.as_str(), ch.clone()));
+                parts.push((colour.clone(), ch.clone()));
             }
-            rows.push(tc::seg(&parts, w - 1));
+            rows.push(with_figure(parts, fig(4 + n), pad_to, w - 1));
         }
         let left = format!("{}d ago", days.len());
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!(" {}", left)),
+        rows.push(with_figure(
+            vec![
+                (p.dim.clone(), format!(" {}", left)),
                 (
-                    p.dim.as_str(),
+                    p.dim.clone(),
                     " ".repeat(chart_cols.saturating_sub(left.len() + 5).max(1)),
                 ),
-                (p.dim.as_str(), "today".into()),
+                (p.dim.clone(), "today".into()),
             ],
+            fig(7),
+            pad_to,
             w - 1,
         ));
         rows.push(String::new());
@@ -1978,7 +2264,7 @@ fn main() {
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 osel = osel.min(nodes.len().saturating_sub(1));
-                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, &p);
+                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, tick, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -2141,11 +2427,205 @@ mod tests {
     fn the_window_ends_today_and_spans_exactly_its_days() {
         // `days - 1` back from today, because the chart under it plots N
         // days *including* today - one more would quietly disagree with it.
-        let q = build_query("acme", 7, "w");
+        let q = build_query("acme", 7, "w", Utc::now());
         let since = (today() - Days::days(6)).format("%Y-%m-%d").to_string();
         assert!(q.contains(&format!("merged:>={}", since)), "{}", q);
         assert!(q.contains("org:acme is:pr is:open"));
         assert!(q.contains("rateLimit"));
+    }
+
+    #[test]
+    fn the_rolling_day_carries_its_time_of_day() {
+        // A date-only cut is the calendar-day bug: at nine in the morning
+        // it reports three hours of evidence as a day's throughput. The
+        // `T…Z` is what makes GitHub read this as twenty-four hours back
+        // from now, and it is the whole reason `now` is a parameter.
+        let now = DateTime::parse_from_rfc3339("2026-09-13T11:22:33Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let q = build_query("acme", 7, "w", now);
+        assert!(
+            q.contains("is:pr created:>=2026-09-12T11:22:33Z"),
+            "{}",
+            q
+        );
+        assert!(
+            q.contains("is:pr is:merged merged:>=2026-09-12T11:22:33Z"),
+            "{}",
+            q
+        );
+        // Eight aliases, the number the request was re-measured at. A
+        // ninth is not free: the ceiling is the request's complexity, and
+        // this is the line that says one was added without checking.
+        assert_eq!(q.matches("search(").count(), 8, "{}", q);
+        assert_eq!(q.matches("issueCount").count(), 8, "{}", q);
+    }
+
+    #[test]
+    fn a_sum_missing_an_account_is_not_a_total() {
+        // `stats` holds only the accounts that have arrived, so the board
+        // spends its first seconds holding one row of ten - every field of
+        // it present. Counting the rows would call that a total.
+        let row = |o: Option<i64>| Account {
+            opened_24h: o,
+            ..Default::default()
+        };
+        let three = [row(Some(4)), row(Some(5)), row(Some(6))];
+        assert_eq!(board_24h(&three, 3, |s| s.opened_24h), Some(15));
+        assert_eq!(board_24h(&three[..1], 3, |s| s.opened_24h), None);
+        // An account that arrived without the alias is the other half: a
+        // full board of rows, one of them holding nothing.
+        let holed = [row(Some(4)), row(None), row(Some(6))];
+        assert_eq!(board_24h(&holed, 3, |s| s.opened_24h), None);
+        // And no accounts at all sums to nothing, not to zero.
+        assert_eq!(board_24h(&[], 0, |s| s.opened_24h), None);
+    }
+
+    #[test]
+    fn a_missing_alias_is_absent_rather_than_zero() {
+        // `count_at` lands a missing alias on zero, which is the one thing
+        // these two figures must never do.
+        let payload: serde_json::Value =
+            serde_json::from_str(r#"{"o0_o24": {"issueCount": 0}}"#).unwrap();
+        assert_eq!(figure_at(&payload, "o0_o24"), Some(0));
+        assert_eq!(figure_at(&payload, "o0_m24"), None);
+        assert_eq!(count_at(&payload, "o0_m24"), 0);
+    }
+
+    #[test]
+    fn the_figures_stand_down_before_the_chart_does() {
+        // The column is the wider of the two labels plus its gutter, and
+        // it is only taken where the chart can still hold all its days and
+        // stay above `MIN_CHART`.
+        let col = FIG_LABELS.iter().map(|l| tc::display_width(l)).max().unwrap() + 2;
+        assert_eq!(figure_col(col + MIN_CHART, 7), col);
+        assert_eq!(figure_col(col + MIN_CHART - 1, 7), 0);
+        // A window longer than the floor pays for itself in days, not in
+        // the floor: 90 days needs 90 columns left over, not 20.
+        assert_eq!(figure_col(col + 89, 90), 0);
+        assert_eq!(figure_col(col + 90, 90), col);
+        // The two widths the change was read back at, so the commit and
+        // the pull request quote something pinned rather than recomputed
+        // by hand: a 56-column pane, which is the narrower of the two this
+        // board is actually on, and a 35-column one, which is not.
+        assert_eq!(figure_col(56usize.saturating_sub(3), 7), col);
+        assert_eq!(figure_col(35usize.saturating_sub(3), 7), 0);
+    }
+
+    #[test]
+    fn a_figure_that_has_not_arrived_is_not_a_zero() {
+        let p = palette();
+        let plain = |rows: &[Vec<(String, String)>]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.iter().map(|(_, t)| t.clone()).collect::<String>())
+                .collect()
+        };
+        // A real zero draws the glyph. Nothing opened in a day is a
+        // reading, and it has to be legible as one.
+        let zero = plain(&figure_rows(Some(0), Some(0), 19, 0, &p));
+        assert!(
+            zero.iter().any(|r| r.contains('█')),
+            "a counted zero lost its digits: {:?}",
+            zero
+        );
+        // Nothing arrived draws no digit at all - if this ever falls
+        // through to `Some(0)` the two readings become one screen.
+        let waiting = plain(&figure_rows(None, None, 19, 0, &p));
+        for row in &waiting {
+            assert!(
+                !row.contains('▀') && !row.contains('▄'),
+                "a figure still counting drew a digit: {:?}",
+                waiting
+            );
+        }
+        // Both halves always say what their window is, whichever state
+        // they are in - a figure whose window nobody can read is not a
+        // figure.
+        for rows in [waiting, zero] {
+            for label in FIG_LABELS {
+                assert!(
+                    rows.iter().any(|r| r.contains(label)),
+                    "{} went missing: {:?}",
+                    label,
+                    rows
+                );
+            }
+        }
+        // Eight rows, always, because that is the height of the chart
+        // beside it and the two have to end level.
+        assert_eq!(figure_rows(Some(3), None, 19, 0, &p).len(), 8);
+    }
+
+    #[test]
+    fn the_figure_column_never_overflows_or_loses_its_label() {
+        // `seg` clips from the right, so an off-by-one in the reserve eats
+        // the label silently rather than erroring.
+        let p = palette();
+        // `display_width` counts what it is given, and these rows carry
+        // real colours - so the escapes come off before anything is
+        // measured, or every row measures as wildly too wide.
+        let plain = |s: &str| -> String {
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+        // One chart row of `cols` columns with the nth figure fragment
+        // after it - the shape both PR FLOWs build.
+        let row_at = |cols: usize, figw: usize, n: usize, w: usize| -> String {
+            let figs = (figw > 0).then(|| figure_rows(Some(7), Some(123), figw, 0, &p));
+            with_figure(
+                vec![(String::new(), " ".to_string()), (String::new(), "─".repeat(cols))],
+                figs.as_ref().and_then(|f| f.get(n)),
+                1 + cols,
+                w - 1,
+            )
+        };
+        let mut narrowing_mattered = 0usize;
+        for w in 20..=200usize {
+            let (cols, figw) = chart_split(w, 7);
+            for n in 0..8 {
+                let row = row_at(cols, figw, n, w);
+                assert!(
+                    tc::display_width(&plain(&row)) <= w - 1,
+                    "width {} row {} overflowed: {:?}",
+                    w,
+                    n,
+                    row
+                );
+                let Some(label) = (figw > 0).then(|| FIG_LABELS.get(usize::from(n == 7)))
+                    .flatten()
+                    .filter(|_| n == 3 || n == 7)
+                else {
+                    continue;
+                };
+                assert!(row.contains(label), "width {} cut {}: {:?}", w, label, row);
+                // And the narrowing is what saved it. Spreading the days
+                // across the whole pane and hanging the figures off the end
+                // is the mistake this whole column exists to avoid, so the
+                // clause above is measured against a row that made it.
+                let wide = row_at(w.saturating_sub(3).max(10), figw, n, w);
+                if !wide.contains(label) {
+                    narrowing_mattered += 1;
+                }
+            }
+        }
+        // Never zero, or every clause above passed on a column that was
+        // never in any danger.
+        assert!(
+            narrowing_mattered > 0,
+            "the label survived even without narrowing the chart"
+        );
     }
 
     #[test]
