@@ -130,7 +130,7 @@ If you work in a [Luvus](https://luvus.dev) session, these install as a module
 and open as panes:
 
 ```sh
-luvus module install stealth-factory/opscope/luvus
+luvus module install stealth-factory/opscope
 luvus module pane open opscope.widgets ports --placement split
 ```
 

@@ -116,9 +116,9 @@ jobs:
           # checkout pinned to this commit with a stale version in it would
           # fetch an older release's binaries, or none at all, and the
           # failure would land on whoever installed it.
-          module=$(sed -n 's/^version = "\(.*\)"/\1/p' luvus/luvus-module.toml | head -1)
+          module=$(sed -n 's/^version = "\(.*\)"/\1/p' luvus-module.toml | head -1)
           if [ "$tag" != "$module" ]; then
-            echo "tag v$tag but luvus/luvus-module.toml says $module" >&2
+            echo "tag v$tag but luvus-module.toml says $module" >&2
             echo "it is generated: UPDATE_LUVUS_MODULE=1 cargo test --test" >&2
             echo "check generated_luvus_module_matches_the_widgets" >&2
             exit 1
@@ -467,10 +467,11 @@ jobs:
           # The registry can answer `npm view` before the tarball is
           # reachable from every edge, and the launcher's platform package
           # is a separate publish that npm fetches on install. So this
-          # retries rather than failing on the first minute - what it is
-          # here to catch is a release still not installable after several,
-          # not the propagation itself.
-          for attempt in 1 2 3 4 5 6; do
+          # retries rather than failing early. v0.16.0 measured this: npm
+          # moved the `latest` dist-tag immediately and took four minutes to
+          # make the version document readable, so a three-minute window
+          # failed a release that was fine. Eight, against an observed four.
+          for attempt in $(seq 1 16); do
             if said=$(npx -y "opscope@${version}" --version 2>&1); then
               break
             fi
@@ -480,7 +481,9 @@ jobs:
             sleep 30
           done
           if [ -z "${said:-}" ]; then
-            echo "opscope@${version} was not installable from npm after three minutes" >&2
+            echo "opscope@${version} was still not installable from npm eight" >&2
+            echo "minutes after publish, which is long past propagation: treat" >&2
+            echo "this as a release that did not land, not a slow registry" >&2
             exit 1
           fi
           echo "$said"
@@ -525,6 +528,6 @@ jobs:
               echo "the manifest declares a ${pane} pane and the release has no such binary" >&2
               missing=1
             fi
-          done <<< "$(sed -n 's/^id = "\(.*\)"$/\1/p' luvus/luvus-module.toml | grep -v '\.')"
+          done <<< "$(sed -n 's/^id = "\(.*\)"$/\1/p' luvus-module.toml | grep -v '\.')"
           [ "$missing" = 0 ]
           echo "every declared pane has a binary"

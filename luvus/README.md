@@ -9,7 +9,7 @@ already have, so there is nothing here but the manifest and a script that
 fetches them.
 
 ```sh
-luvus module install stealth-factory/opscope/luvus
+luvus module install stealth-factory/opscope
 luvus module pane open opscope.widgets ports --placement split
 ```
 
@@ -19,7 +19,7 @@ luvus module pane open opscope.widgets ports --placement split
 
 One pane per widget, plus `menu` for the launcher — the front door that shows
 every widget and a preview before it runs. Every pane goes through
-`./bin/opscope <widget>` rather than at the widget binary directly: named a
+`./luvus/bin/opscope <widget>` rather than at the widget binary directly: named a
 widget, the launcher draws no menu, starts it, and exits with its status — so
 the pane closes when you quit the widget, and the old names the launcher
 resolves keep working. It waits as the parent while the widget runs, which is
@@ -31,10 +31,13 @@ reads nothing about your session and writes nothing to it.
 
 ## Where the binaries come from
 
-`[[build]]` runs `build.sh` once at install time. It reads the version out
-of the manifest beside it, fetches that release's tarball for this host from
-GitHub, checks it against the `.sha256` published beside it, and leaves the
-binaries in `bin/`.
+`[[build]]` runs `luvus/build.sh` once at install time. It reads the version
+from the manifest at the module root, fetches that release's tarball for this
+host from GitHub, checks it against the `.sha256` published beside it, and
+leaves the binaries in `luvus/bin/` — which is what the pane commands point
+at. It also refuses a tarball that is missing any widget the manifest declares
+a pane for, since a pane with no binary behind it is a menu entry that dies on
+open.
 
 The version comes from the manifest and never from `/releases/latest`. Luvus
 pins an installed module to the commit you reviewed, and a build that fetched
@@ -57,7 +60,7 @@ the settings screen inside any widget.
 `curl` or `wget`, `tar`, and `shasum` or `sha256sum` at install time. After
 that the binaries carry everything they need; the widgets that read host
 tools (`ss`, `ping`, `tailscale`, `luvus` itself) say so and stop rather than
-drawing an empty pane. `./bin/opscope doctor` reports what this machine has.
+drawing an empty pane. `./luvus/bin/opscope doctor` reports what this machine has.
 
 Written against the manifest features Luvus documents at **0.8.3**, which is
 what `min_luvus_version` says. Run against **0.13.4**, which is a different
@@ -65,8 +68,10 @@ claim and the one worth trusting.
 
 ## The manifest is generated
 
-`luvus-module.toml` is written by `cargo test` from the widget folders on
-disk, so adding a widget adds a pane and a rename cannot leave a pane
+`luvus-module.toml` — at the repo root, because a manifest in a subdirectory
+can only be installed as `owner/repo/sub` and `owner/repo` is the line the
+module index prints under every listing — is written by `cargo test` from the
+widget folders on disk, so adding a widget adds a pane and a rename cannot leave a pane
 pointing at a binary that is gone. After changing the widget list or the
 version:
 
@@ -82,5 +87,5 @@ generator is in [`widgets/tests/check.rs`](../widgets/tests/check.rs).
 
 A module is ordinary code that runs as you. Luvus shows every command a
 module declares before it installs one, and the whole of this module's is
-above: one `/bin/sh build.sh`, and one `./bin/opscope` line for each of the
+above: one `/bin/sh luvus/build.sh`, and one `./luvus/bin/opscope` line for each of the
 sixteen widgets and the launcher menu.

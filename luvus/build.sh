@@ -34,9 +34,12 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$here"
 
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' luvus-module.toml | head -1)
+# The manifest is at the module root, a level above this script - it has to
+# be there for `luvus module install owner/repo` to find it at all. The
+# binaries stay down here, which is what the pane commands point at.
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' ../luvus-module.toml | head -1)
 if [ -z "$version" ]; then
-  echo "luvus-module.toml beside this script has no version line" >&2
+  echo "no version line in the luvus-module.toml above this script" >&2
   exit 1
 fi
 
@@ -129,7 +132,15 @@ fi
 # refuses everywhere else. `menu` is the launcher itself. The module id
 # carries a dot; a pane id may not, which is how those two are told apart
 # without parsing TOML tables.
-for pane in $(sed -n 's/^id = "\(.*\)"$/\1/p' luvus-module.toml); do
+panes=$(sed -n 's/^id = "\(.*\)"$/\1/p' ../luvus-module.toml)
+# A manifest that read as having no panes would walk this loop zero times
+# and report success, which is the reading this whole check exists to
+# refuse. It cannot be empty: the launcher's own entry is always there.
+if [ -z "$panes" ]; then
+  echo "no pane ids read out of the manifest, so nothing below was checked" >&2
+  exit 1
+fi
+for pane in $panes; do
   case "$pane" in
     *.*|menu) continue ;;
   esac

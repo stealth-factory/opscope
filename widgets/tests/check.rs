@@ -737,7 +737,7 @@ fn widget_summaries(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-/// `luvus/luvus-module.toml`, from the widget folders on disk.
+/// `luvus-module.toml`, from the widget folders on disk.
 ///
 /// A Luvus module declares argv arrays luvus runs as subprocesses, and a
 /// `[[panes]]` entry opens a real pane running one - which is the shape
@@ -745,6 +745,12 @@ fn widget_summaries(root: &std::path::Path) -> Vec<(String, String)> {
 /// generated rather than written because the widget list already lives in
 /// too many places, and a module whose pane list has gone stale offers a
 /// widget that is not there or hides one that is.
+///
+/// The manifest is at the repo root, not beside the script it runs: a
+/// module whose manifest is in a subdirectory installs only as
+/// `owner/repo/sub`, and `owner/repo` is the line the module index prints
+/// under every listing. Nothing else has to move with it - a command is
+/// resolved from the module root, so the panes reach into `luvus/`.
 ///
 /// Every pane goes through the launcher rather than straight at the
 /// widget binary. Named a widget, `opscope` draws no menu, starts it, and
@@ -785,7 +791,7 @@ fn render_luvus_module() -> String {
          # promised a PATH, and `sh` that does not resolve is a build that\n\
          # fails for a reason it is not about.\n\
          [[build]]\n\
-         command = [\"/bin/sh\", \"build.sh\"]\n",
+         command = [\"/bin/sh\", \"luvus/build.sh\"]\n",
     );
 
     out.push_str(
@@ -796,7 +802,7 @@ fn render_luvus_module() -> String {
          id = \"menu\"\n\
          title = \"opscope\"\n\
          placement = \"split\"\n\
-         command = [\"./bin/opscope\"]\n",
+         command = [\"./luvus/bin/opscope\"]\n",
     );
 
     for (stem, summary) in widgets {
@@ -805,14 +811,14 @@ fn render_luvus_module() -> String {
         out.push_str(&format!("id = \"{}\"\n", stem));
         out.push_str(&format!("title = \"{}\"\n", stem));
         out.push_str("placement = \"split\"\n");
-        out.push_str(&format!("command = [\"./bin/opscope\", \"{}\"]\n", stem));
+        out.push_str(&format!("command = [\"./luvus/bin/opscope\", \"{}\"]\n", stem));
     }
     out
 }
 
 #[test]
 fn generated_luvus_module_matches_the_widgets() {
-    let path = root().join("luvus/luvus-module.toml");
+    let path = root().join("luvus-module.toml");
     let generated = render_luvus_module();
     // Written first and compared after, as config.example.json is: a
     // regenerating run still proves the result rather than rewriting the
@@ -844,7 +850,7 @@ fn generated_luvus_module_matches_the_widgets() {
         ),
     };
     panic!(
-        "luvus/luvus-module.toml is not what the widget folders generate.\n  {detail}\n\n\
+        "luvus-module.toml is not what the widget folders generate.\n  {detail}\n\n\
          A widget added or renamed changes the panes; a release changes the version.\n\
          Rewrite it with:\n  UPDATE_LUVUS_MODULE=1 cargo test --test check \
          generated_luvus_module_matches_the_widgets -- --exact"
