@@ -419,12 +419,12 @@ pub fn restore_screen() {
 /// line wraps instead of truncating - the rule the whole repo follows.
 ///
 /// A thin call onto `pack_hints_placed`, which does the packing and also
-/// records where each hint landed. Sixteen widgets call this one and its
-/// signature is not going to change under them; a widget that wants its
-/// footer clickable asks for the placed form instead. Written this way
-/// round rather than as two packers so the two cannot drift: a footer that
-/// is clickable in the wrong places would be worse than one that is not
-/// clickable at all.
+/// records where each hint landed. Every widget that draws a footer calls
+/// this one - fifteen call sites - and its signature is not going to change
+/// under them; a widget that wants its footer clickable asks for the placed
+/// form instead. Written this way round rather than as two packers so the
+/// two cannot drift: a footer that is clickable in the wrong places would
+/// be worse than one that is not clickable at all.
 pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec<String> {
     pack_hints_placed(hints, width, sep).lines
 }
@@ -2130,6 +2130,10 @@ impl Keyboard {
         remember_termios(self.fd, saved);
         self.saved = Some(saved);
         self.buf.clear();
+        // Whatever was on screen while the child had the terminal was the
+        // child's, so no placement of ours describes it. Dropped for the
+        // same reason the buffered input above is.
+        self.hints.clear();
     }
 
     /// Make this frame's footer clickable.
@@ -2161,6 +2165,19 @@ impl Keyboard {
                 )
             })
             .collect();
+    }
+
+    /// Forget where the hints were.
+    ///
+    /// Any screen that takes the terminal over in this process has to call
+    /// this on the way in, because the placements belong to the frame that
+    /// was on screen and that frame has just been replaced. The settings
+    /// screen shares the caller's `Keyboard`, and without this the
+    /// launcher's `[q]uit` spot sat over settings' `[r]eload`: clicking
+    /// reload backed out of settings instead, which is the exact failure
+    /// `footer_at` warns about, arriving through a door it left open.
+    pub fn forget_footer(&mut self) {
+        self.hints.clear();
     }
 
     /// A click on a registered hint, as the key that hint names.
@@ -3621,25 +3638,114 @@ mod tests {
         }
     }
 
+    /// The packer as it stood before it learned to record placements,
+    /// copied verbatim.
+    ///
+    /// Kept so the claim below can be false. Comparing `pack_hints` with
+    /// `pack_hints_placed().lines` would compare the new packer with
+    /// itself, since the first is a call onto the second - sixty widths of
+    /// `x == y` where `y` is spelled `x`, which no edit to this file could
+    /// ever turn red. What has to hold is that the footers already in the
+    /// tree did not move, and only the old body can say that.
+    fn shipped_pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for hint in hints {
+            let plain: usize = hint.iter().map(|(_, t)| display_width(t)).sum();
+            let extra = if current.is_empty() {
+                plain
+            } else {
+                plain + display_width(sep)
+            };
+            if !current.is_empty() && used + extra > width {
+                lines.push(current.join(sep));
+                current = Vec::new();
+                used = 0;
+            }
+            let piece: String = hint
+                .iter()
+                .map(|(c, t)| format!("{}{}", c, t))
+                .collect::<Vec<_>>()
+                .join("");
+            if current.is_empty() {
+                used = plain;
+            } else {
+                used += plain + display_width(sep);
+            }
+            current.push(piece);
+        }
+        if !current.is_empty() {
+            lines.push(current.join(sep));
+        }
+        lines
+    }
+
     #[test]
-    fn pack_hints_draws_exactly_what_the_placed_form_draws() {
-        // Sixteen widgets draw their footer through pack_hints. Adopting
-        // the placed form has to be invisible on screen or nobody can
-        // adopt it, so the plain one is the placed one with the spots
-        // dropped - and this is what says so.
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![("\x1b[36m", "\u{2191}\u{2193}".into()), ("\x1b[90m", " select".into())],
-            vec![("\x1b[90m", "[,] settings".into())],
-            vec![("\x1b[90m", "[q]uit".into())],
-            vec![("\x1b[90m", "[\u{b1}]25".into())],
+    fn the_placed_packer_wraps_exactly_where_the_shipped_one_did() {
+        let hint = |pieces: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            pieces.iter().map(|(c, t)| (*c, (*t).to_string())).collect()
+        };
+        let footers: Vec<Vec<Vec<(&str, String)>>> = vec![
+            // The launcher's own, coloured and in two pieces per hint -
+            // the shape that would catch a width summed on the joined
+            // string instead of per piece.
+            vec![
+                hint(&[("\x1b[36m", "\u{2191}\u{2193}"), ("\x1b[90m", " select")]),
+                hint(&[("\x1b[36m", "\u{21b5}"), ("\x1b[90m", " launch")]),
+                hint(&[("\x1b[90m", "[,] settings")]),
+                hint(&[("\x1b[90m", "[q]uit")]),
+            ],
+            // Hints of wildly uneven length, so the wrap points are not
+            // regular and an off-by-one in the running total shows.
+            vec![
+                hint(&[("", "[a]")]),
+                hint(&[("", "[b]ravo charlie delta")]),
+                hint(&[("", "[c]")]),
+                hint(&[("", "[d]elta")]),
+                hint(&[("", "[\u{b1}]25")]),
+            ],
+            // Wide glyphs and a hint longer than most panes, which is the
+            // case a naive byte count gets wrong.
+            vec![
+                hint(&[("", "\u{1f7e2} [g]reen")]),
+                hint(&[("", "[l]onger than any sensible pane will ever be")]),
+                hint(&[("", "esc closes")]),
+            ],
+            // A hint whose pieces split one grapheme - a woman and a
+            // laptop joined by a zero-width joiner, drawn in two coloured
+            // halves. Summed per piece that is four columns; measured on
+            // the joined string it is two, and the wrap points move. The
+            // footers here are built to the per-piece sum, so that is what
+            // has to be preserved rather than the tidier-looking answer.
+            vec![
+                hint(&[("\x1b[36m", "\u{1f469}"), ("\x1b[90m", "\u{200d}\u{1f4bb} [w]ork")]),
+                hint(&[("", "[q]uit")]),
+                hint(&[("", "[r]eload the whole thing")]),
+            ],
+            // One hint, and none at all.
+            vec![hint(&[("", "[q]uit")])],
+            vec![],
         ];
-        for width in 1..60 {
-            assert_eq!(
-                pack_hints(&hints, width, "  "),
-                pack_hints_placed(&hints, width, "  ").lines,
-                "the two packers disagreed at width {}",
-                width
-            );
+        for (which, hints) in footers.iter().enumerate() {
+            for width in 1..80 {
+                assert_eq!(
+                    shipped_pack_hints(hints, width, "  "),
+                    pack_hints_placed(hints, width, "  ").lines,
+                    "footer {} wraps differently at width {}",
+                    which,
+                    width
+                );
+                // And the separator is not baked in: `·` is what half the
+                // footers here use.
+                assert_eq!(
+                    shipped_pack_hints(hints, width, " \u{b7} "),
+                    pack_hints_placed(hints, width, " \u{b7} ").lines,
+                    "footer {} wraps differently at width {} with a dot separator",
+                    which,
+                    width
+                );
+            }
         }
     }
 
@@ -3700,6 +3806,15 @@ mod tests {
         // Registering an empty footer takes the hints back off, which is
         // what a widget that stops drawing one has to be able to do.
         kb.footer_at(&Footer::default(), 20, 1);
+        assert_eq!(kb.hint_under("click:1,20".into()), "click:1,20");
+        // And so does forgetting them outright, which is what a screen
+        // borrowing somebody else's keyboard has to do on the way in. The
+        // settings screen shares the launcher's: before it did this, the
+        // launcher's `[q]uit` spot sat over settings' `[r]eload`, and
+        // clicking reload backed out of settings.
+        kb.footer_at(&footer, 20, 1);
+        assert_eq!(kb.hint_under("click:1,20".into()), "a");
+        kb.forget_footer();
         assert_eq!(kb.hint_under("click:1,20".into()), "click:1,20");
     }
 

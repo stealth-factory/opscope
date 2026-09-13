@@ -3625,6 +3625,14 @@ fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> 
 pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
     let p = palette();
     let mut app = load(spec);
+    // This screen borrows the caller's keyboard, so it inherits wherever
+    // the caller said its footer hints were - and this loop polls before it
+    // draws, so the first click lands on a placement describing a frame
+    // that is no longer on screen. Measured: the launcher's `[q]uit` sat
+    // over settings' `[r]eload`, and clicking reload backed out of
+    // settings. Dropped on the way in and again on the way out, so neither
+    // screen answers for the other.
+    keyboard.forget_footer();
 
     loop {
         for key in keyboard.poll() {
@@ -3637,6 +3645,11 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
                 if app.wrote {
                     relaunch(keyboard);
                 }
+                // And the other half: the caller redraws and registers its
+                // own footer on its next pass, but it polls first, so a
+                // click arriving in between must not land on this screen's
+                // placements either.
+                keyboard.forget_footer();
                 return;
             }
         }
