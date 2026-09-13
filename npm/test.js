@@ -539,6 +539,91 @@ test('release.yml publishes a local directory, not a github shorthand', () => {
   );
 });
 
+// The job a line belongs to, so a check can say *where* as well as
+// *what*. Jobs sit at two spaces and everything inside them is deeper,
+// which is enough structure to slice on without a YAML parser.
+function jobBlock(yml, name) {
+  const lines = yml.split('\n');
+  const start = lines.findIndex((l) => l === `  ${name}:`);
+  assert.notEqual(start, -1, `release.yml has no ${name} job`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {2}[a-z]/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+test('release.yml publishes to next, so latest never names an unserved version', () => {
+  // npm publish moves `latest` in the same registry write that creates
+  // the version. v0.16.0 measured four minutes between npm taking the
+  // publish and npm being able to serve it, and `latest` named it for
+  // all four - so `npx opscope@latest` resolved a version and then died
+  // fetching it. Publishing under a tag nobody follows is the half of
+  // the fix that lives in the publish step; the other half is below.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const publishes = yml.match(/npm publish "\.\/\$dir"[^\n]*/g) || [];
+  assert.equal(publishes.length, 1, 'expected exactly one npm publish line');
+  assert.match(
+    publishes[0],
+    /--tag next(\s|$)/,
+    'npm publish without --tag moves latest before the version is servable',
+  );
+});
+
+test('release.yml moves latest only after the npm smoke job', () => {
+  // Promotion has to be a job that waits on verification, not a step
+  // inside publish: a step there would run before anything had tried to
+  // install what was published, which is the state this whole shape
+  // exists to avoid.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const promote = jobBlock(yml, 'promote');
+  assert.match(
+    promote,
+    /^ {4}needs: smoke-npm$/m,
+    'promote must wait on the job that proves the version installs',
+  );
+  // And nowhere else may move a dist-tag. A second `dist-tag add` in the
+  // publish job would put `latest` back where it was.
+  const all = (yml.match(/npm dist-tag add/g) || []).length;
+  const mine = (promote.match(/npm dist-tag add/g) || []).length;
+  assert.ok(all > 0, 'nothing in release.yml moves a dist-tag any more');
+  assert.equal(all, mine, 'a dist-tag is moved outside the promote job');
+});
+
+test('release.yml runs the two smoke checks as jobs, not as two steps', () => {
+  // They were two steps of one job, npx first, under `set -e`. The npx
+  // retry loop can spend eight minutes failing, and the module check
+  // then never ran - so the second question went unanswered, which on
+  // screen is indistinguishable from an answer of no.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  for (const job of ['smoke-npm', 'smoke-module']) {
+    const block = jobBlock(yml, job);
+    assert.match(block, /^ {4}needs: publish$/m, `${job} must follow publish`);
+    assert.match(
+      block,
+      /macos-15/,
+      `${job} must run on macOS as well as Linux`,
+    );
+  }
+  assert.equal(
+    (jobBlock(yml, 'smoke-npm').match(/luvus/g) || []).length,
+    0,
+    'the module check is back inside the job that gates promotion',
+  );
+});
+
 test('nothing under npm/ still says the old project name', () => {
   // The leftover name is how npx would install a different package.
   // Built, not written, so this file is not itself a hit.
