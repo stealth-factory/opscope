@@ -131,10 +131,24 @@ impl Widget {
 }
 
 /// Break a paragraph at spaces, for the note under the list.
+///
+/// No row cap: the body is a window onto this note, so a paragraph
+/// that needs more than three lines has to keep wrapping or the rest
+/// can never be scrolled to.
 fn wrap(text: &str, width: usize) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    // A pane with no usable width still has to say something: dropping
+    // the note is indistinguishable from there being none, and without
+    // this `cut` is zero and `rest` never shrinks.
+    if width == 0 {
+        return vec![text.to_string()];
+    }
     let mut lines = Vec::new();
-    let mut rest: Vec<char> = text.trim().chars().collect();
-    while !rest.is_empty() && lines.len() < 3 {
+    let mut rest: Vec<char> = text.chars().collect();
+    while !rest.is_empty() {
         if rest.len() <= width {
             lines.push(rest.iter().collect());
             break;
@@ -174,37 +188,124 @@ fn palette() -> Palette {
     }
 }
 
-/// The rows to draw, and where the window sits.
+/// Where the window onto the body sits after a frame's worth of input.
 ///
-/// Returns the first index shown, so the caller can say what it is
-/// showing rather than presenting a slice as the whole list.
+/// The same shape as `github-prs`, and for the same reason: the wheel
+/// writes `at` and nothing else, and this hands it straight back, because
+/// scrolling to look at something must never change what `↵` opens. Only
+/// on the frame a key moved the selection - `chase` - does the window
+/// follow the cursor; a view that re-centred every frame dragged itself
+/// back from wherever the wheel had just put it.
 ///
-/// `from` is where the window sat last frame. `chase` is true only on a
-/// frame a key moved the cursor: then the window moves by as little as it
-/// takes to hold it, because a list that jumps to centre the selection
-/// loses the reader's place. On a frame the wheel moved the view, `from`
-/// stands and the cursor is allowed to scroll out of sight - it is still
-/// what enter launches, and the next arrow press brings the window to it.
-fn window_for(
-    count: usize,
-    selected: usize,
-    room: usize,
-    from: usize,
-    chase: bool,
-) -> (usize, usize) {
-    if count <= room || room == 0 {
-        return (0, count);
-    }
-    let last = count - room;
-    let first = if chase {
-        tc::follow(from.min(last), selected, room)
-    } else {
-        from.min(last)
+/// Its own function so the composition can be tested. `tc::follow` is
+/// already tested; what has been wrong is when it is called.
+fn scrolled(at: usize, cursor: Option<usize>, chase: bool, body: usize, room: usize) -> usize {
+    let at = match cursor.filter(|_| chase) {
+        Some(row) => tc::follow(at, row, room),
+        None => at,
     };
-    (first, room)
+    // Clamped last, and written back by the caller: without that a wheel
+    // spun past the end leaves a scroll nobody can see, and the same
+    // number of wheel-ups to undo.
+    at.min(body.saturating_sub(room))
 }
 
-fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -> Vec<String> {
+/// The pinned top row: the name, and the version that is actually running.
+///
+/// The version sits after the rule as its own segment rather than inside
+/// the title text, because `tc::title` upper-cases what it is given and
+/// `V0.17.0` is not a version anybody writes. As a segment it takes the
+/// dim colour while the name keeps the accent, and the title is built to
+/// the width the version leaves so the row still measures exactly `w`.
+///
+/// Below that, the version goes rather than being cut: half of `v0.17.0`
+/// is worse than no version at all, and a build number that might be
+/// missing a digit is a build number nobody can act on.
+fn title_row(w: usize, p: &Palette) -> String {
+    let tag = format!(" v{}", tc::version_number());
+    let cells = tc::display_width(&tag);
+    // `╺━ OPSCOPE ╸` is twelve cells, and two of rule either side of the
+    // name is the least that still reads as a title bar.
+    if w >= 14 + cells {
+        let mut row = tc::title("opscope", w - cells, &p.accent);
+        row.push_str(&tc::seg(&[(p.dim.as_str(), tag)], cells));
+        row
+    } else {
+        tc::title("opscope", w, &p.accent)
+    }
+}
+
+/// The list row the cursor is on, counting from the top of the body.
+///
+/// The count line and the blank under it come first.
+const LIST_TOP: usize = 2;
+
+/// Everything under the title, built at whatever height it needs.
+///
+/// Not given `h` on purpose. Every part of this used to be sized to what
+/// the pane had left - the list to `h - 8`, the description to one line or
+/// three, the example to whatever remained - so a short pane hid the
+/// description and most of the list, and the wheel could not move the
+/// chrome out of the way. A window onto this is what scrolls now.
+fn body_rows(w: usize, selected: usize, p: &Palette) -> Vec<String> {
+    let mut body = vec![tc::seg(
+        &[(
+            p.dim.as_str(),
+            format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len()),
+        )],
+        w - 1,
+    )];
+    body.push(String::new());
+    body.extend(rows_for(w, selected, p));
+    body.push(String::new());
+
+    // What the highlighted one is for, in its own words - the rest of
+    // its opening paragraph, which the row has no room for. Not the
+    // command to run it: that is this screen's job, not the reader's.
+    let pick = &WIDGETS[selected.min(WIDGETS.len() - 1)];
+    body.push(tc::seg(
+        &[(
+            p.lbl.as_str(),
+            format!(" ── {} ── ", pick.stem.to_uppercase()),
+        )],
+        w - 1,
+    ));
+    for line in wrap(&pick.about(), w.saturating_sub(4)) {
+        body.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
+    }
+
+    // And what it looks like. A picture from its README rather than the
+    // widget itself: starting one to look at it would ping hosts, spend
+    // API quota and read the whole agent transcript tree, and browsing
+    // a menu should cost nothing at all.
+    let shown = pick.sample();
+    if !shown.is_empty() && w >= 44 {
+        let rule = "─".repeat(w.saturating_sub(15).max(1));
+        body.push(tc::seg(
+            &[
+                (p.grid.as_str(), " ┌── ".into()),
+                (p.dim.as_str(), "example".into()),
+                (p.grid.as_str(), format!(" {}┐", rule)),
+            ],
+            w - 1,
+        ));
+        for line in shown {
+            body.push(tc::seg(
+                &[
+                    (p.grid.as_str(), " │".into()),
+                    (
+                        p.dim.as_str(),
+                        line.chars().take(w.saturating_sub(4)).collect::<String>(),
+                    ),
+                ],
+                w - 1,
+            ));
+        }
+    }
+    body
+}
+
+fn rows_for(w: usize, selected: usize, p: &Palette) -> Vec<String> {
     let name_w = WIDGETS
         .iter()
         .map(|item| item.stem.chars().count())
@@ -216,8 +317,6 @@ fn rows_for(w: usize, selected: usize, first: usize, room: usize, p: &Palette) -
     WIDGETS
         .iter()
         .enumerate()
-        .skip(first)
-        .take(room)
         .map(|(i, item)| {
             let here = i == selected;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
@@ -429,63 +528,9 @@ fn main() -> std::process::ExitCode {
             selected = WIDGETS.len() - 1;
         }
 
-        let mut body = vec![tc::title("opscope", w, &p.accent)];
-        // What is left for the list once the title, the count line, the two
-        // blanks, the description heading and the footer have had theirs.
-        // Drawing all of them and letting the frame cut the tail is what put
-        // the cursor off the bottom of a short pane. Worked out once and used
-        // by both the count line and the list: the two had drifted two rows
-        // apart, so the header named a range that was not what was drawn.
-        let room = h.saturating_sub(8).max(1);
-        let (first, shown) = window_for(WIDGETS.len(), selected, room, scroll, moved);
-        scroll = first;
-        moved = false;
-        body.push(tc::seg(
-            &[(
-                p.dim.as_str(),
-                if shown < WIDGETS.len() {
-                    // A partial list says so, rather than reading as the
-                    // whole set with some widgets missing.
-                    format!(
-                        " {} widgets · showing {}-{}   ↵ or → starts one, q leaves",
-                        WIDGETS.len(),
-                        first + 1,
-                        first + shown
-                    )
-                } else {
-                    format!(" {} widgets   ↵ or → starts one, q leaves", WIDGETS.len())
-                },
-            )],
-            w - 1,
-        ));
-        body.push(String::new());
-        body.extend(rows_for(w, selected, first, shown, &p));
-        body.push(String::new());
-
-        // What the highlighted one is for, in its own words - the rest of
-        // its opening paragraph, which the row has no room for. Not the
-        // command to run it: that is this screen's job, not the reader's.
-        let pick = &WIDGETS[selected];
-        if h.saturating_sub(body.len()) >= 3 {
-            body.push(tc::seg(
-                &[(
-                    p.lbl.as_str(),
-                    format!(" ── {} ── ", pick.stem.to_uppercase()),
-                )],
-                w - 1,
-            ));
-            let tall = h.saturating_sub(body.len()) >= 12;
-            let about = wrap(&pick.about(), w.saturating_sub(4));
-            for line in about.iter().take(if tall { 1 } else { 3 }) {
-                body.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
-            }
-        }
-
-        // And what it looks like. A picture from its README rather than the
-        // widget itself: starting one to look at it would ping hosts, spend
-        // API quota and read the whole agent transcript tree, and browsing
-        // a menu should cost nothing at all. Measured against the footer
-        // that will actually be drawn, rather than a guess at its height.
+        // The footer is pinned and measured first: it is what the body has
+        // to fit above, and a guess at its height put the last row of the
+        // list under it.
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " launch".into())],
@@ -496,38 +541,27 @@ fn main() -> std::process::ExitCode {
             .into_iter()
             .map(|l| format!(" {}", l))
             .collect();
-        let room = h.saturating_sub(body.len() + foot.len());
-        let shown = pick.sample();
-        if !shown.is_empty() && room >= 6 && w >= 44 {
-            let rule = "─".repeat(w.saturating_sub(15).max(1));
-            body.push(tc::seg(
-                &[
-                    (p.grid.as_str(), " ┌── ".into()),
-                    (p.dim.as_str(), "example".into()),
-                    (p.grid.as_str(), format!(" {}┐", rule)),
-                ],
-                w - 1,
-            ));
-            for line in shown.iter().take(room - 1) {
-                body.push(tc::seg(
-                    &[
-                        (p.grid.as_str(), " │".into()),
-                        (
-                            p.dim.as_str(),
-                            line.chars().take(w.saturating_sub(4)).collect::<String>(),
-                        ),
-                    ],
-                    w - 1,
-                ));
-            }
-        }
 
-        while body.len() < h.saturating_sub(foot.len()) {
-            body.push(String::new());
+        // A window onto the body rather than a cut of it, with the title
+        // pinned above it: scrolled away, the screen stops saying what it
+        // is. Everything else - the count line, the list, the description
+        // and the example - moves together, so a ten-row pane scrolls its
+        // chrome out of the way instead of leaving one row of list under
+        // eight rows of everything else.
+        let body = body_rows(w, selected, &p);
+        let room = h.saturating_sub(foot.len());
+        let room_below = room.saturating_sub(1).max(1);
+        scroll = scrolled(scroll, Some(LIST_TOP + selected), moved, body.len(), room_below);
+        moved = false;
+
+        let mut frame = vec![title_row(w, &p)];
+        frame.extend(body.iter().skip(scroll).take(room_below).cloned());
+        while frame.len() < room {
+            frame.push(String::new());
         }
-        body.extend(foot);
-        body.truncate(h);
-        tc::draw(&body, w, h);
+        frame.extend(foot);
+        frame.truncate(h);
+        tc::draw(&frame, w, h);
         std::thread::sleep(Duration::from_millis(150));
     }
 }
@@ -536,62 +570,134 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_window_always_contains_the_cursor() {
-        // The bug this replaces: all thirteen rows were drawn and the
-        // frame cut the tail, so on a short pane the cursor moved onto a
-        // row that was not there - nothing highlighted, and Enter still
-        // starting whatever it was invisibly on.
-        for room in 1usize..14 {
-            for selected in 0..13 {
-                let (first, shown) = window_for(13, selected, room, 0, true);
-                assert!(
-                    selected >= first && selected < first + shown,
-                    "room {} cursor {} fell outside {}..{}",
-                    room,
-                    selected,
-                    first,
-                    first + shown
-                );
-                assert!(first + shown <= 13, "window ran past the list");
+    /// A row as it reaches the terminal, without the colour escapes.
+    fn plain(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
             }
         }
+        out
     }
 
     #[test]
-    fn a_list_that_fits_is_not_windowed() {
-        // No note, no scrolling, nothing changed for the pane sizes these
-        // actually run at.
-        assert_eq!(window_for(13, 0, 13, 0, true), (0, 13));
-        assert_eq!(window_for(13, 12, 20, 0, true), (0, 13));
-        assert_eq!(window_for(0, 0, 5, 0, true), (0, 0));
+    fn the_title_row_carries_the_running_version_and_still_measures_the_pane() {
+        // The version is what a stale npx cache cannot lie about, so it has
+        // to be the stamp rather than a number typed here - and `tc::title`
+        // fills to width, so hanging a segment off it without taking those
+        // cells out of the title is a row wider than the pane, which wraps
+        // and scrolls the pinned title off the top.
+        let p = palette();
+        let tag = format!("v{}", tc::version_number());
+        assert!(
+            tc::version().contains(&tc::version_number().to_string()),
+            "the title would disagree with --version"
+        );
+        let mut stood_down = 0;
+        for w in 20usize..=160 {
+            let row = plain(&title_row(w, &p));
+            assert_eq!(tc::display_width(&row), w, "the title row is not {w} wide");
+            assert!(row.contains("OPSCOPE"), "the title lost its name at {w}");
+            if row.contains(&tag[..2]) {
+                // Present in full or not at all: `v0.1` is a version that
+                // was never released.
+                assert!(row.contains(&tag), "the version was cut at {w}: {row:?}");
+            } else {
+                stood_down += 1;
+            }
+        }
+        assert!(stood_down > 0, "the version never stood down on a narrow pane");
+        // Where it stands down, rather than merely that it does: the title
+        // itself wants twelve cells and two of rule, and the version takes
+        // the rest.
+        let edge = 14 + tc::display_width(&format!(" {tag}"));
+        assert!(plain(&title_row(edge, &p)).contains(&tag), "no version at {edge}");
+        assert!(
+            !plain(&title_row(edge - 1, &p)).contains(&tag[..2]),
+            "a version at {} , which cannot hold it",
+            edge - 1
+        );
+        assert!(plain(&title_row(80, &p)).contains(&tag), "no version on a wide pane");
     }
 
     #[test]
-    fn the_window_moves_only_as_far_as_it_must() {
-        // Scrolling by one when the cursor steps off the edge, rather than
-        // recentring: a list that jumps loses the reader's place.
-        assert_eq!(window_for(13, 5, 6, 0, true), (0, 6));
-        assert_eq!(window_for(13, 6, 6, 0, true), (1, 6));
-        assert_eq!(window_for(13, 12, 6, 0, true), (7, 6));
-        // And it holds still while the cursor moves about inside it.
-        assert_eq!(window_for(13, 8, 6, 7, true), (7, 6));
-        assert_eq!(window_for(13, 12, 6, 7, true), (7, 6));
+    fn the_wheel_moves_the_view_and_only_a_key_brings_it_back() {
+        // The rule the launcher was breaking: the wheel slides the viewport
+        // and `selected` stays exactly where it is, even off screen, so
+        // scrolling to look at something never changes what enter opens.
+        let (body, room) = (60usize, 10usize);
+        // A wheel-moved view is handed straight back, cursor or no cursor.
+        assert_eq!(scrolled(7, Some(0), false, body, room), 7);
+        // And is not dragged back on the next frame either.
+        assert_eq!(scrolled(7, Some(0), false, body, room), 7);
+        // On the frame a key moved the selection, the window follows it.
+        assert_eq!(scrolled(0, Some(40), true, body, room), 31);
+        assert_eq!(scrolled(31, Some(40), false, body, room), 31);
+        // Spun past the end it stops with the last row on screen.
+        assert_eq!(scrolled(9_999, None, false, body, room), body - room);
+        // A body that fits has nowhere to go.
+        assert_eq!(scrolled(5, None, false, 8, room), 0);
     }
 
     #[test]
-    fn the_wheel_moves_the_window_off_the_cursor_and_stops_at_the_end() {
-        // Not chasing: the window sits where the wheel put it, and the
-        // cursor is left behind rather than dragged along.
-        assert_eq!(window_for(13, 0, 6, 4, false), (4, 6));
-        assert_eq!(window_for(13, 12, 6, 0, false), (0, 6));
-        // It stops with the last row on screen rather than scrolling into
-        // blank space below it.
-        assert_eq!(window_for(13, 0, 6, 99, false), (7, 6));
-        // A list that fits is not windowed however far the wheel is turned.
-        assert_eq!(window_for(13, 0, 13, 99, false), (0, 13));
+    fn the_body_is_built_whole_whatever_the_pane_can_show() {
+        // Every part of this used to be sized to the rows left over, so a
+        // short pane showed one row of list under eight of chrome and the
+        // wheel could not reach any of it. The body knows nothing about
+        // height now: the list is whole, the description is under it, and
+        // the example is under that.
+        let p = palette();
+        let body = body_rows(90, 0, &p);
+        let rows: Vec<String> = body.iter().map(|r| plain(r)).collect();
+        for widget in WIDGETS {
+            assert!(
+                rows.iter().any(|row| row.contains(widget.stem)),
+                "{} is not in the body",
+                widget.stem
+            );
+        }
+        assert!(
+            rows.iter().any(|row| row.contains("── AGENT-USAGE ──")),
+            "the description of the selected widget is not in the body"
+        );
+        // The paragraph used to stop at three lines, which hid the rest
+        // of agent-usage at eighty columns. Scrolling cannot reach what
+        // was never built.
+        assert!(
+            rows.iter().any(|row| row.contains("plausible zero")),
+            "the end of the selected paragraph is not in the body"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("example")),
+            "the preview is not in the body"
+        );
+        // Taller than any short pane, which is the point: there is
+        // something for the wheel to move.
+        assert!(
+            body.len() > WIDGETS.len() + 4,
+            "the body is only {} rows",
+            body.len()
+        );
+        // The cursor's row in the body, which is what the follow is given.
+        assert!(
+            plain(&body[LIST_TOP]).contains(WIDGETS[0].stem),
+            "the first list row is not where the follow thinks it is"
+        );
+        let later = body_rows(90, 3, &p);
+        assert!(
+            plain(&later[LIST_TOP + 3]).contains(WIDGETS[3].stem),
+            "row {} of the body is not the selected widget",
+            LIST_TOP + 3
+        );
     }
-
 
     #[test]
     fn the_old_deployments_name_still_starts_the_widget() {
@@ -606,7 +712,7 @@ mod tests {
         // name_w used to cap at 18 and then take one cell for padding, so
         // `vercel-deployments` drew as the command that is not built.
         let p = palette();
-        let rows = rows_for(86, 0, 0, WIDGETS.len(), &p);
+        let rows = rows_for(86, 0, &p);
         for widget in WIDGETS {
             assert!(
                 rows.iter().any(|row| row.contains(widget.stem)),
@@ -719,9 +825,15 @@ mod tests {
         assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
         // A word longer than the line is cut rather than dropped.
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        // Three lines at most: this is a note, not the doc page.
-        assert_eq!(wrap(&"word ".repeat(60), 10).len(), 3);
+        // The body is a window onto the whole note, so a long paragraph
+        // keeps wrapping rather than stopping at three.
+        assert!(wrap(&"word ".repeat(60), 10).len() > 3);
         assert!(wrap("", 8).is_empty());
+        // Four cells or fewer leave wrap a width of zero. The three-line
+        // cap used to hide the hang; without it, cut is zero and rest
+        // never shrinks. Keep the string, as wrap_words does.
+        assert_eq!(wrap("one two three", 0), vec!["one two three"]);
+        assert!(wrap("", 0).is_empty());
     }
 
     #[cfg(unix)]
