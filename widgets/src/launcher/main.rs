@@ -131,10 +131,14 @@ impl Widget {
 }
 
 /// Break a paragraph at spaces, for the note under the list.
+///
+/// No row cap: the body is a window onto this note, so a paragraph
+/// that needs more than three lines has to keep wrapping or the rest
+/// can never be scrolled to.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut rest: Vec<char> = text.trim().chars().collect();
-    while !rest.is_empty() && lines.len() < 3 {
+    while !rest.is_empty() {
         if rest.len() <= width {
             lines.push(rest.iter().collect());
             break;
@@ -654,6 +658,13 @@ mod tests {
             rows.iter().any(|row| row.contains("── AGENT-USAGE ──")),
             "the description of the selected widget is not in the body"
         );
+        // The paragraph used to stop at three lines, which hid the rest
+        // of agent-usage at eighty columns. Scrolling cannot reach what
+        // was never built.
+        assert!(
+            rows.iter().any(|row| row.contains("plausible zero")),
+            "the end of the selected paragraph is not in the body"
+        );
         assert!(
             rows.iter().any(|row| row.contains("example")),
             "the preview is not in the body"
@@ -804,8 +815,9 @@ mod tests {
         assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
         // A word longer than the line is cut rather than dropped.
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        // Three lines at most: this is a note, not the doc page.
-        assert_eq!(wrap(&"word ".repeat(60), 10).len(), 3);
+        // The body is a window onto the whole note, so a long paragraph
+        // keeps wrapping rather than stopping at three.
+        assert!(wrap(&"word ".repeat(60), 10).len() > 3);
         assert!(wrap("", 8).is_empty());
     }
 
