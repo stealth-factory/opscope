@@ -951,6 +951,30 @@ enum Mode {
     },
 }
 
+/// What the frame now on screen offers a click.
+///
+/// Handed back by whichever draw function ran, because that is the only
+/// place the geometry is known - and read on the next poll, because a click
+/// is answered against the frame the reader was looking at when they
+/// clicked, not the one about to be built.
+#[derive(Default)]
+struct Clickable {
+    /// Which row of the frame each list entry landed on, and which entry it
+    /// is. Shifted by the pinned head, because every screen here builds its
+    /// body in its own vec and assembles `[head] ++ body[window]` - so a
+    /// body index is not a frame row until the head is added to it.
+    placed: Vec<(usize, usize)>,
+    /// How many rows stay pinned above the window. One: the title.
+    head: usize,
+    /// Where the window starts in the body, as actually drawn rather than
+    /// as asked for - `follow` clamps it and the clamped value is what the
+    /// reader saw.
+    scroll: usize,
+    footer: crate::Footer,
+    foot_top: usize,
+    foot_indent: usize,
+}
+
 struct App {
     widget: &'static str,
     section: &'static str,
@@ -2800,7 +2824,7 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
     false
 }
 
-fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
+fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
     // Pinned: it names the widget whose settings these are, which is the one
     // thing that must not scroll away from somebody halfway down a long list.
     let head = crate::title(&format!("{} settings", app.widget), w, &p.accent);
@@ -2853,10 +2877,8 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         .get(app.selected)
         .is_some_and(|f| f.default.is_boolean());
     let hints = list_hints(p, boolean);
-    let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
-        .into_iter()
-        .map(|l| format!(" {l}"))
-        .collect();
+    let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+    let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
 
     if !app.fields.is_empty() {
         app.selected = app.selected.min(app.fields.len() - 1);
@@ -2886,7 +2908,12 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     // Every field, at its natural height. What does not fit is below the
     // fold and reachable, rather than absent and indistinguishable from a
     // widget with fewer settings than it has.
+    // One row per field, so the placements are the first field's row plus
+    // the index. Shifted by the pinned title below, where the frame is
+    // assembled: a body index is not a frame row until the head is added.
+    let mut rows_at: Vec<(usize, usize)> = Vec::new();
     for (i, field) in app.fields.iter().enumerate() {
+        rows_at.push((body.len(), i));
         let here = i == app.selected;
         let tint = if here {
             crate::bg(38, 56, 76)
@@ -3026,12 +3053,23 @@ fn draw_list(app: &mut App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     while out.len() + foot.len() < h {
         out.push(String::new());
     }
+    let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
-    out
+    (
+        out,
+        Clickable {
+            placed: rows_at.into_iter().map(|(row, i)| (row + 1, i)).collect(),
+            head: 1,
+            scroll: app.scroll,
+            footer: packed,
+            foot_top,
+            foot_indent: 1,
+        },
+    )
 }
 
-fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
+fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
     let Mode::Edit {
         index,
         buffer,
@@ -3039,11 +3077,10 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         error,
     } = &app.mode
     else {
-        return vec![crate::title(
-            &format!("{} settings", app.widget),
-            w,
-            &p.accent,
-        )];
+        return (
+            vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)],
+            Clickable::default(),
+        );
     };
     let field = &app.fields[*index];
     let mut body = vec![crate::title(
@@ -3112,10 +3149,8 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
         vec![(p.accent.as_str(), "ctrl-u".into()), (p.dim.as_str(), " clear".into())],
         vec![(p.dim.as_str(), "esc cancel".into())],
     ];
-    let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
-        .into_iter()
-        .map(|l| format!(" {l}"))
-        .collect();
+    let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+    let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
     // Title pinned, the rest windowed - the same shape as the list, and for
     // the same reason: a pane too short is a pane you scroll.
     let head = body.remove(0);
@@ -3126,9 +3161,20 @@ fn draw_edit(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
     while out.len() + foot.len() < h {
         out.push(String::new());
     }
+    let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
-    out
+    (
+        out,
+        Clickable {
+            placed: Vec::new(),
+            head: 1,
+            scroll: at,
+            footer: packed,
+            foot_top,
+            foot_indent: 1,
+        },
+    )
 }
 
 /// One text field, drawn the same way everywhere something is typed.
@@ -3197,10 +3243,13 @@ fn input_row(
     )
 }
 
-fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> Vec<String> {
+fn draw_pick(app: &App, w: usize, h: usize, p: &Palette) -> (Vec<String>, Clickable) {
     let Mode::Pick { index, query, sel, scroll, show_all, on_list, cursor } = &app.mode
     else {
-        return vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)];
+        return (
+            vec![crate::title(&format!("{} settings", app.widget), w, &p.accent)],
+            Clickable::default(),
+        );
     };
     let field = &app.fields[*index];
     let choices = zone_choices(app, *index, query, *show_all);
@@ -3406,7 +3455,11 @@ format!(
         };
         say(&mut body, p.dim.as_str(), "  ", why.trim(), w);
     }
+    // One row per choice, so the placements are the first choice's row plus
+    // the index - shifted by the pinned title where the frame is built.
+    let mut rows_at: Vec<(usize, usize)> = Vec::new();
     for (i, (zone, on)) in choices.iter().enumerate() {
+        rows_at.push((body.len(), i));
         // A free list hands focus back and forth, and only the side holding
         // it wears a cursor. Every other picker has one place for keys to
         // go, so its selection always stands.
@@ -3613,10 +3666,8 @@ format!(
             vec![(p.dim.as_str(), "esc done".into())],
         ]
     };
-    let foot: Vec<String> = crate::pack_hints(&hints, w.saturating_sub(2), "  ")
-        .into_iter()
-        .map(|l| format!(" {l}"))
-        .collect();
+    let packed = crate::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+    let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {l}")).collect();
     // Title pinned, the rest windowed - the same shape as the list, and for
     // the same reason: a pane too short is a pane you scroll.
     let head = body.remove(0);
@@ -3631,9 +3682,20 @@ format!(
     while out.len() + foot.len() < h {
         out.push(String::new());
     }
+    let foot_top = out.len();
     out.extend(foot);
     out.truncate(h);
-    out
+    (
+        out,
+        Clickable {
+            placed: rows_at.into_iter().map(|(row, i)| (row + 1, i)).collect(),
+            head: 1,
+            scroll: at,
+            footer: packed,
+            foot_top,
+            foot_indent: 1,
+        },
+    )
 }
 
 fn list_hints<'a>(p: &'a Palette, boolean: bool) -> Vec<Vec<(&'a str, String)>> {
@@ -3665,8 +3727,48 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
     // screen answers for the other.
     keyboard.forget_footer();
 
+    // What the frame now on screen offers a click, carried from the draw at
+    // the bottom of the loop to the poll at the top of the next one: a click
+    // is answered against the frame the reader was looking at.
+    let mut click = Clickable::default();
+
     loop {
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which opens the editor on the
+        // list and takes a choice on the picker - the keys both screens
+        // already answer. The two are separate arms because the picker
+        // keeps its cursor inside its own mode rather than in `app`.
+        if matches!(app.mode, Mode::List) {
+            if let Some(at) = crate::rows_clicked(
+                &mut keys,
+                Some(app.selected),
+                click.head,
+                click.scroll,
+                &click.placed,
+                None,
+            ) {
+                app.selected = at;
+                app.chase = true;
+            }
+        } else if let Mode::Pick { sel, on_list, .. } = &mut app.mode {
+            if let Some(at) = crate::rows_clicked(
+                &mut keys,
+                Some(*sel),
+                click.head,
+                click.scroll,
+                &click.placed,
+                None,
+            ) {
+                *sel = at;
+                // Clicking a choice focuses the list as well as moving its
+                // cursor, because arrowing into it from the search box does
+                // both - and a cursor moved in an unfocused list would draw
+                // nowhere and answer to nothing.
+                *on_list = true;
+            }
+        }
+        for key in keys {
             let quit = match app.mode {
                 Mode::List => handle_list_key(&mut app, &key),
                 Mode::Edit { .. } => handle_edit_key(&mut app, &key),
@@ -3685,12 +3787,14 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
             }
         }
         let (w, h) = crate::size();
-        let body = match app.mode {
+        let (body, next) = match app.mode {
             Mode::List => draw_list(&mut app, w, h, &p),
             Mode::Edit { .. } => draw_edit(&app, w, h, &p),
             Mode::Pick { .. } => draw_pick(&app, w, h, &p),
         };
         crate::draw(&body, w, h);
+        keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
+        click = next;
         std::thread::sleep(Duration::from_millis(80));
     }
 }
@@ -3904,6 +4008,49 @@ mod tests {
     }
 
     /// An App holding one field, for asking what kind of picker it gets.
+    #[test]
+    fn the_list_hands_back_a_clickable_row_for_every_field() {
+        // The settings screen is core's, not a widget's, so the two checks
+        // in check.rs never walk it - this is what says its rows are
+        // clickable at all.
+        let mut app = field_app("alpha", serde_json::json!(1.0), None);
+        app.fields = ["alpha", "bravo", "charlie"]
+            .iter()
+            .map(|key| Field {
+                section: "w".into(),
+                key: (*key).to_string(),
+                parents: Vec::new(),
+                help: String::new(),
+                default: serde_json::json!(1.0),
+            })
+            .collect();
+        let (frame, click) = draw_list(&mut app, 80, 40, &palette());
+
+        // One placement per field, in order, and one row each.
+        assert_eq!(click.placed.len(), app.fields.len());
+        let rows: Vec<usize> = click.placed.iter().map(|(row, _)| *row).collect();
+        let items: Vec<usize> = click.placed.iter().map(|(_, i)| *i).collect();
+        assert_eq!(items, vec![0, 1, 2]);
+        assert_eq!(rows[1], rows[0] + 1);
+        assert_eq!(rows[2], rows[0] + 2);
+
+        // And they are frame rows, not body rows: the title is pinned above
+        // the window, so a placement that forgot it would be one row short
+        // and every click would land on the field below the one clicked.
+        // Read off the frame rather than recomputed, so the assertion
+        // cannot agree with the same mistake.
+        for (row, i) in &click.placed {
+            let drawn = &frame[*row];
+            assert!(
+                drawn.contains(&app.fields[*i].key),
+                "frame row {row} should carry {:?}",
+                app.fields[*i].key
+            );
+        }
+        assert_eq!(click.head, 1, "the title is the pinned row");
+        assert!(!click.footer.spots.is_empty(), "the footer is clickable too");
+    }
+
     fn field_app(key: &str, default: Value, rule: Option<Value>) -> App {
         let mut app = catalogue_app(serde_json::json!({"w": {}}));
         app.catalogues = &[];
@@ -4362,7 +4509,7 @@ mod tests {
             cursor: 4,
         };
         assert!(!add_free_entry(&mut app, 0, "http"));
-        let drawn = draw_pick(&app, 60, 24, &palette()).join("\n");
+        let drawn = draw_pick(&app, 60, 24, &palette()).0.join("\n");
         assert!(
             drawn.contains("whole number"),
             "the refusal has to reach the screen:\n{drawn}"

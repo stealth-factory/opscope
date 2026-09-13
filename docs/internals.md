@@ -113,6 +113,17 @@ moving its cursor, because that is what walking into it with the arrows
 does. Where the sections share one index — `herdr-panes`, `luvus-panes` —
 there is nothing extra to do.
 
+**The shared settings screen is clickable too.** Its three modes each hand
+back what the frame offers a click — where each row landed, what the window
+did, and the packed footer — and `run_settings` registers it after the draw
+and resolves clicks before the next keys. Clicking a row picks it; clicking
+it again is `enter`, which opens the editor, cycles a boolean or takes a
+choice, exactly as the key does. It still clears the registration on the way
+in and out, because it borrows its caller's `Keyboard` and polls before it
+draws. It is core's screen rather than a widget's, so the two checks never
+walk it — a unit test asserts one placement per field, read off the frame
+rather than recomputed.
+
 **A screen that draws without a list of its own clears the placements**, the
 same way a screen with no packed footer calls `forget_footer()`. Leaving
 them answers a click on a detail screen with whichever item happened to be
