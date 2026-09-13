@@ -45,7 +45,10 @@
 //! an `opscope.rs` that the port had already replaced.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// The repo root, from this crate's own location.
 fn root() -> PathBuf {
@@ -694,6 +697,126 @@ fn pane_ids_match_the_luvus_grammar() {
     assert!(!is_valid_pane_id(&format!("a{}", "b".repeat(120))));
 }
 
+/// Ids the install and release scanners will demand a binary for.
+///
+/// Only `[[panes]]` tables. The module header and `[[actions]]` also
+/// have `id =`, and a scanner that took every id then required
+/// `luvus/bin/open-menu` would refuse every install.
+fn pane_ids_from_manifest(toml: &str) -> Vec<String> {
+    let mut in_panes = false;
+    let mut ids = Vec::new();
+    for line in toml.lines() {
+        if line == "[[panes]]" {
+            in_panes = true;
+            continue;
+        }
+        if line.starts_with("[[") {
+            in_panes = false;
+            continue;
+        }
+        if let (true, Some(id)) = (in_panes, line.strip_prefix("id = \"")) {
+            if let Some(id) = id.strip_suffix('"') {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+#[test]
+fn pane_id_scanner_skips_actions_and_the_module_id() {
+    let fixture = "\
+id = \"opscope.widgets\"\n\
+[[actions]]\n\
+id = \"open-menu\"\n\
+[[panes]]\n\
+id = \"menu\"\n\
+[[panes]]\n\
+id = \"ports\"\n\
+[[actions]]\n\
+id = \"after-panes\"\n";
+    assert_eq!(pane_ids_from_manifest(fixture), ["menu", "ports"]);
+
+    let live = std::fs::read_to_string(root().join("luvus-module.toml"))
+        .expect("the committed manifest");
+    let live_ids = pane_ids_from_manifest(&live);
+    assert!(live_ids.contains(&"menu".to_string()));
+    assert!(live_ids.contains(&"ports".to_string()));
+    assert!(
+        !live_ids.iter().any(|id| id == "open-menu" || id.contains('.')),
+        "scanners must not treat the action or the module id as a pane: {live_ids:?}"
+    );
+
+    // The script the install and the release job actually run has to
+    // agree. A Rust-only test would pass while the shell still took
+    // every id.
+    let out = Command::new("/bin/sh")
+        .arg(root().join("luvus/pane-ids.sh"))
+        .arg(root().join("luvus-module.toml"))
+        .output()
+        .expect("pane-ids.sh");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script_ids: Vec<String> = String::from_utf8(out.stdout)
+        .expect("pane-ids.sh is text")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(script_ids, live_ids);
+}
+
+#[test]
+fn open_menu_action_asks_luvus_for_the_launcher() {
+    // The action is the module's only interface entry. A TOML-text
+    // compare cannot see a wrong module id, pane id, or argv, so this
+    // runs the script against a stub that records what it would have
+    // asked luvus. CI has no luvus, and a missing tool is not a
+    // reason to skip the one path that opens the launcher.
+    let syntax = Command::new("/bin/sh")
+        .args(["-n"])
+        .arg(root().join("luvus/open-menu.sh"))
+        .status()
+        .expect("sh -n");
+    assert!(syntax.success(), "open-menu.sh does not parse");
+
+    let tmp = std::env::temp_dir().join(format!("opscope-open-menu-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("a scratch dir for the stub");
+    let stub = tmp.join("luvus");
+    let argv = tmp.join("argv");
+    std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OPSCOPE_ARGV\"\n")
+        .expect("the stub");
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let run = |module: Option<&str>| {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(root().join("luvus/open-menu.sh"))
+            .env("LUVUS_BIN_PATH", &stub)
+            .env("OPSCOPE_ARGV", &argv);
+        match module {
+            Some(id) => {
+                cmd.env("LUVUS_MODULE_ID", id);
+            }
+            None => {
+                cmd.env_remove("LUVUS_MODULE_ID");
+            }
+        }
+        let status = cmd.status().expect("open-menu.sh");
+        assert!(status.success(), "open-menu.sh exited {status}");
+        std::fs::read_to_string(&argv).expect("the stub wrote argv")
+    };
+
+    assert_eq!(run(None), "module\npane\nopen\nopscope.widgets\nmenu\n");
+    assert_eq!(run(Some("other.id")), "module\npane\nopen\nother.id\nmenu\n");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The workspace version, which the module manifest has to carry.
 ///
 /// A module's `version` is committed and is read before its build step
@@ -792,6 +915,23 @@ fn render_luvus_module() -> String {
          # fails for a reason it is not about.\n\
          [[build]]\n\
          command = [\"/bin/sh\", \"luvus/build.sh\"]\n",
+    );
+
+    // The way in. Luvus shows a module's actions in its right-click menus
+    // and its declared panes nowhere at all, so without this an installed
+    // module puts nothing in the interface and every widget needs a typed
+    // command. One action, opening the launcher, because browsing sixteen
+    // widgets is what the launcher already solves - the pane declarations
+    // below stay for anybody who knows which one they want.
+    out.push_str(
+        "\n# Right-click any pane to open the launcher. An action has no\n\
+         # terminal of its own, so it asks luvus for a pane rather than\n\
+         # being the widget itself.\n\
+         [[actions]]\n\
+         id = \"open-menu\"\n\
+         title = \"opscope\"\n\
+         contexts = [\"pane\"]\n\
+         command = [\"/bin/sh\", \"luvus/open-menu.sh\"]\n",
     );
 
     out.push_str(

@@ -10,24 +10,53 @@ fetches them.
 
 ```sh
 luvus module install stealth-factory/opscope
-luvus module pane open opscope.widgets ports --placement split
 ```
 
-`luvus module info opscope.widgets` lists every pane it declares.
+## The way in is the launcher
+
+**Right-click any pane and choose *opscope*.** That opens the launcher: all
+sixteen widgets, each with its own one-line summary and a preview of what it
+looks like running, and `↵` starts the one under the cursor in that same pane.
+Browsing is the launcher's whole job and there is no reason to make anyone do
+it from a command line.
+
+That is the only thing this module puts in Luvus's interface, deliberately.
+Luvus shows a module's **actions** in its right-click menus and its declared
+**panes** nowhere at all — so a module with seventeen panes and no action
+installs successfully and then appears nowhere, which is how this started.
+
+**If you already know which widget you want, name it and skip the menu:**
+
+```sh
+luvus module pane open opscope.widgets ports
+luvus module pane open opscope.widgets clocks --placement overlay
+```
+
+Every widget has a pane of its own, so anything on the launcher's list is
+also a command. `--placement` takes `split`, `overlay` or `tab`; left out, the
+manifest's own `split` stands. `luvus module info opscope.widgets` lists all
+seventeen.
 
 ## What it declares
 
-One pane per widget, plus `menu` for the launcher — the front door that shows
-every widget and a preview before it runs. Every pane goes through
-`./luvus/bin/opscope <widget>` rather than at the widget binary directly: named a
-widget, the launcher draws no menu, starts it, and exits with its status — so
+One pane per widget, plus `menu` for the launcher, and one action —
+`open-menu` — which is the right-click row above. An action is a
+fire-and-forget subprocess with no terminal of its own, so it cannot *be* a
+widget: `luvus/open-menu.sh` asks luvus for a pane and lets the declaration
+decide where it lands.
+
+Every pane goes through `./luvus/bin/opscope <widget>` rather than at the
+widget binary directly: named a widget, the launcher draws no menu, starts it,
+and exits with its status — so
 the pane closes when you quit the widget, and the old names the launcher
 resolves keep working. It waits as the parent while the widget runs, which is
 one extra process per pane and the same shape `npx opscope <widget>` already
 has. Closing the pane takes both.
 
 Nothing else. No dock, no bar, no settings, no event hooks — this module
-reads nothing about your session and writes nothing to it.
+reads nothing about your session and writes nothing to it. The one action it
+declares opens a pane and takes no argument; it cannot reach anything you are
+running.
 
 ## Where the binaries come from
 
@@ -66,6 +95,30 @@ Written against the manifest features Luvus documents at **0.8.3**, which is
 what `min_luvus_version` says. Run against **0.13.4**, which is a different
 claim and the one worth trusting.
 
+## Upgrading, and going back to a working tree
+
+There is no `luvus module update`. `install` on an id that is already
+registered is an error — and it is raised *after* the clone, the download and
+the checksum, so a cheap mistake looks expensive. Upgrading is two commands:
+
+```sh
+luvus module uninstall opscope.widgets     # unlink, and delete the checkout
+luvus module install stealth-factory/opscope
+```
+
+`uninstall` deletes the managed checkout; `unlink` on its own only
+deregisters and leaves your files alone, which is what you want for a module
+you linked rather than installed:
+
+```sh
+luvus module link /path/to/opscope         # develop against a working tree
+luvus module unlink opscope.widgets        # and stop
+```
+
+Both forms claim the same id, so only one can be registered at a time. A
+`link` left over from development is the likeliest reason an install stops
+with *module opscope.widgets is already registered*.
+
 ## The manifest is generated
 
 `luvus-module.toml` — at the repo root, because a manifest in a subdirectory
@@ -87,5 +140,6 @@ generator is in [`widgets/tests/check.rs`](../widgets/tests/check.rs).
 
 A module is ordinary code that runs as you. Luvus shows every command a
 module declares before it installs one, and the whole of this module's is
-above: one `/bin/sh luvus/build.sh`, and one `./luvus/bin/opscope` line for each of the
-sixteen widgets and the launcher menu.
+above: one `/bin/sh luvus/build.sh` at install time, one `/bin/sh
+luvus/open-menu.sh` behind the right-click row, and one `./luvus/bin/opscope`
+line for each of the sixteen widgets and the launcher menu.
