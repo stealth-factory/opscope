@@ -3,6 +3,13 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.19.0] - 2026-09-13
+
+### Features
+
+- **core**: A click is a key, so a footer becomes clickable in two lines (#225)
+- **widgets**: Every widget answers a click (#229)
+
 ## [0.18.0] - 2026-09-13
 
 ### Features
