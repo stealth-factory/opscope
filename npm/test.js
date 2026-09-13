@@ -633,8 +633,32 @@ test('the stale check runs before promote offers the by-hand commands', () => {
   const clears = promote.indexOf("npm config delete '//registry.npmjs.org/:_authToken'");
   assert.notEqual(byHand, -1, 'promote no longer offers the by-hand commands');
   assert.notEqual(clears, -1, 'promote never clears the empty auth token');
-  assert.ok(clears < guard, 'the anonymous read happens before the token is cleared');
-  assert.ok(guard < byHand, 'the by-hand commands are offered before the stale check');
+  assert.ok(clears < guard, 'the empty token is cleared before the anonymous next read');
+  assert.ok(guard < byHand, 'the stale check runs before the by-hand commands are offered');
+  const offered = promote.slice(byHand);
+  const offeredCheck = offered.indexOf('dist-tags.next');
+  const offeredWrite = offered.indexOf('npm dist-tag add');
+  assert.ok(offeredCheck !== -1 && offeredWrite !== -1 && offeredCheck < offeredWrite,
+    'the printed recovery script must check next before any dist-tag add');
+});
+
+test('releasing.md recovery script checks next before moving latest', () => {
+  // The same four writes, copied from the docs, would roll latest
+  // backwards if next has already moved. The script has to refuse first.
+  const md = fs.readFileSync(
+    path.join(repoRoot, 'docs/releasing.md'),
+    'utf8',
+  );
+  const start = md.indexOf('```sh\nversion=X.Y.Z');
+  assert.notEqual(start, -1, 'releasing.md has no versioned recovery script');
+  const end = md.indexOf('```', start + 4);
+  const script = md.slice(start, end);
+  const check = script.indexOf('dist-tags.next');
+  const write = script.indexOf('npm dist-tag add');
+  assert.ok(check !== -1 && write !== -1 && check < write,
+    'the docs recovery script must check next before any dist-tag add');
+  assert.match(script, /opscope-linux-x64[\s\S]*opscope-darwin-arm64[\s\S]*opscope-darwin-x64[\s\S]*opscope@/,
+    'platforms first, launcher last');
 });
 
 test('release.yml moves latest only after the npm smoke job', () => {

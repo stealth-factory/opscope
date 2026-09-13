@@ -750,10 +750,20 @@ jobs:
             echo "npm publish and nowhere else. Finishing this wants a" >&2
             echo "granular access token in the NPM_TOKEN secret." >&2
             echo >&2
-            echo "To finish it by hand, logged in to npm:" >&2
+            echo "To finish it by hand, logged in to npm. Check next" >&2
+            echo "still names this version, then move latest. Platforms" >&2
+            echo "first, the launcher last:" >&2
             echo >&2
+            echo "  version=${version}" >&2
             for name in $platforms $launcher; do
-              echo "  npm dist-tag add ${name}@${version} latest" >&2
+              echo "  staged=\$(npm view ${name} dist-tags.next 2>/dev/null | tr -d '[:space:]')" >&2
+              echo "  if [ \"\$staged\" != \"\$version\" ]; then" >&2
+              echo "    echo \"${name}@next is \${staged:-unset}, not \$version\" >&2" >&2
+              echo "    exit 1" >&2
+              echo "  fi" >&2
+            done
+            for name in $platforms $launcher; do
+              echo "  npm dist-tag add ${name}@\${version} latest" >&2
             done
             echo >&2
             echo "Or set NPM_TOKEN and re-dispatch release.yml at this tag:" >&2

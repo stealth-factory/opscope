@@ -261,17 +261,33 @@ does not work — the release simply is not being advertised yet.
 
 Either `promote` did not run, because `smoke-npm` failed and the
 version could not be installed from a clean runner, or it ran and
-stopped for want of a token. The run log says which, and the promote
-job prints the commands either way.
+stopped for want of a token. The run log says which. The promote job
+prints the finish-by-hand commands only if this version still owns
+`next`; a stale re-dispatch is refused and offers nothing.
 
-To finish it, logged in to npm as somebody who can publish these — the
-launcher last, because `opscope@latest` is the pointer people follow:
+To finish it, logged in to npm as somebody who can publish these —
+confirm every package's `next` still names this version, then move
+`latest`. Platforms first, the launcher last, because
+`opscope@latest` is the pointer people follow:
 
 ```sh
-npm dist-tag add opscope-linux-x64@X.Y.Z latest
-npm dist-tag add opscope-darwin-arm64@X.Y.Z latest
-npm dist-tag add opscope-darwin-x64@X.Y.Z latest
-npm dist-tag add opscope@X.Y.Z latest
+version=X.Y.Z
+for name in \
+  opscope-linux-x64 \
+  opscope-darwin-arm64 \
+  opscope-darwin-x64 \
+  opscope
+do
+  staged=$(npm view "$name" dist-tags.next | tr -d '[:space:]')
+  if [ "$staged" != "$version" ]; then
+    echo "$name@next is ${staged:-unset}, not $version" >&2
+    exit 1
+  fi
+done
+npm dist-tag add opscope-linux-x64@$version latest
+npm dist-tag add opscope-darwin-arm64@$version latest
+npm dist-tag add opscope-darwin-x64@$version latest
+npm dist-tag add opscope@$version latest
 ```
 
 Setting `NPM_TOKEN` and re-dispatching `release.yml` at the tag does
