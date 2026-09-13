@@ -136,8 +136,18 @@ impl Widget {
 /// that needs more than three lines has to keep wrapping or the rest
 /// can never be scrolled to.
 fn wrap(text: &str, width: usize) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    // A pane with no usable width still has to say something: dropping
+    // the note is indistinguishable from there being none, and without
+    // this `cut` is zero and `rest` never shrinks.
+    if width == 0 {
+        return vec![text.to_string()];
+    }
     let mut lines = Vec::new();
-    let mut rest: Vec<char> = text.trim().chars().collect();
+    let mut rest: Vec<char> = text.chars().collect();
     while !rest.is_empty() {
         if rest.len() <= width {
             lines.push(rest.iter().collect());
@@ -819,6 +829,11 @@ mod tests {
         // keeps wrapping rather than stopping at three.
         assert!(wrap(&"word ".repeat(60), 10).len() > 3);
         assert!(wrap("", 8).is_empty());
+        // Four cells or fewer leave wrap a width of zero. The three-line
+        // cap used to hide the hang; without it, cut is zero and rest
+        // never shrinks. Keep the string, as wrap_words does.
+        assert_eq!(wrap("one two three", 0), vec!["one two three"]);
+        assert!(wrap("", 0).is_empty());
     }
 
     #[cfg(unix)]
