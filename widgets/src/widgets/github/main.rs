@@ -220,6 +220,19 @@ fn board_24h(stats: &[Account], watched: usize, pick: fn(&Account) -> Option<i64
     Some(stats.iter().filter_map(pick).sum())
 }
 
+/// Drop the rolling-day pair on a row that failed this pass.
+///
+/// `by_acc` is seeded from what is already on screen, so a later aggregate
+/// failure would otherwise keep last pass's counts. The rest of the row
+/// stays — the table should not empty — but a mixture of stale and fresh
+/// 24h figures wearing the same `last 24h` label is a smaller number
+/// wearing a complete one, and the gate above cannot see the difference
+/// until these two are gone.
+fn forget_24h(row: &mut Account) {
+    row.opened_24h = None;
+    row.merged_24h = None;
+}
+
 /// `tc::seg` over segments that own their colours.
 fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     let borrowed: Vec<(&str, String)> =
@@ -836,8 +849,11 @@ fn build_day_query(q: &str, dates: &[String]) -> String {
 /// an `issueCount` costs one rate-limit point per *request* however many
 /// aliases ride in it.
 ///
-/// `now` is a parameter rather than read inside, so the rolling
-/// twenty-four-hour cut can be pinned by a test.
+/// `now` is a parameter rather than read inside, so the caller can pin
+/// one cut for a whole account pass (and a test can pin a frozen one).
+/// Reading it per account would give each a different 24h window, and the
+/// board sum would then cover several slightly different intervals under
+/// one `last 24h` label.
 fn build_query(acc: &str, days: i64, viewer: &str, now: DateTime<Utc>) -> String {
     // N days *ending today*, so this spans exactly the dates the per-day
     // charts plot - `days` rather than `days - 1` would cover one day more
@@ -1254,14 +1270,22 @@ fn one_pass(
     // request each, so the headline is live in seconds; the day charts below
     // can cost fifty requests on a cold 90d window and would otherwise hold
     // the whole board grey for minutes.
+    // One `now` for the whole pass: each account is queried sequentially,
+    // and a fresh `Utc::now()` per request would stagger the 24h cut so
+    // the board sum covered several slightly different windows.
+    let rolling_now = Utc::now();
     for acc in &accounts {
-        let data = match graphql(&build_query(acc, days_now, viewer, Utc::now()), tok, scopes) {
+        let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes) {
             Ok(d) => d,
             Err(e) => {
                 // Fifty characters, which is what the branch below used to
                 // take before `graphql` started refusing an errors payload
                 // itself and made that branch unreachable.
                 failed.push(format!("{} ({})", acc, e.chars().take(50).collect::<String>()));
+                if let Some(row) = by_acc.get_mut(acc) {
+                    forget_24h(row);
+                    publish(state, &accounts, &by_acc, rate);
+                }
                 continue;
             }
         };
@@ -2479,6 +2503,30 @@ mod tests {
         assert_eq!(board_24h(&holed, 3, |s| s.opened_24h), None);
         // And no accounts at all sums to nothing, not to zero.
         assert_eq!(board_24h(&[], 0, |s| s.opened_24h), None);
+    }
+
+    #[test]
+    fn a_failed_refresh_is_not_a_current_total() {
+        // After an account has landed once, a later aggregate failure
+        // leaves its row in `by_acc`. Clearing only the rolling-day pair
+        // keeps the table on screen and the figures off it — the mutation
+        // that would make this fail is leaving the previous Some values.
+        let mut stale = Account {
+            opened_24h: Some(4),
+            merged_24h: Some(5),
+            open: 12,
+            ..Default::default()
+        };
+        forget_24h(&mut stale);
+        assert_eq!(stale.opened_24h, None);
+        assert_eq!(stale.merged_24h, None);
+        assert_eq!(stale.open, 12);
+        let fresh = Account {
+            opened_24h: Some(7),
+            merged_24h: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(board_24h(&[stale, fresh], 2, |s| s.opened_24h), None);
     }
 
     #[test]
