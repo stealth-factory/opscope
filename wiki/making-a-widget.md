@@ -451,6 +451,9 @@ and npm publication path is separate from PR merge; it is documented in
 | alphabetical launcher order | `the_list_is_in_a_settled_order` in `widgets/src/launcher/main.rs` |
 | first README preview | `a_sample_is_a_picture_of_the_widget` in `widgets/src/launcher/main.rs` |
 | `help.txt` summary and paragraph | `every_widget_describes_itself` in `widgets/src/launcher/main.rs` |
+| answering the wheel | `every_widget_answers_the_wheel` |
+| registering the footer, so its hints are clickable | `every_widget_registers_its_footer` |
+| answering a click on a row | `every_widget_with_a_cursor_answers_a_click` |
 
 `every_widget_is_on_the_launcher_menu` is the repository check: it fails
 if a widget folder is missing from the launcher registry.
@@ -598,10 +601,16 @@ unambiguous about which characters are the key: `[q]uit`, `[d] cloudflare`,
 `[↵] open`, or a bare `↵ → ← ↑ ↓`. `↑↓ select` names two and gets nothing —
 there is no honest answer to which one a click sent — and `[±]25` is one
 glyph standing for `+` and `-`, so it gets nothing either. Write them as two
-hints if you want both clickable. A key named only in prose (`esc closes`) is
-left alone on purpose: guessing which word was the key would sometimes fire
-the wrong one, and a hint that fires the wrong key is worse than one that
-fires none.
+hints if you want both clickable.
+
+**A hint can also name its key as its leading token** — `ctrl-u clear`,
+`esc cancel`, `tab to add another`. Only the first token is read, so the
+words after it stay words and `clear` never becomes a key. Write the key
+first, which this tree does everywhere anyway.
+
+That is a fallback and never a tie-breaker: `esc / [,] back` names two keys
+for one action, and counting both would make it ambiguous and take away a
+spot it already had, so the bracket wins and the synonym is ignored.
 
 **Call `footer_at` every frame**, beside the draw. The footer moves when the
 pane resizes and wraps onto a second line when it narrows; a placement kept

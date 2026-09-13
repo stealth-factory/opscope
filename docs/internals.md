@@ -78,15 +78,26 @@ inside a hint arrives as the key that hint names, through the match arm the
 widget already has. Hints added to the footer later are clickable the moment
 they are added: the widget registers the footer, not the hints.
 
-A hint is clickable when it names exactly one key, in one of the two forms
-that are unambiguous about which characters are the key — `[q]uit`,
+A hint is clickable when it names exactly one key. Two forms count first,
+both unambiguous about which characters are the key — `[q]uit`,
 `[d] cloudflare`, `[↵] open`, or a bare `↵ → ← ↑ ↓`. The launcher's
 `↑↓ select` names two and gets no spot; `[±]25` is one glyph standing for
-`+` and `-` and gets none either. A key named only in prose (`esc closes`)
-is left alone: recovering it from a sentence means guessing, and a click
-that fires the wrong key is worse than one that fires none. The bracket
-rules are the four `check.rs` uses, so the two readers agree about what a
-footer teaches.
+`+` and `-` and gets none either. The bracket rules are the four `check.rs`
+uses, so the two readers agree about what a footer teaches.
+
+A hint that names its key neither way falls back to its **leading token**,
+when that token is a key with a name — `ctrl-u clear`, `esc cancel`,
+`tab to add another`, which is how the settings screen writes half of its
+footer. This is not the loose reading `check.rs` does. There a whole footer
+is one string and the key could be anywhere in it, so recovering it means
+guessing; here each hint arrives on its own and this tree writes the key
+first, every time. Nothing after the first token is read, which is what
+keeps `clear`, `cancel` and `done` from becoming keys.
+
+A fallback, never a tie-breaker, and that ordering is load-bearing:
+`esc / [,] back` names two keys for one action, so counting both would make
+it ambiguous and take away a spot it already had. The bracket wins, the
+synonym is ignored, the hint stays clickable.
 
 Register every frame. The footer moves when the pane resizes and wraps onto
 a second line when it narrows, and a placement kept from an older frame
@@ -198,8 +209,11 @@ widget can satisfy either without the other: `every_widget_registers_its_footer`
 reads for the `footer_at` call — not for `pack_hints_placed`, since `months`
 wraps prose through `pack_hints` too and a sentence is not a footer — and
 `every_widget_with_a_cursor_answers_a_click` reads for `tc::rows_clicked(`,
-which is the one call that does both halves of the gesture — and not
-`row_at(`, because `github` keeps a local closure of that name.
+which is the one call that does both halves of the gesture. Not `item_at(`,
+which a widget could call without ever opening anything, and not `row_at(`,
+which is not even core API any more — `github` keeps a local closure of that
+name, and a reader looking for it would have been satisfied by a widget that
+answered nothing.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
