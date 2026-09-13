@@ -391,6 +391,13 @@ fn main() -> std::process::ExitCode {
     // Where the list window sits, and whether a key has just moved the
     // cursor. The wheel writes the first and never the second.
     let (mut scroll, mut moved) = (0usize, false);
+    // Where the list was drawn on the frame now on screen: its first row,
+    // the widget drawn there, and how many rows it got. A click is
+    // answered against the frame the reader was looking at when they
+    // clicked, which is the one built on the previous pass - so these are
+    // kept rather than recomputed. Nothing is on screen yet on the first
+    // pass, and a list of no rows is one nothing can land on.
+    let (mut list_top, mut list_first, mut list_rows) = (0usize, 0usize, 0usize);
 
     loop {
         for key in keyboard.poll() {
@@ -420,7 +427,21 @@ fn main() -> std::process::ExitCode {
                 "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }
-                _ => {}
+                // A click on a row picks it, exactly as the arrows do, and
+                // stops there. Starting a widget stays ↵ - which the
+                // footer's `↵ launch` hint answers to, and core turns a
+                // click on that hint into the key it names before this
+                // match ever sees it. So the mouse reaches nothing the
+                // keyboard cannot, and the three bracketed hints below
+                // became clickable without a line of code apiece.
+                other => {
+                    if let Some((_, row)) = tc::click_at(other) {
+                        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -459,6 +480,7 @@ fn main() -> std::process::ExitCode {
             w - 1,
         ));
         body.push(String::new());
+        (list_top, list_first, list_rows) = (body.len(), first, shown);
         body.extend(rows_for(w, selected, first, shown, &p));
         body.push(String::new());
 
@@ -492,10 +514,8 @@ fn main() -> std::process::ExitCode {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let room = h.saturating_sub(body.len() + foot.len());
         let shown = pick.sample();
         if !shown.is_empty() && room >= 6 && w >= 44 {
@@ -525,9 +545,17 @@ fn main() -> std::process::ExitCode {
         while body.len() < h.saturating_sub(foot.len()) {
             body.push(String::new());
         }
+        // Where the footer actually ends up, after the blank rows that
+        // push it to the bottom, and one column in because that is where
+        // the indent above puts it. Registered every frame rather than
+        // once: the footer moves as the pane resizes and wraps onto a
+        // second line as it narrows, and a placement kept from an older
+        // frame sends whatever key used to be under the pointer.
+        let foot_top = body.len();
         body.extend(foot);
         body.truncate(h);
         tc::draw(&body, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(150));
     }
 }

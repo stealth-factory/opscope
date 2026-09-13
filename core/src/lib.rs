@@ -417,11 +417,134 @@ pub fn restore_screen() {
 ///
 /// A hint that gets cut in half teaches a key that does not exist, so the
 /// line wraps instead of truncating - the rule the whole repo follows.
+///
+/// A thin call onto `pack_hints_placed`, which does the packing and also
+/// records where each hint landed. Sixteen widgets call this one and its
+/// signature is not going to change under them; a widget that wants its
+/// footer clickable asks for the placed form instead. Written this way
+/// round rather than as two packers so the two cannot drift: a footer that
+/// is clickable in the wrong places would be worse than one that is not
+/// clickable at all.
 pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec<String> {
+    pack_hints_placed(hints, width, sep).lines
+}
+
+/// The four glyphs the control standard leans on, and the keys they mean.
+///
+/// The same table `check.rs` reads footers with, for the same reason: a
+/// hint that names its key as an arrow is naming a key, and a reader that
+/// only understood brackets would call half of these footers keyless.
+const HINT_GLYPHS: &[(char, &str)] = &[
+    ('\u{21b5}', "enter"), // ↵
+    ('\u{2192}', "right"), // →
+    ('\u{2190}', "left"),  // ←
+    ('\u{2191}', "up"),    // ↑
+    ('\u{2193}', "down"),  // ↓
+];
+
+/// Where one hint landed in a packed footer, and the key it names.
+///
+/// Columns are terminal cells from the start of the footer line, not
+/// bytes: a hint drawn after `↑↓ select` starts ten columns along, and the
+/// `↑↓` is two of them rather than six.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HintSpot {
+    /// What a click here should arrive as, in the names `poll` already
+    /// returns - `"q"`, `"enter"`, `"left"`.
+    pub key: String,
+    /// Which packed line it is on, counting from zero.
+    pub line: usize,
+    /// Its first column within that line, counting from zero.
+    pub col: usize,
+    /// How many columns it occupies, not counting the separator after it.
+    pub width: usize,
+}
+
+/// A packed footer that remembers where its hints went.
+#[derive(Debug, Clone, Default)]
+pub struct Footer {
+    /// Exactly what `pack_hints` returns for the same arguments.
+    pub lines: Vec<String>,
+    /// One entry per hint that names exactly one key. A hint naming two -
+    /// `↑↓ select` - or none is drawn like any other and has no entry,
+    /// because there is no honest answer to which key clicking it sent.
+    pub spots: Vec<HintSpot>,
+}
+
+/// The one key a hint teaches, or nothing when it does not teach exactly one.
+///
+/// Two forms count, and deliberately only two: a single character in
+/// brackets, and one of the arrow-and-return glyphs. Both are unambiguous
+/// about which characters are the key, which is what a click needs. The
+/// third form `check.rs` reads - a key named in prose, as in
+/// `esc, ↵ or i to close` - is not taken here, because recovering the key
+/// out of a sentence means guessing, and a click that fires the wrong key
+/// is worse than one that fires none.
+///
+/// `[±]25` is the case that proves the rule. One glyph standing for two
+/// arms, `+` and `-`, so a click on it has no single answer and gets none.
+fn hint_key(plain: &str) -> Option<String> {
+    let chars: Vec<char> = plain.chars().collect();
+    // Every key the hint could be taken to name, in the order they appear.
+    // Collected rather than counted so that one entry meaning no key - the
+    // `±` case - is told apart from no entries at all.
+    let mut named: Vec<Option<String>> = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        // `[q]uit`, and `[↵] open` which means the same as a bare ↵.
+        // The same four rules `check.rs` separates a hint from a string
+        // that merely contains brackets with, because the two readers have
+        // to agree about what a footer teaches: exactly one character
+        // between the brackets kills `[::1]` and `[[bin]]`, that character
+        // not being `{` kills the placeholder `[{}]`, an alphanumeric
+        // before the `[` kills `args[0]`, and a `.`, `(` or `[` after the
+        // `]` kills `][0].as_str()`.
+        let bracketed = chars[i] == '['
+            && chars.get(i + 2) == Some(&']')
+            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+            && chars
+                .get(i + 3)
+                .is_none_or(|c| *c != '.' && *c != '(' && *c != '[');
+        if bracketed {
+            let glyph = chars[i + 1];
+            let key = match HINT_GLYPHS.iter().find(|(g, _)| *g == glyph) {
+                Some((_, name)) => Some((*name).to_string()),
+                None if glyph == '{' || glyph == '\u{b1}' => None,
+                None => Some(glyph.to_string()),
+            };
+            named.push(key);
+            i += 3;
+            continue;
+        }
+        if let Some((_, name)) = HINT_GLYPHS.iter().find(|(g, _)| *g == chars[i]) {
+            named.push(Some((*name).to_string()));
+        }
+        i += 1;
+    }
+    match named.as_slice() {
+        [one] => one.clone(),
+        _ => None,
+    }
+}
+
+/// Pack a footer and record where every hint landed.
+///
+/// The lines are the ones `pack_hints` draws - same wrapping, same
+/// separator, same refusal to split a hint - and the spots are what turns
+/// a click into a key. Hand the result to `Keyboard::footer_at` and every
+/// hint that names one key becomes clickable at once, including hints
+/// added to the footer later: the widget registers the footer, not the
+/// hints, so there is nothing per-hint to forget.
+pub fn pack_hints_placed(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Footer {
     let mut lines: Vec<String> = Vec::new();
+    let mut spots: Vec<HintSpot> = Vec::new();
     let mut current: Vec<String> = Vec::new();
     let mut used = 0usize;
     for hint in hints {
+        // Summed per piece rather than measured on the joined string,
+        // which is what the widths have always been: the two differ where
+        // a piece ends mid-grapheme, and the footers are built to the
+        // first.
         let plain: usize = hint.iter().map(|(_, t)| display_width(t)).sum();
         let extra = if current.is_empty() {
             plain
@@ -438,17 +561,66 @@ pub fn pack_hints(hints: &[Vec<(&str, String)>], width: usize, sep: &str) -> Vec
             .map(|(c, t)| format!("{}{}", c, t))
             .collect::<Vec<_>>()
             .join("");
-        if current.is_empty() {
-            used = plain;
+        let col = if current.is_empty() {
+            0
         } else {
-            used += plain + display_width(sep);
+            used + display_width(sep)
+        };
+        let text: String = hint.iter().map(|(_, t)| t.as_str()).collect();
+        if let Some(key) = hint_key(&text) {
+            spots.push(HintSpot {
+                key,
+                line: lines.len(),
+                col,
+                width: plain,
+            });
         }
+        used = col + plain;
         current.push(piece);
     }
     if !current.is_empty() {
         lines.push(current.join(sep));
     }
-    lines
+    Footer { lines, spots }
+}
+
+/// The frame cell a click key names, or nothing if the key is not one.
+///
+/// Zero-based and in the widget's own coordinates: `(0, 0)` is the first
+/// cell of `rows[0]` as handed to `draw`. The terminal counts rows and
+/// columns from one and the subtraction is done here, once, rather than in
+/// every widget that ever hit-tests a click.
+///
+/// A click arrives as a key because that is the whole shape of mouse
+/// support here - the mouse is a second route to something a key already
+/// does, never a capability of its own. It is deliberately more than one
+/// character long: every place in this tree that types an unrecognised key
+/// into a filter or a text field guards on `chars().count() == 1` first,
+/// so a click cannot be typed into a search box by a widget that has not
+/// heard of it.
+pub fn click_at(key: &str) -> Option<(usize, usize)> {
+    let rest = key.strip_prefix("click:")?;
+    let (col, row) = rest.split_once(',')?;
+    Some((col.parse().ok()?, row.parse().ok()?))
+}
+
+/// Which item a click on frame row `y` landed on, if it landed on one.
+///
+/// The inverse of the window `follow` decides: `top` is the frame row the
+/// list starts on, `first` the index drawn there, and `shown` how many
+/// rows it got. This is the whole of what core can do for clicking a row,
+/// because which rows are selectable is the widget's own business and
+/// nothing here can see it.
+///
+/// Outside those rows the answer is `None` rather than a clamp. A click on
+/// the footer is not a click on the last item, and a list that selected
+/// its last row whenever somebody clicked below it would move the cursor
+/// for a click that was aimed at nothing.
+pub fn row_at(y: usize, top: usize, first: usize, shown: usize) -> Option<usize> {
+    if y < top || y >= top + shown {
+        return None;
+    }
+    Some(first + (y - top))
 }
 
 /// Where settings are looked for, in order of preference.
@@ -1876,6 +2048,12 @@ pub struct Keyboard {
     /// A bare ESC is held for one poll before it counts as Escape: it is
     /// indistinguishable from the start of a sequence still arriving.
     lone_esc: bool,
+    /// Where this frame's footer hints are - key, frame row, first column,
+    /// width - so a click on one arrives as the key it names. Empty until
+    /// a widget registers a footer, which is what makes clickable hints
+    /// something a widget opts into rather than something that happens to
+    /// it.
+    hints: Vec<(String, usize, usize, usize)>,
 }
 
 impl Keyboard {
@@ -1902,6 +2080,7 @@ impl Keyboard {
             fd,
             saved,
             buf: Vec::new(),
+            hints: Vec::new(),
         }
     }
 
@@ -1953,6 +2132,54 @@ impl Keyboard {
         self.buf.clear();
     }
 
+    /// Make this frame's footer clickable.
+    ///
+    /// `top` is the frame row the footer's first line is drawn on and
+    /// `indent` how far right it is shifted, both zero-based and in the
+    /// same coordinates `click_at` reports - `rows[0]` as handed to `draw`
+    /// is row zero. Most footers are indented by one, because most of them
+    /// are drawn as `format!(" {}", line)`.
+    ///
+    /// Call it every frame, beside the draw. The footer moves when the
+    /// pane resizes and wraps onto a second line when it narrows, so a
+    /// placement kept from an older frame sends whatever key used to be
+    /// under the pointer - and a hint that fires the wrong key is worse
+    /// than one that fires none.
+    ///
+    /// Registering nothing is how a widget turns hint clicks back off:
+    /// pass a footer with no spots, or simply never call this.
+    pub fn footer_at(&mut self, footer: &Footer, top: usize, indent: usize) {
+        self.hints = footer
+            .spots
+            .iter()
+            .map(|spot| {
+                (
+                    spot.key.clone(),
+                    top + spot.line,
+                    indent + spot.col,
+                    spot.width,
+                )
+            })
+            .collect();
+    }
+
+    /// A click on a registered hint, as the key that hint names.
+    ///
+    /// Anything else is handed back untouched, clicks included: a click
+    /// that missed every hint still reaches the widget as `click:x,y`, and
+    /// that is what `row_at` is for.
+    fn hint_under(&self, key: String) -> String {
+        let Some((x, y)) = click_at(&key) else {
+            return key;
+        };
+        for (name, row, col, width) in &self.hints {
+            if y == *row && x >= *col && x < col + width {
+                return name.clone();
+            }
+        }
+        key
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
     pub fn poll(&mut self) -> Vec<String> {
         if self.saved.is_none() {
@@ -1973,6 +2200,9 @@ impl Keyboard {
             .push_str(&String::from_utf8_lossy(&self.buf).to_string());
         self.buf.clear();
         decode(&mut self.pending, &mut self.lone_esc)
+            .into_iter()
+            .map(|key| self.hint_under(key))
+            .collect()
     }
 }
 
@@ -2029,49 +2259,78 @@ fn escape_len(s: &[char]) -> Option<usize> {
 /// no release to pair with, which is why a wheel `m` is not a thing to
 /// wait for.
 ///
-/// Returns `Some((len, None))` for a report that is well-formed but not a
-/// wheel - a click, a release, a drag. Those are consumed rather than
-/// passed on, because a report nobody handles must still not arrive as
-/// keystrokes. Clicks become keys in OPS-55; until then they are eaten
-/// here deliberately rather than by accident.
+/// Returns `Some((len, None))` for a report that is well-formed and means
+/// nothing here - a release, a middle or right button, a drag. Those are
+/// consumed rather than passed on, because a report nobody handles must
+/// still not arrive as keystrokes.
 ///
 /// A report still arriving returns `None` and is left in the buffer for
 /// the next poll, which is what the caller does with every other partial
 /// sequence.
-fn mouse_report(s: &[char]) -> Option<(usize, Option<&'static str>)> {
+fn mouse_report(s: &[char]) -> Option<(usize, Option<String>)> {
     if s.first() != Some(&'\x1b') || s.get(1) != Some(&'[') || s.get(2) != Some(&'<') {
         return None;
     }
-    let mut i = 3;
-    let mut button = 0u32;
+    // Button, column, row. The column and row were read past and thrown
+    // away while only the wheel meant anything; a click is a position or
+    // it is nothing, so all three are kept now.
+    let mut fields = [0u32; 3];
+    let mut field = 0usize;
     let mut digits = 0;
-    while let Some(c) = s.get(i).filter(|c| c.is_ascii_digit()) {
-        // Saturating, so a terminal sending a preposterous button number
-        // cannot wrap it round into one that means something else.
-        button = button.saturating_mul(10).saturating_add(*c as u32 - '0' as u32);
-        digits += 1;
-        i += 1;
+    let mut i = 3;
+    loop {
+        while let Some(c) = s.get(i).filter(|c| c.is_ascii_digit()) {
+            if let Some(slot) = fields.get_mut(field) {
+                // Saturating, so a terminal sending a preposterous number
+                // cannot wrap it round into one that means something else.
+                *slot = slot.saturating_mul(10).saturating_add(*c as u32 - '0' as u32);
+            }
+            digits += 1;
+            i += 1;
+        }
+        if s.get(i) == Some(&';') {
+            field += 1;
+            i += 1;
+            continue;
+        }
+        break;
     }
     if digits == 0 {
         return None;
     }
-    // The column and row are read past but not kept: nothing scrolls
-    // differently for being scrolled over. OPS-55 wants them.
-    while matches!(s.get(i), Some(c) if c.is_ascii_digit() || *c == ';') {
-        i += 1;
-    }
     match s.get(i) {
-        Some('M') | Some('m') => {
+        Some(end @ ('M' | 'm')) => {
+            let press = *end == 'M';
             // SGR adds Shift (4), Meta (8) and Control (16) to the
             // button. A modified wheel is still a wheel - 68 is
             // shift-up, 81 is ctrl-down - and matching the bare 64/65
-            // only would consume those reports without scrolling.
-            let wheel = match button & !(4 | 8 | 16) {
-                64 => Some("wheel-up"),
-                65 => Some("wheel-down"),
+            // only would consume those reports without scrolling. The
+            // same goes for a click: a ctrl-click is a click, since
+            // nothing here gives a modifier a meaning of its own.
+            let key = match fields[0] & !(4 | 8 | 16) {
+                64 => Some("wheel-up".to_string()),
+                65 => Some("wheel-down".to_string()),
+                // The left button going down, and only that. The release
+                // is where a drag ends, and a drag is the terminal's own
+                // text selection - or, inside Luvus, its copy gesture. A
+                // widget that acted on the release would be answering the
+                // end of somebody else's gesture. Button 1 and 2 are the
+                // middle and right, which nothing here binds: a menu
+                // reachable only by right-clicking has no hint, no --help
+                // line and no doc row, and is invisible to the check that
+                // would have caught that.
+                0 if press => Some(format!(
+                    "click:{},{}",
+                    // The terminal counts from one and the widget counts
+                    // from zero, `rows[0]` being the top line `draw`
+                    // paints. Converted here so no widget has to hold the
+                    // off-by-one.
+                    fields[1].saturating_sub(1),
+                    fields[2].saturating_sub(1)
+                )),
                 _ => None,
             };
-            Some((i + 1, wheel))
+            Some((i + 1, key))
         }
         // Nothing yet, or something that is not a terminator: incomplete.
         _ => None,
@@ -2150,10 +2409,10 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             // at a time and the rest of the report arrives as keystrokes:
             // `[`, `<`, digits, `;`, `M`. On a widget with a filter that is
             // typing into it; on one without, `M` is whatever `M` does.
-            if let Some((len, wheel)) = mouse_report(&chars[at..]) {
+            if let Some((len, mouse)) = mouse_report(&chars[at..]) {
                 at += len;
-                if let Some(name) = wheel {
-                    keys.push(name.to_string());
+                if let Some(name) = mouse {
+                    keys.push(name);
                 }
                 continue;
             }
@@ -3210,7 +3469,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mouse_report_becomes_a_wheel_key_or_nothing_at_all() {
+    fn a_mouse_report_becomes_a_key_or_nothing_at_all() {
         // The wheel, both ways: button 64 up, 65 down, in SGR.
         assert_eq!(keys("\x1b[<64;10;5M"), vec!["wheel-up"]);
         assert_eq!(keys("\x1b[<65;10;5M"), vec!["wheel-down"]);
@@ -3225,10 +3484,25 @@ mod tests {
         assert_eq!(keys("\x1b[<73;10;5M"), vec!["wheel-down"]);
         assert_eq!(keys("\x1b[<81;10;5M"), vec!["wheel-down"]);
         assert_eq!(keys("\x1b[<85;10;5M"), vec!["wheel-down"]);
-        // A click is consumed, not passed on and not leaked. Until it
-        // means something it must still not reach a widget as text.
-        assert_eq!(keys("\x1b[<0;12;34M"), Vec::<String>::new());
+        // The left button going down arrives as a key carrying where it
+        // landed, counted from zero: the terminal's column 12 row 34 is
+        // column 11 row 33 of the frame the widget built.
+        assert_eq!(keys("\x1b[<0;12;34M"), vec!["click:11,33"]);
+        // The release is not a second click. It is where a drag ends, and
+        // a drag is the terminal's own text selection.
         assert_eq!(keys("\x1b[<0;12;34m"), Vec::<String>::new());
+        // Middle and right are consumed and mean nothing: an action
+        // reachable only by right-clicking has no hint, no --help line and
+        // no doc row, so nobody would ever find it.
+        assert_eq!(keys("\x1b[<1;12;34M"), Vec::<String>::new());
+        assert_eq!(keys("\x1b[<2;12;34M"), Vec::<String>::new());
+        // A modified click is still a click, as a modified wheel is still
+        // a wheel. 4 is Shift, 8 Meta, 16 Control.
+        assert_eq!(keys("\x1b[<4;12;34M"), vec!["click:11,33"]);
+        assert_eq!(keys("\x1b[<16;12;34M"), vec!["click:11,33"]);
+        // A click past column 223, for the same reason the wheel is tested
+        // there: the legacy encoding cannot express one and SGR can.
+        assert_eq!(keys("\x1b[<0;300;41M"), vec!["click:299,40"]);
         // The leak this branch exists to stop. escape_len and
         // still_arriving both walk only digits and `;` after ESC-[, so the
         // `<` stopped them both and the report was torn up one character
@@ -3257,6 +3531,176 @@ mod tests {
         assert_eq!(keys("\x19"), vec!["ctrl-y"]);
         assert_eq!(keys("\x05"), vec!["ctrl-e"]);
         assert_eq!(keys("\x15"), vec!["ctrl-u"]);
+    }
+
+    #[test]
+    fn click_at_reads_back_what_the_decoder_wrote() {
+        // The two halves are written apart - one in mouse_report, one in
+        // click_at - so the round trip is what says they agree.
+        assert_eq!(keys("\x1b[<0;1;1M"), vec!["click:0,0"]);
+        assert_eq!(click_at("click:0,0"), Some((0, 0)));
+        assert_eq!(click_at("click:299,40"), Some((299, 40)));
+        // Anything that is not a click reads as nothing, so a widget can
+        // ask of every key it is handed without matching first.
+        for key in ["q", "enter", "wheel-up", "click:", "click:1", "click:a,b", ""] {
+            assert_eq!(click_at(key), None, "{:?} read as a click", key);
+        }
+    }
+
+    #[test]
+    fn a_packed_footer_records_the_columns_its_hints_landed_on() {
+        let hints = |_: ()| -> Vec<Vec<(&'static str, String)>> {
+            vec![
+                vec![("", "[a]lpha".to_string())],
+                vec![("", "[b]ravo".to_string())],
+                vec![("", "[c]harlie".to_string())],
+            ]
+        };
+        // Worked out by hand at width 16, separator two columns wide:
+        // `[a]lpha` is seven and starts the line at column 0; `[b]ravo` is
+        // another seven and needs 7 + 2 + 7 = 16, which fits exactly, so
+        // it starts at column 9; `[c]harlie` would need 16 + 2 + 9 and
+        // wraps to a line of its own.
+        let wide = pack_hints_placed(&hints(()), 16, "  ");
+        assert_eq!(wide.lines, vec!["[a]lpha  [b]ravo", "[c]harlie"]);
+        assert_eq!(
+            wide.spots,
+            vec![
+                HintSpot { key: "a".into(), line: 0, col: 0, width: 7 },
+                HintSpot { key: "b".into(), line: 0, col: 9, width: 7 },
+                HintSpot { key: "c".into(), line: 1, col: 0, width: 9 },
+            ]
+        );
+        // One column narrower and the exact fit stops fitting, which moves
+        // `[b]ravo` to the start of the next line. Asserted rather than
+        // described: a placement that did not move when the pane did would
+        // be sending the key that used to be under the pointer, and a
+        // hint firing the wrong key is worse than one firing none.
+        let narrow = pack_hints_placed(&hints(()), 15, "  ");
+        assert_eq!(narrow.lines, vec!["[a]lpha", "[b]ravo", "[c]harlie"]);
+        assert_eq!(
+            narrow.spots,
+            vec![
+                HintSpot { key: "a".into(), line: 0, col: 0, width: 7 },
+                HintSpot { key: "b".into(), line: 1, col: 0, width: 7 },
+                HintSpot { key: "c".into(), line: 2, col: 0, width: 9 },
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_hint_naming_exactly_one_key_is_clickable() {
+        let spots = |text: &str| {
+            pack_hints_placed(&[vec![("", text.to_string())]], 80, "  ")
+                .spots
+                .into_iter()
+                .map(|s| s.key)
+                .collect::<Vec<_>>()
+        };
+        // The forms this tree writes a key in.
+        assert_eq!(spots("[q]uit"), vec!["q"]);
+        assert_eq!(spots("[d] cloudflare"), vec!["d"]);
+        assert_eq!(spots("\u{21b5} launch"), vec!["enter"]);
+        assert_eq!(spots("[\u{21b5}] open"), vec!["enter"]);
+        // Two keys in one hint, which is the launcher's own `↑↓ select`.
+        // Drawn like any other and clickable nowhere, because there is no
+        // honest answer to which of the two a click sent.
+        assert_eq!(spots("\u{2191}\u{2193} select"), Vec::<String>::new());
+        // `[±]25` is one glyph standing for two arms, `+` and `-`. Same
+        // answer for the same reason.
+        assert_eq!(spots("[\u{b1}]25"), Vec::<String>::new());
+        // A key named only in prose is left alone. check.rs reads this
+        // form because it is hunting for hints bound to nothing; taking it
+        // here would mean guessing which word was the key, and a click
+        // that fires the wrong key is worse than one that fires none.
+        assert_eq!(spots("esc closes"), Vec::<String>::new());
+        // Brackets that are not a key, each of which has been in a footer
+        // or beside one.
+        for text in ["[::1]:8080", "[[bin]]", "args[0]", "[{}] rows"] {
+            assert_eq!(spots(text), Vec::<String>::new(), "{:?} offered a key", text);
+        }
+    }
+
+    #[test]
+    fn pack_hints_draws_exactly_what_the_placed_form_draws() {
+        // Sixteen widgets draw their footer through pack_hints. Adopting
+        // the placed form has to be invisible on screen or nobody can
+        // adopt it, so the plain one is the placed one with the spots
+        // dropped - and this is what says so.
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![("\x1b[36m", "\u{2191}\u{2193}".into()), ("\x1b[90m", " select".into())],
+            vec![("\x1b[90m", "[,] settings".into())],
+            vec![("\x1b[90m", "[q]uit".into())],
+            vec![("\x1b[90m", "[\u{b1}]25".into())],
+        ];
+        for width in 1..60 {
+            assert_eq!(
+                pack_hints(&hints, width, "  "),
+                pack_hints_placed(&hints, width, "  ").lines,
+                "the two packers disagreed at width {}",
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn row_at_undoes_the_window_follow_chose() {
+        // Twenty items through a window six tall, drawn from frame row 3.
+        let (top, room, count) = (3usize, 6usize, 20usize);
+        for selected in 0..count {
+            let first = follow(0, selected, room);
+            // Every row of the window answers with the item drawn on it.
+            for offset in 0..room {
+                assert_eq!(
+                    row_at(top + offset, top, first, room),
+                    Some(first + offset),
+                    "row {} of the window at first={}",
+                    offset,
+                    first
+                );
+            }
+        }
+        // Above the list, below it, and on a list with nothing in it.
+        assert_eq!(row_at(2, top, 0, room), None);
+        assert_eq!(row_at(top + room, top, 0, room), None);
+        assert_eq!(row_at(top, top, 0, 0), None);
+        // A short list is shorter than its room, and the rows it does not
+        // fill belong to nothing.
+        assert_eq!(row_at(top + 2, top, 0, 3), Some(2));
+        assert_eq!(row_at(top + 3, top, 0, 3), None);
+    }
+
+    #[test]
+    fn a_registered_footer_turns_a_click_into_the_key_the_hint_names() {
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![("", "[a]lpha".into())],
+            vec![("", "[b]ravo".into())],
+            vec![("", "[c]harlie".into())],
+        ];
+        let footer = pack_hints_placed(&hints, 16, "  ");
+        let mut kb = Keyboard::new();
+        // Drawn at frame row 20, indented one column - the shape almost
+        // every footer here is drawn in.
+        kb.footer_at(&footer, 20, 1);
+        // `[a]lpha` occupies columns 1-7 of row 20, `[b]ravo` 10-16, and
+        // `[c]harlie` columns 1-9 of row 21.
+        assert_eq!(kb.hint_under("click:1,20".into()), "a");
+        assert_eq!(kb.hint_under("click:7,20".into()), "a");
+        assert_eq!(kb.hint_under("click:10,20".into()), "b");
+        assert_eq!(kb.hint_under("click:9,21".into()), "c");
+        // The separator between two hints is not either of them, and
+        // neither is the column before the indent.
+        assert_eq!(kb.hint_under("click:8,20".into()), "click:8,20");
+        assert_eq!(kb.hint_under("click:0,20".into()), "click:0,20");
+        // A click that missed every hint is handed back as a click, which
+        // is how a widget hit-tests its own rows.
+        assert_eq!(kb.hint_under("click:4,3".into()), "click:4,3");
+        // And a key is a key.
+        assert_eq!(kb.hint_under("enter".into()), "enter");
+        // Registering an empty footer takes the hints back off, which is
+        // what a widget that stops drawing one has to be able to do.
+        kb.footer_at(&Footer::default(), 20, 1);
+        assert_eq!(kb.hint_under("click:1,20".into()), "click:1,20");
     }
 
     #[test]
