@@ -15,15 +15,15 @@ is actually moving.
  ── MERGE RATE ── last 7 days
  81%  ████████████████████████████████████░░░░░░░░  17 merged / 4 dropped
 
- ── PR FLOW ── 7d · ▲ 30 opened · ▼ 17 merged   peak 19/day
-         ███████                                          ▀▀█ █▀█
-         ███████                                          ▀▀█ █ █
- ▅▅▅▅▅▅▅ ███████ ▆▆▆▆▆▆▆                 ▃▃▃▃▃▃▃          ▀▀▀ ▀▀▀
- ───────────────────────────────────────────────────────  opened · last 24h
- ▄▄▄▄▄▄▄                                         ███████    █ ▀▀█
-                                                 ███████    █   █
-                                                 ▂▂▂▂▂▂▂    ▀   ▀
- 7d ago                                            today  merged · last 24h
+ ── PR FLOW ── 7d · peak 11/day
+         ▁▁▁▁▁▁▁         ███████                 ▅▅▅▅▅▅▅  ▀▀█ █▀█
+         ███████ ▁▁▁▁▁▁▁ ███████ ▇▇▇▇▇▇▇         ███████    █ █ █
+ ▂▂▂▂▂▂▂ ███████ ███████ ███████ ███████ ▆▆▆▆▆▆▆ ███████    ▀ ▀▀▀
+ ───────────────────── ▲ 30 · ▼ 17 ─────────────────────  opened 24h
+         ███████ ▀▀▀▀▀▀▀ ███████ ▀▀▀▀▀▀▀ ███████ ███████    █ █ █
+         ▀▀▀▀▀▀▀         ▀▀▀▀▀▀▀         ███████            █ ▀▀█
+                                                            ▀   ▀
+ 7d ago                                            today  merged 24h
 
  ── CONTRIBUTIONS ── yours, everywhere · 6024 in 52 weeks, peak 241/day
  Mon   ░▒░▒░ ░▒░           ░     ░   ░ ░ ░ ░ ░░░░░░░▒░ ░░▒
@@ -87,23 +87,43 @@ oldest days are cropped and the heading says so — `54d of 90d` — because the
 totals describe what is drawn, not the whole window.
 
 To the right of it stand the two figures the window total cannot give you:
-**opened · last 24h** above the axis and **merged · last 24h** below it,
-repeating the chart's own grammar. A week of `▲ 30 opened · ▼ 17 merged` says
-the queue grew; it cannot say whether it grew *today*, which is the only
-version of the question you can still do something about.
+**opened 24h** above the axis and **merged 24h** below it, repeating the
+chart's own grammar. A week of `▲ 30 · ▼ 17` says the queue grew; it cannot
+say whether it grew *today*, which is the only version of the question you
+can still do something about.
+
+The **window totals sit on the axis**, which is the line that divides opened
+above from merged below — so each total labels the half it divides rather
+than being a fourth fact in a heading that overflowed first on a narrow pane.
+Where the rule is too short to carry them and still read as one rule rather
+than two stubs, they go back into the heading, worded where the words fit and
+as bare numbers where only the numbers do; where the heading cannot hold them
+either they take a row of their own. Nothing here is ever clipped mid-number:
+the heading used to lose `▼ 147 merged` to `▼ 1` on a forty-column pane, which
+is a wrong number rather than a missing one.
+
+The figure column is **as wide as the wider of its label and three large
+digits**, thirteen cells, and it stands down below a thirty-six column pane —
+where the two figures take one row of text under the heading instead, because
+a pane with no figure on it reads as an account with nothing opened. The
+labels say `24h` rather than `opened · last 24h`: seven cells of wording that
+named no window the short form leaves unnamed, spent out of a chart that had
+eighteen columns to draw eighteen days in. Six of them come back to the
+chart, which at fifty-six columns over an eighteen-day window is the
+difference between one cell a day and two.
 
 Three things about those figures:
 
 - The window is a **rolling twenty-four hours**, not a calendar day. It is
   cut twenty-four hours back from now and carries the time of day, so it
   does not collapse every morning the way a midnight-to-now count does. The
-  label says `last 24h` for that reason.
+  label says `24h` rather than `today` for that reason.
 - They count **only the configured accounts**, which is what everything else
-  on this board except the calendar counts. `github-prs` draws figures with
-  the identical label from a different population: it pools `@mine`,
+  on this board except the calendar counts. `github-prs` draws the same two
+  figures over the same window from a different population: it pools `@mine`,
   authored and assigned and dedupes them, so it sees pull requests in
   repositories this board never asks about. **Two panes of the same wall
-  will show different numbers under the same words**, and neither is wrong.
+  will show different numbers under the same window**, and neither is wrong.
 - A figure still being counted **shimmers rather than showing a zero**.
   Nothing opened in a day is a real and unremarkable reading, and it has to
   look different from a figure that has not arrived. The board's figures are
@@ -252,7 +272,7 @@ was closed unmerged — plus a few figures worth deriving:
 The **OPEN PR STATE** bar and the **PR FLOW** chart are the two the board
 draws for every account added together, drawn here for one. That is the
 reason to open the screen: a queue growing in a single account is invisible
-in a total six others are also feeding. The two **last 24h** figures come
+in a total six others are also feeding. The two **24h** figures come
 with the chart and are scoped the same way — this account alone rather than
 the board's sum.
 
