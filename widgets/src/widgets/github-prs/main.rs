@@ -4101,7 +4101,7 @@ mod tests {
         let prs = a_long_list(40);
         // Every row, whatever the pane: a blank, the section head, the
         // column head, and one row per PR.
-        let (list, cursor) =
+        let (list, cursor, _) =
             list_view(&prs, 7, "created", true, "", 80, false, "all", prs.len(), &p);
         assert_eq!(list.len(), 3 + prs.len(), "the list is built whole");
         assert_eq!(cursor, Some(3 + 7), "the selected row is where it says");
