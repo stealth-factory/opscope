@@ -53,11 +53,12 @@ there is no second input type and no widget decoding escape sequences.
 `Keyboard::poll()` turns an SGR report into `wheel-up`, `wheel-down`, or
 `click:<col>,<row>` — zero-based and in the widget's own coordinates, where
 `(0, 0)` is the first cell of `rows[0]` as handed to `draw()`. Only the left
-button going down becomes a click: the release is where a drag ends and a
-drag is the terminal's own text selection, and the middle and right buttons
-are bound to nothing, because an action reachable only by right-clicking has
-no hint, no `--help` line and no doc row and is invisible to the check that
-would have caught that.
+button going down becomes a click. The release, a drag, and the middle and
+right buttons are eaten rather than acted on: with reporting on, an ordinary
+drag selects nothing — Shift-drag, or `"terminal": {"mouse": false}`, gives
+the terminal its selection back. An action bound only to the right button
+would have no hint, no `--help` line and no doc row, and is invisible to the
+check that would have caught that.
 
 A click key is deliberately longer than one character. Every place in this
 tree that types an unrecognised key into a filter or a text field guards on

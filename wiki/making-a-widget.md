@@ -569,14 +569,16 @@ hint's key. Both mirror something the keyboard does.
 You do not decode anything. `poll()` hands you `click:<col>,<row>`,
 zero-based and in your own coordinates — `(0, 0)` is the first cell of
 `rows[0]` as you hand it to `draw()`. Only the left button going down gets
-that far; the release belongs to a drag, and a drag is the terminal's own
-text selection.
+that far. The release, a drag, and the middle and right buttons are eaten
+rather than acted on: with reporting on, an ordinary drag selects nothing.
+Shift-drag, or `"terminal": {"mouse": false}`, gives the terminal its
+selection back.
 
 **The footer is free.** Swap `pack_hints` for `pack_hints_placed`, draw
 `.lines` exactly as before, and register where it landed:
 
 ```rust
-let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
 let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 // ... pad, extend, draw ...
 let foot_top = body.len();

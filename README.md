@@ -235,7 +235,7 @@ no-scroll exception.
 | click a row | move the selection there — the same thing `↑` `↓` do |
 | click a hint | press the key that hint names |
 
-The split is the point: **the mouse moves the view, the keys move the
+The split is the point: **the wheel moves the view; keys and clicks move the
 selection.** Turning the wheel never changes which row is selected — not even
 when it scrolls that row off the screen — and never changes which section has
 focus. So scrolling to look at something cannot change what `↵` opens. Press
@@ -247,7 +247,7 @@ clicking `[q]uit` in the footer is `q`. Nothing here is reachable only with a
 mouse, so nothing is lost by not having one — and nothing new has to be
 learned to use one. Clicking the launcher's list is the worked example; the
 widgets follow in [OPS-55](https://github.com/stealth-factory/opscope/issues/89).
-Right-clicking and dragging are left to the terminal, which had them first.
+Right-click, middle-click and drag reports are eaten, not acted on.
 
 Nothing is ever hidden because a pane is short. Each widget builds its frame
 at whatever height it needs and the pane shows a window onto it, so a section

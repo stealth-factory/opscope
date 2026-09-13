@@ -21,8 +21,8 @@ wrong first.
   and it reads match arms rather than the file, so a comment saying it scrolls
   will not satisfy it.
 - **A click is a second route to a key, never a capability of its own.** The
-  wheel moves the view and leaves the selection where it is; a click moves the
-  selection, because that is what an arrow already does. Nothing is reachable
+  wheel moves the view; keys and clicks move the selection. A click moves the
+  selection because that is what an arrow already does. Nothing is reachable
   by clicking that a key cannot reach: an action with no hint has no `--help`
   line and no doc row either, so no reader this repo has would ever find it,
   and it is invisible to the check that fails the build when a hint names a
