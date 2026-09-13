@@ -98,7 +98,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: The tag and the manifest must agree
+      - name: The tag and the manifests must agree
         # Only meaningful on a tag; a dispatch has no version to check.
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -109,6 +109,18 @@ jobs:
             echo "release-pr.yml bumps the manifest in a commit, and" >&2
             echo "tag-release.yml tags that commit, rather than having" >&2
             echo "this workflow rewrite the source it is building" >&2
+            exit 1
+          fi
+          # The Luvus module manifest carries the same version, because the
+          # module's build step fetches this tag's release by name. A module
+          # checkout pinned to this commit with a stale version in it would
+          # fetch an older release's binaries, or none at all, and the
+          # failure would land on whoever installed it.
+          module=$(sed -n 's/^version = "\(.*\)"/\1/p' luvus/luvus-module.toml | head -1)
+          if [ "$tag" != "$module" ]; then
+            echo "tag v$tag but luvus/luvus-module.toml says $module" >&2
+            echo "it is generated: UPDATE_LUVUS_MODULE=1 cargo test --test" >&2
+            echo "check generated_luvus_module_matches_the_widgets" >&2
             exit 1
           fi
           echo "v$tag"

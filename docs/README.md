@@ -45,3 +45,4 @@ navigation, not itself a widget.
 | [Link acquisition](link.md) | How `link` maps Linux `ss` and macOS `nettop` onto one session view, including the delivery-rate and loss boundaries. |
 | [Building herdr panels](building-herdr-panels.md) | Driving these from Herdr: resize semantics, focus, and the layout mistakes worth skipping. |
 | [Releasing](releasing.md) | How a version is decided, what merging the release PR sets off, and what to do when it goes wrong. |
+| [As a Luvus module](../luvus/README.md) | Every widget as a pane inside a Luvus session: what the module declares, where its binaries come from, and why the manifest is generated. |

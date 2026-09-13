@@ -124,6 +124,21 @@ macOS Intel.
 There is no Homebrew formula yet. You can also download three files, or
 build all seventeen binaries. Both take about a minute.
 
+### Inside Luvus
+
+If you work in a [Luvus](https://luvus.dev) session, these install as a module
+and open as panes:
+
+```sh
+luvus module install stealth-factory/opscope/luvus
+luvus module pane open opscope.widgets ports --placement split
+```
+
+One pane per widget, plus the launcher menu. Installing fetches this version's
+binaries and checks them against the sha256 published beside them, so nothing
+has to be on your `PATH`, and the settings are the same `config.json` every
+other route reads. [What the module declares](luvus/README.md).
+
 ### Download a release
 
 Linux x86-64, macOS Apple Silicon and macOS Intel are built for every tag.

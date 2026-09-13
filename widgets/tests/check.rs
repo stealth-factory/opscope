@@ -647,6 +647,171 @@ fn generated_config_example_matches_widget_settings() {
     );
 }
 
+/// The lowest Luvus that can install the module.
+///
+/// Luvus documents 0.8.3 as the floor for the manifest features used here
+/// - panes and a build step - and naming a higher one refuses the install
+/// on hosts where the module works. What it has actually been run against
+/// is a different claim and lives in `luvus/README.md`, which is where
+/// somebody deciding whether to trust it looks.
+const MIN_LUVUS_VERSION: &str = "0.8.3";
+
+/// The module's own id. Dots are allowed here and nowhere else in the
+/// manifest: a pane id may not contain one.
+const MODULE_ID: &str = "opscope.widgets";
+
+/// The workspace version, which the module manifest has to carry.
+///
+/// A module's `version` is committed and is read before its build step
+/// runs - luvus refuses the install if the manifest changed during the
+/// build - so it cannot be stamped at publish time the way
+/// `npm/package.json` carries `0.0.0-dev` until pack.js fills it in.
+/// release-pr.yml bumps this line in the same commit as Cargo.toml's, and
+/// this test is what fails when it forgets.
+fn workspace_version(root: &std::path::Path) -> String {
+    let toml = std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest");
+    toml.lines()
+        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+        .expect("a version in Cargo.toml")
+        .to_string()
+}
+
+/// Every widget folder that builds a binary, sorted, with its own first
+/// line of help.
+///
+/// The same rule `widgets()` uses - a directory holding a `main.rs` - so
+/// the module lists exactly the binaries the build produces, and a widget
+/// added tomorrow is a pane without anyone remembering this file.
+fn widget_summaries(root: &std::path::Path) -> Vec<(String, String)> {
+    let dir = root.join("widgets/src/widgets");
+    let mut found: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .expect("the widget directory")
+        .flatten()
+        .filter(|entry| entry.path().join("main.rs").exists())
+        .filter_map(|entry| {
+            let stem = entry.file_name().into_string().ok()?;
+            let help = std::fs::read_to_string(entry.path().join("help.txt")).unwrap_or_default();
+            Some((stem, help.lines().next().unwrap_or("").trim().to_string()))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// `luvus/luvus-module.toml`, from the widget folders on disk.
+///
+/// A Luvus module declares argv arrays luvus runs as subprocesses, and a
+/// `[[panes]]` entry opens a real pane running one - which is the shape
+/// these binaries already have, so the manifest is the whole port. It is
+/// generated rather than written because the widget list already lives in
+/// too many places, and a module whose pane list has gone stale offers a
+/// widget that is not there or hides one that is.
+///
+/// Every pane goes through the launcher rather than straight at the
+/// widget binary. Named a widget, `opscope` draws no menu, starts it, and
+/// exits with its status - so the pane closes when the widget does, and
+/// the old names the launcher resolves keep working.
+fn render_luvus_module() -> String {
+    let root = root();
+    let version = workspace_version(&root);
+    let widgets = widget_summaries(&root);
+    assert!(!widgets.is_empty(), "no widget folder builds a binary");
+
+    let mut out = String::new();
+    out.push_str(
+        "# Generated from the widget folders by `cargo test`. Do not edit.\n\
+         #\n\
+         # Rewrite it with:\n\
+         #   UPDATE_LUVUS_MODULE=1 cargo test --test check \\\n\
+         #     generated_luvus_module_matches_the_widgets -- --exact\n\
+         #\n\
+         # Adding a widget adds a pane. Nothing here has to be remembered,\n\
+         # which is the point: see widgets/tests/check.rs.\n\n",
+    );
+    out.push_str(&format!("id = \"{}\"\n", MODULE_ID));
+    out.push_str("name = \"opscope\"\n");
+    out.push_str(
+        "description = \"Terminal widgets that look like sci-fi movie panels \
+         and show only real data.\"\n",
+    );
+    out.push_str(&format!("version = \"{}\"\n", version));
+    out.push_str(&format!("min_luvus_version = \"{}\"\n", MIN_LUVUS_VERSION));
+    // What the release workflow actually builds. A platform that is only a
+    // wish is not a row here either.
+    out.push_str("platforms = [\"macos\", \"linux\"]\n");
+
+    out.push_str(
+        "\n# The binaries, fetched from this version's GitHub release and\n\
+         # checksummed. Named by path because a scrubbed environment is not\n\
+         # promised a PATH, and `sh` that does not resolve is a build that\n\
+         # fails for a reason it is not about.\n\
+         [[build]]\n\
+         command = [\"/bin/sh\", \"build.sh\"]\n",
+    );
+
+    out.push_str(
+        "\n# The launcher: every widget, what it does, and a preview before it\n\
+         # runs. It is packaging and navigation, not a widget, so it is not\n\
+         # one of the panes below.\n\
+         [[panes]]\n\
+         id = \"menu\"\n\
+         title = \"opscope\"\n\
+         placement = \"split\"\n\
+         command = [\"./bin/opscope\"]\n",
+    );
+
+    for (stem, summary) in widgets {
+        out.push_str(&format!("\n# {}\n", summary));
+        out.push_str("[[panes]]\n");
+        out.push_str(&format!("id = \"{}\"\n", stem));
+        out.push_str(&format!("title = \"{}\"\n", stem));
+        out.push_str("placement = \"split\"\n");
+        out.push_str(&format!("command = [\"./bin/opscope\", \"{}\"]\n", stem));
+    }
+    out
+}
+
+#[test]
+fn generated_luvus_module_matches_the_widgets() {
+    let path = root().join("luvus/luvus-module.toml");
+    let generated = render_luvus_module();
+    // Written first and compared after, as config.example.json is: a
+    // regenerating run still proves the result rather than rewriting the
+    // file and reporting nothing about it.
+    if std::env::var_os("UPDATE_LUVUS_MODULE").is_some() {
+        std::fs::create_dir_all(path.parent().expect("the module folder"))
+            .expect("the module folder");
+        std::fs::write(&path, &generated).expect("rewriting luvus-module.toml");
+    }
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current == generated {
+        return;
+    }
+    let parted = current
+        .lines()
+        .zip(generated.lines())
+        .position(|(a, b)| a != b);
+    let detail = match parted {
+        Some(n) => format!(
+            "line {} differs:\n     on disk: {}\n   generated: {}",
+            n + 1,
+            current.lines().nth(n).unwrap_or(""),
+            generated.lines().nth(n).unwrap_or("")
+        ),
+        None => format!(
+            "the shorter file is a prefix of the other: {} lines on disk, {} generated",
+            current.lines().count(),
+            generated.lines().count()
+        ),
+    };
+    panic!(
+        "luvus/luvus-module.toml is not what the widget folders generate.\n  {detail}\n\n\
+         A widget added or renamed changes the panes; a release changes the version.\n\
+         Rewrite it with:\n  UPDATE_LUVUS_MODULE=1 cargo test --test check \
+         generated_luvus_module_matches_the_widgets -- --exact"
+    );
+}
+
 /// Text inside double-quoted string literals, where hints live.
 ///
 /// Deliberately crude: it is looking for `[w]indow`, and a hint never
