@@ -245,9 +245,14 @@ Clicking is the other half of the same idea, in reverse: **a click is a second
 route to a key, never a capability of its own.** Clicking a row is `↑`/`↓`;
 clicking `[q]uit` in the footer is `q`. Nothing here is reachable only with a
 mouse, so nothing is lost by not having one — and nothing new has to be
-learned to use one. Clicking the launcher's list is the worked example; the
-widgets follow in [OPS-55](https://github.com/stealth-factory/opscope/issues/89).
-Right-click, middle-click and drag reports are eaten, not acted on.
+learned to use one. Right-click, middle-click and drag reports are eaten,
+not acted on.
+
+Every widget with a cursor answers a click, and every footer is clickable —
+two checks in `cargo test` fail the build when one is not. Turning mouse
+reporting off is now in **every** widget's settings screen under `,`, not
+only the launcher's: toggle it and that pane restarts without reporting,
+which gives drag-to-select back where you are rather than where you are not.
 
 Nothing is ever hidden because a pane is short. Each widget builds its frame
 at whatever height it needs and the pane shows a window onto it, so a section
@@ -257,7 +262,8 @@ your problem to fix.
 
 Mouse reporting is on by default and takes drag-to-select away from the
 terminal while it is. `"terminal": {"mouse": false}` in your config turns it
-off; the keys are unaffected. See [Configuration](#configuration).
+off, and so does the `mouse` row in any widget's settings screen; the keys are
+unaffected either way. See [Configuration](#configuration).
 
 ## Configuration
 

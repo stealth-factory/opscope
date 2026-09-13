@@ -608,10 +608,12 @@ pane resizes and wraps onto a second line when it narrows; a placement kept
 from an older frame sends whatever key used to be under the pointer.
 
 **A row costs one hit-test.** Core cannot know which of your rows are
-selectable, so it gives you the arithmetic and you do the rest —
-`row_at(y, top, first, shown)` is the inverse of the window `follow()` chose,
-and answers `None` outside those rows rather than clamping, because a click
-on the footer is not a click on the last item:
+selectable, so it gives you the arithmetic and you do the rest.
+
+If your list is one row per item laid end to end, `row_at(y, top, first, shown)`
+is the inverse of the window `follow()` chose, and answers `None` outside
+those rows rather than clamping, because a click on the footer is not a click
+on the last item:
 
 ```rust
 other => {
@@ -629,6 +631,42 @@ one you built on the previous pass — so keep `list_top`, `list_first` and
 `list_rows` across iterations rather than recomputing them. `widgets/src/launcher/main.rs`
 is the worked example, and its whole click support is that arm plus the
 `footer_at` line.
+
+**Most widgets are not that shape**, and `item_at(y, head, scroll, placed)` is
+for the rest. Charts, section headings, blank spacers and multi-line rows sit
+between your items, so the nth row of the frame is not the nth item. Record
+where each item's rows landed while you build the body — you already do this
+for your cursor, `cursor = Some(rows.len())`, so extend it to every item:
+
+```rust
+for (i, thing) in things.iter().enumerate() {
+    let from = rows.len();
+    // ... push this item's rows ...
+    rows_at.extend((from..rows.len()).map(|row| (row, i)));
+}
+```
+
+One entry per row an item occupies, taken as a span rather than counted — a
+span cannot drift from what was actually drawn, and it is what makes a click
+on `latency`'s sparkline pick the row above it. Matching is exact, so a click
+on the blank under a short list selects nothing rather than the last item.
+
+**If your sections have separate cursors**, record `(row, slot)` and keep the
+`(section, index)` pairs beside it; `item_at` hands back the slot and you look
+it up. Clicking into a section focuses it as well as moving its cursor,
+because that is what walking into it with the arrows does. If your sections
+share one index — `herdr-panes` and `luvus-panes` do — there is nothing extra.
+
+**A screen that draws without a list of its own must clear the placements**,
+the same way a screen with no packed footer calls `forget_footer()`. Otherwise
+a click on your detail screen is answered by whichever item was drawn on that
+row on the frame behind it.
+
+**Two checks enforce this** and they are separate, because a widget can
+satisfy either without the other: `every_widget_registers_its_footer` and
+`every_widget_with_a_cursor_answers_a_click`. A widget with nothing selectable
+goes in `NO_CURSOR` with the reason written there; one with no hints at all
+goes in `NO_FOOTER`.
 
 **Testing it without a mouse.** You cannot inject a click into your own
 terminal, and clicking by hand tests one pane at one width. Drive the binary

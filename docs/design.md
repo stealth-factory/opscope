@@ -32,11 +32,14 @@ wrong first.
   footer becomes clickable in two lines and stays clickable as hints are
   added — the widget registers the footer, not the hints. `click_at()` and
   `row_at()` are the row half, which stays one match arm in the widget
-  because only the widget knows which of its rows are selectable. The
-  launcher is the worked example. Not yet a check: that lands in OPS-55, when
-  every widget has been made to answer, and it is deliberately separate from
-  the wheel one — a single "supports the mouse" check would go in half-true
-  and pass a widget that only scrolls.
+  because only the widget knows which of its rows are selectable, and
+  `item_at()` is the same for a body where charts, headings and multi-line
+  rows sit between the items, so the nth row is not the nth item. Two
+  checks enforce it, deliberately apart because a widget can satisfy either
+  without the other: `every_widget_registers_its_footer` and
+  `every_widget_with_a_cursor_answers_a_click`. Both were written before a
+  single widget changed and seen red on fourteen and eleven of them, which
+  is the only moment `HEAD` is the known-failing case.
 - **A pane too short is a pane you scroll, not a pane that hides things.**
   Every frame is a window onto a body built at whatever height it needs, with
   the title pinned above it. Nothing stands down for want of rows: a section

@@ -18,7 +18,9 @@ colour that draws text on the selected-row tint below WCAG AA, an incomplete
 widget folder, a widget missing from the README table or docs index, a
 name in the launcher's sample listing that is not a widget, a parser or a
 test gated by `cfg(target_os)` (which would vanish from the macOS CI run), an
-invalid or unwired `dependencies.json`,
+invalid or unwired `dependencies.json`, a widget that does not answer the
+wheel, a footer that is drawn and never registered so nobody can click it,
+a widget with a cursor that ignores a click,
 and a widget that opens `/proc` with no macOS path and no explanation.
 
 Every one of them exists because something shipped broken and looked, on
@@ -91,11 +93,37 @@ a second line when it narrows, and a placement kept from an older frame
 sends whatever key used to be under the pointer.
 
 **Rows cost one hit-test.** Which rows are selectable is widget state and
-nothing in core can see it, so core provides only the arithmetic:
+nothing in core can see it, so core provides only the arithmetic.
+
 `row_at(y, top, first, shown)` is the inverse of the window `follow()`
-chose, and returns `None` outside those rows rather than clamping — a click
-on the footer is not a click on the last item. The widget answers a click
-that reached it unmatched:
+chose, for a list of one-row items laid end to end — the launcher, and
+almost nothing else. It returns `None` outside those rows rather than
+clamping: a click on the footer is not a click on the last item.
+
+`item_at(y, head, scroll, placed)` is for every other body, where charts,
+section headings, blank spacers and multi-line rows sit between the items
+so the nth row is not the nth item. The widget records where each item's
+rows landed while building the body — which is the bookkeeping it already
+does for its cursor, `cursor = Some(rows.len())`, extended to every item —
+and one entry per row an item occupies, so a click on a sparkline picks the
+row above it. Matched exactly rather than to the nearest, so a click on the
+blank under a short list selects nothing. `luvus-panes` was already keeping
+exactly this, as `spans.push(start..body.len())`, to bring its window to the
+selected entry; read the other way round it is a click map.
+
+A widget with sections whose cursors are separate — `linear` — records
+`(row, slot)` and keeps the `(section, index)` pairs beside it, so
+`item_at` stays as it is. Clicking into a section focuses it as well as
+moving its cursor, because that is what walking into it with the arrows
+does. Where the sections share one index — `herdr-panes`, `luvus-panes` —
+there is nothing extra to do.
+
+**A screen that draws without a list of its own clears the placements**, the
+same way a screen with no packed footer calls `forget_footer()`. Leaving
+them answers a click on a detail screen with whichever item happened to be
+drawn on that row behind it.
+
+The widget answers a click that reached it unmatched:
 
 ```rust
 other => {
@@ -116,6 +144,21 @@ Tracking itself is asked for in `claim_screen()` unless
 `"terminal": {"mouse": false}` says otherwise, and given back on all three
 ways out: a normal quit, `SCREEN_RESTORE` in the signal handler, and
 `Keyboard::restore()` on the unwind from a panic.
+
+That key is the runtime toggle. The launcher has owned the shared
+`terminal` section since the wheel landed, and `load` in `settings.rs` now
+wraps it alongside whichever section the widget asked for — so every
+settings screen offers it, and leaving the screen relaunches *that* widget
+with the new setting. The schema is read out of the launcher's own
+`settings.json` rather than copied, because two records of the same
+defaults is one record and one thing that used to be true.
+
+Two checks enforce all of it, and they are separate on purpose because a
+widget can satisfy either without the other: `every_widget_registers_its_footer`
+reads for the `footer_at` call — not for `pack_hints_placed`, since `months`
+wraps prose through `pack_hints` too and a sentence is not a footer — and
+`every_widget_with_a_cursor_answers_a_click` reads for `tc::click_at(`, not
+`row_at(`, because `github` keeps a local closure of that name.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and
 its mirror `vbars_down()` (pair them on a shared scale for a diverging chart),
