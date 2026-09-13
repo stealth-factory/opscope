@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.17.0] - 2026-09-13
+
+### Features
+
+- **luvus**: The launcher on right-click, so the module has a way in (#221)
+
 ## [0.16.1] - 2026-09-13
 
 ### Bug Fixes
