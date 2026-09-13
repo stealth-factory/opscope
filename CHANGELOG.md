@@ -3,6 +3,18 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.16.0] - 2026-09-13
+
+### Bug Fixes
+
+- **github**: Spend PR FLOW's width on the chart, not on wording (#210)
+- **github-prs**: Colour each figure like the bars it stands beside (#214)
+
+### Features
+
+- **github**: Draw opened and merged in the last 24h beside PR FLOW (#208)
+- **luvus**: The widgets as a Luvus module, with its panes generated (#206)
+
 ## [0.15.2] - 2026-09-13
 
 ### Bug Fixes
