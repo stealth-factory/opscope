@@ -98,7 +98,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: The tag and the manifest must agree
+      - name: The tag and the manifests must agree
         # Only meaningful on a tag; a dispatch has no version to check.
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -109,6 +109,18 @@ jobs:
             echo "release-pr.yml bumps the manifest in a commit, and" >&2
             echo "tag-release.yml tags that commit, rather than having" >&2
             echo "this workflow rewrite the source it is building" >&2
+            exit 1
+          fi
+          # The Luvus module manifest carries the same version, because the
+          # module's build step fetches this tag's release by name. A module
+          # checkout pinned to this commit with a stale version in it would
+          # fetch an older release's binaries, or none at all, and the
+          # failure would land on whoever installed it.
+          module=$(sed -n 's/^version = "\(.*\)"/\1/p' luvus/luvus-module.toml | head -1)
+          if [ "$tag" != "$module" ]; then
+            echo "tag v$tag but luvus/luvus-module.toml says $module" >&2
+            echo "it is generated: UPDATE_LUVUS_MODULE=1 cargo test --test" >&2
+            echo "check generated_luvus_module_matches_the_widgets" >&2
             exit 1
           fi
           echo "v$tag"
@@ -416,3 +428,103 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file CHANGELOG-release.md \
             artifacts/*.tar.gz artifacts/*.tar.gz.sha256
+
+  # Both ways in, tried the way somebody would try them, after the release
+  # exists. The build job proves the binaries work; nothing proved the paths
+  # that deliver them, and those fail differently: npm can answer that a
+  # version exists before its tarball is reachable, and the module fetches
+  # release assets by name, so a rename in the packaging step would 404 for
+  # everyone and be green here.
+  #
+  # It cannot block anything - publish has already happened by the time this
+  # runs and npm does not take a version back. It is a detector, and the
+  # thing it detects is a release that looks finished and is not installable.
+  smoke:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # This job runs the published npm package and the module's
+          # downloaded binaries with the workspace as cwd. The job token
+          # can write contents; do not leave it in .git for those steps.
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: npx fetches this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # The registry can answer `npm view` before the tarball is
+          # reachable from every edge, and the launcher's platform package
+          # is a separate publish that npm fetches on install. So this
+          # retries rather than failing on the first minute - what it is
+          # here to catch is a release still not installable after several,
+          # not the propagation itself.
+          for attempt in 1 2 3 4 5 6; do
+            if said=$(npx -y "opscope@${version}" --version 2>&1); then
+              break
+            fi
+            echo "attempt ${attempt}: not yet installable"
+            echo "$said"
+            said=""
+            sleep 30
+          done
+          if [ -z "${said:-}" ]; then
+            echo "opscope@${version} was not installable from npm after three minutes" >&2
+            exit 1
+          fi
+          echo "$said"
+          # `opscope 0.16.0 (abc1234, 2026-09-13)` - the version is the
+          # second field, and it has to be the one this tag published.
+          # stderr is folded into said, so an npx warning can sit on
+          # line 1; take the banner, not the first line.
+          got=$(printf '%s' "$said" | awk '/^opscope / { print $2; exit }')
+          if [ -z "$got" ]; then
+            echo "npx did not print an opscope version line" >&2
+            exit 1
+          fi
+          if [ "$got" != "$version" ]; then
+            echo "npx gave ${got}, this tag is ${version}" >&2
+            exit 1
+          fi
+
+      - name: The Luvus module's build step fetches this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # By path, not by name. A macOS runner has failed a release test
+          # with `sh: No such file or directory` when PATH was not what the
+          # step assumed, and a test that can fail for a reason it is not
+          # testing teaches people to press the button again.
+          /bin/sh luvus/build.sh
+          said=$(./luvus/bin/opscope --version)
+          echo "$said"
+          got=$(printf '%s' "$said" | awk 'NR==1{print $2}')
+          if [ "$got" != "$version" ]; then
+            echo "the module fetched ${got}, this tag is ${version}" >&2
+            exit 1
+          fi
+          # Every pane the manifest declares has to be a binary that is
+          # there. A pane naming a binary the release did not carry is a
+          # menu entry that dies on open.
+          missing=0
+          while read -r pane; do
+            [ "$pane" = "menu" ] && continue
+            if [ ! -x "luvus/bin/${pane}" ]; then
+              echo "the manifest declares a ${pane} pane and the release has no such binary" >&2
+              missing=1
+            fi
+          done <<< "$(sed -n 's/^id = "\(.*\)"$/\1/p' luvus/luvus-module.toml | grep -v '\.')"
+          [ "$missing" = 0 ]
+          echo "every declared pane has a binary"

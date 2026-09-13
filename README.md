@@ -124,6 +124,21 @@ macOS Intel.
 There is no Homebrew formula yet. You can also download three files, or
 build all seventeen binaries. Both take about a minute.
 
+### Inside Luvus
+
+If you work in a [Luvus](https://luvus.dev) session, these install as a module
+and open as panes:
+
+```sh
+luvus module install stealth-factory/opscope/luvus
+luvus module pane open opscope.widgets ports --placement split
+```
+
+One pane per widget, plus the launcher menu. Installing fetches this version's
+binaries and checks them against the sha256 published beside them, so nothing
+has to be on your `PATH`, and the settings are the same `config.json` every
+other route reads. [What the module declares](luvus/README.md).
+
 ### Download a release
 
 Linux x86-64, macOS Apple Silicon and macOS Intel are built for every tag.
@@ -377,7 +392,7 @@ plain-Markdown AI configuration guide, and — when the widget has settings —
 its settings declaration. They are linked from the table above and indexed in
 [`docs/`](docs/README.md).
 
-Seven pages are about the repository rather than a widget:
+Eight pages are about the repository rather than a widget:
 
 | | |
 |---|---|
@@ -387,6 +402,7 @@ Seven pages are about the repository rather than a widget:
 | [Internals](docs/internals.md) | `opscope-core`, the chart helpers, and what `cargo test` checks that a compiler cannot |
 | [Port decisions](docs/port-decisions.md) | what the Rust port changed from the Python and why — the answer to most questions beginning *why does this key do that* |
 | [Building Herdr panels](docs/building-herdr-panels.md) | resize semantics, focus, and the layout mistakes worth skipping |
+| [As a Luvus module](luvus/README.md) | every widget as a pane inside a [Luvus](https://luvus.dev) session: what the module declares, where its binaries come from, and why its manifest is generated |
 | [Releasing](docs/releasing.md) | how a version is decided, what merging the release PR sets off, and what to do when it goes wrong |
 
 ## Bundled skill
