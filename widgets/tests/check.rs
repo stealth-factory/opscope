@@ -3245,6 +3245,7 @@ fn every_stated_count_of_widgets_or_binaries_is_the_real_one() {
         "docs/design.md",
         "docs/releasing.md",
         "npm/README.md",
+        "luvus/README.md",
         "core/build.rs",
         "core/src/lib.rs",
         "widgets/src/launcher/README.md",

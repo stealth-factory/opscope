@@ -82,4 +82,5 @@ generator is in [`widgets/tests/check.rs`](../widgets/tests/check.rs).
 
 A module is ordinary code that runs as you. Luvus shows every command a
 module declares before it installs one, and the whole of this module's is
-above: seventeen `./bin/opscope` invocations and one `/bin/sh build.sh`.
+above: one `/bin/sh build.sh`, and one `./bin/opscope` line for each of the
+sixteen widgets and the launcher menu.
