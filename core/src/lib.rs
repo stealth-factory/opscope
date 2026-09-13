@@ -473,16 +473,27 @@ pub struct Footer {
 
 /// The one key a hint teaches, or nothing when it does not teach exactly one.
 ///
-/// Two forms count, and deliberately only two: a single character in
-/// brackets, and one of the arrow-and-return glyphs. Both are unambiguous
-/// about which characters are the key, which is what a click needs. The
-/// third form `check.rs` reads - a key named in prose, as in
-/// `esc, ↵ or i to close` - is not taken here, because recovering the key
-/// out of a sentence means guessing, and a click that fires the wrong key
-/// is worse than one that fires none.
+/// Two forms count first: a single character in brackets, and one of the
+/// arrow-and-return glyphs. Both are unambiguous about which characters are
+/// the key, which is what a click needs.
 ///
-/// `[±]25` is the case that proves the rule. One glyph standing for two
+/// `[±]25` is the case that proves that rule. One glyph standing for two
 /// arms, `+` and `-`, so a click on it has no single answer and gets none.
+///
+/// A hint that names its key neither way falls back to its **leading
+/// token**, when that token is a key with a name - `ctrl-u clear`,
+/// `esc done`, `tab to add another`. This is not the loose reading
+/// `check.rs` does, which takes any single letter anywhere inside a footer:
+/// there, a whole footer is one string and the key could be anywhere in it,
+/// so recovering it means guessing. Here each hint arrives on its own and
+/// this tree writes the key first, every time, so the first token is the
+/// key or the hint has none. Nothing else in the sentence is read, which is
+/// what keeps `clear` and `done` from becoming keys.
+///
+/// Only as a fallback, and that ordering matters: `esc / [,] back` names
+/// two keys for one action, and counting both would make it ambiguous and
+/// take away a spot it already had. The bracket wins, the synonym is
+/// ignored, and the hint stays clickable.
 fn hint_key(plain: &str) -> Option<String> {
     let chars: Vec<char> = plain.chars().collect();
     // Every key the hint could be taken to name, in the order they appear.
@@ -521,10 +532,27 @@ fn hint_key(plain: &str) -> Option<String> {
         }
         i += 1;
     }
-    match named.as_slice() {
-        [one] => one.clone(),
-        _ => None,
+    if let [one] = named.as_slice() {
+        return one.clone();
     }
+    if !named.is_empty() {
+        // More than one bracketed key or glyph: genuinely ambiguous, and
+        // the leading token cannot break the tie.
+        return None;
+    }
+    // The keys that have names rather than characters, as `poll` returns
+    // them. `ctrl-` plus one letter covers the editing keys a text field
+    // binds without listing each.
+    const NAMED: &[&str] = &[
+        "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
+    ];
+    let first = plain.split_whitespace().next()?;
+    let lowered = first.to_lowercase();
+    let known = NAMED.contains(&lowered.as_str())
+        || (lowered.strip_prefix("ctrl-")).is_some_and(|rest| {
+            rest.chars().count() == 1 && rest.chars().all(|c| c.is_ascii_alphabetic())
+        });
+    known.then_some(lowered)
 }
 
 /// Pack a footer and record where every hint landed.
@@ -3715,11 +3743,25 @@ mod tests {
         // `[±]25` is one glyph standing for two arms, `+` and `-`. Same
         // answer for the same reason.
         assert_eq!(spots("[\u{b1}]25"), Vec::<String>::new());
-        // A key named only in prose is left alone. check.rs reads this
-        // form because it is hunting for hints bound to nothing; taking it
-        // here would mean guessing which word was the key, and a click
-        // that fires the wrong key is worse than one that fires none.
-        assert_eq!(spots("esc closes"), Vec::<String>::new());
+        // A key named as the hint's leading token, which is how the
+        // settings screen writes half of its footer. Only the first token
+        // is read, so the words after it stay words.
+        assert_eq!(spots("esc done"), vec!["esc"]);
+        assert_eq!(spots("ctrl-u clear"), vec!["ctrl-u"]);
+        assert_eq!(spots("tab to add another"), vec!["tab"]);
+        assert_eq!(spots("esc closes"), vec!["esc"]);
+        // And nothing else in the sentence is a key, which is what stops
+        // `clear` and `done` and `closes` from becoming one.
+        assert_eq!(spots("name it and set it"), Vec::<String>::new());
+        assert_eq!(spots("type to add one"), Vec::<String>::new());
+        assert_eq!(spots("or i to close"), Vec::<String>::new());
+        // The leading token is a fallback, never a tie-breaker. This names
+        // two keys for one action; counting both would make it ambiguous
+        // and take away a spot it already had, so the bracket wins.
+        assert_eq!(spots("esc / [,] back"), vec![","]);
+        // Three keys for one action is still ambiguous - the glyphs are
+        // counted before the fallback is reached.
+        assert_eq!(spots("tab / \u{2191}\u{2193} to open or remove one"), Vec::<String>::new());
         // Brackets that are not a key, each of which has been in a footer
         // or beside one.
         for text in ["[::1]:8080", "[[bin]]", "args[0]", "[{}] rows"] {
