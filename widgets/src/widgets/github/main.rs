@@ -247,6 +247,33 @@ fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     tc::seg(&borrowed, w)
 }
 
+fn parts_width(parts: &[(String, String)]) -> usize {
+    parts.iter().map(|(_, t)| tc::display_width(t)).sum()
+}
+
+/// One figure's mark and value, or the shimmer that stands in for a count
+/// that has not arrived.
+fn figure_mark(
+    n: usize,
+    value: Option<i64>,
+    tick: usize,
+    p: &Palette,
+) -> Vec<(String, String)> {
+    let colour = if n == 0 { p.pr.clone() } else { p.ok.clone() };
+    let mark = if n == 0 { "▲" } else { "▼" };
+    match value {
+        Some(v) => vec![(colour, format!("{} {}", mark, v))],
+        // Still counting, and it has to look like it: a row reading
+        // `▲ 0` is a reading of a quiet day, which is not what this
+        // is.
+        None => {
+            let mut parts = vec![(colour, format!("{} ", mark))];
+            parts.extend(tc::skeleton(3, tick * 2, 5));
+            parts
+        }
+    }
+}
+
 /// One chart row with its figure fragment beside it.
 ///
 /// Padded to `pad_to` first: the axis-label row is shorter than the bars
@@ -269,25 +296,29 @@ fn with_figure(
     seg_owned(&parts, w)
 }
 
-/// The two figures on one row of text, for a pane too narrow to give them a
-/// column of their own.
+/// The two figures as text, for a pane too narrow to give them a column of
+/// their own.
 ///
 /// The second rung of the ladder `github-prs` climbs, and the reason the
 /// column is allowed to stand down at all: a pane that cannot hold the
 /// digits loses the *size* of the number, never the number. Numbers first,
 /// because `seg` clips from the right and the wording is the part a reader
 /// can infer.
+///
+/// One row where both figures fit; two when even the compact form would
+/// clip. The compact line ` 24h · ▲ 170 · ▼ 147` is twenty cells, and a
+/// twenty-column pane hands this nineteen (`w - 1`) — returning that line
+/// unchecked drew `▼ 14`.
 fn figure_line(
     opened: Option<i64>,
     merged: Option<i64>,
     w: usize,
     tick: usize,
     p: &Palette,
-) -> Vec<(String, String)> {
-    // Each figure under its own label where the row has room for both, and
-    // the window named once in front of them where it has not. Never
-    // clipped: a labelled row is thirty-three cells, and at twenty the clip
-    // takes the whole of the merged figure with it.
+) -> Vec<String> {
+    // Each figure under its own label where the row has room for both, the
+    // window named once in front of them where it has not, and a row each
+    // where even that compact form would clip a number.
     let build = |labelled: bool| -> Vec<(String, String)> {
         let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
         if !labelled {
@@ -297,18 +328,7 @@ fn figure_line(
             if n > 0 {
                 parts.push((p.dim.clone(), " · ".to_string()));
             }
-            let colour = if n == 0 { p.pr.clone() } else { p.ok.clone() };
-            let mark = if n == 0 { "▲" } else { "▼" };
-            match value {
-                Some(v) => parts.push((colour, format!("{} {}", mark, v))),
-                // Still counting, and it has to look like it: a row reading
-                // `▲ 0` is a reading of a quiet day, which is not what this
-                // is.
-                None => {
-                    parts.push((colour, format!("{} ", mark)));
-                    parts.extend(tc::skeleton(3, tick * 2, 5));
-                }
-            }
+            parts.extend(figure_mark(n, value, tick, p));
             if labelled {
                 parts.push((p.dim.clone(), format!(" {}", FIG_LABELS[n])));
             }
@@ -316,12 +336,34 @@ fn figure_line(
         parts
     };
     let labelled = build(true);
-    let width: usize = labelled.iter().map(|(_, t)| tc::display_width(t)).sum();
-    if width <= w {
-        labelled
-    } else {
-        build(false)
+    if parts_width(&labelled) <= w {
+        return vec![seg_owned(&labelled, w)];
     }
+    let compact = build(false);
+    if parts_width(&compact) <= w {
+        return vec![seg_owned(&compact, w)];
+    }
+    let mut opened_row: Vec<(String, String)> = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.dim.clone(), "24h · ".to_string()),
+    ];
+    opened_row.extend(figure_mark(0, opened, tick, p));
+    let mut merged_row: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    merged_row.extend(figure_mark(1, merged, tick, p));
+    if parts_width(&opened_row) <= w {
+        return vec![seg_owned(&opened_row, w), seg_owned(&merged_row, w)];
+    }
+    let window = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.dim.clone(), "24h".to_string()),
+    ];
+    let mut opened_only: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    opened_only.extend(figure_mark(0, opened, tick, p));
+    vec![
+        seg_owned(&window, w),
+        seg_owned(&opened_only, w),
+        seg_owned(&merged_row, w),
+    ]
 }
 
 /// The gap between the rule and the totals set into it, each side.
@@ -421,9 +463,6 @@ fn flow_heading(
         (p.lbl.clone(), " ── PR FLOW ── ".to_string()),
         (p.dim.clone(), span),
     ];
-    let width = |parts: &[(String, String)]| -> usize {
-        parts.iter().map(|(_, t)| tc::display_width(t)).sum()
-    };
     let mut parts = base.clone();
     let mut placed = totals.is_none();
     if let Some(t) = totals {
@@ -431,7 +470,7 @@ fn flow_heading(
             let mut wanted = base.clone();
             wanted.push((p.dim.clone(), " · ".to_string()));
             wanted.extend(totals_parts(t, worded, p));
-            if width(&wanted) <= w {
+            if parts_width(&wanted) <= w {
                 parts = wanted;
                 placed = true;
                 break;
@@ -445,7 +484,7 @@ fn flow_heading(
         // totals to set off.
         format!("{}peak {}/day", if parts.len() > base.len() { "   " } else { " · " }, peak),
     );
-    if width(&parts) + tc::display_width(&peak.1) <= w {
+    if parts_width(&parts) + tc::display_width(&peak.1) <= w {
         parts.push(peak);
     }
     (seg_owned(&parts, w), placed)
@@ -455,17 +494,26 @@ fn flow_heading(
 /// not hold them and whose axis was too short to carry them.
 ///
 /// The bottom rung of the ladder: a pane this narrow loses the words, never
-/// the numbers.
-fn totals_row(totals: (i64, i64), w: usize, p: &Palette) -> String {
+/// the numbers. When even the bare pair would clip, they take a row each —
+/// the last fallback used to return the bare form unchecked, and `seg`
+/// then cut the merged total.
+fn totals_row(totals: (i64, i64), w: usize, p: &Palette) -> Vec<String> {
     for worded in [true, false] {
         let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
         parts.extend(totals_parts(totals, worded, p));
-        let width: usize = parts.iter().map(|(_, t)| tc::display_width(t)).sum();
-        if width <= w || !worded {
-            return seg_owned(&parts, w);
+        if parts_width(&parts) <= w {
+            return vec![seg_owned(&parts, w)];
         }
     }
-    unreachable!("the bare form is always returned")
+    let opened = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.pr.clone(), format!("▲ {}", totals.0)),
+    ];
+    let merged = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.ok.clone(), format!("▼ {}", totals.1)),
+    ];
+    vec![seg_owned(&opened, w), seg_owned(&merged, w)]
 }
 
 /// What the heading of a PR FLOW has to say: a chart that has counted, or
@@ -515,7 +563,7 @@ fn flow_section(
             let (row, placed) = flow_heading(span, totals.filter(|_| !on_axis), peak, w, p);
             let mut rows = vec![row];
             if let Some(t) = totals.filter(|_| !placed) {
-                rows.push(totals_row(t, w, p));
+                rows.extend(totals_row(t, w, p));
             }
             rows
         }
@@ -524,7 +572,7 @@ fn flow_section(
     if figs.is_none() {
         // The column stood down, so the two figures take a row of text under
         // the heading rather than leaving the pane.
-        rows.push(seg_owned(&figure_line(figures.0, figures.1, w, tick, p), w));
+        rows.extend(figure_line(figures.0, figures.1, w, tick, p));
     }
     rows.extend(flow_body(
         up,
@@ -3147,7 +3195,9 @@ mod tests {
         // And both figures survive whole on every pane narrow enough to
         // need the row: the labelled form is thirty-three cells, so a row
         // that goes on drawing it at twenty clips the second figure away
-        // and the pane says only what was opened.
+        // and the pane says only what was opened. 12 and 345 still fit the
+        // compact line at nineteen cells; 170 and 147 do not — see
+        // `the_compact_figures_stay_whole_when_they_need_two_rows`.
         for w in 20..36usize {
             let rows = frame_at(w, 18, (170, 147), (Some(12), Some(345)));
             assert!(
@@ -3163,6 +3213,58 @@ mod tests {
                 rows
             );
         }
+    }
+
+    #[test]
+    fn the_compact_figures_stay_whole_when_they_need_two_rows() {
+        // The compact fallback was returned without measuring it. At twenty
+        // columns the section has nineteen cells and ` 24h · ▲ 170 · ▼ 147`
+        // needs twenty, so `seg` clipped the merged count to `14`.
+        let rows = frame_at(20, 18, (12, 9), (Some(170), Some(147)));
+        assert!(
+            rows.iter().any(|r| r.contains("▲ 170")),
+            "opened figure left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("▼ 147")),
+            "merged figure was clipped: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("24h")),
+            "the window left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("▼ 14") || r.contains("▼ 147")),
+            "a cut merged count is on the pane: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn the_bare_totals_stay_whole_when_they_need_two_rows() {
+        // Same unchecked last step on `totals_row`: the bare pair is
+        // returned even when it does not fit, and `seg` cuts the merged
+        // total. ` ▲ 123456 · ▼ 789012` is twenty cells; a twenty-column
+        // pane has nineteen.
+        let rows = frame_at(20, 18, (123456, 789012), (Some(12), Some(9)));
+        assert!(
+            rows.iter().any(|r| r.contains("▲ 123456")),
+            "opened total left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("▼ 789012")),
+            "merged total was clipped: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("▼ 78901") || r.contains("▼ 789012")),
+            "a cut merged total is on the pane: {:?}",
+            rows
+        );
     }
 
     #[test]
@@ -3245,7 +3347,12 @@ mod tests {
         // and costs the frame a line.
         for w in 20..=200usize {
             for days in [7usize, 18, 90] {
-                for figures in [(Some(12), Some(9)), (None, None), (Some(1234), Some(9))] {
+                for figures in [
+                    (Some(12), Some(9)),
+                    (None, None),
+                    (Some(1234), Some(9)),
+                    (Some(170), Some(147)),
+                ] {
                     for row in frame_at(w, days, (170, 147), figures) {
                         assert!(
                             tc::display_width(&row) <= w - 1,

@@ -104,8 +104,11 @@ is a wrong number rather than a missing one.
 
 The figure column is **as wide as the wider of its label and three large
 digits**, thirteen cells, and it stands down below a thirty-six column pane —
-where the two figures take one row of text under the heading instead, because
-a pane with no figure on it reads as an account with nothing opened. The
+where the two figures take a row of text under the heading instead, because
+a pane with no figure on it reads as an account with nothing opened. When
+even the compact form would clip a count they take a row each: a
+twenty-column pane has nineteen cells and `24h · ▲ 170 · ▼ 147` needs
+twenty, which used to draw `▼ 14`. The
 labels say `24h` rather than `opened · last 24h`: seven cells of wording that
 named no window the short form leaves unnamed, spent out of a chart that had
 eighteen columns to draw eighteen days in. Six of them come back to the
