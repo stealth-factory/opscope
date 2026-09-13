@@ -2535,25 +2535,53 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(board_24h(&[stale, fresh], 2, |s| s.opened_24h), None);
-        // The same hole appears at the start of a healthy pass: every
-        // retained row is forgotten before the first account lands, so
-        // a mid-pass publish cannot mix two cutoffs under one label.
-        let mut prior = [
+    }
+
+    #[test]
+    fn a_mid_pass_mix_is_not_a_current_total() {
+        // After the first successful pass, every row holds Some. A new
+        // rolling_now starts; the first account lands with this cutoff
+        // while the rest still hold last pass. The gate sees two Somes
+        // and would draw 4+7 as this window's total — that mix is 11.
+        let last_pass = Account {
+            opened_24h: Some(4),
+            merged_24h: Some(1),
+            ..Default::default()
+        };
+        let this_pass = Account {
+            opened_24h: Some(7),
+            merged_24h: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            board_24h(&[this_pass.clone(), last_pass.clone()], 2, |s| s.opened_24h),
+            Some(11)
+        );
+        // Forgetting every retained row before the loop, then landing the
+        // first account of this cutoff, leaves a hole. The figures shimmer
+        // instead of showing 11.
+        let mut mid = [last_pass, this_pass.clone()];
+        for row in &mut mid {
+            forget_24h(row);
+        }
+        mid[0] = this_pass;
+        assert_eq!(board_24h(&mid, 2, |s| s.opened_24h), None);
+        // Once every account reports for this cutoff, the sum is the
+        // complete value — 7+9, not the mixed 11.
+        let complete = [
             Account {
-                opened_24h: Some(4),
-                merged_24h: Some(5),
+                opened_24h: Some(7),
+                merged_24h: Some(2),
                 ..Default::default()
             },
             Account {
-                opened_24h: Some(7),
-                merged_24h: Some(1),
+                opened_24h: Some(9),
+                merged_24h: Some(3),
                 ..Default::default()
             },
         ];
-        for row in &mut prior {
-            forget_24h(row);
-        }
-        assert_eq!(board_24h(&prior, 2, |s| s.opened_24h), None);
+        assert_eq!(board_24h(&complete, 2, |s| s.opened_24h), Some(16));
+        assert_eq!(board_24h(&complete, 2, |s| s.merged_24h), Some(5));
     }
 
     #[test]
