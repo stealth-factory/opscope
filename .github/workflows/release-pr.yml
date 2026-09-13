@@ -204,8 +204,11 @@ jobs:
             "It tags the merge commit and starts \`release.yml\` there: three" \
             "platforms built and tested, checked for anything dynamically" \
             "linked beyond the C runtime, tarballed with checksums," \
-            "published to npm, then attached to a GitHub Release so" \
-            "\`npx opscope\` is this version." \
+            "published to npm under the \`next\` tag, then attached to a" \
+            "GitHub Release. A clean Linux runner and a clean macOS one" \
+            "install that exact version, and only then does \`latest\` move -" \
+            "so \`npx opscope\` is this version, and never names one npm" \
+            "cannot yet serve." \
             "" \
             "This PR rewrites itself on every merge to main. Do not commit" \
             "to it - the branch is force-pushed - and edit the changelog on" \
