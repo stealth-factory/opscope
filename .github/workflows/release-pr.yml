@@ -144,8 +144,8 @@ jobs:
           # cannot be stamped at publish time the way npm/package.json is.
           # `cargo test` holds the two together; bumping it here is what
           # keeps that check from failing on the release PR itself.
-          sed -i "0,/^version = \"$CURRENT\"$/s//version = \"$NEXT\"/" luvus/luvus-module.toml
-          grep -q "^version = \"$NEXT\"$" luvus/luvus-module.toml || {
+          sed -i "0,/^version = \"$CURRENT\"$/s//version = \"$NEXT\"/" luvus-module.toml
+          grep -q "^version = \"$NEXT\"$" luvus-module.toml || {
             echo "the luvus module manifest did not take the bump" >&2; exit 1; }
           # The lock carries the workspace crates' own versions, and a lock
           # disagreeing with its manifest makes the next build rewrite it
@@ -174,7 +174,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch"
           git add CHANGELOG.md Cargo.toml Cargo.lock widgets/Cargo.toml \
-            luvus/luvus-module.toml
+            luvus-module.toml
           if git diff --cached --quiet; then
             echo "nothing changed since the last run"
             exit 0

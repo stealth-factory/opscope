@@ -19,7 +19,7 @@ platforms = ["macos", "linux"]
 # promised a PATH, and `sh` that does not resolve is a build that
 # fails for a reason it is not about.
 [[build]]
-command = ["/bin/sh", "build.sh"]
+command = ["/bin/sh", "luvus/build.sh"]
 
 # The launcher: every widget, what it does, and a preview before it
 # runs. It is packaging and navigation, not a widget, so it is not
@@ -28,116 +28,116 @@ command = ["/bin/sh", "build.sh"]
 id = "menu"
 title = "opscope"
 placement = "split"
-command = ["./bin/opscope"]
+command = ["./luvus/bin/opscope"]
 
 # How much the coding agents on this machine have been used.
 [[panes]]
 id = "agent-usage"
 title = "agent-usage"
 placement = "split"
-command = ["./bin/opscope", "agent-usage"]
+command = ["./luvus/bin/opscope", "agent-usage"]
 
 # Clocks: this server's, everyone else's, and the ones counting down.
 [[panes]]
 id = "clocks"
 title = "clocks"
 placement = "split"
-command = ["./bin/opscope", "clocks"]
+command = ["./luvus/bin/opscope", "clocks"]
 
 # GitHub delivery metrics across every org and account you can see.
 [[panes]]
 id = "github"
 title = "github"
 placement = "split"
-command = ["./bin/opscope", "github"]
+command = ["./luvus/bin/opscope", "github"]
 
 # GitHub Actions runs, failures and queue time.
 [[panes]]
 id = "github-actions"
 title = "github-actions"
 placement = "split"
-command = ["./bin/opscope", "github-actions"]
+command = ["./luvus/bin/opscope", "github-actions"]
 
 # Watch the pull requests you have to follow up on.
 [[panes]]
 id = "github-prs"
 title = "github-prs"
 placement = "split"
-command = ["./bin/opscope", "github-prs"]
+command = ["./luvus/bin/opscope", "github-prs"]
 
 # Everything running in Herdr, across every workspace.
 [[panes]]
 id = "herdr-panes"
 title = "herdr-panes"
 placement = "split"
-command = ["./bin/opscope", "herdr-panes"]
+command = ["./luvus/bin/opscope", "herdr-panes"]
 
 # Multi-target latency monitor.
 [[panes]]
 id = "latency"
 title = "latency"
 placement = "split"
-command = ["./bin/opscope", "latency"]
+command = ["./luvus/bin/opscope", "latency"]
 
 # Linear delivery metrics across every team in the workspace.
 [[panes]]
 id = "linear"
 title = "linear"
 placement = "split"
-command = ["./bin/opscope", "linear"]
+command = ["./luvus/bin/opscope", "linear"]
 
 # How good the connection is between here and whoever is connected to it.
 [[panes]]
 id = "link"
 title = "link"
 placement = "split"
-command = ["./bin/opscope", "link"]
+command = ["./luvus/bin/opscope", "link"]
 
 # Everything running under a Luvus session, and who needs a human.
 [[panes]]
 id = "luvus-panes"
 title = "luvus-panes"
 placement = "split"
-command = ["./bin/opscope", "luvus-panes"]
+command = ["./luvus/bin/opscope", "luvus-panes"]
 
 # Digital rain.
 [[panes]]
 id = "matrix"
 title = "matrix"
 placement = "split"
-command = ["./bin/opscope", "matrix"]
+command = ["./luvus/bin/opscope", "matrix"]
 
 # A month grid you can page through, with today in context.
 [[panes]]
 id = "months"
 title = "months"
 placement = "split"
-command = ["./bin/opscope", "months"]
+command = ["./luvus/bin/opscope", "months"]
 
 # Which processes are using the network, how much, and how fast.
 [[panes]]
 id = "netwatch"
 title = "netwatch"
 placement = "split"
-command = ["./bin/opscope", "netwatch"]
+command = ["./luvus/bin/opscope", "netwatch"]
 
 # What is listening on this machine, what started it, and who can reach it.
 [[panes]]
 id = "ports"
 title = "ports"
 placement = "split"
-command = ["./bin/opscope", "ports"]
+command = ["./luvus/bin/opscope", "ports"]
 
 # Tailscale network: who is online, and how you are reaching them.
 [[panes]]
 id = "tailnet"
 title = "tailnet"
 placement = "split"
-command = ["./bin/opscope", "tailnet"]
+command = ["./luvus/bin/opscope", "tailnet"]
 
 # Vercel deployments, live.
 [[panes]]
 id = "vercel-deployments"
 title = "vercel-deployments"
 placement = "split"
-command = ["./bin/opscope", "vercel-deployments"]
+command = ["./luvus/bin/opscope", "vercel-deployments"]
