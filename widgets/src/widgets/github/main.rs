@@ -220,14 +220,16 @@ fn board_24h(stats: &[Account], watched: usize, pick: fn(&Account) -> Option<i64
     Some(stats.iter().filter_map(pick).sum())
 }
 
-/// Drop the rolling-day pair on a row that failed this pass.
+/// Drop the rolling-day pair on a row that is not current for this pass.
 ///
-/// `by_acc` is seeded from what is already on screen, so a later aggregate
-/// failure would otherwise keep last pass's counts. The rest of the row
-/// stays — the table should not empty — but a mixture of stale and fresh
-/// 24h figures wearing the same `last 24h` label is a smaller number
-/// wearing a complete one, and the gate above cannot see the difference
-/// until these two are gone.
+/// `by_acc` is seeded from what is already on screen, so last pass's
+/// `Some` values would otherwise survive: a later aggregate failure keeps
+/// them, and a healthy pass publishes after each account and mixes this
+/// cutoff with the previous one for accounts not yet queried. The rest of
+/// the row stays — the table should not empty — but a mixture of 24h
+/// figures wearing the same `last 24h` label is a smaller number wearing
+/// a complete one, and the gate above cannot see the difference until
+/// these two are gone.
 fn forget_24h(row: &mut Account) {
     row.opened_24h = None;
     row.merged_24h = None;
@@ -1274,6 +1276,12 @@ fn one_pass(
     // and a fresh `Utc::now()` per request would stagger the 24h cut so
     // the board sum covered several slightly different windows.
     let rolling_now = Utc::now();
+    // Last pass's figures are a different cutoff. Forget them before any
+    // account lands, or the first publish mixes this window with the last.
+    for row in by_acc.values_mut() {
+        forget_24h(row);
+    }
+    publish(state, &accounts, &by_acc, rate);
     for acc in &accounts {
         let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes) {
             Ok(d) => d,
@@ -2527,6 +2535,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(board_24h(&[stale, fresh], 2, |s| s.opened_24h), None);
+        // The same hole appears at the start of a healthy pass: every
+        // retained row is forgotten before the first account lands, so
+        // a mid-pass publish cannot mix two cutoffs under one label.
+        let mut prior = [
+            Account {
+                opened_24h: Some(4),
+                merged_24h: Some(5),
+                ..Default::default()
+            },
+            Account {
+                opened_24h: Some(7),
+                merged_24h: Some(1),
+                ..Default::default()
+            },
+        ];
+        for row in &mut prior {
+            forget_24h(row);
+        }
+        assert_eq!(board_24h(&prior, 2, |s| s.opened_24h), None);
     }
 
     #[test]
