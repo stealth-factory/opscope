@@ -48,11 +48,28 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 /// The two figures beside PR FLOW, and the only place their wording is
 /// written down.
 ///
-/// `last 24h` rather than `today`, because the window is rolling: at nine
-/// in the morning a calendar day is three hours of evidence and reads as a
-/// collapse in throughput. Opened first, merged second, so the column
-/// repeats the chart's own grammar - opened above the axis, merged below.
-const FIG_LABELS: [&str; 2] = ["opened · last 24h", "merged · last 24h"];
+/// `24h` rather than `today`, because the window is rolling: at nine in the
+/// morning a calendar day is three hours of evidence and reads as a collapse
+/// in throughput. Opened first, merged second, so the column repeats the
+/// chart's own grammar - opened above the axis, merged below.
+///
+/// Ten cells rather than the seventeen of `opened · last 24h`. The label is
+/// what [`figure_col`] measures, so every cell of wording here is a cell the
+/// chart does not get, and ` · last` names no window that ` ` does not. Six
+/// of the nineteen cells the column took come back, which on a fifty-six
+/// column pane over an eighteen-day window is the difference between a chart
+/// of eighteen columns and a chart of thirty-six: one cell a day against
+/// two.
+const FIG_LABELS: [&str; 2] = ["opened 24h", "merged 24h"];
+
+/// Room for three digits drawn large, which is `4n - 1` cells.
+///
+/// Fixed at three rather than fitted to the figure, so the column does not
+/// jump sideways the day a count crosses a hundred - and it is a floor under
+/// the label, not an alternative to it: a column sized to a ten-cell label
+/// alone leaves `inner` at ten, and a three-digit figure drops to plain text
+/// in a column that had eleven cells to spare.
+const FIG_DIGITS: usize = 11;
 
 /// A chart narrower than this is a smudge rather than a chart, so the
 /// figures stand down before it gets there. The chart is the section; the
@@ -64,13 +81,16 @@ const MIN_CHART: usize = 20;
 /// PR FLOW spreads its days across the whole pane, so this is taken out of
 /// `avail` *before* the days are spread - a column claimed afterwards would
 /// land on top of bars already drawn. The figures come off where the chart
-/// would have to lose days or fall under [`MIN_CHART`] to pay for them.
+/// would have to lose days or fall under [`MIN_CHART`] to pay for them, and
+/// what they lose there they get back on a row of their own: see
+/// [`figure_line`].
 fn figure_col(avail: usize, days: usize) -> usize {
     let want = FIG_LABELS
         .iter()
         .map(|l| tc::display_width(l))
         .max()
         .unwrap_or(0)
+        .max(FIG_DIGITS)
         + 2;
     if avail >= want + days.max(MIN_CHART) {
         want
@@ -227,7 +247,7 @@ fn board_24h(stats: &[Account], watched: usize, pick: fn(&Account) -> Option<i64
 /// them, and a healthy pass publishes after each account and mixes this
 /// cutoff with the previous one for accounts not yet queried. The rest of
 /// the row stays — the table should not empty — but a mixture of 24h
-/// figures wearing the same `last 24h` label is a smaller number wearing
+/// figures wearing the same `24h` label is a smaller number wearing
 /// a complete one, and the gate above cannot see the difference until
 /// these two are gone.
 fn forget_24h(row: &mut Account) {
@@ -240,6 +260,33 @@ fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     let borrowed: Vec<(&str, String)> =
         parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     tc::seg(&borrowed, w)
+}
+
+fn parts_width(parts: &[(String, String)]) -> usize {
+    parts.iter().map(|(_, t)| tc::display_width(t)).sum()
+}
+
+/// One figure's mark and value, or the shimmer that stands in for a count
+/// that has not arrived.
+fn figure_mark(
+    n: usize,
+    value: Option<i64>,
+    tick: usize,
+    p: &Palette,
+) -> Vec<(String, String)> {
+    let colour = if n == 0 { p.pr.clone() } else { p.ok.clone() };
+    let mark = if n == 0 { "▲" } else { "▼" };
+    match value {
+        Some(v) => vec![(colour, format!("{} {}", mark, v))],
+        // Still counting, and it has to look like it: a row reading
+        // `▲ 0` is a reading of a quiet day, which is not what this
+        // is.
+        None => {
+            let mut parts = vec![(colour, format!("{} ", mark))];
+            parts.extend(tc::skeleton(3, tick * 2, 5));
+            parts
+        }
+    }
 }
 
 /// One chart row with its figure fragment beside it.
@@ -262,6 +309,384 @@ fn with_figure(
         parts.extend(fig.iter().cloned());
     }
     seg_owned(&parts, w)
+}
+
+/// The two figures as text, for a pane too narrow to give them a column of
+/// their own.
+///
+/// The second rung of the ladder `github-prs` climbs, and the reason the
+/// column is allowed to stand down at all: a pane that cannot hold the
+/// digits loses the *size* of the number, never the number. Numbers first,
+/// because `seg` clips from the right and the wording is the part a reader
+/// can infer.
+///
+/// One row where both figures fit; two when even the compact form would
+/// clip. The compact line ` 24h · ▲ 170 · ▼ 147` is twenty cells, and a
+/// twenty-column pane hands this nineteen (`w - 1`) — returning that line
+/// unchecked drew `▼ 14`.
+fn figure_line(
+    opened: Option<i64>,
+    merged: Option<i64>,
+    w: usize,
+    tick: usize,
+    p: &Palette,
+) -> Vec<String> {
+    // Each figure under its own label where the row has room for both, the
+    // window named once in front of them where it has not, and a row each
+    // where even that compact form would clip a number.
+    let build = |labelled: bool| -> Vec<(String, String)> {
+        let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+        if !labelled {
+            parts.push((p.dim.clone(), "24h · ".to_string()));
+        }
+        for (n, value) in [opened, merged].into_iter().enumerate() {
+            if n > 0 {
+                parts.push((p.dim.clone(), " · ".to_string()));
+            }
+            parts.extend(figure_mark(n, value, tick, p));
+            if labelled {
+                parts.push((p.dim.clone(), format!(" {}", FIG_LABELS[n])));
+            }
+        }
+        parts
+    };
+    let labelled = build(true);
+    if parts_width(&labelled) <= w {
+        return vec![seg_owned(&labelled, w)];
+    }
+    let compact = build(false);
+    if parts_width(&compact) <= w {
+        return vec![seg_owned(&compact, w)];
+    }
+    let mut opened_row: Vec<(String, String)> = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.dim.clone(), "24h · ".to_string()),
+    ];
+    opened_row.extend(figure_mark(0, opened, tick, p));
+    let mut merged_row: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    merged_row.extend(figure_mark(1, merged, tick, p));
+    if parts_width(&opened_row) <= w {
+        return vec![seg_owned(&opened_row, w), seg_owned(&merged_row, w)];
+    }
+    let window = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.dim.clone(), "24h".to_string()),
+    ];
+    let mut opened_only: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    opened_only.extend(figure_mark(0, opened, tick, p));
+    vec![
+        seg_owned(&window, w),
+        seg_owned(&opened_only, w),
+        seg_owned(&merged_row, w),
+    ]
+}
+
+/// The gap between the rule and the totals set into it, each side.
+const AXIS_TOTALS_PAD: usize = 1;
+
+/// The shortest run of rule that still reads as a rule rather than as a
+/// stub. Below this on either side the totals go back to the heading: two
+/// short dashes either side of a number look like two charts, not one axis.
+const AXIS_RULE_MIN: usize = 4;
+
+/// The window totals, worded or bare.
+///
+/// Worded where a heading has room for the words; bare on the axis, where
+/// the rule above and below says which is which, and in a heading with no
+/// room for `opened` and `merged` - a total nobody can read is worse than a
+/// total whose noun the arrow and the colour already gave.
+fn totals_parts(totals: (i64, i64), worded: bool, p: &Palette) -> Vec<(String, String)> {
+    let word = |n: usize| {
+        if worded {
+            [" opened", " merged"][n]
+        } else {
+            ""
+        }
+    };
+    vec![
+        (p.pr.clone(), format!("▲ {}{}", totals.0, word(0))),
+        (p.dim.clone(), " · ".to_string()),
+        (p.ok.clone(), format!("▼ {}{}", totals.1, word(1))),
+    ]
+}
+
+/// The window totals as they sit on the axis: opened, which is the half
+/// above it, then merged, which is the half below.
+fn axis_totals(totals: (i64, i64), p: &Palette) -> Vec<(String, String)> {
+    let mut parts = vec![(tc::RST.to_string(), " ".repeat(AXIS_TOTALS_PAD))];
+    parts.extend(totals_parts(totals, false, p));
+    parts.push((tc::RST.to_string(), " ".repeat(AXIS_TOTALS_PAD)));
+    parts
+}
+
+/// Whether a rule of `cols` can carry the totals and still be one rule.
+fn axis_totals_fit(cols: usize, totals: (i64, i64), p: &Palette) -> bool {
+    let inner: usize = axis_totals(totals, p)
+        .iter()
+        .map(|(_, t)| tc::display_width(t))
+        .sum();
+    cols >= inner + AXIS_RULE_MIN * 2
+}
+
+/// The axis: one rule exactly `cols` wide, with the window totals set into
+/// it where there is room for them and a plain rule where there is not.
+///
+/// The axis is what divides opened above from merged below, so a total
+/// sitting on it labels the half it divides rather than being one more
+/// fact in a heading that already carries four. Exactly `cols`, because
+/// every row of the chart is padded to the same column and a rule one cell
+/// short steps the figures sideways on this one row.
+fn axis_row(cols: usize, totals: Option<(i64, i64)>, p: &Palette) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    match totals.filter(|t| axis_totals_fit(cols, *t, p)) {
+        Some(t) => {
+            let mid = axis_totals(t, p);
+            let inner: usize = mid.iter().map(|(_, t)| tc::display_width(t)).sum();
+            let left = (cols - inner) / 2;
+            parts.push((p.grid.clone(), "─".repeat(left)));
+            parts.extend(mid);
+            parts.push((p.grid.clone(), "─".repeat(cols - inner - left)));
+        }
+        None => parts.push((p.grid.clone(), "─".repeat(cols))),
+    }
+    parts
+}
+
+/// The PR FLOW heading: the span, the totals where the axis did not take
+/// them, and the peak the shared scale represents.
+///
+/// One builder for both PR FLOWs, and the only thing on this pane that
+/// decides what a heading can hold.
+///
+/// `seg` clips from the right, and clipping a heading of four facts cuts a
+/// number in half - `▼ 147 merged` became `▼ 1` at forty columns, which is
+/// a wrong number rather than a missing one. So every fact here is measured
+/// before it goes in: the totals worded where the words fit, bare where
+/// only the numbers do, and reported back as unplaced where neither does so
+/// the caller can give them a row of their own. The peak goes on last and
+/// only whole.
+///
+/// Returns the row and whether the totals are on it.
+fn flow_heading(
+    span: String,
+    totals: Option<(i64, i64)>,
+    peak: i64,
+    w: usize,
+    p: &Palette,
+) -> (String, bool) {
+    let base: Vec<(String, String)> = vec![
+        (p.lbl.clone(), " ── PR FLOW ── ".to_string()),
+        (p.dim.clone(), span),
+    ];
+    let mut parts = base.clone();
+    let mut placed = totals.is_none();
+    if let Some(t) = totals {
+        for worded in [true, false] {
+            let mut wanted = base.clone();
+            wanted.push((p.dim.clone(), " · ".to_string()));
+            wanted.extend(totals_parts(t, worded, p));
+            if parts_width(&wanted) <= w {
+                parts = wanted;
+                placed = true;
+                break;
+            }
+        }
+    }
+    let peak = (
+        p.dim.clone(),
+        // Three spaces after the totals, which is the gap this heading has
+        // always set them off by, and a plain separator where there are no
+        // totals to set off.
+        format!("{}peak {}/day", if parts.len() > base.len() { "   " } else { " · " }, peak),
+    );
+    if parts_width(&parts) + tc::display_width(&peak.1) <= w {
+        parts.push(peak);
+    }
+    (seg_owned(&parts, w), placed)
+}
+
+/// The window totals on a row of their own, for a pane whose heading could
+/// not hold them and whose axis was too short to carry them.
+///
+/// The bottom rung of the ladder: a pane this narrow loses the words, never
+/// the numbers. When even the bare pair would clip, they take a row each —
+/// the last fallback used to return the bare form unchecked, and `seg`
+/// then cut the merged total.
+fn totals_row(totals: (i64, i64), w: usize, p: &Palette) -> Vec<String> {
+    for worded in [true, false] {
+        let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+        parts.extend(totals_parts(totals, worded, p));
+        if parts_width(&parts) <= w {
+            return vec![seg_owned(&parts, w)];
+        }
+    }
+    let opened = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.pr.clone(), format!("▲ {}", totals.0)),
+    ];
+    let merged = vec![
+        (tc::RST.to_string(), " ".to_string()),
+        (p.ok.clone(), format!("▼ {}", totals.1)),
+    ];
+    vec![seg_owned(&opened, w), seg_owned(&merged, w)]
+}
+
+/// What the heading of a PR FLOW has to say: a chart that has counted, or
+/// one that is still counting and has no totals to put anywhere yet.
+enum FlowHead {
+    Counted { span: String, peak: i64 },
+    Counting { want: i64 },
+}
+
+/// One whole PR FLOW - heading, the rows its totals and figures fall back
+/// to, and the chart - for the board and for an account's own screen alike.
+///
+/// The two used to share the pieces and keep their own copy of the order
+/// they go in, which is the half that decides what a narrow pane shows:
+/// whether the totals reach the axis, whether they come back to the
+/// heading, whether the figures get a column or a row. Copied glue drifts,
+/// and a test of the pieces cannot see it - so the glue is here, called
+/// twice, and the tests drive this.
+#[allow(clippy::too_many_arguments)]
+fn flow_section(
+    head: FlowHead,
+    totals: Option<(i64, i64)>,
+    figures: (Option<i64>, Option<i64>),
+    figw: usize,
+    up: &[f64],
+    down: &[f64],
+    scale: f64,
+    cu: &str,
+    cd: &str,
+    days: usize,
+    tick: usize,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    // The totals go on the axis they divide, and back into the heading on a
+    // chart too short to carry them without breaking its rule.
+    let on_axis = totals.is_some_and(|t| axis_totals_fit(up.len(), t, p));
+    let mut rows = match head {
+        FlowHead::Counting { want } => vec![tc::seg(
+            &[
+                (p.lbl.as_str(), " ── PR FLOW ── ".into()),
+                (p.dim.as_str(), format!("counting {}d…", want)),
+            ],
+            w,
+        )],
+        FlowHead::Counted { span, peak } => {
+            let (row, placed) = flow_heading(span, totals.filter(|_| !on_axis), peak, w, p);
+            let mut rows = vec![row];
+            if let Some(t) = totals.filter(|_| !placed) {
+                rows.extend(totals_row(t, w, p));
+            }
+            rows
+        }
+    };
+    let figs = (figw > 0).then(|| figure_rows(figures.0, figures.1, figw, tick, p));
+    if figs.is_none() {
+        // The column stood down, so the two figures take a row of text under
+        // the heading rather than leaving the pane.
+        rows.extend(figure_line(figures.0, figures.1, w, tick, p));
+    }
+    rows.extend(flow_body(
+        up,
+        down,
+        scale,
+        cu,
+        cd,
+        days,
+        totals.filter(|_| on_axis),
+        figs.as_ref(),
+        w,
+        p,
+    ));
+    rows
+}
+
+/// The eight rows under the heading: three of bars up, the axis, three of
+/// bars down, the axis labels - each with its figure fragment beside it.
+///
+/// One body for both PR FLOWs, which is the only way the board's chart and
+/// an account's own land in the same columns at the same widths. The board
+/// hands it values already divided by its own scale while it animates, so
+/// the scale is a parameter rather than something computed here.
+#[allow(clippy::too_many_arguments)]
+fn flow_body(
+    up: &[f64],
+    down: &[f64],
+    scale: f64,
+    cu: &str,
+    cd: &str,
+    days: usize,
+    totals: Option<(i64, i64)>,
+    figs: Option<&Vec<Vec<(String, String)>>>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let cols = up.len();
+    // Where the figure column starts: one for the chart's left margin, then
+    // the bars - the bars drawn, not the columns the chart was given. A day
+    // is a whole number of cells, so fourteen days in forty columns draw
+    // twenty-eight and leave a dozen over; the figures were tried against
+    // the right edge of that width instead, and read as a second thing
+    // stranded across a gap rather than as a column beside the chart. The
+    // slack stays at the edge of the pane, where it looks like a margin.
+    // Every chart row is padded to this column, because the axis labels
+    // below are shorter than the bars above whenever `Nd ago` and `today`
+    // do not reach across, and the column would otherwise step sideways on
+    // that one row.
+    let pad_to = 1 + cols;
+    let fig = |n: usize| figs.and_then(|f| f.get(n));
+    let mut rows = Vec::new();
+    for (n, line) in tc::vbars(
+        &up.iter().map(|v| (*v, cu.to_string())).collect::<Vec<_>>(),
+        3,
+        scale,
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
+        for (colour, ch) in &line {
+            parts.push((colour.clone(), ch.clone()));
+        }
+        rows.push(with_figure(parts, fig(n), pad_to, w));
+    }
+    // An explicit baseline: without it the two series abut and the eye
+    // cannot tell which row the bars grow from.
+    rows.push(with_figure(axis_row(cols, totals, p), fig(3), pad_to, w));
+    for (n, line) in tc::vbars_down(
+        &down.iter().map(|v| (*v, cd.to_string())).collect::<Vec<_>>(),
+        3,
+        scale,
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
+        for (colour, ch) in &line {
+            parts.push((colour.clone(), ch.clone()));
+        }
+        rows.push(with_figure(parts, fig(4 + n), pad_to, w));
+    }
+    let left = format!("{}d ago", days);
+    let now = "today";
+    let mut labels: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
+    // Both ends, or only the end that says which way time runs. A chart
+    // narrower than the two words together would otherwise draw a row wider
+    // than the chart it labels and push the figure column out of line - and
+    // the window the left end names is in the heading either way.
+    if cols >= tc::display_width(&left) + now.len() + 1 {
+        labels.push((p.dim.clone(), left.clone()));
+        labels.push((
+            p.dim.clone(),
+            " ".repeat(cols - tc::display_width(&left) - now.len()),
+        ));
+    }
+    labels.push((p.dim.clone(), now.to_string()));
+    rows.push(with_figure(labels, fig(7), pad_to, w));
+    rows
 }
 
 /// How many of the longest-open PRs an account's own screen names.
@@ -674,68 +1099,27 @@ fn account_detail(
         .max(1.0);
     if !up.is_empty() {
         rows.push(String::new());
-        rows.push(tc::seg(
-            &[
-                (p.lbl.as_str(), " ── PR FLOW ── ".into()),
-                (p.dim.as_str(), format!("{}d · ", days.len())),
-                (p.pr.as_str(), format!("▲ {} opened", opened.iter().sum::<f64>() as i64)),
-                (p.dim.as_str(), " · ".into()),
-                (p.ok.as_str(), format!("▼ {} merged", merged.iter().sum::<f64>() as i64)),
-                (p.dim.as_str(), format!("   peak {}/day", hi as i64)),
-            ],
+        let totals = (
+            opened.iter().sum::<f64>() as i64,
+            merged.iter().sum::<f64>() as i64,
+        );
+        rows.extend(flow_section(
+            FlowHead::Counted {
+                span: format!("{}d", days.len()),
+                peak: hi as i64,
+            },
+            Some(totals),
+            (a.opened_24h, a.merged_24h),
+            figw,
+            &up,
+            &down,
+            hi,
+            &p.pr.clone(),
+            &p.ok.clone(),
+            days.len(),
+            tick,
             w - 1,
-        ));
-        let figs = (figw > 0)
-            .then(|| figure_rows(a.opened_24h, a.merged_24h, figw, tick, p));
-        let fig = |n: usize| figs.as_ref().and_then(|f| f.get(n));
-        let pad_to = 1 + up.len();
-        for (n, line) in
-            tc::vbars(&up.iter().map(|v| (*v, p.pr.clone())).collect::<Vec<_>>(), 3, hi)
-                .into_iter()
-                .enumerate()
-        {
-            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
-            for (colour, ch) in &line {
-                parts.push((colour.clone(), ch.clone()));
-            }
-            rows.push(with_figure(parts, fig(n), pad_to, w - 1));
-        }
-        rows.push(with_figure(
-            vec![
-                (tc::RST.to_string(), " ".into()),
-                (p.grid.clone(), "─".repeat(up.len())),
-            ],
-            fig(3),
-            pad_to,
-            w - 1,
-        ));
-        for (n, line) in
-            tc::vbars_down(&down.iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(), 3, hi)
-                .into_iter()
-                .enumerate()
-        {
-            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
-            for (colour, ch) in &line {
-                parts.push((colour.clone(), ch.clone()));
-            }
-            rows.push(with_figure(parts, fig(4 + n), pad_to, w - 1));
-        }
-        let left = format!("{}d ago", days.len());
-        rows.push(with_figure(
-            vec![
-                (p.dim.clone(), format!(" {}", left)),
-                (
-                    p.dim.clone(),
-                    format!(
-                        "{:>width$}",
-                        "today",
-                        width = up.len().saturating_sub(left.chars().count() + 1)
-                    ),
-                ),
-            ],
-            fig(7),
-            pad_to,
-            w - 1,
+            p,
         ));
     }
     (rows, cursor)
@@ -855,7 +1239,7 @@ fn build_day_query(q: &str, dates: &[String]) -> String {
 /// one cut for a whole account pass (and a test can pin a frozen one).
 /// Reading it per account would give each a different 24h window, and the
 /// board sum would then cover several slightly different intervals under
-/// one `last 24h` label.
+/// one `24h` label.
 fn build_query(acc: &str, days: i64, viewer: &str, now: DateTime<Utc>) -> String {
     // N days *ending today*, so this spans exactly the dates the per-day
     // charts plot - `days` rather than `days - 1` would cover one day more
@@ -1864,22 +2248,6 @@ fn main() {
             .collect();
         let (up, down) = (spread(&opened_day), spread(&merged_day));
         let chart_cols = up.len();
-        let figs = (figw > 0).then(|| {
-            figure_rows(
-                board_24h(&stats, watched, |s| s.opened_24h),
-                board_24h(&stats, watched, |s| s.merged_24h),
-                figw,
-                tick,
-                &p,
-            )
-        });
-        // Where the figure column starts: one for the chart's left margin,
-        // then the bars. Every chart row is padded to it, because the axis
-        // labels below are shorter than the bars above whenever `Nd ago`
-        // and `today` do not reach across, and the column would otherwise
-        // step sideways on that one row.
-        let pad_to = 1 + chart_cols;
-        let fig = |n: usize| figs.as_ref().and_then(|f| f.get(n));
         // One scale both ways, or the comparison lies.
         let span_hi = up
             .iter()
@@ -1888,40 +2256,15 @@ fn main() {
             .fold(0.0f64, f64::max)
             .max(1.0);
         rows.push(String::new());
-        if chart_stale {
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── PR FLOW ── ".into()),
-                    (p.dim.as_str(), format!("counting {}d…", want)),
-                ],
-                w - 1,
-            ));
-        } else {
-            // Totals come from the days themselves: a day spans several
-            // columns now, so summing the columns would multiply by bar width.
-            let span = if days.len() < want as usize {
-                format!("{}d of {}d", days.len(), want)
-            } else {
-                format!("{}d", days.len())
-            };
-            rows.push(tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── PR FLOW ── ".into()),
-                    (p.dim.as_str(), format!("{} · ", span)),
-                    (
-                        p.pr.as_str(),
-                        format!("▲ {} opened", opened_day.iter().sum::<f64>() as i64),
-                    ),
-                    (p.dim.as_str(), " · ".into()),
-                    (
-                        p.ok.as_str(),
-                        format!("▼ {} merged", merged_day.iter().sum::<f64>() as i64),
-                    ),
-                    (p.dim.as_str(), format!("   peak {}/day", span_hi as i64)),
-                ],
-                w - 1,
-            ));
-        }
+        // Totals come from the days themselves: a day spans several columns
+        // now, so summing the columns would multiply by bar width. A chart
+        // that has not counted yet has no totals to put anywhere.
+        let totals = (!chart_stale).then(|| {
+            (
+                opened_day.iter().sum::<f64>() as i64,
+                merged_day.iter().sum::<f64>() as i64,
+            )
+        });
         // While the figures are still arriving the bars bounce like a level
         // meter in pale versions of their own colours, then settle onto the
         // real values rather than cutting to them. Three rows each side,
@@ -1959,52 +2302,38 @@ fn main() {
                 _ => (real_u, real_d, p.pr.clone(), p.ok.clone()),
             }
         };
-        for (n, line) in
-            tc::vbars(&hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0)
-                .into_iter()
-                .enumerate()
-        {
-            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
-            for (colour, ch) in &line {
-                parts.push((colour.clone(), ch.clone()));
+        let head = if chart_stale {
+            FlowHead::Counting { want }
+        } else {
+            FlowHead::Counted {
+                // The oldest days are cropped where the pane cannot hold
+                // them all, and the heading says so, because the totals
+                // describe what is drawn rather than the whole window.
+                span: if days.len() < want as usize {
+                    format!("{}d of {}d", days.len(), want)
+                } else {
+                    format!("{}d", days.len())
+                },
+                peak: span_hi as i64,
             }
-            rows.push(with_figure(parts, fig(n), pad_to, w - 1));
-        }
-        // An explicit baseline: without it the two series abut and the eye
-        // cannot tell which row the bars grow from.
-        rows.push(with_figure(
-            vec![
-                (tc::RST.to_string(), " ".into()),
-                (p.grid.clone(), "─".repeat(chart_cols)),
-            ],
-            fig(3),
-            pad_to,
+        };
+        rows.extend(flow_section(
+            head,
+            totals,
+            (
+                board_24h(&stats, watched, |s| s.opened_24h),
+                board_24h(&stats, watched, |s| s.merged_24h),
+            ),
+            figw,
+            &hu,
+            &hd,
+            1.0,
+            &cu,
+            &cd,
+            days.len(),
+            tick,
             w - 1,
-        ));
-        for (n, line) in
-            tc::vbars_down(&hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0)
-                .into_iter()
-                .enumerate()
-        {
-            let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
-            for (colour, ch) in &line {
-                parts.push((colour.clone(), ch.clone()));
-            }
-            rows.push(with_figure(parts, fig(4 + n), pad_to, w - 1));
-        }
-        let left = format!("{}d ago", days.len());
-        rows.push(with_figure(
-            vec![
-                (p.dim.clone(), format!(" {}", left)),
-                (
-                    p.dim.clone(),
-                    " ".repeat(chart_cols.saturating_sub(left.len() + 5).max(1)),
-                ),
-                (p.dim.clone(), "today".into()),
-            ],
-            fig(7),
-            pad_to,
-            w - 1,
+            &p,
         ));
         rows.push(String::new());
 
@@ -2597,21 +2926,30 @@ mod tests {
 
     #[test]
     fn the_figures_stand_down_before_the_chart_does() {
-        // The column is the wider of the two labels plus its gutter, and
-        // it is only taken where the chart can still hold all its days and
-        // stay above `MIN_CHART`.
-        let col = FIG_LABELS.iter().map(|l| tc::display_width(l)).max().unwrap() + 2;
+        // The column is the wider of the two labels and the three digits,
+        // plus its gutter, and it is only taken where the chart can still
+        // hold all its days and stay above `MIN_CHART`.
+        let col = FIG_LABELS
+            .iter()
+            .map(|l| tc::display_width(l))
+            .max()
+            .unwrap()
+            .max(FIG_DIGITS)
+            + 2;
         assert_eq!(figure_col(col + MIN_CHART, 7), col);
         assert_eq!(figure_col(col + MIN_CHART - 1, 7), 0);
         // A window longer than the floor pays for itself in days, not in
         // the floor: 90 days needs 90 columns left over, not 20.
         assert_eq!(figure_col(col + 89, 90), 0);
         assert_eq!(figure_col(col + 90, 90), col);
-        // The two widths the change was read back at, so the commit and
-        // the pull request quote something pinned rather than recomputed
-        // by hand: a 56-column pane, which is the narrower of the two this
-        // board is actually on, and a 35-column one, which is not.
+        // The widths the change was read back at, so the commit and the
+        // pull request quote something pinned rather than recomputed by
+        // hand: a 56-column pane, which is the narrower of the two this
+        // board is actually on, and the boundary the shorter label moved -
+        // a 36-column pane keeps the column where a 35-column one gives it
+        // up. It was 43 while the labels said `opened · last 24h`.
         assert_eq!(figure_col(56usize.saturating_sub(3), 7), col);
+        assert_eq!(figure_col(36usize.saturating_sub(3), 7), col);
         assert_eq!(figure_col(35usize.saturating_sub(3), 7), 0);
     }
 
@@ -2833,4 +3171,304 @@ mod tests {
         assert_eq!(grid[0].chars().next(), Some(' '));
         assert_eq!(grid[1].chars().next(), Some('█'));
     }
+    /// Everything PR FLOW draws at one width, in the order both PR FLOWs
+    /// push it: the heading, the row the totals fall back to, the row the
+    /// figures fall back to, then the eight rows of chart. Colour comes
+    /// off, because every assertion below is about what a reader sees.
+    ///
+    /// Built from the same four functions the two call sites use, which is
+    /// the point of their being four functions.
+    fn frame_at(w: usize, days: usize, totals: (i64, i64), figures: (Option<i64>, Option<i64>)) -> Vec<String> {
+        let p = palette();
+        let (avail, figw) = chart_split(w, days);
+        // The oldest days are cropped where the pane cannot hold them all,
+        // exactly as both call sites crop them before spreading.
+        let days = days.min(avail);
+        let slot = (avail / days).max(1);
+        let gap = if slot >= 3 { 1 } else { 0 };
+        let barw = slot - gap;
+        let spread = |per: &[f64]| -> Vec<f64> {
+            let mut cols = Vec::new();
+            for (n, v) in per.iter().enumerate() {
+                cols.extend(std::iter::repeat_n(*v, barw));
+                if gap > 0 && n + 1 < per.len() {
+                    cols.extend(std::iter::repeat_n(0.0, gap));
+                }
+            }
+            cols
+        };
+        let up = spread(&(0..days).map(|n| ((n * 7) % 11) as f64 + 1.0).collect::<Vec<_>>());
+        let down = spread(&(0..days).map(|n| ((n * 5) % 9) as f64 + 1.0).collect::<Vec<_>>());
+        let hi = up.iter().chain(down.iter()).cloned().fold(0.0f64, f64::max).max(1.0);
+        flow_section(
+            FlowHead::Counted {
+                span: format!("{}d", days),
+                peak: hi as i64,
+            },
+            Some(totals),
+            figures,
+            figw,
+            &up,
+            &down,
+            hi,
+            &p.pr.clone(),
+            &p.ok.clone(),
+            days,
+            0,
+            w - 1,
+            &p,
+        )
+        .iter()
+        .map(|r| plain(r))
+        .collect()
+    }
+
+    /// A row with its escapes taken off. `display_width` counts what it is
+    /// given, so a row measured with its colours still on measures wildly
+    /// too wide.
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_column_is_never_narrower_than_the_digits_it_holds() {
+        // The column used to be sized by the label alone. Shorten the label
+        // to ten cells and that leaves eleven-cell digits in a ten-cell
+        // column, which drops every three-digit figure to plain text - in a
+        // column that had the room for it.
+        let p = palette();
+        let figw = figure_col(53, 18);
+        let rows: Vec<String> = figure_rows(Some(170), Some(147), figw, 0, &p)
+            .iter()
+            .map(|r| r.iter().map(|(_, t)| t.clone()).collect())
+            .collect();
+        for drawn in ["170", "147"] {
+            assert!(
+                !rows.iter().any(|r| r.contains(drawn)),
+                "{} fell back to plain text in a {}-cell column: {:?}",
+                drawn,
+                figw,
+                rows
+            );
+        }
+        assert!(
+            rows.iter().filter(|r| r.contains('█') || r.contains('▀')).count() >= 6,
+            "three digits did not draw large: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn the_figures_take_a_row_when_the_column_stands_down() {
+        // The rung the port left behind: below the column the figures used
+        // to leave the pane altogether, and a pane with no figure on it
+        // reads as an account with nothing opened.
+        let narrow = frame_at(35, 18, (170, 147), (Some(12), Some(9)));
+        let line = narrow
+            .iter()
+            .find(|r| r.contains("12"))
+            .unwrap_or_else(|| panic!("the figures left the pane: {:?}", narrow));
+        assert!(line.contains('9') && line.contains("24h"), "{:?}", line);
+        // And it is the *fallback*: one column wider the figures are drawn
+        // large instead, so the row above is not simply always there.
+        let wide = frame_at(36, 18, (170, 147), (Some(12), Some(9)));
+        assert!(
+            wide.iter().all(|r| !r.contains("▲ 12")),
+            "the text row was drawn beside a column that stood up: {:?}",
+            wide
+        );
+        assert!(
+            wide.iter().any(|r| r.contains("opened 24h")),
+            "the column lost its label: {:?}",
+            wide
+        );
+        // And both figures survive whole on every pane narrow enough to
+        // need the row: the labelled form is thirty-three cells, so a row
+        // that goes on drawing it at twenty clips the second figure away
+        // and the pane says only what was opened. 12 and 345 still fit the
+        // compact line at nineteen cells; 170 and 147 do not — see
+        // `the_compact_figures_stay_whole_when_they_need_two_rows`.
+        for w in 20..36usize {
+            let rows = frame_at(w, 18, (170, 147), (Some(12), Some(345)));
+            assert!(
+                rows.iter().any(|r| r.contains("▲ 12") && r.contains("▼ 345")),
+                "width {} lost a figure: {:?}",
+                w,
+                rows
+            );
+            assert!(
+                rows.iter().any(|r| r.contains("24h")),
+                "width {} lost the window: {:?}",
+                w,
+                rows
+            );
+        }
+    }
+
+    #[test]
+    fn the_compact_figures_stay_whole_when_they_need_two_rows() {
+        // The compact fallback was returned without measuring it. At twenty
+        // columns the section has nineteen cells and ` 24h · ▲ 170 · ▼ 147`
+        // needs twenty, so `seg` clipped the merged count to `14`.
+        let rows = frame_at(20, 18, (12, 9), (Some(170), Some(147)));
+        assert!(
+            rows.iter().any(|r| r.contains("▲ 170")),
+            "opened figure left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("▼ 147")),
+            "merged figure was clipped: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("24h")),
+            "the window left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("▼ 14") || r.contains("▼ 147")),
+            "a cut merged count is on the pane: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn the_bare_totals_stay_whole_when_they_need_two_rows() {
+        // Same unchecked last step on `totals_row`: the bare pair is
+        // returned even when it does not fit, and `seg` cuts the merged
+        // total. ` ▲ 123456 · ▼ 789012` is twenty cells; a twenty-column
+        // pane has nineteen.
+        let rows = frame_at(20, 18, (123456, 789012), (Some(12), Some(9)));
+        assert!(
+            rows.iter().any(|r| r.contains("▲ 123456")),
+            "opened total left the pane: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("▼ 789012")),
+            "merged total was clipped: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("▼ 78901") || r.contains("▼ 789012")),
+            "a cut merged total is on the pane: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn the_totals_land_somewhere_whole_at_every_width() {
+        // Three places, in order of preference: the axis they divide, the
+        // heading, and a row of their own. Exactly one of them, at every
+        // width, with both numbers intact - a heading clipped mid-total
+        // drew `▼ 1` for 147, which is a wrong number rather than a missing
+        // one.
+        for w in 20..=200usize {
+            for days in [7usize, 18, 90] {
+                let rows = frame_at(w, days, (170, 147), (Some(12), Some(9)));
+                let carrying: Vec<&String> = rows
+                    .iter()
+                    .filter(|r| r.contains("▲ 170") || r.contains("▼ 147"))
+                    .collect();
+                assert_eq!(
+                    carrying.len(),
+                    1,
+                    "width {} days {} put the totals in {} places: {:?}",
+                    w,
+                    days,
+                    carrying.len(),
+                    rows
+                );
+                assert!(
+                    carrying[0].contains("▲ 170") && carrying[0].contains("▼ 147"),
+                    "width {} days {} cut a total: {:?}",
+                    w,
+                    days,
+                    carrying[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_axis_reads_as_one_rule_wherever_it_carries_the_totals() {
+        // Two short dashes either side of a number look like two charts
+        // rather than one axis, so below that the totals go back to the
+        // heading rather than being squeezed onto the rule.
+        let p = palette();
+        let mut carried = 0usize;
+        for cols in 1..=200usize {
+            let parts = axis_row(cols, Some((170, 147)), &p);
+            // Measured off the parts rather than off a clipped row: `seg`
+            // would take the extra cell away and the step sideways with
+            // it, and the figure column is padded to `1 + cols` whatever
+            // this row actually drew.
+            let drawn: usize = parts.iter().map(|(_, t)| tc::display_width(t)).sum();
+            assert_eq!(drawn, cols + 1, "a {}-column axis drew {} cells", cols, drawn);
+            let row = plain(&seg_owned(&parts, cols + 1));
+            if !row.contains("170") {
+                continue;
+            }
+            carried += 1;
+            let rule: Vec<usize> = row
+                .split(|c: char| c != '─')
+                .filter(|run| !run.is_empty())
+                .map(|run| run.chars().count())
+                .collect();
+            assert_eq!(rule.len(), 2, "the totals broke the rule: {:?}", row);
+            for run in rule {
+                assert!(
+                    run >= AXIS_RULE_MIN,
+                    "a {}-column axis left a {}-cell stub: {:?}",
+                    cols,
+                    run,
+                    row
+                );
+            }
+        }
+        assert!(carried > 0, "the axis never carried the totals at any width");
+    }
+
+    #[test]
+    fn no_row_of_the_flow_overflows_the_pane_it_was_built_for() {
+        // `seg` clips what goes through it; a row assembled from prose and
+        // pushed straight on does not, and a row wider than the pane wraps
+        // and costs the frame a line.
+        for w in 20..=200usize {
+            for days in [7usize, 18, 90] {
+                for figures in [
+                    (Some(12), Some(9)),
+                    (None, None),
+                    (Some(1234), Some(9)),
+                    (Some(170), Some(147)),
+                ] {
+                    for row in frame_at(w, days, (170, 147), figures) {
+                        assert!(
+                            tc::display_width(&row) <= w - 1,
+                            "width {} days {} drew {} cells: {:?}",
+                            w,
+                            days,
+                            tc::display_width(&row),
+                            row
+                        );
+                    }
+                }
+            }
+        }
+    }
+
 }
