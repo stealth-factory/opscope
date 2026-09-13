@@ -233,6 +233,7 @@ no-scroll exception.
 | `Ctrl-Y` `Ctrl-E` | the same thing from the keyboard, a line at a time, as in vim |
 | `↑` `↓` | move the **selection**, and the view follows to keep it in sight |
 | click a row | move the selection there — the same thing `↑` `↓` do |
+| click it again | open it — the same thing `↵` does |
 | click a hint | press the key that hint names |
 
 The split is the point: **the wheel moves the view; keys and clicks move the
@@ -245,9 +246,19 @@ Clicking is the other half of the same idea, in reverse: **a click is a second
 route to a key, never a capability of its own.** Clicking a row is `↑`/`↓`;
 clicking `[q]uit` in the footer is `q`. Nothing here is reachable only with a
 mouse, so nothing is lost by not having one — and nothing new has to be
-learned to use one. Clicking the launcher's list is the worked example; the
-widgets follow in [OPS-55](https://github.com/stealth-factory/opscope/issues/89).
-Right-click, middle-click and drag reports are eaten, not acted on.
+learned to use one. Right-click, middle-click and drag reports are eaten,
+not acted on.
+
+Clicking the row the cursor is already on opens it, which is `↵`. Not a
+double-click: the terminal never says how many times you clicked, and the
+selected row is tinted anyway — you can see that the next click will open it,
+where a double-click shows nothing before it fires.
+
+Every widget with a cursor answers a click, and every footer is clickable —
+two checks in `cargo test` fail the build when one is not. Turning mouse
+reporting off is now in **every** widget's settings screen under `,`, not
+only the launcher's: toggle it and that pane restarts without reporting,
+which gives drag-to-select back where you are rather than where you are not.
 
 Nothing is ever hidden because a pane is short. Each widget builds its frame
 at whatever height it needs and the pane shows a window onto it, so a section
@@ -257,7 +268,8 @@ your problem to fix.
 
 Mouse reporting is on by default and takes drag-to-select away from the
 terminal while it is. `"terminal": {"mouse": false}` in your config turns it
-off; the keys are unaffected. See [Configuration](#configuration).
+off, and so does the `mouse` row in any widget's settings screen; the keys are
+unaffected either way. See [Configuration](#configuration).
 
 ## Configuration
 

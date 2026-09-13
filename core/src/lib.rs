@@ -473,16 +473,27 @@ pub struct Footer {
 
 /// The one key a hint teaches, or nothing when it does not teach exactly one.
 ///
-/// Two forms count, and deliberately only two: a single character in
-/// brackets, and one of the arrow-and-return glyphs. Both are unambiguous
-/// about which characters are the key, which is what a click needs. The
-/// third form `check.rs` reads - a key named in prose, as in
-/// `esc, ↵ or i to close` - is not taken here, because recovering the key
-/// out of a sentence means guessing, and a click that fires the wrong key
-/// is worse than one that fires none.
+/// Two forms count first: a single character in brackets, and one of the
+/// arrow-and-return glyphs. Both are unambiguous about which characters are
+/// the key, which is what a click needs.
 ///
-/// `[±]25` is the case that proves the rule. One glyph standing for two
+/// `[±]25` is the case that proves that rule. One glyph standing for two
 /// arms, `+` and `-`, so a click on it has no single answer and gets none.
+///
+/// A hint that names its key neither way falls back to its **leading
+/// token**, when that token is a key with a name - `ctrl-u clear`,
+/// `esc done`, `tab to add another`. This is not the loose reading
+/// `check.rs` does, which takes any single letter anywhere inside a footer:
+/// there, a whole footer is one string and the key could be anywhere in it,
+/// so recovering it means guessing. Here each hint arrives on its own and
+/// this tree writes the key first, every time, so the first token is the
+/// key or the hint has none. Nothing else in the sentence is read, which is
+/// what keeps `clear` and `done` from becoming keys.
+///
+/// Only as a fallback, and that ordering matters: `esc / [,] back` names
+/// two keys for one action, and counting both would make it ambiguous and
+/// take away a spot it already had. The bracket wins, the synonym is
+/// ignored, and the hint stays clickable.
 fn hint_key(plain: &str) -> Option<String> {
     let chars: Vec<char> = plain.chars().collect();
     // Every key the hint could be taken to name, in the order they appear.
@@ -521,10 +532,27 @@ fn hint_key(plain: &str) -> Option<String> {
         }
         i += 1;
     }
-    match named.as_slice() {
-        [one] => one.clone(),
-        _ => None,
+    if let [one] = named.as_slice() {
+        return one.clone();
     }
+    if !named.is_empty() {
+        // More than one bracketed key or glyph: genuinely ambiguous, and
+        // the leading token cannot break the tie.
+        return None;
+    }
+    // The keys that have names rather than characters, as `poll` returns
+    // them. `ctrl-` plus one letter covers the editing keys a text field
+    // binds without listing each.
+    const NAMED: &[&str] = &[
+        "esc", "tab", "enter", "backspace", "pgup", "pgdn", "home", "end",
+    ];
+    let first = plain.split_whitespace().next()?;
+    let lowered = first.to_lowercase();
+    let known = NAMED.contains(&lowered.as_str())
+        || (lowered.strip_prefix("ctrl-")).is_some_and(|rest| {
+            rest.chars().count() == 1 && rest.chars().all(|c| c.is_ascii_alphabetic())
+        });
+    known.then_some(lowered)
 }
 
 /// Pack a footer and record where every hint landed.
@@ -604,24 +632,101 @@ pub fn click_at(key: &str) -> Option<(usize, usize)> {
     Some((col.parse().ok()?, row.parse().ok()?))
 }
 
-/// Which item a click on frame row `y` landed on, if it landed on one.
+/// Which item is drawn on frame row `y`, for a body that is not a plain list.
 ///
-/// The inverse of the window `follow` decides: `top` is the frame row the
-/// list starts on, `first` the index drawn there, and `shown` how many
-/// rows it got. This is the whole of what core can do for clicking a row,
-/// because which rows are selectable is the widget's own business and
-/// nothing here can see it.
+/// `row_at` answers a list whose items are one row each, laid end to end -
+/// the launcher's. Most widgets here are not that: charts, section
+/// headings, blank spacers and multi-line rows all sit between the items,
+/// so the nth row of the frame is not the nth item.
 ///
-/// Outside those rows the answer is `None` rather than a clamp. A click on
-/// the footer is not a click on the last item, and a list that selected
-/// its last row whenever somebody clicked below it would move the cursor
-/// for a click that was aimed at nothing.
-pub fn row_at(y: usize, top: usize, first: usize, shown: usize) -> Option<usize> {
-    if y < top || y >= top + shown {
+/// The bookkeeping is already half done in every one of them. A widget
+/// records where its cursor landed so `follow` can chase it -
+/// `cursor = Some(rows.len())` while the body is being built - and
+/// recording every item the same way costs one `push` in a loop that is
+/// already running. An item drawn across several rows pushes one entry per
+/// row it occupies; matching is exact rather than nearest, so a click below
+/// the last item selects nothing instead of selecting the last item.
+///
+/// `head` is how many rows stay pinned above the window - the title - and
+/// `scroll` is where the window starts in what is left. Rows above the
+/// head are the pinned ones and belong to no item.
+pub fn item_at(y: usize, head: usize, scroll: usize, placed: &[(usize, usize)]) -> Option<usize> {
+    if y < head {
         return None;
     }
-    Some(first + (y - top))
+    // The window shows `rest[scroll..]` starting at frame row `head`, and
+    // `rest` starts at body row `head` - so the two heads cancel and a
+    // frame row is its body row minus the scroll.
+    let body = y + scroll;
+    placed
+        .iter()
+        .find(|(row, _)| *row == body)
+        .map(|(_, item)| *item)
 }
+
+/// Resolve a frame's row clicks, before its keys are matched.
+///
+/// A click on a row the cursor is not on moves the cursor there. A click on
+/// the row it is already on becomes `enter` - the key that opens whatever is
+/// selected, and the one the footer already names. So the gesture is two
+/// routes to two keys rather than one new capability, and it is the widget's
+/// own `enter` arm that does the opening. That is the point of rewriting the
+/// key rather than acting here: this cannot drift from what the keyboard
+/// does, because it *is* what the keyboard does.
+///
+/// Why this and not a double-click. The terminal never says how many times
+/// somebody clicked - an SGR report carries a button and a cell and nothing
+/// else - so recognising a double-click means holding the last press's cell
+/// and timestamp and inventing a threshold, which is state on the input path
+/// and a tunable nobody can see. And the affordance here is better: the
+/// selected row is tinted, so a reader can see that the next click will open
+/// it. A double-click shows nothing before it fires.
+///
+/// `off_list` says what a click that lands on no row becomes, and it is a
+/// decision each widget makes rather than a default. `Some("esc")` suits a
+/// widget whose selection can be empty and whose footer says so - `latency`
+/// hints `[esc] clear focus`, so clicking away from the host list is a
+/// second route to a key that is already named. `None` everywhere else,
+/// because in most widgets `esc` closes a detail screen or clears a filter,
+/// and a click on a chart that shut the screen would be a capability nobody
+/// asked for.
+///
+/// Every key that is not a click is left alone. A click that only moved the
+/// cursor is replaced with an empty key: nothing in this tree matches one -
+/// every arm that takes an arbitrary key guards on `chars().count() == 1`
+/// first - and it keeps the rewrite in one place rather than leaving a click
+/// for a catch-all to find again.
+///
+/// Returns where the cursor should go, or `None` if no click moved it.
+pub fn rows_clicked(
+    keys: &mut [String],
+    at: Option<usize>,
+    head: usize,
+    scroll: usize,
+    placed: &[(usize, usize)],
+    off_list: Option<&str>,
+) -> Option<usize> {
+    let mut moved = None;
+    for key in keys.iter_mut() {
+        let Some((_, y)) = click_at(key) else { continue };
+        let Some(row) = item_at(y, head, scroll, placed) else {
+            if let Some(name) = off_list {
+                *key = name.to_string();
+            }
+            continue;
+        };
+        // The cursor as it stands *now*, so two clicks in one poll read the
+        // way two clicks always do: the first moves, the second opens.
+        if moved.or(at) == Some(row) {
+            *key = "enter".to_string();
+        } else {
+            moved = Some(row);
+            key.clear();
+        }
+    }
+    moved
+}
+
 
 /// Where settings are looked for, in order of preference.
 ///
@@ -3638,11 +3743,25 @@ mod tests {
         // `[±]25` is one glyph standing for two arms, `+` and `-`. Same
         // answer for the same reason.
         assert_eq!(spots("[\u{b1}]25"), Vec::<String>::new());
-        // A key named only in prose is left alone. check.rs reads this
-        // form because it is hunting for hints bound to nothing; taking it
-        // here would mean guessing which word was the key, and a click
-        // that fires the wrong key is worse than one that fires none.
-        assert_eq!(spots("esc closes"), Vec::<String>::new());
+        // A key named as the hint's leading token, which is how the
+        // settings screen writes half of its footer. Only the first token
+        // is read, so the words after it stay words.
+        assert_eq!(spots("esc done"), vec!["esc"]);
+        assert_eq!(spots("ctrl-u clear"), vec!["ctrl-u"]);
+        assert_eq!(spots("tab to add another"), vec!["tab"]);
+        assert_eq!(spots("esc closes"), vec!["esc"]);
+        // And nothing else in the sentence is a key, which is what stops
+        // `clear` and `done` and `closes` from becoming one.
+        assert_eq!(spots("name it and set it"), Vec::<String>::new());
+        assert_eq!(spots("type to add one"), Vec::<String>::new());
+        assert_eq!(spots("or i to close"), Vec::<String>::new());
+        // The leading token is a fallback, never a tie-breaker. This names
+        // two keys for one action; counting both would make it ambiguous
+        // and take away a spot it already had, so the bracket wins.
+        assert_eq!(spots("esc / [,] back"), vec![","]);
+        // Three keys for one action is still ambiguous - the glyphs are
+        // counted before the fallback is reached.
+        assert_eq!(spots("tab / \u{2191}\u{2193} to open or remove one"), Vec::<String>::new());
         // Brackets that are not a key, each of which has been in a footer
         // or beside one.
         for text in ["[::1]:8080", "[[bin]]", "args[0]", "[{}] rows"] {
@@ -3761,31 +3880,95 @@ mod tests {
         }
     }
 
+
     #[test]
-    fn row_at_undoes_the_window_follow_chose() {
-        // Twenty items through a window six tall, drawn from frame row 3.
-        let (top, room, count) = (3usize, 6usize, 20usize);
-        for selected in 0..count {
-            let first = follow(0, selected, room);
-            // Every row of the window answers with the item drawn on it.
-            for offset in 0..room {
-                assert_eq!(
-                    row_at(top + offset, top, first, room),
-                    Some(first + offset),
-                    "row {} of the window at first={}",
-                    offset,
-                    first
-                );
-            }
+    fn item_at_finds_the_item_drawn_on_a_row_and_no_other() {
+        // A body the shape these widgets actually build: a pinned title,
+        // a chart, a heading, then rows - two of which are two lines tall.
+        //
+        //   body 0  title            (pinned)
+        //   body 1  chart
+        //   body 2  chart
+        //   body 3  heading
+        //   body 4  item 0
+        //   body 5  item 1, line one
+        //   body 6  item 1, line two
+        //   body 7  item 2
+        let placed = [(4usize, 0usize), (5, 1), (6, 1), (7, 2)];
+        // Unscrolled, the frame row is the body row.
+        assert_eq!(item_at(4, 1, 0, &placed), Some(0));
+        assert_eq!(item_at(5, 1, 0, &placed), Some(1));
+        // The second line of a two-line item is that item, because the
+        // widget pushed an entry for it. Nothing else could know.
+        assert_eq!(item_at(6, 1, 0, &placed), Some(1));
+        assert_eq!(item_at(7, 1, 0, &placed), Some(2));
+        // The chart and the heading belong to nobody, and neither does a
+        // row past the last item - matched exactly rather than to the
+        // nearest, so a click on the blank space below a short list does
+        // not quietly select its last row.
+        for y in [1, 2, 3, 8, 20] {
+            assert_eq!(item_at(y, 1, 0, &placed), None, "frame row {}", y);
         }
-        // Above the list, below it, and on a list with nothing in it.
-        assert_eq!(row_at(2, top, 0, room), None);
-        assert_eq!(row_at(top + room, top, 0, room), None);
-        assert_eq!(row_at(top, top, 0, 0), None);
-        // A short list is shorter than its room, and the rows it does not
-        // fill belong to nothing.
-        assert_eq!(row_at(top + 2, top, 0, 3), Some(2));
-        assert_eq!(row_at(top + 3, top, 0, 3), None);
+        // Scrolled by three, the window shows body 4 upwards at frame row
+        // 1, right under the pinned title.
+        assert_eq!(item_at(1, 1, 3, &placed), Some(0));
+        assert_eq!(item_at(2, 1, 3, &placed), Some(1));
+        assert_eq!(item_at(4, 1, 3, &placed), Some(2));
+        // The pinned rows are the title's, whatever the scroll - and the
+        // scroll chosen here is the one that puts an item's body row under
+        // frame row 0, so dropping the head guard returns item 0 for a
+        // click on the title. At scroll 3 that row lands on the heading and
+        // the assertion would pass without the guard doing anything.
+        assert_eq!(item_at(0, 1, 4, &placed), None);
+        assert_eq!(item_at(1, 1, 4, &placed), Some(1));
+        // And a body with nothing selectable in it answers nothing.
+        assert_eq!(item_at(4, 1, 0, &[]), None);
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_row_is_enter() {
+        // Three one-row items at frame rows 4, 5 and 6.
+        let placed = [(4usize, 0usize), (5, 1), (6, 2)];
+        let at = |keys: &[&str], sel: Option<usize>| {
+            let mut keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let moved = rows_clicked(&mut keys, sel, 1, 0, &placed, None);
+            (keys, moved)
+        };
+
+        // A click on a row that is not selected moves the cursor and is
+        // spent doing it.
+        assert_eq!(at(&["click:3,6"], Some(0)), (vec!["".to_string()], Some(2)));
+        // A click on the row already under the cursor is the key that opens
+        // it, and does not move anything.
+        assert_eq!(at(&["click:3,4"], Some(0)), (vec!["enter".to_string()], None));
+        // Two clicks on the same row in one poll: the first selects, the
+        // second opens. Reading `at` rather than the running cursor would
+        // make the second one select again and nothing would ever open.
+        assert_eq!(
+            at(&["click:3,6", "click:3,6"], Some(0)),
+            (vec!["".to_string(), "enter".to_string()], Some(2))
+        );
+        // Nothing selected yet - the first click only selects.
+        assert_eq!(at(&["click:3,4"], None), (vec!["".to_string()], Some(0)));
+        // A click that hits no row is left exactly as it was, for whatever
+        // else the widget does with clicks.
+        assert_eq!(at(&["click:3,9"], Some(0)), (vec!["click:3,9".to_string()], None));
+        // Unless the widget asked for one to mean something. `latency`
+        // hints `[esc] clear focus`, so a click away from its host list is
+        // a second route to a key its footer already names.
+        let mut off = vec!["click:3,9".to_string(), "click:3,5".to_string()];
+        assert_eq!(
+            rows_clicked(&mut off, Some(0), 1, 0, &placed, Some("esc")),
+            Some(1),
+            "a click that did land on a row still moves the cursor"
+        );
+        assert_eq!(off, vec!["esc".to_string(), "".to_string()]);
+        // And a key is a key. `enter` typed at the keyboard is untouched,
+        // which is what makes this safe to run over every poll.
+        assert_eq!(
+            at(&["q", "enter", "wheel-up"], Some(0)),
+            (vec!["q".to_string(), "enter".to_string(), "wheel-up".to_string()], None)
+        );
     }
 
     #[test]

@@ -56,6 +56,24 @@ Herdr pane, in the same `ESC [ < b ; x ; y M` form a bare terminal sends. This
 was worth checking before building on it, and it is the reason every widget
 here scrolls under the mouse.
 
+**Left clicks reach a pane too — in Herdr and in Luvus.** Confirmed by hand on
+these widgets in both hosts, which is the only way it could be confirmed: a
+click cannot be injected into your own terminal, and the pty harness proves
+the decoder without saying anything about what a multiplexer passes through.
+
+It was worth checking, and the two hosts' own documentation pointed opposite
+ways. Luvus's scrollback guide promises the wheel explicitly — *"Apps that
+enable terminal mouse reporting receive their wheel input"* — but for buttons
+describes a gesture of its own, *"Drag across a pane to select. Release
+requests a copy."* That asymmetry read as though buttons might be kept by the
+host. They are not: a press is delivered, and Luvus's copy gesture is the
+drag, which is a different event.
+
+Which is the reason the widgets bind **only the left button going down**. The
+release is where a drag ends, and the drag belongs to the host — inside Luvus
+it is how somebody copies a hostname off a pane. A widget acting on the
+release would be answering the end of someone else's gesture.
+
 **Turn tracking off on every way out, the panic included.** A pane left
 reporting outlives the process that asked for it: every later click spits
 escape bytes at the shell prompt, from something that has already exited, with
@@ -65,10 +83,16 @@ signal handler's copy has to be a pre-built constant, because a handler that
 formats, allocates or takes the stdout lock can deadlock against a `draw`
 already in flight.
 
-**Tracking costs the reader drag-to-select.** While a program is reporting,
-dragging in its pane selects nothing, so copying a line off a panel with the
-mouse stops working. Worth a config key so it can be turned off, rather than a
-trade made on the reader's behalf.
+**Tracking costs the reader drag-to-select, and it costs more inside Luvus.**
+While a program is reporting, dragging in its pane selects nothing, so copying
+a line off a panel with the mouse stops working. In Luvus the drag is not the
+terminal's own selection but Luvus's copy gesture, with a flash and a clipboard
+write, so the loss is that host's feature rather than a generic one.
+
+Which is why it is a config key rather than a trade made on the reader's
+behalf — `terminal.mouse`, offered by every widget's settings screen, so the
+reader can give it back on the pane they are looking at without editing JSON
+or restarting anything else.
 
 **`pane send-text` will not deliver an arrow; `pane send-keys` will.** Testing
 a panel's key handling from the CLI, `herdr pane send-keys <pane> Down` works

@@ -1702,17 +1702,31 @@ fn gripe_lines(gripe: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
+/// The tab strip, and which column each tab occupies.
+///
+/// The placements come back with the row because this is where the widths
+/// are known - a tab is its name plus the two brackets, and the separator
+/// after it is one column either way. Working that out again at the click
+/// would be a second copy of the layout, and the two would drift the first
+/// time a tab changed shape.
+///
+/// One entry per column rather than a range, which is the same idiom the
+/// row placements use along the other axis: an exact match then says a
+/// click landed on a tab rather than in the gap beside it.
 fn tab_bar(
     active: &str,
     installed: &HashMap<String, Presence>,
     tabs: &[String],
     w: usize,
     p: &Palette,
-) -> String {
+) -> (String, Vec<(usize, usize)>) {
     // Brackets as well as the tint: which tab is open must not depend on a
     // background colour surviving. A dot marks an agent that is installed.
     let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
-    for name in tabs {
+    // The leading space above, so the first tab starts one column in.
+    let mut at = 1usize;
+    let mut placed: Vec<(usize, usize)> = Vec::new();
+    for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
         let have = installed.get(name).is_some_and(|x| x.present);
         parts.push((
@@ -1727,6 +1741,12 @@ fn tab_bar(
                 format!(" {} ", name.to_uppercase())
             },
         ));
+        // Both forms are the name plus two columns - `[NAME]` and ` NAME `
+        // - which is what lets the brackets mark the open tab without the
+        // strip shifting under them.
+        let wide = name.to_uppercase().chars().count() + 2;
+        placed.extend((at..at + wide).map(|col| (col, i)));
+        at += wide + 1; // every branch below adds exactly one column
         if name == SUMMARY_TAB {
             parts.push((p.grid.clone(), " ".into()));
             continue;
@@ -1737,7 +1757,7 @@ fn tab_bar(
         ));
     }
     let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-    tc::seg(&refs, w - 1)
+    (tc::seg(&refs, w - 1), placed)
 }
 
 /// Where a tab cursor lands after moving `by` tabs among `count`.
@@ -1846,6 +1866,9 @@ fn main() {
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
     let (mut active, mut tick) = (0i64, 0usize);
+    // The tab strip on the frame now on screen: which row it is on, and
+    // which tab each of its columns belongs to.
+    let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize)>) = (0, Vec::new());
     // Switching tabs lands at the top of the new one.
     //
     // This used to be one offset per tab, kept so that switching away and
@@ -1892,7 +1915,21 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                _ => {}
+                // A click on a tab opens it, which is what stepping to it
+                // with the arrows does - the same rule as everywhere else,
+                // that the mouse is a second route to something a key
+                // already reaches. The strip is one row of labelled
+                // columns, so it is hit-tested along the other axis from a
+                // list: the column decides, and the row has to match.
+                other => {
+                    if let Some((x, y)) = tc::click_at(other) {
+                        if y == tab_row {
+                            if let Some(&(_, i)) = tabs_at.iter().find(|(col, _)| *col == x) {
+                                active = i as i64;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1926,7 +1963,13 @@ fn main() {
                 rows.push(tc::seg(&[(p.bad.as_str(), line)], w - 1));
             }
         }
-        rows.push(tab_bar(&name, &snapshot.installed, &tabs, w, &p));
+        // Which frame row the strip lands on, kept with its columns: a
+        // click is answered against the frame that was on screen when it
+        // happened, and what sits above the strip can change height.
+        tab_row = rows.len();
+        let (strip, strip_at) = tab_bar(&name, &snapshot.installed, &tabs, w, &p);
+        tabs_at = strip_at;
+        rows.push(strip);
         rows.push(String::new());
 
         let body = if snapshot.fetched <= 0.0 {
@@ -2004,22 +2047,29 @@ fn main() {
             w - 1,
         );
 
-        let mut footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let mut footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // Padded back to the height already reserved, so dropping the scroll
         // hint does not lift the footer off the bottom of the pane.
+        let mut blanks = 0usize;
         while footer.len() < reserved {
             footer.insert(0, String::new());
+            blanks += 1;
         }
         rows.extend(view);
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
         }
+        // The blanks go in *above* the hints, so the first hint line is that
+        // many rows further down than where the footer starts. Counting them
+        // rather than measuring the footer is the difference between
+        // registering the hints and registering the padding.
+        let foot_top = rows.len() + blanks;
         rows.extend(footer);
         rows.truncate(h);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

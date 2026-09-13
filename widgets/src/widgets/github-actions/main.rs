@@ -1686,6 +1686,10 @@ fn main() {
     let mut overlay = false;
     let mut overlay_id: i64 = 0;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    // Where each run's rows landed on the frame now on screen. The list
+    // windows itself rather than the frame being windowed, so a frame row
+    // is a body row and there is nothing pinned to skip.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut visible = 1usize;
@@ -1697,7 +1701,16 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
+            selected = at;
+        }
+        for key in keys {
             if typing && !overlay {
                 match key.as_str() {
                     "esc" => {
@@ -1978,6 +1991,17 @@ fn main() {
                 )],
                 w - 1,
             ));
+            // This overlay writes its footer as one line of prose rather
+            // than packing hints, so there are no placements to register -
+            // and leaving the screen underneath registered would answer a
+            // click here with whatever key sat in that column there. The
+            // settings screen had exactly that bug. Making this footer
+            // clickable means building it out of hints first, which is a
+            // change to what it draws and belongs on its own.
+            keyboard.forget_footer();
+            // And the list's row placements, for the same reason: they
+            // describe a frame that is no longer on screen.
+            placed.clear();
             tc::draw(&out, w, h);
             std::thread::sleep(Duration::from_millis(250));
             continue;
@@ -2156,10 +2180,14 @@ fn main() {
             moved = false;
         }
 
+        // The span each run covers, taken from where its rows started
+        // and ended: a run is one row, or two when its jobs are drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
             if rows.len() >= h.saturating_sub(1) {
                 break;
             }
+            let from = rows.len();
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
@@ -2261,6 +2289,7 @@ fn main() {
                 ));
             }
             visible = i.saturating_sub(scroll) + 1;
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
 
         if shown.is_empty() && err.is_empty() {
@@ -2315,16 +2344,24 @@ fn main() {
                 "[,] settings".into(),
             )]);
         }
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        placed = rows_at;
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         rows.truncate(h.saturating_sub(footer.len()));
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
         }
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = rows.len();
         rows.extend(footer);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(250));
     }
 }

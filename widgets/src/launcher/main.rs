@@ -519,7 +519,23 @@ fn main() -> std::process::ExitCode {
     let (mut list_top, mut list_first, mut list_rows) = (0usize, 0usize, 0usize);
 
     loop {
-        for key in keyboard.poll() {
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        // The list is contiguous - one row per widget under the heading -
+        // so its placements are the arithmetic rather than a record kept
+        // while drawing. Starting a widget stays ↵, which the footer's
+        // `↵ launch` hint already answers to.
+        let mut keys = keyboard.poll();
+        let placed: Vec<(usize, usize)> =
+            (0..list_rows).map(|n| (list_top + n, list_first + n)).collect();
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
+            selected = at;
+            moved = true;
+        }
+        for key in keys {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
@@ -546,21 +562,7 @@ fn main() -> std::process::ExitCode {
                 "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }
-                // A click on a row picks it, exactly as the arrows do, and
-                // stops there. Starting a widget stays ↵ - which the
-                // footer's `↵ launch` hint answers to, and core turns a
-                // click on that hint into the key it names before this
-                // match ever sees it. So the mouse reaches nothing the
-                // keyboard cannot, and the three bracketed hints below
-                // became clickable without a line of code apiece.
-                other => {
-                    if let Some((_, row)) = tc::click_at(other) {
-                        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
-                            selected = at;
-                            moved = true;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
 
@@ -747,6 +749,16 @@ mod tests {
         );
     }
 
+    /// The placements the key loop builds, from the same three numbers.
+    ///
+    /// Written once here so the tests exercise the arithmetic the widget
+    /// actually uses rather than a second copy of it - the launcher's list
+    /// is contiguous, so its placements are the heading's row plus the
+    /// index rather than a record kept while drawing.
+    fn placements(top: usize, first: usize, shown: usize) -> Vec<(usize, usize)> {
+        (0..shown).map(|n| (top + n, first + n)).collect()
+    }
+
     #[test]
     fn a_click_on_a_visible_list_row_picks_that_widget() {
         // Title pinned on frame row 0, body window starting at scroll 0,
@@ -755,13 +767,13 @@ mod tests {
         assert_eq!(first, 0);
         assert_eq!(shown, WIDGETS.len());
         assert_eq!(top, 1 + LIST_TOP);
-        assert_eq!(tc::row_at(top, top, first, shown), Some(0));
-        assert_eq!(tc::row_at(top + 2, top, first, shown), Some(2));
+        assert_eq!(tc::item_at(top, 0, 0, &placements(top, first, shown)), Some(0));
+        assert_eq!(tc::item_at(top + 2, 0, 0, &placements(top, first, shown)), Some(2));
         // Title and count line are not list rows.
-        assert_eq!(tc::row_at(0, top, first, shown), None);
-        assert_eq!(tc::row_at(1, top, first, shown), None);
+        assert_eq!(tc::item_at(0, 0, 0, &placements(top, first, shown)), None);
+        assert_eq!(tc::item_at(1, 0, 0, &placements(top, first, shown)), None);
         // Below the list is not the last widget.
-        assert_eq!(tc::row_at(top + shown, top, first, shown), None);
+        assert_eq!(tc::item_at(top + shown, 0, 0, &placements(top, first, shown)), None);
     }
 
     #[test]
@@ -770,19 +782,19 @@ mod tests {
         // already a widget. That widget is then on frame row 1.
         let (top, first, shown) = list_on_frame(LIST_TOP, 4);
         assert_eq!((top, first, shown), (1, 0, 4));
-        assert_eq!(tc::row_at(1, top, first, shown), Some(0));
-        assert_eq!(tc::row_at(4, top, first, shown), Some(3));
-        assert_eq!(tc::row_at(5, top, first, shown), None);
+        assert_eq!(tc::item_at(1, 0, 0, &placements(top, first, shown)), Some(0));
+        assert_eq!(tc::item_at(4, 0, 0, &placements(top, first, shown)), Some(3));
+        assert_eq!(tc::item_at(5, 0, 0, &placements(top, first, shown)), None);
         // Scrolled into the middle of the list.
         let (top, first, shown) = list_on_frame(LIST_TOP + 5, 3);
         assert_eq!((top, first, shown), (1, 5, 3));
-        assert_eq!(tc::row_at(top, top, first, shown), Some(5));
-        assert_eq!(tc::row_at(top + 2, top, first, shown), Some(7));
-        assert_eq!(tc::row_at(top + 3, top, first, shown), None);
+        assert_eq!(tc::item_at(top, 0, 0, &placements(top, first, shown)), Some(5));
+        assert_eq!(tc::item_at(top + 2, 0, 0, &placements(top, first, shown)), Some(7));
+        assert_eq!(tc::item_at(top + 3, 0, 0, &placements(top, first, shown)), None);
         // A window that has scrolled past the list altogether.
         let past = LIST_TOP + WIDGETS.len();
         assert_eq!(list_on_frame(past, 4), (0, 0, 0));
-        assert_eq!(tc::row_at(1, 0, 0, 0), None);
+        assert_eq!(tc::item_at(1, 0, 0, &placements(0, 0, 0)), None);
     }
 
     #[test]

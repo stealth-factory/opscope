@@ -933,7 +933,7 @@ fn copy_overlay(
     h: usize,
     note: &str,
     p: &Palette,
-) -> Vec<String> {
+) -> (Vec<String>, tc::Footer, usize) {
     let pairs = copy_items(dep, detail);
     let mut rows = vec![tc::title("copy", w, &p.prod)];
     rows.push(String::new());
@@ -971,21 +971,25 @@ fn copy_overlay(
         vec![(p.hint.as_str(), "[,] settings".into())],
         vec![(p.hint.as_str(), "[q]uit".into())],
     ]);
-    let foot: Vec<String> = tc::pack_hints(&hints, w - 2, " · ")
-        .into_iter()
-        .map(|line| format!(" {}", line))
-        .collect();
+    let packed = tc::pack_hints_placed(&hints, w - 2, " · ");
+    let foot: Vec<String> = packed.lines.iter().map(|line| format!(" {}", line)).collect();
     rows.truncate(h.saturating_sub(foot.len() + 1));
     while rows.len() < h.saturating_sub(foot.len() + 1) {
         rows.push(String::new());
     }
+    // Where the footer lands is only knowable here, since this builds the
+    // whole frame, and only the caller holds the keyboard - so the row
+    // travels back with the rows rather than being guessed at either end.
+    // The note line goes on underneath, which is why this is taken before
+    // the extend rather than from the end of the frame.
+    let foot_top = rows.len();
     rows.extend(foot);
     rows.push(if note.is_empty() {
         String::new()
     } else {
         tc::seg(&[(p.ready.as_str(), format!(" {}", note))], w - 1)
     });
-    rows
+    (rows, packed, foot_top)
 }
 
 fn main() {
@@ -1162,6 +1166,11 @@ fn main() {
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    // Every row each deployment occupies on the frame now on screen, and
+    // how many rows stay pinned above the window. A click is answered
+    // against the frame the reader was looking at when they clicked, which
+    // is the one built on the previous pass.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // The copy list is a page of its own, opened from the detail with c.
     let mut copying = false;
     // How far down the detail is scrolled. The build log makes it taller
@@ -1177,7 +1186,17 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, scroll, &placed, None) {
+            selected = at;
+            moved = true;
+        }
+        for key in keys {
             // While filtering, keys are text - only escape and enter are
             // navigation, or the filter could never contain "q".
             if typing && !overlay {
@@ -1394,7 +1413,12 @@ fn main() {
                     });
                 }
             }
-            let rows = if copying {
+            // Neither overlay has a row to pick, and the list's placements
+            // describe a frame that is no longer on screen. Leaving them
+            // would answer a click here with whichever deployment happened
+            // to be drawn on that row behind it.
+            placed.clear();
+            let (rows, packed, foot_top) = if copying {
                 copy_overlay(&chosen, held.as_ref(), w, h, &note.0, &p)
             } else {
                 let body = info_overlay(&chosen, held.as_ref(), w, h, &note.0, &p);
@@ -1411,10 +1435,9 @@ fn main() {
                     let widest = format!("↑↓ scroll {0}-{0} of {0}", rest_len);
                     hints.insert(0, vec![(p.hint.as_str(), widest)]);
                 }
-                let mut foot: Vec<String> = tc::pack_hints(&hints, w - 2, " · ")
-                    .into_iter()
-                    .map(|line| format!(" {}", line))
-                    .collect();
+                let mut packed = tc::pack_hints_placed(&hints, w - 2, " · ");
+                let mut foot: Vec<String> =
+                    packed.lines.iter().map(|line| format!(" {}", line)).collect();
                 let room = h.saturating_sub(foot.len() + 1).max(1);
                 // The title stays; the rest scrolls under it. Scroll an
                 // overlay far enough without this and nothing on screen
@@ -1437,25 +1460,27 @@ fn main() {
                         ),
                     );
                     hints[0][0].1 = position;
-                    foot = tc::pack_hints(&hints, w - 2, " · ")
-                        .into_iter()
-                        .map(|line| format!(" {}", line))
-                        .collect();
+                    packed = tc::pack_hints_placed(&hints, w - 2, " · ");
+                    foot = packed.lines.iter().map(|line| format!(" {}", line)).collect();
                 }
                 let mut out: Vec<String> = head.to_vec();
                 out.extend_from_slice(&rest[oscroll..last]);
                 while out.len() < room {
                     out.push(String::new());
                 }
+                let foot_top = out.len();
                 out.extend(foot);
                 out.push(if note.0.is_empty() {
                     String::new()
                 } else {
                     tc::seg(&[(p.ready.as_str(), format!(" {}", note.0))], w - 1)
                 });
-                out
+                (out, packed, foot_top)
             };
             tc::draw(&rows, w, h);
+            // Whichever overlay drew is the one on screen, so it is the one
+            // a click arriving next has to be measured against.
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -1615,7 +1640,14 @@ fn main() {
         let per_item = if cols.single { 1 } else { 2 };
         let list_start = rows.len();
         let mut cursor = None;
+        // Every row each deployment occupies, taken as a span rather than
+        // counted: a deployment is one row or two depending on the width,
+        // and the commit subject under it is conditional on top of that.
+        // Capturing where the rows started and where they ended is the only
+        // form that cannot drift from what was actually drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, d) in shown.iter().enumerate() {
+            let from = rows.len();
             let here = i == selected;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let meta = &d["meta"];
@@ -1686,6 +1718,7 @@ fn main() {
                 // deployment cannot leave its commit subject below the pane.
                 cursor = Some(rows.len().saturating_sub(1));
             }
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
         if shown.is_empty() {
             let said = nothing_shown(deps.len(), &filters, fetched, &err);
@@ -1711,13 +1744,12 @@ fn main() {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         let room = h.saturating_sub(footer.len());
         let head_len = 1.min(rows.len());
         let room_below = room.saturating_sub(head_len);
+        (placed, list_head) = (rows_at, head_len);
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the body back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -1740,8 +1772,10 @@ fn main() {
             scroll,
             room_below,
         );
+        let foot_top = frame.len();
         frame.extend(footer);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(250));
     }
 }

@@ -493,6 +493,11 @@ fn main() {
     // then opens showing every session at equal weight, and focus is
     // something you leave the way you entered it.
     let (mut selected, mut hide_idle, mut span_at) = (None::<usize>, false, 0usize);
+    // Where each session's row landed on the frame now on screen, and how
+    // many rows stay pinned above the window. A click is answered against
+    // the frame the reader was looking at when they clicked - the one built
+    // on the previous pass - so these are kept rather than recomputed.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     let mut count = 0usize;
     let mut detail = false;
     // How far down the detail screen we are. Clamped against the body every
@@ -509,7 +514,17 @@ fn main() {
         // how big a page is on this pane.
         let (w, h) = tc::size();
         let page = h.saturating_sub(4).max(1);
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, selected, list_head, lscroll, &placed, None) {
+            selected = Some(at);
+            moved = true;
+        }
+        for key in keys {
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -642,6 +657,11 @@ fn main() {
         // noticing; this is for looking into, and the two want different
         // amounts of room for the same chart.
         if let (true, Some(pick)) = (detail && !shown.is_empty(), selected) {
+            // The detail screen has no row to pick, and the list's
+            // placements describe a frame that is no longer on screen.
+            // Leaving them would answer a click here with whichever
+            // session happened to be drawn on that row behind it.
+            placed.clear();
             // The footer is measured before the body is built, and the body
             // is told the height it actually has. Sizing the chart to the
             // whole pane and appending the hints afterwards pushed them off
@@ -672,14 +692,22 @@ fn main() {
                     vec![(p.dim.as_str(), place)],
                 ]
             };
-            let pack = |hints: &[Vec<(&str, String)>]| -> Vec<String> {
-                tc::pack_hints(hints, w - 2, "  ")
+            // Returns the placement alongside the lines, because the footer
+            // is packed twice here: once to measure how many rows it will
+            // take, and again with the real scroll label once that is
+            // known. The second one is the footer on screen, so it is the
+            // one registered.
+            let pack = |hints: &[Vec<(&str, String)>]| -> tc::Footer {
+                let mut packed = tc::pack_hints_placed(hints, w - 2, "  ");
+                packed.lines = packed
+                    .lines
                     .into_iter()
                     .map(|l| format!(" {}", l))
-                    .collect()
+                    .collect();
+                packed
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
-            let room = h.saturating_sub(foot.len() + 1).max(1);
+            let room = h.saturating_sub(foot.lines.len() + 1).max(1);
             let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
             drop(guard);
             // The body is as tall as it needs to be and the pane shows a
@@ -697,18 +725,22 @@ fn main() {
             while shown_body.len() < room {
                 shown_body.push(String::new());
             }
-            shown_body.extend(pack(&detail_hints(scroll_label(
+            let packed = pack(&detail_hints(scroll_label(
                 scroll + 1,
                 last,
                 rest.len(),
-            ))));
+            )));
+            let foot_top = shown_body.len();
+            shown_body.extend(packed.lines.iter().cloned());
             tc::draw(&shown_body, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
 
         let mut rows = vec![tc::title("connections", w, &p.link)];
         let mut cursor: Option<usize> = None;
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
@@ -740,6 +772,11 @@ fn main() {
         } else {
             // Where the selected row lands: one heading, then a row each.
             cursor = selected.map(|at| rows.len() + 1 + at);
+            // And where every other row lands, by the same arithmetic - the
+            // table is contiguous, so this is the heading plus the index.
+            // Recorded rather than recomputed at the click, because by then
+            // the body has been windowed and the heading's row is gone.
+            rows_at = (0..shown.len()).map(|at| (rows.len() + 1 + at, at)).collect();
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
             // The chart takes MIN_CHART rows whatever the table has already
@@ -808,10 +845,8 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         drop(guard);
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the body rather than a cut of it, and the title
         // stays put above it: on a pane too short for every session the
         // table and the chart under it used to run off the bottom with
@@ -819,6 +854,7 @@ fn main() {
         let room = h.saturating_sub(foot.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        (placed, list_head) = (rows_at, head.len());
         // Only on the frame a key moved the selection: chasing it every
         // frame drags the view back from wherever the wheel put it.
         if moved {
@@ -833,8 +869,13 @@ fn main() {
         while frame.len() < room {
             frame.push(String::new());
         }
+        // Each screen registers its own footer as it draws, and the last
+        // draw wins - which is right, because the last draw is what is on
+        // screen when the next click arrives.
+        let foot_top = frame.len();
         frame.extend(foot);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

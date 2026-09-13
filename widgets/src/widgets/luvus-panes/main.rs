@@ -754,6 +754,11 @@ fn main() {
     // across frames so the view holds still while the cursor moves inside
     // it, and only moves when the cursor would leave it.
     let mut scroll = 0usize;
+    // Where each entry's rows landed on the frame now on screen, how many
+    // rows the header keeps above the window, and where the window starts.
+    // A click is answered against the frame the reader was looking at.
+    let (mut placed, mut list_head, mut list_scroll): (Vec<(usize, usize)>, usize, usize) =
+        (Vec::new(), 0, 0);
     // Set by whichever key moved the cursor, and cleared once the window
     // has been asked to hold it. Without it the window chases the cursor
     // every frame and drags itself back from wherever the wheel put it.
@@ -775,7 +780,17 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, list_scroll, &placed, None) {
+            selected = at;
+            moved = true;
+        }
+        for key in keys {
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -1221,10 +1236,9 @@ fn main() {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let footer: Vec<String> = tc::pack_hints(&hints, w.saturating_sub(2), "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // ---- the body, built at whatever height it needs ----
         let mut body: Vec<String> = Vec::new();
@@ -2143,6 +2157,28 @@ fn main() {
 
         // The headings are drawn inside the body and scroll with it, so the
         // count of what is on screen is added after the window is known.
+        // The spans this widget already keeps - one per entry, recorded
+        // while the body was built so the window could be brought to the
+        // selected one - are exactly what a click needs read the other way
+        // round. One entry per row it covers, so a click on any line of a
+        // multi-line entry picks that entry.
+        //
+        // Shifted by the header, because this widget keeps `head` and `body`
+        // in two vecs rather than splitting one - so a span is an index into
+        // `body` while a click is a row of `head` ++ `body[window]`. Without
+        // the shift every click lands however many rows the header is tall
+        // further down the list, and the first few entries cannot be reached
+        // at all.
+        let head_len = head.len();
+        (placed, list_head, list_scroll) = (
+            spans
+                .iter()
+                .enumerate()
+                .flat_map(|(i, span)| span.clone().map(move |row| (row + head_len, i)))
+                .collect(),
+            head_len,
+            window.start,
+        );
         let mut rows = head;
         rows.extend(body[window.clone()].iter().cloned());
         // Said in the footer note line rather than beside every heading,
@@ -2179,8 +2215,16 @@ fn main() {
             ),
             None => String::new(),
         });
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = rows.len();
         rows.extend(footer);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(250));
     }
 }

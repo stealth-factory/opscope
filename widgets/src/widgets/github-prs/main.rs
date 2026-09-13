@@ -1981,6 +1981,11 @@ fn main() {
     // has just moved the selection. The wheel writes a scroll and never the
     // flag, so neither screen chases a cursor the moment it is turned.
     let (mut board, mut dscroll, mut moved) = (0usize, 0usize, false);
+    // Where each PR's rows landed on the frame now on screen, and how many
+    // rows stay pinned above the window. A click is answered against the
+    // frame the reader was looking at when they clicked. Cleared whenever
+    // the detail screen draws, since its stack is a list of its own.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // The stack cursor is a second selection, on the detail page. The
     // wheel writes `dscroll` and never this, so walking a stack with
     // the arrows is what brings that row back into view.
@@ -2064,7 +2069,17 @@ fn main() {
             })
             .collect();
 
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, board, &placed, None) {
+            selected = at;
+            moved = true;
+        }
+        for key in keys {
             if typing {
                 // While filtering, keys are text - only escape and enter are
                 // navigation, or the filter could never contain "q".
@@ -2381,7 +2396,7 @@ fn main() {
                 ));
             }
             let top = rows.len();
-            let (list, at) = list_view(
+            let (list, at, list_at) = list_view(
                 &shown,
                 selected,
                 SORTS[sort_at],
@@ -2394,6 +2409,9 @@ fn main() {
                 &p,
             );
             list_cursor = at.map(|at| top + at);
+            // The same shift for every PR's rows, not only the selected
+            // one - list_view numbers them from its own first row.
+            placed = list_at.into_iter().map(|(row, i)| (top + row, i)).collect();
             rows.extend(list);
             vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
@@ -2436,10 +2454,9 @@ fn main() {
         } else {
             hints
         };
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: scrolled away, either screen stops saying what it is
         // describing. Both screens work this way - the list's body is the
@@ -2448,7 +2465,11 @@ fn main() {
         let room = h.saturating_sub(footer.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        list_head = head.len();
         let off = if detail.is_some() || loading {
+            // The detail screen's stack is a list of its own, so the
+            // board's placements come off rather than answering for it.
+            placed.clear();
             // Only on the frame a key walked the stack. The STACK section
             // windows itself around `stack_sel`, but that does not move
             // the section inside the outer page - without this chase a
@@ -2473,8 +2494,16 @@ fn main() {
         while frame.len() < room {
             frame.push(String::new());
         }
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = frame.len();
         frame.extend(footer);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -3233,7 +3262,7 @@ fn list_view(
     // everything, or a board with nothing on it.
     held: usize,
     p: &Palette,
-) -> (Vec<String>, Option<usize>) {
+) -> (Vec<String>, Option<usize>, Vec<(usize, usize)>) {
     let mut rows = vec![String::new()];
     let arrow = if newest_first { "↓" } else { "↑" };
     rows.push(tc::seg(
@@ -3272,7 +3301,7 @@ fn list_view(
             None => "  no open PRs".to_string(),
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
-        return (rows, None);
+        return (rows, None, Vec::new());
     }
 
     // Columns are budgeted rather than guessed: the fixed ones are summed
@@ -3308,7 +3337,12 @@ fn list_view(
     // them: pinning it as well would be a second sticky region, which is
     // the thing this removed.
     let mut cursor = None;
+    // The span each PR covers, taken from where its rows started and
+    // ended rather than counted: a PR is one row or two depending on
+    // the width, and the branch line under it is conditional on top.
+    let mut rows_at: Vec<(usize, usize)> = Vec::new();
     for (i, pr) in prs.iter().enumerate() {
+        let from = rows.len();
         let here = i == selected;
         if here {
             cursor = Some(rows.len());
@@ -3403,8 +3437,9 @@ fn list_view(
         }
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
+        rows_at.extend((from..rows.len()).map(|row| (row, i)));
     }
-    (rows, cursor)
+    (rows, cursor, rows_at)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4065,7 +4100,7 @@ mod tests {
         let prs = a_long_list(40);
         // Every row, whatever the pane: a blank, the section head, the
         // column head, and one row per PR.
-        let (list, cursor) =
+        let (list, cursor, _) =
             list_view(&prs, 7, "created", true, "", 80, false, "all", prs.len(), &p);
         assert_eq!(list.len(), 3 + prs.len(), "the list is built whole");
         assert_eq!(cursor, Some(3 + 7), "the selected row is where it says");

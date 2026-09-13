@@ -625,17 +625,24 @@ fn empty_filter_explains(listed: usize, has_self: bool, of: usize, filters: &[St
 /// is already the pane wide wraps in the terminal while `foot.len()` still
 /// counts one row — the same overflow the body budget was written to stop.
 /// The margin gives way first, which is what `months` settled on.
-fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> Vec<String> {
+/// Returns the indent beside the packed footer, because that is the half a
+/// caller cannot work out: the rows come back already indented, but
+/// `footer_at` needs the number to shift each hint's columns by, and the
+/// row it lands on is knowable only at the draw site after the padding.
+fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> (tc::Footer, usize) {
     let widest = hints
         .iter()
         .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0);
     let indent = usize::from(widest + 1 <= w);
-    tc::pack_hints(hints, w.saturating_sub(indent + 1).max(1), "  ")
+    let mut packed = tc::pack_hints_placed(hints, w.saturating_sub(indent + 1).max(1), "  ");
+    packed.lines = packed
+        .lines
         .into_iter()
         .map(|line| format!("{}{}", " ".repeat(indent), line))
-        .collect()
+        .collect();
+    (packed, indent)
 }
 
 /// Live throughput for peers that are actually moving data.
@@ -772,6 +779,10 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut hide_offline, mut show_graph) = (false, true);
     let (mut selected, mut scroll, mut visible) = (0usize, 0usize, 1usize);
+    // Where each machine's rows landed on the frame now on screen. This
+    // screen windows its own list rather than windowing the frame, so a
+    // frame row is a body row and there is nothing pinned to skip.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     // Where the open sub-view has scrolled to, and whether a key has just
     // moved the cursor. The wheel writes a scroll and never the flag, so
     // the list stops chasing the selection the moment it is turned.
@@ -806,7 +817,16 @@ fn main() {
             Err(_) => return,
         };
 
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
+            selected = at;
+        }
+        for key in keys {
             if view.is_some() {
                 match key.as_str() {
                     // Left comes back out, the way it does everywhere
@@ -953,12 +973,15 @@ fn main() {
                 vec![(p.dim.as_str(), "[,] settings".into())],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let foot = pack_footer(&hints, w);
+            let (packed, indent) = pack_footer(&hints, w);
+            let foot = &packed.lines;
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
-            rows.extend(foot);
+            let foot_top = rows.len();
+            rows.extend(foot.iter().cloned());
             tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, indent);
             std::thread::sleep(Duration::from_millis(400));
             continue;
         };
@@ -1092,6 +1115,18 @@ fn main() {
             };
             dscroll = at;
             tc::draw(&body, w, h);
+            // This overlay writes its footer as one line of prose rather
+            // than packing hints, so there are no placements to register -
+            // and leaving the screen underneath registered would answer a
+            // click here with whatever key sat in that column there. The
+            // settings screen had exactly that bug. Making this footer
+            // clickable means building it out of hints first, which is a
+            // change to what it draws and belongs on its own.
+            keyboard.forget_footer();
+            // And the list's row placements, for the same reason: they
+            // describe a frame that is no longer on screen.
+            placed.clear();
+
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -1214,7 +1249,8 @@ fn main() {
         // guess, and a footer that wrapped onto a second line put the
         // frame one row over the pane - which `draw` cuts from the bottom,
         // taking `[q]uit` with it. A route row costs one more.
-        let foot = pack_footer(&hints, w);
+        let (packed, indent) = pack_footer(&hints, w);
+        let foot = &packed.lines;
         // The emptied-filter line is part of the body budget, not a row
         // pushed after it: with the graph up on a short pane the self row
         // already spent the last slot, and appending then grew the frame
@@ -1241,10 +1277,14 @@ fn main() {
         }
         scroll = scroll.min(listed.len().saturating_sub(visible));
 
+        // The span each machine covers, taken from where its rows started
+        // and ended: a peer is one row, or two when its routes are drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (idx, peer) in listed.iter().enumerate().skip(scroll).take(visible) {
             if rows.len() >= h.saturating_sub(tail) {
                 break;
             }
+            let from = rows.len();
             let mine = peer["_self"].as_bool().unwrap_or(false);
             let up = mine || peer["Online"].as_bool().unwrap_or(false);
             let here = idx == selected;
@@ -1334,6 +1374,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, idx)));
         }
 
         // This machine is always in the list, so a filter that hides every
@@ -1369,8 +1410,11 @@ fn main() {
                 w - 1,
             ));
         }
-        rows.extend(foot);
+        placed = rows_at;
+        let foot_top = rows.len();
+        rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, indent);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -1885,6 +1929,27 @@ mod tests {
         assert_eq!(toggle_hint("[o]ffline", hide_offline), "[o]ffline show");
     }
 
+    /// A row with its escape sequences taken out, which is what the reader
+    /// actually gets cells for.
+    fn visible(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // CSI: ESC [ then parameters then a final letter. Every escape
+            // a footer carries is one of these.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn a_fourteen_column_footer_does_not_wrap_the_offline_toggle() {
         // `[o]ffline hide` is fourteen cells. A leading space on top of it
@@ -1895,19 +1960,25 @@ mod tests {
             vec![("", toggle_hint("[o]ffline", true))],
             vec![("", "[q]uit".into())],
         ];
-        let foot = pack_footer(&hints, 14);
+        let foot = pack_footer(&hints, 14).0.lines;
         for line in &foot {
+            // Measured on what a reader sees. `display_width` counts every
+            // character it is given, escapes included, so a composed row is
+            // not something to hand it - these hints carry no colour, but a
+            // clickable one is wrapped in the underline that says so, and
+            // that alone made this read 21 cells for a fourteen-cell line.
+            let seen = visible(line);
             assert!(
-                tc::display_width(line) <= 14,
-                "{line:?} is {} cells",
-                tc::display_width(line)
+                tc::display_width(&seen) <= 14,
+                "{seen:?} is {} cells",
+                tc::display_width(&seen)
             );
         }
         assert!(
             foot.iter().any(|line| line.contains("[o]ffline hide")),
             "the wording stays; the indent gives way"
         );
-        let wide = pack_footer(&hints, 74);
+        let wide = pack_footer(&hints, 74).0.lines;
         assert!(
             wide.first().is_some_and(|line| line.starts_with(' ')),
             "a wide pane still pads the footer"

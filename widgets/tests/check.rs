@@ -2459,6 +2459,153 @@ fn a_ramp_composed_inline_is_seen() {
 /// is a decision someone makes in a review, not a gap nobody notices.
 const NO_SCROLL: &[&str] = &["matrix"];
 
+/// Widgets with no footer to make clickable.
+///
+/// `matrix` computes nothing on purpose and draws no hints at all, which is
+/// the same reason it is the sole entry in `NO_SCROLL`.
+const NO_FOOTER: &[&str] = &["matrix"];
+
+/// Widgets with no row for a click to land on.
+///
+/// Named rather than inferred, because the obvious marker is wrong twice
+/// over: `agent-usage`, `clocks` and `months` all keep a scroll offset and
+/// answer the wheel, so anything reading for a viewport would call them
+/// cursor widgets; and half the widgets that *do* have a cursor keep it in
+/// a variable this check cannot see. Their footers are still clickable -
+/// they are exempt from the click check, not from the footer one.
+const NO_CURSOR: &[&str] = &["matrix", "agent-usage", "clocks", "months"];
+
+/// Waiting on another branch, with the issue named so the wait is visible.
+///
+/// `ports/main.rs` is contended by OPS-81 (#212, In Review), which is
+/// +121/-7 on the widget with the largest key loop in the tree. Adding a
+/// third hand to it would be resolved by hand at merge, in the file where
+/// a mistake is hardest to see. It follows when #212 lands.
+///
+/// This is the `/proc` allowlist's shape on purpose: a row that names an
+/// open issue, so the exemption reads as a queue rather than a decision.
+const CLICK_LATER: &[&str] = &["ports"];
+
+/// Whether `src` calls `token` somewhere the compiler will reach.
+///
+/// Comment lines are dropped first. Without that, `// footer_at(&packed,
+/// top, 1)` in a doc comment explaining the pattern satisfies the check
+/// that the pattern is used - and the doc comments in this tree describe
+/// the pattern at length, so that is not a hypothetical.
+///
+/// What it cannot see, and the reason the wording below says "never calls"
+/// rather than "does not support": a call sitting in a branch nothing
+/// reaches. When this check is quiet that is not proof, which is the same
+/// admission the hint reader makes.
+fn calls(src: &str, token: &str) -> bool {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .any(|line| line.contains(token))
+}
+
+/// The launcher's source, which is not a widget and so is not in
+/// `widgets()`.
+///
+/// Used as a positive control: it does both of the things the two checks
+/// below look for, so a reader that cannot find them there is broken, and
+/// its failures on fifteen widgets would be a checker crying wolf. Three
+/// versions of one check did exactly that here in a single day.
+fn launcher_source() -> String {
+    std::fs::read_to_string(root().join("widgets/src/launcher/main.rs"))
+        .expect("the launcher source")
+}
+
+#[test]
+fn every_widget_registers_its_footer() {
+    // Half of the click rule, and the half that costs nothing per hint:
+    // core packs the footer, so core knows where every hint went, and
+    // `Keyboard::footer_at` turns a click on one into the key that hint
+    // names. A widget registers the footer rather than the hints, so a
+    // hint added later is clickable the day it is added - which is exactly
+    // why this is worth a check rather than a habit.
+    //
+    // Reads for the `footer_at` call and not for `pack_hints_placed`.
+    // `months` wraps prose through `pack_hints` as well, handing each word
+    // in as its own hint, and that use must stay exactly as it is: a
+    // sentence is not a footer and its words are not keys. Reading the
+    // registration instead means the packer can be swapped where it helps
+    // and left alone where it would not.
+    assert!(
+        calls(&launcher_source(), "footer_at("),
+        "the launcher registers its footer, so a reader that cannot find          one there is broken rather than right"
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    for (name, src) in widgets() {
+        if NO_FOOTER.contains(&name.as_str()) || CLICK_LATER.contains(&name.as_str()) {
+            continue;
+        }
+        if !calls(&src, "footer_at(") {
+            missing.push(format!("{}: draws a footer and never registers it", name));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "a footer that is not registered is a footer nobody can click:\n  {}\n\
+         Pack it with `tc::pack_hints_placed`, draw `.lines` exactly as \
+         before, and call `keyboard.footer_at(&packed, top, indent)` beside \
+         the draw - every frame, because the footer moves when the pane \
+         resizes. A widget with no hints at all belongs in NO_FOOTER, with \
+         the reason written there.",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn every_widget_with_a_cursor_answers_a_click() {
+    // The other half. Core cannot do this one for a widget: which rows are
+    // selectable is widget state and nothing in core can see it, so the
+    // widget hit-tests with `tc::row_at` against the geometry of the frame
+    // that was on screen when the click happened.
+    //
+    // Reads for `tc::rows_clicked(`, which is the one call that does both
+    // halves of the gesture: a click on another row moves the cursor, a
+    // click on the row it is already on becomes `enter`. A widget that
+    // resolved clicks some other way would answer only half of it.
+    //
+    // Deliberately not `row_at(` - `github` keeps a local closure of that
+    // name for laying out a figure column, which would satisfy a reader
+    // looking for the wrong token while the widget answered nothing, the
+    // same accident that let two widgets pass the poller check on a
+    // `catch_unwind` and a Bresenham variable called `err`.
+    assert!(
+        calls(&launcher_source(), "tc::rows_clicked("),
+        "the launcher answers a click on a row, so a reader that cannot \
+         find one there is broken rather than right"
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    for (name, src) in widgets() {
+        if NO_CURSOR.contains(&name.as_str()) || CLICK_LATER.contains(&name.as_str()) {
+            continue;
+        }
+        if !calls(&src, "tc::rows_clicked(") {
+            missing.push(format!("{}: has a cursor and ignores a click", name));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "a click moves the cursor wherever a widget has one:\n  {}\n\
+         Keep the frame's row placements across iterations and resolve the \
+         clicks before the keys are matched, so your own `enter` arm does \
+         the opening:\n\
+         \n    let mut keys = keyboard.poll();\n\
+         \u{20}   if let Some(at) = tc::rows_clicked(\n\
+         \u{20}           &mut keys, Some(selected), head, scroll, &placed, None) {{\n\
+         \u{20}       selected = at;\n\
+         \u{20}   }}\n\
+         \u{20}   for key in keys {{ ... }}\n\
+         \nA widget with nothing selectable belongs in NO_CURSOR, with the \
+         reason written there.",
+        missing.join("\n  ")
+    );
+}
+
 #[test]
 fn every_widget_answers_the_wheel() {
     // The rule this enforces: the mouse moves the view, keys move the

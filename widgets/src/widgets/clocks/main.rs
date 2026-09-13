@@ -1096,19 +1096,26 @@ fn main() {
         }
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         while rows.len() < h.saturating_sub(foot.len()) {
             rows.push(String::new());
         }
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = rows.len();
         rows.extend(foot);
         if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
             tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
         } else {
             tc::draw(&rows, w, h);
         }
+        keyboard.footer_at(&packed, foot_top, 1);
         // Forget a flash once its last blink has passed, so the check stops
         // costing anything for the rest of the session.
         if let Some(started) = flash_started {

@@ -744,6 +744,11 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let (mut selected, mut tick) = (0usize, 0usize);
+    // Where each pane's rows landed on the frame now on screen. The three
+    // sections share one index - agents, then busy, then the rest - which
+    // is what the arrows walk, so a click lands in the same space and
+    // needs nothing extra to say which section it was in.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     // How far down the three lists, read as one, the window has scrolled.
     // Kept across frames so the view holds still while the cursor moves
     // inside it, and only moves when the cursor would leave it.
@@ -762,7 +767,18 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        // The list windows itself - rows outside `window_over` are never
+        // built - so the frame is the body and there is nothing to subtract.
+        let mut keys = keyboard.poll();
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
+            selected = at;
+        }
+        for key in keys {
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -898,6 +914,9 @@ fn main() {
             agents.iter().map(|a| a.workspace_id.as_str()).collect();
 
         let mut rows = vec![tc::title("herdr panes", w, &p.accent)];
+        // The span each pane covers, taken from where its rows started and
+        // ended: a pane is one row, or several once its detail is drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         let mut summary = vec![
             (
                 p.dim.as_str(),
@@ -982,10 +1001,9 @@ fn main() {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // One window over the three lists read as one, which is the order
         // `rows_now` is in and the order the keys walk. The cursor used to
@@ -1053,6 +1071,7 @@ fn main() {
             if !window.contains(&i) {
                 continue;
             }
+            let from = rows.len();
             let here = i == selected;
             let colour = colour_of(&a.state, &p);
             // Blocked and done keep a tint of their own even unselected: the
@@ -1150,6 +1169,7 @@ fn main() {
                     w - 1,
                 ));
             }
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
         if agents.is_empty() && err.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), "   no agents running".into())], w - 1));
@@ -1200,6 +1220,7 @@ fn main() {
             if !window.contains(&(agents.len() + j)) {
                 continue;
             }
+            let from = rows.len();
             let here = agents.len() + j == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
@@ -1275,6 +1296,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + j)));
         }
         // True only when nothing was unread either: an empty section with a
         // pane the probe failed on is not a Herdr where everything rests.
@@ -1311,6 +1333,7 @@ fn main() {
                 if !window.contains(&(agents.len() + busy.len() + j)) {
                     continue;
                 }
+                let from = rows.len();
                 let here = agents.len() + busy.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c = |colour: &str| {
@@ -1352,6 +1375,7 @@ fn main() {
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
+                rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + busy.len() + j)));
             }
         }
 
@@ -1370,8 +1394,17 @@ fn main() {
             ),
             None => String::new(),
         });
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        placed = rows_at;
+        let foot_top = rows.len();
         rows.extend(footer);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(250));
     }
 }

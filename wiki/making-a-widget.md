@@ -451,6 +451,9 @@ and npm publication path is separate from PR merge; it is documented in
 | alphabetical launcher order | `the_list_is_in_a_settled_order` in `widgets/src/launcher/main.rs` |
 | first README preview | `a_sample_is_a_picture_of_the_widget` in `widgets/src/launcher/main.rs` |
 | `help.txt` summary and paragraph | `every_widget_describes_itself` in `widgets/src/launcher/main.rs` |
+| answering the wheel | `every_widget_answers_the_wheel` |
+| registering the footer, so its hints are clickable | `every_widget_registers_its_footer` |
+| answering a click on a row | `every_widget_with_a_cursor_answers_a_click` |
 
 `every_widget_is_on_the_launcher_menu` is the repository check: it fails
 if a widget folder is missing from the launcher registry.
@@ -598,37 +601,109 @@ unambiguous about which characters are the key: `[q]uit`, `[d] cloudflare`,
 `[↵] open`, or a bare `↵ → ← ↑ ↓`. `↑↓ select` names two and gets nothing —
 there is no honest answer to which one a click sent — and `[±]25` is one
 glyph standing for `+` and `-`, so it gets nothing either. Write them as two
-hints if you want both clickable. A key named only in prose (`esc closes`) is
-left alone on purpose: guessing which word was the key would sometimes fire
-the wrong one, and a hint that fires the wrong key is worse than one that
-fires none.
+hints if you want both clickable.
+
+**A hint can also name its key as its leading token** — `ctrl-u clear`,
+`esc cancel`, `tab to add another`. Only the first token is read, so the
+words after it stay words and `clear` never becomes a key. Write the key
+first, which this tree does everywhere anyway.
+
+That is a fallback and never a tie-breaker: `esc / [,] back` names two keys
+for one action, and counting both would make it ambiguous and take away a
+spot it already had, so the bracket wins and the synonym is ignored.
 
 **Call `footer_at` every frame**, beside the draw. The footer moves when the
 pane resizes and wraps onto a second line when it narrows; a placement kept
 from an older frame sends whatever key used to be under the pointer.
 
 **A row costs one hit-test.** Core cannot know which of your rows are
-selectable, so it gives you the arithmetic and you do the rest —
-`row_at(y, top, first, shown)` is the inverse of the window `follow()` chose,
-and answers `None` outside those rows rather than clamping, because a click
-on the footer is not a click on the last item:
+selectable, so it gives you the arithmetic and you do the rest.
+
+**Click a row to select it; click the selected row to open it.** That is the
+whole gesture, and you get the second half for nothing: `rows_clicked`
+rewrites a click on the already-selected row into the literal key `enter`,
+so your own `enter` arm does the opening. It cannot drift from what the
+keyboard does, because it *is* what the keyboard does — and if you have no
+`enter` arm, a second click correctly does nothing.
 
 ```rust
-other => {
-    if let Some((_, row)) = tc::click_at(other) {
-        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
-            selected = at;
-            moved = true;
-        }
-    }
+let mut keys = keyboard.poll();
+if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed, None) {
+    selected = at;
+    moved = true;
+}
+for key in keys { match key.as_str() { /* unchanged */ } }
+```
+
+The last argument says what a click that misses every row should become.
+Pass `None` unless your selection can be *empty* and your footer says how to
+empty it — `latency` passes `Some("esc")` because it hints `[esc] clear
+focus`, so clicking away from its host list is a second route to a key it
+already names. If your `esc` closes a detail screen or drops a filter, pass
+`None`: a click on a chart that shut the screen is a capability nobody asked
+for.
+
+Resolve before you match, not in a catch-all arm. The alternative is
+comparing `at == selected` yourself and repeating whatever your `enter` arm
+does, which is a second copy of it that goes stale the first time you change
+one and not the other.
+
+Hit-test against the frame that was on screen when the click happened — the
+one you built on the previous pass — so keep the placements across iterations
+rather than recomputing them.
+
+**The placements must index the same vec the frame is built from.** This is
+the one that bites. If you split one `rows` vec into a pinned head and a
+windowed rest, they already do. If you keep the header in a *separate* vec
+and build the frame as `head ++ body[window]`, your spans are `body`-relative
+and every click lands however many rows the header is tall further down the
+list — with the first few entries unreachable entirely. `luvus-panes` shipped
+exactly that for an afternoon. Shift by `head.len()` when you record them,
+and pass that same length as `head`.
+
+**`placed` is where each item's rows landed**, and `item_at` is what reads a
+frame row back into an item. Charts, section headings, blank spacers and
+multi-line rows sit between your items, so the nth row of the frame is not the
+nth item. You already record this for your cursor,
+`cursor = Some(rows.len())`, so extend it to every item:
+
+```rust
+for (i, thing) in things.iter().enumerate() {
+    let from = rows.len();
+    // ... push this item's rows ...
+    rows_at.extend((from..rows.len()).map(|row| (row, i)));
 }
 ```
 
-Hit-test against the frame that was on screen when the click happened — the
-one you built on the previous pass — so keep `list_top`, `list_first` and
-`list_rows` across iterations rather than recomputing them. `widgets/src/launcher/main.rs`
-is the worked example, and its whole click support is that arm plus the
-`footer_at` line.
+One entry per row an item occupies, taken as a span rather than counted — a
+span cannot drift from what was actually drawn, and it is what makes a click
+on `latency`'s sparkline pick the row above it. Matching is exact, so a click
+on the blank under a short list selects nothing rather than the last item.
+
+**If your sections have separate cursors**, record `(row, slot)` and keep the
+`(section, index)` pairs beside it; `item_at` hands back the slot and you look
+it up. Clicking into a section focuses it as well as moving its cursor,
+because that is what walking into it with the arrows does. If your sections
+share one index — `herdr-panes` and `luvus-panes` do — there is nothing extra.
+
+**A screen that draws without a list of its own must clear the placements**,
+the same way a screen with no packed footer calls `forget_footer()`. Otherwise
+a click on your detail screen is answered by whichever item was drawn on that
+row on the frame behind it.
+
+**A strip of tabs is the same idea sideways.** `agent-usage` draws one row of
+labelled columns, so it records `(column, tab)` where a list records
+`(row, item)`, and the hit-test compares the column with the row having to
+match. Record it where the strip is built, not where the click arrives —
+working the widths out a second time is a second copy of the layout, and the
+two drift the first time a tab changes shape. Clicking a tab does what
+stepping to it with `←`/`→` does, which is the rule again.
+
+**Two checks enforce this** and they are separate, because a widget can
+satisfy either without the other: `every_widget_registers_its_footer` and
+`every_widget_with_a_cursor_answers_a_click`. A widget with nothing selectable
+goes in `NO_CURSOR` with the reason written there; one with no hints at all
+goes in `NO_FOOTER`.
 
 **Testing it without a mouse.** You cannot inject a click into your own
 terminal, and clicking by hand tests one pane at one width. Drive the binary

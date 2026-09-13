@@ -586,7 +586,14 @@ fn hints(p: &Palette, neighbours: bool) -> Vec<Vec<(&str, String)>> {
 /// A hint is never split - `[,] settin` teaches a key that does not exist -
 /// so on a pane narrower than the widest hint it is the margin that gives
 /// way, not the hint. Every other row of the frame keeps its space.
-fn footer(w: usize, neighbours: bool, p: &Palette) -> Vec<String> {
+///
+/// Returns the indent alongside the packed footer, because that is the half
+/// the caller cannot work out: the rows come back already indented, but
+/// `footer_at` needs the number to shift each hint's columns by, and the
+/// row the footer lands on is only knowable at the draw site after the
+/// padding that pushes it to the bottom. One of the two is known here and
+/// the other there, so they meet in the call.
+fn footer(w: usize, neighbours: bool, p: &Palette) -> (tc::Footer, usize) {
     let hints = hints(p, neighbours);
     let widest = hints
         .iter()
@@ -594,10 +601,13 @@ fn footer(w: usize, neighbours: bool, p: &Palette) -> Vec<String> {
         .max()
         .unwrap_or(0);
     let indent = usize::from(widest + 1 <= w);
-    tc::pack_hints(&hints, w.saturating_sub(indent + 1).max(1), "  ")
+    let mut packed = tc::pack_hints_placed(&hints, w.saturating_sub(indent + 1).max(1), "  ");
+    packed.lines = packed
+        .lines
         .into_iter()
         .map(|line| format!("{}{}", " ".repeat(indent), line))
-        .collect()
+        .collect();
+    (packed, indent)
 }
 
 /// The whole frame at width `w`, title first, at whatever height it needs.
@@ -765,7 +775,8 @@ fn main() {
         let (w, h) = tc::size();
         let view = anchor.unwrap_or_else(|| Month::of(today));
         let body = frame(w, today, view, start, &zone.label(now), zone_note.as_deref(), neighbours, weeks, &p);
-        let foot = footer(w, neighbours, &p);
+        let (packed, indent) = footer(w, neighbours, &p);
+        let foot = &packed.lines;
         // A window onto the body rather than a cut of it, with the title
         // pinned above: on a wall of panes it is the only row saying which
         // widget this is.
@@ -779,8 +790,15 @@ fn main() {
         while rows.len() < room {
             rows.push(String::new());
         }
-        rows.extend(foot);
+        // Where the footer actually lands, after the blanks that push it to
+        // the bottom. Registered every frame: it moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = rows.len();
+        rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, indent);
         std::thread::sleep(Wait::from_millis(200));
     }
 }
@@ -1323,7 +1341,7 @@ mod tests {
                 // The footer as it is drawn, not as it is packed: the margin
                 // is part of the row, and leaving it out of the measurement
                 // is how a footer one cell too wide goes unnoticed.
-                rows.extend(footer(w, true, &p));
+                rows.extend(footer(w, true, &p).0.lines);
                 // Arbitrary text in other widgets reaches the same shared
                 // clipper. This fits by character count but not by terminal
                 // columns: the final glyph occupies two. If seg lets it

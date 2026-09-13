@@ -1913,6 +1913,12 @@ fn main() {
     // it was last drawn - the keys run before the frame that answers them.
     let mut board = 0usize;
     let mut board_len = 0usize;
+    // The board now on screen: every row's slot, what each slot selects,
+    // and how many rows stay pinned above the window. A click is answered
+    // against the frame the reader was looking at when they clicked.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
+    let mut click_targets: Vec<(usize, usize)> = Vec::new();
+    let mut list_head = 0usize;
     // Set by a key that moved a cursor, and cleared once the window has
     // followed it. The wheel writes a scroll and never this, so a turn
     // past the selected row is not pulled back on the next frame.
@@ -1925,7 +1931,28 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        // A click also focuses the section the row is in, because walking
+        // into one with the arrows does both - a click that moved a cursor
+        // in an unfocused section would leave the arrows somewhere else.
+        // The slot the cursor is on right now is what decides whether this
+        // click opens or selects, so it is looked up rather than assumed.
+        let mut keys = keyboard.poll();
+        let here = focus.and_then(|pane| {
+            click_targets.iter().position(|&(p, i)| p == pane && i == sel[pane])
+        });
+        if let Some(slot) = tc::rows_clicked(&mut keys, here, list_head, board, &placed, None) {
+            if let Some(&(pane, at)) = click_targets.get(slot) {
+                focus = Some(pane);
+                sel[pane] = at;
+                moved = true;
+            }
+        }
+        for key in keys {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
@@ -2163,6 +2190,14 @@ fn main() {
         // Where the focused section's cursor landed, so the board can be
         // scrolled to keep it on screen.
         let mut cursor: Option<usize> = None;
+        // And where every row of every section landed, so a click can be
+        // read back into one. The board has three sections with a cursor
+        // each, so a row identifies a pane *and* an index - `item_at`
+        // answers with a slot into `targets`, which carries the pair.
+        // Clicking into a section focuses it as well as moving its cursor,
+        // because that is what walking into it with the arrows does.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
+        let mut targets: Vec<(usize, usize)> = Vec::new();
         let mut head = vec![
             (
                 p.dim.as_str(),
@@ -2187,16 +2222,21 @@ fn main() {
                 p.dim.as_str(),
                 "[q]uit".into(),
             )]];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|line| format!(" {}", line))
-                .collect();
+            let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+            let foot: Vec<String> =
+                packed.lines.iter().map(|line| format!(" {}", line)).collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
+            // The board's placements describe a frame that is no longer
+            // on screen. Leaving them would answer a click here with
+            // whichever row happened to be drawn behind it.
+            placed.clear();
+            let foot_top = rows.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(400));
             continue;
         }
@@ -2351,6 +2391,8 @@ fn main() {
             ));
         }
         for (ci, c) in ranked_cycles.iter().enumerate() {
+            let (from, slot) = (rows.len(), targets.len());
+            targets.push((cycles_pane, ci));
             if here_now && ci == sel[cycles_pane] {
                 cursor = Some(rows.len());
             }
@@ -2442,6 +2484,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, slot)));
         }
 
         // Arrivals against departures.
@@ -2635,6 +2678,8 @@ fn main() {
             w - 1,
         ));
         for (i, (key, name)) in ranked.iter().enumerate() {
+            let (from, slot) = (rows.len(), targets.len());
+            targets.push((teams_pane, i));
             if on_teams && i == sel[teams_pane] {
                 cursor = Some(rows.len());
             }
@@ -2688,6 +2733,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, slot)));
         }
         // Every project that is still going, whichever team owns it. The
         // board reaches them without going through a team first, the way
@@ -2762,6 +2808,8 @@ fn main() {
             let base = 2 + team_w + 2 + name_w + 5;
             let (label_cost, bar_w, room) = project_columns(w, base, label_w, full);
             for (i, (q, aside)) in live.iter().zip(&asides).enumerate() {
+                let (from, slot) = (rows.len(), targets.len());
+                targets.push((projects_pane, i));
                 let here = on_projects && i == sel[projects_pane];
                 if here {
                     cursor = Some(rows.len());
@@ -2825,6 +2873,7 @@ fn main() {
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
+                rows_at.extend((from..rows.len()).map(|row| (row, slot)));
             }
         }
 
@@ -2976,10 +3025,9 @@ fn main() {
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-                let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                    .into_iter()
-                    .map(|l| format!(" {}", l))
-                    .collect();
+                let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+                let foot: Vec<String> =
+                    packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
                 // The title is pinned here as it is on the board. A detail
@@ -3014,8 +3062,11 @@ fn main() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
                 }
+                placed.clear();
+                let foot_top = out.len();
                 out.extend(foot);
                 tc::draw(&out, w, h);
+                keyboard.footer_at(&packed, foot_top, 1);
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
             }
@@ -3058,10 +3109,9 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // The board is longer than most panes are tall, and every section
         // is now drawn whole - so the frame is a window onto it. With a
         // section focused the window chases its cursor; with none, the
@@ -3077,6 +3127,7 @@ fn main() {
         // list, so it shifts by the header when it moves into the body.
         let (head, body) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        (placed, click_targets, list_head) = (rows_at, targets, head.len());
         if moved {
             if let Some(at) = cursor {
                 board = tc::follow(board, at.saturating_sub(head.len()), room_below);
@@ -3091,8 +3142,10 @@ fn main() {
         while out.len() < room {
             out.push(String::new());
         }
+        let foot_top = out.len();
         out.extend(footer);
         tc::draw(&out, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

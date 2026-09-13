@@ -1808,6 +1808,11 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut selected = 0usize;
+    // Where each process's row landed on the frame now on screen, and how
+    // many rows stay pinned above the window. A click is answered against
+    // the frame the reader was looking at when they clicked, which is the
+    // one built on the previous pass.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // Where the process table is scrolled to, and whether a key has just
     // moved the cursor. The wheel writes the first and never the second, so
     // the table stops re-centring on the selection the moment it is turned.
@@ -1845,7 +1850,16 @@ fn main() {
     let mut next_redraw = Instant::now();
 
     loop {
-        let keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        let mut keys = keyboard.poll();
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, 0, &placed, None) {
+            selected = at;
+            moved = true;
+        }
         let had_input = !keys.is_empty();
         for key in keys {
             if detail.is_some() {
@@ -2010,7 +2024,18 @@ fn main() {
                     selected = 0;
                     moved = true;
                 }
-                _ => {}
+                // A click picks the process under it, which is what the
+                // arrows do. Only on the list: the detail screen clears
+                // the placements as it draws, because it keeps a cursor
+                // per section of its own.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, 0, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -2114,12 +2139,16 @@ fn main() {
                 ],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let mut foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|l| format!(" {}", l))
-                .collect();
+            let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+            let mut foot: Vec<String> =
+                packed.lines.iter().map(|l| format!(" {}", l)).collect();
             if let Some((text, colour, _)) = notice.as_ref() {
                 foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+            // The notice replaces the footer outright, so there is nothing
+            // to click: registering the hints that are no longer drawn
+            // would fire one from under a line of text saying something
+            // else. An empty footer is how a widget takes them back off.
+                packed = tc::Footer::default();
             }
             let room = h.saturating_sub(foot.len() + 1).max(1);
             // Built at the height it wants rather than the height it has:
@@ -2192,19 +2221,24 @@ fn main() {
                     p.dim.as_str(),
                     scroll_label(dscroll + 1, last, rest.len()),
                 )]);
-                foot = tc::pack_hints(&with_pos, w - 2, "  ")
-                    .into_iter()
-                    .map(|l| format!(" {}", l))
-                    .collect();
+                packed = tc::pack_hints_placed(&with_pos, w - 2, "  ");
+                foot = packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 if let Some((text, colour, _)) = notice.as_ref() {
                     foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+                    packed = tc::Footer::default();
                 }
                 while shown.len() + foot.len() < h {
                     shown.push(String::new());
                 }
             }
+            // The detail screen keeps a cursor per section of its own. The
+            // list's placements describe a frame that is no longer on
+            // screen, so they come off rather than answering for it.
+            placed.clear();
+            let foot_top = shown.len();
             shown.extend(foot);
             tc::draw(&shown, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             continue;
         }
 
@@ -2221,6 +2255,7 @@ fn main() {
         let up: f64 = rows.iter().map(|r| r.up_rate).sum();
 
         let mut out = vec![tc::title("netwatch", w, &p.accent)];
+        let mut placed_now: Vec<(usize, usize)> = Vec::new();
         // Held open. What this line has to say depends on how many rows fit,
         // which is not known until the chart above the table has been built -
         // but the line is one row tall whatever it ends up saying, so nothing
@@ -2412,6 +2447,14 @@ fn main() {
                 w - 1,
             ));
         } else {
+            // One heading, then a row per process, in window order - so the
+            // nth drawn row is process `first + n`. Recorded here rather
+            // than worked out at the click, because by then the body has
+            // been windowed and the heading's row is gone.
+            let from = out.len() + 1;
+            placed_now = (0..last.saturating_sub(first))
+                .map(|n| (from + n, first + n))
+                .collect();
             out.extend(table(&rows, w, first, show, selected, &p));
         }
 
@@ -2438,15 +2481,22 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         drop(guard);
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        // Nothing is pinned on this screen - the whole frame is built to
+        // the pane and the table windows itself - so the head is zero and
+        // a frame row is a body row.
+        (placed, list_head) = (placed_now, 0);
         while out.len() < h.saturating_sub(foot.len()) {
             out.push(String::new());
         }
+        // Each screen registers its own as it draws, and the last draw
+        // wins - which is what a click arriving next has to be measured
+        // against.
+        let foot_top = out.len();
         out.extend(foot);
         tc::draw(&out, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
     }
 }
 

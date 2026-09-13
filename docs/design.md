@@ -31,12 +31,22 @@ wrong first.
   `Keyboard::footer_at()` turns a click on one into the key it names, so a
   footer becomes clickable in two lines and stays clickable as hints are
   added — the widget registers the footer, not the hints. `click_at()` and
-  `row_at()` are the row half, which stays one match arm in the widget
-  because only the widget knows which of its rows are selectable. The
-  launcher is the worked example. Not yet a check: that lands in OPS-55, when
-  every widget has been made to answer, and it is deliberately separate from
-  the wheel one — a single "supports the mouse" check would go in half-true
-  and pass a widget that only scrolls.
+  `click_at()`, `item_at()` and `rows_clicked()` are the row half.
+  `rows_clicked` is the one a widget calls: it resolves a frame's clicks
+  before the keys are matched, so a click on another row moves the cursor
+  and a click on the row it is already on becomes `enter` - the key the
+  footer already names for opening one. Rewriting the key rather than
+  acting on it is the point: the widget's own `enter` arm does the opening,
+  so the mouse cannot drift from what the keyboard does. Not a
+  double-click, because the terminal never says how many times somebody
+  clicked and a threshold is state on the input path that nobody can see -
+  and because the selected row is tinted, so the affordance is on screen
+  before the click rather than after it. Two checks enforce it,
+  deliberately apart because a widget can satisfy either without the other:
+  `every_widget_registers_its_footer` and
+  `every_widget_with_a_cursor_answers_a_click`. Both were written before a
+  single widget changed and seen red on fourteen and eleven of them, which
+  is the only moment `HEAD` is the known-failing case.
 - **A pane too short is a pane you scroll, not a pane that hides things.**
   Every frame is a window onto a body built at whatever height it needs, with
   the title pinned above it. Nothing stands down for want of rows: a section
