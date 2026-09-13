@@ -599,7 +599,8 @@ jobs:
           fi
           # Every pane the manifest declares has to be a binary that is
           # there. A pane naming a binary the release did not carry is a
-          # menu entry that dies on open.
+          # menu entry that dies on open. pane-ids.sh reads only
+          # [[panes]] so an action id is not demanded as a binary.
           missing=0
           while read -r pane; do
             [ "$pane" = "menu" ] && continue
@@ -607,7 +608,7 @@ jobs:
               echo "the manifest declares a ${pane} pane and the release has no such binary" >&2
               missing=1
             fi
-          done <<< "$(sed -n 's/^id = "\(.*\)"$/\1/p' luvus-module.toml | grep -v '\.')"
+          done <<< "$(/bin/sh luvus/pane-ids.sh luvus-module.toml)"
           [ "$missing" = 0 ]
           echo "every declared pane has a binary"
 

@@ -129,10 +129,13 @@ fi
 # Every pane the manifest names, not just the launcher. A checksummed
 # tarball can still omit a widget, and an install that accepted that left
 # a menu entry that died on open - the same empty-pane reading this repo
-# refuses everywhere else. `menu` is the launcher itself. The module id
-# carries a dot; a pane id may not, which is how those two are told apart
-# without parsing TOML tables.
-panes=$(sed -n 's/^id = "\(.*\)"$/\1/p' ../luvus-module.toml)
+# refuses everywhere else. `menu` is the launcher itself.
+#
+# Only `[[panes]]` ids. The module header and `[[actions]]` also have
+# `id =`, and treating those as panes would demand a binary for
+# `open-menu`, which is a shell script. The table is the thing that
+# tells them apart; a missing-dot rule cannot.
+panes=$(/bin/sh "$here/pane-ids.sh" ../luvus-module.toml)
 # A manifest that read as having no panes would walk this loop zero times
 # and report success, which is the reading this whole check exists to
 # refuse. It cannot be empty: the launcher's own entry is always there.
