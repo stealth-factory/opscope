@@ -665,6 +665,14 @@ the same way a screen with no packed footer calls `forget_footer()`. Otherwise
 a click on your detail screen is answered by whichever item was drawn on that
 row on the frame behind it.
 
+**A strip of tabs is the same idea sideways.** `agent-usage` draws one row of
+labelled columns, so it records `(column, tab)` where a list records
+`(row, item)`, and the hit-test compares the column with the row having to
+match. Record it where the strip is built, not where the click arrives —
+working the widths out a second time is a second copy of the layout, and the
+two drift the first time a tab changes shape. Clicking a tab does what
+stepping to it with `←`/`→` does, which is the rule again.
+
 **Two checks enforce this** and they are separate, because a widget can
 satisfy either without the other: `every_widget_registers_its_footer` and
 `every_widget_with_a_cursor_answers_a_click`. A widget with nothing selectable
