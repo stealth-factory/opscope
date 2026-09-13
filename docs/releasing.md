@@ -150,6 +150,28 @@ names the previous release, which is what you want it to name. In the
 steady state after a good release `next` and `latest` are the same
 version; `next` ahead of `latest` means a release stopped half way.
 
+**`latest` only ever moves onto whatever owns `next`.** Promotion is a
+job that can be reached without publishing anything, which publishing
+itself never was — and that is a way to move `latest` *backwards*.
+Re-dispatch `release.yml` at an older tag and everything ahead of
+`promote` is green for an honest reason: publish finds each package
+already on npm from that tag's own commit and skips it, the release
+step walks past a release that exists, and `smoke-npm` installs that
+version and gets what it asked for, because it is installable — it
+simply is not the newest.
+
+So `promote` reads `next` for all four packages before it writes
+anything and refuses unless every one names the version being
+promoted. One check rather than two: `next` is exactly the "is this
+still the newest" question, because publish moves it, and it goes on
+naming this version through a retry of a promote that failed or only
+half finished. The read is retried for a couple of minutes, since a
+packument briefly behind would otherwise refuse a release that is
+fine. `publish` and `promote` also share a queuing concurrency group,
+because the check alone races a newer publish — queued, the older run
+reaches `promote` after the newer publish has moved `next`, reads
+that, and refuses.
+
 **Promotion needs `NPM_TOKEN`; trusted publishing cannot do it.** OIDC
 covers `npm publish` and `npm stage publish` and nothing else — the
 npm CLI performs the token exchange inside the publish command, and no

@@ -668,6 +668,75 @@ jobs:
             exit 1
           fi
 
+          # setup-node always writes _authToken=${NODE_AUTH_TOKEN}, and an
+          # empty value is a 401 rather than an anonymous request. The
+          # reads below come before the token is needed at all, so it is
+          # cleared here for the same reason the publish step clears it.
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            npm config delete '//registry.npmjs.org/:_authToken' || true
+            npm config delete always-auth || true
+          fi
+
+          # A re-dispatch of an older tag walks past an existing GitHub
+          # release and skips packages whose gitHead already matches, so
+          # without this check it would move latest backwards. next still
+          # naming this version is the proof nobody newer has published
+          # since; the next release promoting over a half-finished one is
+          # what docs/releasing.md calls abandoning it.
+          #
+          # Before the missing-token message below, not after it. That
+          # message tells you to run four dist-tag commands by hand, and
+          # printing those for a version that must not be promoted would
+          # be worse than printing nothing at all.
+          #
+          # In rounds over the whole list rather than one read each, so a
+          # packument that is briefly behind costs two minutes once rather
+          # than refusing a release that is fine. A stale re-dispatch is
+          # still refused - what is behind never catches up to this
+          # version, because a newer one owns the tag.
+          owns_next=0
+          behind=""
+          for round in $(seq 1 5); do
+            behind=""
+            for name in $platforms $launcher; do
+              staged=$(npm view "$name" dist-tags.next 2>/dev/null | tr -d '[:space:]' || true)
+              if [ "$staged" != "$version" ]; then
+                behind="${behind} ${name}@${staged:-unset}"
+              fi
+            done
+            if [ -z "$behind" ]; then
+              owns_next=1
+              break
+            fi
+            echo "round ${round}: next does not name ${version} for:${behind}"
+            if [ "$round" -lt 5 ]; then
+              sleep 30
+            fi
+          done
+          if [ "$owns_next" = 0 ]; then
+            was=$(npm view "$launcher" dist-tags.latest 2>/dev/null | tr -d '[:space:]' || true)
+            echo "refusing stale promotion: latest was not moved, and" >&2
+            echo "nothing was written." >&2
+            echo >&2
+            echo "  ${version} does not own the next tag. What next names:" >&2
+            for pair in $behind; do
+              echo "    ${pair}" >&2
+            done
+            echo >&2
+            echo "publish moves next, so next names the newest version" >&2
+            echo "published. A re-dispatch at an older tag gets this far" >&2
+            echo "with everything green - publish skips what is already on" >&2
+            echo "npm from that commit, the release exists, and smoke-npm" >&2
+            echo "installs that version because it is installable - and" >&2
+            echo "moving latest here would roll npx opscope backwards." >&2
+            echo >&2
+            echo "latest still names ${was:-nothing}, and stays there. If a" >&2
+            echo "newer version owns next, that is the one to promote:" >&2
+            echo "re-dispatch release.yml at its tag." >&2
+            exit 1
+          fi
+          echo "${version} owns next on every package"
+
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "latest was not moved." >&2
             echo >&2
@@ -697,21 +766,6 @@ jobs:
           # Platforms first, the launcher last, for the reason the publish
           # step orders them the same way: opscope@latest is the pointer
           # people follow, so it is the last thing to move.
-          #
-          # A re-dispatch of an older tag walks past an existing GitHub
-          # release and skips packages whose gitHead already matches, so
-          # without this check it would move latest backwards. next still
-          # naming this version is the proof nobody newer has published
-          # since; the next release promoting over a half-finished one is
-          # what docs/releasing.md calls abandoning it.
-          for name in $platforms $launcher; do
-            staged=$(npm view "$name" dist-tags.next 2>/dev/null | tr -d '[:space:]' || true)
-            if [ "$staged" != "$version" ]; then
-              echo "${name}@next is ${staged:-unset}, not ${version}; refusing stale promotion" >&2
-              exit 1
-            fi
-          done
-
           moved=""
           for name in $platforms $launcher; do
             echo "moving ${name}@latest to ${version}"

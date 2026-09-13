@@ -615,6 +615,28 @@ test('release.yml refuses to promote unless next still names this version', () =
   }
 });
 
+test('the stale check runs before promote offers the by-hand commands', () => {
+  // With no NPM_TOKEN the job prints four `npm dist-tag add` commands to
+  // finish the release by hand. Printing those for a version that must
+  // not be promoted is worse than printing nothing: they are the exact
+  // writes the stale check exists to refuse, addressed to somebody with
+  // the rights to make them. So the check comes first, and it reads the
+  // registry anonymously to get there — an empty NODE_AUTH_TOKEN is a
+  // 401 rather than a fallthrough, so it has to be cleared before.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const promote = jobBlock(yml, 'promote');
+  const guard = promote.indexOf('dist-tags.next');
+  const byHand = promote.indexOf('To finish it by hand');
+  const clears = promote.indexOf("npm config delete '//registry.npmjs.org/:_authToken'");
+  assert.notEqual(byHand, -1, 'promote no longer offers the by-hand commands');
+  assert.notEqual(clears, -1, 'promote never clears the empty auth token');
+  assert.ok(clears < guard, 'the anonymous read happens before the token is cleared');
+  assert.ok(guard < byHand, 'the by-hand commands are offered before the stale check');
+});
+
 test('release.yml moves latest only after the npm smoke job', () => {
   // Promotion has to be a job that waits on verification, not a step
   // inside publish: a step there would run before anything had tried to
