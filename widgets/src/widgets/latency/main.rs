@@ -1065,6 +1065,14 @@ fn main() {
     // drawn rather than when the key is pressed, because targets are only
     // known to the poll threads.
     let mut selected: Option<usize> = None;
+    // Where each target's row landed on the frame now on screen, and the
+    // two numbers needed to read a frame row back into a body row: how many
+    // rows stay pinned above the window, and where the window starts. A
+    // click is answered against the frame the reader was looking at when
+    // they clicked, which is the one built on the previous pass, so these
+    // are kept rather than recomputed. Nothing is drawn yet on the first
+    // pass and an empty list is one nothing can land on.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // How far the list has been scrolled, for when there are more targets
     // than the pane is tall. The rows were truncated to the body height
     // before, so a seventh host on a six-host pane simply was not drawn.
@@ -1142,7 +1150,19 @@ fn main() {
                         s.seconds_per_column = cycle(COLUMN_CHOICES, s.seconds_per_column);
                     }
                 }
-                _ => {}
+                // A click picks the target under it, which is what the
+                // arrows do. The chart and the event log sit between the
+                // rows, so the answer comes from where each row actually
+                // landed on the frame that was on screen - not from
+                // counting rows down from the top.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(i) = tc::item_at(y, list_head, scroll, &placed) {
+                            selected = Some(i);
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
         let (w, h) = tc::size();
@@ -1229,12 +1249,19 @@ fn main() {
             w - 1,
         ));
         let mut cursor: Option<usize> = None;
+        // The same bookkeeping the cursor already needed, for every target
+        // rather than the selected one. One push in a loop that is running
+        // anyway, and it is the only thing that can say which target a
+        // click landed on: the chart and the event log sit between the
+        // rows, so the nth row of the frame is not the nth target.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, t) in snapshot.iter().enumerate() {
             let st = t.stats();
             let here = selected == Some(i);
             if here {
                 cursor = Some(rows.len());
             }
+            rows_at.push((rows.len(), i));
             // The selected row is tinted rather than marked, so the thing
             // that says "this one" in the table is the same thing that says
             // it in the chart: one target at full strength, the rest behind.
@@ -1364,6 +1391,12 @@ fn main() {
                     line.push((colour.as_str(), text.clone()));
                 }
                 rows.push(tc::seg(&line, w - 1));
+                // The sparkline belongs to the target above it, so a click
+                // on it picks that target. One entry per row a target
+                // occupies is what lets the match be exact - and exact is
+                // what stops a click on the blank below the list quietly
+                // selecting its last row.
+                rows_at.push((rows.len() - 1, i));
             }
         }
         rows.push(String::new());
@@ -1469,6 +1502,7 @@ fn main() {
         // targets and thinking you have six. The title is pinned above it.
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = body_h.saturating_sub(head.len()).max(1);
+        (placed, list_head) = (rows_at, head.len());
         // Only on the frame a key moved the focus. Chasing it every frame
         // pulls the list back to the selected host the instant the wheel
         // moves it, which reads as the wheel doing nothing at all.

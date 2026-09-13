@@ -604,6 +604,38 @@ pub fn click_at(key: &str) -> Option<(usize, usize)> {
     Some((col.parse().ok()?, row.parse().ok()?))
 }
 
+/// Which item is drawn on frame row `y`, for a body that is not a plain list.
+///
+/// `row_at` answers a list whose items are one row each, laid end to end -
+/// the launcher's. Most widgets here are not that: charts, section
+/// headings, blank spacers and multi-line rows all sit between the items,
+/// so the nth row of the frame is not the nth item.
+///
+/// The bookkeeping is already half done in every one of them. A widget
+/// records where its cursor landed so `follow` can chase it -
+/// `cursor = Some(rows.len())` while the body is being built - and
+/// recording every item the same way costs one `push` in a loop that is
+/// already running. An item drawn across several rows pushes one entry per
+/// row it occupies; matching is exact rather than nearest, so a click below
+/// the last item selects nothing instead of selecting the last item.
+///
+/// `head` is how many rows stay pinned above the window - the title - and
+/// `scroll` is where the window starts in what is left. Rows above the
+/// head are the pinned ones and belong to no item.
+pub fn item_at(y: usize, head: usize, scroll: usize, placed: &[(usize, usize)]) -> Option<usize> {
+    if y < head {
+        return None;
+    }
+    // The window shows `rest[scroll..]` starting at frame row `head`, and
+    // `rest` starts at body row `head` - so the two heads cancel and a
+    // frame row is its body row minus the scroll.
+    let body = y + scroll;
+    placed
+        .iter()
+        .find(|(row, _)| *row == body)
+        .map(|(_, item)| *item)
+}
+
 /// Which item a click on frame row `y` landed on, if it landed on one.
 ///
 /// The inverse of the window `follow` decides: `top` is the frame row the
@@ -3786,6 +3818,50 @@ mod tests {
         // fill belong to nothing.
         assert_eq!(row_at(top + 2, top, 0, 3), Some(2));
         assert_eq!(row_at(top + 3, top, 0, 3), None);
+    }
+
+    #[test]
+    fn item_at_finds_the_item_drawn_on_a_row_and_no_other() {
+        // A body the shape these widgets actually build: a pinned title,
+        // a chart, a heading, then rows - two of which are two lines tall.
+        //
+        //   body 0  title            (pinned)
+        //   body 1  chart
+        //   body 2  chart
+        //   body 3  heading
+        //   body 4  item 0
+        //   body 5  item 1, line one
+        //   body 6  item 1, line two
+        //   body 7  item 2
+        let placed = [(4usize, 0usize), (5, 1), (6, 1), (7, 2)];
+        // Unscrolled, the frame row is the body row.
+        assert_eq!(item_at(4, 1, 0, &placed), Some(0));
+        assert_eq!(item_at(5, 1, 0, &placed), Some(1));
+        // The second line of a two-line item is that item, because the
+        // widget pushed an entry for it. Nothing else could know.
+        assert_eq!(item_at(6, 1, 0, &placed), Some(1));
+        assert_eq!(item_at(7, 1, 0, &placed), Some(2));
+        // The chart and the heading belong to nobody, and neither does a
+        // row past the last item - matched exactly rather than to the
+        // nearest, so a click on the blank space below a short list does
+        // not quietly select its last row.
+        for y in [1, 2, 3, 8, 20] {
+            assert_eq!(item_at(y, 1, 0, &placed), None, "frame row {}", y);
+        }
+        // Scrolled by three, the window shows body 4 upwards at frame row
+        // 1, right under the pinned title.
+        assert_eq!(item_at(1, 1, 3, &placed), Some(0));
+        assert_eq!(item_at(2, 1, 3, &placed), Some(1));
+        assert_eq!(item_at(4, 1, 3, &placed), Some(2));
+        // The pinned rows are the title's, whatever the scroll - and the
+        // scroll chosen here is the one that puts an item's body row under
+        // frame row 0, so dropping the head guard returns item 0 for a
+        // click on the title. At scroll 3 that row lands on the heading and
+        // the assertion would pass without the guard doing anything.
+        assert_eq!(item_at(0, 1, 4, &placed), None);
+        assert_eq!(item_at(1, 1, 4, &placed), Some(1));
+        // And a body with nothing selectable in it answers nothing.
+        assert_eq!(item_at(4, 1, 0, &[]), None);
     }
 
     #[test]
