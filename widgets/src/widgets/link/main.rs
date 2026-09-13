@@ -672,14 +672,22 @@ fn main() {
                     vec![(p.dim.as_str(), place)],
                 ]
             };
-            let pack = |hints: &[Vec<(&str, String)>]| -> Vec<String> {
-                tc::pack_hints(hints, w - 2, "  ")
+            // Returns the placement alongside the lines, because the footer
+            // is packed twice here: once to measure how many rows it will
+            // take, and again with the real scroll label once that is
+            // known. The second one is the footer on screen, so it is the
+            // one registered.
+            let pack = |hints: &[Vec<(&str, String)>]| -> tc::Footer {
+                let mut packed = tc::pack_hints_placed(hints, w - 2, "  ");
+                packed.lines = packed
+                    .lines
                     .into_iter()
                     .map(|l| format!(" {}", l))
-                    .collect()
+                    .collect();
+                packed
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
-            let room = h.saturating_sub(foot.len() + 1).max(1);
+            let room = h.saturating_sub(foot.lines.len() + 1).max(1);
             let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
             drop(guard);
             // The body is as tall as it needs to be and the pane shows a
@@ -697,12 +705,15 @@ fn main() {
             while shown_body.len() < room {
                 shown_body.push(String::new());
             }
-            shown_body.extend(pack(&detail_hints(scroll_label(
+            let packed = pack(&detail_hints(scroll_label(
                 scroll + 1,
                 last,
                 rest.len(),
-            ))));
+            )));
+            let foot_top = shown_body.len();
+            shown_body.extend(packed.lines.iter().cloned());
             tc::draw(&shown_body, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -808,10 +819,8 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         drop(guard);
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the body rather than a cut of it, and the title
         // stays put above it: on a pane too short for every session the
         // table and the chart under it used to run off the bottom with
@@ -833,8 +842,13 @@ fn main() {
         while frame.len() < room {
             frame.push(String::new());
         }
+        // Each screen registers its own footer as it draws, and the last
+        // draw wins - which is right, because the last draw is what is on
+        // screen when the next click arrives.
+        let foot_top = frame.len();
         frame.extend(foot);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

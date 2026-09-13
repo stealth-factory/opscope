@@ -1978,6 +1978,14 @@ fn main() {
                 )],
                 w - 1,
             ));
+            // This overlay writes its footer as one line of prose rather
+            // than packing hints, so there are no placements to register -
+            // and leaving the screen underneath registered would answer a
+            // click here with whatever key sat in that column there. The
+            // settings screen had exactly that bug. Making this footer
+            // clickable means building it out of hints first, which is a
+            // change to what it draws and belongs on its own.
+            keyboard.forget_footer();
             tc::draw(&out, w, h);
             std::thread::sleep(Duration::from_millis(250));
             continue;

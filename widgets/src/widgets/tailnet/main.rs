@@ -625,17 +625,24 @@ fn empty_filter_explains(listed: usize, has_self: bool, of: usize, filters: &[St
 /// is already the pane wide wraps in the terminal while `foot.len()` still
 /// counts one row — the same overflow the body budget was written to stop.
 /// The margin gives way first, which is what `months` settled on.
-fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> Vec<String> {
+/// Returns the indent beside the packed footer, because that is the half a
+/// caller cannot work out: the rows come back already indented, but
+/// `footer_at` needs the number to shift each hint's columns by, and the
+/// row it lands on is knowable only at the draw site after the padding.
+fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> (tc::Footer, usize) {
     let widest = hints
         .iter()
         .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0);
     let indent = usize::from(widest + 1 <= w);
-    tc::pack_hints(hints, w.saturating_sub(indent + 1).max(1), "  ")
+    let mut packed = tc::pack_hints_placed(hints, w.saturating_sub(indent + 1).max(1), "  ");
+    packed.lines = packed
+        .lines
         .into_iter()
         .map(|line| format!("{}{}", " ".repeat(indent), line))
-        .collect()
+        .collect();
+    (packed, indent)
 }
 
 /// Live throughput for peers that are actually moving data.
@@ -953,12 +960,15 @@ fn main() {
                 vec![(p.dim.as_str(), "[,] settings".into())],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let foot = pack_footer(&hints, w);
+            let (packed, indent) = pack_footer(&hints, w);
+            let foot = &packed.lines;
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
-            rows.extend(foot);
+            let foot_top = rows.len();
+            rows.extend(foot.iter().cloned());
             tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, indent);
             std::thread::sleep(Duration::from_millis(400));
             continue;
         };
@@ -1092,6 +1102,15 @@ fn main() {
             };
             dscroll = at;
             tc::draw(&body, w, h);
+            // This overlay writes its footer as one line of prose rather
+            // than packing hints, so there are no placements to register -
+            // and leaving the screen underneath registered would answer a
+            // click here with whatever key sat in that column there. The
+            // settings screen had exactly that bug. Making this footer
+            // clickable means building it out of hints first, which is a
+            // change to what it draws and belongs on its own.
+            keyboard.forget_footer();
+
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -1214,7 +1233,8 @@ fn main() {
         // guess, and a footer that wrapped onto a second line put the
         // frame one row over the pane - which `draw` cuts from the bottom,
         // taking `[q]uit` with it. A route row costs one more.
-        let foot = pack_footer(&hints, w);
+        let (packed, indent) = pack_footer(&hints, w);
+        let foot = &packed.lines;
         // The emptied-filter line is part of the body budget, not a row
         // pushed after it: with the graph up on a short pane the self row
         // already spent the last slot, and appending then grew the frame
@@ -1369,8 +1389,10 @@ fn main() {
                 w - 1,
             ));
         }
-        rows.extend(foot);
+        let foot_top = rows.len();
+        rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, indent);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -1895,7 +1917,7 @@ mod tests {
             vec![("", toggle_hint("[o]ffline", true))],
             vec![("", "[q]uit".into())],
         ];
-        let foot = pack_footer(&hints, 14);
+        let foot = pack_footer(&hints, 14).0.lines;
         for line in &foot {
             assert!(
                 tc::display_width(line) <= 14,
@@ -1907,7 +1929,7 @@ mod tests {
             foot.iter().any(|line| line.contains("[o]ffline hide")),
             "the wording stays; the indent gives way"
         );
-        let wide = pack_footer(&hints, 74);
+        let wide = pack_footer(&hints, 74).0.lines;
         assert!(
             wide.first().is_some_and(|line| line.starts_with(' ')),
             "a wide pane still pads the footer"

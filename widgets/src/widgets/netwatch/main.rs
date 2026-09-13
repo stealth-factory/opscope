@@ -2114,12 +2114,16 @@ fn main() {
                 ],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let mut foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|l| format!(" {}", l))
-                .collect();
+            let mut packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+            let mut foot: Vec<String> =
+                packed.lines.iter().map(|l| format!(" {}", l)).collect();
             if let Some((text, colour, _)) = notice.as_ref() {
                 foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+            // The notice replaces the footer outright, so there is nothing
+            // to click: registering the hints that are no longer drawn
+            // would fire one from under a line of text saying something
+            // else. An empty footer is how a widget takes them back off.
+                packed = tc::Footer::default();
             }
             let room = h.saturating_sub(foot.len() + 1).max(1);
             // Built at the height it wants rather than the height it has:
@@ -2192,19 +2196,20 @@ fn main() {
                     p.dim.as_str(),
                     scroll_label(dscroll + 1, last, rest.len()),
                 )]);
-                foot = tc::pack_hints(&with_pos, w - 2, "  ")
-                    .into_iter()
-                    .map(|l| format!(" {}", l))
-                    .collect();
+                packed = tc::pack_hints_placed(&with_pos, w - 2, "  ");
+                foot = packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 if let Some((text, colour, _)) = notice.as_ref() {
                     foot = vec![tc::seg(&[(colour.as_str(), format!(" {}", text))], w - 1)];
+                    packed = tc::Footer::default();
                 }
                 while shown.len() + foot.len() < h {
                     shown.push(String::new());
                 }
             }
+            let foot_top = shown.len();
             shown.extend(foot);
             tc::draw(&shown, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             continue;
         }
 
@@ -2438,15 +2443,18 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         drop(guard);
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
         while out.len() < h.saturating_sub(foot.len()) {
             out.push(String::new());
         }
+        // Each screen registers its own as it draws, and the last draw
+        // wins - which is what a click arriving next has to be measured
+        // against.
+        let foot_top = out.len();
         out.extend(foot);
         tc::draw(&out, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
     }
 }
 

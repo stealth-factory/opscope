@@ -2187,16 +2187,17 @@ fn main() {
                 p.dim.as_str(),
                 "[q]uit".into(),
             )]];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|line| format!(" {}", line))
-                .collect();
+            let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+            let foot: Vec<String> =
+                packed.lines.iter().map(|line| format!(" {}", line)).collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
+            let foot_top = rows.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(400));
             continue;
         }
@@ -2976,10 +2977,9 @@ fn main() {
                 hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
                 hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
                 hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-                let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                    .into_iter()
-                    .map(|l| format!(" {}", l))
-                    .collect();
+                let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+                let foot: Vec<String> =
+                    packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 let at = if reading.is_some() { &mut pscroll } else { &mut dscroll };
                 // The title is pinned here as it is on the board. A detail
@@ -3014,8 +3014,10 @@ fn main() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
                 }
+                let foot_top = out.len();
                 out.extend(foot);
                 tc::draw(&out, w, h);
+                keyboard.footer_at(&packed, foot_top, 1);
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
             }
@@ -3058,10 +3060,9 @@ fn main() {
         hints.push(vec![(p.dim.as_str(), "[r]efresh".into())]);
         hints.push(vec![(p.dim.as_str(), "[,] settings".into())]);
         hints.push(vec![(p.dim.as_str(), "[q]uit".into())]);
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // The board is longer than most panes are tall, and every section
         // is now drawn whole - so the frame is a window onto it. With a
         // section focused the window chases its cursor; with none, the
@@ -3091,8 +3092,10 @@ fn main() {
         while out.len() < room {
             out.push(String::new());
         }
+        let foot_top = out.len();
         out.extend(footer);
         tc::draw(&out, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

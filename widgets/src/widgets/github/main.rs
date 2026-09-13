@@ -2080,16 +2080,17 @@ fn main() {
                 p.dim.as_str(),
                 "[q]uit".into(),
             )]];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|line| format!(" {}", line))
-                .collect();
+            let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+            let foot: Vec<String> =
+                packed.lines.iter().map(|line| format!(" {}", line)).collect();
             rows.truncate(h.saturating_sub(foot.len()));
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
+            let foot_top = rows.len();
             rows.extend(foot);
             tc::draw(&rows, w, h);
+            keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(400));
             continue;
         }
@@ -2640,10 +2641,9 @@ fn main() {
                     vec![(p.dim.as_str(), "[,] settings".into())],
                     vec![(p.dim.as_str(), "[q]uit".into())],
                 ];
-                let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                    .into_iter()
-                    .map(|l| format!(" {}", l))
-                    .collect();
+                let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+                let foot: Vec<String> =
+                    packed.lines.iter().map(|l| format!(" {}", l)).collect();
                 let room = h.saturating_sub(foot.len()).max(1);
                 // The page follows the cursor into the oldest list, the way
                 // netwatch's detail follows one into a section. Without it
@@ -2683,8 +2683,10 @@ fn main() {
                         *row = tc::seg(&[(p.ok.as_str(), format!(" {}", note))], w - 1);
                     }
                 }
+                let foot_top = out.len();
                 out.extend(foot);
                 tc::draw(&out, w, h);
+                keyboard.footer_at(&packed, foot_top, 1);
                 std::thread::sleep(Duration::from_millis(300));
                 continue;
             }
@@ -2702,10 +2704,9 @@ fn main() {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the frame, title pinned, rather than a cut of it.
         // Truncating dropped every account past the fold with nothing
         // saying so.
@@ -2725,8 +2726,10 @@ fn main() {
         while rows.len() < room {
             rows.push(String::new());
         }
+        let foot_top = rows.len();
         rows.extend(footer);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
