@@ -2601,6 +2601,12 @@ fn figure_block(
     label: &str,
     width: usize,
     tick: usize,
+    // The colour this row's bars are drawn in. The figure is the same
+    // count as the bars beside it, so it is the same colour: arrivals read
+    // as arrivals and departures as departures without reading the label.
+    // `github` has always done this; here the digits fell back to plain
+    // text because the colour was never handed down.
+    figure_colour: &str,
     p: &Palette,
 ) -> Vec<Vec<(String, String)>> {
     let gutter = || (tc::RST.to_string(), "  ".to_string());
@@ -2619,7 +2625,7 @@ fn figure_block(
             let digits = big_digits(v);
             if digits.first().map(|r| r.chars().count()).unwrap_or(0) <= inner {
                 for line in digits {
-                    rows.push(vec![gutter(), (p.txt.clone(), line)]);
+                    rows.push(vec![gutter(), (figure_colour.to_string(), line)]);
                 }
                 rows.push(Vec::new());
             } else {
@@ -2628,7 +2634,7 @@ fn figure_block(
                 // wrong number, so it drops to plain text rather than being
                 // cut.
                 rows.push(Vec::new());
-                rows.push(vec![gutter(), (p.txt.clone(), v.to_string())]);
+                rows.push(vec![gutter(), (figure_colour.to_string(), v.to_string())]);
                 rows.push(Vec::new());
                 rows.push(Vec::new());
             }
@@ -2702,7 +2708,10 @@ fn day_chart(
         let mut fig: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
         match figure {
             Some(v) => {
-                fig.push((p.txt.clone(), v.to_string()));
+                // Same colour as the bars, and as the right-half figure:
+                // a narrow pane still has to tell arrivals from departures
+                // without reading the label.
+                fig.push((bar_colour.to_string(), v.to_string()));
                 fig.push((p.dim.clone(), format!(" {}", label)));
             }
             None if stalled => {
@@ -2775,7 +2784,7 @@ fn day_chart(
     labels.push((p.dim.clone(), now.to_string()));
     left_rows.push(labels);
 
-    let figures = figure_block(figure, stalled, label, right, tick, p);
+    let figures = figure_block(figure, stalled, label, right, tick, bar_colour, p);
     for (i, mut parts) in left_rows.into_iter().enumerate() {
         if right > 0 {
             let used: usize = parts.iter().map(|(_, t)| tc::display_width(t)).sum();
@@ -4739,10 +4748,119 @@ mod tests {
     }
 
     #[test]
+    fn the_figure_is_the_colour_of_the_bars_it_stands_beside() {
+        // Arrivals and departures are told apart by colour on the charts;
+        // a figure counting the same thing in plain text made the reader
+        // fall back on the label. The digits took `p.txt` because the
+        // colour was never passed down, while the bars beside them had it
+        // all along.
+        let p = palette();
+        let colours = |block: Vec<Vec<(String, String)>>| {
+            block
+                .iter()
+                .flat_map(|row| row.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        let coloured = |colour: &str| {
+            colours(figure_block(Some(24), false, FIGURE_LABELS[0], 19, 3, colour, &p))
+        };
+        let opened = coloured(&p.pr);
+        let merged = coloured(&p.ok);
+        assert!(opened.contains(&p.pr), "the arrivals figure is not the arrivals colour");
+        assert!(merged.contains(&p.ok), "the departures figure is not the departures colour");
+        // And the two are actually distinguishable, which is the whole
+        // point - a palette that made them equal would pass the pair of
+        // assertions above and fail the reader.
+        assert_ne!(p.pr, p.ok, "arrivals and departures must not share a colour");
+        assert!(
+            !opened.contains(&p.txt),
+            "a digit fell back to plain text: {:?}",
+            opened
+        );
+
+        // Six digits need 23 cells; a 19-wide half leaves 17, so this is
+        // the plain-number path the large-digit case above never reaches.
+        let too_wide = figure_block(Some(123456), false, FIGURE_LABELS[0], 19, 3, &p.pr, &p);
+        let fallback = colours(too_wide.clone());
+        let fallback_plain: String = too_wide
+            .iter()
+            .map(|row| plain(&seg_owned(row, 19)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            fallback_plain.contains("123456"),
+            "the wide figure was not drawn as digits: {:?}",
+            fallback_plain
+        );
+        assert!(
+            !fallback_plain.contains('█'),
+            "the wide figure still drew large: {:?}",
+            fallback_plain
+        );
+        assert!(
+            fallback.contains(&p.pr),
+            "the fallback figure is not the supplied colour"
+        );
+        assert!(
+            !fallback.contains(&p.txt),
+            "fallback digits used plain text: {:?}",
+            fallback
+        );
+
+        // A pane too narrow for the right half draws the figure under the
+        // caption. That path used to take `p.txt` even after the right
+        // half was coloured, so resizing the pane made both figures the
+        // same again.
+        let days = chart_days();
+        let series: Vec<(String, i64)> = days.iter().map(|d| (d.clone(), 1)).collect();
+        assert_eq!(split_halves(40).1, 0, "40 columns still has a right half");
+        let narrow = |colour: &str, heading: &str, label: &str| {
+            let rows = day_chart(
+                heading,
+                vec![(p.dim.clone(), "last 30d".to_string())],
+                Some(series.as_slice()),
+                colour,
+                Some(24),
+                false,
+                label,
+                40,
+                4,
+                &p,
+            );
+            rows.get(2).cloned().unwrap_or_default()
+        };
+        let opened_row = narrow(&p.pr, "OPENED / DAY", FIGURE_LABELS[1]);
+        let merged_row = narrow(&p.ok, "MERGED / DAY", FIGURE_LABELS[0]);
+        assert!(
+            plain(&opened_row).contains("24"),
+            "narrow arrivals lost the figure: {:?}",
+            plain(&opened_row)
+        );
+        assert!(
+            opened_row.contains(&p.pr),
+            "narrow arrivals figure is not the arrivals colour"
+        );
+        assert!(
+            !opened_row.contains(&p.txt),
+            "narrow arrivals fell back to plain text: {:?}",
+            opened_row
+        );
+        assert!(
+            merged_row.contains(&p.ok),
+            "narrow departures figure is not the departures colour"
+        );
+        assert!(
+            !merged_row.contains(&p.txt),
+            "narrow departures fell back to plain text: {:?}",
+            merged_row
+        );
+    }
+
+    #[test]
     fn a_figure_that_has_not_arrived_is_not_a_figure_of_zero() {
         let p = palette();
         let drawn = |figure, stalled| {
-            figure_block(figure, stalled, FIGURE_LABELS[0], 19, 3, &p)
+            figure_block(figure, stalled, FIGURE_LABELS[0], 19, 3, &p.ok, &p)
                 .iter()
                 .map(|row| plain(&seg_owned(row, 19)))
                 .collect::<Vec<_>>()
