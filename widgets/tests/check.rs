@@ -794,6 +794,23 @@ fn render_luvus_module() -> String {
          command = [\"/bin/sh\", \"luvus/build.sh\"]\n",
     );
 
+    // The way in. Luvus shows a module's actions in its right-click menus
+    // and its declared panes nowhere at all, so without this an installed
+    // module puts nothing in the interface and every widget needs a typed
+    // command. One action, opening the launcher, because browsing sixteen
+    // widgets is what the launcher already solves - the pane declarations
+    // below stay for anybody who knows which one they want.
+    out.push_str(
+        "\n# Right-click any pane to open the launcher. An action has no\n\
+         # terminal of its own, so it asks luvus for a pane rather than\n\
+         # being the widget itself.\n\
+         [[actions]]\n\
+         id = \"open-menu\"\n\
+         title = \"opscope\"\n\
+         contexts = [\"pane\"]\n\
+         command = [\"/bin/sh\", \"luvus/open-menu.sh\"]\n",
+    );
+
     out.push_str(
         "\n# The launcher: every widget, what it does, and a preview before it\n\
          # runs. It is packaging and navigation, not a widget, so it is not\n\

@@ -21,6 +21,15 @@ platforms = ["macos", "linux"]
 [[build]]
 command = ["/bin/sh", "luvus/build.sh"]
 
+# Right-click any pane to open the launcher. An action has no
+# terminal of its own, so it asks luvus for a pane rather than
+# being the widget itself.
+[[actions]]
+id = "open-menu"
+title = "opscope"
+contexts = ["pane"]
+command = ["/bin/sh", "luvus/open-menu.sh"]
+
 # The launcher: every widget, what it does, and a preview before it
 # runs. It is packaging and navigation, not a widget, so it is not
 # one of the panes below.
