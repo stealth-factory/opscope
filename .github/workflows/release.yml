@@ -449,6 +449,11 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # This job runs the published npm package and the module's
+          # downloaded binaries with the workspace as cwd. The job token
+          # can write contents; do not leave it in .git for those steps.
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

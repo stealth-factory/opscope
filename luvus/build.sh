@@ -123,5 +123,23 @@ if [ ! -x bin/opscope ]; then
   exit 1
 fi
 
+# Every pane the manifest names, not just the launcher. A checksummed
+# tarball can still omit a widget, and an install that accepted that left
+# a menu entry that died on open - the same empty-pane reading this repo
+# refuses everywhere else. `menu` is the launcher itself. The module id
+# carries a dot; a pane id may not, which is how those two are told apart
+# without parsing TOML tables.
+for pane in $(sed -n 's/^id = "\(.*\)"$/\1/p' luvus-module.toml); do
+  case "$pane" in
+    *.*|menu) continue ;;
+  esac
+  if [ ! -x "bin/${pane}" ]; then
+    echo "the manifest declares a ${pane} pane and v${version} has no such binary" >&2
+    echo "a pane added since that release is not in the tarball, and leaving" >&2
+    echo "it as a dead menu entry would look like a widget with nothing in it" >&2
+    exit 1
+  fi
+done
+
 count=$(find bin -type f | wc -l | tr -d ' ')
 echo "opscope $version: $count binaries in $here/bin"

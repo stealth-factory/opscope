@@ -660,6 +660,33 @@ const MIN_LUVUS_VERSION: &str = "0.8.3";
 /// manifest: a pane id may not contain one.
 const MODULE_ID: &str = "opscope.widgets";
 
+/// A Luvus pane id: lowercase, digits, hyphens, and no dot.
+///
+/// The module id is `opscope.widgets`. A folder named `foo.v2` would
+/// regenerate cleanly and produce a manifest Luvus rejects, so the
+/// generator stops before writing one.
+fn is_valid_pane_id(stem: &str) -> bool {
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+#[test]
+fn pane_ids_match_the_luvus_grammar() {
+    assert!(is_valid_pane_id("clocks"));
+    assert!(is_valid_pane_id("herdr-panes"));
+    assert!(is_valid_pane_id("github-prs"));
+    assert!(is_valid_pane_id("vercel-deployments"));
+    assert!(!is_valid_pane_id("foo.v2"));
+    assert!(!is_valid_pane_id("opscope.widgets"));
+    assert!(!is_valid_pane_id("Menu"));
+    assert!(!is_valid_pane_id(""));
+    assert!(!is_valid_pane_id("-leading"));
+}
+
 /// The workspace version, which the module manifest has to carry.
 ///
 /// A module's `version` is committed and is read before its build step
@@ -690,6 +717,11 @@ fn widget_summaries(root: &std::path::Path) -> Vec<(String, String)> {
         .filter(|entry| entry.path().join("main.rs").exists())
         .filter_map(|entry| {
             let stem = entry.file_name().into_string().ok()?;
+            assert!(
+                is_valid_pane_id(&stem),
+                "{stem}: widget folder name is not a Luvus pane id \
+                 (lowercase, digits, hyphens; no dots)"
+            );
             let help = std::fs::read_to_string(entry.path().join("help.txt")).unwrap_or_default();
             Some((stem, help.lines().next().unwrap_or("").trim().to_string()))
         })
