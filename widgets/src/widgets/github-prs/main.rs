@@ -2069,7 +2069,17 @@ fn main() {
             })
             .collect();
 
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, board, &placed) {
+            selected = at;
+            moved = true;
+        }
+        for key in keys {
             if typing {
                 // While filtering, keys are text - only escape and enter are
                 // navigation, or the filter could never contain "q".
@@ -2236,18 +2246,7 @@ fn main() {
                     let at = if detail.is_some() { &mut dscroll } else { &mut board };
                     *at = at.saturating_add(1);
                 }
-                // A click picks the PR under it, which is what the arrows
-                // do. Either of its rows, and the branch line under them,
-                // belong to the same PR - which is why spans are recorded
-                // rather than first rows.
-                other => {
-                    if let Some((_, y)) = tc::click_at(other) {
-                        if let Some(at) = tc::item_at(y, list_head, board, &placed) {
-                            selected = at;
-                            moved = true;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
 

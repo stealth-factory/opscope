@@ -1850,7 +1850,16 @@ fn main() {
     let mut next_redraw = Instant::now();
 
     loop {
-        let keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        let mut keys = keyboard.poll();
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, 0, &placed) {
+            selected = at;
+            moved = true;
+        }
         let had_input = !keys.is_empty();
         for key in keys {
             if detail.is_some() {

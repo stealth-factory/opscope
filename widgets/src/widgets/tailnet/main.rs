@@ -817,7 +817,16 @@ fn main() {
             Err(_) => return,
         };
 
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed) {
+            selected = at;
+        }
+        for key in keys {
             if view.is_some() {
                 match key.as_str() {
                     // Left comes back out, the way it does everywhere
@@ -942,17 +951,7 @@ fn main() {
                         dscroll = 0;
                     }
                 }
-                // A click picks the machine under it, which is what the
-                // arrows do. A peer drawn across two rows - the second
-                // being its routes - answers on either, because the span
-                // is what was recorded rather than the first row.
-                other => {
-                    if let Some((_, y)) = tc::click_at(other) {
-                        if let Some(at) = tc::item_at(y, 0, 0, &placed) {
-                            selected = at;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
 

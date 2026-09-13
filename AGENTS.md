@@ -88,12 +88,19 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   `Keyboard::footer_at()` turns a click on one into the key it names, so a
   footer becomes clickable in two lines and stays clickable as hints are
   added — the widget registers the footer, not the hints. `click_at()` and
-  `row_at()` are the row half, which stays one match arm in the widget
-  because only the widget knows which of its rows are selectable, and
-  `item_at()` is the same for a body where charts, headings and multi-line
-  rows sit between the items, so the nth row is not the nth item. Two
-  checks enforce it, deliberately apart because a widget can satisfy either
-  without the other: `every_widget_registers_its_footer` and
+  `click_at()`, `item_at()` and `rows_clicked()` are the row half.
+  `rows_clicked` is the one a widget calls: it resolves a frame's clicks
+  before the keys are matched, so a click on another row moves the cursor
+  and a click on the row it is already on becomes `enter` - the key the
+  footer already names for opening one. Rewriting the key rather than
+  acting on it is the point: the widget's own `enter` arm does the opening,
+  so the mouse cannot drift from what the keyboard does. Not a
+  double-click, because the terminal never says how many times somebody
+  clicked and a threshold is state on the input path that nobody can see -
+  and because the selected row is tinted, so the affordance is on screen
+  before the click rather than after it. Two checks enforce it,
+  deliberately apart because a widget can satisfy either without the other:
+  `every_widget_registers_its_footer` and
   `every_widget_with_a_cursor_answers_a_click`. Both were written before a
   single widget changed and seen red on fourteen and eleven of them, which
   is the only moment `HEAD` is the known-failing case.
@@ -344,7 +351,7 @@ and `health_on()`, the same ramp with its hot end lifted for anything drawn
 on a tinted row — `seg()` for clipping
 coloured segments to a cell budget, `pack_hints()` and the `pack_hints_placed()`
 that also says where each hint landed, `follow()` for a window
-that keeps a cursor in view and `row_at()` for undoing it, bar and chart helpers (`vbars`, `vbars_down`,
+that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,
 `filter_row()` and `filtered_to_nothing()` for the one wording every pane
 says its filters in, `config_token_warning()` for widgets holding a secret,

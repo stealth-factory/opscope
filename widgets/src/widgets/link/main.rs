@@ -514,7 +514,17 @@ fn main() {
         // how big a page is on this pane.
         let (w, h) = tc::size();
         let page = h.saturating_sub(4).max(1);
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, selected, list_head, lscroll, &placed) {
+            selected = Some(at);
+            moved = true;
+        }
+        for key in keys {
             match key.as_str() {
                 "q" | "Q" => {
                     keyboard.restore();
@@ -616,18 +626,7 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                // A click picks the session under it, which is what the
-                // arrows do. The chart and the headings sit between the
-                // rows, so the answer comes from where each row actually
-                // landed rather than from counting down from the top.
-                other => {
-                    if let Some((_, y)) = tc::click_at(other) {
-                        if let Some(at) = tc::item_at(y, list_head, lscroll, &placed) {
-                            selected = Some(at);
-                            moved = true;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
 

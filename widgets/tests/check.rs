@@ -2563,14 +2563,18 @@ fn every_widget_with_a_cursor_answers_a_click() {
     // widget hit-tests with `tc::row_at` against the geometry of the frame
     // that was on screen when the click happened.
     //
-    // Reads for `tc::click_at(` and deliberately not for `row_at(`.
-    // `github` keeps a local closure of that name for laying out a figure
-    // column, which would satisfy a reader looking for the wrong token
-    // while the widget answered nothing - the same accident that let two
-    // widgets pass the poller check on a `catch_unwind` and a Bresenham
-    // variable called `err`.
+    // Reads for `tc::rows_clicked(`, which is the one call that does both
+    // halves of the gesture: a click on another row moves the cursor, a
+    // click on the row it is already on becomes `enter`. A widget that
+    // resolved clicks some other way would answer only half of it.
+    //
+    // Deliberately not `row_at(` - `github` keeps a local closure of that
+    // name for laying out a figure column, which would satisfy a reader
+    // looking for the wrong token while the widget answered nothing, the
+    // same accident that let two widgets pass the poller check on a
+    // `catch_unwind` and a Bresenham variable called `err`.
     assert!(
-        calls(&launcher_source(), "tc::click_at("),
+        calls(&launcher_source(), "tc::rows_clicked("),
         "the launcher answers a click on a row, so a reader that cannot \
          find one there is broken rather than right"
     );
@@ -2580,22 +2584,22 @@ fn every_widget_with_a_cursor_answers_a_click() {
         if NO_CURSOR.contains(&name.as_str()) || CLICK_LATER.contains(&name.as_str()) {
             continue;
         }
-        if !calls(&src, "tc::click_at(") {
+        if !calls(&src, "tc::rows_clicked(") {
             missing.push(format!("{}: has a cursor and ignores a click", name));
         }
     }
     assert!(
         missing.is_empty(),
         "a click moves the cursor wherever a widget has one:\n  {}\n\
-         Keep the frame's list geometry across iterations and answer the \
-         click in the arm that already catches everything else:\n\
-         \n    other => {{\n\
-         \u{20}       if let Some((_, row)) = tc::click_at(other) {{\n\
-         \u{20}           if let Some(at) = tc::row_at(row, top, first, rows) {{\n\
-         \u{20}               selected = at;\n\
-         \u{20}           }}\n\
-         \u{20}       }}\n\
+         Keep the frame's row placements across iterations and resolve the \
+         clicks before the keys are matched, so your own `enter` arm does \
+         the opening:\n\
+         \n    let mut keys = keyboard.poll();\n\
+         \u{20}   if let Some(at) = tc::rows_clicked(\n\
+         \u{20}           &mut keys, Some(selected), head, scroll, &placed) {{\n\
+         \u{20}       selected = at;\n\
          \u{20}   }}\n\
+         \u{20}   for key in keys {{ ... }}\n\
          \nA widget with nothing selectable belongs in NO_CURSOR, with the \
          reason written there.",
         missing.join("\n  ")

@@ -233,6 +233,7 @@ no-scroll exception.
 | `Ctrl-Y` `Ctrl-E` | the same thing from the keyboard, a line at a time, as in vim |
 | `↑` `↓` | move the **selection**, and the view follows to keep it in sight |
 | click a row | move the selection there — the same thing `↑` `↓` do |
+| click it again | open it — the same thing `↵` does |
 | click a hint | press the key that hint names |
 
 The split is the point: **the wheel moves the view; keys and clicks move the
@@ -247,6 +248,11 @@ clicking `[q]uit` in the footer is `q`. Nothing here is reachable only with a
 mouse, so nothing is lost by not having one — and nothing new has to be
 learned to use one. Right-click, middle-click and drag reports are eaten,
 not acted on.
+
+Clicking the row the cursor is already on opens it, which is `↵`. Not a
+double-click: the terminal never says how many times you clicked, and the
+selected row is tinted anyway — you can see that the next click will open it,
+where a double-click shows nothing before it fires.
 
 Every widget with a cursor answers a click, and every footer is clickable —
 two checks in `cargo test` fail the build when one is not. Turning mouse

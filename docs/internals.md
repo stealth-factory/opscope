@@ -34,8 +34,8 @@ screen, exactly like "there is no data".
 tint, `seg()` for clipping coloured
 text to a cell budget, `pack_hints()` for wrapping footers and
 `pack_hints_placed()` for wrapping them and remembering where each hint
-landed, `follow()` for a window that keeps a cursor in view and `row_at()`
-for undoing it, non-blocking `Keyboard` input with
+landed, `follow()` for a window that keeps a cursor in view with `item_at()`
+and `rows_clicked()` for undoing it, non-blocking `Keyboard` input with
 arrow-key decoding, `clipboard()` over OSC 52, `unsupported()` /
 `cannot_start_because()` when this kernel has no source, and
 the dependency warning screen when a required tool is missing. It also owns
@@ -95,12 +95,7 @@ sends whatever key used to be under the pointer.
 **Rows cost one hit-test.** Which rows are selectable is widget state and
 nothing in core can see it, so core provides only the arithmetic.
 
-`row_at(y, top, first, shown)` is the inverse of the window `follow()`
-chose, for a list of one-row items laid end to end — the launcher, and
-almost nothing else. It returns `None` outside those rows rather than
-clamping: a click on the footer is not a click on the last item.
-
-`item_at(y, head, scroll, placed)` is for every other body, where charts,
+`item_at(y, head, scroll, placed)` reads a frame row back into an item, where charts,
 section headings, blank spacers and multi-line rows sit between the items
 so the nth row is not the nth item. The widget records where each item's
 rows landed while building the body — which is the bookkeeping it already
@@ -123,17 +118,38 @@ same way a screen with no packed footer calls `forget_footer()`. Leaving
 them answers a click on a detail screen with whichever item happened to be
 drawn on that row behind it.
 
-The widget answers a click that reached it unmatched:
+**`rows_clicked` is the one a widget calls.** It resolves a frame's clicks
+before the keys are matched: a click on another row moves the cursor there,
+and a click on the row it is already on is rewritten to the literal key
+`enter` — the key the footer already names for opening one.
 
 ```rust
-other => {
-    if let Some((_, row)) = tc::click_at(other) {
-        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
-            selected = at;
-        }
-    }
+let mut keys = keyboard.poll();
+if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed) {
+    selected = at;
+    moved = true;
 }
+for key in keys { match key.as_str() { /* unchanged */ } }
 ```
+
+Rewriting the key rather than acting on it is the whole point. The widget's
+own `enter` arm does the opening, so the click cannot drift from what the
+keyboard does — it *is* what the keyboard does. A widget with no `enter`
+arm (`latency`, `clocks`, `matrix`) gets the right behaviour for free:
+nothing.
+
+It reads the running cursor rather than the one passed in, so two clicks on
+the same row inside one poll behave like two clicks. A click that lands on
+no row is left exactly as it was; a click that only moved the cursor is
+replaced with an empty key, which nothing matches because every arm taking
+an arbitrary key guards on `chars().count() == 1` first.
+
+**Not a double-click.** An SGR report carries a button and a cell and never
+a click count, so recognising one means holding the last press's cell and
+timestamp and inventing a threshold — state on the input path, and a
+tunable nobody can see. The affordance is better this way round too: the
+selected row is tinted, so a reader can see that the next click will open
+it. A double-click shows nothing before it fires.
 
 Hit-test against the frame that was on screen when the click happened — the
 one built on the previous pass — rather than recomputing the geometry, which
@@ -157,7 +173,8 @@ Two checks enforce all of it, and they are separate on purpose because a
 widget can satisfy either without the other: `every_widget_registers_its_footer`
 reads for the `footer_at` call — not for `pack_hints_placed`, since `months`
 wraps prose through `pack_hints` too and a sentence is not a footer — and
-`every_widget_with_a_cursor_answers_a_click` reads for `tc::click_at(`, not
+`every_widget_with_a_cursor_answers_a_click` reads for `tc::rows_clicked(`,
+which is the one call that does both halves of the gesture — and not
 `row_at(`, because `github` keeps a local closure of that name.
 
 The chart helpers are worth knowing before drawing anything new: `vbars()` and

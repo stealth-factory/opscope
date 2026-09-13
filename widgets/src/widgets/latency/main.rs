@@ -1086,7 +1086,17 @@ fn main() {
     let mut scroll = 0usize;
     let mut moved = false;
     loop {
-        for key in keyboard.poll() {
+        let mut keys = keyboard.poll();
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        if let Some(at) = tc::rows_clicked(&mut keys, selected, list_head, scroll, &placed) {
+            selected = Some(at);
+            moved = true;
+        }
+        for key in keys {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
@@ -1150,19 +1160,7 @@ fn main() {
                         s.seconds_per_column = cycle(COLUMN_CHOICES, s.seconds_per_column);
                     }
                 }
-                // A click picks the target under it, which is what the
-                // arrows do. The chart and the event log sit between the
-                // rows, so the answer comes from where each row actually
-                // landed on the frame that was on screen - not from
-                // counting rows down from the top.
-                other => {
-                    if let Some((_, y)) = tc::click_at(other) {
-                        if let Some(i) = tc::item_at(y, list_head, scroll, &placed) {
-                            selected = Some(i);
-                            moved = true;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
         let (w, h) = tc::size();

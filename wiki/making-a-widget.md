@@ -610,33 +610,36 @@ from an older frame sends whatever key used to be under the pointer.
 **A row costs one hit-test.** Core cannot know which of your rows are
 selectable, so it gives you the arithmetic and you do the rest.
 
-If your list is one row per item laid end to end, `row_at(y, top, first, shown)`
-is the inverse of the window `follow()` chose, and answers `None` outside
-those rows rather than clamping, because a click on the footer is not a click
-on the last item:
+**Click a row to select it; click the selected row to open it.** That is the
+whole gesture, and you get the second half for nothing: `rows_clicked`
+rewrites a click on the already-selected row into the literal key `enter`,
+so your own `enter` arm does the opening. It cannot drift from what the
+keyboard does, because it *is* what the keyboard does — and if you have no
+`enter` arm, a second click correctly does nothing.
 
 ```rust
-other => {
-    if let Some((_, row)) = tc::click_at(other) {
-        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
-            selected = at;
-            moved = true;
-        }
-    }
+let mut keys = keyboard.poll();
+if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed) {
+    selected = at;
+    moved = true;
 }
+for key in keys { match key.as_str() { /* unchanged */ } }
 ```
 
-Hit-test against the frame that was on screen when the click happened — the
-one you built on the previous pass — so keep `list_top`, `list_first` and
-`list_rows` across iterations rather than recomputing them. `widgets/src/launcher/main.rs`
-is the worked example, and its whole click support is that arm plus the
-`footer_at` line.
+Resolve before you match, not in a catch-all arm. The alternative is
+comparing `at == selected` yourself and repeating whatever your `enter` arm
+does, which is a second copy of it that goes stale the first time you change
+one and not the other.
 
-**Most widgets are not that shape**, and `item_at(y, head, scroll, placed)` is
-for the rest. Charts, section headings, blank spacers and multi-line rows sit
-between your items, so the nth row of the frame is not the nth item. Record
-where each item's rows landed while you build the body — you already do this
-for your cursor, `cursor = Some(rows.len())`, so extend it to every item:
+Hit-test against the frame that was on screen when the click happened — the
+one you built on the previous pass — so keep the placements across iterations
+rather than recomputing them.
+
+**`placed` is where each item's rows landed**, and `item_at` is what reads a
+frame row back into an item. Charts, section headings, blank spacers and
+multi-line rows sit between your items, so the nth row of the frame is not the
+nth item. You already record this for your cursor,
+`cursor = Some(rows.len())`, so extend it to every item:
 
 ```rust
 for (i, thing) in things.iter().enumerate() {

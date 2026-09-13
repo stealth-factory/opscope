@@ -1931,7 +1931,28 @@ fn main() {
 
     loop {
         tick += 1;
-        for key in keyboard.poll() {
+        // A click on another row moves the cursor there; a click on the row
+        // it is already on becomes `enter`, which is the key the footer
+        // names for opening one. Rewritten before the match rather than
+        // acted on here, so the arm below does the opening and this cannot
+        // drift from what the keyboard does.
+        // A click also focuses the section the row is in, because walking
+        // into one with the arrows does both - a click that moved a cursor
+        // in an unfocused section would leave the arrows somewhere else.
+        // The slot the cursor is on right now is what decides whether this
+        // click opens or selects, so it is looked up rather than assumed.
+        let mut keys = keyboard.poll();
+        let here = focus.and_then(|pane| {
+            click_targets.iter().position(|&(p, i)| p == pane && i == sel[pane])
+        });
+        if let Some(slot) = tc::rows_clicked(&mut keys, here, list_head, board, &placed) {
+            if let Some(&(pane, at)) = click_targets.get(slot) {
+                focus = Some(pane);
+                sel[pane] = at;
+                moved = true;
+            }
+        }
+        for key in keys {
             match key.as_str() {
                 "," => {
                     tc::run_settings(&mut keyboard, SETTINGS);
@@ -2150,22 +2171,7 @@ fn main() {
                         moved = true;
                     }
                 }
-                // A click picks the row under it and focuses the section
-                // it is in - both halves, because walking into a section
-                // with the arrows does both, and a click that moved a
-                // cursor in an unfocused section would leave the arrows
-                // somewhere else entirely.
-                other => {
-                    if let Some((_, y)) = tc::click_at(other) {
-                        if let Some(slot) = tc::item_at(y, list_head, board, &placed) {
-                            if let Some(&(pane, at)) = click_targets.get(slot) {
-                                focus = Some(pane);
-                                sel[pane] = at;
-                                moved = true;
-                            }
-                        }
-                    }
-                }
+                _ => {}
             }
         }
 

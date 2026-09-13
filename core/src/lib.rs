@@ -636,24 +636,56 @@ pub fn item_at(y: usize, head: usize, scroll: usize, placed: &[(usize, usize)]) 
         .map(|(_, item)| *item)
 }
 
-/// Which item a click on frame row `y` landed on, if it landed on one.
+/// Resolve a frame's row clicks, before its keys are matched.
 ///
-/// The inverse of the window `follow` decides: `top` is the frame row the
-/// list starts on, `first` the index drawn there, and `shown` how many
-/// rows it got. This is the whole of what core can do for clicking a row,
-/// because which rows are selectable is the widget's own business and
-/// nothing here can see it.
+/// A click on a row the cursor is not on moves the cursor there. A click on
+/// the row it is already on becomes `enter` - the key that opens whatever is
+/// selected, and the one the footer already names. So the gesture is two
+/// routes to two keys rather than one new capability, and it is the widget's
+/// own `enter` arm that does the opening. That is the point of rewriting the
+/// key rather than acting here: this cannot drift from what the keyboard
+/// does, because it *is* what the keyboard does.
 ///
-/// Outside those rows the answer is `None` rather than a clamp. A click on
-/// the footer is not a click on the last item, and a list that selected
-/// its last row whenever somebody clicked below it would move the cursor
-/// for a click that was aimed at nothing.
-pub fn row_at(y: usize, top: usize, first: usize, shown: usize) -> Option<usize> {
-    if y < top || y >= top + shown {
-        return None;
+/// Why this and not a double-click. The terminal never says how many times
+/// somebody clicked - an SGR report carries a button and a cell and nothing
+/// else - so recognising a double-click means holding the last press's cell
+/// and timestamp and inventing a threshold, which is state on the input path
+/// and a tunable nobody can see. And the affordance here is better: the
+/// selected row is tinted, so a reader can see that the next click will open
+/// it. A double-click shows nothing before it fires.
+///
+/// A click that lands on no row is left alone, as is every key that is not a
+/// click. A click that only moved the cursor is replaced with an empty key:
+/// nothing in this tree matches one - every arm that takes an arbitrary key
+/// guards on `chars().count() == 1` first - and it keeps the rewrite in one
+/// place rather than leaving a click for a catch-all to find again.
+///
+/// Returns where the cursor should go, or `None` if no click moved it.
+pub fn rows_clicked(
+    keys: &mut [String],
+    at: Option<usize>,
+    head: usize,
+    scroll: usize,
+    placed: &[(usize, usize)],
+) -> Option<usize> {
+    let mut moved = None;
+    for key in keys.iter_mut() {
+        let Some((_, y)) = click_at(key) else { continue };
+        let Some(row) = item_at(y, head, scroll, placed) else {
+            continue;
+        };
+        // The cursor as it stands *now*, so two clicks in one poll read the
+        // way two clicks always do: the first moves, the second opens.
+        if moved.or(at) == Some(row) {
+            *key = "enter".to_string();
+        } else {
+            moved = Some(row);
+            key.clear();
+        }
     }
-    Some(first + (y - top))
+    moved
 }
+
 
 /// Where settings are looked for, in order of preference.
 ///
@@ -3793,32 +3825,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn row_at_undoes_the_window_follow_chose() {
-        // Twenty items through a window six tall, drawn from frame row 3.
-        let (top, room, count) = (3usize, 6usize, 20usize);
-        for selected in 0..count {
-            let first = follow(0, selected, room);
-            // Every row of the window answers with the item drawn on it.
-            for offset in 0..room {
-                assert_eq!(
-                    row_at(top + offset, top, first, room),
-                    Some(first + offset),
-                    "row {} of the window at first={}",
-                    offset,
-                    first
-                );
-            }
-        }
-        // Above the list, below it, and on a list with nothing in it.
-        assert_eq!(row_at(2, top, 0, room), None);
-        assert_eq!(row_at(top + room, top, 0, room), None);
-        assert_eq!(row_at(top, top, 0, 0), None);
-        // A short list is shorter than its room, and the rows it does not
-        // fill belong to nothing.
-        assert_eq!(row_at(top + 2, top, 0, 3), Some(2));
-        assert_eq!(row_at(top + 3, top, 0, 3), None);
-    }
 
     #[test]
     fn item_at_finds_the_item_drawn_on_a_row_and_no_other() {
@@ -3862,6 +3868,42 @@ mod tests {
         assert_eq!(item_at(1, 1, 4, &placed), Some(1));
         // And a body with nothing selectable in it answers nothing.
         assert_eq!(item_at(4, 1, 0, &[]), None);
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_row_is_enter() {
+        // Three one-row items at frame rows 4, 5 and 6.
+        let placed = [(4usize, 0usize), (5, 1), (6, 2)];
+        let at = |keys: &[&str], sel: Option<usize>| {
+            let mut keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let moved = rows_clicked(&mut keys, sel, 1, 0, &placed);
+            (keys, moved)
+        };
+
+        // A click on a row that is not selected moves the cursor and is
+        // spent doing it.
+        assert_eq!(at(&["click:3,6"], Some(0)), (vec!["".to_string()], Some(2)));
+        // A click on the row already under the cursor is the key that opens
+        // it, and does not move anything.
+        assert_eq!(at(&["click:3,4"], Some(0)), (vec!["enter".to_string()], None));
+        // Two clicks on the same row in one poll: the first selects, the
+        // second opens. Reading `at` rather than the running cursor would
+        // make the second one select again and nothing would ever open.
+        assert_eq!(
+            at(&["click:3,6", "click:3,6"], Some(0)),
+            (vec!["".to_string(), "enter".to_string()], Some(2))
+        );
+        // Nothing selected yet - the first click only selects.
+        assert_eq!(at(&["click:3,4"], None), (vec!["".to_string()], Some(0)));
+        // A click that hits no row is left exactly as it was, for whatever
+        // else the widget does with clicks.
+        assert_eq!(at(&["click:3,9"], Some(0)), (vec!["click:3,9".to_string()], None));
+        // And a key is a key. `enter` typed at the keyboard is untouched,
+        // which is what makes this safe to run over every poll.
+        assert_eq!(
+            at(&["q", "enter", "wheel-up"], Some(0)),
+            (vec!["q".to_string(), "enter".to_string(), "wheel-up".to_string()], None)
+        );
     }
 
     #[test]
