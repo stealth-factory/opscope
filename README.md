@@ -221,7 +221,7 @@ rather than break as panes get narrower: columns drop out in priority order,
 footers wrap instead of truncating, and graphs rescale. A widget in a
 30-column strip still says something useful.
 
-### Scrolling
+### Scrolling and clicking
 
 Every widget with a scrollable body scrolls the same way. `matrix` has no
 body, selection, or content below the viewport and is the sole explicit
@@ -232,12 +232,22 @@ no-scroll exception.
 | `wheel` | **full widget scroll** — the whole pane moves under a pinned title |
 | `Ctrl-Y` `Ctrl-E` | the same thing from the keyboard, a line at a time, as in vim |
 | `↑` `↓` | move the **selection**, and the view follows to keep it in sight |
+| click a row | move the selection there — the same thing `↑` `↓` do |
+| click a hint | press the key that hint names |
 
-The split is the point: **the mouse moves the view, the keys move the
+The split is the point: **the wheel moves the view; keys and clicks move the
 selection.** Turning the wheel never changes which row is selected — not even
 when it scrolls that row off the screen — and never changes which section has
 focus. So scrolling to look at something cannot change what `↵` opens. Press
 an arrow and the window comes back to the cursor.
+
+Clicking is the other half of the same idea, in reverse: **a click is a second
+route to a key, never a capability of its own.** Clicking a row is `↑`/`↓`;
+clicking `[q]uit` in the footer is `q`. Nothing here is reachable only with a
+mouse, so nothing is lost by not having one — and nothing new has to be
+learned to use one. Clicking the launcher's list is the worked example; the
+widgets follow in [OPS-55](https://github.com/stealth-factory/opscope/issues/89).
+Right-click, middle-click and drag reports are eaten, not acted on.
 
 Nothing is ever hidden because a pane is short. Each widget builds its frame
 at whatever height it needs and the pane shows a window onto it, so a section

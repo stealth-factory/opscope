@@ -534,6 +534,7 @@ will not satisfy it.
 | key | does |
 |---|---|
 | `wheel-up` / `wheel-down` | scroll the body one line |
+| `click:<col>,<row>` | a left click, where it landed — see below |
 | `k` / `j`, `up` / `down` | move the selection where there is one |
 | `ctrl-y` / `ctrl-e` | scroll one line without moving a cursor |
 | `pgup` / `pgdn` | scroll a screen |
@@ -555,6 +556,98 @@ the chart before the scroll code.
 Underneath it: **a pane too short is a pane you scroll, not a pane that hides
 things.** A section that is not drawn looks exactly like a section with
 nothing in it, and those are opposite readings of the same screen.
+
+### Clicking
+
+**A click is a second route to a key you already answer.** Never a capability
+of its own. An action reachable only by clicking has no hint, no `--help`
+line and no doc row, so nobody would ever find it — and it is invisible to
+the check that fails the build when a hint names a key no match arm answers.
+So: a click on a row moves the cursor there, and a click on a hint sends that
+hint's key. Both mirror something the keyboard does.
+
+You do not decode anything. `poll()` hands you `click:<col>,<row>`,
+zero-based and in your own coordinates — `(0, 0)` is the first cell of
+`rows[0]` as you hand it to `draw()`. Only the left button going down gets
+that far. The release, a drag, and the middle and right buttons are eaten
+rather than acted on: with reporting on, an ordinary drag selects nothing.
+Shift-drag, or `"terminal": {"mouse": false}`, gives the terminal its
+selection back.
+
+**The footer is free.** Swap `pack_hints` for `pack_hints_placed`, draw
+`.lines` exactly as before, and register where it landed:
+
+```rust
+let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
+// ... pad, extend, draw ...
+let foot_top = body.len();
+body.extend(foot);
+tc::draw(&body, w, h);
+keyboard.footer_at(&packed, foot_top, 1);   // 1 = the indent above
+```
+
+Every hint that names exactly one key is now clickable and arrives at the
+match arm you already wrote. You register the footer, not the hints, so a
+hint added next year is clickable the day it is added. `pack_hints_placed`
+draws what `pack_hints` draws — a test asserts it at every width from 1 to
+60 — so adopting it changes nothing on screen.
+
+A hint is clickable when it names exactly one key, in a form that is
+unambiguous about which characters are the key: `[q]uit`, `[d] cloudflare`,
+`[↵] open`, or a bare `↵ → ← ↑ ↓`. `↑↓ select` names two and gets nothing —
+there is no honest answer to which one a click sent — and `[±]25` is one
+glyph standing for `+` and `-`, so it gets nothing either. Write them as two
+hints if you want both clickable. A key named only in prose (`esc closes`) is
+left alone on purpose: guessing which word was the key would sometimes fire
+the wrong one, and a hint that fires the wrong key is worse than one that
+fires none.
+
+**Call `footer_at` every frame**, beside the draw. The footer moves when the
+pane resizes and wraps onto a second line when it narrows; a placement kept
+from an older frame sends whatever key used to be under the pointer.
+
+**A row costs one hit-test.** Core cannot know which of your rows are
+selectable, so it gives you the arithmetic and you do the rest —
+`row_at(y, top, first, shown)` is the inverse of the window `follow()` chose,
+and answers `None` outside those rows rather than clamping, because a click
+on the footer is not a click on the last item:
+
+```rust
+other => {
+    if let Some((_, row)) = tc::click_at(other) {
+        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
+            selected = at;
+            moved = true;
+        }
+    }
+}
+```
+
+Hit-test against the frame that was on screen when the click happened — the
+one you built on the previous pass — so keep `list_top`, `list_first` and
+`list_rows` across iterations rather than recomputing them. `widgets/src/launcher/main.rs`
+is the worked example, and its whole click support is that arm plus the
+`footer_at` line.
+
+**Testing it without a mouse.** You cannot inject a click into your own
+terminal, and clicking by hand tests one pane at one width. Drive the binary
+under a pty and write the report yourself — this is how the launcher's was
+checked:
+
+```python
+import os, pty, fcntl, termios, struct
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv("./target/debug/opscope", ["./target/debug/opscope"])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+# ESC [ < button ; column ; row M — one-based, so this is frame row 5.
+os.write(fd, b"\x1b[<0;10;6M")
+print(os.read(fd, 65536).decode("utf-8", "replace"))
+```
+
+Check three things, not one: the row you aimed at, a hint (it should do what
+its key does), and the gap between two hints (it should do nothing at all).
 
 ## Settings
 

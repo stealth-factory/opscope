@@ -240,6 +240,26 @@ fn title_row(w: usize, p: &Palette) -> String {
 /// The count line and the blank under it come first.
 const LIST_TOP: usize = 2;
 
+/// Where the list sits on a frame whose title is pinned and whose body
+/// window starts at `scroll` and is `room_below` rows tall.
+///
+/// Returns `(top, first, shown)` for `row_at`: the frame row of the first
+/// visible widget, that widget's index, and how many list rows are on
+/// screen. A click is answered against the previous frame, so the caller
+/// stores these rather than recomputing them after the reader has moved.
+fn list_on_frame(scroll: usize, room_below: usize) -> (usize, usize, usize) {
+    let vis_start = scroll.max(LIST_TOP);
+    let vis_end = (scroll + room_below).min(LIST_TOP + WIDGETS.len());
+    if vis_start >= vis_end {
+        return (0, 0, 0);
+    }
+    let list_first = vis_start - LIST_TOP;
+    let list_rows = vis_end - vis_start;
+    // Title pinned on frame row 0; the body window starts on row 1.
+    let list_top = 1 + (vis_start - scroll);
+    (list_top, list_first, list_rows)
+}
+
 /// Everything under the title, built at whatever height it needs.
 ///
 /// Not given `h` on purpose. Every part of this used to be sized to what
@@ -490,6 +510,13 @@ fn main() -> std::process::ExitCode {
     // Where the list window sits, and whether a key has just moved the
     // cursor. The wheel writes the first and never the second.
     let (mut scroll, mut moved) = (0usize, false);
+    // Where the list was drawn on the frame now on screen: its first row,
+    // the widget drawn there, and how many rows it got. A click is
+    // answered against the frame the reader was looking at when they
+    // clicked, which is the one built on the previous pass - so these are
+    // kept rather than recomputed. Nothing is on screen yet on the first
+    // pass, and a list of no rows is one nothing can land on.
+    let (mut list_top, mut list_first, mut list_rows) = (0usize, 0usize, 0usize);
 
     loop {
         for key in keyboard.poll() {
@@ -519,7 +546,21 @@ fn main() -> std::process::ExitCode {
                 "enter" | "right" => {
                     run_widget(&mut keyboard, WIDGETS[selected.min(WIDGETS.len() - 1)].stem)
                 }
-                _ => {}
+                // A click on a row picks it, exactly as the arrows do, and
+                // stops there. Starting a widget stays ↵ - which the
+                // footer's `↵ launch` hint answers to, and core turns a
+                // click on that hint into the key it names before this
+                // match ever sees it. So the mouse reaches nothing the
+                // keyboard cannot, and the three bracketed hints below
+                // became clickable without a line of code apiece.
+                other => {
+                    if let Some((_, row)) = tc::click_at(other) {
+                        if let Some(at) = tc::row_at(row, list_top, list_first, list_rows) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -537,10 +578,8 @@ fn main() -> std::process::ExitCode {
             vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
+        let foot: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // A window onto the body rather than a cut of it, with the title
         // pinned above it: scrolled away, the screen stops saying what it
@@ -553,15 +592,24 @@ fn main() -> std::process::ExitCode {
         let room_below = room.saturating_sub(1).max(1);
         scroll = scrolled(scroll, Some(LIST_TOP + selected), moved, body.len(), room_below);
         moved = false;
+        (list_top, list_first, list_rows) = list_on_frame(scroll, room_below);
 
         let mut frame = vec![title_row(w, &p)];
         frame.extend(body.iter().skip(scroll).take(room_below).cloned());
         while frame.len() < room {
             frame.push(String::new());
         }
+        // Where the footer actually ends up, after the blank rows that
+        // push it to the bottom, and one column in because that is where
+        // the indent above puts it. Registered every frame rather than
+        // once: the footer moves as the pane resizes and wraps onto a
+        // second line as it narrows, and a placement kept from an older
+        // frame sends whatever key used to be under the pointer.
+        let foot_top = frame.len();
         frame.extend(foot);
         frame.truncate(h);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(150));
     }
 }
@@ -697,6 +745,44 @@ mod tests {
             "row {} of the body is not the selected widget",
             LIST_TOP + 3
         );
+    }
+
+    #[test]
+    fn a_click_on_a_visible_list_row_picks_that_widget() {
+        // Title pinned on frame row 0, body window starting at scroll 0,
+        // so the first widget is on frame row 1 + LIST_TOP.
+        let (top, first, shown) = list_on_frame(0, 20);
+        assert_eq!(first, 0);
+        assert_eq!(shown, WIDGETS.len());
+        assert_eq!(top, 1 + LIST_TOP);
+        assert_eq!(tc::row_at(top, top, first, shown), Some(0));
+        assert_eq!(tc::row_at(top + 2, top, first, shown), Some(2));
+        // Title and count line are not list rows.
+        assert_eq!(tc::row_at(0, top, first, shown), None);
+        assert_eq!(tc::row_at(1, top, first, shown), None);
+        // Below the list is not the last widget.
+        assert_eq!(tc::row_at(top + shown, top, first, shown), None);
+    }
+
+    #[test]
+    fn a_scrolled_list_answers_only_the_rows_still_on_screen() {
+        // Scrolled past the count line so the first visible body row is
+        // already a widget. That widget is then on frame row 1.
+        let (top, first, shown) = list_on_frame(LIST_TOP, 4);
+        assert_eq!((top, first, shown), (1, 0, 4));
+        assert_eq!(tc::row_at(1, top, first, shown), Some(0));
+        assert_eq!(tc::row_at(4, top, first, shown), Some(3));
+        assert_eq!(tc::row_at(5, top, first, shown), None);
+        // Scrolled into the middle of the list.
+        let (top, first, shown) = list_on_frame(LIST_TOP + 5, 3);
+        assert_eq!((top, first, shown), (1, 5, 3));
+        assert_eq!(tc::row_at(top, top, first, shown), Some(5));
+        assert_eq!(tc::row_at(top + 2, top, first, shown), Some(7));
+        assert_eq!(tc::row_at(top + 3, top, first, shown), None);
+        // A window that has scrolled past the list altogether.
+        let past = LIST_TOP + WIDGETS.len();
+        assert_eq!(list_on_frame(past, 4), (0, 0, 0));
+        assert_eq!(tc::row_at(1, 0, 0, 0), None);
     }
 
     #[test]

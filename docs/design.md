@@ -20,6 +20,23 @@ wrong first.
   `every_widget_answers_the_wheel` in `check.rs` fails when a widget does not,
   and it reads match arms rather than the file, so a comment saying it scrolls
   will not satisfy it.
+- **A click is a second route to a key, never a capability of its own.** The
+  wheel moves the view; keys and clicks move the selection. A click moves the
+  selection because that is what an arrow already does. Nothing is reachable
+  by clicking that a key cannot reach: an action with no hint has no `--help`
+  line and no doc row either, so no reader this repo has would ever find it,
+  and it is invisible to the check that fails the build when a hint names a
+  key no match arm answers. Core carries all of it.
+  `pack_hints_placed()` records where each hint landed and
+  `Keyboard::footer_at()` turns a click on one into the key it names, so a
+  footer becomes clickable in two lines and stays clickable as hints are
+  added — the widget registers the footer, not the hints. `click_at()` and
+  `row_at()` are the row half, which stays one match arm in the widget
+  because only the widget knows which of its rows are selectable. The
+  launcher is the worked example. Not yet a check: that lands in OPS-55, when
+  every widget has been made to answer, and it is deliberately separate from
+  the wheel one — a single "supports the mouse" check would go in half-true
+  and pass a widget that only scrolls.
 - **A pane too short is a pane you scroll, not a pane that hides things.**
   Every frame is a window onto a body built at whatever height it needs, with
   the title pinned above it. Nothing stands down for want of rows: a section
