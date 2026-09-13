@@ -2075,7 +2075,7 @@ fn main() {
         // names for opening one. Rewritten before the match rather than
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, board, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, board, &placed, None) {
             selected = at;
             moved = true;
         }

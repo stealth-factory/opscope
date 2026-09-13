@@ -531,7 +531,7 @@ fn main() -> std::process::ExitCode {
         let mut keys = keyboard.poll();
         let placed: Vec<(usize, usize)> =
             (0..list_rows).map(|n| (list_top + n, list_first + n)).collect();
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
             selected = at;
             moved = true;
         }

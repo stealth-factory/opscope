@@ -1092,7 +1092,15 @@ fn main() {
         // names for opening one. Rewritten before the match rather than
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
-        if let Some(at) = tc::rows_clicked(&mut keys, selected, list_head, scroll, &placed) {
+        // And a click away from the host list clears the focus, which is
+        // what `esc` does here and what the footer's `[esc] clear focus`
+        // already names. Only this widget asks for it: everywhere else
+        // `esc` closes a detail screen or drops a filter, and a click on a
+        // chart that shut the screen would be a capability nobody asked
+        // for.
+        if let Some(at) =
+            tc::rows_clicked(&mut keys, selected, list_head, scroll, &placed, Some("esc"))
+        {
             selected = Some(at);
             moved = true;
         }

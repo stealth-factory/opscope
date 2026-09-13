@@ -619,12 +619,20 @@ keyboard does, because it *is* what the keyboard does — and if you have no
 
 ```rust
 let mut keys = keyboard.poll();
-if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed) {
+if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), head, scroll, &placed, None) {
     selected = at;
     moved = true;
 }
 for key in keys { match key.as_str() { /* unchanged */ } }
 ```
+
+The last argument says what a click that misses every row should become.
+Pass `None` unless your selection can be *empty* and your footer says how to
+empty it — `latency` passes `Some("esc")` because it hints `[esc] clear
+focus`, so clicking away from its host list is a second route to a key it
+already names. If your `esc` closes a detail screen or drops a filter, pass
+`None`: a click on a chart that shut the screen is a capability nobody asked
+for.
 
 Resolve before you match, not in a catch-all arm. The alternative is
 comparing `at == selected` yourself and repeating whatever your `enter` arm
@@ -634,6 +642,15 @@ one and not the other.
 Hit-test against the frame that was on screen when the click happened — the
 one you built on the previous pass — so keep the placements across iterations
 rather than recomputing them.
+
+**The placements must index the same vec the frame is built from.** This is
+the one that bites. If you split one `rows` vec into a pinned head and a
+windowed rest, they already do. If you keep the header in a *separate* vec
+and build the frame as `head ++ body[window]`, your spans are `body`-relative
+and every click lands however many rows the header is tall further down the
+list — with the first few entries unreachable entirely. `luvus-panes` shipped
+exactly that for an afternoon. Shift by `head.len()` when you record them,
+and pass that same length as `head`.
 
 **`placed` is where each item's rows landed**, and `item_at` is what reads a
 frame row back into an item. Charts, section headings, blank spacers and

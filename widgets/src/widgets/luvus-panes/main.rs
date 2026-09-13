@@ -786,7 +786,7 @@ fn main() {
         // names for opening one. Rewritten before the match rather than
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, list_scroll, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, list_scroll, &placed, None) {
             selected = at;
             moved = true;
         }
@@ -2162,13 +2162,21 @@ fn main() {
         // selected one - are exactly what a click needs read the other way
         // round. One entry per row it covers, so a click on any line of a
         // multi-line entry picks that entry.
+        //
+        // Shifted by the header, because this widget keeps `head` and `body`
+        // in two vecs rather than splitting one - so a span is an index into
+        // `body` while a click is a row of `head` ++ `body[window]`. Without
+        // the shift every click lands however many rows the header is tall
+        // further down the list, and the first few entries cannot be reached
+        // at all.
+        let head_len = head.len();
         (placed, list_head, list_scroll) = (
             spans
                 .iter()
                 .enumerate()
-                .flat_map(|(i, span)| span.clone().map(move |row| (row, i)))
+                .flat_map(|(i, span)| span.clone().map(move |row| (row + head_len, i)))
                 .collect(),
-            head.len(),
+            head_len,
             window.start,
         );
         let mut rows = head;

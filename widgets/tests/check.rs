@@ -2596,7 +2596,7 @@ fn every_widget_with_a_cursor_answers_a_click() {
          the opening:\n\
          \n    let mut keys = keyboard.poll();\n\
          \u{20}   if let Some(at) = tc::rows_clicked(\n\
-         \u{20}           &mut keys, Some(selected), head, scroll, &placed) {{\n\
+         \u{20}           &mut keys, Some(selected), head, scroll, &placed, None) {{\n\
          \u{20}       selected = at;\n\
          \u{20}   }}\n\
          \u{20}   for key in keys {{ ... }}\n\

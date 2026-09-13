@@ -823,7 +823,7 @@ fn main() {
         // names for opening one. Rewritten before the match rather than
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
             selected = at;
         }
         for key in keys {

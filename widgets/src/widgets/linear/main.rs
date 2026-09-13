@@ -1945,7 +1945,7 @@ fn main() {
         let here = focus.and_then(|pane| {
             click_targets.iter().position(|&(p, i)| p == pane && i == sel[pane])
         });
-        if let Some(slot) = tc::rows_clicked(&mut keys, here, list_head, board, &placed) {
+        if let Some(slot) = tc::rows_clicked(&mut keys, here, list_head, board, &placed, None) {
             if let Some(&(pane, at)) = click_targets.get(slot) {
                 focus = Some(pane);
                 sel[pane] = at;

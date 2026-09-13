@@ -654,11 +654,20 @@ pub fn item_at(y: usize, head: usize, scroll: usize, placed: &[(usize, usize)]) 
 /// selected row is tinted, so a reader can see that the next click will open
 /// it. A double-click shows nothing before it fires.
 ///
-/// A click that lands on no row is left alone, as is every key that is not a
-/// click. A click that only moved the cursor is replaced with an empty key:
-/// nothing in this tree matches one - every arm that takes an arbitrary key
-/// guards on `chars().count() == 1` first - and it keeps the rewrite in one
-/// place rather than leaving a click for a catch-all to find again.
+/// `off_list` says what a click that lands on no row becomes, and it is a
+/// decision each widget makes rather than a default. `Some("esc")` suits a
+/// widget whose selection can be empty and whose footer says so - `latency`
+/// hints `[esc] clear focus`, so clicking away from the host list is a
+/// second route to a key that is already named. `None` everywhere else,
+/// because in most widgets `esc` closes a detail screen or clears a filter,
+/// and a click on a chart that shut the screen would be a capability nobody
+/// asked for.
+///
+/// Every key that is not a click is left alone. A click that only moved the
+/// cursor is replaced with an empty key: nothing in this tree matches one -
+/// every arm that takes an arbitrary key guards on `chars().count() == 1`
+/// first - and it keeps the rewrite in one place rather than leaving a click
+/// for a catch-all to find again.
 ///
 /// Returns where the cursor should go, or `None` if no click moved it.
 pub fn rows_clicked(
@@ -667,11 +676,15 @@ pub fn rows_clicked(
     head: usize,
     scroll: usize,
     placed: &[(usize, usize)],
+    off_list: Option<&str>,
 ) -> Option<usize> {
     let mut moved = None;
     for key in keys.iter_mut() {
         let Some((_, y)) = click_at(key) else { continue };
         let Some(row) = item_at(y, head, scroll, placed) else {
+            if let Some(name) = off_list {
+                *key = name.to_string();
+            }
             continue;
         };
         // The cursor as it stands *now*, so two clicks in one poll read the
@@ -3876,7 +3889,7 @@ mod tests {
         let placed = [(4usize, 0usize), (5, 1), (6, 2)];
         let at = |keys: &[&str], sel: Option<usize>| {
             let mut keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-            let moved = rows_clicked(&mut keys, sel, 1, 0, &placed);
+            let moved = rows_clicked(&mut keys, sel, 1, 0, &placed, None);
             (keys, moved)
         };
 
@@ -3898,6 +3911,16 @@ mod tests {
         // A click that hits no row is left exactly as it was, for whatever
         // else the widget does with clicks.
         assert_eq!(at(&["click:3,9"], Some(0)), (vec!["click:3,9".to_string()], None));
+        // Unless the widget asked for one to mean something. `latency`
+        // hints `[esc] clear focus`, so a click away from its host list is
+        // a second route to a key its footer already names.
+        let mut off = vec!["click:3,9".to_string(), "click:3,5".to_string()];
+        assert_eq!(
+            rows_clicked(&mut off, Some(0), 1, 0, &placed, Some("esc")),
+            Some(1),
+            "a click that did land on a row still moves the cursor"
+        );
+        assert_eq!(off, vec!["esc".to_string(), "".to_string()]);
         // And a key is a key. `enter` typed at the keyboard is untouched,
         // which is what makes this safe to run over every poll.
         assert_eq!(

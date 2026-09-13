@@ -775,7 +775,7 @@ fn main() {
         // The list windows itself - rows outside `window_over` are never
         // built - so the frame is the body and there is nothing to subtract.
         let mut keys = keyboard.poll();
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), 0, 0, &placed, None) {
             selected = at;
         }
         for key in keys {

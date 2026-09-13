@@ -139,10 +139,17 @@ arm (`latency`, `clocks`, `matrix`) gets the right behaviour for free:
 nothing.
 
 It reads the running cursor rather than the one passed in, so two clicks on
-the same row inside one poll behave like two clicks. A click that lands on
-no row is left exactly as it was; a click that only moved the cursor is
+the same row inside one poll behave like two clicks. A click that only moved the cursor is
 replaced with an empty key, which nothing matches because every arm taking
 an arbitrary key guards on `chars().count() == 1` first.
+
+**`off_list` says what a click that misses every row becomes**, and it is a
+decision each widget makes rather than a default. `latency` passes
+`Some("esc")`: its selection can be empty, its footer hints
+`[esc] clear focus`, and so clicking away from the host list is a second
+route to a key already named. Every other widget passes `None`, because
+their `esc` closes a detail screen or drops a filter — a click on a chart
+that shut the screen would be a capability nobody asked for.
 
 **Not a double-click.** An SGR report carries a button and a cell and never
 a click count, so recognising one means holding the last press's cell and
@@ -152,9 +159,15 @@ selected row is tinted, so a reader can see that the next click will open
 it. A double-click shows nothing before it fires.
 
 Hit-test against the frame that was on screen when the click happened — the
-one built on the previous pass — rather than recomputing the geometry, which
-is why the launcher keeps `list_top`, `list_first` and `list_rows` across
-iterations.
+one built on the previous pass — rather than recomputing the geometry.
+
+The placements have to index the same vec the frame is built from. Splitting
+one `rows` into a pinned head and a windowed rest satisfies that for free;
+keeping the header in a separate vec and assembling `head ++ body[window]`
+does not, and `luvus-panes` is the one widget shaped that way. Its spans are
+`body`-relative, so they are shifted by `head.len()` when recorded — without
+it every click landed a header's height further down and the first entries
+could not be reached at all.
 
 Tracking itself is asked for in `claim_screen()` unless
 `"terminal": {"mouse": false}` says otherwise, and given back on all three

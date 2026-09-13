@@ -1856,7 +1856,7 @@ fn main() {
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
         let mut keys = keyboard.poll();
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, 0, &placed) {
+        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, 0, &placed, None) {
             selected = at;
             moved = true;
         }
