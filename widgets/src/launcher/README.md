@@ -5,7 +5,7 @@
 The front door: every widget, what it does, and a preview before it runs.
 
 ```
-╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
+╺━ OPSCOPE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ v0.17.0
  16 widgets   ↵ or → starts one, q leaves
 
  ▸ agent-usage  How much the coding agents have been used…
@@ -44,10 +44,26 @@ So a widget's description here and its own `--help` cannot disagree: they are
 the same words. The settings this screen opens are the shared `terminal`
 section only — a widget's own settings belong to the widget.
 
+## The version on the title row
+
+The right of the title row is the release this binary was built from, and it
+is the build stamp rather than a number written here — the same one
+`opscope --version` prints, with the commit and date that answer carries left
+off a title bar.
+
+It is there because this is what `npx opscope@latest` starts, and a stale npx
+cache serves an old build without saying so. A cached `0.14.0` launcher went
+on listing the menu it was built with after a release had added to it, and the
+only symptom was a widget that appeared not to exist.
+
+On a pane too narrow to hold it the version goes rather than being cut: half
+of `v0.17.0` is a build number nobody can act on. That is below 22 columns —
+twelve for `╺━ OPSCOPE ╸`, two of rule, and the version's own eight.
+
 ## The preview
 
-Under the description, in whatever height is left, a picture of the
-highlighted widget — its own README's opening example, marked as one.
+Under the description, a picture of the highlighted widget — its own README's
+opening example, marked as one.
 
 ```
  ── CLOCKS ──
@@ -85,6 +101,27 @@ past a row is a menu with a trap in it.
 What is lost is colour, and the certainty that the picture matches today's
 build. The docs are checked by review rather than by machine, so a page that
 falls behind its widget shows a stale picture here too.
+
+## A short pane scrolls, it does not hide things
+
+The title is pinned at the top and the footer at the bottom. Everything
+between them — the count line, the whole list, the description of the
+highlighted widget and its picture — is one body built at whatever height it
+needs, and the pane is a window onto it.
+
+That is the difference from what this used to do. The list was the only thing
+that scrolled: the chrome took its eight rows first and whatever was left went
+to the widgets, down to a single row on a short pane, and the wheel could not
+move any of it out of the way. The description is what makes that plain — it
+wraps to as many rows as the selected widget's paragraph needs, so the taller
+it is the less list there was, and nothing could scroll past it.
+
+The wheel, `Ctrl-Y` and `Ctrl-E` move that window and nothing else: the
+selection stays exactly where it is, even when the scroll takes it off screen,
+so looking at something never changes what `↵` opens. The arrows move the
+selection, and the window follows it only on the frame a key moved it — the
+follow would otherwise drag the view straight back from wherever the wheel had
+just put it.
 
 ## Dependencies stay with the widget
 
@@ -171,7 +208,7 @@ The suffix is stripped and the binary of the same stem runs.
 |---|---|
 | `↑` `↓` / `j` `k` | select a widget |
 | `↵` / `→` | launch it, and come back here when it quits |
-| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the view a line at a time — the pane moves, the selection stays where it is |
+| `Ctrl-Y` `Ctrl-E` `wheel` | scroll the whole view a line at a time — the pane moves, the selection stays where it is |
 | `,` | open shared terminal settings |
 | `q` | quit |
 

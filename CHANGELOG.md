@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.18.0] - 2026-09-13
+
+### Features
+
+- **launcher**: The version on the title row, and a pane that scrolls whole (#224)
+
 ## [0.17.0] - 2026-09-13
 
 ### Features

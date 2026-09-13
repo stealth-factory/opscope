@@ -2726,6 +2726,18 @@ pub fn version() -> String {
     )
 }
 
+/// The release this binary was built from, the number alone.
+///
+/// `version()` is the `--version` answer and carries the commit and the
+/// build date with it, which is what somebody identifying a build wants and
+/// two things too many for a title row. Both read the same stamp, so a
+/// widget drawing this cannot disagree with what `--version` prints - and a
+/// number typed into a widget could, which is the whole reason this is here
+/// rather than a constant at the call site.
+pub fn version_number() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// The name this binary was invoked as, for the first word of `--version`.
 fn binary_name() -> String {
     std::env::current_exe()
