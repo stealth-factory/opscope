@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.16.1] - 2026-09-13
+
+### Bug Fixes
+
+- **luvus**: The manifest at the repo root, so owner/repo installs (#216)
+
+### CI
+
+- Publish npm under `next` and move `latest` only once it installs (#219)
+
 ## [0.16.0] - 2026-09-13
 
 ### Bug Fixes
