@@ -576,6 +576,45 @@ test('release.yml publishes to next, so latest never names an unserved version',
   );
 });
 
+test('release.yml refuses to promote unless next still names this version', () => {
+  // Re-dispatching an older tag walks past an existing GitHub release
+  // and skips packages whose gitHead already matches, so without this
+  // check promote would move latest backwards. The same-tag retry that
+  // finishes a half-promoted release still works: next has not moved.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const publish = jobBlock(yml, 'publish');
+  const promote = jobBlock(yml, 'promote');
+  assert.match(
+    promote,
+    /dist-tags\.next/,
+    'promote must read next before moving latest',
+  );
+  assert.match(
+    promote,
+    /refusing stale promotion/,
+    'a next tag that is not this version must stop the job',
+  );
+  const nextCheckAt = promote.indexOf('dist-tags.next');
+  const writeAt = promote.indexOf('npm dist-tag add "${name}@${version}" latest');
+  assert.ok(nextCheckAt !== -1 && writeAt !== -1 && nextCheckAt < writeAt,
+    'the next check must run before any dist-tag write');
+  for (const [name, block] of [['publish', publish], ['promote', promote]]) {
+    assert.match(
+      block,
+      /group: npm-release-promotion/,
+      `${name} must share the promotion concurrency group`,
+    );
+    assert.match(
+      block,
+      /cancel-in-progress: false/,
+      `${name} must wait rather than cancel a publish mid-flight`,
+    );
+  }
+});
+
 test('release.yml moves latest only after the npm smoke job', () => {
   // Promotion has to be a job that waits on verification, not a step
   // inside publish: a step there would run before anything had tried to

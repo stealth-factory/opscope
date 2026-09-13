@@ -255,7 +255,12 @@ npm dist-tag add opscope@X.Y.Z latest
 Setting `NPM_TOKEN` and re-dispatching `release.yml` at the tag does
 the same thing: the publish step skips every package already on npm
 from that commit, the release step skips a release that already
-exists, and the run is then there to promote.
+exists, and the run is then there to promote. Promote itself will not
+move `latest` unless every package's `next` tag still names this
+version, so a re-dispatch of an older tag after a newer one has
+published cannot roll `npx opscope` backwards. The same-tag retry
+that finishes a half-promoted release still works: `next` has not
+moved.
 
 To abandon it instead, do nothing. `latest` stays on the previous
 release, the version sits on npm under `next` reachable only by
