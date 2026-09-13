@@ -2436,10 +2436,9 @@ fn main() {
         } else {
             hints
         };
-        let footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // A window onto the body rather than a cut of it, with the title
         // pinned above: scrolled away, either screen stops saying what it is
         // describing. Both screens work this way - the list's body is the
@@ -2473,8 +2472,16 @@ fn main() {
         while frame.len() < room {
             frame.push(String::new());
         }
+        // Where the footer lands on the frame, after the padding that pushes
+        // it to the bottom, and one column in because that is the indent
+        // above. Registered every frame: the footer moves when the pane
+        // resizes and wraps onto a second line when it narrows, and a
+        // placement kept from an older frame sends whatever key used to be
+        // under the pointer.
+        let foot_top = frame.len();
         frame.extend(footer);
         tc::draw(&frame, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }

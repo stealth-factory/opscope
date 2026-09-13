@@ -2004,22 +2004,29 @@ fn main() {
             w - 1,
         );
 
-        let mut footer: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|l| format!(" {}", l))
-            .collect();
+        let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
+        let mut footer: Vec<String> =
+            packed.lines.iter().map(|l| format!(" {}", l)).collect();
         // Padded back to the height already reserved, so dropping the scroll
         // hint does not lift the footer off the bottom of the pane.
+        let mut blanks = 0usize;
         while footer.len() < reserved {
             footer.insert(0, String::new());
+            blanks += 1;
         }
         rows.extend(view);
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
         }
+        // The blanks go in *above* the hints, so the first hint line is that
+        // many rows further down than where the footer starts. Counting them
+        // rather than measuring the footer is the difference between
+        // registering the hints and registering the padding.
+        let foot_top = rows.len() + blanks;
         rows.extend(footer);
         rows.truncate(h);
         tc::draw(&rows, w, h);
+        keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
 }
