@@ -29,7 +29,9 @@ Enter opens a second screen for one port, where there is more to show than the
 table holds: the command behind it, every address it can actually be reached
 at - bounded by what the socket is bound to - and c to copy one. From there s
 and t publish it over Tailscale, to the tailnet or to the internet, and d
-opens a Cloudflare quick tunnel. Each asks first.
+opens a Cloudflare quick tunnel. Each asks first, and each copies the address
+it produces - printed on the line too, marked copied or no clipboard, since
+OSC 52 cannot be checked from this end.
 
 Keys: up/down select, enter opens, esc goes back, c copies, s serves,
 t funnels, d tunnels, k kills, o hides the machine's own ports, r refreshes,

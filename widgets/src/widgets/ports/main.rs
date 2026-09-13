@@ -1901,7 +1901,16 @@ struct Watch {
 struct Working {
     kind: String,
     row: Row,
-    done: Arc<Mutex<Vec<Notice>>>,
+    /*
+     * What to say, and the address to put on the clipboard beside it.
+     *
+     * The copy CANNOT happen on the worker thread. `tc::clipboard` writes an
+     * OSC 52 escape to stdout, and this thread runs while the main one is
+     * drawing frames - the sequence would land in the middle of a row and
+     * corrupt the pane. So the thread carries the address back and the main
+     * loop, which owns the terminal, does the copying.
+     */
+    done: Arc<Mutex<Vec<(Notice, Option<String>)>>>,
 }
 
 /// The second screen's own state: which port, and which address is picked.
@@ -1913,6 +1922,26 @@ struct Detail {
     tunnel: Option<Tunnel>,
 }
 
+/// The notice for a publish that produced an address.
+///
+/// The address is on the line whether or not the clipboard took it. OSC 52 is
+/// refused by some terminals and swallowed by some multiplexers, and the copy
+/// cannot be verified from this end - the escape is written and nothing
+/// answers. So a failed copy has to leave the address somewhere readable, or
+/// the feature that was meant to save a step costs one instead.
+fn published_notice(said: Notice, url: &str, copied: bool, warn: &str) -> Notice {
+    (
+        format!(
+            "{}  {}{}",
+            said.0,
+            if copied { "copied  " } else { "no clipboard  " },
+            url
+        ),
+        if copied { said.1 } else { warn.to_string() },
+        said.2,
+    )
+}
+
 /// Carry out one exposure change and record how it went.
 fn start_work(kind: &str, row: Row) -> Working {
     let done = Arc::new(Mutex::new(Vec::new()));
@@ -1920,14 +1949,30 @@ fn start_work(kind: &str, row: Row) -> Working {
     let (what, port) = (kind.to_string(), row.port);
     let p = rgb_ok();
     std::thread::spawn(move || {
+        // The address this action published, for the main loop to copy. None
+        // for anything that took an address away or never had one.
+        let mut address: Option<String> = None;
         let said: Notice = match what.as_str() {
             "serve" | "funnel" => {
                 let failed = serve_port(port, what == "funnel");
                 if failed.is_empty() {
+                    /*
+                     * Asked for rather than assembled. The mount carries the
+                     * host and the listen port, and a funnel does not always
+                     * get 443 - `free_funnel_port` picks the first of 443,
+                     * 8443 and 10000 that is free - so a URL built from the
+                     * port we asked to expose would be confidently wrong on
+                     * the second funnel of the session.
+                     */
+                    address = Some(served_url(&serve_config(), port)).filter(|u| !u.is_empty());
                     (
                         format!("{} now serves :{}", what, port),
                         p.ok,
-                        tc::now() + 6.0,
+                        // Longer when there is an address on the line: a
+                        // terminal that refuses OSC 52 leaves reading it as
+                        // the only way to get it, and six seconds is not
+                        // enough to read a URL and retype it.
+                        tc::now() + if address.is_some() { 12.0 } else { 6.0 },
                     )
                 } else {
                     (failed, p.bad, tc::now() + 8.0)
@@ -1944,7 +1989,15 @@ fn start_work(kind: &str, row: Row) -> Working {
             "tunnel" => {
                 let (url, failed) = start_tunnel(port, 25.0);
                 if failed.is_empty() {
-                    (url, p.ok, tc::now() + 20.0)
+                    // The sentence says what happened; the address arrives on
+                    // the same line from the copy below, so that both kinds of
+                    // publish read the same way.
+                    address = Some(url).filter(|u| !u.is_empty());
+                    (
+                        format!("tunnel open on :{}", port),
+                        p.ok,
+                        tc::now() + 20.0,
+                    )
                 } else {
                     (failed, p.bad, tc::now() + 10.0)
                 }
@@ -1962,7 +2015,7 @@ fn start_work(kind: &str, row: Row) -> Working {
             }
         };
         if let Ok(mut guard) = job.lock() {
-            guard.push(said);
+            guard.push((said, address));
         }
     });
     Working {
@@ -2273,8 +2326,26 @@ fn main() {
         // and its answer is collected here.
         if let Some(job) = working.as_ref() {
             let done = job.done.lock().ok().and_then(|g| g.first().cloned());
-            if let Some(said) = done {
-                notice = Some(said);
+            if let Some((said, address)) = done {
+                /*
+                 * Publishing a port and then hunting for the address it got is
+                 * two steps where the second is the whole point, so the address
+                 * goes on the clipboard here without being asked for.
+                 *
+                 * It is done on THIS thread deliberately - see the note on
+                 * `Working::done`. And it is worded exactly as the `c` key
+                 * words it, including printing the address when the copy did
+                 * not happen: OSC 52 is refused by some terminals and swallowed
+                 * by some multiplexers, and a copy that silently did nothing
+                 * would leave nothing on screen to read instead.
+                 */
+                notice = Some(match address {
+                    Some(url) => {
+                        let copied = tc::clipboard(&url);
+                        published_notice(said, &url, copied, &ok.warn)
+                    }
+                    None => said,
+                });
                 working = None;
                 net = None;
                 store.wake();
@@ -3402,6 +3473,32 @@ mod tests {
         .unwrap();
         assert_eq!(served_url(&other, 3003), "https://host.ts.net:8443/");
         assert_eq!(listen_for(&other, 3003), 8443);
+    }
+
+    #[test]
+    fn a_published_address_reaches_the_screen_even_when_the_copy_fails() {
+        // Publishing puts the address on the clipboard without being asked.
+        // The clipboard is the convenience; the LINE is the guarantee, because
+        // OSC 52 cannot be verified from this end - some terminals refuse it
+        // and some multiplexers swallow it, and nothing answers either way.
+        let said = ("funnel now serves :3000".to_string(), "ok".to_string(), 12.0);
+        let url = "https://host.ts.net/";
+
+        let copied = published_notice(said.clone(), url, true, "warn");
+        assert_eq!(copied.0, "funnel now serves :3000  copied  https://host.ts.net/");
+        // The action's own colour survives a copy that worked.
+        assert_eq!(copied.1, "ok");
+
+        let failed = published_notice(said.clone(), url, false, "warn");
+        assert!(failed.0.contains(url), "the address must still be readable: {}", failed.0);
+        assert!(failed.0.contains("no clipboard"), "{}", failed.0);
+        // And it is marked, so a silent no-op is not mistaken for a copy.
+        assert_eq!(failed.1, "warn");
+
+        // Both keep the caller's timeout - a cloudflared tunnel is shown for
+        // far longer than a serve, and the copy must not shorten it.
+        assert_eq!(copied.2, 12.0);
+        assert_eq!(failed.2, 12.0);
     }
 
     #[test]

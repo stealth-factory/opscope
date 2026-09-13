@@ -353,6 +353,21 @@ the mount the first one already owns.
   written under `$XDG_STATE_HOME/opscope/tunnels` so a tunnel survives
   the widget restarting and can still be found and closed.
 
+Whichever of the three you use, **the address it produces is copied for you**
+when it comes up. Publishing a port and then hunting for the address it landed
+on is two steps where the second one is the whole point, and the address is not
+something you can guess: a funnel takes the first of 443, 8443 and 10000 that
+is free, and a quick tunnel's name is random. So it is asked for rather than
+assembled — `tailscale serve status` is read back for the mount it actually
+made — and put on the clipboard by the same OSC 52 route `c` uses.
+
+That route cannot be verified from this end: the escape is written and nothing
+answers, so a terminal that refuses it and one that accepts it look identical
+here. The address is therefore printed on the line whether or not the copy
+worked, marked `copied` or `no clipboard`, and the line stays up long enough to
+read a URL off it. A feature meant to save a step must not cost one when the
+clipboard is not available.
+
 ### Why only these two
 
 Tailscale and Cloudflare, and deliberately nothing else.
