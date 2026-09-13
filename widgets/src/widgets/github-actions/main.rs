@@ -1686,6 +1686,10 @@ fn main() {
     let mut overlay = false;
     let mut overlay_id: i64 = 0;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    // Where each run's rows landed on the frame now on screen. The list
+    // windows itself rather than the frame being windowed, so a frame row
+    // is a body row and there is nothing pinned to skip.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     let mut oscroll = 0usize;
     let mut note: (String, f64) = (String::new(), 0.0);
     let mut visible = 1usize;
@@ -1850,7 +1854,16 @@ fn main() {
                             .unwrap_or(0);
                     }
                 }
-                _ => {}
+                // A click picks the run under it, which is what the arrows
+                // do. A run drawn across more than one row answers on any
+                // of them, because the span is what was recorded.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, 0, 0, &placed) {
+                            selected = at;
+                        }
+                    }
+                }
             }
         }
 
@@ -1986,6 +1999,9 @@ fn main() {
             // clickable means building it out of hints first, which is a
             // change to what it draws and belongs on its own.
             keyboard.forget_footer();
+            // And the list's row placements, for the same reason: they
+            // describe a frame that is no longer on screen.
+            placed.clear();
             tc::draw(&out, w, h);
             std::thread::sleep(Duration::from_millis(250));
             continue;
@@ -2164,10 +2180,14 @@ fn main() {
             moved = false;
         }
 
+        // The span each run covers, taken from where its rows started
+        // and ended: a run is one row, or two when its jobs are drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, run) in shown.iter().enumerate().skip(scroll) {
             if rows.len() >= h.saturating_sub(1) {
                 break;
             }
+            let from = rows.len();
             let here = i == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
@@ -2269,6 +2289,7 @@ fn main() {
                 ));
             }
             visible = i.saturating_sub(scroll) + 1;
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
 
         if shown.is_empty() && err.is_empty() {
@@ -2323,6 +2344,7 @@ fn main() {
                 "[,] settings".into(),
             )]);
         }
+        placed = rows_at;
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> =
             packed.lines.iter().map(|l| format!(" {}", l)).collect();

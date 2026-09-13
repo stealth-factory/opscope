@@ -754,6 +754,11 @@ fn main() {
     // across frames so the view holds still while the cursor moves inside
     // it, and only moves when the cursor would leave it.
     let mut scroll = 0usize;
+    // Where each entry's rows landed on the frame now on screen, how many
+    // rows the header keeps above the window, and where the window starts.
+    // A click is answered against the frame the reader was looking at.
+    let (mut placed, mut list_head, mut list_scroll): (Vec<(usize, usize)>, usize, usize) =
+        (Vec::new(), 0, 0);
     // Set by whichever key moved the cursor, and cleared once the window
     // has been asked to hold it. Without it the window chases the cursor
     // every frame and drags itself back from wherever the wheel put it.
@@ -932,7 +937,17 @@ fn main() {
                         });
                     }
                 }
-                _ => {}
+                // A click picks the entry under it, which is what the
+                // arrows do. The five sections share one index, so
+                // clicking into another is the same walk the arrows make.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, list_scroll, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
         if let Ok(mut guard) = inbox.lock() {
@@ -2142,6 +2157,20 @@ fn main() {
 
         // The headings are drawn inside the body and scroll with it, so the
         // count of what is on screen is added after the window is known.
+        // The spans this widget already keeps - one per entry, recorded
+        // while the body was built so the window could be brought to the
+        // selected one - are exactly what a click needs read the other way
+        // round. One entry per row it covers, so a click on any line of a
+        // multi-line entry picks that entry.
+        (placed, list_head, list_scroll) = (
+            spans
+                .iter()
+                .enumerate()
+                .flat_map(|(i, span)| span.clone().map(move |row| (row, i)))
+                .collect(),
+            head.len(),
+            window.start,
+        );
         let mut rows = head;
         rows.extend(body[window.clone()].iter().cloned());
         // Said in the footer note line rather than beside every heading,

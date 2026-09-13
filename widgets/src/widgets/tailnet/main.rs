@@ -779,6 +779,10 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut hide_offline, mut show_graph) = (false, true);
     let (mut selected, mut scroll, mut visible) = (0usize, 0usize, 1usize);
+    // Where each machine's rows landed on the frame now on screen. This
+    // screen windows its own list rather than windowing the frame, so a
+    // frame row is a body row and there is nothing pinned to skip.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     // Where the open sub-view has scrolled to, and whether a key has just
     // moved the cursor. The wheel writes a scroll and never the flag, so
     // the list stops chasing the selection the moment it is turned.
@@ -938,7 +942,17 @@ fn main() {
                         dscroll = 0;
                     }
                 }
-                _ => {}
+                // A click picks the machine under it, which is what the
+                // arrows do. A peer drawn across two rows - the second
+                // being its routes - answers on either, because the span
+                // is what was recorded rather than the first row.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, 0, 0, &placed) {
+                            selected = at;
+                        }
+                    }
+                }
             }
         }
 
@@ -1110,6 +1124,9 @@ fn main() {
             // clickable means building it out of hints first, which is a
             // change to what it draws and belongs on its own.
             keyboard.forget_footer();
+            // And the list's row placements, for the same reason: they
+            // describe a frame that is no longer on screen.
+            placed.clear();
 
             std::thread::sleep(Duration::from_millis(100));
             continue;
@@ -1261,10 +1278,14 @@ fn main() {
         }
         scroll = scroll.min(listed.len().saturating_sub(visible));
 
+        // The span each machine covers, taken from where its rows started
+        // and ended: a peer is one row, or two when its routes are drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (idx, peer) in listed.iter().enumerate().skip(scroll).take(visible) {
             if rows.len() >= h.saturating_sub(tail) {
                 break;
             }
+            let from = rows.len();
             let mine = peer["_self"].as_bool().unwrap_or(false);
             let up = mine || peer["Online"].as_bool().unwrap_or(false);
             let here = idx == selected;
@@ -1354,6 +1375,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, idx)));
         }
 
         // This machine is always in the list, so a filter that hides every
@@ -1389,6 +1411,7 @@ fn main() {
                 w - 1,
             ));
         }
+        placed = rows_at;
         let foot_top = rows.len();
         rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);

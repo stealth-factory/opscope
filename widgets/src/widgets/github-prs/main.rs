@@ -1981,6 +1981,11 @@ fn main() {
     // has just moved the selection. The wheel writes a scroll and never the
     // flag, so neither screen chases a cursor the moment it is turned.
     let (mut board, mut dscroll, mut moved) = (0usize, 0usize, false);
+    // Where each PR's rows landed on the frame now on screen, and how many
+    // rows stay pinned above the window. A click is answered against the
+    // frame the reader was looking at when they clicked. Cleared whenever
+    // the detail screen draws, since its stack is a list of its own.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // The stack cursor is a second selection, on the detail page. The
     // wheel writes `dscroll` and never this, so walking a stack with
     // the arrows is what brings that row back into view.
@@ -2231,7 +2236,18 @@ fn main() {
                     let at = if detail.is_some() { &mut dscroll } else { &mut board };
                     *at = at.saturating_add(1);
                 }
-                _ => {}
+                // A click picks the PR under it, which is what the arrows
+                // do. Either of its rows, and the branch line under them,
+                // belong to the same PR - which is why spans are recorded
+                // rather than first rows.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, board, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -2381,7 +2397,7 @@ fn main() {
                 ));
             }
             let top = rows.len();
-            let (list, at) = list_view(
+            let (list, at, list_at) = list_view(
                 &shown,
                 selected,
                 SORTS[sort_at],
@@ -2394,6 +2410,9 @@ fn main() {
                 &p,
             );
             list_cursor = at.map(|at| top + at);
+            // The same shift for every PR's rows, not only the selected
+            // one - list_view numbers them from its own first row.
+            placed = list_at.into_iter().map(|(row, i)| (top + row, i)).collect();
             rows.extend(list);
             vec![
                 vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
@@ -2447,7 +2466,11 @@ fn main() {
         let room = h.saturating_sub(footer.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        list_head = head.len();
         let off = if detail.is_some() || loading {
+            // The detail screen's stack is a list of its own, so the
+            // board's placements come off rather than answering for it.
+            placed.clear();
             // Only on the frame a key walked the stack. The STACK section
             // windows itself around `stack_sel`, but that does not move
             // the section inside the outer page - without this chase a
@@ -3240,7 +3263,7 @@ fn list_view(
     // everything, or a board with nothing on it.
     held: usize,
     p: &Palette,
-) -> (Vec<String>, Option<usize>) {
+) -> (Vec<String>, Option<usize>, Vec<(usize, usize)>) {
     let mut rows = vec![String::new()];
     let arrow = if newest_first { "↓" } else { "↑" };
     rows.push(tc::seg(
@@ -3279,7 +3302,7 @@ fn list_view(
             None => "  no open PRs".to_string(),
         };
         rows.push(tc::seg(&[(p.dim.as_str(), why)], w - 1));
-        return (rows, None);
+        return (rows, None, Vec::new());
     }
 
     // Columns are budgeted rather than guessed: the fixed ones are summed
@@ -3315,7 +3338,12 @@ fn list_view(
     // them: pinning it as well would be a second sticky region, which is
     // the thing this removed.
     let mut cursor = None;
+    // The span each PR covers, taken from where its rows started and
+    // ended rather than counted: a PR is one row or two depending on
+    // the width, and the branch line under it is conditional on top.
+    let mut rows_at: Vec<(usize, usize)> = Vec::new();
     for (i, pr) in prs.iter().enumerate() {
+        let from = rows.len();
         let here = i == selected;
         if here {
             cursor = Some(rows.len());
@@ -3410,8 +3438,9 @@ fn list_view(
         }
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
+        rows_at.extend((from..rows.len()).map(|row| (row, i)));
     }
-    (rows, cursor)
+    (rows, cursor, rows_at)
 }
 
 #[allow(clippy::too_many_arguments)]

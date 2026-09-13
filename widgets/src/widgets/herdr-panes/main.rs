@@ -744,6 +744,11 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let (mut selected, mut tick) = (0usize, 0usize);
+    // Where each pane's rows landed on the frame now on screen. The three
+    // sections share one index - agents, then busy, then the rest - which
+    // is what the arrows walk, so a click lands in the same space and
+    // needs nothing extra to say which section it was in.
+    let mut placed: Vec<(usize, usize)> = Vec::new();
     // How far down the three lists, read as one, the window has scrolled.
     // Kept across frames so the view holds still while the cursor moves
     // inside it, and only moves when the cursor would leave it.
@@ -847,7 +852,20 @@ fn main() {
                         ));
                     }
                 }
-                _ => {}
+                // A click picks the pane under it, which is what the
+                // arrows do. The three sections share one index, so
+                // clicking into another one is the same walk the arrows
+                // make - there is no separate focus to move.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        // The list windows itself - rows outside
+                        // `window_over` are never built - so the frame is
+                        // the body and there is nothing to subtract.
+                        if let Some(at) = tc::item_at(y, 0, 0, &placed) {
+                            selected = at;
+                        }
+                    }
+                }
             }
         }
 
@@ -898,6 +916,9 @@ fn main() {
             agents.iter().map(|a| a.workspace_id.as_str()).collect();
 
         let mut rows = vec![tc::title("herdr panes", w, &p.accent)];
+        // The span each pane covers, taken from where its rows started and
+        // ended: a pane is one row, or several once its detail is drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         let mut summary = vec![
             (
                 p.dim.as_str(),
@@ -1052,6 +1073,7 @@ fn main() {
             if !window.contains(&i) {
                 continue;
             }
+            let from = rows.len();
             let here = i == selected;
             let colour = colour_of(&a.state, &p);
             // Blocked and done keep a tint of their own even unselected: the
@@ -1149,6 +1171,7 @@ fn main() {
                     w - 1,
                 ));
             }
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
         if agents.is_empty() && err.is_empty() {
             rows.push(tc::seg(&[(p.dim.as_str(), "   no agents running".into())], w - 1));
@@ -1199,6 +1222,7 @@ fn main() {
             if !window.contains(&(agents.len() + j)) {
                 continue;
             }
+            let from = rows.len();
             let here = agents.len() + j == selected;
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let c = |colour: &str| {
@@ -1274,6 +1298,7 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + j)));
         }
         // True only when nothing was unread either: an empty section with a
         // pane the probe failed on is not a Herdr where everything rests.
@@ -1310,6 +1335,7 @@ fn main() {
                 if !window.contains(&(agents.len() + busy.len() + j)) {
                     continue;
                 }
+                let from = rows.len();
                 let here = agents.len() + busy.len() + j == selected;
                 let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
                 let c = |colour: &str| {
@@ -1351,6 +1377,7 @@ fn main() {
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
+                rows_at.extend((from..rows.len()).map(|row| (row, agents.len() + busy.len() + j)));
             }
         }
 
@@ -1375,6 +1402,7 @@ fn main() {
         // resizes and wraps onto a second line when it narrows, and a
         // placement kept from an older frame sends whatever key used to be
         // under the pointer.
+        placed = rows_at;
         let foot_top = rows.len();
         rows.extend(footer);
         tc::draw(&rows, w, h);
