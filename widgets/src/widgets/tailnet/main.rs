@@ -580,6 +580,64 @@ fn palette() -> Palette {
     }
 }
 
+/// The filter `[o]` applies, named, or nothing when it holds nothing back.
+///
+/// Hiding the offline machines is a filter like any other, and an unstated
+/// one leaves a short list reading as a tailnet with little on it. It is
+/// only a filter while there is something behind it: with every peer
+/// online, hidden and shown are the same screen, and `0 offline machines
+/// hidden` would be a filter announcing itself for nothing.
+fn offline_filter(hide_offline: bool, offline: usize) -> Vec<String> {
+    if !hide_offline || offline == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "{} offline machine{} hidden",
+        offline,
+        if offline == 1 { "" } else { "s" }
+    )]
+}
+
+/// A two-way toggle's hint: the label, then what the next press does.
+///
+/// `showing` is whether the thing named is on screen now, so the word is
+/// always the other state. Written once because both of this widget's
+/// toggles want it and one of them stores the flag the other way round -
+/// `show_graph` against `hide_offline` - which is exactly the place a hint
+/// gets built backwards.
+fn toggle_hint(label: &str, showing: bool) -> String {
+    format!("{} {}", label, if showing { "hide" } else { "show" })
+}
+
+/// Whether the emptied-filter explanation will sit under the list.
+///
+/// That line is appended after the peer rows, so the list budget has to
+/// leave a slot for it. Counting it only once it was pushed made a short
+/// pane with the graph up one row taller than the frame, and `draw` cut
+/// the footer.
+fn empty_filter_explains(listed: usize, has_self: bool, of: usize, filters: &[String]) -> bool {
+    listed <= usize::from(has_self) && tc::filtered_to_nothing(of, filters).is_some()
+}
+
+/// Footer lines, indented when the widest hint plus a space still fits.
+///
+/// `pack_hints` will not split a group, so a leading space on a hint that
+/// is already the pane wide wraps in the terminal while `foot.len()` still
+/// counts one row — the same overflow the body budget was written to stop.
+/// The margin gives way first, which is what `months` settled on.
+fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> Vec<String> {
+    let widest = hints
+        .iter()
+        .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let indent = usize::from(widest + 1 <= w);
+    tc::pack_hints(hints, w.saturating_sub(indent + 1).max(1), "  ")
+        .into_iter()
+        .map(|line| format!("{}{}", " ".repeat(indent), line))
+        .collect()
+}
+
 /// Live throughput for peers that are actually moving data.
 fn activity_rows(
     rates: &HashMap<String, Vec<(f64, f64)>>,
@@ -895,10 +953,7 @@ fn main() {
                 vec![(p.dim.as_str(), "[,] settings".into())],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|line| format!(" {}", line))
-                .collect();
+            let foot = pack_footer(&hints, w);
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
@@ -998,6 +1053,15 @@ fn main() {
             ],
             w - 1,
         ));
+        // Hiding the offline machines is a filter, and now that the footer
+        // names what the next press does this is the only place the pane
+        // says the filter is on. Self is in neither count, the same way it
+        // is in neither count above: those describe connections out of
+        // here, and this describes the subset of them on screen.
+        let offline_hidden = offline_filter(hide_offline, peers.len() - online.len());
+        if let Some(said) = tc::filter_row(online.len(), peers.len(), &offline_hidden) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", said))], w - 1));
+        }
         rows.push(String::new());
 
         if let (Some(which), false) = (view, listed.is_empty()) {
@@ -1117,7 +1181,57 @@ fn main() {
         if !listed.is_empty() && selected >= listed.len() {
             selected = listed.len() - 1;
         }
-        visible = h.saturating_sub(rows.len() + 2).max(1);
+        let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
+            vec![
+                (p.accent.as_str(), "→".into()),
+                (p.dim.as_str(), "/↵ info".into()),
+            ],
+            vec![(p.dim.as_str(), "[c]opy".into())],
+            // Both name the state the next press moves to, like the
+            // interval below them: these three sit in one footer, and a
+            // bare `[g]raph` beside `[i]nterval 10s` is the same shape
+            // saying nothing. What is in force is on screen either way -
+            // the graph is a section you can see, and the filter is the
+            // count line under the header.
+            vec![(p.dim.as_str(), toggle_hint("[g]raph", show_graph))],
+            vec![(p.dim.as_str(), toggle_hint("[o]ffline", !hide_offline))],
+            // The interval the next press moves to, like every other
+            // stateful hint in the collection. Nothing is lost by not
+            // naming the current one: the header line three rows up says
+            // `every {interval}s` and is always drawn.
+            vec![(
+                p.dim.as_str(),
+                format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
+            )],
+            vec![(p.dim.as_str(), "[r]efresh".into())],
+            vec![(p.dim.as_str(), "[,] settings".into())],
+            vec![(p.dim.as_str(), "[q]uit".into())],
+        ];
+        // The footer is built before the body, not after it, because it
+        // wraps: how many rows it takes depends on the width, and nothing
+        // below can budget for itself until that is settled. Two was the
+        // guess, and a footer that wrapped onto a second line put the
+        // frame one row over the pane - which `draw` cuts from the bottom,
+        // taking `[q]uit` with it. A route row costs one more.
+        let foot = pack_footer(&hints, w);
+        // The emptied-filter line is part of the body budget, not a row
+        // pushed after it: with the graph up on a short pane the self row
+        // already spent the last slot, and appending then grew the frame
+        // so `draw` cut `[q]uit`.
+        let explain = empty_filter_explains(
+            listed.len(),
+            !me.is_null(),
+            peers.len(),
+            &offline_hidden,
+        );
+        let tail = foot.len()
+            + usize::from(routers.first().is_some())
+            + usize::from(explain);
+        visible = h.saturating_sub(rows.len() + tail);
+        if !explain {
+            visible = visible.max(1);
+        }
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -1128,7 +1242,7 @@ fn main() {
         scroll = scroll.min(listed.len().saturating_sub(visible));
 
         for (idx, peer) in listed.iter().enumerate().skip(scroll).take(visible) {
-            if rows.len() >= h.saturating_sub(2) {
+            if rows.len() >= h.saturating_sub(tail) {
                 break;
             }
             let mine = peer["_self"].as_bool().unwrap_or(false);
@@ -1222,7 +1336,18 @@ fn main() {
             rows.push(tc::seg(&refs, w - 1));
         }
 
-        while rows.len() < h.saturating_sub(2) {
+        // This machine is always in the list, so a filter that hides every
+        // peer leaves one row standing and the board reads as a tailnet
+        // with nothing else on it. Only the filter's doing is blamed on
+        // the filter: with no peers at all `filtered_to_nothing` says
+        // nothing, because that is a tailnet of one and not a hidden one.
+        if explain {
+            if let Some(said) = tc::filtered_to_nothing(peers.len(), &offline_hidden) {
+                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", said))], w - 1));
+            }
+        }
+
+        while rows.len() < h.saturating_sub(tail) {
             rows.push(String::new());
         }
         if let Some(first) = routers.first() {
@@ -1244,30 +1369,7 @@ fn main() {
                 w - 1,
             ));
         }
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
-            vec![
-                (p.accent.as_str(), "→".into()),
-                (p.dim.as_str(), "/↵ info".into()),
-            ],
-            vec![(p.dim.as_str(), "[c]opy".into())],
-            vec![(p.dim.as_str(), "[g]raph".into())],
-            vec![(p.dim.as_str(), "[o]ffline".into())],
-            // The interval the next press moves to, like every other
-            // stateful hint in the collection. Nothing is lost by not
-            // naming the current one: the header line three rows up says
-            // `every {interval}s` and is always drawn.
-            vec![(
-                p.dim.as_str(),
-                format!("[i]nterval {}s", tc::cycle(REFRESH_CHOICES, interval)),
-            )],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
-        for line in tc::pack_hints(&hints, w - 2, "  ") {
-            rows.push(format!(" {}", line));
-        }
+        rows.extend(foot);
         tc::draw(&rows, w, h);
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -1728,6 +1830,123 @@ fn copy_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hiding_the_offline_machines_is_a_filter_the_pane_states() {
+        assert!(offline_filter(false, 9).is_empty(), "nothing is hidden");
+        assert!(
+            offline_filter(true, 0).is_empty(),
+            "a filter holding nothing back is not worth a row"
+        );
+        assert_eq!(offline_filter(true, 9), vec!["9 offline machines hidden"]);
+        assert_eq!(offline_filter(true, 1), vec!["1 offline machine hidden"]);
+        // And the row it produces says the count is a subset.
+        let said = tc::filter_row(12, 21, &offline_filter(true, 9)).expect("a filter is on");
+        assert_eq!(said, "12 of 21 shown · 9 offline machines hidden");
+        // A board the filter emptied says the filter emptied it, rather
+        // than leaving the one row that is always there - this machine -
+        // reading as a tailnet with nothing else on it.
+        let emptied = tc::filtered_to_nothing(21, &offline_filter(true, 21))
+            .expect("the filter is holding all of them");
+        assert_eq!(
+            emptied,
+            "nothing matches · all 21 hidden by the filter · 21 offline machines hidden"
+        );
+        // A tailnet of one is not the filter's doing.
+        assert_eq!(tc::filtered_to_nothing(0, &offline_filter(true, 0)), None);
+        // The list budget asks the same question the draw path does, so a
+        // short pane reserves the row instead of growing past the footer.
+        assert!(
+            empty_filter_explains(1, true, 21, &offline_filter(true, 21)),
+            "self plus a hidden tailnet spends a body row"
+        );
+        assert!(
+            !empty_filter_explains(12, true, 21, &offline_filter(true, 9)),
+            "peers still on screen: no emptied-board line"
+        );
+        assert!(
+            !empty_filter_explains(1, true, 0, &offline_filter(true, 0)),
+            "a peer-less tailnet is not the filter's doing"
+        );
+    }
+
+    #[test]
+    fn the_toggle_hints_name_the_state_the_next_press_moves_to() {
+        // The footer calls this with the flag the widget keeps, and the
+        // two flags run opposite ways: `show_graph` is what is on screen,
+        // `hide_offline` is what is not, which is where a hint gets built
+        // backwards.
+        let (show_graph, hide_offline) = (true, false);
+        assert_eq!(toggle_hint("[g]raph", show_graph), "[g]raph hide");
+        assert_eq!(toggle_hint("[g]raph", !show_graph), "[g]raph show");
+        // Offline machines on screen: pressing it hides them. Hidden
+        // already: pressing it brings them back.
+        assert_eq!(toggle_hint("[o]ffline", !hide_offline), "[o]ffline hide");
+        assert_eq!(toggle_hint("[o]ffline", hide_offline), "[o]ffline show");
+    }
+
+    #[test]
+    fn a_fourteen_column_footer_does_not_wrap_the_offline_toggle() {
+        // `[o]ffline hide` is fourteen cells. A leading space on top of it
+        // is fifteen, and `pack_hints` will not split the group, so the
+        // terminal wrapped a row `foot.len()` still counted as one.
+        let hints = vec![
+            vec![("", toggle_hint("[g]raph", true))],
+            vec![("", toggle_hint("[o]ffline", true))],
+            vec![("", "[q]uit".into())],
+        ];
+        let foot = pack_footer(&hints, 14);
+        for line in &foot {
+            assert!(
+                tc::display_width(line) <= 14,
+                "{line:?} is {} cells",
+                tc::display_width(line)
+            );
+        }
+        assert!(
+            foot.iter().any(|line| line.contains("[o]ffline hide")),
+            "the wording stays; the indent gives way"
+        );
+        let wide = pack_footer(&hints, 74);
+        assert!(
+            wide.first().is_some_and(|line| line.starts_with(' ')),
+            "a wide pane still pads the footer"
+        );
+    }
+
+    #[test]
+    fn the_copy_sheet_numbers_every_address_it_has() {
+        // Six is the full sheet: v4, MagicDNS, public, two private, IPv6.
+        // The overlay accepts 1 through that count, so the docs must not
+        // invent a smaller range.
+        let peer = serde_json::json!({
+            "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+            "DNSName": "nas.example.ts.net.",
+            "CurAddr": "203.0.113.9:41641",
+            "PrimaryRoutes": ["192.168.7.0/24"]
+        });
+        let mut eps = HashMap::new();
+        eps.insert(
+            "nas.example.ts.net".into(),
+            vec![
+                "203.0.113.9".into(),
+                "192.168.7.20".into(),
+                "172.17.0.1".into(),
+            ],
+        );
+        let pairs = addresses(&peer, &eps);
+        assert_eq!(
+            pairs.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(),
+            [
+                "Tailscale IP",
+                "MagicDNS name",
+                "Public IP",
+                "Private IP (LAN)",
+                "Other private IP",
+                "Tailscale IPv6",
+            ]
+        );
+    }
 
     #[test]
     fn a_name_comes_from_magicdns_not_the_device() {

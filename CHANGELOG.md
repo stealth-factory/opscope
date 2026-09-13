@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.15.2] - 2026-09-13
+
+### Bug Fixes
+
+- **widgets**: Three toggles say what the next press does, and tailnet names its filter (#202)
+
 ## [0.15.1] - 2026-09-12
 
 ### Bug Fixes
