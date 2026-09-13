@@ -612,7 +612,24 @@ test('release.yml refuses to promote unless next still names this version', () =
       /cancel-in-progress: false/,
       `${name} must wait rather than cancel a publish mid-flight`,
     );
+    assert.match(
+      block,
+      /third enqueue drops/,
+      `${name} must name GitHub's one-pending limit, not imply a FIFO`,
+    );
   }
+});
+
+test('releasing.md names the concurrency limit and the recovery', () => {
+  // The group is not a FIFO. Docs that say "queued" without the drop
+  // teach a third overlapping release that it will wait. It will not.
+  const md = fs.readFileSync(
+    path.join(repoRoot, 'docs/releasing.md'),
+    'utf8',
+  );
+  assert.match(md, /one running and one pending/);
+  assert.match(md, /third[\s\S]{0,40}drops the pending/);
+  assert.match(md, /Re-dispatch `release\.yml` at (the dropped tag|that tag)/);
 });
 
 test('the stale check runs before promote offers the by-hand commands', () => {

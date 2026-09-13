@@ -167,18 +167,22 @@ still the newest" question, because publish moves it, and it goes on
 naming this version through a retry of a promote that failed or only
 half finished. The read is retried for a couple of minutes, since a
 packument briefly behind would otherwise refuse a release that is
-fine. `publish` and `promote` also share a queuing concurrency group,
-because the check alone races a newer publish — queued, the older run
-reaches `promote` after the newer publish has moved `next`, reads
-that, and refuses.
+fine. `publish` and `promote` share a concurrency group so a newer
+publish cannot slip between that check and the dist-tag writes.
+GitHub keeps one running and one pending in the group; a third
+enqueue drops the pending job, even with `cancel-in-progress: false`.
+That is not a FIFO. Re-dispatch `release.yml` at the dropped tag.
+If `next` already names a newer version, `promote` refuses rather
+than moving `latest` backwards.
 
 **Promotion needs `NPM_TOKEN`; trusted publishing cannot do it.** OIDC
 covers `npm publish` and `npm stage publish` and nothing else — the
 npm CLI performs the token exchange inside the publish command, and no
 other command asks for it. `npm dist-tag add` therefore wants a
 granular access token in `NPM_TOKEN`, and with none the `promote` job
-stops before touching npm and prints the four commands that finish the
-release by hand. `npm stage` is not an alternative: approving a staged
+stops before touching npm and prints a recovery script that checks
+`next` still names this version before any `dist-tag add`. `npm stage`
+is not an alternative: approving a staged
 publish requires interactive proof of presence, so a workflow cannot
 complete one.
 
@@ -233,6 +237,13 @@ being broken; the log says which.
 **A version was cut by mistake.** Nothing is unpublishable, so do not delete
 the release — cut the next one. Deleting a tag that people may already have
 fetched trades a small mistake for a confusing one.
+
+**A publish or promote was cancelled while waiting.** The shared
+`npm-release-promotion` group holds one running job and one pending.
+A third publish or promote drops the pending one, even though
+`cancel-in-progress` is false. Re-dispatch `release.yml` at that tag.
+If a newer version already owns `next`, promote refuses rather than
+rolling `latest` back.
 
 **npm publish failed and there is no GitHub release.** That is the
 intended failure: trusted publishing is not configured and `NPM_TOKEN`

@@ -299,7 +299,10 @@ jobs:
     # Shared with promote. The next==version check alone has a race: an
     # older promote can read next, a newer publish can move it, and the
     # older run then writes latest backwards. cancel-in-progress is false
-    # so a second tag waits rather than killing a publish mid-flight.
+    # so a second job waits rather than killing a publish mid-flight.
+    # GitHub still keeps only one pending: a third enqueue drops the
+    # waiting job. Re-dispatch that tag. The next check refuses a stale
+    # latest if a newer publish already owns the tag.
     concurrency:
       group: npm-release-promotion
       cancel-in-progress: false
@@ -634,6 +637,9 @@ jobs:
   promote:
     needs: smoke-npm
     if: startsWith(github.ref, 'refs/tags/v')
+    # Same group as publish. One running, one pending. A third enqueue drops
+    # the pending job. Re-dispatch that tag. The next check refuses a stale
+    # latest if a newer publish already owns the tag.
     concurrency:
       group: npm-release-promotion
       cancel-in-progress: false
