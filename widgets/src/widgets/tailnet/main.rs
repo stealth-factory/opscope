@@ -609,6 +609,35 @@ fn toggle_hint(label: &str, showing: bool) -> String {
     format!("{} {}", label, if showing { "hide" } else { "show" })
 }
 
+/// Whether the emptied-filter explanation will sit under the list.
+///
+/// That line is appended after the peer rows, so the list budget has to
+/// leave a slot for it. Counting it only once it was pushed made a short
+/// pane with the graph up one row taller than the frame, and `draw` cut
+/// the footer.
+fn empty_filter_explains(listed: usize, has_self: bool, of: usize, filters: &[String]) -> bool {
+    listed <= usize::from(has_self) && tc::filtered_to_nothing(of, filters).is_some()
+}
+
+/// Footer lines, indented when the widest hint plus a space still fits.
+///
+/// `pack_hints` will not split a group, so a leading space on a hint that
+/// is already the pane wide wraps in the terminal while `foot.len()` still
+/// counts one row — the same overflow the body budget was written to stop.
+/// The margin gives way first, which is what `months` settled on.
+fn pack_footer(hints: &[Vec<(&str, String)>], w: usize) -> Vec<String> {
+    let widest = hints
+        .iter()
+        .map(|hint| hint.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let indent = usize::from(widest + 1 <= w);
+    tc::pack_hints(hints, w.saturating_sub(indent + 1).max(1), "  ")
+        .into_iter()
+        .map(|line| format!("{}{}", " ".repeat(indent), line))
+        .collect()
+}
+
 /// Live throughput for peers that are actually moving data.
 fn activity_rows(
     rates: &HashMap<String, Vec<(f64, f64)>>,
@@ -924,10 +953,7 @@ fn main() {
                 vec![(p.dim.as_str(), "[,] settings".into())],
                 vec![(p.dim.as_str(), "[q]uit".into())],
             ];
-            let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-                .into_iter()
-                .map(|line| format!(" {}", line))
-                .collect();
+            let foot = pack_footer(&hints, w);
             while rows.len() < h.saturating_sub(foot.len()) {
                 rows.push(String::new());
             }
@@ -1188,12 +1214,24 @@ fn main() {
         // guess, and a footer that wrapped onto a second line put the
         // frame one row over the pane - which `draw` cuts from the bottom,
         // taking `[q]uit` with it. A route row costs one more.
-        let foot: Vec<String> = tc::pack_hints(&hints, w - 2, "  ")
-            .into_iter()
-            .map(|line| format!(" {}", line))
-            .collect();
-        let tail = foot.len() + usize::from(routers.first().is_some());
-        visible = h.saturating_sub(rows.len() + tail).max(1);
+        let foot = pack_footer(&hints, w);
+        // The emptied-filter line is part of the body budget, not a row
+        // pushed after it: with the graph up on a short pane the self row
+        // already spent the last slot, and appending then grew the frame
+        // so `draw` cut `[q]uit`.
+        let explain = empty_filter_explains(
+            listed.len(),
+            !me.is_null(),
+            peers.len(),
+            &offline_hidden,
+        );
+        let tail = foot.len()
+            + usize::from(routers.first().is_some())
+            + usize::from(explain);
+        visible = h.saturating_sub(rows.len() + tail);
+        if !explain {
+            visible = visible.max(1);
+        }
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the list back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
@@ -1303,7 +1341,7 @@ fn main() {
         // with nothing else on it. Only the filter's doing is blamed on
         // the filter: with no peers at all `filtered_to_nothing` says
         // nothing, because that is a tailnet of one and not a hidden one.
-        if listed.len() <= usize::from(!me.is_null()) {
+        if explain {
             if let Some(said) = tc::filtered_to_nothing(peers.len(), &offline_hidden) {
                 rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", said))], w - 1));
             }
@@ -1816,6 +1854,20 @@ mod tests {
         );
         // A tailnet of one is not the filter's doing.
         assert_eq!(tc::filtered_to_nothing(0, &offline_filter(true, 0)), None);
+        // The list budget asks the same question the draw path does, so a
+        // short pane reserves the row instead of growing past the footer.
+        assert!(
+            empty_filter_explains(1, true, 21, &offline_filter(true, 21)),
+            "self plus a hidden tailnet spends a body row"
+        );
+        assert!(
+            !empty_filter_explains(12, true, 21, &offline_filter(true, 9)),
+            "peers still on screen: no emptied-board line"
+        );
+        assert!(
+            !empty_filter_explains(1, true, 0, &offline_filter(true, 0)),
+            "a peer-less tailnet is not the filter's doing"
+        );
     }
 
     #[test]
@@ -1831,6 +1883,69 @@ mod tests {
         // already: pressing it brings them back.
         assert_eq!(toggle_hint("[o]ffline", !hide_offline), "[o]ffline hide");
         assert_eq!(toggle_hint("[o]ffline", hide_offline), "[o]ffline show");
+    }
+
+    #[test]
+    fn a_fourteen_column_footer_does_not_wrap_the_offline_toggle() {
+        // `[o]ffline hide` is fourteen cells. A leading space on top of it
+        // is fifteen, and `pack_hints` will not split the group, so the
+        // terminal wrapped a row `foot.len()` still counted as one.
+        let hints = vec![
+            vec![("", toggle_hint("[g]raph", true))],
+            vec![("", toggle_hint("[o]ffline", true))],
+            vec![("", "[q]uit".into())],
+        ];
+        let foot = pack_footer(&hints, 14);
+        for line in &foot {
+            assert!(
+                tc::display_width(line) <= 14,
+                "{line:?} is {} cells",
+                tc::display_width(line)
+            );
+        }
+        assert!(
+            foot.iter().any(|line| line.contains("[o]ffline hide")),
+            "the wording stays; the indent gives way"
+        );
+        let wide = pack_footer(&hints, 74);
+        assert!(
+            wide.first().is_some_and(|line| line.starts_with(' ')),
+            "a wide pane still pads the footer"
+        );
+    }
+
+    #[test]
+    fn the_copy_sheet_numbers_every_address_it_has() {
+        // Six is the full sheet: v4, MagicDNS, public, two private, IPv6.
+        // The overlay accepts 1 through that count, so the docs must not
+        // invent a smaller range.
+        let peer = serde_json::json!({
+            "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+            "DNSName": "nas.example.ts.net.",
+            "CurAddr": "203.0.113.9:41641",
+            "PrimaryRoutes": ["192.168.7.0/24"]
+        });
+        let mut eps = HashMap::new();
+        eps.insert(
+            "nas.example.ts.net".into(),
+            vec![
+                "203.0.113.9".into(),
+                "192.168.7.20".into(),
+                "172.17.0.1".into(),
+            ],
+        );
+        let pairs = addresses(&peer, &eps);
+        assert_eq!(
+            pairs.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(),
+            [
+                "Tailscale IP",
+                "MagicDNS name",
+                "Public IP",
+                "Private IP (LAN)",
+                "Other private IP",
+                "Tailscale IPv6",
+            ]
+        );
     }
 
     #[test]
