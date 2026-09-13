@@ -2708,7 +2708,10 @@ fn day_chart(
         let mut fig: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".to_string())];
         match figure {
             Some(v) => {
-                fig.push((p.txt.clone(), v.to_string()));
+                // Same colour as the bars, and as the right-half figure:
+                // a narrow pane still has to tell arrivals from departures
+                // without reading the label.
+                fig.push((bar_colour.to_string(), v.to_string()));
                 fig.push((p.dim.clone(), format!(" {}", label)));
             }
             None if stalled => {
@@ -4752,11 +4755,14 @@ mod tests {
         // colour was never passed down, while the bars beside them had it
         // all along.
         let p = palette();
-        let coloured = |colour: &str| {
-            figure_block(Some(24), false, FIGURE_LABELS[0], 19, 3, colour, &p)
+        let colours = |block: Vec<Vec<(String, String)>>| {
+            block
                 .iter()
                 .flat_map(|row| row.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>())
                 .collect::<Vec<_>>()
+        };
+        let coloured = |colour: &str| {
+            colours(figure_block(Some(24), false, FIGURE_LABELS[0], 19, 3, colour, &p))
         };
         let opened = coloured(&p.pr);
         let merged = coloured(&p.ok);
@@ -4770,6 +4776,83 @@ mod tests {
             !opened.contains(&p.txt),
             "a digit fell back to plain text: {:?}",
             opened
+        );
+
+        // Six digits need 23 cells; a 19-wide half leaves 17, so this is
+        // the plain-number path the large-digit case above never reaches.
+        let too_wide = figure_block(Some(123456), false, FIGURE_LABELS[0], 19, 3, &p.pr, &p);
+        let fallback = colours(too_wide.clone());
+        let fallback_plain: String = too_wide
+            .iter()
+            .map(|row| plain(&seg_owned(row, 19)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            fallback_plain.contains("123456"),
+            "the wide figure was not drawn as digits: {:?}",
+            fallback_plain
+        );
+        assert!(
+            !fallback_plain.contains('█'),
+            "the wide figure still drew large: {:?}",
+            fallback_plain
+        );
+        assert!(
+            fallback.contains(&p.pr),
+            "the fallback figure is not the supplied colour"
+        );
+        assert!(
+            !fallback.contains(&p.txt),
+            "fallback digits used plain text: {:?}",
+            fallback
+        );
+
+        // A pane too narrow for the right half draws the figure under the
+        // caption. That path used to take `p.txt` even after the right
+        // half was coloured, so resizing the pane made both figures the
+        // same again.
+        let days = chart_days();
+        let series: Vec<(String, i64)> = days.iter().map(|d| (d.clone(), 1)).collect();
+        assert_eq!(split_halves(40).1, 0, "40 columns still has a right half");
+        let narrow = |colour: &str, heading: &str, label: &str| {
+            let rows = day_chart(
+                heading,
+                vec![(p.dim.clone(), "last 30d".to_string())],
+                Some(series.as_slice()),
+                colour,
+                Some(24),
+                false,
+                label,
+                40,
+                4,
+                &p,
+            );
+            rows.get(2).cloned().unwrap_or_default()
+        };
+        let opened_row = narrow(&p.pr, "OPENED / DAY", FIGURE_LABELS[1]);
+        let merged_row = narrow(&p.ok, "MERGED / DAY", FIGURE_LABELS[0]);
+        assert!(
+            plain(&opened_row).contains("24"),
+            "narrow arrivals lost the figure: {:?}",
+            plain(&opened_row)
+        );
+        assert!(
+            opened_row.contains(&p.pr),
+            "narrow arrivals figure is not the arrivals colour"
+        );
+        assert!(
+            !opened_row.contains(&p.txt),
+            "narrow arrivals fell back to plain text: {:?}",
+            opened_row
+        );
+        assert!(
+            merged_row.contains(&p.ok),
+            "narrow departures figure is not the departures colour"
+        );
+        assert!(
+            !merged_row.contains(&p.txt),
+            "narrow departures fell back to plain text: {:?}",
+            merged_row
         );
     }
 
