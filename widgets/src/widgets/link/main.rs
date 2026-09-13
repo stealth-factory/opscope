@@ -493,6 +493,11 @@ fn main() {
     // then opens showing every session at equal weight, and focus is
     // something you leave the way you entered it.
     let (mut selected, mut hide_idle, mut span_at) = (None::<usize>, false, 0usize);
+    // Where each session's row landed on the frame now on screen, and how
+    // many rows stay pinned above the window. A click is answered against
+    // the frame the reader was looking at when they clicked - the one built
+    // on the previous pass - so these are kept rather than recomputed.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     let mut count = 0usize;
     let mut detail = false;
     // How far down the detail screen we are. Clamped against the body every
@@ -611,7 +616,18 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                _ => {}
+                // A click picks the session under it, which is what the
+                // arrows do. The chart and the headings sit between the
+                // rows, so the answer comes from where each row actually
+                // landed rather than from counting down from the top.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, lscroll, &placed) {
+                            selected = Some(at);
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -642,6 +658,11 @@ fn main() {
         // noticing; this is for looking into, and the two want different
         // amounts of room for the same chart.
         if let (true, Some(pick)) = (detail && !shown.is_empty(), selected) {
+            // The detail screen has no row to pick, and the list's
+            // placements describe a frame that is no longer on screen.
+            // Leaving them would answer a click here with whichever
+            // session happened to be drawn on that row behind it.
+            placed.clear();
             // The footer is measured before the body is built, and the body
             // is told the height it actually has. Sizing the chart to the
             // whole pane and appending the hints afterwards pushed them off
@@ -720,6 +741,7 @@ fn main() {
 
         let mut rows = vec![tc::title("connections", w, &p.link)];
         let mut cursor: Option<usize> = None;
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!(" {} inbound", guard.rows.len())),
@@ -751,6 +773,11 @@ fn main() {
         } else {
             // Where the selected row lands: one heading, then a row each.
             cursor = selected.map(|at| rows.len() + 1 + at);
+            // And where every other row lands, by the same arithmetic - the
+            // table is contiguous, so this is the heading plus the index.
+            // Recorded rather than recomputed at the click, because by then
+            // the body has been windowed and the heading's row is gone.
+            rows_at = (0..shown.len()).map(|at| (rows.len() + 1 + at, at)).collect();
             rows.extend(table(&shown, &guard, w, selected, &p));
             rows.push(String::new());
             // The chart takes MIN_CHART rows whatever the table has already
@@ -828,6 +855,7 @@ fn main() {
         let room = h.saturating_sub(foot.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        (placed, list_head) = (rows_at, head.len());
         // Only on the frame a key moved the selection: chasing it every
         // frame drags the view back from wherever the wheel put it.
         if moved {

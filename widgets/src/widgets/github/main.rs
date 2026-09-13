@@ -1891,6 +1891,11 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut selected, mut tick) = (0usize, 0usize);
+    // Every row each account occupies on the frame now on screen, and how
+    // many rows stay pinned above the window. A click is answered against
+    // the frame the reader was looking at when they clicked, which is the
+    // one built on the previous pass.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // The frame's own scroll, and whether the selection moved this tick.
     //
     // The two have to be separate. The window used to be a function of the
@@ -2022,7 +2027,18 @@ fn main() {
                     let at = if detail { &mut dscroll } else { &mut board };
                     *at = at.saturating_add(1);
                 }
-                _ => {}
+                // A click picks the account under it, which is what the
+                // arrows do. Only on the board: the detail screen clears
+                // the placements below, because they describe a frame that
+                // is no longer on screen.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, board, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -2493,7 +2509,12 @@ fn main() {
         }
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
+        // The span each account covers, taken from where its rows started
+        // and ended rather than counted: an account is one row or several
+        // depending on what it has to say and how wide the pane is.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, s) in stats.iter().enumerate().skip(first).take(room) {
+            let from = rows.len();
             let here = i == selected;
             if here {
                 cursor = Some(rows.len());
@@ -2589,10 +2610,18 @@ fn main() {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
 
         // One account in full, opened from the row it belongs to.
         if detail {
+            // The board's placements describe a frame that is no longer on
+            // screen. Leaving them would answer a click here with whichever
+            // account happened to be drawn on that row behind it. The
+            // detail screen has a cursor of its own; making it clickable
+            // means recording the spans of its own sections, which is its
+            // own change.
+            placed.clear();
             if let Some(a) = stats.get(selected.min(stats.len().saturating_sub(1))) {
                 // One request, on opening, for the question the aggregates
                 // cannot answer. Held per account so leaving and coming back
@@ -2713,6 +2742,7 @@ fn main() {
         let room = h.saturating_sub(footer.len());
         let (head, rest) = rows.split_at(1.min(rows.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        (placed, list_head) = (rows_at, head.len());
         if moved {
             if let Some(at) = cursor {
                 board = tc::follow(board, at.saturating_sub(head.len()), room_below);

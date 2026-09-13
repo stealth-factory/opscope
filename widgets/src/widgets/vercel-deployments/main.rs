@@ -1166,6 +1166,11 @@ fn main() {
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
     let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    // Every row each deployment occupies on the frame now on screen, and
+    // how many rows stay pinned above the window. A click is answered
+    // against the frame the reader was looking at when they clicked, which
+    // is the one built on the previous pass.
+    let (mut placed, mut list_head): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
     // The copy list is a page of its own, opened from the detail with c.
     let mut copying = false;
     // How far down the detail is scrolled. The build log makes it taller
@@ -1334,7 +1339,18 @@ fn main() {
                         note = (String::new(), 0.0);
                     }
                 }
-                _ => {}
+                // A click picks the deployment under it, which is what the
+                // arrows do. Either of its two rows, and the commit subject
+                // under them, belong to the same deployment - which is why
+                // the spans are recorded rather than the first row.
+                other => {
+                    if let Some((_, y)) = tc::click_at(other) {
+                        if let Some(at) = tc::item_at(y, list_head, scroll, &placed) {
+                            selected = at;
+                            moved = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -1398,6 +1414,11 @@ fn main() {
                     });
                 }
             }
+            // Neither overlay has a row to pick, and the list's placements
+            // describe a frame that is no longer on screen. Leaving them
+            // would answer a click here with whichever deployment happened
+            // to be drawn on that row behind it.
+            placed.clear();
             let (rows, packed, foot_top) = if copying {
                 copy_overlay(&chosen, held.as_ref(), w, h, &note.0, &p)
             } else {
@@ -1620,7 +1641,14 @@ fn main() {
         let per_item = if cols.single { 1 } else { 2 };
         let list_start = rows.len();
         let mut cursor = None;
+        // Every row each deployment occupies, taken as a span rather than
+        // counted: a deployment is one row or two depending on the width,
+        // and the commit subject under it is conditional on top of that.
+        // Capturing where the rows started and where they ended is the only
+        // form that cannot drift from what was actually drawn.
+        let mut rows_at: Vec<(usize, usize)> = Vec::new();
         for (i, d) in shown.iter().enumerate() {
+            let from = rows.len();
             let here = i == selected;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
             let meta = &d["meta"];
@@ -1691,6 +1719,7 @@ fn main() {
                 // deployment cannot leave its commit subject below the pane.
                 cursor = Some(rows.len().saturating_sub(1));
             }
+            rows_at.extend((from..rows.len()).map(|row| (row, i)));
         }
         if shown.is_empty() {
             let said = nothing_shown(deps.len(), &filters, fetched, &err);
@@ -1721,6 +1750,7 @@ fn main() {
         let room = h.saturating_sub(footer.len());
         let head_len = 1.min(rows.len());
         let room_below = room.saturating_sub(head_len);
+        (placed, list_head) = (rows_at, head_len);
         // Only on the frame a key moved the cursor. Chasing it every frame
         // pulls the body back to the selection the instant the wheel moves
         // it, which reads as the wheel doing nothing at all.
