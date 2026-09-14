@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.19.1] - 2026-09-14
+
+### Bug Fixes
+
+- **agent-usage**: Poll Grok inside the window that judges the reading (#232)
+- **agent-usage**: Cap the Grok poll below the age that judges it (#235)
+
+### CI
+
+- Publish straight to latest again, and drop the promote job (#231)
+
 ## [0.19.0] - 2026-09-13
 
 ### Features
