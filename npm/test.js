@@ -556,149 +556,225 @@ function jobBlock(yml, name) {
   return lines.slice(start, end).join('\n');
 }
 
-test('release.yml publishes to next, so latest never names an unserved version', () => {
-  // npm publish moves `latest` in the same registry write that creates
-  // the version. v0.16.0 measured four minutes between npm taking the
-  // publish and npm being able to serve it, and `latest` named it for
-  // all four - so `npx opscope@latest` resolved a version and then died
-  // fetching it. Publishing under a tag nobody follows is the half of
-  // the fix that lives in the publish step; the other half is below.
+test('release.yml publishes untagged, so one write creates and advertises', () => {
+  // The other shape was tried: `--tag next` here and a `promote` job that
+  // moved `latest` once two clean runners had installed the version. It
+  // bought a real thing - npm cannot serve a version for some minutes
+  // after taking it, four measured on v0.16.0, and during those minutes
+  // `latest` named a version npx resolved and then failed to fetch. It
+  // was backed out because `npm dist-tag add` needs a stored credential
+  // and trusted publishing cannot supply one, so promote never ran once
+  // and four releases stopped at that fence. npm/cli#8547 is where it
+  // comes back. Until then the propagation window is accepted, and this
+  // test is what stops `--tag` being reintroduced by half.
   const yml = fs.readFileSync(
     path.join(repoRoot, '.github/workflows/release.yml'),
     'utf8',
   );
   const publishes = yml.match(/npm publish "\.\/\$dir"[^\n]*/g) || [];
   assert.equal(publishes.length, 1, 'expected exactly one npm publish line');
-  assert.match(
+  assert.doesNotMatch(
     publishes[0],
-    /--tag next(\s|$)/,
-    'npm publish without --tag moves latest before the version is servable',
+    /--tag\b/,
+    'a --tag on publish leaves latest where it was, and nothing here moves it',
   );
 });
 
-test('release.yml refuses to promote unless next still names this version', () => {
-  // Re-dispatching an older tag walks past an existing GitHub release
-  // and skips packages whose gitHead already matches, so without this
-  // check promote would move latest backwards. The same-tag retry that
-  // finishes a half-promoted release still works: next has not moved.
+test('nothing in release.yml moves a dist-tag or wants a token', () => {
+  // The promote job is gone. A `dist-tag add` anywhere in this workflow
+  // would be that job growing back a step at a time, and it cannot work:
+  // the npm CLI performs the OIDC exchange inside `npm publish` and
+  // nowhere else, so a dist-tag write wants NPM_TOKEN - a credential npm
+  // now expires after 90 days, which is a release-day failure waiting
+  // months to happen. Trusted publishing is the whole of the auth story.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  // A command, not the word. The publish step's note explains at length
+  // what `npm dist-tag add` would have been for, and that prose is the
+  // point of it - a reader who deletes the note is the reader this test
+  // cannot help. What must not come back is a line that runs it.
+  assert.equal(
+    (yml.match(/^[^#\n]*\bnpm dist-tag add\b/gm) || []).length,
+    0,
+    'release.yml moves a dist-tag again; promote is growing back',
+  );
+  assert.equal(
+    (yml.match(/^ {2}promote:$/m) || []).length,
+    0,
+    'release.yml has a promote job again',
+  );
+  assert.doesNotMatch(
+    yml,
+    /NPM_TOKEN/,
+    'release.yml wants a stored npm credential again',
+  );
+});
+
+test('publish serializes tagged runs so latest cannot move backwards', () => {
+  // tag-release.yml dispatches release.yml without waiting, so two
+  // tags can overlap. Untagged publish moves latest in the same
+  // write; without a shared group an older run finishing last
+  // rolls opscope@latest backwards. The group must be shared
+  // across tags — a per-ref group would let two tags publish at
+  // once — and unique per run otherwise, because concurrency is
+  // joined before the job-level `if` and a pull request's skipped
+  // publish would otherwise sit in a real release's slot.
   const yml = fs.readFileSync(
     path.join(repoRoot, '.github/workflows/release.yml'),
     'utf8',
   );
   const publish = jobBlock(yml, 'publish');
-  const promote = jobBlock(yml, 'promote');
+  assert.match(publish, /^ {4}concurrency:$/m, 'publish has no concurrency group');
   assert.match(
-    promote,
-    /dist-tags\.next/,
-    'promote must read next before moving latest',
+    publish,
+    /cancel-in-progress:\s*false/,
+    'publish would cancel a mid-flight publish',
   );
   assert.match(
-    promote,
-    /refusing stale promotion/,
-    'a next tag that is not this version must stop the job',
+    publish,
+    /npm-release-publish/,
+    'publish no longer names the shared tagged group',
   );
-  const nextCheckAt = promote.indexOf('dist-tags.next');
-  const writeAt = promote.indexOf('npm dist-tag add "${name}@${version}" latest');
-  assert.ok(nextCheckAt !== -1 && writeAt !== -1 && nextCheckAt < writeAt,
-    'the next check must run before any dist-tag write');
-  for (const [name, block] of [['publish', publish], ['promote', promote]]) {
-    assert.match(
-      block,
-      /group: npm-release-promotion/,
-      `${name} must share the promotion concurrency group`,
+  assert.doesNotMatch(
+    publish,
+    /github\.(ref_name|sha)\b/,
+    'a per-tag concurrency group lets two tags publish at once',
+  );
+  assert.match(
+    publish,
+    /github\.run_id/,
+    'a pull request skipped publish would share a real release\'s slot',
+  );
+  assert.match(
+    publish,
+    /node npm\/refuse-stale-latest\.js "\$version"/,
+    'publish no longer refuses a queued older tag',
+  );
+});
+
+test('refuse-stale-latest lets equal or older latest through and stops a newer one', () => {
+  const {
+    parse,
+    cmp,
+    packageNames,
+    refuseStaleLatest,
+    main,
+  } = require('./refuse-stale-latest');
+
+  assert.deepEqual(parse('0.19.0'), [0, 19, 0]);
+  assert.equal(parse('0.19'), null);
+  assert.equal(parse('v0.19.0'), null);
+  assert.ok(cmp([0, 20, 0], [0, 19, 0]) > 0);
+  assert.equal(cmp([0, 19, 0], [0, 19, 0]), 0);
+
+  const names = packageNames();
+  assert.equal(names[0], 'opscope');
+  assert.ok(names.includes('opscope-linux-x64'));
+  assert.equal(names.length, 4);
+
+  const view = (versions) => (name) =>
+    Object.prototype.hasOwnProperty.call(versions, name) ? versions[name] : null;
+
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({}),
+    }),
+    null,
+    'unpublished is not newer',
+  );
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: '0.19.0', 'opscope-linux-x64': '0.19.0' }),
+    }),
+    null,
+    'older latest is the normal next release',
+  );
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: '0.20.0' }),
+    }),
+    null,
+    'same version is a retry, not a rollback',
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.19.0',
+      names,
+      view: view({ opscope: '0.20.0' }),
+    }),
+    /A newer publish already owns latest/,
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.19.0',
+      names,
+      view: view({ 'opscope-darwin-arm64': '1.0.0' }),
+    }),
+    /opscope-darwin-arm64@latest is 1\.0\.0/,
+    'any of the four packages is enough',
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: 'not-a-version' }),
+    }),
+    /not x\.y\.z/,
+  );
+  assert.match(
+    refuseStaleLatest({ version: 'v0.20.0', names, view: view({}) }),
+    /ref version is not x\.y\.z/,
+  );
+
+  const printed = [];
+  const orig = console.error;
+  console.error = (msg) => {
+    printed.push(String(msg));
+  };
+  try {
+    assert.equal(
+      main(['node', 'refuse-stale-latest.js', '0.19.0'], view({ opscope: '0.20.0' })),
+      1,
     );
-    assert.match(
-      block,
-      /cancel-in-progress: false/,
-      `${name} must wait rather than cancel a publish mid-flight`,
-    );
-    assert.match(
-      block,
-      /third enqueue drops/,
-      `${name} must name GitHub's one-pending limit, not imply a FIFO`,
-    );
+    assert.equal(main(['node', 'refuse-stale-latest.js', '0.20.0'], view({})), 0);
+    assert.equal(main(['node', 'refuse-stale-latest.js'], view({})), 2);
+  } finally {
+    console.error = orig;
   }
+  assert.match(printed.join('\n'), /A newer publish already owns latest/);
 });
 
-test('releasing.md names the concurrency limit and the recovery', () => {
-  // The group is not a FIFO. Docs that say "queued" without the drop
-  // teach a third overlapping release that it will wait. It will not.
-  const md = fs.readFileSync(
-    path.join(repoRoot, 'docs/releasing.md'),
-    'utf8',
-  );
-  assert.match(md, /one running and one pending/);
-  assert.match(md, /third[\s\S]{0,40}drops the pending/);
-  assert.match(md, /Re-dispatch `release\.yml` at (the dropped tag|that tag)/);
-});
-
-test('the stale check runs before promote offers the by-hand commands', () => {
-  // With no NPM_TOKEN the job prints four `npm dist-tag add` commands to
-  // finish the release by hand. Printing those for a version that must
-  // not be promoted is worse than printing nothing: they are the exact
-  // writes the stale check exists to refuse, addressed to somebody with
-  // the rights to make them. So the check comes first, and it reads the
-  // registry anonymously to get there — an empty NODE_AUTH_TOKEN is a
-  // 401 rather than a fallthrough, so it has to be cleared before.
+test('the smoke jobs say they report rather than gate', () => {
+  // They run after publish, and publish has already moved `latest`. So a
+  // failure here says a release that has already happened is bad; it
+  // stops nothing. A job whose failure prevents nothing must not read as
+  // a gate - that misreading is how somebody later concludes a release
+  // was held back when it was not.
   const yml = fs.readFileSync(
     path.join(repoRoot, '.github/workflows/release.yml'),
     'utf8',
   );
-  const promote = jobBlock(yml, 'promote');
-  const guard = promote.indexOf('dist-tags.next');
-  const byHand = promote.indexOf('To finish it by hand');
-  const clears = promote.indexOf("npm config delete '//registry.npmjs.org/:_authToken'");
-  assert.notEqual(byHand, -1, 'promote no longer offers the by-hand commands');
-  assert.notEqual(clears, -1, 'promote never clears the empty auth token');
-  assert.ok(clears < guard, 'the empty token is cleared before the anonymous next read');
-  assert.ok(guard < byHand, 'the stale check runs before the by-hand commands are offered');
-  const offered = promote.slice(byHand);
-  const offeredCheck = offered.indexOf('dist-tags.next');
-  const offeredWrite = offered.indexOf('npm dist-tag add');
-  assert.ok(offeredCheck !== -1 && offeredWrite !== -1 && offeredCheck < offeredWrite,
-    'the printed recovery script must check next before any dist-tag add');
-});
-
-test('releasing.md recovery script checks next before moving latest', () => {
-  // The same four writes, copied from the docs, would roll latest
-  // backwards if next has already moved. The script has to refuse first.
-  const md = fs.readFileSync(
-    path.join(repoRoot, 'docs/releasing.md'),
-    'utf8',
-  );
-  const start = md.indexOf('```sh\nversion=X.Y.Z');
-  assert.notEqual(start, -1, 'releasing.md has no versioned recovery script');
-  const end = md.indexOf('```', start + 4);
-  const script = md.slice(start, end);
-  const check = script.indexOf('dist-tags.next');
-  const write = script.indexOf('npm dist-tag add');
-  assert.ok(check !== -1 && write !== -1 && check < write,
-    'the docs recovery script must check next before any dist-tag add');
-  assert.match(script, /opscope-linux-x64[\s\S]*opscope-darwin-arm64[\s\S]*opscope-darwin-x64[\s\S]*opscope@/,
-    'platforms first, launcher last');
-});
-
-test('release.yml moves latest only after the npm smoke job', () => {
-  // Promotion has to be a job that waits on verification, not a step
-  // inside publish: a step there would run before anything had tried to
-  // install what was published, which is the state this whole shape
-  // exists to avoid.
-  const yml = fs.readFileSync(
-    path.join(repoRoot, '.github/workflows/release.yml'),
-    'utf8',
-  );
-  const promote = jobBlock(yml, 'promote');
   assert.match(
-    promote,
-    /^ {4}needs: smoke-npm$/m,
-    'promote must wait on the job that proves the version installs',
+    yml,
+    /NEITHER OF THESE IS A GATE/,
+    'the smoke jobs no longer say they decide nothing',
   );
-  // And nowhere else may move a dist-tag. A second `dist-tag add` in the
-  // publish job would put `latest` back where it was.
-  const all = (yml.match(/npm dist-tag add/g) || []).length;
-  const mine = (promote.match(/npm dist-tag add/g) || []).length;
-  assert.ok(all > 0, 'nothing in release.yml moves a dist-tag any more');
-  assert.equal(all, mine, 'a dist-tag is moved outside the promote job');
+  // And the failure message may not describe the pipeline that was
+  // removed: `latest` has moved by the time this job can fail.
+  const smoke = jobBlock(yml, 'smoke-npm');
+  assert.doesNotMatch(
+    smoke,
+    /latest has not been moved|under the next tag/,
+    'smoke-npm still tells the reader latest was held back',
+  );
 });
 
 test('release.yml runs the two smoke checks as jobs, not as two steps', () => {

@@ -30,21 +30,22 @@ merge the release PR
                                       linked beyond the C runtime,
                                       tarballed with checksums, packed
                                       into four npm packages from those
-                                      same tarballs, published to npm
-                                      under the `next` tag, then
+                                      same tarballs, published to npm —
+                                      which moves `latest` — then
                                       attached to a GitHub Release
                               │
                               ├─► smoke-npm     two clean runners, one
-                              │   └─► promote   Linux and one macOS,
+                              │                 Linux and one macOS,
                               │                 install this exact
-                              │                 version from npm; only
-                              │                 then does `latest`
-                              │                 move, so `npx opscope`
-                              │                 is this version
+                              │                 version from npm
                               │
                               └─► smoke-module  the Luvus module's
                                                 build step fetches
                                                 this release's assets
+
+           Neither smoke job is a gate. They run after the release is
+           out, so they report on it rather than deciding it; a red
+           one is a release to fix forward, not a release held back.
 ```
 
 ## What decides the version
@@ -119,79 +120,72 @@ so `tag-release.yml` starts the build with an explicit `workflow_dispatch`
 at the tag — the documented exception to that rule — rather than relying
 on the push to do it.
 
-**npm publish uses trusted publishing, with `NPM_TOKEN` as a fallback.**
-The four packages are unscoped (`opscope` and one optional dependency
-per platform). Configure each as a trusted publisher for this
-repository's `release.yml` — no token; the job has `id-token: write`
-and publishes with provenance — or store a granular access token with
-permission to publish them as the `NPM_TOKEN` repository secret.
-Classic automation tokens were revoked in November 2025 and will not
-work.
+**npm publish uses trusted publishing, and nothing else.** The four
+packages are unscoped (`opscope` and one optional dependency per
+platform). Each is configured as a trusted publisher for this
+repository's `release.yml`: no token, `id-token: write`, published
+with provenance. There is no secret in the release pipeline and no
+fallback to one — classic automation tokens were revoked in November
+2025, and the granular tokens that replaced them expire after 90 days,
+which is a release-day failure sitting quietly in the calendar. The
+publish step deletes the `_authToken` line `setup-node` writes,
+because any credential at all, an empty one included, makes npm skip
+the OIDC exchange.
 
-The job does not fail closed on an empty secret: that would block the
-OIDC path. Publish itself fails if neither trusted publishing nor the
-token is set, and the GitHub release is then not created.
+Publish fails if trusted publishing is not configured, and the GitHub
+release is then not created.
 
-**Everything publishes under `next`, and `latest` moves last.**
-`npm publish` moves the `latest` dist-tag in the same registry write
-that creates the version, and npm cannot serve the version for some
-minutes after taking it — four, measured on v0.16.0. For those four
-minutes `latest` named a version `npx opscope@latest` resolved and
-then failed to fetch, which is the worst message npm has: the pointer
-npm itself served is what named the version it says does not exist.
-Nothing downstream could compensate, because by the time anything can
-look, the pointer is already wrong.
+**Publishing advertises, and there is a propagation window.** `npm
+publish` moves the `latest` dist-tag in the same registry write that
+creates the version, and npm cannot serve the version for some minutes
+after taking it — four, measured on v0.16.0. For those minutes
+`latest` names a version `npx opscope@latest` resolves and then fails
+to fetch, which is the worst message npm has: the pointer npm itself
+served is what named the version it says does not exist. Nothing
+downstream can compensate, because by the time anything can look, the
+pointer is already wrong.
 
-So the publish job publishes all four packages with `--tag next`,
-which nobody follows, and `latest` is moved by the `promote` job after
-`smoke-npm` has installed that exact version on a clean Linux runner
-and a clean macOS one. During the propagation window `latest` still
-names the previous release, which is what you want it to name. In the
-steady state after a good release `next` and `latest` are the same
-version; `next` ahead of `latest` means a release stopped half way.
+Publish jobs for different tags share one concurrency group and
+do not cancel each other, so two overlapping tagged runs cannot
+interleave their writes. `tag-release.yml` dispatches this
+workflow without waiting, which is how two tags overlap. An older
+run that was already queued is refused if `latest` already names
+a newer version.
 
-**`latest` only ever moves onto whatever owns `next`.** Promotion is a
-job that can be reached without publishing anything, which publishing
-itself never was — and that is a way to move `latest` *backwards*.
-Re-dispatch `release.yml` at an older tag and everything ahead of
-`promote` is green for an honest reason: publish finds each package
-already on npm from that tag's own commit and skips it, the release
-step walks past a release that exists, and `smoke-npm` installs that
-version and gets what it asked for, because it is installable — it
-simply is not the newest.
+That is a known cost, weighed and accepted, rather than something
+nobody noticed. The careful shape was tried and backed out. It
+published all four packages under `--tag next`, which nobody follows,
+and moved `latest` from a separate `promote` job once `smoke-npm` had
+installed that exact version on a clean Linux runner and a clean macOS
+one — so during the propagation window `latest` still named the
+previous release, which is what you want it to name. It worked on
+paper and never once ran: `npm dist-tag add` needs a stored
+credential, and trusted publishing cannot supply one, because the npm
+CLI performs the OIDC exchange inside `npm publish` and nowhere else.
+`npm stage` is not an alternative either — approving a staged publish
+wants interactive proof of presence, which a workflow cannot give.
 
-So `promote` reads `next` for all four packages before it writes
-anything and refuses unless every one names the version being
-promoted. One check rather than two: `next` is exactly the "is this
-still the newest" question, because publish moves it, and it goes on
-naming this version through a retry of a promote that failed or only
-half finished. The read is retried for a couple of minutes, since a
-packument briefly behind would otherwise refuse a release that is
-fine. `publish` and `promote` share a concurrency group so a newer
-publish cannot slip between that check and the dist-tag writes.
-GitHub keeps one running and one pending in the group; a third
-enqueue drops the pending job, even with `cancel-in-progress: false`.
-That is not a FIFO. Re-dispatch `release.yml` at the dropped tag.
-If `next` already names a newer version, `promote` refuses rather
-than moving `latest` backwards.
+So the choice was a secret that expires every 90 days and fails on
+some release day months from now, against a window that is brief,
+self-correcting, and what most of the ecosystem lives with. Four
+releases stopped at the promote fence before it was removed.
 
-**Promotion needs `NPM_TOKEN`; trusted publishing cannot do it.** OIDC
-covers `npm publish` and `npm stage publish` and nothing else — the
-npm CLI performs the token exchange inside the publish command, and no
-other command asks for it. `npm dist-tag add` therefore wants a
-granular access token in `NPM_TOKEN`, and with none the `promote` job
-stops before touching npm and prints a recovery script that checks
-`next` still names this version before any `dist-tag add`. `npm stage`
-is not an alternative: approving a staged
-publish requires interactive proof of presence, so a workflow cannot
-complete one.
+[npm/cli#8547](https://github.com/npm/cli/issues/8547) asks npm to
+cover dist-tags with OIDC. The day it lands this can come back exactly
+as it was: `--tag next` on the publish line, and a promote job after
+`smoke-npm`.
 
-That is the one trade this shape asks for. A granular token with
-publish rights is a long-lived credential of the kind trusted
-publishing exists to remove, and npm has no dist-tag-only scope to
-narrow it to. Leaving `NPM_TOKEN` unset is a supported choice: every
-release then ends one manual command per package away from finished,
-and never advertises a version nobody has installed.
+**The smoke jobs report; they do not gate.** `smoke-npm` and
+`smoke-module` both run after `publish`, and `publish` has already
+moved `latest`. A failure in either fails the release run loudly, and
+that is all it does — the version is out and `npx opscope` is already
+pointing at it. Read a red smoke job as *this release is bad*, not as
+*this release was stopped*. The fix is forward: cut the next version.
+Do not unpublish.
+
+`smoke-npm` retries for eight minutes against an observed four,
+because a registry that has not finished propagating is not a release
+that failed.
 
 The four packages — the launcher and one optional dependency per
 platform — are generated by `npm/pack.js` from the tarballs on the
@@ -238,17 +232,12 @@ being broken; the log says which.
 the release — cut the next one. Deleting a tag that people may already have
 fetched trades a small mistake for a confusing one.
 
-**A publish or promote was cancelled while waiting.** The shared
-`npm-release-promotion` group holds one running job and one pending.
-A third publish or promote drops the pending one, even though
-`cancel-in-progress` is false. Re-dispatch `release.yml` at that tag.
-If a newer version already owns `next`, promote refuses rather than
-rolling `latest` back.
-
-**npm publish failed and there is no GitHub release.** That is the
-intended failure: trusted publishing is not configured and `NPM_TOKEN`
-is missing, and nothing was published on either side. Fix the
-publisher or the secret, then
+**npm publish failed and there is no GitHub release.** Look at all
+four packages on npm (`opscope` and the three platform packages)
+before retrying the tag — the four publishes are not atomic, so a
+later package can fail after earlier ones have landed. If none of
+them have this version, trusted publishing is likely not configured
+and nothing was published on either side: fix the publisher, then
 re-dispatch `release.yml` at that tag. A version already on npm from
 this same commit — proven by a 40-hex `gitHead` that matches
 `GITHUB_SHA` — is skipped rather than republished, so a retry after
@@ -262,58 +251,21 @@ if a draft is still there it blocks the retry — delete it and
 re-dispatch. A release that already exists and is published is walked
 past rather than failed on, so a re-dispatch reaches the jobs after it.
 
-**A release is published but `latest` never moved.** The half-promoted
-state, and the one this shape deliberately prefers to the alternative.
-It looks like this: the tag has a GitHub release, all four packages are
-on npm at that version under `next`, `npm view opscope dist-tags` shows
-`next` ahead of `latest`, and `npx opscope` still installs the previous
-release. Nothing is broken and nobody is being handed a version that
-does not work — the release simply is not being advertised yet.
+**`smoke-npm` went red.** `latest` already names this version and npm
+could not install it from a clean runner within eight minutes, so
+`npx opscope` is pointing at something that does not work. Nothing in
+the pipeline can take that back. Cut the next version — which means
+landing the `fix:` that makes a release worth cutting, since a version
+whose binaries are byte-for-byte the last one's is the noise this
+pipeline declines to make — and do not unpublish:
+a version withdrawn from under somebody who installed it by number is
+a worse problem than one that is merely broken.
 
-Either `promote` did not run, because `smoke-npm` failed and the
-version could not be installed from a clean runner, or it ran and
-stopped for want of a token. The run log says which. The promote job
-prints the finish-by-hand commands only if this version still owns
-`next`; a stale re-dispatch is refused and offers nothing.
-
-To finish it, logged in to npm as somebody who can publish these —
-confirm every package's `next` still names this version, then move
-`latest`. Platforms first, the launcher last, because
-`opscope@latest` is the pointer people follow:
-
-```sh
-version=X.Y.Z
-for name in \
-  opscope-linux-x64 \
-  opscope-darwin-arm64 \
-  opscope-darwin-x64 \
-  opscope
-do
-  staged=$(npm view "$name" dist-tags.next | tr -d '[:space:]')
-  if [ "$staged" != "$version" ]; then
-    echo "$name@next is ${staged:-unset}, not $version" >&2
-    exit 1
-  fi
-done
-npm dist-tag add opscope-linux-x64@$version latest
-npm dist-tag add opscope-darwin-arm64@$version latest
-npm dist-tag add opscope-darwin-x64@$version latest
-npm dist-tag add opscope@$version latest
-```
-
-Setting `NPM_TOKEN` and re-dispatching `release.yml` at the tag does
-the same thing: the publish step skips every package already on npm
-from that commit, the release step skips a release that already
-exists, and the run is then there to promote. Promote itself will not
-move `latest` unless every package's `next` tag still names this
-version, so a re-dispatch of an older tag after a newer one has
-published cannot roll `npx opscope` backwards. The same-tag retry
-that finishes a half-promoted release still works: `next` has not
-moved.
-
-To abandon it instead, do nothing. `latest` stays on the previous
-release, the version sits on npm under `next` reachable only by
-someone who asks for it by name, and the next release promotes over
-it. Do not unpublish: nothing here is unpublishable, and a version
-withdrawn from under somebody who installed it by number is a worse
-problem than one nobody was pointed at.
+**Re-dispatching an older tag.** Publish refuses to write if
+`latest` already names a newer version on any of the four packages,
+so a queued older run cannot roll `npx opscope` backwards.
+Re-dispatch to finish the release that is newest. A re-dispatch of
+a fully published older tag writes nothing and moves nothing.
+A *partly* published older tag whose `latest` is still that older
+version can still finish and keep `latest` there — cut the next
+version instead.

@@ -296,20 +296,31 @@ jobs:
     # meant to cut. Dispatching at a tag is a real release, and is how
     # tag-release.yml gets here.
     if: startsWith(github.ref, 'refs/tags/v')
-    # Shared with promote. The next==version check alone has a race: an
-    # older promote can read next, a newer publish can move it, and the
-    # older run then writes latest backwards. cancel-in-progress is false
-    # so a second job waits rather than killing a publish mid-flight.
-    # GitHub still keeps only one pending: a third enqueue drops the
-    # waiting job. Re-dispatch that tag. The next check refuses a stale
-    # latest if a newer publish already owns the tag.
+    # One tagged publish at a time. Untagged `npm publish` moves
+    # `latest` in the same write, so two overlapping tagged runs
+    # can interleave their four packages and an older run finishing
+    # last rolls `opscope@latest` backwards. tag-release.yml
+    # dispatches this workflow without waiting, which is how two
+    # tags overlap. cancel-in-progress is false so a second job
+    # waits rather than killing a publish mid-flight. GitHub still
+    # keeps only one pending: a third enqueue drops the waiting
+    # job. Re-dispatch that tag.
+    #
+    # The group is shared across tags and unique per run otherwise.
+    # Concurrency is joined before the job-level `if`, so a pull
+    # request's skipped publish would otherwise sit in the same
+    # slot as a real release.
+    #
+    # The latest-is-newer check in the publish step is the other
+    # half: concurrency orders the writes, the check refuses a
+    # queued older tag if a newer publish already owns `latest`.
     concurrency:
-      group: npm-release-promotion
+      group: ${{ startsWith(github.ref, 'refs/tags/v') && 'npm-release-publish' || format('npm-release-publish-{0}', github.run_id) }}
       cancel-in-progress: false
     # Job-level permissions replace the workflow ones, so contents
     # has to be restated. id-token is for npm trusted publishing —
-    # OIDC, no secret — which is the path that still works after
-    # classic automation tokens were revoked.
+    # OIDC, no secret — which is the only path left after classic
+    # automation tokens were revoked and is the one this repo uses.
     permissions:
       contents: write
       id-token: write
@@ -344,20 +355,20 @@ jobs:
       # same binaries: there is no second copy to forget to bump.
       #
       # npm first, then the GitHub release. A missing
-      # trusted-publisher setup or a missing token then fails the
-      # job with nothing published on either side, which is
-      # agreement. The other order leaves a GitHub release whose
-      # version npm has never heard of, and `gh release create`
-      # will not run twice.
+      # trusted-publisher setup fails on the first package and
+      # leaves nothing on either side, which is agreement. The
+      # four publishes are not atomic, though: a later package
+      # can fail after earlier ones have reached npm. The GitHub
+      # release is then not created, but npm is partly published.
+      # Inspect all four versions before retrying the tag; see
+      # docs/releasing.md. The other order leaves a GitHub
+      # release whose version npm has never heard of, and
+      # `gh release create` will not run twice.
       #
-      # That ordering is unchanged. What this job no longer does is
-      # advertise: everything here goes out under the `next` tag, and
-      # `latest` is moved by the promote job at the bottom of this
-      # file, after two clean runners have installed the version by
-      # number. So the guarantee is now two-sided - a failed publish
-      # leaves nothing on either side, and a publish that lands but
-      # cannot be installed leaves `latest` on the previous release
-      # rather than on a version npm cannot yet serve.
+      # This job also advertises: `npm publish` with no `--tag` moves
+      # `latest` in the same registry write that creates the version.
+      # See the note on the publish line for the split that was tried
+      # instead and why it was backed out.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -379,22 +390,31 @@ jobs:
           ls -la npm-dist
 
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          # Trusted publishing is the path that does not need a
-          # secret: id-token: write plus --provenance. A granular
-          # access token in NPM_TOKEN is the fallback for when that
-          # is not configured yet. setup-node always writes
-          # _authToken=${NODE_AUTH_TOKEN}; an empty value is a 401,
-          # not a fallthrough to OIDC, so it is cleared when unset.
-          # Classic automation tokens were revoked in November 2025.
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            npm config delete '//registry.npmjs.org/:_authToken' || true
-            npm config delete always-auth || true
-          fi
+          # Trusted publishing is the whole story here: id-token:
+          # write plus --provenance, and no secret anywhere in this
+          # workflow. Classic automation tokens were revoked in
+          # November 2025 and granular write tokens expire after 90
+          # days, so a stored credential is a thing that fails
+          # silently on a release day months from now.
+          #
+          # setup-node with registry-url always writes
+          # _authToken=${NODE_AUTH_TOKEN} into .npmrc, and any
+          # credential at all - including an empty one, which is a
+          # 401 rather than an anonymous request - makes npm skip the
+          # OIDC exchange. NODE_AUTH_TOKEN is never set now, so this
+          # always runs; it is what clears the line setup-node wrote.
+          npm config delete '//registry.npmjs.org/:_authToken' || true
+          npm config delete always-auth || true
           version="${GITHUB_REF_NAME#v}"
+          # Refuse if latest already names a newer version on any
+          # of the four. Concurrency lets only one publish run at
+          # a time, but an older run queued behind a newer one
+          # would otherwise move latest backwards the moment it
+          # writes. Names come from npm/platform.js, the same
+          # list pack.js publishes.
+          node npm/refuse-stale-latest.js "$version"
           publish() {
             local dir="$1"
             local name published_sha
@@ -428,19 +448,35 @@ jobs:
               # `git ls-remote ssh://git@github.com/npm-dist/opscope-darwin-arm64.git`
               # and died 128 before it reached the registry.
               #
-              # --tag next, because publishing without one moves
-              # `latest` in the same write that creates the version,
-              # and the version is not servable yet. v0.16.0 measured
-              # four minutes between npm accepting the publish and npm
-              # being able to answer for it, and `latest` named it for
-              # all four - `npx opscope@latest` resolved a version and
-              # then died fetching it, which is the worst message npm
-              # has, because the pointer npm itself served is what
-              # named the version it says does not exist. Under `next`
-              # the version is fully resolvable by number and nothing
-              # points at it; the promote job moves `latest` once two
-              # runners have installed it.
-              npm publish "./$dir" --access public --provenance --tag next
+              # No --tag, so this write creates the version and moves
+              # `latest` at once. That buys a window: npm cannot serve
+              # a version for some minutes after taking it - four,
+              # measured on v0.16.0 - and for those minutes `latest`
+              # names a version `npx opscope@latest` resolves and then
+              # fails to fetch.
+              #
+              # That window is a known cost, weighed and accepted, not
+              # an oversight. The careful shape was tried: publish
+              # under `--tag next`, which nobody follows, and move
+              # `latest` from a separate job once two clean runners had
+              # installed the version by number. It worked and the
+              # window went away. It was backed out because the second
+              # half never ran once - `npm dist-tag add` needs a stored
+              # credential and trusted publishing cannot supply one:
+              # the npm CLI performs the OIDC exchange inside `npm
+              # publish` and nowhere else. The only credential npm
+              # still issues with write rights expires after 90 days,
+              # so that shape costs a secret renewed four times a year
+              # that fails on a release day, against a propagation
+              # window that is brief, self-correcting and what most of
+              # the ecosystem lives with. Four releases stopped at that
+              # fence before it was removed.
+              #
+              # https://github.com/npm/cli/issues/8547 asks npm to
+              # cover dist-tags with OIDC. The day it lands, the split
+              # can come back: publish with `--tag next` here and move
+              # `latest` after smoke-npm.
+              npm publish "./$dir" --access public --provenance
             fi
           }
           # Platforms first. The launcher lists them as
@@ -457,11 +493,11 @@ jobs:
         run: |
           set -euo pipefail
           ls -la artifacts
-          # `gh release create` will not run twice, and since promotion
-          # moved out of this job a re-dispatch at the same tag is the
-          # ordinary way to finish a release whose `latest` never moved.
-          # So an existing *published* release is a thing to walk past,
-          # not to fail on. A draft still is a failure: it is what a
+          # `gh release create` will not run twice, and a re-dispatch at
+          # the same tag is the ordinary way to finish a release whose
+          # npm half landed and whose GitHub half did not. So an
+          # existing *published* release is a thing to walk past, not
+          # to fail on. A draft still is a failure: it is what a
           # half-finished upload leaves behind, and skipping it would
           # ship a release nobody can see.
           draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft \
@@ -493,13 +529,18 @@ jobs:
   # screen is indistinguishable from an answer of no. Neither can mask the
   # other now.
   #
-  # smoke-npm is a gate. promote waits on it and `latest` moves only if it
-  # passes, which is what turns npm's propagation window from a hazard into
-  # something nobody outside this workflow can see. smoke-module is still a
-  # detector: it reports on the GitHub release assets, a different delivery
-  # path, and a failure there says nothing about whether the npm packages
-  # install - holding `latest` back for it would leave npm on a stale
-  # version for a reason that has nothing to do with npm.
+  # NEITHER OF THESE IS A GATE. Both run after `publish`, and `publish` has
+  # already moved `latest` - so by the time either of them can look, the
+  # release is out and everyone who asks npm for `opscope` is being given
+  # this version. They report; they do not decide. A failure here fails the
+  # run loudly and that is the whole of what it does: it tells you a release
+  # that has already happened is bad, which is worth knowing and is not the
+  # same as having stopped it.
+  #
+  # smoke-npm used to be a gate - `promote` waited on it and moved `latest`
+  # only if it passed. That job is gone (see the publish step's note on
+  # npm/cli#8547), and a red smoke-npm now means a bad `latest` to be fixed
+  # by cutting the next version, not a release held back.
   smoke-npm:
     needs: publish
     if: startsWith(github.ref, 'refs/tags/v')
@@ -520,9 +561,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          # By version, not by tag. `latest` has not moved yet - that is
-          # what this job decides - and the question is whether the exact
-          # version npm accepted is one npm can serve.
+          # By version, not by tag. `latest` already names this version,
+          # so asking for it by tag would answer a different question;
+          # what is being asked is whether the exact version npm
+          # accepted is one npm can serve.
           #
           # The registry can answer `npm view` before the tarball is
           # reachable from every edge, and the launcher's platform package
@@ -544,9 +586,12 @@ jobs:
             echo "opscope@${version} was still not installable from npm eight" >&2
             echo "minutes after publish, which is long past propagation: treat" >&2
             echo "this as a release that did not land, not a slow registry." >&2
-            echo "latest has not been moved and will not be; the version is on" >&2
-            echo "npm under the next tag and latest still names the previous" >&2
-            echo "release." >&2
+            echo >&2
+            echo "This job reports; it does not gate. The publish already" >&2
+            echo "happened and latest already names ${version}, so npx opscope" >&2
+            echo "is pointing at something that cannot be fetched. Nothing" >&2
+            echo "here can undo that: fix it forward by cutting the next" >&2
+            echo "version. Do not unpublish." >&2
             exit 1
           fi
           echo "$said"
@@ -611,225 +656,3 @@ jobs:
           done <<< "$(/bin/sh luvus/pane-ids.sh luvus-module.toml)"
           [ "$missing" = 0 ]
           echo "every declared pane has a binary"
-
-  # The only thing that moves `latest`, and the last thing that happens.
-  #
-  # `npm publish` used to do it, in the same registry write that created
-  # the version - so for four minutes on v0.16.0 `latest` named a version
-  # npm could not yet serve, and `npx opscope@latest` resolved it and then
-  # died fetching it. Nothing downstream could have compensated: by the
-  # time anything could look, the pointer was already wrong. Publishing
-  # under `next` and moving `latest` here makes that window harmless
-  # rather than merely short, because during it `latest` still names the
-  # previous release, which is what you want it to name.
-  #
-  # It needs a token, and trusted publishing cannot supply one. The npm
-  # CLI performs the OIDC exchange inside the publish command and nowhere
-  # else - `lib/utils/oidc.js` is required by `lib/commands/publish.js`
-  # and by no other command - and npm's documentation says the same, that
-  # OIDC supports `npm publish` and `npm stage publish`. So this job takes
-  # NPM_TOKEN, and with no token it stops and says what is unfinished and
-  # how to finish it rather than dying on a 401 nobody can read. There is
-  # deliberately no `id-token: write` here: the permission's absence is
-  # the statement that this job does not try OIDC.
-  #
-  # Re-running it is safe. A dist-tag already naming this version is a
-  # write that changes nothing.
-  promote:
-    needs: smoke-npm
-    if: startsWith(github.ref, 'refs/tags/v')
-    # Same group as publish. One running, one pending. A third enqueue drops
-    # the pending job. Re-dispatch that tag. The next check refuses a stale
-    # latest if a newer publish already owns the tag.
-    concurrency:
-      group: npm-release-promotion
-      cancel-in-progress: false
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22"
-          registry-url: https://registry.npmjs.org
-
-      - name: Move latest onto this version
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          # From the one list that has the names. A second copy here is
-          # how a new platform package comes to be published and never
-          # promoted, which would leave its `latest` a release behind
-          # while everything else moved.
-          platforms=$(node -p 'require("./npm/platform.js").PLATFORMS.map((p) => p.pkg).join("\n")')
-          launcher=$(node -p 'require("./npm/platform.js").LAUNCHER')
-          if [ -z "$platforms" ] || [ -z "$launcher" ]; then
-            echo "npm/platform.js named no packages to promote" >&2
-            exit 1
-          fi
-
-          # setup-node always writes _authToken=${NODE_AUTH_TOKEN}, and an
-          # empty value is a 401 rather than an anonymous request. The
-          # reads below come before the token is needed at all, so it is
-          # cleared here for the same reason the publish step clears it.
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            npm config delete '//registry.npmjs.org/:_authToken' || true
-            npm config delete always-auth || true
-          fi
-
-          # A re-dispatch of an older tag walks past an existing GitHub
-          # release and skips packages whose gitHead already matches, so
-          # without this check it would move latest backwards. next still
-          # naming this version is the proof nobody newer has published
-          # since; the next release promoting over a half-finished one is
-          # what docs/releasing.md calls abandoning it.
-          #
-          # Before the missing-token message below, not after it. That
-          # message tells you to run four dist-tag commands by hand, and
-          # printing those for a version that must not be promoted would
-          # be worse than printing nothing at all.
-          #
-          # In rounds over the whole list rather than one read each, so a
-          # packument that is briefly behind costs two minutes once rather
-          # than refusing a release that is fine. A stale re-dispatch is
-          # still refused - what is behind never catches up to this
-          # version, because a newer one owns the tag.
-          owns_next=0
-          behind=""
-          for round in $(seq 1 5); do
-            behind=""
-            for name in $platforms $launcher; do
-              staged=$(npm view "$name" dist-tags.next 2>/dev/null | tr -d '[:space:]' || true)
-              if [ "$staged" != "$version" ]; then
-                behind="${behind} ${name}@${staged:-unset}"
-              fi
-            done
-            if [ -z "$behind" ]; then
-              owns_next=1
-              break
-            fi
-            echo "round ${round}: next does not name ${version} for:${behind}"
-            if [ "$round" -lt 5 ]; then
-              sleep 30
-            fi
-          done
-          if [ "$owns_next" = 0 ]; then
-            was=$(npm view "$launcher" dist-tags.latest 2>/dev/null | tr -d '[:space:]' || true)
-            echo "refusing stale promotion: latest was not moved, and" >&2
-            echo "nothing was written." >&2
-            echo >&2
-            echo "  ${version} does not own the next tag. What next names:" >&2
-            for pair in $behind; do
-              echo "    ${pair}" >&2
-            done
-            echo >&2
-            echo "publish moves next, so next names the newest version" >&2
-            echo "published. A re-dispatch at an older tag gets this far" >&2
-            echo "with everything green - publish skips what is already on" >&2
-            echo "npm from that commit, the release exists, and smoke-npm" >&2
-            echo "installs that version because it is installable - and" >&2
-            echo "moving latest here would roll npx opscope backwards." >&2
-            echo >&2
-            echo "latest still names ${was:-nothing}, and stays there. If a" >&2
-            echo "newer version owns next, that is the one to promote:" >&2
-            echo "re-dispatch release.yml at its tag." >&2
-            exit 1
-          fi
-          echo "${version} owns next on every package"
-
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "latest was not moved." >&2
-            echo >&2
-            echo "  Nothing is broken: opscope@${version} is on npm under the" >&2
-            echo "  next tag, installable by version, and latest still names" >&2
-            echo "  the previous release. Nobody is being pointed at this one" >&2
-            echo "  yet, which is the safe half of a half-finished release." >&2
-            echo >&2
-            echo "npm dist-tag needs a token and trusted publishing cannot" >&2
-            echo "supply one: the npm CLI runs the OIDC exchange inside" >&2
-            echo "npm publish and nowhere else. Finishing this wants a" >&2
-            echo "granular access token in the NPM_TOKEN secret." >&2
-            echo >&2
-            echo "To finish it by hand, logged in to npm. Check next" >&2
-            echo "still names this version, then move latest. Platforms" >&2
-            echo "first, the launcher last:" >&2
-            echo >&2
-            echo "  version=${version}" >&2
-            for name in $platforms $launcher; do
-              echo "  staged=\$(npm view ${name} dist-tags.next 2>/dev/null | tr -d '[:space:]')" >&2
-              echo "  if [ \"\$staged\" != \"\$version\" ]; then" >&2
-              echo "    echo \"${name}@next is \${staged:-unset}, not \$version\" >&2" >&2
-              echo "    exit 1" >&2
-              echo "  fi" >&2
-            done
-            for name in $platforms $launcher; do
-              echo "  npm dist-tag add ${name}@\${version} latest" >&2
-            done
-            echo >&2
-            echo "Or set NPM_TOKEN and re-dispatch release.yml at this tag:" >&2
-            echo "publish skips a version already on npm from this commit," >&2
-            echo "the release step skips a release that already exists, and" >&2
-            echo "this job is what the run is then for." >&2
-            exit 1
-          fi
-
-          # Platforms first, the launcher last, for the reason the publish
-          # step orders them the same way: opscope@latest is the pointer
-          # people follow, so it is the last thing to move.
-          moved=""
-          for name in $platforms $launcher; do
-            echo "moving ${name}@latest to ${version}"
-            if ! npm dist-tag add "${name}@${version}" latest; then
-              echo >&2
-              echo "npm refused the dist-tag write for ${name}. A token that" >&2
-              echo "can publish cannot always retag; check what NPM_TOKEN is" >&2
-              echo "allowed to do." >&2
-              echo "moved so far:${moved:- nothing}" >&2
-              echo "opscope@latest moves last, so unless it is named on that" >&2
-              echo "line it is still on the previous release. Finish the rest" >&2
-              echo "by hand, or fix the token and re-dispatch at this tag." >&2
-              exit 1
-            fi
-            moved="${moved} ${name}"
-          done
-
-          # And read it back, because a pointer is the one thing here with
-          # no other evidence that it took. npm exiting 0 means the
-          # registry accepted the write, so a stale read is the packument
-          # cache catching up rather than a failure - it is said as a
-          # warning naming what to look at, since a check that fails a
-          # release that is fine gets turned off.
-          stale=""
-          for name in $platforms $launcher; do
-            seen=""
-            for attempt in $(seq 1 8); do
-              seen=$(npm view "$name" dist-tags.latest 2>/dev/null | tr -d '[:space:]' || true)
-              if [ "$seen" = "$version" ]; then
-                break
-              fi
-              sleep 15
-            done
-            if [ "$seen" = "$version" ]; then
-              echo "${name} latest reads ${seen}"
-            else
-              echo "${name} latest still reads ${seen:-nothing}"
-              stale="${stale} ${name}"
-            fi
-          done
-          if [ -n "$stale" ]; then
-            echo
-            echo "npm took every dist-tag write above and exited 0. Two"
-            echo "minutes later the registry still reads the old value for:"
-            echo "  ${stale# }"
-            echo "That is the read catching up, not a release that failed."
-            echo "Check npmjs.com if it has not settled in a few minutes."
-          else
-            echo "latest names ${version}"
-          fi
