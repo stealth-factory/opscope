@@ -296,6 +296,27 @@ jobs:
     # meant to cut. Dispatching at a tag is a real release, and is how
     # tag-release.yml gets here.
     if: startsWith(github.ref, 'refs/tags/v')
+    # One tagged publish at a time. Untagged `npm publish` moves
+    # `latest` in the same write, so two overlapping tagged runs
+    # can interleave their four packages and an older run finishing
+    # last rolls `opscope@latest` backwards. tag-release.yml
+    # dispatches this workflow without waiting, which is how two
+    # tags overlap. cancel-in-progress is false so a second job
+    # waits rather than killing a publish mid-flight. GitHub still
+    # keeps only one pending: a third enqueue drops the waiting
+    # job. Re-dispatch that tag.
+    #
+    # The group is shared across tags and unique per run otherwise.
+    # Concurrency is joined before the job-level `if`, so a pull
+    # request's skipped publish would otherwise sit in the same
+    # slot as a real release.
+    #
+    # The latest-is-newer check in the publish step is the other
+    # half: concurrency orders the writes, the check refuses a
+    # queued older tag if a newer publish already owns `latest`.
+    concurrency:
+      group: ${{ startsWith(github.ref, 'refs/tags/v') && 'npm-release-publish' || format('npm-release-publish-{0}', github.run_id) }}
+      cancel-in-progress: false
     # Job-level permissions replace the workflow ones, so contents
     # has to be restated. id-token is for npm trusted publishing —
     # OIDC, no secret — which is the only path left after classic
@@ -334,10 +355,15 @@ jobs:
       # same binaries: there is no second copy to forget to bump.
       #
       # npm first, then the GitHub release. A missing
-      # trusted-publisher setup then fails the job with nothing
-      # published on either side, which is agreement. The other
-      # order leaves a GitHub release whose version npm has never
-      # heard of, and `gh release create` will not run twice.
+      # trusted-publisher setup fails on the first package and
+      # leaves nothing on either side, which is agreement. The
+      # four publishes are not atomic, though: a later package
+      # can fail after earlier ones have reached npm. The GitHub
+      # release is then not created, but npm is partly published.
+      # Inspect all four versions before retrying the tag; see
+      # docs/releasing.md. The other order leaves a GitHub
+      # release whose version npm has never heard of, and
+      # `gh release create` will not run twice.
       #
       # This job also advertises: `npm publish` with no `--tag` moves
       # `latest` in the same registry write that creates the version.
@@ -382,6 +408,13 @@ jobs:
           npm config delete '//registry.npmjs.org/:_authToken' || true
           npm config delete always-auth || true
           version="${GITHUB_REF_NAME#v}"
+          # Refuse if latest already names a newer version on any
+          # of the four. Concurrency lets only one publish run at
+          # a time, but an older run queued behind a newer one
+          # would otherwise move latest backwards the moment it
+          # writes. Names come from npm/platform.js, the same
+          # list pack.js publishes.
+          node npm/refuse-stale-latest.js "$version"
           publish() {
             local dir="$1"
             local name published_sha

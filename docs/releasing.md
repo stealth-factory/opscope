@@ -145,6 +145,13 @@ served is what named the version it says does not exist. Nothing
 downstream can compensate, because by the time anything can look, the
 pointer is already wrong.
 
+Publish jobs for different tags share one concurrency group and
+do not cancel each other, so two overlapping tagged runs cannot
+interleave their writes. `tag-release.yml` dispatches this
+workflow without waiting, which is how two tags overlap. An older
+run that was already queued is refused if `latest` already names
+a newer version.
+
 That is a known cost, weighed and accepted, rather than something
 nobody noticed. The careful shape was tried and backed out. It
 published all four packages under `--tag next`, which nobody follows,
@@ -225,9 +232,12 @@ being broken; the log says which.
 the release — cut the next one. Deleting a tag that people may already have
 fetched trades a small mistake for a confusing one.
 
-**npm publish failed and there is no GitHub release.** That is the
-intended failure: trusted publishing is not configured, and nothing
-was published on either side. Fix the publisher, then
+**npm publish failed and there is no GitHub release.** Look at all
+four packages on npm (`opscope` and the three platform packages)
+before retrying the tag — the four publishes are not atomic, so a
+later package can fail after earlier ones have landed. If none of
+them have this version, trusted publishing is likely not configured
+and nothing was published on either side: fix the publisher, then
 re-dispatch `release.yml` at that tag. A version already on npm from
 this same commit — proven by a 40-hex `gitHead` that matches
 `GITHUB_SHA` — is skipped rather than republished, so a retry after
@@ -251,11 +261,11 @@ pipeline declines to make — and do not unpublish:
 a version withdrawn from under somebody who installed it by number is
 a worse problem than one that is merely broken.
 
-**Re-dispatching an older tag can move `latest` backwards.** Publish
-skips packages already on npm from that tag's own commit, so a
-re-dispatch of a fully-published older tag writes nothing and moves
-nothing. A *partly* published one is different: the packages it
-finishes publishing take `latest` with them, and `latest` then names
-the older version. Re-dispatch to finish the release that is newest,
-not an older one; if an older one is half-published, cut the next
+**Re-dispatching an older tag.** Publish refuses to write if
+`latest` already names a newer version on any of the four packages,
+so a queued older run cannot roll `npx opscope` backwards.
+Re-dispatch to finish the release that is newest. A re-dispatch of
+a fully published older tag writes nothing and moves nothing.
+A *partly* published older tag whose `latest` is still that older
+version can still finish and keep `latest` there — cut the next
 version instead.

@@ -612,6 +612,146 @@ test('nothing in release.yml moves a dist-tag or wants a token', () => {
   );
 });
 
+test('publish serializes tagged runs so latest cannot move backwards', () => {
+  // tag-release.yml dispatches release.yml without waiting, so two
+  // tags can overlap. Untagged publish moves latest in the same
+  // write; without a shared group an older run finishing last
+  // rolls opscope@latest backwards. The group must be shared
+  // across tags — a per-ref group would let two tags publish at
+  // once — and unique per run otherwise, because concurrency is
+  // joined before the job-level `if` and a pull request's skipped
+  // publish would otherwise sit in a real release's slot.
+  const yml = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows/release.yml'),
+    'utf8',
+  );
+  const publish = jobBlock(yml, 'publish');
+  assert.match(publish, /^ {4}concurrency:$/m, 'publish has no concurrency group');
+  assert.match(
+    publish,
+    /cancel-in-progress:\s*false/,
+    'publish would cancel a mid-flight publish',
+  );
+  assert.match(
+    publish,
+    /npm-release-publish/,
+    'publish no longer names the shared tagged group',
+  );
+  assert.doesNotMatch(
+    publish,
+    /github\.(ref_name|sha)\b/,
+    'a per-tag concurrency group lets two tags publish at once',
+  );
+  assert.match(
+    publish,
+    /github\.run_id/,
+    'a pull request skipped publish would share a real release\'s slot',
+  );
+  assert.match(
+    publish,
+    /node npm\/refuse-stale-latest\.js "\$version"/,
+    'publish no longer refuses a queued older tag',
+  );
+});
+
+test('refuse-stale-latest lets equal or older latest through and stops a newer one', () => {
+  const {
+    parse,
+    cmp,
+    packageNames,
+    refuseStaleLatest,
+    main,
+  } = require('./refuse-stale-latest');
+
+  assert.deepEqual(parse('0.19.0'), [0, 19, 0]);
+  assert.equal(parse('0.19'), null);
+  assert.equal(parse('v0.19.0'), null);
+  assert.ok(cmp([0, 20, 0], [0, 19, 0]) > 0);
+  assert.equal(cmp([0, 19, 0], [0, 19, 0]), 0);
+
+  const names = packageNames();
+  assert.equal(names[0], 'opscope');
+  assert.ok(names.includes('opscope-linux-x64'));
+  assert.equal(names.length, 4);
+
+  const view = (versions) => (name) =>
+    Object.prototype.hasOwnProperty.call(versions, name) ? versions[name] : null;
+
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({}),
+    }),
+    null,
+    'unpublished is not newer',
+  );
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: '0.19.0', 'opscope-linux-x64': '0.19.0' }),
+    }),
+    null,
+    'older latest is the normal next release',
+  );
+  assert.equal(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: '0.20.0' }),
+    }),
+    null,
+    'same version is a retry, not a rollback',
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.19.0',
+      names,
+      view: view({ opscope: '0.20.0' }),
+    }),
+    /A newer publish already owns latest/,
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.19.0',
+      names,
+      view: view({ 'opscope-darwin-arm64': '1.0.0' }),
+    }),
+    /opscope-darwin-arm64@latest is 1\.0\.0/,
+    'any of the four packages is enough',
+  );
+  assert.match(
+    refuseStaleLatest({
+      version: '0.20.0',
+      names,
+      view: view({ opscope: 'not-a-version' }),
+    }),
+    /not x\.y\.z/,
+  );
+  assert.match(
+    refuseStaleLatest({ version: 'v0.20.0', names, view: view({}) }),
+    /ref version is not x\.y\.z/,
+  );
+
+  const printed = [];
+  const orig = console.error;
+  console.error = (msg) => {
+    printed.push(String(msg));
+  };
+  try {
+    assert.equal(
+      main(['node', 'refuse-stale-latest.js', '0.19.0'], view({ opscope: '0.20.0' })),
+      1,
+    );
+    assert.equal(main(['node', 'refuse-stale-latest.js', '0.20.0'], view({})), 0);
+    assert.equal(main(['node', 'refuse-stale-latest.js'], view({})), 2);
+  } finally {
+    console.error = orig;
+  }
+  assert.match(printed.join('\n'), /A newer publish already owns latest/);
+});
+
 test('the smoke jobs say they report rather than gate', () => {
   // They run after publish, and publish has already moved `latest`. So a
   // failure here says a release that has already happened is bad; it
