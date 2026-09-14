@@ -759,7 +759,7 @@ fn fetch_billing(key: &str, seconds: u64) -> Option<serde_json::Value> {
 /// quota_from) and the fallback was a log line eleven days old, so the row
 /// said "not live" whether the ping was working or not, and turning the
 /// ping on changed nothing a reader could see.
-const GROK_FRESH_FOR: f64 = 1800.0;
+pub const GROK_FRESH_FOR: f64 = 1800.0;
 
 /// True when the reading is old enough to be worth flagging, whatever its
 /// source. A reading with no timestamp at all is treated as old, because

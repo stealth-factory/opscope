@@ -1444,7 +1444,15 @@ struct Config {
     /// one a reader can act on: the window it reports moves over days, but
     /// the spend inside it moves while they work, and an hour-old reading
     /// of a live session is exactly the stale number this asks the server
-    /// to avoid. One small GET twelve times an hour is not traffic.
+    /// to avoid.
+    ///
+    /// Fifteen, and the ceiling is `GROK_FRESH_FOR` rather than taste. A
+    /// reading older than half an hour is drawn with the cached mark, so
+    /// an interval above thirty minutes flags its own freshest possible
+    /// answer as doubtful for the back half of every cycle - telling the
+    /// reader something no configuration of theirs can fix. Fifteen leaves
+    /// the mark for a reading that is genuinely late, and asks the server
+    /// half as often as five did.
     grok_ping_minutes: f64,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
@@ -1493,7 +1501,7 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .get("grok_ping")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 5.0),
+        grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 15.0),
         antigravity_remote: raw
             .get("antigravity_remote")
             .and_then(|v| v.as_bool())
@@ -2556,6 +2564,24 @@ mod tests {
         assert_eq!(cal.best, Some(day("2026-08-01")));
         // Seven weekday rows plus the month strip.
         assert_eq!(cal.rows.len(), 8);
+    }
+
+    #[test]
+    fn the_ping_interval_stays_inside_the_freshness_window() {
+        // A reading older than GROK_FRESH_FOR is drawn with the cached
+        // mark. An interval above that flags its own freshest possible
+        // answer as doubtful for the back half of every cycle, which tells
+        // the reader something no setting of theirs can fix. This is the
+        // one relationship between the two numbers that has to hold.
+        let cfg = config_from(&serde_json::json!({}), false);
+        let interval = cfg.grok_ping_minutes * 60.0;
+        assert!(
+            interval < crate::grok::GROK_FRESH_FOR,
+            "the default polls every {}s but a reading goes stale at {}s",
+            interval,
+            crate::grok::GROK_FRESH_FOR
+        );
+        assert_eq!(cfg.grok_ping_minutes, 15.0);
     }
 
     #[test]
