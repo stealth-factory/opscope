@@ -25,8 +25,8 @@
     "antigravity_start": true,
     "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token — without it the asking works until the token lapses and then silently stops. On by default: the request goes to the endpoint the Grok CLI itself bills through, with that CLI's own token, and the alternative is a figure that moves only when you use Grok on this machine and is marked cached. Turn it off to keep the widget from talking to x.ai or starting the CLI; the tab then says so and names this key.",
     "grok_ping": true,
-    "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls.",
-    "grok_ping_minutes": 5.0
+    "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls. Keep it under thirty: a reading older than half an hour is drawn with the cached mark, so a longer interval flags its own freshest answer as doubtful for the back half of every cycle.",
+    "grok_ping_minutes": 15.0
   },
   "clocks": {
     "_cities_comment": "World clocks as [label, IANA timezone] pairs. Pick them with the search list rather than typing: a zone the database does not know is dropped without a word. The order here is ignored — the pane sorts west to east by each zone's current offset, with the label breaking ties, so the rows read as a map.",
