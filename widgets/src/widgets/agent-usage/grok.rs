@@ -295,7 +295,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
             return (fresher(held, from_log()), false, at, why);
         }
     };
-    let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
+    let ttl = ping_ttl(cfg.grok_ping_minutes);
     let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
@@ -551,7 +551,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             quota_live,
             quota_at,
             quota_why,
-            quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
+            quota_every: quota_every_secs(cfg),
             ..Data::default()
         };
     }
@@ -641,7 +641,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         quota_live: quota_read.1,
         quota_at: quota_read.2,
         quota_why: quota_read.3,
-        quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
+        quota_every: quota_every_secs(cfg),
     }
 }
 
@@ -759,7 +759,46 @@ fn fetch_billing(key: &str, seconds: u64) -> Option<serde_json::Value> {
 /// quota_from) and the fallback was a log line eleven days old, so the row
 /// said "not live" whether the ping was working or not, and turning the
 /// ping on changed nothing a reader could see.
-pub const GROK_FRESH_FOR: f64 = 1800.0;
+pub const GROK_FRESH_FOR: f64 = 1860.0;
+
+/// The longest interval the poll may be set to, and the reason it and the
+/// window above cannot collide.
+///
+/// Thirty-one minutes to call a reading old, thirty as the most anyone can
+/// wait between asks: the ceiling sits a minute under the threshold, so the
+/// freshest answer the widget can hold is always inside the window that
+/// judges it. Before this the two were unrelated, and an interval of sixty
+/// made the widget mark its own newest reading as doubtful for the back
+/// half of every cycle - a warning about something no setting of the
+/// reader's could fix.
+pub const GROK_PING_MAX: f64 = 1800.0;
+
+/// How long a reading is held, from the interval the reader asked for.
+///
+/// Clamped rather than refused: a config file is hand-edited as often as it
+/// is set through the settings screen, and a number quietly doing the
+/// nearest sane thing beats a widget that will not start. The tab says the
+/// interval it actually used, so a clamped value is visible rather than
+/// silent.
+///
+/// Its own function so the clamp under test is the one the widget runs. The
+/// first version of its test rewrote the clamp beside it and passed with
+/// the production one deleted - the shape that makes a guard look held and
+/// leaves it loose.
+pub fn ping_ttl(minutes: f64) -> f64 {
+    (minutes * 60.0).clamp(60.0, GROK_PING_MAX)
+}
+
+/// The interval the tab prints, which is the one the poll uses.
+///
+/// A hand-edited file can name sixty; the poll still waits thirty, and
+/// this is what makes that visible. Both construction sites used to
+/// multiply the raw minutes, so a clamp on the poll left the tab saying
+/// every 1h. Its own function so the number under test is the one the
+/// tab is given, not a copy of it.
+pub fn quota_every_secs(cfg: &Config) -> f64 {
+    cfg.grok_ping.then(|| ping_ttl(cfg.grok_ping_minutes)).unwrap_or(0.0)
+}
 
 /// True when the reading is old enough to be worth flagging, whatever its
 /// source. A reading with no timestamp at all is treated as old, because
@@ -1483,6 +1522,19 @@ mod tests {
     /// for the tests whose subject is the credit lane alone.
     fn no_cap_line() -> String {
         LOG_LINE.replace(r#""onDemandCap":{"val":25}"#, r#""onDemandCap":{"val":0}"#)
+    }
+
+    #[test]
+    fn a_clamped_interval_does_not_print_as_an_hour() {
+        // Sixty in the file is thirty on the glass. `every` is what the
+        // tab runs, so a copy of the clamp that never reached it would
+        // still say "1h".
+        let cfg = Config {
+            grok_ping: true,
+            grok_ping_minutes: 60.0,
+            ..Config::default()
+        };
+        assert_eq!(every(quota_every_secs(&cfg)), "30m");
     }
 
     #[test]

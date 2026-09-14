@@ -1441,15 +1441,16 @@ struct Config {
     /// Antigravity ran, which is the token's life.
     antigravity_start: bool,
     /// Minutes between those requests. Fifteen, and the ceiling is
-    /// `GROK_FRESH_FOR` rather than taste. The window it reports moves
+    /// `GROK_PING_MAX` rather than taste. The window it reports moves
     /// over days, but the spend inside it moves while they work, and an
     /// hour-old reading of a live session is exactly the stale number
-    /// this asks the server to avoid. A reading older than half an hour
-    /// is drawn with the cached mark, so an interval above thirty minutes
-    /// flags its own freshest possible answer as doubtful for the back
-    /// half of every cycle - telling the reader something no
-    /// configuration of theirs can fix. Fifteen leaves the mark for a
-    /// reading that is genuinely late.
+    /// this asks the server to avoid. A reading older than
+    /// `GROK_FRESH_FOR` is drawn with the cached mark, so the ceiling
+    /// sits a minute under that window and the freshest answer the
+    /// widget can hold is always inside it. A larger number in a
+    /// hand-edited file is clamped, and the tab says the interval
+    /// actually used. Fifteen leaves the mark for a reading that is
+    /// genuinely late.
     grok_ping_minutes: f64,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
@@ -2579,6 +2580,67 @@ mod tests {
             crate::grok::GROK_FRESH_FOR
         );
         assert_eq!(cfg.grok_ping_minutes, 15.0);
+    }
+
+    #[test]
+    fn no_permitted_interval_outlives_the_freshness_window() {
+        // The relationship, not the numbers: the longest wait the poll can
+        // be set to has to be shorter than the age at which a reading is
+        // called old. Otherwise the widget marks its own freshest possible
+        // answer as doubtful for the back half of every cycle - a warning
+        // about something no setting of the reader's could fix, which is
+        // what an interval of sixty did before the ceiling existed.
+        //
+        // Against the ceiling rather than the default, so raising the
+        // default is free and raising it past the ceiling is not.
+        assert!(
+            crate::grok::GROK_PING_MAX < crate::grok::GROK_FRESH_FOR,
+            "the longest permitted poll is {}s but a reading goes stale at {}s",
+            crate::grok::GROK_PING_MAX,
+            crate::grok::GROK_FRESH_FOR
+        );
+        let cfg = config_from(&serde_json::json!({}), false);
+        assert!(cfg.grok_ping_minutes * 60.0 <= crate::grok::GROK_PING_MAX);
+    }
+
+    #[test]
+    fn an_interval_past_the_ceiling_is_clamped_rather_than_obeyed() {
+        // Through the widget's own `ping_ttl`, not a copy of it: the
+        // schema's maximum binds the settings screen and nothing else, and
+        // a config file is hand-edited as often as it is set there. Sixty
+        // is the value that exposed the collision on a real board.
+        let ttl = crate::grok::ping_ttl;
+        assert_eq!(ttl(60.0), crate::grok::GROK_PING_MAX, "sixty was obeyed");
+        assert_eq!(ttl(15.0), 900.0, "the default is not clamped");
+        assert_eq!(ttl(0.01), 60.0, "the floor still holds");
+        assert!(
+            ttl(f64::MAX) < crate::grok::GROK_FRESH_FOR,
+            "no interval, however large, may outlive the window"
+        );
+    }
+
+    #[test]
+    fn the_tab_prints_the_interval_the_poll_uses() {
+        // The settings comment promises the tab says the interval
+        // actually used. Both Data construction sites used to multiply
+        // the raw minutes, so sixty in the file printed "every 1h"
+        // while the poll waited thirty. Through `quota_every_secs`,
+        // not a copy of it, for the same reason `ping_ttl` is a
+        // function.
+        let shown = crate::grok::quota_every_secs;
+        let clamped = config_from(&serde_json::json!({"grok_ping_minutes": 60.0}), false);
+        assert_eq!(
+            shown(&clamped),
+            crate::grok::GROK_PING_MAX,
+            "sixty printed as an hour"
+        );
+        let default = config_from(&serde_json::json!({}), false);
+        assert_eq!(shown(&default), 900.0, "the default is not clamped");
+        let off = config_from(
+            &serde_json::json!({"grok_ping": false, "grok_ping_minutes": 60.0}),
+            false,
+        );
+        assert_eq!(shown(&off), 0.0, "off still prints no interval");
     }
 
     #[test]
