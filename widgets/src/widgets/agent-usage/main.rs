@@ -1449,8 +1449,7 @@ struct Config {
     /// flags its own freshest possible answer as doubtful for the back
     /// half of every cycle - telling the reader something no
     /// configuration of theirs can fix. Fifteen leaves the mark for a
-    /// reading that is genuinely late, and asks the server half as often
-    /// as five did.
+    /// reading that is genuinely late.
     grok_ping_minutes: f64,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
