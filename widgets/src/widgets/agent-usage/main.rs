@@ -2582,6 +2582,43 @@ mod tests {
     }
 
     #[test]
+    fn no_permitted_interval_outlives_the_freshness_window() {
+        // The relationship, not the numbers: the longest wait the poll can
+        // be set to has to be shorter than the age at which a reading is
+        // called old. Otherwise the widget marks its own freshest possible
+        // answer as doubtful for the back half of every cycle - a warning
+        // about something no setting of the reader's could fix, which is
+        // what an interval of sixty did before the ceiling existed.
+        //
+        // Against the ceiling rather than the default, so raising the
+        // default is free and raising it past the ceiling is not.
+        assert!(
+            crate::grok::GROK_PING_MAX < crate::grok::GROK_FRESH_FOR,
+            "the longest permitted poll is {}s but a reading goes stale at {}s",
+            crate::grok::GROK_PING_MAX,
+            crate::grok::GROK_FRESH_FOR
+        );
+        let cfg = config_from(&serde_json::json!({}), false);
+        assert!(cfg.grok_ping_minutes * 60.0 <= crate::grok::GROK_PING_MAX);
+    }
+
+    #[test]
+    fn an_interval_past_the_ceiling_is_clamped_rather_than_obeyed() {
+        // Through the widget's own `ping_ttl`, not a copy of it: the
+        // schema's maximum binds the settings screen and nothing else, and
+        // a config file is hand-edited as often as it is set there. Sixty
+        // is the value that exposed the collision on a real board.
+        let ttl = crate::grok::ping_ttl;
+        assert_eq!(ttl(60.0), crate::grok::GROK_PING_MAX, "sixty was obeyed");
+        assert_eq!(ttl(15.0), 900.0, "the default is not clamped");
+        assert_eq!(ttl(0.01), 60.0, "the floor still holds");
+        assert!(
+            ttl(f64::MAX) < crate::grok::GROK_FRESH_FOR,
+            "no interval, however large, may outlive the window"
+        );
+    }
+
+    #[test]
     fn grok_is_asked_for_its_quota_unless_told_not_to() {
         // On by default as of 0.14. Before that a fresh install showed a
         // `cached` figure that moved only when Grok was used here, and the

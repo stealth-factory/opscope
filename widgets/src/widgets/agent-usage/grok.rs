@@ -295,7 +295,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
             return (fresher(held, from_log()), false, at, why);
         }
     };
-    let ttl = (cfg.grok_ping_minutes * 60.0).max(60.0);
+    let ttl = ping_ttl(cfg.grok_ping_minutes);
     let got = cached(caches, PING_KEY, ttl, || fetch_billing(&key, QUOTA_TIMEOUT));
     // When the ask was actually made, which is not this frame most of the
     // time. The tab reports it, so it has to be the fetch and not the read.
@@ -759,7 +759,35 @@ fn fetch_billing(key: &str, seconds: u64) -> Option<serde_json::Value> {
 /// quota_from) and the fallback was a log line eleven days old, so the row
 /// said "not live" whether the ping was working or not, and turning the
 /// ping on changed nothing a reader could see.
-pub const GROK_FRESH_FOR: f64 = 1800.0;
+pub const GROK_FRESH_FOR: f64 = 1860.0;
+
+/// The longest interval the poll may be set to, and the reason it and the
+/// window above cannot collide.
+///
+/// Thirty-one minutes to call a reading old, thirty as the most anyone can
+/// wait between asks: the ceiling sits a minute under the threshold, so the
+/// freshest answer the widget can hold is always inside the window that
+/// judges it. Before this the two were unrelated, and an interval of sixty
+/// made the widget mark its own newest reading as doubtful for the back
+/// half of every cycle - a warning about something no setting of the
+/// reader's could fix.
+pub const GROK_PING_MAX: f64 = 1800.0;
+
+/// How long a reading is held, from the interval the reader asked for.
+///
+/// Clamped rather than refused: a config file is hand-edited as often as it
+/// is set through the settings screen, and a number quietly doing the
+/// nearest sane thing beats a widget that will not start. The tab says the
+/// interval it actually used, so a clamped value is visible rather than
+/// silent.
+///
+/// Its own function so the clamp under test is the one the widget runs. The
+/// first version of its test rewrote the clamp beside it and passed with
+/// the production one deleted - the shape that makes a guard look held and
+/// leaves it loose.
+pub fn ping_ttl(minutes: f64) -> f64 {
+    (minutes * 60.0).clamp(60.0, GROK_PING_MAX)
+}
 
 /// True when the reading is old enough to be worth flagging, whatever its
 /// source. A reading with no timestamp at all is treated as old, because
