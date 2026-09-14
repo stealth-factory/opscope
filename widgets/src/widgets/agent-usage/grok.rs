@@ -551,7 +551,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
             quota_live,
             quota_at,
             quota_why,
-            quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
+            quota_every: quota_every_secs(cfg),
             ..Data::default()
         };
     }
@@ -641,7 +641,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         quota_live: quota_read.1,
         quota_at: quota_read.2,
         quota_why: quota_read.3,
-        quota_every: cfg.grok_ping.then(|| cfg.grok_ping_minutes * 60.0).unwrap_or(0.0),
+        quota_every: quota_every_secs(cfg),
     }
 }
 
@@ -787,6 +787,17 @@ pub const GROK_PING_MAX: f64 = 1800.0;
 /// leaves it loose.
 pub fn ping_ttl(minutes: f64) -> f64 {
     (minutes * 60.0).clamp(60.0, GROK_PING_MAX)
+}
+
+/// The interval the tab prints, which is the one the poll uses.
+///
+/// A hand-edited file can name sixty; the poll still waits thirty, and
+/// this is what makes that visible. Both construction sites used to
+/// multiply the raw minutes, so a clamp on the poll left the tab saying
+/// every 1h. Its own function so the number under test is the one the
+/// tab is given, not a copy of it.
+pub fn quota_every_secs(cfg: &Config) -> f64 {
+    cfg.grok_ping.then(|| ping_ttl(cfg.grok_ping_minutes)).unwrap_or(0.0)
 }
 
 /// True when the reading is old enough to be worth flagging, whatever its
@@ -1511,6 +1522,19 @@ mod tests {
     /// for the tests whose subject is the credit lane alone.
     fn no_cap_line() -> String {
         LOG_LINE.replace(r#""onDemandCap":{"val":25}"#, r#""onDemandCap":{"val":0}"#)
+    }
+
+    #[test]
+    fn a_clamped_interval_does_not_print_as_an_hour() {
+        // Sixty in the file is thirty on the glass. `every` is what the
+        // tab runs, so a copy of the clamp that never reached it would
+        // still say "1h".
+        let cfg = Config {
+            grok_ping: true,
+            grok_ping_minutes: 60.0,
+            ..Config::default()
+        };
+        assert_eq!(every(quota_every_secs(&cfg)), "30m");
     }
 
     #[test]
