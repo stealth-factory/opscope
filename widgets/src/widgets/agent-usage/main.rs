@@ -1440,19 +1440,17 @@ struct Config {
     /// one down. Turn it off and the quota lasts an hour past the last time
     /// Antigravity ran, which is the token's life.
     antigravity_start: bool,
-    /// Minutes between those requests. Five, so the figure on screen is
-    /// one a reader can act on: the window it reports moves over days, but
-    /// the spend inside it moves while they work, and an hour-old reading
-    /// of a live session is exactly the stale number this asks the server
-    /// to avoid.
-    ///
-    /// Fifteen, and the ceiling is `GROK_FRESH_FOR` rather than taste. A
-    /// reading older than half an hour is drawn with the cached mark, so
-    /// an interval above thirty minutes flags its own freshest possible
-    /// answer as doubtful for the back half of every cycle - telling the
-    /// reader something no configuration of theirs can fix. Fifteen leaves
-    /// the mark for a reading that is genuinely late, and asks the server
-    /// half as often as five did.
+    /// Minutes between those requests. Fifteen, and the ceiling is
+    /// `GROK_FRESH_FOR` rather than taste. The window it reports moves
+    /// over days, but the spend inside it moves while they work, and an
+    /// hour-old reading of a live session is exactly the stale number
+    /// this asks the server to avoid. A reading older than half an hour
+    /// is drawn with the cached mark, so an interval above thirty minutes
+    /// flags its own freshest possible answer as doubtful for the back
+    /// half of every cycle - telling the reader something no
+    /// configuration of theirs can fix. Fifteen leaves the mark for a
+    /// reading that is genuinely late, and asks the server half as often
+    /// as five did.
     grok_ping_minutes: f64,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
