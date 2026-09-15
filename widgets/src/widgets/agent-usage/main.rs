@@ -947,9 +947,56 @@ fn total_tokens(t: &Tokens) -> f64 {
         .sum()
 }
 
-/// One costed window: its label, what it cost, how many tokens, and the
-/// models under it.
-type Window = (String, f64, f64, Vec<(String, f64)>);
+/// One model inside a window: its name, what it cost where a rate exists,
+/// and how many tokens it ran.
+///
+/// The cost is optional because an absent rate and a zero rate are opposite
+/// facts: `None` is "nobody has published a price for this", which is not
+/// free.
+type Metered = (String, Option<f64>, f64);
+
+/// One costed window: its label, what the models with a rate cost, how many
+/// tokens ran in total, and the models under it.
+///
+/// The models arrive priced first, highest cost down, then the unpriced ones
+/// by tokens. The window's cost covers only the priced half while its token
+/// count covers both, so a window holding unpriced tokens says `at least`
+/// where the dollars go.
+type Window = (String, f64, f64, Vec<Metered>);
+
+/// How many models each half of a window lists before saying how many it
+/// cut.
+const TOP_MODELS: usize = 5;
+
+/// Right-align inside `n` cells, for a column of figures where a bare `—`
+/// has to sit under the dollars it stands in for.
+fn rpad(s: &str, n: usize) -> String {
+    format!("{}{}", " ".repeat(n.saturating_sub(s.chars().count())), s)
+}
+
+/// The cost cell for a window: a total, a floor, or nothing at all.
+///
+/// A window whose tokens are not all priced cannot show its dollars as the
+/// cost of those tokens, so it says `at least` - the same word `linear` and
+/// `github-prs` use for a count that stopped counting. Where nothing at all
+/// priced, `at least $0.00` would be a figure pretending to be one, so the
+/// cell takes the same dash an unpriced model row takes.
+fn window_cost(cost: f64, unpriced: bool) -> String {
+    match (unpriced, cost > 0.0) {
+        (true, false) => "—".to_string(),
+        (floor, _) => dollars(cost, floor),
+    }
+}
+
+/// A dollar figure, said as a floor where it covers only part of what the
+/// row it sits on describes.
+fn dollars(value: f64, floor: bool) -> String {
+    if floor {
+        format!("at least ${:.2}", value)
+    } else {
+        format!("${:.2}", value)
+    }
+}
 
 /// The metered section: one row per window, each with its models under it.
 ///
@@ -961,7 +1008,10 @@ fn metered_block(
     where_: &str,
     windows: &[Window],
     w: usize,
-    extras: &[(String, Option<f64>, String)],
+    // A summary figure below the windows, already rendered - a floor
+    // carries `at least` in the figure rather than in its label, which
+    // would otherwise widen the label column for every window row.
+    extras: &[(String, Option<String>, String)],
     note: &str,
     scope: &str,
     caveat: &str,
@@ -995,7 +1045,7 @@ fn metered_block(
             rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
         }
     }
-    let extras: Vec<&(String, Option<f64>, String)> =
+    let extras: Vec<&(String, Option<String>, String)> =
         extras.iter().filter(|x| x.1.is_some()).collect();
     let label_w = windows
         .iter()
@@ -1003,44 +1053,112 @@ fn metered_block(
         .chain(extras.iter().map(|x| x.0.chars().count()))
         .max()
         .unwrap_or(6);
-    for (label, cost, tokens, models) in windows {
-        rows.push(tc::seg(
-            &[
+    let cost_w = windows
+        .iter()
+        .map(|(_, cost, _, models)| {
+            window_cost(*cost, models.iter().any(|m| m.1.is_none())).chars().count()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(9)
+        + 2;
+    // The token column is content rather than decoration, so a pane too
+    // narrow drops it whole: `1.` is a wrong number, where a missing column
+    // is only a narrower pane. The rows are built and then measured, not
+    // predicted - a second copy of this arithmetic would drift from the one
+    // that draws.
+    let build = |show_tokens: bool| -> Vec<Vec<(&str, String)>> {
+        let mut out: Vec<Vec<(&str, String)>> = Vec::new();
+        for (label, cost, tokens, models) in windows {
+            let priced: Vec<&Metered> = models.iter().filter(|m| m.1.is_some()).collect();
+            let unpriced: Vec<&Metered> = models.iter().filter(|m| m.1.is_none()).collect();
+            let mut row = vec![
                 (p.txt.as_str(), format!("  {}  ", tc::pad(label, label_w))),
-                (p.agent.as_str(), tc::pad(&format!("${:.2}", cost), 11)),
-                (p.dim.as_str(), format!("{} tokens", big_num(*tokens))),
-            ],
-            w - 1,
-        ));
-        let top: Vec<&(String, f64)> = models.iter().take(5).collect();
-        let name_w = top.iter().map(|(m, _)| m.chars().count()).max().unwrap_or(0);
-        for (model, model_cost) in &top {
-            rows.push(tc::seg(
-                &[
-                    (p.dim.as_str(), format!("  {}   ", " ".repeat(label_w))),
+                (
+                    p.agent.as_str(),
+                    tc::pad(&window_cost(*cost, !unpriced.is_empty()), cost_w),
+                ),
+            ];
+            if show_tokens {
+                row.push((p.dim.as_str(), format!("{} tokens", big_num(*tokens))));
+            }
+            out.push(row);
+            // Each half gets its own five. An unpriced model competing with
+            // priced ones for the same five would vanish behind them, and a
+            // window whose unpriced list is not drawn reads as a window with
+            // nothing unpriced in it - which is the opposite fact.
+            let top: Vec<&Metered> = priced.iter().take(TOP_MODELS).copied().collect();
+            let rest: Vec<&Metered> = unpriced.iter().take(TOP_MODELS).copied().collect();
+            let indent = format!("  {}   ", " ".repeat(label_w));
+            let name_w = top
+                .iter()
+                .chain(rest.iter())
+                .map(|(m, _, _)| m.chars().count())
+                .max()
+                .unwrap_or(0);
+            let cell = |cost: &Option<f64>| match cost {
+                Some(c) => format!("${:.2}", c),
+                None => "—".to_string(),
+            };
+            let figure_w = top
+                .iter()
+                .chain(rest.iter())
+                .map(|(_, cost, _)| cell(cost).chars().count())
+                .max()
+                .unwrap_or(0);
+            let model_row = |model: &str, cost: &Option<f64>, tokens: f64| {
+                let mut row = vec![
+                    (p.dim.as_str(), indent.clone()),
                     (p.dim.as_str(), format!("{}  ", tc::pad(model, name_w))),
-                    (p.txt.as_str(), format!("${:.2}", model_cost)),
-                ],
-                w - 1,
-            ));
+                    (p.txt.as_str(), rpad(&cell(cost), figure_w)),
+                ];
+                if show_tokens {
+                    row.push((p.dim.as_str(), format!("   {} tokens", big_num(tokens))));
+                }
+                row
+            };
+            for (model, model_cost, model_tokens) in &top {
+                out.push(model_row(model, model_cost, *model_tokens));
+            }
+            if priced.len() > top.len() {
+                out.push(vec![
+                    (p.dim.as_str(), indent.clone()),
+                    (p.dim.as_str(), format!("+{} more", priced.len() - top.len())),
+                ]);
+            }
+            if !rest.is_empty() {
+                out.push(vec![
+                    (p.dim.as_str(), indent.clone()),
+                    (p.warn.as_str(), "unpriced".to_string()),
+                ]);
+                for (model, model_cost, model_tokens) in &rest {
+                    out.push(model_row(model, model_cost, *model_tokens));
+                }
+                if unpriced.len() > rest.len() {
+                    out.push(vec![
+                        (p.dim.as_str(), indent.clone()),
+                        (p.dim.as_str(), format!("+{} more unpriced", unpriced.len() - rest.len())),
+                    ]);
+                }
+            }
         }
-        if models.len() > top.len() {
-            rows.push(tc::seg(
-                &[
-                    (p.dim.as_str(), format!("  {}   ", " ".repeat(label_w))),
-                    (p.dim.as_str(), format!("+{} more", models.len() - top.len())),
-                ],
-                w - 1,
-            ));
-        }
+        out
+    };
+    let budget = w - 1;
+    let mut parts = build(true);
+    if parts.iter().any(|row| {
+        row.iter().map(|(_, text)| text.chars().count()).sum::<usize>() > budget
+    }) {
+        parts = build(false);
     }
+    rows.extend(parts.iter().map(|row| tc::seg(row, budget)));
     // Summary rows below the windows rather than in the header, which had
     // grown long enough to clip the moment a scope word joined it.
     for (label, value, colour) in extras {
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!("  {}  ", tc::pad(label, label_w))),
-                (colour.as_str(), format!("${:.2}", value.unwrap_or(0.0))),
+                (colour.as_str(), value.clone().unwrap_or_default()),
             ],
             w - 1,
         ));
@@ -1051,8 +1169,9 @@ fn metered_block(
 
 /// Cost a set of windows against the rate card.
 ///
-/// Only models with a rate are counted and the unpriced ones are named, so
-/// a half-filled card cannot read as a total.
+/// Only models with a rate are costed. The ones with none keep their tokens
+/// and get a row of their own under the window that ran them, so a
+/// half-filled card cannot read as a total.
 #[allow(clippy::too_many_arguments)]
 fn metered_rows(
     windows: &[(String, Vec<(String, Tokens)>)],
@@ -1065,21 +1184,23 @@ fn metered_rows(
     p: &Palette,
 ) -> Vec<String> {
     let mut origins: Vec<&'static str> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
     let mut built: Vec<Window> = Vec::new();
     for (label, entries) in windows {
         let (mut cost, mut tokens) = (0.0, 0.0);
-        let mut models: Vec<(String, f64)> = Vec::new();
+        let mut models: Vec<Metered> = Vec::new();
+        let mut unpriced: Vec<Metered> = Vec::new();
         for (model, counts) in entries {
-            if total_tokens(counts) <= 0.0 {
+            let ran = total_tokens(counts);
+            if ran <= 0.0 {
                 continue;
             }
             let (rate, origin) = rate_for(model, &cfg.rates);
-            tokens += total_tokens(counts);
+            tokens += ran;
             let Some(rate) = rate else {
-                if !missing.contains(model) {
-                    missing.push(model.clone());
-                }
+                // The tokens were already counted into the window above, so
+                // they carry their own row rather than vanishing at this
+                // `continue` and leaving the window's total unexplained.
+                unpriced.push((model.clone(), None, ran));
                 continue;
             };
             let this = cost_of(counts, &rate);
@@ -1087,12 +1208,20 @@ fn metered_rows(
             if !origins.contains(&origin) {
                 origins.push(origin);
             }
-            models.push((model.clone(), this));
+            models.push((model.clone(), Some(this), ran));
         }
-        models.sort_by(|a, b| b.1.total_cmp(&a.1));
+        models.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        unpriced.sort_by(|a, b| b.2.total_cmp(&a.2));
+        models.extend(unpriced);
         built.push((label.clone(), cost, tokens, models));
     }
-    if !built.iter().any(|x| x.1 > 0.0) {
+    let unpriced_anywhere = built.iter().any(|x| x.3.iter().any(|m| m.1.is_none()));
+    let priced_anywhere = built.iter().any(|x| x.1 > 0.0);
+    // Nothing priced and no rates set at all: the tab says how to set them.
+    // Where there are unpriced tokens the block is still drawn under that
+    // advice, because a tab saying only "no rates" is silent about what it
+    // would have been pricing - which is the whole of its spend.
+    if !priced_anywhere && !unpriced_anywhere {
         if cfg.rates.is_empty() {
             let mut rows = vec![tc::seg(
                 &[
@@ -1117,7 +1246,11 @@ fn metered_rows(
     // Where the prices came from belongs on screen: a list price is a dated
     // fact that goes stale in silence, and a configured one is the reader's
     // own assertion. Neither should be mistaken for the other.
-    let where_ = if origins == ["config"] {
+    let where_ = if origins.is_empty() {
+        // Nothing priced, so no price came from anywhere. The card was still
+        // the one consulted, and every row below says it had no entry.
+        format!("list prices · {}, which name none of these", LIST_RATES_AS_OF)
+    } else if origins == ["config"] {
         "your configured rates".to_string()
     } else if origins == ["list"] {
         format!("list prices · {}", LIST_RATES_AS_OF)
@@ -1127,11 +1260,18 @@ fn metered_rows(
     // A month's list cost against what the month actually cost you. Shown
     // only when the plan price is configured, because it is the one figure
     // in this section that no machine here knows.
-    let month = built.iter().find(|x| x.0 == "30 days").map(|x| x.1);
+    let month = built.iter().find(|x| x.0 == "30 days");
+    // What the plan saves is the month's cost minus the plan price, so
+    // where that cost is a floor this is one too: fixing the window row and
+    // leaving the arithmetic under it unmarked would be half a fix.
+    let floor = month.is_some_and(|m| m.3.iter().any(|x| x.1.is_none()));
     let saves = match (cfg.plan_cost.get(agent), month) {
-        (Some(paid), Some(month)) => Some(month - paid),
+        (Some(paid), Some(month)) => Some(dollars(month.1 - paid, floor)),
         _ => None,
     };
+    // The unpriced models used to arrive here as one footnote deduped
+    // across every window, which is why it could carry no number: the
+    // tokens differ per window. They are rows under their own window now.
     let mut rows = metered_block(
         &where_,
         &built,
@@ -1142,29 +1282,18 @@ fn metered_rows(
         caveat,
         p,
     );
-    if !missing.is_empty() && !rows.is_empty() {
-        missing.sort();
+    // Nothing priced and no rates of the reader's own: the advice goes under
+    // the rows it is advice about, so the tokens it would price are on
+    // screen beside it rather than in place of it.
+    if !priced_anywhere && cfg.rates.is_empty() && !rows.is_empty() {
         let at = rows.len() - 1;
-        rows.insert(
-            at,
-            tc::seg(
-                &[
-                    (
-                        p.warn.as_str(),
-                        format!(
-                            "  {} model{} unpriced: ",
-                            missing.len(),
-                            if missing.len() == 1 { "" } else { "s" }
-                        ),
-                    ),
-                    (
-                        p.dim.as_str(),
-                        missing.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
-                    ),
-                ],
-                w - 1,
-            ),
+        let advice = no_local(
+            &tc::missing_config("Set agent_usage.rates - US$ per million tokens, keyed by model."),
+            "",
+            w,
+            p,
         );
+        rows.splice(at..at, advice);
     }
     rows
 }
@@ -2115,6 +2244,201 @@ mod tests {
         assert!(!left_span(almost).starts_with('0'));
     }
     use super::*;
+
+    /// A token count under one kind, which is all the metered rows read it
+    /// through: `total_tokens` sums the kinds.
+    fn counts(n: f64) -> Tokens {
+        [("input".to_string(), n)].into_iter().collect()
+    }
+
+    /// One window holding a model the list card prices and one it names as
+    /// having no published price - the shape the whole defect lives in.
+    fn priced_and_unpriced() -> Vec<(String, Vec<(String, Tokens)>)> {
+        vec![(
+            "30 days".to_string(),
+            vec![
+                ("gpt-6-astra".to_string(), counts(1.4e9)),
+                ("codex-auto-review".to_string(), counts(61.2e6)),
+            ],
+        )]
+    }
+
+    /// What a row says once its colours are taken off, which is the only
+    /// half a reader sees and the only half a width can be measured in.
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut rest = s.chars();
+        while let Some(c) = rest.next() {
+            if c == '\u{1b}' {
+                for c in rest.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn metered(width: usize, paid: Option<f64>) -> Vec<String> {
+        let mut cfg = Config::default();
+        if let Some(paid) = paid {
+            cfg.plan_cost.insert("codex".to_string(), paid);
+        }
+        metered_rows(&priced_and_unpriced(), width, "", "codex", "", "", &cfg, &palette())
+            .iter()
+            .map(|r| plain(r))
+            .collect()
+    }
+
+    /// One priced and one unpriced model in the same window. The priced row
+    /// carries its tokens beside its dollars; the unpriced one carries its
+    /// tokens and a dash where the dollars would be; and the window figure
+    /// stops reading as the cost of the tokens beside it, because it is the
+    /// cost of only one of those two models.
+    #[test]
+    fn a_window_with_unpriced_tokens_says_at_least_and_lists_them() {
+        let rows = metered(120, None);
+        let window = rows.iter().find(|r| r.contains("30 days")).expect("a window row");
+        // 1.4B tokens of input at $10 per million, and the window's tokens
+        // are both models' - which is exactly why the dollars are a floor.
+        assert!(window.contains("at least $14000.00"), "{:?}", window);
+        assert!(window.contains("1.5B tokens"), "{:?}", window);
+        let astra = rows.iter().find(|r| r.contains("gpt-6-astra")).expect("the priced row");
+        assert!(astra.contains("$14000.00"), "{:?}", astra);
+        assert!(astra.contains("1.4B tokens"), "{:?}", astra);
+        assert!(rows.iter().any(|r| r.trim() == "unpriced"), "{:#?}", rows);
+        let review =
+            rows.iter().find(|r| r.contains("codex-auto-review")).expect("the unpriced row");
+        assert!(review.contains("61.2M tokens"), "{:?}", review);
+        assert!(review.contains('—'), "{:?}", review);
+        // No dollar figure at all, because nobody published one. A $0.00
+        // would say the vendor gives it away.
+        assert!(!review.contains('$'), "{:?}", review);
+        // And the deduped footnote that could carry no number is gone.
+        assert!(!rows.iter().any(|r| r.contains("unpriced: ")), "{:#?}", rows);
+    }
+
+    /// A tab where nothing has a price still accounts for its tokens.
+    ///
+    /// It used to draw the advice alone, which said nothing about the spend
+    /// it was advice about - a section reading as an agent nobody had used.
+    #[test]
+    fn a_tab_with_no_priced_model_still_shows_what_it_ran() {
+        let windows = vec![(
+            "30 days".to_string(),
+            vec![("codex-auto-review".to_string(), counts(61.2e6))],
+        )];
+        let rows: Vec<String> =
+            metered_rows(&windows, 120, "", "codex", "", "", &Config::default(), &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        let window = rows.iter().find(|r| r.contains("30 days")).expect("a window row");
+        // No dollars at all, because none of it priced - and not $0.00,
+        // which would say the tokens were free.
+        assert!(window.contains('—') && !window.contains('$'), "{:?}", window);
+        assert!(window.contains("61.2M tokens"), "{:?}", window);
+        assert!(
+            rows.iter().any(|r| r.contains("codex-auto-review") && r.contains("61.2M tokens")),
+            "{:#?}",
+            rows
+        );
+        // And the advice on how to price them is still there.
+        assert!(rows.iter().any(|r| r.contains("agent_usage.rates")), "{:#?}", rows);
+    }
+
+    /// What the plan saves is the month's cost minus the plan price, so it
+    /// inherits the floor rather than stating a total of its own.
+    #[test]
+    fn the_plan_saving_is_a_floor_when_the_month_holds_unpriced_tokens() {
+        let rows = metered(120, Some(200.0));
+        assert!(
+            rows.iter().any(|r| r.contains("the plan saves") && r.contains("at least $13800.00")),
+            "{:#?}",
+            rows
+        );
+        // With every token priced it is a figure again, not a floor.
+        let cfg = Config { plan_cost: [("codex".to_string(), 200.0)].into(), ..Config::default() };
+        let only_priced = vec![(
+            "30 days".to_string(),
+            vec![("gpt-6-astra".to_string(), counts(1.4e9))],
+        )];
+        let rows: Vec<String> =
+            metered_rows(&only_priced, 120, "", "codex", "", "", &cfg, &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        assert!(rows.iter().any(|r| r.contains("the plan saves  ")), "{:#?}", rows);
+        assert!(!rows.iter().any(|r| r.contains("at least")), "{:#?}", rows);
+    }
+
+    /// The token column stands down whole on a pane too narrow for it.
+    ///
+    /// `1.` is a wrong number where a missing column is only a narrower
+    /// pane, so every row that mentions tokens at all carries the entire
+    /// figure and the words after it.
+    #[test]
+    fn the_token_column_stands_down_rather_than_being_cut() {
+        let whole = ["1.5B tokens", "1.4B tokens", "61.2M tokens"];
+        let (mut seen_with, mut seen_without) = (false, false);
+        for w in 20..=140 {
+            let rows = metered(w, Some(200.0));
+            let mut tokens_here = false;
+            for row in &rows {
+                assert!(row.chars().count() <= w - 1, "{} wide: {:?}", w, row);
+                if row.contains("token") {
+                    tokens_here = true;
+                    assert!(
+                        whole.iter().any(|t| row.contains(t)) && row.ends_with(" tokens"),
+                        "{} wide: {:?}",
+                        w,
+                        row
+                    );
+                }
+            }
+            seen_with |= tokens_here;
+            seen_without |= !tokens_here;
+            // The floor is the truth of the row, so it never stands down
+            // with the column that prompted it. Below about forty columns
+            // the dollar figure itself is what `seg` is clipping - a pane
+            // that narrow has always cut this block's money column, and it
+            // is not what this test is about.
+            if w >= 40 {
+                assert!(rows.iter().any(|r| r.contains("at least $")), "{} wide: {:#?}", w, rows);
+            }
+        }
+        // Both sides of the decision are actually exercised by that sweep.
+        assert!(seen_with && seen_without);
+        assert!(metered(140, None).iter().any(|r| r.contains("1.4B tokens")));
+        assert!(!metered(40, None).iter().any(|r| r.contains("token")));
+    }
+
+    /// Each half of a window lists five and says how many it cut. The halves
+    /// are capped apart because an unpriced model losing five places to
+    /// costlier priced ones would leave the window reading as one with
+    /// nothing unpriced in it - the opposite fact.
+    #[test]
+    fn each_half_of_a_window_lists_five_and_says_what_it_cut() {
+        let mut entries: Vec<(String, Tokens)> = Vec::new();
+        for model in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5-pro", "gpt-5.4", "gpt-5.2"] {
+            entries.push((model.to_string(), counts(1e8)));
+        }
+        for model in NO_PUBLISHED_PRICE.iter().take(7) {
+            entries.push((model.to_string(), counts(1e7)));
+        }
+        let windows = vec![("30 days".to_string(), entries)];
+        let rows: Vec<String> =
+            metered_rows(&windows, 120, "", "codex", "", "", &Config::default(), &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        assert_eq!(rows.iter().filter(|r| r.contains("+2 more")).count(), 2, "{:#?}", rows);
+        assert!(rows.iter().any(|r| r.trim() == "+2 more"), "{:#?}", rows);
+        assert!(rows.iter().any(|r| r.trim() == "+2 more unpriced"), "{:#?}", rows);
+    }
 
     #[test]
     fn a_model_takes_the_longest_matching_rate() {
