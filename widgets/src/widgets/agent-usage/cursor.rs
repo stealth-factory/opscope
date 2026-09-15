@@ -1084,8 +1084,8 @@ fn window_of(by: &serde_json::Value, days: i64, today: NaiveDate) -> (f64, f64, 
     // Every Cursor event carries its own vendor rate, so nothing here is
     // unpriced and every cost is `Some`.
     let mut ranked: Vec<Metered> =
-        models.into_iter().map(|(m, (c, t))| (m, Some(c / 100.0), t)).collect();
-    ranked.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        models.into_iter().map(|(m, (c, t))| (m, Some((c / 100.0, true)), t)).collect();
+    ranked.sort_by(|a, b| super::model_amount(&b.1).total_cmp(&super::model_amount(&a.1)));
     (cents / 100.0, tokens, ranked)
 }
 
@@ -1788,7 +1788,9 @@ mod tests {
         assert!((cost - 8.50).abs() < 1e-9);
         // Costliest model first, in dollars, with the tokens that cost it.
         assert_eq!(models[0].0, "model-y");
-        assert!((models[0].1.expect("a vendor rate priced it") - 5.0).abs() < 1e-9);
+        let (cost, complete) = models[0].1.expect("a vendor rate priced it");
+        assert!((cost - 5.0).abs() < 1e-9);
+        assert!(complete, "Cursor's events carry their own rate");
         assert!((models[0].2 - 900.0).abs() < 1e-9);
     }
 

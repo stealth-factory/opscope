@@ -936,6 +936,14 @@ fn cost_of(tokens: &Tokens, rate: &Rate) -> f64 {
         .sum()
 }
 
+/// Every kind that actually ran has a rate. A missing kind is not free, so
+/// a rate that only names some of them cannot cover the tokens beside it.
+fn rate_covers(tokens: &Tokens, rate: &Rate) -> bool {
+    RATE_KINDS.iter().all(|kind| {
+        tokens.get(*kind).copied().unwrap_or(0.0) <= 0.0 || rate.contains_key(*kind)
+    })
+}
+
 fn empty_tokens() -> Tokens {
     RATE_KINDS.iter().map(|k| (k.to_string(), 0.0)).collect()
 }
@@ -952,8 +960,10 @@ fn total_tokens(t: &Tokens) -> f64 {
 ///
 /// The cost is optional because an absent rate and a zero rate are opposite
 /// facts: `None` is "nobody has published a price for this", which is not
-/// free.
-type Metered = (String, Option<f64>, f64);
+/// free. `Some((amount, complete))` is a number; `complete` is whether every
+/// kind that ran is inside that number. A partial custom rate is still a
+/// number — and a floor.
+type Metered = (String, Option<(f64, bool)>, f64);
 
 /// One costed window: its label, what the models with a rate cost, how many
 /// tokens ran in total, and the models under it.
@@ -976,16 +986,36 @@ fn rpad(s: &str, n: usize) -> String {
 
 /// The cost cell for a window: a total, a floor, or nothing at all.
 ///
-/// A window whose tokens are not all priced cannot show its dollars as the
-/// cost of those tokens, so it says `at least` - the same word `linear` and
-/// `github-prs` use for a count that stopped counting. Where nothing at all
-/// priced, `at least $0.00` would be a figure pretending to be one, so the
-/// cell takes the same dash an unpriced model row takes.
-fn window_cost(cost: f64, unpriced: bool) -> String {
-    match (unpriced, cost > 0.0) {
-        (true, false) => "—".to_string(),
-        (floor, _) => dollars(cost, floor),
+/// `priced` is whether any model had a rate — a configured zero is a rate,
+/// so `$0.00` is a figure and not a dash. `floor` is whether any tokens sit
+/// outside those rates: an unpriced model, or a rate that only names some
+/// of the kinds that ran. A window whose tokens are not all priced cannot
+/// show its dollars as the cost of those tokens, so it says `at least` -
+/// the same word `linear` and `github-prs` use for a count that stopped
+/// counting. Where nothing at all priced, `at least $0.00` would be a
+/// figure pretending to be one, so the cell takes the same dash an
+/// unpriced model row takes.
+fn window_cost(cost: f64, priced: bool, floor: bool) -> String {
+    match (priced, floor) {
+        (false, true) => "—".to_string(),
+        (_, floor) => dollars(cost, floor),
     }
+}
+
+/// Whether this window's dollars cover every token under it.
+///
+/// Empty is not a floor: nothing ran, so the cost of nothing is `$0.00`.
+/// A model with no rate, or a rate that missed a kind that ran, is.
+fn window_is_floor(models: &[Metered]) -> bool {
+    models.iter().any(|m| !matches!(m.1, Some((_, true))))
+}
+
+fn window_is_priced(models: &[Metered]) -> bool {
+    models.iter().any(|m| m.1.is_some())
+}
+
+fn model_amount(cost: &Option<(f64, bool)>) -> f64 {
+    cost.map(|(amount, _)| amount).unwrap_or(0.0)
 }
 
 /// A dollar figure, said as a floor where it covers only part of what the
@@ -1056,7 +1086,7 @@ fn metered_block(
     let cost_w = windows
         .iter()
         .map(|(_, cost, _, models)| {
-            window_cost(*cost, models.iter().any(|m| m.1.is_none())).chars().count()
+            window_cost(*cost, window_is_priced(models), window_is_floor(models)).chars().count()
         })
         .max()
         .unwrap_or(0)
@@ -1076,7 +1106,10 @@ fn metered_block(
                 (p.txt.as_str(), format!("  {}  ", tc::pad(label, label_w))),
                 (
                     p.agent.as_str(),
-                    tc::pad(&window_cost(*cost, !unpriced.is_empty()), cost_w),
+                    tc::pad(
+                        &window_cost(*cost, window_is_priced(models), window_is_floor(models)),
+                        cost_w,
+                    ),
                 ),
             ];
             if show_tokens {
@@ -1096,8 +1129,9 @@ fn metered_block(
                 .map(|(m, _, _)| m.chars().count())
                 .max()
                 .unwrap_or(0);
-            let cell = |cost: &Option<f64>| match cost {
-                Some(c) => format!("${:.2}", c),
+            let cell = |cost: &Option<(f64, bool)>| match cost {
+                Some((c, true)) => format!("${:.2}", c),
+                Some((c, false)) => dollars(*c, true),
                 None => "—".to_string(),
             };
             let figure_w = top
@@ -1106,7 +1140,7 @@ fn metered_block(
                 .map(|(_, cost, _)| cell(cost).chars().count())
                 .max()
                 .unwrap_or(0);
-            let model_row = |model: &str, cost: &Option<f64>, tokens: f64| {
+            let model_row = |model: &str, cost: &Option<(f64, bool)>, tokens: f64| {
                 let mut row = vec![
                     (p.dim.as_str(), indent.clone()),
                     (p.dim.as_str(), format!("{}  ", tc::pad(model, name_w))),
@@ -1208,15 +1242,19 @@ fn metered_rows(
             if !origins.contains(&origin) {
                 origins.push(origin);
             }
-            models.push((model.clone(), Some(this), ran));
+            // A rate that only names some of the kinds that ran is still a
+            // number — the kinds it knows — and a floor, because the rest
+            // are not free. Storing Some(this) alone would have marked it
+            // fully priced and shown an exact cost beside every token.
+            models.push((model.clone(), Some((this, rate_covers(counts, &rate))), ran));
         }
-        models.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        models.sort_by(|a, b| model_amount(&b.1).total_cmp(&model_amount(&a.1)));
         unpriced.sort_by(|a, b| b.2.total_cmp(&a.2));
         models.extend(unpriced);
         built.push((label.clone(), cost, tokens, models));
     }
     let unpriced_anywhere = built.iter().any(|x| x.3.iter().any(|m| m.1.is_none()));
-    let priced_anywhere = built.iter().any(|x| x.1 > 0.0);
+    let priced_anywhere = built.iter().any(|x| window_is_priced(&x.3));
     // Nothing priced and no rates set at all: the tab says how to set them.
     // Where there are unpriced tokens the block is still drawn under that
     // advice, because a tab saying only "no rates" is silent about what it
@@ -1264,7 +1302,7 @@ fn metered_rows(
     // What the plan saves is the month's cost minus the plan price, so
     // where that cost is a floor this is one too: fixing the window row and
     // leaving the arithmetic under it unmarked would be half a fix.
-    let floor = month.is_some_and(|m| m.3.iter().any(|x| x.1.is_none()));
+    let floor = month.is_some_and(|m| window_is_floor(&m.3));
     let saves = match (cfg.plan_cost.get(agent), month) {
         (Some(paid), Some(month)) => Some(dollars(month.1 - paid, floor)),
         _ => None,
@@ -2319,6 +2357,84 @@ mod tests {
         assert!(!review.contains('$'), "{:?}", review);
         // And the deduped footnote that could carry no number is gone.
         assert!(!rows.iter().any(|r| r.contains("unpriced: ")), "{:#?}", rows);
+    }
+
+    /// A configured zero is a rate, not the absence of one. Treating
+    /// `cost > 0` as "priced" hid every model on a tab whose rates were all
+    /// zero and drew the empty-rates advice over the spend it was about.
+    #[test]
+    fn a_zero_rate_is_still_a_price() {
+        let mut cfg = Config::default();
+        cfg.rates.insert(
+            "gpt-6-astra".into(),
+            RATE_KINDS.iter().map(|k| (k.to_string(), 0.0)).collect(),
+        );
+        let windows = vec![(
+            "30 days".to_string(),
+            vec![("gpt-6-astra".to_string(), counts(1.4e9))],
+        )];
+        let rows: Vec<String> =
+            metered_rows(&windows, 120, "", "codex", "", "", &cfg, &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        let window = rows.iter().find(|r| r.contains("30 days")).expect("a window row");
+        assert!(window.contains("$0.00"), "{:?}", window);
+        assert!(!window.contains("at least"), "{:?}", window);
+        assert!(!window.contains('—'), "{:?}", window);
+        assert!(
+            rows.iter().any(|r| r.contains("gpt-6-astra") && r.contains("$0.00")),
+            "{:#?}",
+            rows
+        );
+        assert!(!rows.iter().any(|r| r.contains("agent_usage.rates")), "{:#?}", rows);
+    }
+
+    /// Zero-cost priced usage beside unpriced tokens is a floor of nothing,
+    /// not a dash. A dash would say nobody priced anything in the window.
+    #[test]
+    fn a_zero_rate_beside_unpriced_tokens_is_a_floor() {
+        let mut cfg = Config::default();
+        cfg.rates.insert(
+            "gpt-6-astra".into(),
+            RATE_KINDS.iter().map(|k| (k.to_string(), 0.0)).collect(),
+        );
+        let rows: Vec<String> =
+            metered_rows(&priced_and_unpriced(), 120, "", "codex", "", "", &cfg, &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        let window = rows.iter().find(|r| r.contains("30 days")).expect("a window row");
+        assert!(window.contains("at least $0.00"), "{:?}", window);
+        assert!(rows.iter().any(|r| r.trim() == "unpriced"), "{:#?}", rows);
+    }
+
+    /// Config that names only some kinds cannot cover tokens of the others.
+    /// The known dollars stay on the row; the window and the row both say
+    /// they are a floor, because the rest of the tokens are not free.
+    #[test]
+    fn a_partial_custom_rate_keeps_the_figures_a_floor() {
+        let mut cfg = Config::default();
+        cfg.rates.insert(
+            "codex-auto-review".into(),
+            [("input".to_string(), 2.0)].into_iter().collect(),
+        );
+        let tokens: Tokens =
+            [("input".to_string(), 1e6), ("output".to_string(), 1e6)].into_iter().collect();
+        let windows = vec![("30 days".to_string(), vec![("codex-auto-review".to_string(), tokens)])];
+        let rows: Vec<String> =
+            metered_rows(&windows, 120, "", "codex", "", "", &cfg, &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        let window = rows.iter().find(|r| r.contains("30 days")).expect("a window row");
+        assert!(window.contains("at least $2.00"), "{:?}", window);
+        let review =
+            rows.iter().find(|r| r.contains("codex-auto-review")).expect("the partial row");
+        assert!(review.contains("at least $2.00"), "{:?}", review);
+        // It had a rate, so it is not the unpriced heading — that heading
+        // is for models with no rate at all.
+        assert!(!rows.iter().any(|r| r.trim() == "unpriced"), "{:#?}", rows);
     }
 
     /// A tab where nothing has a price still accounts for its tokens.

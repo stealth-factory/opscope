@@ -510,7 +510,10 @@ partial result presented as a total — `at least` is the same word `linear` and
 `github-prs` use for a count that stopped counting, and *what the plan saves*
 below inherits it, because that figure is this one minus the plan price.
 Where **nothing** in a window priced, the money column is a dash rather than
-`at least $0.00`: a floor of nothing is not a figure.
+`at least $0.00`: a floor of nothing is not a figure. A configured rate of
+zero is a rate, so it stays `$0.00` — and `at least $0.00` where unpriced
+tokens sit beside it. A rate that only names some of the kinds that ran is
+the same floor: the kinds it knows are a number, the rest are not free.
 
 The token column is content, so a pane too narrow drops it whole rather than
 cutting it — `1.` is a wrong number where a missing column is only a narrower
