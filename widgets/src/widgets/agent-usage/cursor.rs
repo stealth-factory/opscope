@@ -588,8 +588,13 @@ fn tally_events(events: &[serde_json::Value], cut: f64, t: &mut Tally) -> f64 {
         }
         let usage = &e["tokenUsage"];
         let cents = loose(&usage["totalCents"]).unwrap_or(0.0);
-        let n = loose(&usage["inputTokens"]).unwrap_or(0.0)
-            + loose(&usage["outputTokens"]).unwrap_or(0.0);
+        // Same three kinds SPEND sums. Cache reads are most of some
+        // models' traffic; leaving them out here would put a smaller
+        // number on METERED than on SPEND for the same events.
+        let n = ["inputTokens", "outputTokens", "cacheReadTokens"]
+            .iter()
+            .map(|k| loose(&usage[*k]).unwrap_or(0.0))
+            .sum::<f64>();
         let Some(day) = Local
             .timestamp_opt(when as i64, 0)
             .single()
@@ -1803,7 +1808,8 @@ mod tests {
             serde_json::json!({
                 "timestamp": recent.to_string(), "model": "model-x",
                 "tokenUsage": { "totalCents": "12.5",
-                                "inputTokens": "100", "outputTokens": "50" },
+                                "inputTokens": "100", "outputTokens": "50",
+                                "cacheReadTokens": "25" },
             }),
             serde_json::json!({
                 "timestamp": ancient.to_string(), "model": "model-x",
@@ -1817,7 +1823,9 @@ mod tests {
         // caller this page reached past the window and paging can stop.
         assert_eq!(t.counted, 1);
         assert!((t.vendor_cents - 12.5).abs() < 1e-9);
-        assert!((t.tokens - 150.0).abs() < 1e-9);
+        // 100 in + 50 out + 25 cache. A sum that skipped cache reads
+        // would still be 150 and would disagree with SPEND.
+        assert!((t.tokens - 175.0).abs() < 1e-9);
         assert!(oldest < cut);
     }
 
