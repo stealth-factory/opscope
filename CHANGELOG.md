@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.20.0] - 2026-09-15
+
+### Features
+
+- **agent-usage**: Metered rows carry their tokens, and unpriced models get rows (#237)
+
 ## [0.19.1] - 2026-09-14
 
 ### Bug Fixes
