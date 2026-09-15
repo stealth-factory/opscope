@@ -450,24 +450,74 @@ means *too early to say* rather than *on track*.
 ## METERED: today, and the last thirty days
 
 Every tab that can cost its tokens shows the same block — two windows, each
-with its money, its tokens, and the models underneath.
+with its money, its tokens, and the models underneath, and every model row
+carrying both: what it cost and what it ran.
 
 ```
- ── METERED ── at list prices · Aug 2026
-  today    $645.26    688.8M tokens
-             claude-opus-5    $635.17
-             claude-opus-4-8   $10.09
-  30 days  $13884.16  15.8B tokens
-             claude-opus-5    $9640.29
-             claude-opus-4-8  $2298.76
-             claude-fable-5   $1931.03
-             claude-sonnet-5    $14.08
-  the plan saves  $13685.12
+ ── METERED ── this machine · at list prices · 4 Sep 2026
+  Counted from transcripts, which are written where the agent ran. Claude used
+  on another machine, or on claude.ai, is not in here.
+  today    $172.64    74.3M tokens
+            claude-fable-5-1  $124.38   24.6M tokens
+            claude-opus-5      $48.26   49.7M tokens
+  30 days  $24887.52  29.9B tokens
+            claude-opus-5     $20892.59   26.5B tokens
+            claude-fable-5-1   $3295.78   2.8B tokens
+            claude-fable-5      $518.33   221.5M tokens
+            claude-opus-4-8     $145.36   149.8M tokens
+            claude-sonnet-5      $35.27   103.5M tokens
+            +1 more
 ```
 
 Two windows because they answer different questions: a month says what an
 agent costs, today says whether that is still true. A single all-time figure
 answered neither, and quietly flattered a habit that changed last week.
+
+Dollars and tokens together because either alone is half the answer: one
+model's spend is a great many cheap tokens and another's is a few expensive
+ones, and the rows used to say only the money. Five models per window, with
+`+N more` where there were more.
+
+### A model with no published price keeps its tokens
+
+Where a window holds a model nobody has published a rate for, that model gets
+a row of its own under an `unpriced` heading, with its tokens and **no dollar
+figure** — a dash, because `$0.00` would say the vendor gives it away. Its own
+five, separately from the priced five, so a costly priced model cannot push it
+off a list whose absence would read as *nothing here is unpriced*.
+
+And the window's money then says **at least**:
+
+```
+ ── METERED ── this machine · at list prices · 4 Sep 2026
+  CLI rollouts only. Codex bills Cloud, Web, Desktop and the rest to the same
+  account, and none of those leave anything on this disk to count.
+  today    at least $9.79     27.3M tokens
+            gpt-5.6-sol        $9.79   16.3M tokens
+            unpriced
+            codex-auto-review      —   11.1M tokens
+  30 days  at least $1256.47  2.0B tokens
+            gpt-6-astra        $891.76   583.0M tokens
+            gpt-5.6-sol        $364.68   685.0M tokens
+            gpt-5.6-luna         $0.04   677.3k tokens
+            unpriced
+            codex-auto-review        —   732.1M tokens
+```
+
+The token count on that row covers every model; the dollars cover only the
+priced ones. Those were once the same row with nothing saying so, which is a
+partial result presented as a total — `at least` is the same word `linear` and
+`github-prs` use for a count that stopped counting, and *what the plan saves*
+below inherits it, because that figure is this one minus the plan price.
+Where **nothing** in a window priced, the money column is a dash rather than
+`at least $0.00`: a floor of nothing is not a figure. A configured rate of
+zero is a rate, so it stays `$0.00` — and `at least $0.00` where unpriced
+tokens sit beside it. A rate that only names some of the kinds that ran is
+the same floor: the kinds it knows are a number, the rest are not free.
+
+The token column is content, so a pane too narrow drops it whole rather than
+cutting it — `1.` is a wrong number where a missing column is only a narrower
+pane. The dollars, the dash and the `at least` never stand down.
 
 ### Where the prices come from
 

@@ -588,8 +588,13 @@ fn tally_events(events: &[serde_json::Value], cut: f64, t: &mut Tally) -> f64 {
         }
         let usage = &e["tokenUsage"];
         let cents = loose(&usage["totalCents"]).unwrap_or(0.0);
-        let n = loose(&usage["inputTokens"]).unwrap_or(0.0)
-            + loose(&usage["outputTokens"]).unwrap_or(0.0);
+        // Same three kinds SPEND sums. Cache reads are most of some
+        // models' traffic; leaving them out here would put a smaller
+        // number on METERED than on SPEND for the same events.
+        let n = ["inputTokens", "outputTokens", "cacheReadTokens"]
+            .iter()
+            .map(|k| loose(&usage[*k]).unwrap_or(0.0))
+            .sum::<f64>();
         let Some(day) = Local
             .timestamp_opt(when as i64, 0)
             .single()
@@ -1062,10 +1067,13 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 /// One metered window over the per-day, per-model summary: dollars, tokens
 /// and the models under them, costliest first.
-fn window_of(by: &serde_json::Value, days: i64, today: NaiveDate) -> (f64, f64, Vec<(String, f64)>) {
+fn window_of(by: &serde_json::Value, days: i64, today: NaiveDate) -> (f64, f64, Vec<Metered>) {
     let first = (today - Days::days(days - 1)).format("%Y-%m-%d").to_string();
     let (mut cents, mut tokens) = (0.0, 0.0);
-    let mut models: HashMap<String, f64> = HashMap::new();
+    // Per model, both figures the day already carries: Cursor's own events
+    // state cents and tokens together, so its model rows can show their
+    // tokens beside their dollars like every other metered tab.
+    let mut models: HashMap<String, (f64, f64)> = HashMap::new();
     for (day, entries) in by.as_object().into_iter().flatten() {
         if day.as_str() < first.as_str() {
             continue;
@@ -1073,11 +1081,16 @@ fn window_of(by: &serde_json::Value, days: i64, today: NaiveDate) -> (f64, f64, 
         for (model, got) in entries.as_object().into_iter().flatten() {
             cents += num(got, "cents");
             tokens += num(got, "tokens");
-            *models.entry(model.clone()).or_default() += num(got, "cents");
+            let seen = models.entry(model.clone()).or_default();
+            seen.0 += num(got, "cents");
+            seen.1 += num(got, "tokens");
         }
     }
-    let mut ranked: Vec<(String, f64)> = models.into_iter().map(|(m, c)| (m, c / 100.0)).collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Every Cursor event carries its own vendor rate, so nothing here is
+    // unpriced and every cost is `Some`.
+    let mut ranked: Vec<Metered> =
+        models.into_iter().map(|(m, (c, t))| (m, Some((c / 100.0, true)), t)).collect();
+    ranked.sort_by(|a, b| super::model_amount(&b.1).total_cmp(&super::model_amount(&a.1)));
     (cents / 100.0, tokens, ranked)
 }
 
@@ -1123,10 +1136,12 @@ fn cursor_metered(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         &[
             (
                 "cursor meters".to_string(),
-                (metered > 0.0).then_some(metered / 100.0),
+                (metered > 0.0).then(|| dollars(metered / 100.0, false)),
                 p.txt.clone(),
             ),
-            ("the plan saves".to_string(), saves, p.ok.clone()),
+            // Nothing Cursor reports is unpriced, so neither figure here is
+            // a floor.
+            ("the plan saves".to_string(), saves.map(|s| dollars(s, false)), p.ok.clone()),
         ],
         "",
         "account-wide",
@@ -1224,6 +1239,33 @@ fn cursor_daily(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     rows
 }
 
+/// The narrowest bar that still reads as one.
+const MIN_BAR: usize = 6;
+
+/// The row before the bar: two of indent, the name's twenty-six, ten of
+/// right-aligned dollars, and the slack this bar has always been measured
+/// from.
+const SPEND_PREFIX: usize = 44;
+
+/// Whether a spend row has the width for its token column beside the bar.
+///
+/// What is left after the columns before it has to hold the count, the two
+/// spaces after it, and a bar worth drawing - or the count stands down
+/// whole rather than being cut.
+fn spend_tokens_fit(w: usize, tok_w: usize) -> bool {
+    w.saturating_sub(SPEND_PREFIX) >= tok_w + 2 + MIN_BAR
+}
+
+/// How many cells the bar gets, once the token column has had its own.
+///
+/// The bar takes what is left rather than all of it: sized from the whole
+/// width it would be clipped by `seg` exactly where the count sits, and a
+/// bar cut at the right is a meter reading higher than it should.
+fn spend_bar_width(w: usize, tok_w: usize, tokens: bool) -> usize {
+    let taken = SPEND_PREFIX + if tokens { tok_w + 2 } else { 0 };
+    w.saturating_sub(taken).max(MIN_BAR)
+}
+
 /// Where the money went, per model, over the last 30 days.
 fn cursor_spend_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let Some(spend) = d.spend.as_ref() else {
@@ -1254,23 +1296,45 @@ fn cursor_spend_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         v if v != 0.0 => v,
         _ => 1.0,
     };
-    for a in models.iter().take(6) {
+    // What each model's dollars bought, in the same `N tokens` shape the
+    // shared METERED block uses, so a reader crossing from the CODEX tab
+    // sees one format rather than two. The figures are the aggregation's
+    // own, read through `loose` because Connect writes int64 as a string
+    // and `as_f64` on one of those is a silent zero.
+    let shown: Vec<&&serde_json::Value> = models.iter().take(6).collect();
+    let tokens_of = |a: &serde_json::Value| {
+        ["inputTokens", "outputTokens", "cacheReadTokens"]
+            .iter()
+            .map(|k| loose(&a[*k]).unwrap_or(0.0))
+            .sum::<f64>()
+    };
+    let tokens_cell = |a: &serde_json::Value| format!("{} tokens", big_num(tokens_of(a)));
+    let tok_w =
+        shown.iter().map(|a| tokens_cell(a).chars().count()).max().unwrap_or(0);
+    // The column and the bar share what is left rather than the bar taking
+    // it: a bar that swallowed the space would push the count off a pane
+    // with room for it, and a count cut to `1.` is a wrong number where a
+    // missing column is only a narrower pane.
+    let show_tokens = spend_tokens_fit(w, tok_w);
+    let bar_w = spend_bar_width(w, tok_w, show_tokens);
+    for a in shown {
         let cents = cents_of(a);
-        let bar = tc::meter(cents / top, w.saturating_sub(44).max(6));
+        let bar = tc::meter(cents / top, bar_w);
         let filled = bar.chars().filter(|c| *c == '█').count();
         let name = match text(a, "modelIntent") {
             s if s.is_empty() => "?".to_string(),
             s => s,
         };
-        rows.push(tc::seg(
-            &[
-                (p.txt.as_str(), format!("  {}", tc::pad(&name, 26))),
-                (p.agent.as_str(), format!("{:>9} ", format!("${:.2}", cents / 100.0))),
-                (p.agent.as_str(), bar.chars().take(filled).collect::<String>()),
-                (p.grid.as_str(), bar.chars().skip(filled).collect::<String>()),
-            ],
-            w - 1,
-        ));
+        let mut parts = vec![
+            (p.txt.as_str(), format!("  {}", tc::pad(&name, 26))),
+            (p.agent.as_str(), format!("{:>9} ", format!("${:.2}", cents / 100.0))),
+        ];
+        if show_tokens {
+            parts.push((p.dim.as_str(), format!("{:>1$}  ", tokens_cell(a), tok_w)));
+        }
+        parts.push((p.agent.as_str(), bar.chars().take(filled).collect::<String>()));
+        parts.push((p.grid.as_str(), bar.chars().skip(filled).collect::<String>()));
+        rows.push(tc::seg(&parts, w - 1));
     }
     rows.push(String::new());
     rows
@@ -1621,6 +1685,97 @@ mod tests {
         assert!(lanes(&Data::default()).is_empty());
     }
 
+    /// The bar and the token column share what the row leaves them.
+    ///
+    /// A bar sized from the whole width would be clipped by `seg` exactly
+    /// where the count is drawn, which reads as a fuller meter than the
+    /// figure it stands for.
+    #[test]
+    fn the_bar_leaves_the_token_column_its_cells() {
+        // From the first width with room for a bar at all: below that the
+        // floor wins and `seg` clips, which is this block's behaviour from
+        // before there was a column to share with.
+        for w in SPEND_PREFIX + MIN_BAR..=200 {
+            for tok_w in [9, 11, 13, 14] {
+                let tokens = spend_tokens_fit(w, tok_w);
+                let column = if tokens { tok_w + 2 } else { 0 };
+                assert!(
+                    spend_bar_width(w, tok_w, tokens) + column
+                        <= w.saturating_sub(SPEND_PREFIX),
+                    "{} wide, a {}-cell count",
+                    w,
+                    tok_w
+                );
+            }
+        }
+    }
+
+    /// Every spend row says what its dollars bought, and the count stands
+    /// down whole rather than being cut when the pane cannot hold it beside
+    /// a bar worth drawing.
+    #[test]
+    fn a_spend_row_carries_its_tokens_and_drops_them_before_cutting_them() {
+        // Every token field here is a JSON string, which is how Connect
+        // writes int64 and how the live call answers.
+        let d = Data {
+            spend: Some(serde_json::json!({
+                "totalCostCents": "125413",
+                "totalInputTokens": "1300000000",
+                "totalOutputTokens": "61200000",
+                "totalCacheReadTokens": "39000000",
+                "aggregations": [
+                    { "modelIntent": "claude-opus-5", "totalCents": "89176",
+                      "inputTokens": "1300000000", "outputTokens": "61200000",
+                      "cacheReadTokens": "39000000" },
+                    { "modelIntent": "composer-1", "totalCents": "4",
+                      "inputTokens": "400000", "outputTokens": "100000",
+                      "cacheReadTokens": "0" },
+                ],
+            })),
+            ..Data::default()
+        };
+        let p = palette();
+        let whole = ["1.4B tokens", "500.0k tokens"];
+        let (mut with, mut without) = (false, false);
+        for w in 20..=160 {
+            let rows: Vec<String> =
+                cursor_spend_rows(&d, w, &p).iter().map(|r| strip(r)).collect();
+            let model_rows: Vec<&String> =
+                rows.iter().filter(|r| r.contains("claude-opus-5") || r.contains("composer-1")).collect();
+            assert_eq!(model_rows.len(), 2, "{} wide: {:#?}", w, rows);
+            for row in &model_rows {
+                assert!(row.chars().count() <= w - 1, "{} wide: {:?}", w, row);
+                // The bar never goes away for the column beside it. Below
+                // about forty-five columns the name and the dollars alone
+                // fill the row and `seg` has always clipped the bar off -
+                // that is this block's oldest behaviour, not this column's.
+                if w >= 45 {
+                    assert!(row.contains('█') || row.contains('░'), "{} wide: {:?}", w, row);
+                }
+                if row.contains("token") {
+                    assert!(whole.iter().any(|t| row.contains(t)), "{} wide: {:?}", w, row);
+                }
+            }
+            let here = model_rows.iter().any(|r| r.contains("token"));
+            with |= here;
+            without |= !here;
+        }
+        assert!(with && without);
+        // Wide enough: the count is there, and it is the aggregation's own
+        // figure rather than the zero a plain as_f64 would read off a
+        // string.
+        let wide: Vec<String> = cursor_spend_rows(&d, 160, &p).iter().map(|r| strip(r)).collect();
+        assert!(
+            wide.iter().any(|r| r.contains("claude-opus-5") && r.contains("1.4B tokens")),
+            "{:#?}",
+            wide
+        );
+        // Narrow enough that the bar would have nothing left: no count, and
+        // no clipped half of one.
+        let narrow: Vec<String> = cursor_spend_rows(&d, 60, &p).iter().map(|r| strip(r)).collect();
+        assert!(!narrow.iter().any(|r| r.contains("token")), "{:#?}", narrow);
+    }
+
     #[test]
     fn a_window_takes_only_its_own_days() {
         let today = NaiveDate::parse_from_str("2026-08-23", "%Y-%m-%d").unwrap();
@@ -1636,9 +1791,12 @@ mod tests {
         // Thirty days reaches 1 August but not 1 July.
         let (cost, _, models) = window_of(&by, 30, today);
         assert!((cost - 8.50).abs() < 1e-9);
-        // Costliest model first, in dollars.
+        // Costliest model first, in dollars, with the tokens that cost it.
         assert_eq!(models[0].0, "model-y");
-        assert!((models[0].1 - 5.0).abs() < 1e-9);
+        let (cost, complete) = models[0].1.expect("a vendor rate priced it");
+        assert!((cost - 5.0).abs() < 1e-9);
+        assert!(complete, "Cursor's events carry their own rate");
+        assert!((models[0].2 - 900.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1650,7 +1808,8 @@ mod tests {
             serde_json::json!({
                 "timestamp": recent.to_string(), "model": "model-x",
                 "tokenUsage": { "totalCents": "12.5",
-                                "inputTokens": "100", "outputTokens": "50" },
+                                "inputTokens": "100", "outputTokens": "50",
+                                "cacheReadTokens": "25" },
             }),
             serde_json::json!({
                 "timestamp": ancient.to_string(), "model": "model-x",
@@ -1664,7 +1823,9 @@ mod tests {
         // caller this page reached past the window and paging can stop.
         assert_eq!(t.counted, 1);
         assert!((t.vendor_cents - 12.5).abs() < 1e-9);
-        assert!((t.tokens - 150.0).abs() < 1e-9);
+        // 100 in + 50 out + 25 cache. A sum that skipped cache reads
+        // would still be 150 and would disagree with SPEND.
+        assert!((t.tokens - 175.0).abs() < 1e-9);
         assert!(oldest < cut);
     }
 
