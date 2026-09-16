@@ -1599,11 +1599,43 @@ fn stats_source_note(c: &Data, w: usize, p: &Palette) -> Vec<String> {
     if !c.ok {
         return Vec::new();
     }
+    // The quota clause has to agree with the quota heading, which is right
+    // above it and already says whether the reading is live, cached or
+    // missing. Saying "fetched live" from `c.ok` alone described the stats
+    // cache and then made a claim about a different source entirely - so a
+    // failed request drew `cached 10h ago` at the top of the tab and
+    // `fetched live` at the foot of it, about the same numbers.
+    let quota = match (c.quota.is_some(), c.quota_live) {
+        (true, true) => ", and the quota above is the account's, fetched live",
+        (true, false) => ", and the quota above is the account's, from the cached reading its heading dates",
+        // Nothing to describe. `why_no_limits` has already said why, in the
+        // place the bars would have been.
+        (false, _) => "",
+    };
+    let body = format!(
+        "Summary, by model and the two per-day charts are Claude Code's own \
+         stats cache, which it rebuilds only when you open /usage - so they \
+         stop at the last whole day it counted. Output rate and the money \
+         below are read here from the transcripts{}.",
+        quota
+    );
+    // Wrapped to the width these rows are actually drawn at, not a wider
+    // one: the line is indented two and clipped at `w - 1`, so anything
+    // wrapped to more than `w - 3` is cut mid-word and the rest of the
+    // sentence is never moved to a later line. The old floor of twenty did
+    // that to every pane under twenty-three cells.
+    let avail = w.saturating_sub(3);
+    // `wrap_text` breaks on spaces, so a word longer than the width it is
+    // given goes out whole and `seg` cuts it - `transcripts,` came back as
+    // `transcrip` at twelve cells. A word broken by the frame teaches a word
+    // that does not exist, and half a sentence of guidance is worth less than
+    // none: the lag on the chart headings still fits at these widths, and the
+    // README carries the long version. So the note stands down instead.
+    if body.split_whitespace().map(|word| word.chars().count()).max().unwrap_or(0) > avail {
+        return Vec::new();
+    }
     let mut rows = vec![String::new()];
-    for line in wrap_text(
-        "Summary, by model and the two per-day charts are Claude Code's own          stats cache, which it rebuilds only when you open /usage - so they          stop at the last whole day it counted. Output rate and the money          below are read here from the transcripts, and the quota above is the          account's, fetched live.",
-        w.saturating_sub(4).max(20),
-    ) {
+    for line in wrap_text(&body, avail) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
     }
     rows
@@ -2171,6 +2203,74 @@ mod tests {
         // Nothing to describe when the cache was never read.
         let none = Data { ok: false, ..Default::default() };
         assert!(!bare(&claude_tab(&none, 90, &palette()).join(" ")).contains("/usage"));
+    }
+
+    /// The note sits under the quota heading and must not contradict it. It
+    /// used to say "fetched live" off `c.ok`, which is about the stats cache
+    /// - so a failed request drew `cached 10h ago` at the top of the tab and
+    /// `fetched live` at the foot of it, about the same numbers.
+    #[test]
+    fn the_note_does_not_call_a_cached_quota_live() {
+        let base = Data { ok: true, stats: cache_at("2026-09-15"), ..Default::default() };
+        let say = |c: &Data| bare(&stats_source_note(c, 90, &palette()).join(" "));
+
+        let live = Data { quota: Some(measured()), quota_live: true, ..base.clone() };
+        assert!(say(&live).contains("fetched live"), "{}", say(&live));
+
+        let cached = Data {
+            quota: Some(measured()),
+            quota_live: false,
+            quota_at: now() - 3600.0,
+            ..base.clone()
+        };
+        let got = say(&cached);
+        assert!(!got.contains("fetched live"), "a cached reading called live: {}", got);
+        assert!(got.contains("cached"), "{}", got);
+
+        // No quota at all: the clause goes entirely rather than describing a
+        // source that is not there. `why_no_limits` has already said why.
+        let absent = Data { quota: None, ..base.clone() };
+        let got = say(&absent);
+        assert!(!got.contains("quota above"), "described a quota there is none of: {}", got);
+        assert!(got.contains("/usage"), "the cache half went with it: {}", got);
+    }
+
+    /// Wrapped to the width it is drawn at. The rows are indented two and
+    /// clipped at `w - 1`, so wrapping to anything wider cuts the sentence
+    /// mid-word and never moves the rest to a later line - which a floor of
+    /// twenty did to every pane under twenty-three cells.
+    #[test]
+    fn the_note_wraps_to_the_width_it_is_drawn_at() {
+        let c = Data {
+            ok: true,
+            stats: cache_at("2026-09-15"),
+            quota: Some(measured()),
+            quota_live: true,
+            ..Default::default()
+        };
+        let mut drawn_at = 0;
+        for w in 8..=120 {
+            let rows = stats_source_note(&c, w, &palette());
+            let lines: Vec<String> =
+                rows.iter().map(|r| bare(r)).filter(|r| !r.trim().is_empty()).collect();
+            if lines.is_empty() {
+                continue;
+            }
+            drawn_at += 1;
+            for line in &lines {
+                assert!(line.chars().count() <= w - 1, "width {}: {:?}", w, line);
+            }
+            // Drawn at all means drawn whole. Every word of the sentence
+            // survives somewhere in the block - no word is cut by the frame,
+            // at any width where the note appears.
+            let joined = lines.join(" ");
+            for word in ["stats", "cache,", "/usage", "transcripts,", "live"] {
+                assert!(joined.contains(word), "width {} lost {:?}: {}", w, word, joined);
+            }
+        }
+        // And it is not simply never drawn, which would satisfy the above.
+        assert!(drawn_at > 90, "the note stood down almost everywhere: {}", drawn_at);
+        assert!(stats_source_note(&c, 12, &palette()).is_empty(), "shredded at 12 cells");
     }
 
     /// A drawn row without its colour escapes, so a length means cells on
