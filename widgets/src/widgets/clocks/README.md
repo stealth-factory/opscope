@@ -70,8 +70,8 @@ if you routinely run 40 minutes over a 25-minute block, that is telling you the
 block is the wrong length.
 
 **Alerts** fire when a phase elapses and again every minute it keeps running, so
-ignoring one gets progressively harder. Four channels, only one of which needs
-Herdr:
+ignoring one gets progressively harder. Five channels; the first three need
+nothing but a terminal:
 
 | Channel | Reaches |
 |---|---|
@@ -79,6 +79,7 @@ Herdr:
 | OSC 9 | iTerm2, WezTerm, Windows Terminal, Ghostty |
 | OSC 777 | urxvt and others |
 | Herdr toast + sound | only under Herdr; additive, skipped elsewhere |
+| Luvus notification | only under Luvus; additive, skipped elsewhere |
 
 Escape sequences are the only channel that survives SSH — the widget runs on a
 server, so anything local to it would fire where nobody is sitting. The panel
@@ -138,3 +139,22 @@ The flash colour's text contrast is derived from its luminance, so a dark
 choice stays readable rather than turning the panel into a block.
 
 State lives in `~/.local/state/opscope/pomodoro.json`.
+
+**One timer, however many panes.** Every instance shares that file: it is
+re-read each tick, and a lower `seq` is refused, so a key in any pane
+reaches every other pane inside a tick. Writes go through a temp file and
+a rename, so a reader sees the whole old file or the whole new one and
+never a torn one, and a writer that wakes holding a lower `seq` will not
+replace a fresher file with its own snapshot. Two keys in the same tick is
+last-writer-wins by seq.
+
+A phase change therefore arrives in every pane at once, and each
+notification channel is toasted once: the panes that can deliver Herdr
+race for a Herdr marker, the panes that can deliver Luvus race for a
+Luvus marker, and a pane that can deliver neither does not take a claim.
+The once-a-minute repeat, while a finished pomodoro sits ignored, is its
+own event and its own race — which is also the retry if the winner dies
+before its toast leaves. Markers are swept when the day rolls over, except
+those named for a block that is still running. The flash, the bell and
+the escape sequences stay per-pane, since each is the pane talking to the
+terminal it is drawn in.
