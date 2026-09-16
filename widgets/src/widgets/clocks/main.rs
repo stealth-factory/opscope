@@ -350,9 +350,10 @@ fn flash_ink(rgb: (u8, u8, u8)) -> String {
 /// `--body`, `--position` and `--sound` and nothing else; Luvus's
 /// `ui notification push` takes `--text` and `--level`, and `--dedupe-key`
 /// exists only on `clear` - the string appears nowhere in the 250 KB of
-/// `luvus uhp schema`. So the caller claims the event first and only the
-/// winner arrives here. See `claim_event`.
-fn toast(title: &str, body: &str) {
+/// `luvus uhp schema`. Each channel claims its own marker, so a pane
+/// under Herdr and a pane under Luvus each toast once, and a pane that
+/// can deliver neither never takes a claim. See `claim_event`.
+fn toast(title: &str, body: &str, deadline: f64, minute: i64) {
     let herdr = std::env::var("HERDR_ENV").unwrap_or_default() == "1";
     let luvus = std::env::var("LUVUS_ENV").unwrap_or_default() == "1";
     if !herdr && !luvus {
@@ -374,7 +375,7 @@ fn toast(title: &str, body: &str) {
         // being down is not something the pane can fix, and it still has a
         // clock to draw. The once-a-minute repeat is the retry.
     };
-    if herdr {
+    if herdr && claim_event(deadline, minute, "herdr") {
         // --body, not a second positional: `herdr notification show` takes
         // one <TITLE> and the body is an option. Passing it positionally
         // fails with "unknown option" - silently, since stderr is nulled -
@@ -384,7 +385,7 @@ fn toast(title: &str, body: &str) {
             &["notification", "show", title, "--body", body, "--sound", "done"],
         );
     }
-    if luvus {
+    if luvus && claim_event(deadline, minute, "luvus") {
         // One line, because a Luvus notification has no title of its own.
         let text = format!("{}: {}", title, body);
         spawn(
@@ -406,17 +407,29 @@ fn toast(title: &str, body: &str) {
 /// finished pomodoro sits ignored, carries the minute - so each repeat is
 /// its own event with its own race, and nothing has to remember that the
 /// first one happened.
-fn marker_path(deadline: f64, minute: i64) -> String {
+fn marker_path(deadline: f64, minute: i64, channel: &str) -> String {
     let dir = std::path::Path::new(&state_file())
         .parent()
         .map(|d| d.to_string_lossy().to_string())
         .unwrap_or_default();
     let ms = (deadline * 1000.0) as i64;
     if minute <= 0 {
-        format!("{}/notified.{}", dir, ms)
+        format!("{}/notified.{}.{}", dir, ms, channel)
     } else {
-        format!("{}/notified.{}.{}", dir, ms, minute)
+        format!("{}/notified.{}.{}.{}", dir, ms, minute, channel)
     }
+}
+
+/// The prefix every marker for one deadline shares, channel and minute
+/// included. Used so a sweep can keep the block that is still ringing
+/// while dropping yesterday's spent ones.
+fn marker_keep_prefix(deadline: f64) -> String {
+    format!("notified.{}", (deadline * 1000.0) as i64)
+}
+
+fn marker_is_for(name: &str, deadline: f64) -> bool {
+    let prefix = marker_keep_prefix(deadline);
+    name == prefix || name.starts_with(&format!("{}.", prefix))
 }
 
 /// Claim one event's toast, or find it already claimed.
@@ -451,8 +464,8 @@ fn marker_path(deadline: f64, minute: i64) -> String {
 ///   duplicate a toast with. Falling back to `true` keeps the behaviour a
 ///   single pane has always had; returning false would silence the timer on
 ///   the machine where it is the only thing still working.
-fn claim_event(deadline: f64, minute: i64) -> bool {
-    let path = marker_path(deadline, minute);
+fn claim_event(deadline: f64, minute: i64, channel: &str) -> bool {
+    let path = marker_path(deadline, minute, channel);
     if let Some(dir) = std::path::Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -467,14 +480,16 @@ fn claim_event(deadline: f64, minute: i64) -> bool {
     }
 }
 
-/// Drop every event marker.
+/// Drop event markers that no longer belong to a running block.
 ///
 /// One per phase change plus one per minute of an ignored pomodoro, so a
 /// panel left alone for a day would leave hundreds behind. They go on the
 /// day rollover the widget already performs, and again whenever a state
 /// file from another day is read - a widget run nine to five never lives
-/// across midnight and would otherwise never sweep at all.
-fn sweep_markers() {
+/// across midnight and would otherwise never sweep at all. `keep` is the
+/// deadline of a block that is still ringing, so a late pane's sweep
+/// cannot delete a claim a rolled pane has already won.
+fn sweep_markers(keep: Option<f64>) {
     let Some(dir) = std::path::Path::new(&state_file()).parent().map(|d| d.to_path_buf()) else {
         return;
     };
@@ -482,9 +497,18 @@ fn sweep_markers() {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with("notified.") {
-            let _ = std::fs::remove_file(entry.path());
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("notified.") {
+            continue;
         }
+        // A pane that has already rolled can claim the current overtime
+        // event before a later pane notices midnight. Sweeping that
+        // marker would let the late pane toast again. Keep every marker
+        // named for a block that is still running.
+        if keep.is_some_and(|deadline| marker_is_for(&name, deadline)) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
     }
 }
 
@@ -549,13 +573,6 @@ struct Pomodoro {
     /// a write we have already applied, or one we made ourselves, and
     /// applying it again would drag the timer backwards.
     seq: u64,
-    /// The state file's mtime as this instance last saw it.
-    ///
-    /// The cheap half of sharing: stat every tick, read only when it has
-    /// moved. The loop already runs at 200 ms and a stat is a syscall, so
-    /// there is no watcher and no daemon, and a key in any pane reaches
-    /// every other pane inside a tick.
-    seen: Option<std::time::SystemTime>,
 }
 
 /// Where the pomodoro's state lives, shared with clocks.py.
@@ -571,17 +588,6 @@ fn state_file() -> String {
         )
     });
     format!("{}/opscope/pomodoro.json", base)
-}
-
-/// When the state file was last written, if it is there at all.
-///
-/// The whole of the shared timer's cost, once a tick. No inotify, no
-/// kqueue, no thread: a stat is one syscall against a file that changes
-/// only when somebody presses a key.
-fn state_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(state_file())
-        .and_then(|m| m.modified())
-        .ok()
 }
 
 /// Today, in the form the state file stores.
@@ -648,7 +654,6 @@ impl Pomodoro {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
             seq: 0,
-            seen: None,
         };
         it.left = it.duration();
         // Never running from config alone. Setting it running here left the
@@ -665,10 +670,6 @@ impl Pomodoro {
     /// progress belong to it, so a file from yesterday contributes the
     /// focus length and nothing else.
     fn load(&mut self) {
-        // Recorded before the read, not after: a write landing between the
-        // two is then a mtime we have not seen, and the next tick picks it
-        // up rather than the other way about, where it would be lost.
-        self.seen = state_mtime();
         let Ok(text) = std::fs::read_to_string(state_file()) else {
             return;
         };
@@ -679,6 +680,16 @@ impl Pomodoro {
         let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) else {
             return;
         };
+        // A file with no seq at all was written by a release that has never
+        // heard of one, and is taken: refusing it would make this instance
+        // deaf to the very writer the shared file exists for. A lower seq
+        // is a write we have already applied, or one of our own.
+        if d.get("seq")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|seq| seq < self.seq)
+        {
+            return;
+        }
         self.seq = d.get("seq").and_then(|v| v.as_u64()).unwrap_or(self.seq);
         if let Some(v) = d.get("focus").and_then(|v| v.as_f64()) {
             self.focus = v;
@@ -705,11 +716,21 @@ impl Pomodoro {
             self.hints = v;
         }
         if d.get("day").and_then(|v| v.as_str()) != Some(self.day.as_str()) {
-            // The other half of the sweep in roll_day(): a widget run nine
-            // to five never lives across midnight, so yesterday's markers
-            // would sit in the state directory forever.
-            sweep_markers();
-            return; // a new day starts a fresh count
+            if d.get("day").and_then(|v| v.as_str()) == Some(today().as_str()) {
+                // The file is from today; we still have yesterday. Import
+                // today's timer rather than rolling our stale one over it.
+                self.day = today();
+            } else {
+                // The other half of the sweep in roll_day(): a widget run
+                // nine to five never lives across midnight, so yesterday's
+                // markers would sit in the state directory forever. Keep
+                // markers for a block we are still running, or a pane that
+                // has already claimed today's overtime would lose that
+                // claim to a late reader.
+                let keep = (self.running && self.deadline > 0.0).then_some(self.deadline);
+                sweep_markers(keep);
+                return; // a new day starts a fresh count
+            }
         }
         if let Some(v) = d.get("phase").and_then(|v| v.as_str()) {
             self.phase = match v {
@@ -751,36 +772,20 @@ impl Pomodoro {
 
     /// Re-read the state file when somebody else has written it.
     ///
-    /// Every instance holds the same timer because each one stats the file
-    /// each tick and takes whatever it finds. Two panes that take a key in
-    /// the same tick both write the same seq and the second rename wins:
-    /// last-writer-wins by seq, which is why the gate below is `>=` and not
-    /// `>`. For a timer that is fine - **do not build an ordering for it.**
+    /// Every instance holds the same timer because each one reads the file
+    /// each tick and takes whatever it finds. The seq gate lives in
+    /// `load()`, on the bytes that get applied: a lower seq is refused, so
+    /// re-reading our own write is a no-op. Gating on mtime instead left
+    /// panes divergent when two writes landed in one timestamp granule —
+    /// coarse NFS clocks, or two keys inside a single kernel tick — and
+    /// the next write that happened to move the stamp was the only way
+    /// they met again.
+    ///
+    /// Two panes that take a key in the same tick both write, and the
+    /// second rename wins: last-writer-wins by seq. For a timer that is
+    /// fine - **do not build an ordering for it.**
     fn reload_if_changed(&mut self) {
-        let now = state_mtime();
-        if now.is_none() || now == self.seen {
-            return;
-        }
-        let Ok(text) = std::fs::read_to_string(state_file()) else {
-            self.seen = now;
-            return;
-        };
-        let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) else {
-            self.seen = now;
-            return;
-        };
-        // A file with no seq at all was written by a release that has never
-        // heard of one, and is taken: refusing it would make this instance
-        // deaf to the very writer the shared file exists for.
-        let newer = d
-            .get("seq")
-            .and_then(|v| v.as_u64())
-            .is_none_or(|seq| seq >= self.seq);
-        if newer {
-            self.load();
-        } else {
-            self.seen = now;
-        }
+        self.load();
     }
 
     /// Write the state file, failing quietly.
@@ -826,14 +831,26 @@ impl Pomodoro {
             let _ = std::fs::remove_file(&tmp);
             return;
         }
-        // The mtime of the temp file, taken before the rename: rename keeps
-        // the inode, so this is exactly the mtime the state file will show.
-        // Recording it means our own write never trips the reload gate,
-        // while a foreign write carrying an equal seq still does.
-        let mine = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
-        if std::fs::rename(&tmp, &path).is_ok() {
-            self.seen = mine;
-        } else {
+        // Re-read before replacing. A pane descheduled after a reload can
+        // wake holding a lower seq, increment it once, and publish a
+        // snapshot that undoes every save that landed while it slept.
+        // Readers already refuse a lower seq; this is the writer half of
+        // the same rule. Two keys in the same tick still last-writer-wins
+        // across the tiny window between this read and the rename — that
+        // is the case the issue named, not this one.
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) {
+                if d.get("seq")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|disk| disk >= self.seq)
+                {
+                    let _ = std::fs::remove_file(&tmp);
+                    self.load();
+                    return;
+                }
+            }
+        }
+        if std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -850,8 +867,11 @@ impl Pomodoro {
             self.done = 0;
             // Yesterday's event markers go with yesterday's tally. One per
             // phase change plus one per minute of an ignored pomodoro, so
-            // the directory would otherwise grow without bound.
-            sweep_markers();
+            // the directory would otherwise grow without bound. Keep the
+            // block that is still ringing: a late pane's sweep must not
+            // delete a claim a rolled pane has already won.
+            let keep = (self.running && self.deadline > 0.0).then_some(self.deadline);
+            sweep_markers(keep);
             self.save();
             return true;
         }
@@ -1055,9 +1075,12 @@ impl Pomodoro {
         tc::flush();
         // The marker before the spawn, always. The other order would trade
         // a lost toast for duplicate ones, and duplicates are the thing
-        // being removed; claim_event() has the whole reckoning.
-        if self.notify && claim_event(self.deadline, minute) {
-            toast("Pomodoro", text);
+        // being removed; toast() claims each channel it can actually
+        // deliver, so a plain terminal never takes a Herdr or Luvus
+        // marker, and a pane under one multiplexer never silences the
+        // other. claim_event() has the rest of the reckoning.
+        if self.notify {
+            toast("Pomodoro", text, self.deadline, minute);
         }
     }
 }
@@ -1687,7 +1710,6 @@ mod tests {
             hints: true,
             notify: false,
             seq: 0,
-            seen: None,
         };
 
         pomo.phase = Phase::Focus;
@@ -2363,9 +2385,9 @@ mod tests {
         // the whole of the dedupe: no lock, no leader, no heartbeat.
         let _held = sandbox("claim");
         let deadline = 1_700_000_000.5;
-        assert!(claim_event(deadline, 0), "the first instance did not win");
-        assert!(!claim_event(deadline, 0), "a second instance toasted the same event");
-        assert!(!claim_event(deadline, 0), "a third instance toasted the same event");
+        assert!(claim_event(deadline, 0, "herdr"), "the first instance did not win");
+        assert!(!claim_event(deadline, 0, "herdr"), "a second instance toasted the same event");
+        assert!(!claim_event(deadline, 0, "herdr"), "a third instance toasted the same event");
     }
 
     #[test]
@@ -2375,14 +2397,14 @@ mod tests {
         // alone would silence every repeat after the first.
         let _held = sandbox("repeat");
         let deadline = 1_700_000_123.0;
-        assert!(claim_event(deadline, 0));
-        assert!(!claim_event(deadline, 0));
-        assert!(claim_event(deadline, 1), "the first minute repeat was swallowed");
-        assert!(!claim_event(deadline, 1), "two panes repeated the same minute");
-        assert!(claim_event(deadline, 2), "the second minute repeat was swallowed");
+        assert!(claim_event(deadline, 0, "herdr"));
+        assert!(!claim_event(deadline, 0, "herdr"));
+        assert!(claim_event(deadline, 1, "herdr"), "the first minute repeat was swallowed");
+        assert!(!claim_event(deadline, 1, "herdr"), "two panes repeated the same minute");
+        assert!(claim_event(deadline, 2, "herdr"), "the second minute repeat was swallowed");
 
         // And a different phase change is a different event.
-        assert!(claim_event(deadline + 1.0, 0), "the next phase change was swallowed");
+        assert!(claim_event(deadline + 1.0, 0, "herdr"), "the next phase change was swallowed");
     }
 
     #[test]
@@ -2395,13 +2417,13 @@ mod tests {
         let _held = sandbox("sweep");
         let mut p = Pomodoro::new(&serde_json::json!({}));
         let deadline = 1_700_000_777.0;
-        assert!(claim_event(deadline, 0));
-        assert!(!claim_event(deadline, 0));
+        assert!(claim_event(deadline, 0, "herdr"));
+        assert!(!claim_event(deadline, 0, "herdr"));
 
         p.day = "2020-01-01".into();
         assert!(p.roll_day(), "a changed date should roll");
         assert!(
-            claim_event(deadline, 0),
+            claim_event(deadline, 0, "herdr"),
             "yesterday's marker still owns today's event"
         );
 
@@ -2409,14 +2431,132 @@ mod tests {
         // reason for: it never lives across midnight, so roll_day never
         // fires in it and reading a state file from another day is the only
         // moment it learns the date moved.
-        assert!(!claim_event(deadline, 0));
+        assert!(!claim_event(deadline, 0, "herdr"));
         p.day = "2020-01-01".into();
         p.save();
         let fresh = Pomodoro::new(&serde_json::json!({}));
         assert_eq!(fresh.done, 0, "the stale-day branch was not taken");
         assert!(
-            claim_event(deadline, 0),
+            claim_event(deadline, 0, "herdr"),
             "reading a state file from another day left its markers behind"
+        );
+    }
+
+    #[test]
+    fn each_channel_claims_independently() {
+        // A pane under Herdr and a pane under Luvus share the timer but
+        // not a window. One event-wide marker would let the winner silence
+        // the channel it cannot deliver.
+        let _held = sandbox("channels");
+        let deadline = 1_700_000_555.0;
+        assert!(claim_event(deadline, 0, "herdr"));
+        assert!(
+            claim_event(deadline, 0, "luvus"),
+            "a Herdr claim swallowed the Luvus toast"
+        );
+        assert!(!claim_event(deadline, 0, "herdr"));
+        assert!(!claim_event(deadline, 0, "luvus"));
+    }
+
+    #[test]
+    fn two_saves_in_one_mtime_granule_still_converge() {
+        // The reload used to skip the file when mtime had not moved, so
+        // two writes inside one timestamp granule left the other pane on
+        // the first of them until something else happened to bump the
+        // stamp. load() is now the whole of the reload, and the seq gate
+        // is what makes re-reading the same file a no-op.
+        let _held = sandbox("same-mtime");
+        let mut a = Pomodoro::new(&serde_json::json!({}));
+        let mut b = Pomodoro::new(&serde_json::json!({}));
+        a.start_stop(1_000.0);
+        a.adjust(1.0);
+        b.reload_if_changed();
+        assert_eq!(b.focus, a.focus, "the second write was invisible to the other pane");
+        assert!(b.running, "the first write was lost as well");
+    }
+
+    #[test]
+    fn a_stale_save_does_not_replace_a_newer_file() {
+        // A pane descheduled after a reload can wake holding a lower seq,
+        // increment it once, and publish a snapshot that undoes every
+        // save that landed while it slept. Readers already refuse a lower
+        // seq; the writer has to refuse it too, or a newly opened pane
+        // loads the regression.
+        let _held = sandbox("stale-save");
+        let mut fresh = Pomodoro::new(&serde_json::json!({}));
+        fresh.shown = true;
+        fresh.start_stop(1_000.0);
+        let held = fresh.deadline;
+        assert!(held > 0.0);
+
+        let mut stale = Pomodoro::new(&serde_json::json!({}));
+        stale.seq = 0;
+        stale.running = true;
+        stale.deadline = 5.0;
+        stale.save();
+
+        let text = std::fs::read_to_string(state_file()).expect("the state file");
+        let d: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(
+            d["deadline"].as_f64(),
+            Some(held),
+            "a stale writer replaced the canonical file"
+        );
+        assert_eq!(stale.deadline, held, "the stale pane did not take the file it refused to overwrite");
+    }
+
+    #[test]
+    fn a_late_pane_imports_today_instead_of_rolling_over_it() {
+        // The first pane to notice midnight saves a file dated today.
+        // A pane still holding yesterday used to take the day-mismatch
+        // branch, skip the timer, then roll and publish its stale
+        // snapshot over the current-day file.
+        let _held = sandbox("late-roll");
+        let mut first = Pomodoro::new(&serde_json::json!({}));
+        first.shown = true;
+        first.start_stop(1_000.0);
+        let held = first.deadline;
+        first.done = 3;
+        first.save();
+
+        let mut late = Pomodoro::new(&serde_json::json!({}));
+        late.day = "2020-01-01".into();
+        late.deadline = 9.0;
+        late.running = true;
+        late.done = 9;
+        late.reload_if_changed();
+        assert_eq!(late.day, today(), "the late pane kept yesterday");
+        assert_eq!(late.deadline, held, "today's timer was not imported");
+        assert_eq!(late.done, 3, "today's tally was discarded");
+        assert!(!late.roll_day(), "importing today still rolled and saved");
+    }
+
+    #[test]
+    fn a_running_blocks_markers_survive_the_day_roll() {
+        // Two panes can notice midnight a tick apart. The first sweeps
+        // and then claims the current overtime event; the second must
+        // not delete that marker before it processes the same deadline.
+        let _held = sandbox("keep-running");
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        p.running = true;
+        p.deadline = 1_700_000_888.0;
+        assert!(claim_event(p.deadline, 0, "herdr"));
+        assert!(claim_event(p.deadline, 1, "luvus"));
+        assert!(claim_event(p.deadline + 50.0, 0, "herdr"), "a spent block to be swept");
+
+        p.day = "2020-01-01".into();
+        assert!(p.roll_day(), "a changed date should roll");
+        assert!(
+            !claim_event(p.deadline, 0, "herdr"),
+            "the current phase-change claim was swept"
+        );
+        assert!(
+            !claim_event(p.deadline, 1, "luvus"),
+            "the current minute-repeat claim was swept"
+        );
+        assert!(
+            claim_event(p.deadline + 50.0, 0, "herdr"),
+            "a different block's marker survived the roll"
         );
     }
 }
