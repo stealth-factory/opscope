@@ -15,7 +15,8 @@ the four that publish one and a subscription for the five that do.
  session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
  overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
  Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
-  extra usage 0.00 of 50.00 AUD limit · 50.00 left
+
+  extra usage A$0.00 of A$50.00 limit · A$50.00 left
 
  ── SUMMARY ── all time · since 2026-07-16
  Favorite model  opus-5      Total tokens    20.6B
@@ -173,7 +174,7 @@ the same words, because two panes side by side saying `disabled` and `off`
 about one state would be two vocabularies for one fact.
 
 ```
-  extra usage 0.00 of 50.00 AUD limit · 50.00 left
+  extra usage A$0.00 of A$50.00 limit · A$50.00 left
 ```
 
 It stays **money rather than a bar**, for the reason the Cursor section gives
@@ -183,17 +184,28 @@ the pair rather than taken as given, and a cap lowered below what has already
 gone reads as an *overage* rather than as `-9.00 left`, which is arithmetic
 where a reader needs a fact.
 
-The currency is the account's, and it is not assumed to be dollars. Every
-amount arrives in minor units with its own exponent — `5000` at exponent 2 is
-fifty — and reading one as the other is a hundredfold error in a figure about
-money.
+The currency is the account's, written as its own symbol. The dollar
+currencies keep their letter, because `A$50` is fifty Australian dollars and
+`$50` is a different claim about the money; a code the list does not name is
+written as the code, since `SEK 50` costs one cell more than a symbol and
+invents nothing. On a pane too narrow for the pair the symbol is the first
+thing to go, before the clauses after it, and it goes from every amount at
+once — one figure written `A$12.34` beside another written `50.00` would read
+as two currencies on one line.
+
+Every amount arrives in minor units with its own exponent — `5000` at exponent
+2 is fifty — and reading one as the other is a hundredfold error in a figure
+about money.
 
 Colour comes from the server's own `severity`, the same field the limit rows
 above already read, and from its `spend_limit_reached`. Neither is a threshold
 invented here: one pane holding two opinions about one account's health is
 worse than either alone.
 
-On `[+]` it becomes a lane labelled `extra AUD 50` — the cap on the label,
+On `[+]` it becomes a lane labelled `extra A$50`, set apart from the windows
+above it by a blank line: those three are views of one subscription and they
+nest, this is money on a different clock, and a fourth bar in an unbroken run
+reads as another slice of the plan. The cap rides on the label,
 because 19% of an unnamed limit is not a number anyone can act on. The
 percentage is **not clamped**, so a cap set under what is already spent draws
 a full bar beside the true figure. Claude states no reset for this window —
@@ -205,7 +217,7 @@ the same bar:
 
 ```
    extra $50     ░░░░┃░░░░░░░░░░░░░░░░░░░░░░░    0%  +15%  25d 15h
-   extra AUD 50  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+   extra A$50    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
 ```
 
 Cursor's carries the mark and the countdown because Cursor sends its billing
@@ -223,10 +235,10 @@ usage* when it may mean the opposite.
 
 | state | the line reads |
 |---|---|
-| a cap, under it | `0.00 of 50.00 AUD limit · 50.00 left`, and a lane on `[+]` |
-| a cap, over it | `10.00 of 1.00 AUD limit · 9.00 over` — the real figures, and a lane the summary draws full |
+| a cap, under it | `A$0.00 of A$50.00 limit · A$50.00 left`, and a lane on `[+]` |
+| a cap, over it | `A$10.00 of A$1.00 limit · A$9.00 over` — the real figures, and a lane the summary draws full |
 | switched off, nothing spent | `disabled` |
-| switched off, spent earlier | `10.00 AUD · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
+| switched off, spent earlier | `A$10.00 · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
 | block absent, or a shape not recognised | `not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
 
 The line also survives a quota block with **no bars at all**. It lived inside
@@ -291,7 +303,9 @@ already spent would otherwise read *"-$9.00 left"*, which is arithmetic where
 a reader needs a fact.
 
 On `[+]` it becomes a lane labelled `extra $50`, on the plan's own cycle —
-extra usage resets when the cycle does — ranked with everything else. The
+extra usage resets when the cycle does — ranked with everything else, and
+separated from the three plan lanes by a blank line: it shares their clock but
+is not a fourth slice of them. The
 label carries the cap because a percentage of an unnamed limit is not a number
 anyone can act on: 19% says nothing until the reader knows it is 19% of fifty
 dollars. The percentage itself is **not clamped**: a cap set below what is

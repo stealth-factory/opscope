@@ -819,16 +819,47 @@ pub fn extra_lane(state: &Extra) -> Option<(f64, String)> {
     }
 }
 
-/// What goes before the digits on a lane label.
+/// The symbol a currency code is written with, ready to sit in front of an
+/// amount.
 ///
-/// A `$` only where the server said dollars. Anything else keeps its code,
-/// because a label reading `extra $50` on an account billed in AUD is a
-/// claim about the money that nobody made.
+/// The dollar currencies keep their letter. `A$50` is the correct way to
+/// write fifty Australian dollars and `$50` is a different claim about the
+/// money - the same reason a bare `$` was wrong here before, now solved by
+/// writing the symbol properly rather than by falling back to the code.
+///
+/// A code this list does not name is written as the code and a space, which
+/// is what ISO 4217 is for and is always readable. `SEK 50` costs one cell
+/// more than a symbol would and invents nothing; a symbol guessed at for a
+/// currency nobody checked is worth less than that cell.
 fn cap_prefix(currency: &str) -> String {
     match currency {
-        "" | "USD" => "$".to_string(),
-        code => format!("{} ", code),
+        "" | "USD" => "$",
+        "AUD" => "A$",
+        "CAD" => "C$",
+        "NZD" => "NZ$",
+        "HKD" => "HK$",
+        "SGD" => "S$",
+        "BRL" => "R$",
+        "MXN" => "MX$",
+        "ARS" => "AR$",
+        "GBP" => "£",
+        "EUR" => "€",
+        "JPY" => "¥",
+        "CNY" => "CN¥",
+        "KRW" => "₩",
+        "INR" => "₹",
+        "ILS" => "₪",
+        "PHP" => "₱",
+        "VND" => "₫",
+        "NGN" => "₦",
+        "TRY" => "₺",
+        "RUB" => "₽",
+        "THB" => "฿",
+        "UAH" => "₴",
+        "PLN" => "zł",
+        code => return format!("{} ", code),
     }
+    .to_string()
 }
 
 /// The extra-usage line, in whichever state the account is in.
@@ -854,18 +885,49 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
             // `spend_limit_reached` wins over the percentage: a cap that has
             // been hit is hit whatever rounding says.
             let hot = *reached || !matches!(severity.as_str(), "" | "normal");
-            let (used_s, limit_s) = (format!("{:.2}", used), format!("{:.2}", limit));
-            let head = LBL.chars().count() + used_s.len() + 4 + limit_s.len() + 1 + currency.len();
-            // What the line gives up first on a narrow pane, widest last
-            // wanted. Both tails are arithmetic on the pair already on the
+            // The symbol rides in front of every amount, the way Cursor's
+            // line writes its dollars, rather than one currency code parked
+            // at the end of the pair. `50.00 AUD limit · 50.00 left` left the
+            // remainder unlabelled and the reader to carry the code across
+            // the line to it.
+            // The symbol is the first thing to go on a pane too narrow for
+            // the pair, before the clauses after it: `A$` costs two cells,
+            // and at twenty columns those two are the difference between
+            // `12.34 of 50.00` and a spend cut to `A$12.`. The code is
+            // already off the line by then, so nothing is claimed about
+            // which dollars these are - the tab's heading and the lane label
+            // still carry it.
+            let sym = cap_prefix(currency);
+            let fits = |s: &str| {
+                let money = |v: f64| format!("{}{:.2}", s, v);
+                let (u, l) = (money(*used), money(*limit));
+                let head = LBL.chars().count() + u.chars().count() + 4 + l.chars().count();
+                (head <= room).then_some((head, u, l))
+            };
+            let bare_pair = || {
+                let money = |v: f64| format!("{:.2}", v);
+                let (u, l) = (money(*used), money(*limit));
+                (LBL.chars().count() + u.chars().count() + 4 + l.chars().count(), u, l)
+            };
+            let (head, used_s, limit_s) = fits(&sym).unwrap_or_else(bare_pair);
+            // Whatever the pair settled on, the tails match it: one amount
+            // written with a symbol and its neighbour without would read as
+            // two currencies on one line.
+            let shown = match used_s.starts_with(|c: char| c.is_ascii_digit()) {
+                true => String::new(),
+                false => sym.clone(),
+            };
+            let money = |v: f64| format!("{}{:.2}", shown, v);
+            // What the line gives up first on a narrow pane, widest wanted
+            // first. Both tails are arithmetic on the pair already on the
             // line, so dropping one loses no fact - and the overage is
             // written as an overage rather than a negative remainder,
             // because `-9.00 left` is arithmetic where a reader needs a
             // fact.
             let full = if used > limit {
-                format!(" limit · {:.2} over", used - limit)
+                format!(" limit · {} over", money(used - limit))
             } else {
-                format!(" limit · {:.2} left", limit - used)
+                format!(" limit · {} left", money(limit - used))
             };
             let tail = [full.as_str(), " limit", ""]
                 .into_iter()
@@ -877,7 +939,6 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
                     (if hot { p.bad.as_str() } else { p.txt.as_str() }, used_s),
                     (p.dim.as_str(), " of ".into()),
                     (p.txt.as_str(), limit_s),
-                    (p.dim.as_str(), format!(" {}", currency)),
                     (if hot { p.bad.as_str() } else { p.dim.as_str() }, tail.to_string()),
                 ],
                 w - 1,
@@ -894,15 +955,15 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
             // The separator travels with the clause it introduces for
             // exactly that reason. Held apart, a pane too narrow for
             // `disabled` drew `10.00 AUD ·` and stopped.
-            let money = |code: &str| match *used > 0.0 {
-                true => format!("{:.2}{} · ", used, code),
+            let money = |sym: &str| match *used > 0.0 {
+                true => format!("{}{:.2} · ", sym, used),
                 false => String::new(),
             };
             let with = |m: String, reason: bool| match (why.is_empty(), reason) {
                 (false, true) => format!("{}disabled · {}", m, why),
                 _ => format!("{}disabled", m),
             };
-            let coin = format!(" {}", currency);
+            let coin = cap_prefix(currency);
             // The last one carries no separator at all. Below about
             // twenty-five cells neither fact fits beside the other and the
             // row is clipped like any other, so what matters is where the
@@ -1501,7 +1562,12 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
             reset: None,
             stale: reading_is_old(c.quota_at),
             projected: false,
-            apart: false,
+            // Set apart from the windows above it. Those are three views of
+            // the same subscription and they nest; this is money, on a
+            // different clock, and reading it as a fourth slice of the plan
+            // is the one misreading the row can produce. The break costs a
+            // line and says so before the label is read.
+            apart: true,
         });
     }
     out
@@ -1842,7 +1908,7 @@ mod tests {
     #[test]
     fn the_cap_is_read_in_the_minor_units_it_arrives_in() {
         let got = extra_line(&measured(), 80);
-        assert!(got.contains("0.00 of 50.00 AUD"), "{}", got);
+        assert!(got.contains("A$0.00 of A$50.00"), "{}", got);
         assert!(!got.contains("5000"), "minor units drawn as money: {}", got);
     }
 
@@ -1859,7 +1925,7 @@ mod tests {
         u["extra_usage"]["used_credits"] = serde_json::json!(10.0);
         let got = extra_line(&u, 80);
         assert!(got.contains("disabled"), "{}", got);
-        assert!(got.contains("10.00 AUD"), "billable money dropped: {}", got);
+        assert!(got.contains("A$10.00"), "billable money dropped: {}", got);
     }
 
     /// The assumption this rests on, named where it is made: `user_disabled`
@@ -1905,8 +1971,8 @@ mod tests {
         u["spend"]["limit"]["amount_minor"] = serde_json::json!(100);
         u["spend"]["used"]["amount_minor"] = serde_json::json!(1000);
         let got = extra_line(&u, 80);
-        assert!(got.contains("10.00 of 1.00 AUD"), "{}", got);
-        assert!(got.contains("9.00 over"), "{}", got);
+        assert!(got.contains("A$10.00 of A$1.00"), "{}", got);
+        assert!(got.contains("A$9.00 over"), "{}", got);
         assert!(!got.contains("-9.00"), "a negative remainder: {}", got);
         // Unclamped on the summary too: over the cap is a real number over a
         // hundred, and the bar beside it draws full.
@@ -1944,7 +2010,7 @@ mod tests {
         ]);
         let got = lanes(&c);
         let last = got.last().expect("a lane");
-        assert_eq!(last.label, "extra AUD 50");
+        assert_eq!(last.label, "extra A$50");
         // No `resets_at` anywhere in the spend block, so no countdown and no
         // pace rather than a figure worked out from a date nobody sent.
         assert_eq!(last.window_secs, None);
@@ -1970,6 +2036,46 @@ mod tests {
             extra_lane(&extra_state(&measured())).unwrap().1.chars().count() <= CAP_TAG_ROOM,
             "an AUD cap grew the shared label column"
         );
+    }
+
+    /// A code the symbol list does not name is written as the code, which
+    /// is what ISO 4217 is for. Guessing a symbol for a currency nobody
+    /// checked would put the wrong money on the line to save a cell.
+    #[test]
+    fn a_currency_with_no_symbol_here_keeps_its_code() {
+        let mut u = measured();
+        for (code, want, cap) in [
+            ("USD", "$0.00 of $50.00", " $50"),
+            ("GBP", "£0.00 of £50.00", " £50"),
+            ("NZD", "NZ$0.00 of NZ$50.00", " NZ$50"),
+            ("SEK", "SEK 0.00 of SEK 50.00", " SEK 50"),
+            ("XYZ", "XYZ 0.00 of XYZ 50.00", " XYZ 50"),
+        ] {
+            u["spend"]["limit"]["currency"] = serde_json::json!(code);
+            let got = extra_line(&u, 90);
+            assert!(got.contains(want), "{}: {}", code, got);
+            assert_eq!(extra_lane(&extra_state(&u)).expect("a lane").1, cap, "{}", code);
+            assert!(
+                cap.chars().count() <= CAP_TAG_ROOM,
+                "{} grew the shared label column",
+                code
+            );
+        }
+    }
+
+    /// Set apart from the windows above it. Those are three views of one
+    /// subscription and they nest; this is money, on a different clock, and
+    /// a fourth bar in an unbroken run reads as another slice of the plan.
+    #[test]
+    fn the_extra_lane_is_separated_from_the_windows() {
+        let mut u = measured();
+        u["limits"] = serde_json::json!([
+            {"group": "session", "kind": "session", "percent": 20, "resets_at": null}
+        ]);
+        let c = Data { quota: Some(u), ..Default::default() };
+        let got = lanes(&c);
+        assert!(got.last().expect("a lane").apart, "no break before the money");
+        assert!(got.iter().take(got.len() - 1).all(|l| !l.apart), "a window took a break");
     }
 
     /// There is no state for "allowed, with no ceiling". Cursor has one
@@ -2015,7 +2121,7 @@ mod tests {
         u["spend"]["used"]["amount_minor"] = serde_json::json!(1234);
         let c = Data { quota: Some(u), quota_live: true, ..Default::default() };
         let joined = claude_tab(&c, 90, &palette()).join("\n");
-        assert!(bare(&joined).contains("12.34 of 50.00 AUD"), "{}", bare(&joined));
+        assert!(bare(&joined).contains("A$12.34 of A$50.00"), "{}", bare(&joined));
         // And the money does not displace the reason the bars are missing.
         // `why_no_lane` falls silent here - an extra-usage lane is a lane, so
         // the summary has a bar and needs no sentence - but the tab's bars
@@ -2061,8 +2167,16 @@ mod tests {
                 got
             );
         }
-        assert!(extra_line(&u, 120).contains("37.66 left"));
-        assert!(!extra_line(&u, 34).contains("left"));
+        assert!(extra_line(&u, 120).contains("A$37.66 left"));
+        assert!(!extra_line(&u, 40).contains("left"));
+        // The symbol goes before the clauses do, and when it goes it goes
+        // from every amount at once: one written `A$12.34` beside another
+        // written `50.00` reads as two currencies on one line.
+        let wide = extra_line(&u, 120);
+        assert!(wide.matches("A$").count() == 3, "{}", wide);
+        let narrow = extra_line(&u, 22);
+        assert!(narrow.contains("12.34"), "{}", narrow);
+        assert!(!narrow.contains("A$"), "the symbol outstayed the pair: {}", narrow);
     }
 
     /// The other two states have fit-or-drop logic of their own - a reason
