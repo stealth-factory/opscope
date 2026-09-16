@@ -237,6 +237,7 @@ usage* when it may mean the opposite.
 |---|---|
 | a cap, under it | `A$0.00 of A$50.00 limit · A$50.00 left`, and a lane on `[+]` |
 | a cap, over it | `A$10.00 of A$1.00 limit · A$9.00 over` — the real figures, and a lane the summary draws full |
+| no cap at all | `A$9.64 · no limit` — money with no denominator, and **no lane**: a bar needs a ceiling |
 | switched off, nothing spent | `disabled` |
 | switched off, spent earlier | `A$10.00 · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
 | block absent, or a shape not recognised | `not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
@@ -247,12 +248,17 @@ lost the one figure on the tab that is real money — and lost the sentence
 explaining the missing bars along with it, since an extra-usage lane counts as
 a lane and rightly silences that sentence on `[+]`. The tab now says both.
 
-**Only the first state has been seen on a real account**, at nothing spent. The
-switched-off reading rests on an assumption named in the test that covers it.
-There is deliberately **no unlimited state**: Cursor has one because Cursor
-sends a block that says so, and nothing Claude sends has been seen to mean
-*allowed, no ceiling* — so a response shaped that way says `not reported` and
-waits to be mapped rather than being drawn as one of the others.
+**Only the first state has been seen on a real account.** The switched-off and
+unlimited readings rest on assumptions named in the tests that cover them.
+
+The unlimited state is there because Anthropic documents the setting —
+*Set to unlimited* sits beside the monthly cap on claude.com — so the option
+exists and a reading for it has to. What has *not* been seen is the shape the
+response takes when it is chosen, so absence of a ceiling counts as unlimited
+only where the block is recognisably a spend block: it has to say `enabled`
+out loud and carry one more field a real one carries. A half-arrived response
+becoming *this account may spend without limit* is the worst of the five to
+get wrong, and it is the one guarded hardest.
 
 **Cursor** — both quota and authorship.
 

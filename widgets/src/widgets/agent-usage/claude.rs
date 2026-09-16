@@ -722,6 +722,11 @@ pub enum Extra {
         severity: String,
         reached: bool,
     },
+    /// Extra usage allowed with no ceiling - the "Set to unlimited" option
+    /// on claude.com. A percentage of nothing, so no bar and no lane: the
+    /// same refusal Cursor's unlimited state makes, and the same one the
+    /// Grok Bot allowance makes for an allowance that does not exist.
+    Unlimited { used: f64, currency: String },
     /// Extra usage switched off. Anything spent before that is still
     /// billable and stays on screen.
     Off { used: f64, currency: String, why: String },
@@ -742,15 +747,20 @@ fn minor(m: &serde_json::Value) -> Option<f64> {
 
 /// Which state the account's extra usage is in.
 ///
-/// Only `Fixed` has been seen on a real account, at nothing spent. `Off`
-/// rests on an assumption named in the test that covers it, and anything
-/// matching neither is `NotReported` carrying its keys - an admitted gap is
+/// Only `Fixed` has been seen on a real account. `Off` and `Unlimited` rest
+/// on assumptions named in the tests that cover them, and anything matching
+/// none of the three is `NotReported` carrying its keys - an admitted gap is
 /// worth more than a guessed state.
 ///
-/// There is no uncapped state here on purpose. Cursor has one because
-/// Cursor sends a block that says so; nothing in Claude's response has been
-/// seen to mean "allowed, no ceiling", so a response shaped that way lands
-/// in `NotReported` and can be mapped when one is actually seen.
+/// `Unlimited` is read from a spend block that is enabled and states no
+/// ceiling. Anthropic documents the setting - "Set to unlimited" beside the
+/// monthly cap on claude.com - so the option exists and a reading for it has
+/// to exist too; what has not been seen is the shape the response takes when
+/// it is chosen. Absence is therefore read as unlimited only where the block
+/// is recognisably a spend block: it has to carry `enabled` and one of the
+/// fields a real one carries, or a truncated response would arrive as an
+/// account with no ceiling on its spending, which is the worst of the four
+/// to get wrong.
 pub fn extra_state(u: &serde_json::Value) -> Extra {
     let spend = &u["spend"];
     let x = &u["extra_usage"];
@@ -795,14 +805,24 @@ pub fn extra_state(u: &serde_json::Value) -> Extra {
             reached: x["spend_limit_reached"].as_bool().unwrap_or(false),
         };
     }
+    // Enabled, and no ceiling stated. Read as unlimited only from a block
+    // that is recognisably a spend block - `enabled` said out loud, plus one
+    // more field a real one carries. A half-arrived response must not become
+    // an account that may spend without limit.
+    let recognisable = spend["enabled"].as_bool() == Some(true)
+        && ["used", "percent", "severity", "cap"].iter().any(|k| !spend[*k].is_null());
+    if recognisable {
+        return Extra::Unlimited { used: used.unwrap_or(0.0), currency };
+    }
     Extra::NotReported { keys: obj.keys().cloned().collect() }
 }
 
 /// The lane the summary draws for extra usage, where there is one.
 ///
-/// Only a stated ceiling is something to be a percentage of, and the figure
-/// is deliberately not clamped: a cap lowered below what has already gone is
-/// a real number over 100, and the summary draws a full bar and the true
+/// Only a stated ceiling is something to be a percentage of, so `Unlimited`
+/// draws no lane for the same reason it draws no bar. The figure is
+/// deliberately not clamped: a cap lowered below what has already gone is a
+/// real number over 100, and the summary draws a full bar and the true
 /// figure for it.
 ///
 /// The percentage is worked out from the pair on the tab rather than taken
@@ -940,6 +960,24 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
                     (p.dim.as_str(), " of ".into()),
                     (p.txt.as_str(), limit_s),
                     (if hot { p.bad.as_str() } else { p.dim.as_str() }, tail.to_string()),
+                ],
+                w - 1,
+            )
+        }
+        Extra::Unlimited { used, currency } => {
+            // Money with no denominator, the way Cursor writes it. There is
+            // nothing to be a percentage of, so there is no bar here and no
+            // lane on the summary either.
+            let sym = cap_prefix(currency);
+            let spent = [format!("{}{:.2}", sym, used), format!("{:.2}", used)]
+                .into_iter()
+                .find(|m| LBL.chars().count() + m.chars().count() + " · no limit".len() <= room)
+                .unwrap_or_else(|| format!("{:.2}", used));
+            tc::seg(
+                &[
+                    (p.dim.as_str(), LBL.to_string()),
+                    (p.txt.as_str(), spent),
+                    (p.dim.as_str(), " · no limit".to_string()),
                 ],
                 w - 1,
             )
@@ -2078,16 +2116,47 @@ mod tests {
         assert!(got.iter().take(got.len() - 1).all(|l| !l.apart), "a window took a break");
     }
 
-    /// There is no state for "allowed, with no ceiling". Cursor has one
-    /// because Cursor sends a block that says so; nothing Claude sends has
-    /// been seen to mean it, so a cap of zero lands in `NotReported` and
-    /// waits to be mapped rather than being drawn as unlimited.
+    /// Anthropic documents "Set to unlimited" beside the monthly cap, so an
+    /// enabled block stating no ceiling is that setting. Money with no
+    /// denominator, and no lane - a bar needs something to be a percentage
+    /// of, which is the same refusal Cursor's unlimited state makes.
     #[test]
-    fn an_enabled_block_with_no_cap_is_not_read_as_unlimited() {
+    fn an_enabled_block_with_no_cap_is_unlimited_and_draws_no_bar() {
         let mut u = measured();
         u["spend"]["limit"] = serde_json::json!(null);
-        assert!(matches!(extra_state(&u), Extra::NotReported { .. }));
+        u["extra_usage"]["monthly_limit"] = serde_json::json!(null);
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(964);
+        u["extra_usage"]["used_credits"] = serde_json::json!(9.64);
+        assert!(matches!(extra_state(&u), Extra::Unlimited { .. }));
+        let got = extra_line(&u, 90);
+        assert!(got.contains("A$9.64 · no limit"), "{}", got);
+        // No ceiling is not a ceiling of zero: nothing here may read as a
+        // limit, and no lane may be drawn against one.
+        assert!(!got.contains("0.00 limit") && !got.contains("of "), "{}", got);
         assert_eq!(extra_lane(&extra_state(&u)), None);
+        let c = Data { quota: Some(u), ..Default::default() };
+        assert!(lanes(&c).iter().all(|l| !l.label.starts_with("extra")));
+    }
+
+    /// The reading that must not be reached by accident. A response that
+    /// arrived half-formed becoming "this account may spend without limit"
+    /// is the worst of the four states to get wrong, so absence counts as
+    /// unlimited only where the block is recognisably a spend block.
+    #[test]
+    fn a_half_arrived_block_is_not_an_account_without_a_ceiling() {
+        for block in [
+            serde_json::json!({ "enabled": true }),
+            serde_json::json!({ "percent": 0, "severity": "normal" }),
+            serde_json::json!({ "enabled": null, "used": { "amount_minor": 0 } }),
+        ] {
+            let u = serde_json::json!({ "extra_usage": {}, "spend": block });
+            assert!(
+                matches!(extra_state(&u), Extra::NotReported { .. }),
+                "read as unlimited: {}",
+                u["spend"]
+            );
+            assert!(!extra_line(&u, 90).contains("no limit"), "{}", u["spend"]);
+        }
     }
 
     /// The same money arrives twice, in two blocks with different units.
