@@ -745,24 +745,39 @@ pub enum Extra {
 ///
 /// 5000 with `exponent` 2 is fifty, and reading it as five thousand is a
 /// hundredfold error in a figure about money.
+/// ISO 4217's widest minor unit is four places. Anything above that is not
+/// a currency we can draw, and handing it to `format!` as a precision is
+/// an allocation bounded only by the JSON.
+const PLACES_MAX: u64 = 4;
+
 fn minor(m: &serde_json::Value) -> Option<f64> {
     let amount = m.get("amount_minor")?.as_f64()?;
-    Some(amount / 10f64.powf(m["exponent"].as_f64().unwrap_or(2.0)))
+    let exp = match m.get("exponent").and_then(|v| v.as_f64()) {
+        Some(e) if (0.0..=PLACES_MAX as f64).contains(&e) => e,
+        Some(_) => return None,
+        None => 2.0,
+    };
+    Some(amount / 10f64.powf(exp))
 }
 
 /// How many decimal places a money object, or the extra-usage block, states.
 ///
 /// Missing is two: that is the exponent every observed payload has used,
 /// and the ISO 4217 default for currencies that do not name another.
-fn places_of(m: &serde_json::Value) -> Option<usize> {
-    m.get("exponent")
-        .or_else(|| m.get("decimal_places"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
+/// A stated value outside `0..=4` is `Err`, so the caller can refuse the
+/// shape rather than drawing it as two-place money.
+fn places_of(m: &serde_json::Value) -> Result<Option<usize>, ()> {
+    match m.get("exponent").or_else(|| m.get("decimal_places")) {
+        None => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) if n <= PLACES_MAX => Ok(Some(n as usize)),
+            _ => Err(()),
+        },
+    }
 }
 
 fn money_text(prefix: &str, value: f64, places: usize) -> String {
-    format!("{}{:.p$}", prefix, value, p = places)
+    format!("{}{:.p$}", prefix, value, p = places.min(PLACES_MAX as usize))
 }
 
 /// Which state the account's extra usage is in.
@@ -800,10 +815,16 @@ pub fn extra_state(u: &serde_json::Value) -> Extra {
     // agreement so a divergence surfaces rather than one being silently
     // preferred.
     let used = minor(&spend["used"]).or_else(|| x["used_credits"].as_f64());
-    let places = places_of(&spend["limit"])
-        .or_else(|| places_of(&spend["used"]))
-        .or_else(|| places_of(x))
-        .unwrap_or(2);
+    let places = match (
+        places_of(&spend["limit"]),
+        places_of(&spend["used"]),
+        places_of(x),
+    ) {
+        (Err(()), _, _) | (_, Err(()), _) | (_, _, Err(())) => {
+            return Extra::NotReported { keys: obj.keys().cloned().collect() };
+        }
+        (a, b, c) => a.ok().flatten().or(b.ok().flatten()).or(c.ok().flatten()).unwrap_or(2),
+    };
     // Three separate fields can say it is off and any one of them saying so
     // is enough. They have not been seen disagreeing, and treating either
     // block as the only authority would draw a cap for an account that
@@ -824,7 +845,11 @@ pub fn extra_state(u: &serde_json::Value) -> Extra {
             // units. Spend is the authority, but a null `spend.limit`
             // beside a stated monthly cap is a cap, not "no ceiling".
             let raw = x["monthly_limit"].as_f64()?;
-            let places = x["decimal_places"].as_f64().unwrap_or(2.0);
+            let places = match x.get("decimal_places").and_then(|v| v.as_f64()) {
+                Some(p) if (0.0..=PLACES_MAX as f64).contains(&p) => p,
+                Some(_) => return None,
+                None => 2.0,
+            };
             Some(raw / 10f64.powf(places))
         })
         .filter(|l| *l > 0.0)
@@ -2187,6 +2212,23 @@ mod tests {
             }
             other => panic!("a missing exponent became {other:?}"),
         }
+    }
+
+    /// A stated exponent outside ISO 4217's range is not two-place money.
+    /// Conversion would go to infinity and the format precision is otherwise
+    /// bounded only by the JSON.
+    #[test]
+    fn an_impossible_exponent_is_not_a_cap() {
+        let mut u = measured();
+        u["spend"]["limit"]["exponent"] = serde_json::json!(99);
+        assert!(
+            matches!(extra_state(&u), Extra::NotReported { .. }),
+            "{:?}",
+            extra_state(&u)
+        );
+        let got = extra_line(&u, 90);
+        assert!(got.contains("not reported"), "{}", got);
+        assert!(!got.contains("0.00"), "garbage exponent drew a figure: {}", got);
     }
 
     /// A code the symbol list does not name is written as the code, which
