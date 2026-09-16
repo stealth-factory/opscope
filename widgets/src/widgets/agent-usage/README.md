@@ -264,9 +264,11 @@ The unlimited state is there because Anthropic documents the setting —
 exists and a reading for it has to. What has *not* been seen is the shape the
 response takes when it is chosen, so absence of a ceiling counts as unlimited
 only where the block is recognisably a spend block: it has to say `enabled`
-out loud and carry one more field a real one carries. A half-arrived response
-becoming *this account may spend without limit* is the worst of the five to
-get wrong, and it is the one guarded hardest.
+out loud and carry one more field a real one carries, and
+`extra_usage.monthly_limit` has to be gone too — that field is the same
+ceiling. A half-arrived response becoming *this account may spend without
+limit* is the worst of the five to get wrong, and it is the one guarded
+hardest.
 
 **Cursor** — both quota and authorship.
 

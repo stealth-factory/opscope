@@ -818,7 +818,17 @@ pub fn extra_state(u: &serde_json::Value) -> Extra {
         };
         return Extra::Off { used: used.unwrap_or(0.0), currency, why, places };
     }
-    if let Some(limit) = minor(&spend["limit"]).filter(|l| *l > 0.0) {
+    if let Some(limit) = minor(&spend["limit"])
+        .or_else(|| {
+            // `monthly_limit` is the same ceiling in the other block's
+            // units. Spend is the authority, but a null `spend.limit`
+            // beside a stated monthly cap is a cap, not "no ceiling".
+            let raw = x["monthly_limit"].as_f64()?;
+            let places = x["decimal_places"].as_f64().unwrap_or(2.0);
+            Some(raw / 10f64.powf(places))
+        })
+        .filter(|l| *l > 0.0)
+    {
         return Extra::Fixed {
             // A block carrying a cap and no spend is a zero left out, not a
             // spend nobody knows - the server answered the call.
@@ -997,15 +1007,23 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
             // nothing to be a percentage of, so there is no bar here and no
             // lane on the summary either.
             let sym = cap_prefix(currency);
-            let spent = [money_text(&sym, *used, *places), money_text("", *used, *places)]
-                .into_iter()
-                .find(|m| LBL.chars().count() + m.chars().count() + " · no limit".len() <= room)
-                .unwrap_or_else(|| money_text("", *used, *places));
+            // The state is the fact that must survive a narrow pane. An
+            // amount with the tail clipped off reads as spend against a
+            // cap that was never stated.
+            let tries = [
+                (money_text(&sym, *used, *places), " · no limit"),
+                (money_text("", *used, *places), " · no limit"),
+                (String::new(), "no limit"),
+            ];
+            let (spent, rest) = tries
+                .iter()
+                .find(|(m, r)| LBL.chars().count() + m.chars().count() + r.len() <= room)
+                .unwrap_or_else(|| tries.last().expect("a candidate"));
             tc::seg(
                 &[
                     (p.dim.as_str(), LBL.to_string()),
-                    (p.txt.as_str(), spent),
-                    (p.dim.as_str(), " · no limit".to_string()),
+                    (p.txt.as_str(), spent.clone()),
+                    (p.dim.as_str(), rest.to_string()),
                 ],
                 w - 1,
             )
@@ -2231,6 +2249,51 @@ mod tests {
         assert_eq!(extra_lane(&extra_state(&u)), None);
         let c = Data { quota: Some(u), ..Default::default() };
         assert!(lanes(&c).iter().all(|l| !l.label.starts_with("extra")));
+    }
+
+    /// `monthly_limit` is the same ceiling. A null `spend.limit` beside a
+    /// stated one is not "Set to unlimited" - that reading has to clear
+    /// both statements of the cap.
+    #[test]
+    fn a_monthly_limit_is_still_a_cap_when_spend_limit_is_absent() {
+        let mut u = measured();
+        u["spend"]["limit"] = serde_json::json!(null);
+        match extra_state(&u) {
+            Extra::Fixed { limit, .. } => assert_eq!(limit, 50.0),
+            other => panic!("read as unlimited: {other:?}"),
+        }
+        let got = extra_line(&u, 90);
+        assert!(got.contains("A$0.00 of A$50.00"), "{}", got);
+        assert!(!got.contains("no limit"), "{}", got);
+    }
+
+    /// The words `no limit` are the state. An amount whose tail was clipped
+    /// off reads as spend against a cap nobody stated, so the line sheds
+    /// the figure first and keeps the words whole.
+    #[test]
+    fn unlimited_sheds_the_amount_before_it_sheds_the_state() {
+        let mut u = measured();
+        u["spend"]["limit"] = serde_json::json!(null);
+        u["extra_usage"]["monthly_limit"] = serde_json::json!(null);
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(964);
+        u["extra_usage"]["used_credits"] = serde_json::json!(9.64);
+        for w in 20..=90 {
+            let got = extra_line(&u, w);
+            assert!(got.chars().count() <= w - 1, "width {}: {:?}", w, got);
+            assert!(
+                !got.contains('·') || got.ends_with("no limit"),
+                "width {} cut the state: {:?}",
+                w,
+                got
+            );
+        }
+        assert!(extra_line(&u, 90).contains("A$9.64 · no limit"));
+        // 24 cells: the amount no longer fits beside the words, and the
+        // words still fit whole. Narrower than that and `seg` clips a word,
+        // which is the same ending every other row here accepts.
+        let tight = extra_line(&u, 24);
+        assert!(tight.contains("no limit"), "{}", tight);
+        assert!(!tight.contains("9.64"), "the amount outstayed the state: {}", tight);
     }
 
     /// The reading that must not be reached by accident. A response that
