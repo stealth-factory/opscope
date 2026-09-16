@@ -231,6 +231,19 @@ pub const CAP_TAG_ROOM: usize = 7;
 /// to `$10k` above that. `seg` would clip a label that overflowed and clip
 /// is what this exists to avoid.
 pub fn cap_tag(dollars: f64) -> String {
+    cap_tag_in("$", dollars)
+}
+
+/// The same tag, in a currency that is not dollars.
+///
+/// Claude states the account's currency beside every amount and this one is
+/// AUD, so a `$` on the label would be a claim about the money that the
+/// server never made. `prefix` is whatever goes before the digits - `"$"`,
+/// or a three-letter code and a space - and every candidate is still
+/// measured against `CAP_TAG_ROOM`, so a wider prefix folds sooner rather
+/// than growing the label column. ` AUD 50` fits exactly; ` AUD 5,000`
+/// does not and becomes ` AUD 5k`.
+pub fn cap_tag_in(prefix: &str, dollars: f64) -> String {
     let grouped = |n: f64| {
         let digits = (n.abs().round() as i64).to_string();
         let mut out = String::new();
@@ -245,10 +258,15 @@ pub fn cap_tag(dollars: f64) -> String {
     let whole = (dollars - dollars.round()).abs() < 0.005;
     let mut tries: Vec<String> = Vec::new();
     if whole {
-        tries.push(format!(" ${}", grouped(dollars)));
+        tries.push(format!(" {}{}", prefix, grouped(dollars)));
     } else {
-        tries.push(format!(" ${}.{:02}", grouped(dollars.trunc()), ((dollars.fract() * 100.0).round() as i64).abs()));
-        tries.push(format!(" ${}", grouped(dollars)));
+        tries.push(format!(
+            " {}{}.{:02}",
+            prefix,
+            grouped(dollars.trunc()),
+            ((dollars.fract() * 100.0).round() as i64).abs()
+        ));
+        tries.push(format!(" {}{}", prefix, grouped(dollars)));
     }
     // Folded rather than cut. One decimal while it fits, because $12.3k and
     // $12k are different claims about the ceiling.
@@ -257,9 +275,9 @@ pub fn cap_tag(dollars: f64) -> String {
         if scaled >= 1.0 {
             // No ".0" on a round one: $10.0k spends a cell to say nothing.
             if (scaled - scaled.round()).abs() >= 0.05 {
-                tries.push(format!(" ${:.1}{}", scaled, unit));
+                tries.push(format!(" {}{:.1}{}", prefix, scaled, unit));
             }
-            tries.push(format!(" ${:.0}{}", scaled, unit));
+            tries.push(format!(" {}{:.0}{}", prefix, scaled, unit));
         }
     }
     tries
@@ -267,7 +285,7 @@ pub fn cap_tag(dollars: f64) -> String {
         .find(|t| t.chars().count() <= CAP_TAG_ROOM)
         // Nothing left to fold: better an honest long label than a clipped
         // one, and no real cap reaches here.
-        .unwrap_or_else(|| format!(" ${:.0}", dollars))
+        .unwrap_or_else(|| format!(" {}{:.0}", prefix, dollars))
 }
 
 /// What a refused request said, in words a reader can act on.

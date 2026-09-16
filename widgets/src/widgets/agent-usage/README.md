@@ -15,7 +15,8 @@ the four that publish one and a subscription for the five that do.
  session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
  overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
  Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
-  extra usage 0.00 of 50.00 AUD monthly
+
+  extra usage A$0.00 of A$50.00 limit · A$50.00 left
 
  ── SUMMARY ── all time · since 2026-07-16
  Favorite model  opus-5      Total tokens    20.6B
@@ -164,8 +165,110 @@ which is precisely the kind of number this repo exists not to draw. A cached
 reading can sit well under the live one, which is the whole reason it says it
 is cached rather than presenting it as what is left now.
 
-The `extra_usage` line is the monthly credit allowance and its currency, shown
-only when it is enabled.
+### Extra usage (the monthly cap)
+
+Under the lanes sits **on-demand spend**: what the account has spent past the
+subscription, against the monthly cap set on claude.com. Real money, billed,
+and the same thing Cursor's own extra-usage line reports — so it is drawn in
+the same words, because two panes side by side saying `disabled` and `off`
+about one state would be two vocabularies for one fact.
+
+```
+  extra usage A$0.00 of A$50.00 limit · A$50.00 left
+```
+
+It stays **money rather than a bar**, for the reason the Cursor section gives
+at length: this is spend against a denominator of its own, and the three
+percentages above it are not that denominator. What is left is worked out from
+the pair rather than taken as given, and a cap lowered below what has already
+gone reads as an *overage* rather than as `-9.00 left`, which is arithmetic
+where a reader needs a fact.
+
+The currency is the account's, written as its own symbol. The dollar
+currencies keep their letter, because `A$50` is fifty Australian dollars and
+`$50` is a different claim about the money; a code the list does not name is
+written as the code, since `SEK 50` costs one cell more than a symbol and
+invents nothing. On a pane too narrow for the pair the symbol is the first
+thing to go, before the clauses after it, and it goes from every amount at
+once — one figure written `A$12.34` beside another written `50.00` would read
+as two currencies on one line.
+
+Every amount arrives in minor units with its own exponent — `5000` at exponent
+2 is fifty — and reading one as the other is a hundredfold error in a figure
+about money. The drawn amount keeps that exponent: one minor unit at 3 is
+`0.001`, and drawing that as `0.00` would hide real spend. An empty currency
+is written with no symbol rather than as `$`, which is a unit the server
+never named.
+
+Colour comes from the server's own `severity`, the same field the limit rows
+above already read, and from its `spend_limit_reached`. Neither is a threshold
+invented here: one pane holding two opinions about one account's health is
+worse than either alone.
+
+On `[+]` it becomes a lane labelled `extra A$50`, set apart from the windows
+above it by a blank line: those three are views of one subscription and they
+nest, this is money on a different clock, and a fourth bar in an unbroken run
+reads as another slice of the plan. The cap rides on the label,
+because 19% of an unnamed limit is not a number anyone can act on. The
+percentage is **not clamped**, so a cap set under what is already spent draws
+a full bar beside the true figure. Claude states no reset for this window —
+there is no date anywhere in the block — so the lane carries **no countdown
+and no pace** rather than a figure worked out from a date nobody sent.
+
+That is the whole difference between this row and Cursor's, which is otherwise
+the same bar:
+
+```
+   extra $50     ░░░░┃░░░░░░░░░░░░░░░░░░░░░░░    0%  +15%  25d 15h
+   extra A$50    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+```
+
+Cursor's carries the mark and the countdown because Cursor sends its billing
+cycle. The profile endpoint does carry a subscription date, and with Stripe
+billing beside it the cycle could be inferred from the anniversary — but
+whether this cap rolls on the anniversary or on the calendar month is unknown,
+the two differ by up to thirty days, and a countdown that wrong is worse than
+none. The bare row is the decision, not an oversight.
+
+**The line is drawn in every state, including the ones with nothing to
+report.** It used to appear only for an account with extra usage enabled and a
+cap present, which meant a switched-off cap and a response nobody could parse
+both drew nothing at all — and nothing reads as *this account has no extra
+usage* when it may mean the opposite.
+
+| state | the line reads |
+|---|---|
+| a cap, under it | `A$0.00 of A$50.00 limit · A$50.00 left`, and a lane on `[+]` |
+| a cap, over it | `A$10.00 of A$1.00 limit · A$9.00 over` — the real figures, and a lane the summary draws full |
+| no cap at all | `A$9.64 · no limit` — money with no denominator, and **no lane**: a bar needs a ceiling |
+| switched off, nothing spent | `disabled` |
+| switched off, spent earlier | `A$10.00 · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
+| block absent, or a shape not recognised | `not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
+
+The line also survives a quota block with **no bars at all**. It lived inside
+that block, so an account answering with a spend cap and no limit percentages
+lost the one figure on the tab that is real money — and lost the sentence
+explaining the missing bars along with it, since an extra-usage lane counts as
+a lane and rightly silences that sentence on `[+]`. The tab now says both.
+An unrecognised spend shape still names its keys here; a block that arrived
+empty stays silent, because the note already covers a quota that answered
+nothing. A cached snapshot on this path still says `cached … ago` — the
+heading that normally carries the age is the early return this stands in for,
+and without the stamp the money would read as this month's.
+
+**Only the first state has been seen on a real account.** The switched-off and
+unlimited readings rest on assumptions named in the tests that cover them.
+
+The unlimited state is there because Anthropic documents the setting —
+*Set to unlimited* sits beside the monthly cap on claude.com — so the option
+exists and a reading for it has to. What has *not* been seen is the shape the
+response takes when it is chosen, so absence of a ceiling counts as unlimited
+only where the block is recognisably a spend block: it has to say `enabled`
+out loud and carry one more field a real one carries, and
+`extra_usage.monthly_limit` has to be gone too — that field is the same
+ceiling. A half-arrived response becoming *this account may spend without
+limit* is the worst of the five to get wrong, and it is the one guarded
+hardest.
 
 **Cursor** — both quota and authorship.
 
@@ -216,7 +319,9 @@ already spent would otherwise read *"-$9.00 left"*, which is arithmetic where
 a reader needs a fact.
 
 On `[+]` it becomes a lane labelled `extra $50`, on the plan's own cycle —
-extra usage resets when the cycle does — ranked with everything else. The
+extra usage resets when the cycle does — ranked with everything else, and
+separated from the three plan lanes by a blank line: it shares their clock but
+is not a fourth slice of them. The
 label carries the cap because a percentage of an unnamed limit is not a number
 anyone can act on: 19% says nothing until the reader knows it is 19% of fifty
 dollars. The percentage itself is **not clamped**: a cap set below what is

@@ -888,7 +888,12 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset,
             stale: false,
             projected: false,
-            apart: false,
+            // On the plan's cycle, but not one of the plan's three lanes:
+            // those are a widening scope and this is on-demand money past
+            // all of them. It shares their clock, which is why it is not
+            // `grok bot` with a window of its own - and it is still not a
+            // fourth slice of them, which is why it takes the break.
+            apart: true,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes
@@ -2309,7 +2314,11 @@ mod tests {
         assert!((extra.pct - 19.28).abs() < 1e-9, "{}", extra.pct);
         assert_eq!(extra.window_secs, Some(2_678_400.0));
         assert_eq!(extra.reset, Some(1_789_196_473.0));
-        assert!(!extra.apart, "extra usage is part of the monthly group");
+        // It shares the plan's clock and is still set apart from the plan's
+        // three lanes: those are a widening scope, this is on-demand money
+        // past all of them, and a reader running down four bars in a row
+        // takes the fourth for another slice of the plan.
+        assert!(extra.apart, "extra usage reads as a fourth slice of the plan");
         assert_eq!(extra.label, "extra $50", "the lane does not name its ceiling");
         // And it is an addition, not a replacement: the three plan lanes
         // are still there beside it.
