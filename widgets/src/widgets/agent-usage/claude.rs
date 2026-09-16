@@ -1017,10 +1017,23 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
 pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = claude_quota(c, w, p);
     if rows.is_empty() {
-        let note = why_no_lane(c);
+        // Two facts have to survive a quota block that drew nothing: why the
+        // bars are missing, and the extra-usage line, which lives inside that
+        // block and is the one figure on this tab that is real money. An
+        // account answering with a spend cap and no limit percentages lost
+        // both - the second to the early return, and the first to
+        // `why_no_lane`, which counts the extra-usage lane as a bar and
+        // rightly says nothing once there is one.
+        let note = why_no_limits(c);
         if !note.is_empty() {
             rows.extend(no_local(&note, "", w, p));
             rows.push(String::new());
+        }
+        if let Some(u) = c.quota.as_ref() {
+            if !matches!(extra_state(u), Extra::NotReported { .. }) {
+                rows.push(extra_row(&extra_state(u), w, p));
+                rows.push(String::new());
+            }
         }
     }
     if !c.ok {
@@ -1338,6 +1351,17 @@ pub fn why_no_lane(c: &Data) -> String {
     if !lanes(c).is_empty() {
         return String::new();
     }
+    why_no_limits(c)
+}
+
+/// The same sentence, for the tab, where an extra-usage lane does not answer
+/// for the missing bars.
+///
+/// `why_no_lane` goes quiet as soon as there is any lane at all, which is
+/// right for the summary: a bar is drawn there and nothing needs explaining.
+/// The tab's bars are the limits, and an account publishing a spend cap and
+/// no limit percentages still has an unexplained gap where they should be.
+fn why_no_limits(c: &Data) -> String {
     if !c.quota_why.is_empty() {
         return format!("no quota · {}", c.quota_why);
     }
@@ -1939,6 +1963,33 @@ mod tests {
         // 0.8% rounding to `0%` looks exactly like an empty section.
         let (pct, _) = extra_lane(&extra_state(&u)).expect("a lane");
         assert_eq!(pct.round(), spend["percent"].as_f64().unwrap());
+    }
+
+    /// The quota block draws nothing without lanes, and the line lived
+    /// inside it - so a response carrying a spend block and no limits lost
+    /// the one figure on the tab that is real money.
+    #[test]
+    fn a_quota_with_no_lanes_still_draws_the_money() {
+        let mut u = measured();
+        u["limits"] = serde_json::json!([]);
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(1234);
+        let c = Data { quota: Some(u), quota_live: true, ..Default::default() };
+        let joined = claude_tab(&c, 90, &palette()).join("\n");
+        assert!(bare(&joined).contains("12.34 of 50.00 AUD"), "{}", bare(&joined));
+        // And the money does not displace the reason the bars are missing.
+        // `why_no_lane` falls silent here - an extra-usage lane is a lane, so
+        // the summary has a bar and needs no sentence - but the tab's bars
+        // are the limits, and their absence is still worth saying.
+        assert!(why_no_lane(&c).is_empty(), "the summary has a lane to draw");
+        assert!(
+            bare(&joined).contains("published no limit percentages"),
+            "the tab lost its reason: {}",
+            bare(&joined)
+        );
+        // An unreadable block has nothing to say here: the note above
+        // already covers a quota that answered nothing.
+        let empty = Data { quota: Some(serde_json::json!({})), ..Default::default() };
+        assert!(!bare(&claude_tab(&empty, 90, &palette()).join("\n")).contains("extra usage"));
     }
 
     /// A row wider than the pane is worse than a row that was cut, and both

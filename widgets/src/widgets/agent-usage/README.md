@@ -214,6 +214,12 @@ usage* when it may mean the opposite.
 | switched off, spent earlier | `10.00 AUD · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
 | block absent, or a shape not recognised | `not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
 
+The line also survives a quota block with **no bars at all**. It lived inside
+that block, so an account answering with a spend cap and no limit percentages
+lost the one figure on the tab that is real money — and lost the sentence
+explaining the missing bars along with it, since an extra-usage lane counts as
+a lane and rightly silences that sentence on `[+]`. The tab now says both.
+
 **Only the first state has been seen on a real account**, at nothing spent. The
 switched-off reading rests on an assumption named in the test that covers it.
 There is deliberately **no unlimited state**: Cursor has one because Cursor
