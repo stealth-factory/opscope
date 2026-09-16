@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.22.0] - 2026-09-16
+
+### Features
+
+- **agent-usage**: Draw Claude's extra usage the way Cursor's is drawn (#244)
+
 ## [0.21.0] - 2026-09-16
 
 ### Features
