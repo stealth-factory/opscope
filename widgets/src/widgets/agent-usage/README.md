@@ -195,7 +195,10 @@ as two currencies on one line.
 
 Every amount arrives in minor units with its own exponent — `5000` at exponent
 2 is fifty — and reading one as the other is a hundredfold error in a figure
-about money.
+about money. The drawn amount keeps that exponent: one minor unit at 3 is
+`0.001`, and drawing that as `0.00` would hide real spend. An empty currency
+is written with no symbol rather than as `$`, which is a unit the server
+never named.
 
 Colour comes from the server's own `severity`, the same field the limit rows
 above already read, and from its `spend_limit_reached`. Neither is a threshold
@@ -247,6 +250,11 @@ that block, so an account answering with a spend cap and no limit percentages
 lost the one figure on the tab that is real money — and lost the sentence
 explaining the missing bars along with it, since an extra-usage lane counts as
 a lane and rightly silences that sentence on `[+]`. The tab now says both.
+An unrecognised spend shape still names its keys here; a block that arrived
+empty stays silent, because the note already covers a quota that answered
+nothing. A cached snapshot on this path still says `cached … ago` — the
+heading that normally carries the age is the early return this stands in for,
+and without the stamp the money would read as this month's.
 
 **Only the first state has been seen on a real account.** The switched-off and
 unlimited readings rest on assumptions named in the tests that cover them.
