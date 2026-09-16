@@ -15,7 +15,7 @@ the four that publish one and a subscription for the five that do.
  session 5h ███████░░░░░░░░░░░░░░░░░░░░  25%  resets in 3h 14m
  overall 7d ███████████░░░░░░░░░░░░░░░░  41%  resets in 15h 24m
  Fable 7d   █░░░░░░░░░░░░░░░░░░░░░░░░░░   3%  resets in 15h 24m
-  extra usage 0.00 of 50.00 AUD monthly
+  extra usage 0.00 of 50.00 AUD limit · 50.00 left
 
  ── SUMMARY ── all time · since 2026-07-16
  Favorite model  opus-5      Total tokens    20.6B
@@ -164,8 +164,62 @@ which is precisely the kind of number this repo exists not to draw. A cached
 reading can sit well under the live one, which is the whole reason it says it
 is cached rather than presenting it as what is left now.
 
-The `extra_usage` line is the monthly credit allowance and its currency, shown
-only when it is enabled.
+### Extra usage (the monthly cap)
+
+Under the lanes sits **on-demand spend**: what the account has spent past the
+subscription, against the monthly cap set on claude.com. Real money, billed,
+and the same thing Cursor's own extra-usage line reports — so it is drawn in
+the same words, because two panes side by side saying `disabled` and `off`
+about one state would be two vocabularies for one fact.
+
+```
+  extra usage 0.00 of 50.00 AUD limit · 50.00 left
+```
+
+It stays **money rather than a bar**, for the reason the Cursor section gives
+at length: this is spend against a denominator of its own, and the three
+percentages above it are not that denominator. What is left is worked out from
+the pair rather than taken as given, and a cap lowered below what has already
+gone reads as an *overage* rather than as `-9.00 left`, which is arithmetic
+where a reader needs a fact.
+
+The currency is the account's, and it is not assumed to be dollars. Every
+amount arrives in minor units with its own exponent — `5000` at exponent 2 is
+fifty — and reading one as the other is a hundredfold error in a figure about
+money.
+
+Colour comes from the server's own `severity`, the same field the limit rows
+above already read, and from its `spend_limit_reached`. Neither is a threshold
+invented here: one pane holding two opinions about one account's health is
+worse than either alone.
+
+On `[+]` it becomes a lane labelled `extra AUD 50` — the cap on the label,
+because 19% of an unnamed limit is not a number anyone can act on. The
+percentage is **not clamped**, so a cap set under what is already spent draws
+a full bar beside the true figure. Claude states no reset for this window —
+there is no date anywhere in the block — so the lane carries **no countdown
+and no pace** rather than a figure worked out from a date nobody sent.
+
+**The line is drawn in every state, including the ones with nothing to
+report.** It used to appear only for an account with extra usage enabled and a
+cap present, which meant a switched-off cap and a response nobody could parse
+both drew nothing at all — and nothing reads as *this account has no extra
+usage* when it may mean the opposite.
+
+| state | the line reads |
+|---|---|
+| a cap, under it | `0.00 of 50.00 AUD limit · 50.00 left`, and a lane on `[+]` |
+| a cap, over it | `10.00 of 1.00 AUD limit · 9.00 over` — the real figures, and a lane the summary draws full |
+| switched off, nothing spent | `disabled` |
+| switched off, spent earlier | `10.00 AUD · disabled` — that money is billable and stays on screen; the lane goes, because there is no allowance left to be a percentage of |
+| block absent, or a shape not recognised | `not reported`, with the keys that did arrive, so an unmapped shape can be read off the pane and mapped rather than guessed at |
+
+**Only the first state has been seen on a real account**, at nothing spent. The
+switched-off reading rests on an assumption named in the test that covers it.
+There is deliberately **no unlimited state**: Cursor has one because Cursor
+sends a block that says so, and nothing Claude sends has been seen to mean
+*allowed, no ceiling* — so a response shaped that way says `not reported` and
+waits to be mapped rather than being drawn as one of the others.
 
 **Cursor** — both quota and authorship.
 

@@ -689,30 +689,245 @@ pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    let extra = &u["extra_usage"];
-    let spend = &u["spend"];
-    if extra["is_enabled"].as_bool().unwrap_or(false) && !spend["limit"].is_null() {
-        let money = |m: &serde_json::Value| -> String {
-            format!(
-                "{:.2}",
-                num(m, "amount_minor") / 10f64.powf(m["exponent"].as_f64().unwrap_or(2.0))
-            )
-        };
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), "  extra usage ".into()),
-                (p.txt.as_str(), money(&spend["used"])),
-                (p.dim.as_str(), " of ".into()),
-                (p.txt.as_str(), money(&spend["limit"])),
-                (p.dim.as_str(), format!(" {}", text(&spend["limit"], "currency"))),
-                (p.dim.as_str(), " monthly".into()),
-            ],
-            w - 1,
-        ));
-    }
+    rows.push(extra_row(&extra_state(u), w, p));
     rows.push(String::new());
     rows
 }
+
+/// What the account may spend past its plan, in the states Claude describes.
+///
+/// Extra usage is on-demand spend past the subscription: real money, billed,
+/// and capped by a monthly limit the account sets on claude.com. That cap
+/// can be raised, lowered or switched off mid-cycle, so every state has to
+/// be drawable from whatever the next response says - and a shape this
+/// parser has not seen must never be drawn as one of the others.
+///
+/// `cursor.rs` carries the same reading for the same money, and the wording
+/// on screen is deliberately its wording: two panes side by side saying
+/// `disabled` and `off` about the same state would be two vocabularies for
+/// one fact.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Extra {
+    /// A stated ceiling. `used` may exceed `limit`: lowering the cap below
+    /// what has already gone is something the account can do at any time,
+    /// and the figures then have to stay the real ones.
+    Fixed {
+        used: f64,
+        limit: f64,
+        currency: String,
+        /// The server's own `severity`, and its `spend_limit_reached`.
+        /// Neither is worked out here: the limit rows directly above read
+        /// the same `severity` field, and one pane holding two readings of
+        /// one account's health is worse than either alone.
+        severity: String,
+        reached: bool,
+    },
+    /// Extra usage switched off. Anything spent before that is still
+    /// billable and stays on screen.
+    Off { used: f64, currency: String, why: String },
+    /// No spend block, or a shape this parser has not seen. The keys that
+    /// did arrive ride along, so an unmapped response can be read off the
+    /// pane and mapped rather than guessed at.
+    NotReported { keys: Vec<String> },
+}
+
+/// One of Claude's money amounts, which arrive in minor units.
+///
+/// 5000 with `exponent` 2 is fifty, and reading it as five thousand is a
+/// hundredfold error in a figure about money.
+fn minor(m: &serde_json::Value) -> Option<f64> {
+    let amount = m.get("amount_minor")?.as_f64()?;
+    Some(amount / 10f64.powf(m["exponent"].as_f64().unwrap_or(2.0)))
+}
+
+/// Which state the account's extra usage is in.
+///
+/// Only `Fixed` has been seen on a real account, at nothing spent. `Off`
+/// rests on an assumption named in the test that covers it, and anything
+/// matching neither is `NotReported` carrying its keys - an admitted gap is
+/// worth more than a guessed state.
+///
+/// There is no uncapped state here on purpose. Cursor has one because
+/// Cursor sends a block that says so; nothing in Claude's response has been
+/// seen to mean "allowed, no ceiling", so a response shaped that way lands
+/// in `NotReported` and can be mapped when one is actually seen.
+pub fn extra_state(u: &serde_json::Value) -> Extra {
+    let spend = &u["spend"];
+    let x = &u["extra_usage"];
+    let Some(obj) = spend.as_object().filter(|o| !o.is_empty()) else {
+        return Extra::NotReported { keys: Vec::new() };
+    };
+    let currency = match text(&spend["limit"], "currency") {
+        s if !s.is_empty() => s,
+        _ => match text(&spend["used"], "currency") {
+            s if !s.is_empty() => s,
+            _ => text(x, "currency"),
+        },
+    };
+    // `spend.used` is the money; `extra_usage.used_credits` is the same
+    // figure stated a second time. The first is authoritative because it
+    // carries its own currency and exponent, and a test pins the two in
+    // agreement so a divergence surfaces rather than one being silently
+    // preferred.
+    let used = minor(&spend["used"]).or_else(|| x["used_credits"].as_f64());
+    // Three separate fields can say it is off and any one of them saying so
+    // is enough. They have not been seen disagreeing, and treating either
+    // block as the only authority would draw a cap for an account that
+    // cannot spend against it.
+    let off = spend["enabled"].as_bool() == Some(false)
+        || x["user_disabled"].as_bool() == Some(true)
+        || x["is_enabled"].as_bool() == Some(false);
+    if off {
+        let why = match text(x, "disabled_reason") {
+            s if !s.is_empty() => s,
+            _ => text(spend, "disabled_reason"),
+        };
+        return Extra::Off { used: used.unwrap_or(0.0), currency, why };
+    }
+    if let Some(limit) = minor(&spend["limit"]).filter(|l| *l > 0.0) {
+        return Extra::Fixed {
+            // A block carrying a cap and no spend is a zero left out, not a
+            // spend nobody knows - the server answered the call.
+            used: used.unwrap_or(0.0),
+            limit,
+            currency,
+            severity: text(spend, "severity"),
+            reached: x["spend_limit_reached"].as_bool().unwrap_or(false),
+        };
+    }
+    Extra::NotReported { keys: obj.keys().cloned().collect() }
+}
+
+/// The lane the summary draws for extra usage, where there is one.
+///
+/// Only a stated ceiling is something to be a percentage of, and the figure
+/// is deliberately not clamped: a cap lowered below what has already gone is
+/// a real number over 100, and the summary draws a full bar and the true
+/// figure for it.
+///
+/// The percentage is worked out from the pair on the tab rather than taken
+/// from `spend.percent`, which is a whole number - 0.40 of 50.00 is `1%`
+/// there and 0.80% here, and a small real spend reading as `0%` is what an
+/// empty section looks like. The server's figure is not discarded: a test
+/// holds the two to the same value once rounded.
+pub fn extra_lane(state: &Extra) -> Option<(f64, String)> {
+    match state {
+        Extra::Fixed { used, limit, currency, .. } if *limit > 0.0 => {
+            Some((100.0 * used / limit, cap_tag_in(&cap_prefix(currency), *limit)))
+        }
+        _ => None,
+    }
+}
+
+/// What goes before the digits on a lane label.
+///
+/// A `$` only where the server said dollars. Anything else keeps its code,
+/// because a label reading `extra $50` on an account billed in AUD is a
+/// claim about the money that nobody made.
+fn cap_prefix(currency: &str) -> String {
+    match currency {
+        "" | "USD" => "$".to_string(),
+        code => format!("{} ", code),
+    }
+}
+
+/// The extra-usage line, in whichever state the account is in.
+///
+/// Money rather than a bar, the way Cursor's is. This is spend against a
+/// denominator of its own - the account's monthly cap - and not one of the
+/// percentages above it, so drawing it on that scale would invite reading it
+/// as a fourth quota lane.
+///
+/// Drawn in every state, including the ones with nothing to report. The line
+/// used to appear only for an account with extra usage enabled and a cap
+/// present, which meant a switched-off cap and a response nobody could parse
+/// both drew nothing at all - and nothing reads as "this account has no
+/// extra usage" rather than "we could not tell". Each state reads
+/// differently on purpose: `0.00 of 0.00` for an absent cap would be a cap
+/// of nothing rather than no cap.
+fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
+    const LBL: &str = "  extra usage ";
+    let room = w.saturating_sub(2);
+    match state {
+        Extra::Fixed { used, limit, currency, severity, reached } => {
+            // The server's own judgement, not a threshold invented here.
+            // `spend_limit_reached` wins over the percentage: a cap that has
+            // been hit is hit whatever rounding says.
+            let hot = *reached || !matches!(severity.as_str(), "" | "normal");
+            let (used_s, limit_s) = (format!("{:.2}", used), format!("{:.2}", limit));
+            let head = LBL.chars().count() + used_s.len() + 4 + limit_s.len() + 1 + currency.len();
+            // What the line gives up first on a narrow pane, widest last
+            // wanted. Both tails are arithmetic on the pair already on the
+            // line, so dropping one loses no fact - and the overage is
+            // written as an overage rather than a negative remainder,
+            // because `-9.00 left` is arithmetic where a reader needs a
+            // fact.
+            let full = if used > limit {
+                format!(" limit · {:.2} over", used - limit)
+            } else {
+                format!(" limit · {:.2} left", limit - used)
+            };
+            let tail = [full.as_str(), " limit", ""]
+                .into_iter()
+                .find(|t| head + t.chars().count() <= room)
+                .unwrap_or("");
+            tc::seg(
+                &[
+                    (p.dim.as_str(), LBL.to_string()),
+                    (if hot { p.bad.as_str() } else { p.txt.as_str() }, used_s),
+                    (p.dim.as_str(), " of ".into()),
+                    (p.txt.as_str(), limit_s),
+                    (p.dim.as_str(), format!(" {}", currency)),
+                    (if hot { p.bad.as_str() } else { p.dim.as_str() }, tail.to_string()),
+                ],
+                w - 1,
+            )
+        }
+        Extra::Off { used, currency, why } => {
+            let spent = (*used > 0.0).then(|| format!("{:.2} {} · ", used, currency));
+            let head = LBL.chars().count()
+                + spent.as_ref().map(|s| s.chars().count()).unwrap_or(0)
+                + "disabled".len();
+            // The reason only where it fits whole. Half a sentence about
+            // why money cannot be spent is worse than the bare fact.
+            let reason = match why {
+                s if s.is_empty() => String::new(),
+                s if head + 3 + s.chars().count() <= room => format!(" · {}", s),
+                _ => String::new(),
+            };
+            tc::seg(
+                &[
+                    (p.dim.as_str(), LBL.to_string()),
+                    (p.txt.as_str(), spent.unwrap_or_default()),
+                    (p.dim.as_str(), format!("disabled{}", reason)),
+                ],
+                w - 1,
+            )
+        }
+        Extra::NotReported { keys } => {
+            let joined = keys.join(", ");
+            // The keys that did arrive, so the next shape can be mapped from
+            // the pane rather than guessed at - but only whole, since half a
+            // key list names fields that are not there.
+            let tail = match joined {
+                s if s.is_empty() => String::new(),
+                s if LBL.chars().count() + "not reported".len() + 3 + s.chars().count() <= room => {
+                    format!(" · {}", s)
+                }
+                _ => String::new(),
+            };
+            tc::seg(
+                &[
+                    (p.dim.as_str(), LBL.to_string()),
+                    (p.warn.as_str(), "not reported".to_string()),
+                    (p.dim.as_str(), tail),
+                ],
+                w - 1,
+            )
+        }
+    }
+}
+
 
 /// How far behind today the stats cache's own reckoning is.
 ///
@@ -1150,7 +1365,7 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
         .filter(|l| !l["percent"].is_null())
         .collect();
     found.sort_by_key(|l| claude_lane_rank(l));
-    found
+    let mut out: Vec<Lane> = found
         .into_iter()
         .map(|l| {
             let group = text(l, "group");
@@ -1205,7 +1420,27 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                             apart: false,
             }
         })
-        .collect()
+        .collect();
+    // Extra usage is the account's monthly cap and belongs with the windows
+    // above it, but Claude states no reset for it - there is no `resets_at`
+    // anywhere in the spend block. So the lane carries no window, and the
+    // summary draws no countdown and no pace rather than a figure worked out
+    // from a date nobody sent.
+    //
+    // Last, not ranked: Claude's lanes are read in the order the account's
+    // own limits nest, and this is not one of them.
+    if let Some((pct, cap)) = extra_lane(&extra_state(u)) {
+        out.push(Lane {
+            label: format!("extra{}", cap),
+            pct,
+            window_secs: None,
+            reset: None,
+            stale: reading_is_old(c.quota_at),
+            projected: false,
+            apart: false,
+        });
+    }
+    out
 }
 
 /// The whole tab: the quota, what the machine recorded, what it cost, and
@@ -1486,5 +1721,256 @@ mod tests {
         let empty = why_no_lane(&Data::default());
         assert!(empty.contains("no live reading"), "{empty}");
         assert!(lanes(&Data::default()).is_empty());
+    }
+
+    /// A drawn row without its colour escapes, so a length means cells on
+    /// screen rather than bytes in the string.
+    fn bare(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The spend and extra-usage blocks exactly as the account measured here
+    /// sent them: a fifty-dollar monthly cap, enabled, nothing spent, and
+    /// billed in AUD rather than dollars. The only state ever seen live.
+    fn measured() -> serde_json::Value {
+        serde_json::json!({
+            "extra_usage": {
+                "credits_ever_enabled": true,
+                "currency": "AUD",
+                "decimal_places": 2,
+                "disabled_reason": null,
+                "is_enabled": true,
+                "monthly_limit": 5000,
+                "spend_limit_reached": false,
+                "used_credits": 0.0,
+                "user_disabled": false
+            },
+            "spend": {
+                "can_purchase_credits": false,
+                "enabled": true,
+                "limit": { "amount_minor": 5000, "currency": "AUD", "exponent": 2 },
+                "percent": 0,
+                "severity": "normal",
+                "used": { "amount_minor": 0, "currency": "AUD", "exponent": 2 }
+            }
+        })
+    }
+
+    fn extra_line(u: &serde_json::Value, w: usize) -> String {
+        bare(&extra_row(&extra_state(u), w, &palette()))
+    }
+
+    /// 5000 minor units with an exponent of 2 is fifty, and reading it as
+    /// five thousand is a hundredfold error in a figure about money.
+    #[test]
+    fn the_cap_is_read_in_the_minor_units_it_arrives_in() {
+        let got = extra_line(&measured(), 80);
+        assert!(got.contains("0.00 of 50.00 AUD"), "{}", got);
+        assert!(!got.contains("5000"), "minor units drawn as money: {}", got);
+    }
+
+    /// The line used to be drawn only for an account with extra usage
+    /// enabled and a cap present. Switched off, it drew nothing at all - and
+    /// nothing reads as "this account has no extra usage" when it means the
+    /// opposite: money was spent and can no longer be.
+    #[test]
+    fn a_disabled_cap_still_draws_what_was_spent_before_it_went() {
+        let mut u = measured();
+        u["spend"]["enabled"] = serde_json::json!(false);
+        u["extra_usage"]["is_enabled"] = serde_json::json!(false);
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(1000);
+        u["extra_usage"]["used_credits"] = serde_json::json!(10.0);
+        let got = extra_line(&u, 80);
+        assert!(got.contains("disabled"), "{}", got);
+        assert!(got.contains("10.00 AUD"), "billable money dropped: {}", got);
+    }
+
+    /// The assumption this rests on, named where it is made: `user_disabled`
+    /// on its own is taken to mean off, without `spend.enabled` agreeing.
+    /// Not measured - no account here has ever had it set.
+    #[test]
+    fn the_account_switching_it_off_is_enough_on_its_own() {
+        let mut u = measured();
+        u["extra_usage"]["user_disabled"] = serde_json::json!(true);
+        assert!(matches!(extra_state(&u), Extra::Off { .. }));
+    }
+
+    /// A shape this parser has not seen is never drawn as one of the others,
+    /// and the keys that did arrive come with it so the next one can be
+    /// mapped off the pane rather than guessed at.
+    #[test]
+    fn an_unrecognised_spend_block_says_so_and_names_its_keys() {
+        let u = serde_json::json!({
+            "extra_usage": {},
+            "spend": { "ration": 4, "tokens_left": 900 }
+        });
+        let got = extra_line(&u, 80);
+        assert!(got.contains("not reported"), "{}", got);
+        assert!(got.contains("ration") && got.contains("tokens_left"), "{}", got);
+        assert!(!got.contains("0.00"), "an unread shape drew a figure: {}", got);
+    }
+
+    /// An absent block is not a cap of nothing. It says the same thing as an
+    /// unreadable one, with no keys to name.
+    #[test]
+    fn no_spend_block_at_all_is_not_a_cap_of_zero() {
+        let got = extra_line(&serde_json::json!({}), 80);
+        assert!(got.contains("not reported"), "{}", got);
+        assert!(!got.contains("0.00 of 0.00"), "{}", got);
+    }
+
+    /// The cap can be lowered below what has already gone. The figures stay
+    /// the real ones, and the excess is written as an overage: "-9.00 left"
+    /// is arithmetic where a reader needs a fact.
+    #[test]
+    fn a_cap_lowered_under_what_has_gone_reads_as_an_overage() {
+        let mut u = measured();
+        u["spend"]["limit"]["amount_minor"] = serde_json::json!(100);
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(1000);
+        let got = extra_line(&u, 80);
+        assert!(got.contains("10.00 of 1.00 AUD"), "{}", got);
+        assert!(got.contains("9.00 over"), "{}", got);
+        assert!(!got.contains("-9.00"), "a negative remainder: {}", got);
+        // Unclamped on the summary too: over the cap is a real number over a
+        // hundred, and the bar beside it draws full.
+        let (pct, _) = extra_lane(&extra_state(&u)).expect("a lane");
+        assert_eq!(pct, 1000.0);
+    }
+
+    /// The server's own judgement, not a threshold invented here. Both
+    /// fields can say the same thing and either alone is enough.
+    #[test]
+    fn the_servers_severity_colours_the_figure() {
+        let p = palette();
+        let calm = extra_row(&extra_state(&measured()), 80, &p);
+        assert!(!calm.contains(&p.bad), "a normal cap drawn as trouble");
+        for field in ["severity", "spend_limit_reached"] {
+            let mut u = measured();
+            match field {
+                "severity" => u["spend"]["severity"] = serde_json::json!("critical"),
+                _ => u["extra_usage"]["spend_limit_reached"] = serde_json::json!(true),
+            }
+            let hot = extra_row(&extra_state(&u), 80, &p);
+            assert!(hot.contains(&p.bad), "{} went uncoloured", field);
+        }
+    }
+
+    /// The cap rides on the label because a percentage of an unnamed limit
+    /// is not a number anyone can act on - and in the account's own
+    /// currency, since `extra $50` on an AUD account is a claim about the
+    /// money that nobody made.
+    #[test]
+    fn extra_usage_is_a_lane_carrying_its_cap_and_its_currency() {
+        let mut c = Data { quota: Some(measured()), ..Default::default() };
+        c.quota.as_mut().unwrap()["limits"] = serde_json::json!([
+            {"group": "session", "kind": "session", "percent": 20, "resets_at": null}
+        ]);
+        let got = lanes(&c);
+        let last = got.last().expect("a lane");
+        assert_eq!(last.label, "extra AUD 50");
+        // No `resets_at` anywhere in the spend block, so no countdown and no
+        // pace rather than a figure worked out from a date nobody sent.
+        assert_eq!(last.window_secs, None);
+        assert_eq!(last.reset, None);
+        assert_eq!(lead(last.pct, last.window_secs, last.reset), None);
+        // It sits after the windows, not ranked among them.
+        assert_eq!(got.len(), 2);
+    }
+
+    /// Dollars keep their sign. Only a currency that is not dollars carries
+    /// its code, and the label column is the same seven cells either way.
+    #[test]
+    fn a_dollar_cap_still_reads_as_dollars() {
+        let mut u = measured();
+        for block in ["spend", "extra_usage"] {
+            u[block]["currency"] = serde_json::json!("USD");
+        }
+        u["spend"]["limit"]["currency"] = serde_json::json!("USD");
+        let (_, cap) = extra_lane(&extra_state(&u)).expect("a lane");
+        assert_eq!(cap, " $50");
+        assert!(cap.chars().count() <= CAP_TAG_ROOM);
+        assert!(
+            extra_lane(&extra_state(&measured())).unwrap().1.chars().count() <= CAP_TAG_ROOM,
+            "an AUD cap grew the shared label column"
+        );
+    }
+
+    /// There is no state for "allowed, with no ceiling". Cursor has one
+    /// because Cursor sends a block that says so; nothing Claude sends has
+    /// been seen to mean it, so a cap of zero lands in `NotReported` and
+    /// waits to be mapped rather than being drawn as unlimited.
+    #[test]
+    fn an_enabled_block_with_no_cap_is_not_read_as_unlimited() {
+        let mut u = measured();
+        u["spend"]["limit"] = serde_json::json!(null);
+        assert!(matches!(extra_state(&u), Extra::NotReported { .. }));
+        assert_eq!(extra_lane(&extra_state(&u)), None);
+    }
+
+    /// The same money arrives twice, in two blocks with different units.
+    /// `spend` is the one read, because it carries its own currency and
+    /// exponent. This holds the other to it, so a payload where they part
+    /// company fails here rather than being quietly halved on screen.
+    #[test]
+    fn the_two_statements_of_the_same_spend_agree() {
+        let u = measured();
+        let (x, spend) = (&u["extra_usage"], &u["spend"]);
+        let places = 10f64.powf(x["decimal_places"].as_f64().unwrap());
+        assert_eq!(minor(&spend["used"]).unwrap(), x["used_credits"].as_f64().unwrap());
+        assert_eq!(
+            minor(&spend["limit"]).unwrap(),
+            x["monthly_limit"].as_f64().unwrap() / places
+        );
+        // And the server's whole-number percentage agrees with the one drawn
+        // from the pair, which is kept at full precision because a real
+        // 0.8% rounding to `0%` looks exactly like an empty section.
+        let (pct, _) = extra_lane(&extra_state(&u)).expect("a lane");
+        assert_eq!(pct.round(), spend["percent"].as_f64().unwrap());
+    }
+
+    /// A row wider than the pane is worse than a row that was cut, and both
+    /// tails here are arithmetic on figures already on the line - so they go
+    /// before the line does.
+    #[test]
+    fn the_line_sheds_its_tail_rather_than_overflowing() {
+        let mut u = measured();
+        u["spend"]["used"]["amount_minor"] = serde_json::json!(1234);
+        for w in 20..=120 {
+            let got = extra_line(&u, w);
+            assert!(got.chars().count() <= w - 1, "width {}: {:?}", w, got);
+            assert!(got.contains("12.34"), "the spend itself went: {:?}", got);
+            // Shed, not cut. A row that overflows is clipped by `seg` rather
+            // than wrapping, so measuring the length alone cannot tell the
+            // two apart - a tail dropped whole and a tail sliced through the
+            // middle of its own number are both short enough. The clause is
+            // either there complete or not there at all.
+            assert!(
+                !got.contains('·') || got.ends_with("left") || got.ends_with("over"),
+                "width {} cut the tail mid-clause: {:?}",
+                w,
+                got
+            );
+            assert!(
+                !got.contains(" l") || got.contains(" limit"),
+                "width {} cut the word itself: {:?}",
+                w,
+                got
+            );
+        }
+        assert!(extra_line(&u, 120).contains("37.66 left"));
+        assert!(!extra_line(&u, 34).contains("left"));
     }
 }
