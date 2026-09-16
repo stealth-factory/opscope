@@ -884,22 +884,53 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
             )
         }
         Extra::Off { used, currency, why } => {
-            let spent = (*used > 0.0).then(|| format!("{:.2} {} · ", used, currency));
-            let head = LBL.chars().count()
-                + spent.as_ref().map(|s| s.chars().count()).unwrap_or(0)
-                + "disabled".len();
-            // The reason only where it fits whole. Half a sentence about
-            // why money cannot be spent is worse than the bare fact.
-            let reason = match why {
-                s if s.is_empty() => String::new(),
-                s if head + 3 + s.chars().count() <= room => format!(" · {}", s),
-                _ => String::new(),
+            // Both halves are facts and neither can be dropped for the
+            // other: the money is billable, and without the word it reads
+            // like a cap that is still live. So the line sheds the sentence
+            // explaining why, then the currency code, and past that it is
+            // clipped like any other row - which cuts a word rather than
+            // leaving a separator pointing at nothing.
+            //
+            // The separator travels with the clause it introduces for
+            // exactly that reason. Held apart, a pane too narrow for
+            // `disabled` drew `10.00 AUD ·` and stopped.
+            let money = |code: &str| match *used > 0.0 {
+                true => format!("{:.2}{} · ", used, code),
+                false => String::new(),
             };
+            let with = |m: String, reason: bool| match (why.is_empty(), reason) {
+                (false, true) => format!("{}disabled · {}", m, why),
+                _ => format!("{}disabled", m),
+            };
+            let coin = format!(" {}", currency);
+            // The last one carries no separator at all. Below about
+            // twenty-five cells neither fact fits beside the other and the
+            // row is clipped like any other, so what matters is where the
+            // clip lands: inside a word rather than just after a `·`, which
+            // is a line pointing at something that is not there.
+            let tries = [
+                (money(&coin), with(String::new(), true)),
+                (money(&coin), with(String::new(), false)),
+                (money(""), with(String::new(), false)),
+                (
+                    match *used > 0.0 {
+                        true => format!("{:.2} ", used),
+                        false => String::new(),
+                    },
+                    "disabled".to_string(),
+                ),
+            ];
+            let (spent, rest) = tries
+                .iter()
+                .find(|(m, r)| LBL.chars().count() + m.chars().count() + r.chars().count() <= room)
+                .unwrap_or_else(|| tries.last().expect("a candidate"));
             tc::seg(
                 &[
                     (p.dim.as_str(), LBL.to_string()),
-                    (p.txt.as_str(), spent.unwrap_or_default()),
-                    (p.dim.as_str(), format!("disabled{}", reason)),
+                    // The money keeps the brighter colour it had: it is the
+                    // part of this line that is real spend.
+                    (p.txt.as_str(), spent.clone()),
+                    (p.dim.as_str(), rest.clone()),
                 ],
                 w - 1,
             )
@@ -2023,5 +2054,57 @@ mod tests {
         }
         assert!(extra_line(&u, 120).contains("37.66 left"));
         assert!(!extra_line(&u, 34).contains("left"));
+    }
+
+    /// The other two states have fit-or-drop logic of their own - a reason
+    /// for the disabled line, a key list for the unread one - and the same
+    /// rule covers both: whole or absent, never half.
+    #[test]
+    fn the_other_states_shed_whole_clauses_too() {
+        let mut off = measured();
+        off["spend"]["enabled"] = serde_json::json!(false);
+        off["spend"]["used"]["amount_minor"] = serde_json::json!(1000);
+        off["extra_usage"]["disabled_reason"] = serde_json::json!("payment method declined");
+        let unread = serde_json::json!({
+            "extra_usage": {},
+            "spend": { "ration": 4, "tokens_left": 900 }
+        });
+        for (name, u, whole) in [
+            ("disabled", &off, "payment method declined"),
+            ("not reported", &unread, "ration, tokens_left"),
+        ] {
+            for w in 20..=120 {
+                let got = extra_line(u, w);
+                assert!(got.chars().count() <= w - 1, "{} at {}: {:?}", name, w, got);
+                // The fact itself never goes; only the clause after it does.
+                assert!(got.contains("extra usage"), "{} at {}: {:?}", name, w, got);
+                // A separator travels with the clause it introduces, so a
+                // pane too narrow for the clause drops both. Ending on a
+                // lone `·` is a line pointing at something that is not
+                // there - which is what this row drew before, at 26 cells:
+                // `extra usage 10.00 AUD ·` and nothing after it.
+                assert!(
+                    !got.trim_end().ends_with('·'),
+                    "{} at {} ends on a dangling separator: {:?}",
+                    name,
+                    w,
+                    got
+                );
+                assert!(
+                    !got.contains('·') || got.ends_with(whole) || got.ends_with(" · disabled"),
+                    "{} at {} cut its tail mid-clause: {:?}",
+                    name,
+                    w,
+                    got
+                );
+            }
+            assert!(extra_line(u, 120).contains(whole), "{} never draws it whole", name);
+            assert!(!extra_line(u, 40).contains(whole), "{} never sheds it", name);
+        }
+        // The money on a disabled line is not a clause and never sheds: it is
+        // billable, and the sentence beside it is the droppable half.
+        for w in 30..=120 {
+            assert!(extra_line(&off, w).contains("10.00"), "width {}", w);
+        }
     }
 }
