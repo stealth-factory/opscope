@@ -1478,9 +1478,18 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
         .collect();
     // Extra usage is the account's monthly cap and belongs with the windows
     // above it, but Claude states no reset for it - there is no `resets_at`
-    // anywhere in the spend block. So the lane carries no window, and the
-    // summary draws no countdown and no pace rather than a figure worked out
-    // from a date nobody sent.
+    // anywhere in the spend block, the extra-usage block, or beside them. So
+    // the lane carries no window, and the summary draws no countdown and no
+    // pace rather than a figure worked out from a date nobody sent.
+    //
+    // The profile endpoint does carry `subscription_created_at`, and with
+    // `billing_type` of `stripe_subscription` beside it the monthly cycle
+    // can be inferred from the anniversary. It is left alone deliberately:
+    // whether this cap rolls on the billing anniversary or on the calendar
+    // month is unknown, the two differ by up to thirty days, and a countdown
+    // that wrong is worse than no countdown. Cursor's lane has the mark and
+    // the reset because Cursor sends its billing cycle. This is the whole
+    // difference between the two rows, and it is not an oversight.
     //
     // Last, not ranked: Claude's lanes are read in the order the account's
     // own limits nest, and this is not one of them.

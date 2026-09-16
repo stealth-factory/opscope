@@ -200,6 +200,21 @@ a full bar beside the true figure. Claude states no reset for this window —
 there is no date anywhere in the block — so the lane carries **no countdown
 and no pace** rather than a figure worked out from a date nobody sent.
 
+That is the whole difference between this row and Cursor's, which is otherwise
+the same bar:
+
+```
+   extra $50     ░░░░┃░░░░░░░░░░░░░░░░░░░░░░░    0%  +15%  25d 15h
+   extra AUD 50  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0%
+```
+
+Cursor's carries the mark and the countdown because Cursor sends its billing
+cycle. The profile endpoint does carry a subscription date, and with Stripe
+billing beside it the cycle could be inferred from the anniversary — but
+whether this cap rolls on the anniversary or on the calendar month is unknown,
+the two differ by up to thirty days, and a countdown that wrong is worse than
+none. The bare row is the decision, not an oversight.
+
 **The line is drawn in every state, including the ones with nothing to
 report.** It used to appear only for an account with extra usage enabled and a
 cap present, which meant a switched-off cap and a response nobody could parse
