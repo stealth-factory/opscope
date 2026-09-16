@@ -337,29 +337,154 @@ fn flash_ink(rgb: (u8, u8, u8)) -> String {
     }
 }
 
-/// Herdr, when we happen to be inside it, can raise a real toast.
+/// The multiplexer we happen to be inside, when there is one, can raise a
+/// real toast.
 ///
-/// Purely additive: nothing here requires Herdr, and outside it this is a
-/// no-op. The widget usually runs on a server, so anything local to that
-/// machine - notify-send, a sound file - would fire where nobody is.
-fn herdr_toast(title: &str, body: &str) {
-    if std::env::var("HERDR_ENV").unwrap_or_default() != "1" {
+/// Purely additive: nothing here requires Herdr or Luvus, and outside both
+/// this is a no-op. The widget usually runs on a server, so anything local
+/// to that machine - notify-send, a sound file - would fire where nobody
+/// is. Both are checked rather than one or the other: a machine can have a
+/// pane under each, and neither toast reaches the other's window.
+///
+/// Neither channel dedupes for us. Herdr's `notification show` takes
+/// `--body`, `--position` and `--sound` and nothing else; Luvus's
+/// `ui notification push` takes `--text` and `--level`, and `--dedupe-key`
+/// exists only on `clear` - the string appears nowhere in the 250 KB of
+/// `luvus uhp schema`. So the caller claims the event first and only the
+/// winner arrives here. See `claim_event`.
+fn toast(title: &str, body: &str) {
+    let herdr = std::env::var("HERDR_ENV").unwrap_or_default() == "1";
+    let luvus = std::env::var("LUVUS_ENV").unwrap_or_default() == "1";
+    if !herdr && !luvus {
         return;
     }
     let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());
     reap(&mut sent);
-    if let Ok(child) = std::process::Command::new("herdr")
+    let mut spawn = |program: &str, args: &[&str]| {
+        if let Ok(child) = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            sent.push(child);
+        }
+        // A spawn that fails stays silent, as it always has: Herdr or Luvus
+        // being down is not something the pane can fix, and it still has a
+        // clock to draw. The once-a-minute repeat is the retry.
+    };
+    if herdr {
         // --body, not a second positional: `herdr notification show` takes
         // one <TITLE> and the body is an option. Passing it positionally
         // fails with "unknown option" - silently, since stderr is nulled -
         // so this toast had never once been shown.
-        .args(["notification", "show", title, "--body", body, "--sound", "done"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        spawn(
+            "herdr",
+            &["notification", "show", title, "--body", body, "--sound", "done"],
+        );
+    }
+    if luvus {
+        // One line, because a Luvus notification has no title of its own.
+        let text = format!("{}: {}", title, body);
+        spawn(
+            "luvus",
+            &["ui", "notification", "push", "--text", &text, "--level", "info"],
+        );
+    }
+}
+
+/// Where the marker for one event lives.
+///
+/// Named for the event rather than for the pane, because every instance
+/// holding the same state file crosses the same deadline in the same tick
+/// and has to arrive at the same name. The deadline goes in as integer
+/// milliseconds: a formatted float leaves room for two instances to
+/// disagree about a last digit, and then both of them toast.
+///
+/// Minute 0 is the phase change itself. The once-a-minute repeat, while a
+/// finished pomodoro sits ignored, carries the minute - so each repeat is
+/// its own event with its own race, and nothing has to remember that the
+/// first one happened.
+fn marker_path(deadline: f64, minute: i64) -> String {
+    let dir = std::path::Path::new(&state_file())
+        .parent()
+        .map(|d| d.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ms = (deadline * 1000.0) as i64;
+    if minute <= 0 {
+        format!("{}/notified.{}", dir, ms)
+    } else {
+        format!("{}/notified.{}.{}", dir, ms, minute)
+    }
+}
+
+/// Claim one event's toast, or find it already claimed.
+///
+/// `create_new(true)` is `O_EXCL`, so the kernel decides: however many
+/// instances reach this in the same tick, exactly one gets `Ok` and the
+/// rest get `AlreadyExists`. Timing is irrelevant - two instances crossing
+/// a deadline in one tick is the ordinary case here, not a hazard.
+///
+/// **Why not a leader.** A leader needs a lease, a heartbeat, a timeout and
+/// a promotion path, and every one of those is a way to miss a toast or
+/// send two. A race per event has no state that can be orphaned: if the
+/// instance that toasted last is killed, nothing has to notice, because the
+/// next event is a fresh race among whoever is left. Do not add one.
+///
+/// The failure paths, all of them:
+///
+/// * **The winner dies between creating the marker and spawning the
+///   toast.** A microsecond window, and that toast is lost. Toasting first
+///   and marking after trades it for duplicates, which is the thing being
+///   removed, so the marker goes first. The once-a-minute repeat is the
+///   retry: a new event, a new race, a survivor wins it, and the loss is
+///   bounded to one minute.
+/// * **Every instance dies.** No daemon, so no toast - inherent, and true
+///   before any of this. The state file still carries the deadline, so the
+///   next instance to start loads it, finds the deadline passed, and fires
+///   on its first tick.
+/// * **Herdr or Luvus is down.** The spawn fails silently, as today, and
+///   the minute repeat retries.
+/// * **The state directory cannot be written.** Then `save()` is failing
+///   too and nothing is being shared, so there is no second instance to
+///   duplicate a toast with. Falling back to `true` keeps the behaviour a
+///   single pane has always had; returning false would silence the timer on
+///   the machine where it is the only thing still working.
+fn claim_event(deadline: f64, minute: i64) -> bool {
+    let path = marker_path(deadline, minute);
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
     {
-        sent.push(child);
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(_) => true,
+    }
+}
+
+/// Drop every event marker.
+///
+/// One per phase change plus one per minute of an ignored pomodoro, so a
+/// panel left alone for a day would leave hundreds behind. They go on the
+/// day rollover the widget already performs, and again whenever a state
+/// file from another day is read - a widget run nine to five never lives
+/// across midnight and would otherwise never sweep at all.
+fn sweep_markers() {
+    let Some(dir) = std::path::Path::new(&state_file()).parent().map(|d| d.to_path_buf()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("notified.") {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -417,6 +542,20 @@ struct Pomodoro {
     /// Herdr. clocks.py reads this and the port did not, so setting it did
     /// nothing here.
     notify: bool,
+    /// The state file's `seq` as this instance last saw it.
+    ///
+    /// Monotonic, bumped on every save. It is what tells a reload apart
+    /// from a write of our own: a file carrying a seq below what we hold is
+    /// a write we have already applied, or one we made ourselves, and
+    /// applying it again would drag the timer backwards.
+    seq: u64,
+    /// The state file's mtime as this instance last saw it.
+    ///
+    /// The cheap half of sharing: stat every tick, read only when it has
+    /// moved. The loop already runs at 200 ms and a stat is a syscall, so
+    /// there is no watcher and no daemon, and a key in any pane reaches
+    /// every other pane inside a tick.
+    seen: Option<std::time::SystemTime>,
 }
 
 /// Where the pomodoro's state lives, shared with clocks.py.
@@ -432,6 +571,17 @@ fn state_file() -> String {
         )
     });
     format!("{}/opscope/pomodoro.json", base)
+}
+
+/// When the state file was last written, if it is there at all.
+///
+/// The whole of the shared timer's cost, once a tick. No inotify, no
+/// kqueue, no thread: a stat is one syscall against a file that changes
+/// only when somebody presses a key.
+fn state_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(state_file())
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 /// Today, in the form the state file stores.
@@ -497,6 +647,8 @@ impl Pomodoro {
                 .get("pomodoro_notify")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            seq: 0,
+            seen: None,
         };
         it.left = it.duration();
         // Never running from config alone. Setting it running here left the
@@ -513,14 +665,34 @@ impl Pomodoro {
     /// progress belong to it, so a file from yesterday contributes the
     /// focus length and nothing else.
     fn load(&mut self) {
+        // Recorded before the read, not after: a write landing between the
+        // two is then a mtime we have not seen, and the next tick picks it
+        // up rather than the other way about, where it would be lost.
+        self.seen = state_mtime();
         let Ok(text) = std::fs::read_to_string(state_file()) else {
             return;
         };
+        // save() renames a finished temp file into place, so a torn read is
+        // not possible: this is a file some other writer produced, and
+        // keeping what we hold is better than falling back to defaults
+        // without saying so.
         let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) else {
             return;
         };
+        self.seq = d.get("seq").and_then(|v| v.as_u64()).unwrap_or(self.seq);
         if let Some(v) = d.get("focus").and_then(|v| v.as_f64()) {
             self.focus = v;
+        }
+        // The break lengths ride along with the focus length, or a ± taken
+        // during a break in one pane moves that pane's countdown and leaves
+        // every other pane computing its bar and its [±]N hint from the old
+        // number. New keys, so a release that has never heard of them
+        // simply ignores them.
+        if let Some(v) = d.get("short").and_then(|v| v.as_f64()) {
+            self.short = v;
+        }
+        if let Some(v) = d.get("long").and_then(|v| v.as_f64()) {
+            self.long = v;
         }
         // "enabled" is visibility and "hints" is the hint preference - the
         // port had the second one holding the first, so hiding the panel
@@ -533,6 +705,10 @@ impl Pomodoro {
             self.hints = v;
         }
         if d.get("day").and_then(|v| v.as_str()) != Some(self.day.as_str()) {
+            // The other half of the sweep in roll_day(): a widget run nine
+            // to five never lives across midnight, so yesterday's markers
+            // would sit in the state directory forever.
+            sweep_markers();
             return; // a new day starts a fresh count
         }
         if let Some(v) = d.get("phase").and_then(|v| v.as_str()) {
@@ -548,22 +724,74 @@ impl Pomodoro {
         }
         // Resume mid-phase. If it elapsed while the panel was away the
         // timer simply shows how far over it has run, which is what the
-        // Python does rather than pretending it ended on time.
+        // Python does rather than pretending it ended on time. A deadline
+        // already passed is therefore loaded as passed, and the first tick
+        // alerts on it - which is what makes the next instance to start the
+        // one that toasts when every instance was killed.
+        let was = self.deadline;
         let deadline = d.get("deadline").and_then(|v| v.as_f64()).unwrap_or(0.0);
         if d.get("running").and_then(|v| v.as_bool()).unwrap_or(false) && deadline > 0.0 {
             self.deadline = deadline;
             self.running = true;
+        } else {
+            // Cleared, not left alone. This used to only ever start a timer,
+            // which was enough at construction - nothing is running yet -
+            // and wrong on a reload: a pane pausing the timer would never
+            // reach the panes beside it.
+            self.running = false;
+            self.deadline = 0.0;
+        }
+        if self.deadline != was {
+            // A different block, so this instance has not rung for it. The
+            // marker is what stops the panes all toasting at once; this is
+            // only what lets any of them try.
+            self.rang_at = -1;
+        }
+    }
+
+    /// Re-read the state file when somebody else has written it.
+    ///
+    /// Every instance holds the same timer because each one stats the file
+    /// each tick and takes whatever it finds. Two panes that take a key in
+    /// the same tick both write the same seq and the second rename wins:
+    /// last-writer-wins by seq, which is why the gate below is `>=` and not
+    /// `>`. For a timer that is fine - **do not build an ordering for it.**
+    fn reload_if_changed(&mut self) {
+        let now = state_mtime();
+        if now.is_none() || now == self.seen {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(state_file()) else {
+            self.seen = now;
+            return;
+        };
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) else {
+            self.seen = now;
+            return;
+        };
+        // A file with no seq at all was written by a release that has never
+        // heard of one, and is taken: refusing it would make this instance
+        // deaf to the very writer the shared file exists for.
+        let newer = d
+            .get("seq")
+            .and_then(|v| v.as_u64())
+            .is_none_or(|seq| seq >= self.seq);
+        if newer {
+            self.load();
+        } else {
+            self.seen = now;
         }
     }
 
     /// Write the state file, failing quietly.
     ///
     /// A panel that cannot save its tally should still show the clock.
-    fn save(&self) {
+    fn save(&mut self) {
         let path = state_file();
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        self.seq += 1;
         let body = serde_json::json!({
             "day": self.day,
             "phase": match self.phase {
@@ -573,6 +801,9 @@ impl Pomodoro {
             },
             "completed": self.done,
             "focus": self.focus,
+            "short": self.short,
+            "long": self.long,
+            "seq": self.seq,
             "enabled": self.shown,
             "running": self.running,
             "was_running": self.running,
@@ -580,7 +811,31 @@ impl Pomodoro {
             "left": self.left,
             "deadline": self.deadline,
         });
-        let _ = std::fs::write(&path, body.to_string());
+        // Write a temp file and rename it over the original. rename(2) is
+        // atomic within a directory, so a reader sees the whole old file or
+        // the whole new one and a torn read is not something an instance
+        // can observe. The bare fs::write it replaces could be read
+        // half-finished, and the reader then fell back to defaults without
+        // saying so - which looked exactly like a timer nobody had started.
+        //
+        // The temp name carries the pid and the seq: two instances saving
+        // at once onto one temp name would be interleaving their bytes in
+        // it, and the rename would publish the blend.
+        let tmp = format!("{}.tmp.{}.{}", path, std::process::id(), self.seq);
+        if std::fs::write(&tmp, body.to_string()).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        // The mtime of the temp file, taken before the rename: rename keeps
+        // the inode, so this is exactly the mtime the state file will show.
+        // Recording it means our own write never trips the reload gate,
+        // while a foreign write carrying an equal seq still does.
+        let mine = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
+        if std::fs::rename(&tmp, &path).is_ok() {
+            self.seen = mine;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 
     /// Zero the tally when the date changes, even if nothing restarted.
@@ -593,6 +848,10 @@ impl Pomodoro {
         if now != self.day {
             self.day = now;
             self.done = 0;
+            // Yesterday's event markers go with yesterday's tally. One per
+            // phase change plus one per minute of an ignored pomodoro, so
+            // the directory would otherwise grow without bound.
+            sweep_markers();
             self.save();
             return true;
         }
@@ -757,15 +1016,18 @@ impl Pomodoro {
         // it: the render loop used to send a second, richer toast of its
         // own, which meant two notifications under Herdr and one even with
         // pomodoro_notify off.
-        self.alert(&format!(
-            "{} elapsed{}",
-            self.phase.label(),
-            if over >= 60.0 {
-                format!(", {} over", hms(over as i64))
-            } else {
-                String::new()
-            }
-        ));
+        self.alert(
+            &format!(
+                "{} elapsed{}",
+                self.phase.label(),
+                if over >= 60.0 {
+                    format!(", {} over", hms(over as i64))
+                } else {
+                    String::new()
+                }
+            ),
+            minute,
+        );
         true
     }
 
@@ -776,7 +1038,13 @@ impl Pomodoro {
     /// ignore the sequences they do not implement, so sending both costs
     /// nothing, and a multiplexer in between decides whether to forward
     /// them.
-    fn alert(&self, text: &str) {
+    /// The flash, the bell and the escape sequences stay per-pane: each is
+    /// the pane talking to the terminal it is drawn in, and a pane that did
+    /// not flash when its own timer elapsed would be the odd one out. Only
+    /// the toast is deduped, because that one is a machine-wide event and
+    /// every instance holding the shared deadline reaches it in the same
+    /// tick.
+    fn alert(&self, text: &str, minute: i64) {
         if self.bell {
             tc::out("\x07");
         }
@@ -785,8 +1053,11 @@ impl Pomodoro {
             tc::out(&format!("\x1b]777;notify;Pomodoro;{}\x07", text));
         }
         tc::flush();
-        if self.notify {
-            herdr_toast("Pomodoro", text);
+        // The marker before the spawn, always. The other order would trade
+        // a lost toast for duplicate ones, and duplicates are the thing
+        // being removed; claim_event() has the whole reckoning.
+        if self.notify && claim_event(self.deadline, minute) {
+            toast("Pomodoro", text);
         }
     }
 }
@@ -830,6 +1101,11 @@ fn main() {
     let mut scroll = 0usize;
 
     loop {
+        // Before the keys, not after: a key then acts on the freshest state
+        // any pane has written, so pressing space in one pane and ± in
+        // another a tick later composes rather than one of them landing on
+        // a timer that had already moved.
+        pomo.reload_if_changed();
         for key in keyboard.poll() {
             match key.as_str() {
                 "," => {
@@ -1352,6 +1628,22 @@ mod tests {
         }
         assert_eq!(d["completed"], 3);
         assert_eq!(d["phase"], "short");
+        // And the keys sharing added, which the current release ignores
+        // rather than choking on.
+        for key in ["seq", "short", "long"] {
+            assert!(d.get(key).is_some(), "a shared file needs {}", key);
+        }
+        assert!(d["seq"].as_u64().unwrap_or(0) > 0, "seq never moved off zero");
+        // The write is a temp file renamed into place, so nothing is left
+        // beside the state file afterwards.
+        let dir = std::path::Path::new(&state_file()).parent().unwrap().to_path_buf();
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the state directory")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
 
         let back = Pomodoro::new(&serde_json::json!({}));
         assert_eq!(back.done, 3, "the tally did not survive");
@@ -1394,6 +1686,8 @@ mod tests {
             day: today(),
             hints: true,
             notify: false,
+            seq: 0,
+            seen: None,
         };
 
         pomo.phase = Phase::Focus;
@@ -1961,5 +2255,168 @@ mod tests {
         // that have gone.
         pomo.adjust(-20.0);
         assert!(pomo.signed(twenty) < 0.0, "{} left", pomo.left);
+    }
+
+    /// A gap wide enough for the state file's mtime to move.
+    ///
+    /// The reload gate is the mtime, and a kernel timestamp is not
+    /// nanosecond-sharp: two writes inside one granule are one mtime, and a
+    /// test that saved twice in a microsecond would be measuring the clock
+    /// rather than the code.
+    fn let_the_mtime_move() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    #[test]
+    fn two_panes_over_one_file_converge_after_a_save() {
+        // Every instance used to load once, at construction, and never
+        // again - so two clocks panes diverged the moment either one took a
+        // key, and the user had two pomodoros where they had asked for one.
+        let _held = sandbox("converge");
+        let mut a = Pomodoro::new(&serde_json::json!({}));
+        let mut b = Pomodoro::new(&serde_json::json!({}));
+
+        // One pane starts the timer.
+        a.start_stop(1_000.0);
+        assert!(a.running);
+        b.reload_if_changed();
+        assert!(b.running, "the other pane did not see the timer start");
+        assert_eq!(b.deadline, a.deadline, "the two panes hold different deadlines");
+
+        // And the other pane pauses it, which has to reach the first.
+        let_the_mtime_move();
+        b.start_stop(1_100.0);
+        assert!(!b.running);
+        a.reload_if_changed();
+        assert!(!a.running, "a pause in one pane never reached the other");
+        assert_eq!(a.left, b.left, "the two panes hold different remainders");
+
+        // A ± during a break moves the block length everywhere, or the bar
+        // and the [±]N hint disagree from pane to pane.
+        let_the_mtime_move();
+        b.phase = Phase::Short;
+        b.adjust(3.0);
+        a.reload_if_changed();
+        assert_eq!(a.short, b.short, "the break length stayed local to one pane");
+
+        // A stale write cannot drag the timer backwards: the seq decides.
+        // The deadline has to be a running one on both sides, or a paused
+        // timer's zero matches whatever the stale file says and the
+        // assertion holds for the wrong reason.
+        let_the_mtime_move();
+        a.start_stop(2_000.0);
+        let held = a.deadline;
+        assert!(held > 0.0, "the timer under test is not running");
+        a.seq = 99;
+        let_the_mtime_move();
+        b.running = true;
+        b.deadline = 5.0;
+        b.seq = 1;
+        b.save();
+        a.reload_if_changed();
+        assert_eq!(a.deadline, held, "a write with an older seq was applied");
+    }
+
+    #[test]
+    fn an_instance_starting_onto_a_passed_deadline_fires() {
+        // The one failure path with no daemon behind it: every instance is
+        // killed while a block is running, and nothing toasts. The state
+        // file still carries the deadline, so the next instance to start has
+        // to find it passed and alert on its first tick rather than treating
+        // a block that ended an hour ago as one still to come.
+        let _held = sandbox("passed-deadline");
+        let dir = format!("{}/opscope", std::env::var("XDG_STATE_HOME").unwrap());
+        std::fs::create_dir_all(&dir).expect("the state directory");
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            format!("{}/pomodoro.json", dir),
+            serde_json::json!({
+                "day": today(),
+                "phase": "focus",
+                "completed": 0,
+                "focus": 25.0,
+                "enabled": true,
+                "running": true,
+                "hints": true,
+                "left": 0.0,
+                "deadline": now - 90.0,
+                "seq": 1,
+            })
+            .to_string(),
+        )
+        .expect("a seeded state file");
+
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        assert!(p.running, "a block left running was loaded as stopped");
+        assert!(p.overtime(now) > 0.0, "a passed deadline was loaded as pending");
+        // bell and notify off, so tick() reports the alert without writing to
+        // the terminal or spawning anything.
+        p.bell = false;
+        p.notify = false;
+        assert!(p.tick(now), "the first tick did not alert on a passed deadline");
+    }
+
+    #[test]
+    fn exactly_one_instance_claims_an_event() {
+        // Once every pane holds the same deadline they all cross it in the
+        // same tick, and each one used to spawn its own toast. The marker is
+        // the whole of the dedupe: no lock, no leader, no heartbeat.
+        let _held = sandbox("claim");
+        let deadline = 1_700_000_000.5;
+        assert!(claim_event(deadline, 0), "the first instance did not win");
+        assert!(!claim_event(deadline, 0), "a second instance toasted the same event");
+        assert!(!claim_event(deadline, 0), "a third instance toasted the same event");
+    }
+
+    #[test]
+    fn the_minute_repeat_is_its_own_event() {
+        // A finished pomodoro sitting ignored says so once a minute, and
+        // each repeat has to be a fresh race - a marker for the phase change
+        // alone would silence every repeat after the first.
+        let _held = sandbox("repeat");
+        let deadline = 1_700_000_123.0;
+        assert!(claim_event(deadline, 0));
+        assert!(!claim_event(deadline, 0));
+        assert!(claim_event(deadline, 1), "the first minute repeat was swallowed");
+        assert!(!claim_event(deadline, 1), "two panes repeated the same minute");
+        assert!(claim_event(deadline, 2), "the second minute repeat was swallowed");
+
+        // And a different phase change is a different event.
+        assert!(claim_event(deadline + 1.0, 0), "the next phase change was swallowed");
+    }
+
+    #[test]
+    fn a_swept_marker_does_not_block_a_later_day() {
+        // One marker per phase change plus one per ignored minute, so they
+        // are swept on the day rollover the widget already performs. Without
+        // the sweep the directory grows forever; without a sweep that
+        // actually removes them, a deadline landing on an old millisecond
+        // would find its toast already claimed by yesterday.
+        let _held = sandbox("sweep");
+        let mut p = Pomodoro::new(&serde_json::json!({}));
+        let deadline = 1_700_000_777.0;
+        assert!(claim_event(deadline, 0));
+        assert!(!claim_event(deadline, 0));
+
+        p.day = "2020-01-01".into();
+        assert!(p.roll_day(), "a changed date should roll");
+        assert!(
+            claim_event(deadline, 0),
+            "yesterday's marker still owns today's event"
+        );
+
+        // The other sweep, the one a widget run nine to five is the only
+        // reason for: it never lives across midnight, so roll_day never
+        // fires in it and reading a state file from another day is the only
+        // moment it learns the date moved.
+        assert!(!claim_event(deadline, 0));
+        p.day = "2020-01-01".into();
+        p.save();
+        let fresh = Pomodoro::new(&serde_json::json!({}));
+        assert_eq!(fresh.done, 0, "the stale-day branch was not taken");
+        assert!(
+            claim_event(deadline, 0),
+            "reading a state file from another day left its markers behind"
+        );
     }
 }

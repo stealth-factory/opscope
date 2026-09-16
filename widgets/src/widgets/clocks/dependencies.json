@@ -4,6 +4,10 @@
     "herdr": {
       "version": "*",
       "why": "Herdr can show a desktop notification when a timer finishes."
+    },
+    "luvus": {
+      "version": "*",
+      "why": "Luvus can show a notification when a timer finishes."
     }
   }
 }
