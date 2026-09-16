@@ -573,6 +573,13 @@ struct Pomodoro {
     /// a write we have already applied, or one we made ourselves, and
     /// applying it again would drag the timer backwards.
     seq: u64,
+    /// The last stale-day `seq` this instance swept markers for.
+    ///
+    /// `load()` now runs every tick, and a leftover file from another day
+    /// never updates `self.day` and never rewrites the file. Without this,
+    /// that branch would `read_dir` and unlink on every tick, and a pane
+    /// that is not running would delete a claim another pane just won.
+    swept_seq: Option<u64>,
 }
 
 /// Where the pomodoro's state lives, shared with clocks.py.
@@ -654,6 +661,7 @@ impl Pomodoro {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
             seq: 0,
+            swept_seq: None,
         };
         it.left = it.duration();
         // Never running from config alone. Setting it running here left the
@@ -727,8 +735,12 @@ impl Pomodoro {
                 // markers for a block we are still running, or a pane that
                 // has already claimed today's overtime would lose that
                 // claim to a late reader.
+                if self.swept_seq == Some(self.seq) {
+                    return;
+                }
                 let keep = (self.running && self.deadline > 0.0).then_some(self.deadline);
                 sweep_markers(keep);
+                self.swept_seq = Some(self.seq);
                 return; // a new day starts a fresh count
             }
         }
@@ -842,7 +854,7 @@ impl Pomodoro {
             if let Ok(d) = serde_json::from_str::<serde_json::Value>(&text) {
                 if d.get("seq")
                     .and_then(|v| v.as_u64())
-                    .is_some_and(|disk| disk >= self.seq)
+                    .is_some_and(|disk| disk > self.seq)
                 {
                     let _ = std::fs::remove_file(&tmp);
                     self.load();
@@ -1710,6 +1722,7 @@ mod tests {
             hints: true,
             notify: false,
             seq: 0,
+            swept_seq: None,
         };
 
         pomo.phase = Phase::Focus;
@@ -2488,6 +2501,11 @@ mod tests {
         fresh.start_stop(1_000.0);
         let held = fresh.deadline;
         assert!(held > 0.0);
+        // A few more writes so the file is strictly ahead of a pane that
+        // wakes holding seq 0 and increments once. An equal seq is the
+        // same-tick case and last-writer-wins, which is a different test.
+        fresh.save();
+        fresh.save();
 
         let mut stale = Pomodoro::new(&serde_json::json!({}));
         stale.seq = 0;
@@ -2557,6 +2575,47 @@ mod tests {
         assert!(
             claim_event(p.deadline + 50.0, 0, "herdr"),
             "a different block's marker survived the roll"
+        );
+    }
+
+    #[test]
+    fn two_keys_in_one_tick_are_last_writer_wins() {
+        // Both panes hold the same seq and both save. The first lands at
+        // seq+1; the second writes the same seq+1. disk > self.seq is
+        // false, so the second rename wins — the case the issue named.
+        // disk >= would have discarded the second key.
+        let _held = sandbox("last-writer");
+        let mut a = Pomodoro::new(&serde_json::json!({}));
+        let mut b = Pomodoro::new(&serde_json::json!({}));
+        a.start_stop(1_000.0);
+        b.start_stop(2_000.0);
+        a.reload_if_changed();
+        assert_eq!(a.deadline, b.deadline, "the first writer kept the file");
+        assert_eq!(a.deadline, 2_000.0 + b.duration());
+    }
+
+    #[test]
+    fn a_stale_day_file_is_swept_once() {
+        // A leftover file from another day never updates self.day and
+        // never rewrites the file. load() runs every tick, so without
+        // remembering the seq we already swept we would unlink on every
+        // tick and delete a claim another pane just won.
+        let _held = sandbox("sweep-once");
+        let mut yesterday = Pomodoro::new(&serde_json::json!({}));
+        yesterday.day = "2020-01-01".into();
+        yesterday.save();
+
+        let mut pane = Pomodoro::new(&serde_json::json!({}));
+        assert_eq!(pane.day, today(), "the pane under test is not on today");
+        let deadline = 1_700_000_333.0;
+        assert!(
+            claim_event(deadline, 0, "herdr"),
+            "construction left a marker from a directory that had none"
+        );
+        pane.reload_if_changed();
+        assert!(
+            !claim_event(deadline, 0, "herdr"),
+            "a second load of the same stale file swept a fresh claim"
         );
     }
 }
