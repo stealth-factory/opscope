@@ -29,7 +29,7 @@ use crate::*;
 
 #[derive(Clone, Default)]
 pub struct State {
-    pub claude: crate::claude::Data,
+    pub claude: Vec<crate::claude::Data>,
     pub codex: crate::codex::Data,
     pub cursor: crate::cursor::Data,
     pub grok: crate::grok::Data,
@@ -48,16 +48,26 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
-        installed: detect_agents(),
+        installed: detect_agents(cfg),
         fetched: 0.0,
         err: String::new(),
     }
 }
 
+fn claude_of<'a>(s: &'a State, tab: &str) -> Option<&'a crate::claude::Data> {
+    if let Some(label) = tab.strip_prefix("claude:") {
+        s.claude.iter().find(|p| p.label == label)
+    } else {
+        s.claude.first()
+    }
+}
+
 /// Every quota an agent publishes, in the one shape they can be compared in.
 fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
-    match name {
-        "claude" => crate::claude::lanes(&s.claude),
+    match agent_family(name) {
+        "claude" => claude_of(s, name)
+            .map(crate::claude::lanes)
+            .unwrap_or_default(),
         "codex" => crate::codex::lanes(&s.codex),
         "cursor" => crate::cursor::lanes(&s.cursor),
         "grok" => crate::grok::lanes(&s.grok),
@@ -82,6 +92,17 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
 /// Lifted out of `summary_tab` because its test sorted a vector built in the
 /// test body with a comparator written in the test body, so this ordering -
 /// the whole point of that screen - was never run by it.
+/// The agent a summary heading belongs to. Extra Claude profiles are
+/// `{label} - CLAUDE` rather than CLAUDE, and still use Claude's hue and
+/// nest order.
+fn group_agent(heading: &str) -> String {
+    if heading == "CLAUDE" || heading.ends_with(" - CLAUDE") {
+        "claude".into()
+    } else {
+        heading.to_lowercase()
+    }
+}
+
 fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
     let worst = |g: &Vec<Lane>| g.iter().map(|l| l.pct).fold(0.0f64, f64::max);
     groups.sort_by(|a, b| worst(&b.1).total_cmp(&worst(&a.1)));
@@ -104,8 +125,10 @@ fn rank_by_worst_lane<T>(groups: &mut [(T, Vec<Lane>)]) {
 /// fix. Token and setting failures warn; a server that published nothing
 /// does not.
 fn quiet_of(name: &str, s: &State) -> (String, bool) {
-    let note = match name {
-        "claude" => crate::claude::why_no_lane(&s.claude),
+    let note = match agent_family(name) {
+        "claude" => claude_of(s, name)
+            .map(crate::claude::why_no_lane)
+            .unwrap_or_else(|| crate::claude::why_no_lane(&crate::claude::Data::default())),
         "codex" => crate::codex::why_no_lane(&s.codex),
         "cursor" => crate::cursor::why_no_lane(&s.cursor),
         "grok" => crate::grok::why_no_lane(&s.grok),
@@ -123,12 +146,12 @@ fn quiet_is_actionable(note: &str) -> bool {
     !note.contains("answered, and published no")
 }
 
-fn quiet_from(quiet: &[&str], s: &State, w: usize, p: &Palette) -> Vec<String> {
-    let said: Vec<(&str, String, bool)> = quiet
+fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> Vec<String> {
+    let said: Vec<(String, String, bool)> = quiet
         .iter()
-        .map(|name| {
-            let (note, warn) = quiet_of(name, s);
-            (*name, note, warn)
+        .map(|(heading, id)| {
+            let (note, warn) = quiet_of(id, s);
+            (heading.clone(), note, warn)
         })
         .collect();
     quiet_block(&said, w, p)
@@ -137,7 +160,7 @@ fn quiet_from(quiet: &[&str], s: &State, w: usize, p: &Palette) -> Vec<String> {
 /// Split out from summary_tab because the State it needs cannot be built
 /// from another module - every agent's Data keeps its fields private - so
 /// this is the only shape the ordering is testable in.
-fn quiet_block(said: &[(&str, String, bool)], w: usize, p: &Palette) -> Vec<String> {
+fn quiet_block(said: &[(String, String, bool)], w: usize, p: &Palette) -> Vec<String> {
     let mut rows = Vec::new();
     let mut unexplained: Vec<&str> = Vec::new();
     for (name, note, warn) in said {
@@ -146,7 +169,7 @@ fn quiet_block(said: &[(&str, String, bool)], w: usize, p: &Palette) -> Vec<Stri
             continue;
         }
         rows.push(tc::seg(
-            &[(p.lbl.as_str(), format!("  {}", name.to_uppercase()))],
+            &[(p.lbl.as_str(), format!("  {}", name))],
             w - 1,
         ));
         let tone = if *warn { p.warn.as_str() } else { p.dim.as_str() };
@@ -180,14 +203,38 @@ fn summary_tab(s: &State, w: usize, p: &Palette) -> Vec<String> {
 /// never enabled still landed in a roll-call at the bottom, and a quiet
 /// agent they *did* enable got only that roll-call rather than a section.
 fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> {
-    let mut groups: Vec<(&str, Vec<Lane>)> = Vec::new();
-    let mut quiet: Vec<&str> = Vec::new();
+    let mut groups: Vec<(String, Vec<Lane>)> = Vec::new();
+    let mut quiet: Vec<(String, String)> = Vec::new();
     for &name in names {
+        if name == "claude" {
+            let multi = s.claude.len() > 1;
+            if s.claude.is_empty() {
+                quiet.push(("CLAUDE".into(), "claude".into()));
+                continue;
+            }
+            for profile in &s.claude {
+                let heading = crate::claude::summary_heading(&profile.label, multi);
+                let id = crate::claude::tab_id(
+                    &crate::claude::ClaudeDir {
+                        path: profile.dir.clone(),
+                        label: profile.label.clone(),
+                    },
+                    multi,
+                );
+                let got = crate::claude::lanes(profile);
+                if got.is_empty() {
+                    quiet.push((heading, id));
+                } else {
+                    groups.push((heading, got));
+                }
+            }
+            continue;
+        }
         let got = lanes_of(name, s);
         if got.is_empty() {
-            quiet.push(name);
+            quiet.push((name.to_uppercase(), name.to_string()));
         } else {
-            groups.push((name, got));
+            groups.push((name.to_uppercase(), got));
         }
     }
     if groups.is_empty() {
@@ -244,11 +291,11 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         if i > 0 {
             rows.push(String::new());
         }
-        let hue = agent_hue(name);
+        let hue = agent_hue(&group_agent(name));
         rows.push(tc::seg(
             &[(
                 &hue.map(|(r, g, b)| tc::rgb(r, g, b)).unwrap_or_else(|| p.txt.clone()),
-                format!("  {}", name.to_uppercase()),
+                format!("  {}", name),
             )],
             w - 1,
         ));
@@ -263,7 +310,7 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         // ago. It also made this screen disagree with the agent's own tab
         // about the order of the very same bars.
         let mut inner = lanes.clone();
-        if !matches!(*name, "claude" | "cursor") {
+        if !matches!(group_agent(name).as_str(), "claude" | "cursor") {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }
         for lane in &inner {
@@ -348,7 +395,7 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         // the five above it. Said here only while nothing is asking on
         // their behalf - once it is, the tab reports the interval and this
         // line would be repeating a setting back at them.
-        if *name == "grok" && crate::grok::asks_nobody(&s.grok) {
+        if group_agent(name) == "grok" && crate::grok::asks_nobody(&s.grok) {
             // Two lines because both halves are worth having and neither
             // fits beside the other at the widths these panes are dragged
             // to: what the number is, and what to do about it. Clipping one
@@ -417,12 +464,18 @@ pub fn tab_body(
             let shown: Vec<&str> = ORDER
                 .iter()
                 .copied()
-                .filter(|n| tabs.iter().any(|t| t == *n))
+                .filter(|n| {
+                    tabs.iter()
+                        .any(|t| t == *n || t.starts_with(&format!("{n}:")))
+                })
                 .collect();
             let names: &[&str] = if shown.is_empty() { ORDER } else { &shown };
             summary_for(s, w, p, names)
         }
-        "claude" => crate::claude::tab(&s.claude, w, h, cfg, p),
+        name if agent_family(name) == "claude" => {
+            let fallback = crate::claude::Data::default();
+            crate::claude::tab(claude_of(s, name).unwrap_or(&fallback), w, h, cfg, p)
+        }
         "codex" => crate::codex::tab(&s.codex, w, h, cfg, p),
         "cursor" => crate::cursor::tab(&s.cursor, w, h, cfg, p),
         "grok" => crate::grok::tab(&s.grok, w, h, cfg, p),
@@ -491,7 +544,7 @@ mod tests {
     fn a_quiet_agent_is_explained_under_its_own_name() {
         let p = palette();
         let said = vec![(
-            "antigravity",
+            "ANTIGRAVITY".into(),
             "no quota - it publishes none to any server.".to_string(),
             true,
         )];
@@ -520,15 +573,15 @@ mod tests {
         // The roll-call is not dropped, only reduced to what is left.
         let p = palette();
         let said = vec![
-            ("antigravity", "no quota - the app is closed.".to_string(), true),
-            ("copilot", String::new(), false),
+            ("ANTIGRAVITY".into(), "no quota - the app is closed.".to_string(), true),
+            ("COPILOT".into(), String::new(), false),
         ];
         let rows = plain(&quiet_block(&said, 90, &p));
         let roll = rows
             .iter()
             .find(|r| r.contains("No quota published by"))
             .expect("a roll-call for the one with no reason");
-        assert!(roll.contains("copilot"), "{}", roll);
+        assert!(roll.contains("COPILOT"), "{}", roll);
         assert!(!roll.contains("antigravity"), "explained and listed: {}", roll);
         // The explained one still leads with its heading.
         let head = rows.iter().position(|r| r.contains("ANTIGRAVITY")).unwrap();
@@ -628,5 +681,45 @@ mod tests {
         rank_by_worst_lane(&mut groups);
         let order: Vec<&str> = groups.iter().map(|(n, _)| *n).collect();
         assert_eq!(order, vec!["codex", "grok", "claude"]);
+    }
+
+    #[test]
+    fn two_claude_profiles_are_separate_summary_groups() {
+        let p = palette();
+        let s = State {
+            claude: vec![
+                crate::claude::Data::with_session_quota("main", 25),
+                crate::claude::Data::with_session_quota("overflow", 80),
+            ],
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&s, 90, &p, &["claude", "cursor"]));
+        let joined = rows.join("\n");
+        assert!(joined.contains("main - CLAUDE"), "{joined}");
+        assert!(joined.contains("overflow - CLAUDE"), "{joined}");
+        // One CLAUDE heading would be the old merge. The word still appears
+        // in each group title, so look for a lone CLAUDE line.
+        assert!(
+            !rows.iter().any(|r| r.trim() == "CLAUDE"),
+            "two accounts shared one heading:\n{joined}"
+        );
+        assert!(joined.contains("CURSOR"), "{joined}");
+        // Ranked as extra entries: overflow at 80% sits above main at 25%.
+        let overflow = rows.iter().position(|r| r.contains("overflow - CLAUDE")).unwrap();
+        let main = rows.iter().position(|r| r.contains("main - CLAUDE")).unwrap();
+        assert!(overflow < main, "profiles were not ranked apart:\n{joined}");
+    }
+
+    #[test]
+    fn one_claude_profile_keeps_the_claude_heading() {
+        let p = palette();
+        let s = State {
+            claude: vec![crate::claude::Data::with_session_quota("main", 25)],
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&s, 90, &p, &["claude"]));
+        let joined = rows.join("\n");
+        assert!(joined.contains("CLAUDE"), "{joined}");
+        assert!(!joined.contains("main - CLAUDE"), "{joined}");
     }
 }

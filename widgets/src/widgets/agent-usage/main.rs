@@ -332,8 +332,12 @@ const CURSOR_STEPS: [(u8, u8, u8); 4] =
 /// uses, so the same agent looks the same wherever you meet it. Copilot and
 /// Antigravity have no calendar to borrow from and get their own, chosen to
 /// sit clear of the amber and red this widget reserves for trouble.
+fn agent_family(name: &str) -> &str {
+    name.split_once(':').map(|(head, _)| head).unwrap_or(name)
+}
+
 fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
-    Some(match name {
+    Some(match agent_family(name) {
         "claude" => (240, 132, 84),
         "codex" => (206, 214, 228),
         "cursor" => (126, 208, 176),
@@ -342,6 +346,15 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         _ => return None,
     })
+}
+
+/// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
+/// only the configured label, uppercased like every other tab.
+fn tab_title(name: &str) -> String {
+    match name.strip_prefix("claude:") {
+        Some(label) => label.to_uppercase(),
+        None => name.to_uppercase(),
+    }
 }
 
 #[allow(dead_code)]
@@ -1623,6 +1636,9 @@ struct Config {
     /// than `agent_usage`. The pane says so, because a silent fallback is
     /// how a rename looks like nothing changed.
     legacy_section: bool,
+    /// Claude Code config directories, already expanded. Empty on a
+    /// `Default` used by a test, which then means the single `~/.claude`.
+    claude_dirs: Vec<crate::claude::ClaudeDir>,
 }
 
 fn read_config() -> Config {
@@ -1676,6 +1692,11 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         legacy_section,
+        claude_dirs: crate::claude::resolve_claude_dirs(
+            &crate::claude::parse_claude_dir_specs(raw),
+            std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            &home(),
+        ),
     }
 }
 
@@ -1765,11 +1786,17 @@ struct Presence {
     present: bool,
 }
 
-fn detect_agents() -> HashMap<String, Presence> {
-    ORDER
+fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
+    let mut found: HashMap<String, Presence> = ORDER
         .iter()
         .map(|name| {
-            let (_, bins, paths) = agent_spec(name);
+            let (_, bins, mut paths) = agent_spec(name);
+            if *name == "claude" {
+                paths = crate::claude::dirs_of(cfg)
+                    .iter()
+                    .map(|d| format!("{}/stats-cache.json", d.path))
+                    .collect();
+            }
             let has_bin = bins.iter().any(|b| tc::missing(&[b]).is_empty());
             let has_data = paths.iter().any(|p| std::path::Path::new(p).exists());
             (
@@ -1779,7 +1806,19 @@ fn detect_agents() -> HashMap<String, Presence> {
                 },
             )
         })
-        .collect()
+        .collect();
+    let dirs = crate::claude::dirs_of(cfg);
+    if !crate::claude::single_claude_profile(&dirs) {
+        for dir in &dirs {
+            let present = std::path::Path::new(&format!("{}/stats-cache.json", dir.path)).exists()
+                || std::path::Path::new(&format!("{}/.credentials.json", dir.path)).exists();
+            found.insert(
+                crate::claude::tab_id(dir, true),
+                Presence { present },
+            );
+        }
+    }
+    found
 }
 
 /// The tabs to draw.
@@ -1817,12 +1856,27 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
     // The summary leads and is never discovered or excluded: it is not an
     // agent, it is the view across whichever agents there turn out to be.
     let mut out = vec![SUMMARY_TAB.to_string()];
-    if shown.is_empty() {
-        out.extend(ORDER.iter().map(|n| n.to_string()));
+    let chosen = if shown.is_empty() {
+        ORDER.iter().map(|n| n.to_string()).collect()
     } else {
-        out.extend(shown);
+        shown
+    };
+    for name in chosen {
+        if name == "claude" {
+            out.extend(claude_tab_ids(cfg));
+        } else {
+            out.push(name);
+        }
     }
     out
+}
+
+fn claude_tab_ids(cfg: &Config) -> Vec<String> {
+    let dirs = crate::claude::dirs_of(cfg);
+    let multi = !crate::claude::single_claude_profile(&dirs);
+    dirs.iter()
+        .map(|d| crate::claude::tab_id(d, multi))
+        .collect()
 }
 
 /// Names in the config that match no agent we know how to read.
@@ -1909,15 +1963,15 @@ fn tab_bar(
                 p.dim.clone()
             },
             if here {
-                format!("[{}]", name.to_uppercase())
+                format!("[{}]", tab_title(name))
             } else {
-                format!(" {} ", name.to_uppercase())
+                format!(" {} ", tab_title(name))
             },
         ));
         // Both forms are the name plus two columns - `[NAME]` and ` NAME `
         // - which is what lets the brackets mark the open tab without the
         // strip shifting under them.
-        let wide = name.to_uppercase().chars().count() + 2;
+        let wide = tab_title(name).chars().count() + 2;
         placed.extend((at..at + wide).map(|col| (col, i)));
         at += wide + 1; // every branch below adds exactly one column
         if name == SUMMARY_TAB {
@@ -2120,7 +2174,7 @@ fn main() {
             .iter()
             .filter(|n| {
                 snapshot.installed.get(**n).is_some_and(|x| x.present)
-                    && !tabs.contains(&n.to_string())
+                    && !tabs.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
             })
             .count();
 
@@ -3153,5 +3207,59 @@ mod tests {
         assert_eq!(got[0].0, "plan");
         assert_eq!(got[1].0, "");
         assert!(got.len() > 1);
+    }
+
+    #[test]
+    fn extra_claude_dirs_become_their_own_tabs() {
+        let found = HashMap::from([
+            ("claude".into(), Presence { present: true }),
+            ("codex".into(), Presence { present: true }),
+        ]);
+        let one = Config::default();
+        let tabs = visible_agents(&found, &one);
+        assert_eq!(tabs, vec!["+", "claude", "codex"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
+
+        let multi = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: "/tmp/main".into(),
+                    label: "main".into(),
+                },
+                crate::claude::ClaudeDir {
+                    path: "/tmp/overflow".into(),
+                    label: "overflow".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let tabs = visible_agents(&found, &multi);
+        assert_eq!(tabs, vec!["+", "claude:main", "claude:overflow", "codex"]);
+        assert_eq!(tab_title("claude:main"), "MAIN");
+        assert_eq!(tab_title("claude:overflow"), "OVERFLOW");
+        assert!(!tabs.iter().any(|t| t == "claude"), "{tabs:?}");
+    }
+
+    #[test]
+    fn claude_config_dirs_are_read_from_the_section() {
+        let cfg = config_from(
+            &serde_json::json!({
+                "claude_config_dirs": [
+                    { "path": "~/.claude", "label": "main" },
+                    { "path": "~/.claude-overflow", "label": "overflow" }
+                ]
+            }),
+            false,
+        );
+        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("/.claude")), "{paths:?}");
+        assert!(
+            paths.iter().any(|p| p.ends_with("/.claude-overflow")),
+            "{paths:?}"
+        );
+        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
+        assert!(labels.contains(&"main"), "{labels:?}");
+        assert!(labels.contains(&"overflow"), "{labels:?}");
+        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
     }
 }
