@@ -76,9 +76,9 @@ pub struct Data {
     daily: HashMap<String, HashMap<String, Tokens>>,
 }
 
-#[cfg(test)]
 impl Data {
-    pub fn with_session_quota(label: &str, pct: i64) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_session_quota(label: &str, pct: i64) -> Self {
         Self {
             label: label.into(),
             quota: Some(serde_json::json!({
@@ -461,6 +461,7 @@ fn account_marker_at(json_path: &str) -> Option<String> {
     (!uuid.is_empty()).then_some(uuid)
 }
 
+#[allow(dead_code)]
 fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
     write_snapshot(path, utilization, account_marker())
 }
@@ -485,6 +486,7 @@ fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<Stri
     let _ = std::fs::write(path, body.to_string());
 }
 
+#[allow(dead_code)]
 fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
     read_snapshot_against(path, account_marker())
 }
@@ -539,6 +541,7 @@ fn claude_stale_for(dir: &str) -> Option<(serde_json::Value, f64)> {
 
 /// The whole fallback against two named files, so a test can put a fossil
 /// and a fresh reading on disk and check which one comes back.
+#[allow(dead_code)]
 fn stale_from(ours: &str, theirs: &str) -> Option<(serde_json::Value, f64)> {
     fresher(read_snapshot_at(ours), claude_code_cache_at(theirs))
 }
