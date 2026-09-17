@@ -11,8 +11,12 @@ your personal account.
 
 Open counts - PRs, issues, drafts, review backlog - are point-in-time totals of
 whatever is open right now, at any age. Everything else - the merge rate, the
-per-day charts and the per-account merged/rate columns - covers the merge
-window, which is the N days ending today.
+per-day charts and the per-account HELD, R24 and T2D columns - covers the merge
+window, which is the N days ending today. HELD is of PRs that closed in that
+window, the share that merged. R24 and T2D are of PRs that merged in it: first
+human review within 24h, and created-to-merged within 2d. w changes the sample;
+the 24h and 2d bars stay put. A page that has not finished is ···, never a
+sample drawn as the window.
 
 Credentials: `github.token` in config.json, or $GITHUB_TOKEN. It must be a
 *classic* token: a fine-grained one is limited to a single resource owner, so
