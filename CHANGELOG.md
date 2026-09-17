@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.22.1] - 2026-09-17
+
+### Bug Fixes
+
+- **agent-usage**: Count the Claude stats lag in the calendar it is stated in (#248)
+
 ## [0.22.0] - 2026-09-16
 
 ### Features
