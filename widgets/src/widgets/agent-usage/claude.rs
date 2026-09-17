@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone, Utc};
 use opscope_core as tc;
 
 use crate::shared::*;
@@ -1130,27 +1130,68 @@ fn extra_row(state: &Extra, w: usize, p: &Palette) -> String {
 }
 
 
+/// Columns left on a heading after the prefix, in cells rather than bytes.
+///
+/// The chart titles are built from box-drawing dashes and a middle dot, so
+/// `len()` reports more than the pane spends and the lag line is handed a
+/// room that is several cells short of what is actually there. The refresh
+/// hint is the first candidate dropped, and it is the one that does not fit
+/// in that undercount.
+fn remaining(w: usize, parts: &[&str]) -> i64 {
+    w as i64 - 1 - parts.iter().map(|s| s.chars().count() as i64).sum::<i64>()
+}
+
 /// How far behind today the stats cache's own reckoning is.
 ///
 /// `room` is the columns actually left on the line, measured by the caller
 /// rather than guessed from the pane width - the text before this varies,
 /// so a width threshold clipped at some widths and not others.
 pub fn stats_lag(stats: &serde_json::Value, room: i64) -> String {
+    stats_lag_at(stats, Utc::now().date_naive(), room)
+}
+
+/// How far behind the cache is, against a day handed in.
+///
+/// **`today` is a UTC date, and it has to be.** `lastComputedDate` is the
+/// last *complete UTC day* the cache covers, measured twice here: written at
+/// 19:42 UTC it said the day before, and written at 17:11 UTC on another day
+/// it said the day before that one. Subtracting it from `Local::now()` was
+/// comparing two calendars, and the answer was wrong for part of every day in
+/// whichever direction the offset ran.
+///
+/// East of UTC it overstated. At UTC+8 the local date rolls over eight hours
+/// early, so for a third of every day the pane said `cache 2d behind` about a
+/// cache one day behind - which is as current as that file ever gets.
+///
+/// West of UTC it did something worse: the local date lags, `days` reached
+/// zero, and the caveat vanished. A reader in the Americas got charts missing
+/// a day with nothing on screen saying so, which is the hazard this line
+/// exists to prevent wearing the face of a pane that is fine.
+///
+/// One day behind is the floor and says nothing, because the cache cannot
+/// include a day that has not finished. A warning that is permanently on is
+/// one people learn to stop reading, and the standing note at the foot of the
+/// tab says where these figures come from and how to refresh them.
+fn stats_lag_at(stats: &serde_json::Value, today: NaiveDate, room: i64) -> String {
     let last = text(stats, "lastComputedDate");
     let Ok(when) = NaiveDate::parse_from_str(&last, "%Y-%m-%d") else {
         return String::new();
     };
-    let days = (Local::now().date_naive() - when).num_days();
-    if days <= 0 {
+    let days = (today - when).num_days();
+    if days <= 1 {
         return String::new();
     }
     let month = MONTHS[when.month0() as usize];
+    // The refresh is named where there is room for it, because the reader who
+    // has just learned the figures are stale immediately wants to know what
+    // to do about it - and nothing on this machine can do it for them.
     for candidate in [
+        format!("   cache {}d behind, to {} {} · /usage refreshes", days, month, when.day()),
         format!("   cache is {}d behind, to {} {}", days, month, when.day()),
         format!("   cache {}d behind", days),
         format!("  -{}d", days),
     ] {
-        if candidate.len() as i64 <= room {
+        if candidate.chars().count() as i64 <= room {
             return candidate;
         }
     }
@@ -1438,7 +1479,7 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
                 (p.dim.as_str(), tail.clone()),
                 (
                     p.warn.as_str(),
-                    stats_lag(d, w as i64 - 1 - head.len() as i64 - tail.len() as i64),
+                    stats_lag(d, remaining(w, &[head, &tail])),
                 ),
             ],
             w - 1,
@@ -1529,7 +1570,7 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
                 ),
                 (
                     p.warn.as_str(),
-                    stats_lag(d, w as i64 - 1 - head.len() as i64 - tail.len() as i64),
+                    stats_lag(d, remaining(w, &[head, &tail])),
                 ),
             ],
             w - 1,
@@ -1547,7 +1588,90 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
         legend.push((p.dim.as_str(), " More".into()));
         rows.push(tc::seg(&legend, w - 1));
     }
+    rows.extend(stats_source_note(c, w, p));
     rows
+}
+
+/// Where the figures on this tab come from, and the one thing a reader can do
+/// about the stale half.
+///
+/// Four sections here are Claude Code's own `stats-cache.json`, and Claude
+/// Code recomputes it only when its `/usage` screen is opened - not on a
+/// schedule, not on startup, and not from a headless session. Measured on one
+/// machine the file sat untouched for three days across a version upgrade and
+/// five live sessions, then refreshed the moment that screen was opened.
+///
+/// So the tab can be hours old in one section and days old in another, with
+/// nothing on screen distinguishing them, and the refresh is something only
+/// the reader can trigger. Both halves are worth a sentence: naming the stale
+/// sections stops the fresh ones being doubted, and naming `/usage` is the
+/// difference between a caveat and an instruction.
+fn stats_source_note(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    if !c.ok {
+        return Vec::new();
+    }
+    // The quota clause has to agree with the quota heading, which is right
+    // above it and already says whether the reading is live, cached or
+    // missing. Saying "fetched live" from `c.ok` alone described the stats
+    // cache and then made a claim about a different source entirely - so a
+    // failed request drew `cached 10h ago` at the top of the tab and
+    // `fetched live` at the foot of it, about the same numbers.
+    // The heading, not the payload and not `lanes()`. A spend-only
+    // response still sets `quota`, and extra usage is a lane, so both
+    // of those fire while `claude_quota` draws nothing and the tab
+    // writes `no quota · published no limit percentages` in the place
+    // the bars would have been. Saying "the quota above" about that
+    // line is the same contradiction the live/cached split was written
+    // to stop.
+    let quota = match (quota_heading(c), c.quota_live) {
+        (true, true) => ", and the quota above is the account's, fetched live",
+        (true, false) => ", and the quota above is the account's, from the cached reading its heading dates",
+        // Nothing to describe. `why_no_limits` has already said why, in the
+        // place the bars would have been.
+        (false, _) => "",
+    };
+    let body = format!(
+        "Summary, by model and the two per-day charts are Claude Code's own \
+         stats cache, which it rebuilds only when you open /usage - so they \
+         stop at the last whole day it counted. Output rate and the money \
+         below are read here from the transcripts{}.",
+        quota
+    );
+    // Wrapped to the width these rows are actually drawn at, not a wider
+    // one: the line is indented two and clipped at `w - 1`, so anything
+    // wrapped to more than `w - 3` is cut mid-word and the rest of the
+    // sentence is never moved to a later line. The old floor of twenty did
+    // that to every pane under twenty-three cells.
+    let avail = w.saturating_sub(3);
+    // `wrap_text` breaks on spaces, so a word longer than the width it is
+    // given goes out whole and `seg` cuts it - `transcripts,` came back as
+    // `transcrip` at twelve cells. A word broken by the frame teaches a word
+    // that does not exist, and half a sentence of guidance is worth less than
+    // none: the lag on the chart headings still fits at these widths, and the
+    // README carries the long version. So the note stands down instead.
+    if body.split_whitespace().map(|word| word.chars().count()).max().unwrap_or(0) > avail {
+        return Vec::new();
+    }
+    let mut rows = vec![String::new()];
+    for line in wrap_text(&body, avail) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {}", line))], w - 1));
+    }
+    rows
+}
+
+/// Whether `claude_quota` will draw the `── QUOTA ──` heading.
+///
+/// That function returns nothing unless `limits[]` has a percentage. Extra
+/// usage is a lane and a spend-only payload is a `quota`, and neither of
+/// those is a heading.
+fn quota_heading(c: &Data) -> bool {
+    c.quota.as_ref().is_some_and(|u| {
+        u["limits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|l| !l["percent"].is_null())
+    })
 }
 
 /// Why Claude publishes no bar on the summary, when it does not.
@@ -1976,6 +2100,281 @@ mod tests {
         assert!(lanes(&Data::default()).is_empty());
     }
 
+    fn cache_at(last: &str) -> serde_json::Value {
+        serde_json::json!({ "lastComputedDate": last })
+    }
+
+    fn day(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("a date")
+    }
+
+    /// The bug this replaced: `lastComputedDate` is the last complete **UTC**
+    /// day, and it was being subtracted from the **local** date. The two
+    /// calendars disagree for part of every day, in whichever direction the
+    /// offset runs, so the figure was wrong by a day for hours at a stretch.
+    ///
+    /// Both measurements this rests on came off one machine: written 19:42
+    /// UTC the cache said the previous day, and written 17:11 UTC on another
+    /// day it said the previous day again. Never the local one.
+    #[test]
+    fn the_lag_is_counted_in_the_calendar_the_date_is_stated_in() {
+        // The reading that started this: at UTC+8, 01:12 local on the 17th,
+        // UTC was still on the 16th and the cache held the 15th. One day
+        // behind, and the pane said two.
+        assert_eq!(stats_lag_at(&cache_at("2026-09-15"), day("2026-09-16"), 99), "");
+        // The same cache a day later is genuinely two behind and says so.
+        let stale = stats_lag_at(&cache_at("2026-09-15"), day("2026-09-17"), 99);
+        assert!(stale.contains("2d behind"), "{}", stale);
+        assert!(stale.contains("Sep 15"), "{}", stale);
+    }
+
+    /// One day back is the floor: the cache counts complete days, so it can
+    /// never hold today. A warning that is permanently on is one people learn
+    /// to stop reading, and the note at the foot of the tab carries the
+    /// standing explanation instead.
+    #[test]
+    fn the_freshest_the_cache_can_be_is_not_reported_as_a_problem() {
+        for room in [10, 40, 99] {
+            assert_eq!(stats_lag_at(&cache_at("2026-09-15"), day("2026-09-16"), room), "");
+        }
+        // And a clock that disagrees with the file does not produce a
+        // negative countdown or a panic.
+        assert_eq!(stats_lag_at(&cache_at("2026-09-20"), day("2026-09-16"), 99), "");
+        assert_eq!(stats_lag_at(&serde_json::json!({}), day("2026-09-16"), 99), "");
+    }
+
+    /// The half that mattered, stated as the two readings the same cache used
+    /// to produce at one instant.
+    ///
+    /// A cache holding the 15th, at 2026-09-16 20:00 UTC. East of UTC the
+    /// local date has already rolled to the 17th and the old code said two
+    /// days; west of UTC it is still the 16th and it said nothing at all.
+    /// Neither is the answer: the cache is one day back, everywhere.
+    #[test]
+    fn the_day_a_reading_is_counted_in_changes_the_answer() {
+        let cache = cache_at("2026-09-15");
+        let (east, utc, west) = (day("2026-09-17"), day("2026-09-16"), day("2026-09-16"));
+        // What the local calendar would have said, on each side.
+        assert!(stats_lag_at(&cache, east, 99).contains("2d behind"));
+        assert_eq!(stats_lag_at(&cache, west, 99), "");
+        // What UTC says, which is what ships: the floor, and silent.
+        assert_eq!(stats_lag_at(&cache, utc, 99), "");
+        // The west-of-UTC failure was the dangerous one, so pin it on a
+        // cache that is genuinely stale: counted locally the caveat vanished
+        // while three days were missing, counted in UTC it does not.
+        let stale = cache_at("2026-09-13");
+        assert_eq!(stats_lag_at(&stale, day("2026-09-13"), 99), "", "the local reading");
+        assert!(stats_lag_at(&stale, day("2026-09-16"), 99).contains("3d behind"));
+    }
+
+    /// And the shipped wrapper hands the pure function a UTC date rather than
+    /// a local one.
+    ///
+    /// This discriminates only where the machine's offset actually puts the
+    /// two calendars on different dates - eight hours a day at UTC+8, never
+    /// on a CI runner set to UTC. So it is not proof on its own, and the
+    /// mutation was run on a machine where the dates did differ. Quiet here
+    /// means the clock agreed, not that the code is right.
+    #[test]
+    fn the_shipped_reading_is_taken_in_utc() {
+        // Two clock reads, because a midnight between constructing the
+        // cache and asking the wrapper would make a 4d fixture read as 5d.
+        // Either side of that roll is still UTC; only a local date would
+        // land on a third answer.
+        let before = Utc::now().date_naive();
+        let cache = cache_at(&(before - Days::days(4)).to_string());
+        let got = stats_lag(&cache, 99);
+        let after = Utc::now().date_naive();
+        assert!(
+            got == stats_lag_at(&cache, before, 99) || got == stats_lag_at(&cache, after, 99),
+            "the wrapper is not counting in UTC: {got}"
+        );
+        assert!(
+            got.contains("4d behind") || (before != after && got.contains("5d behind")),
+            "{got}"
+        );
+    }
+
+    /// The reader who has just learned the figures are stale wants to know
+    /// what to do, and nothing on this machine can do it for them - Claude
+    /// Code rebuilds the cache only when its own `/usage` screen is opened.
+    #[test]
+    fn a_stale_cache_names_the_command_that_refreshes_it() {
+        let wide = stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), 99);
+        assert!(wide.contains("/usage"), "{}", wide);
+        // It is the first thing dropped, and what is left is still true.
+        let narrow = stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), 34);
+        assert!(!narrow.contains("/usage"), "{}", narrow);
+        assert!(narrow.contains("5d behind"), "{}", narrow);
+        // Never wider than the room it was given, at any width.
+        for room in 0..=120 {
+            let got = stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), room);
+            assert!(got.chars().count() as i64 <= room, "room {}: {:?}", room, got);
+        }
+        // And it takes every cell it is given. The separator in that line is
+        // a multi-byte character, so measuring the candidate in bytes makes
+        // it look one cell wider than it draws and drops the refresh from a
+        // pane that had room for it - the same `len()`-counts-bytes mistake
+        // the padding helpers exist to avoid.
+        let exact = wide.chars().count() as i64;
+        assert!(exact < wide.len() as i64, "no multi-byte char to be wrong about");
+        assert_eq!(
+            stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), exact),
+            wide,
+            "the line was measured in bytes and shed a cell it had"
+        );
+    }
+
+    /// The room handed to that function used to be counted in bytes too.
+    /// The heading is box-drawing dashes and the tail has a middle dot, so
+    /// `len()` on the prefix reports more than the pane spends and the
+    /// refresh is dropped from a width that had room for it.
+    #[test]
+    fn the_heading_measures_the_prefix_in_cells() {
+        let head = " ── MESSAGES / DAY ── ";
+        let tail = "60d · peak 12444";
+        assert!(head.len() > head.chars().count(), "no multi-byte dash to be wrong about");
+        assert!(tail.len() > tail.chars().count(), "no multi-byte dot to be wrong about");
+        let cells = remaining(87, &[head, tail]);
+        let bytes = 87_i64 - 1 - head.len() as i64 - tail.len() as i64;
+        assert!(cells > bytes, "cells {cells} should beat the byte undercount {bytes}");
+        let lag = stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), cells);
+        assert!(lag.contains("/usage"), "cells still shed it: {lag}");
+        let short = stats_lag_at(&cache_at("2026-09-12"), day("2026-09-17"), bytes);
+        assert!(!short.contains("/usage"), "the byte room is not the case this pins: {short}");
+
+        // And through the tab, at the width the full row occupies. Sixty
+        // days, peak 12444, five days behind: 86 cells of heading, drawn
+        // into `w - 1`, so 87 is the first pane that holds `/usage`.
+        let today = Utc::now().date_naive();
+        let last = today - Days::days(5);
+        let daily: Vec<serde_json::Value> = (0..60)
+            .map(|i| {
+                serde_json::json!({
+                    "date": (last - Days::days(59 - i)).to_string(),
+                    "messageCount": if i == 0 { 12444 } else { 1 }
+                })
+            })
+            .collect();
+        let c = Data {
+            ok: true,
+            stats: serde_json::json!({
+                "lastComputedDate": last.to_string(),
+                "dailyActivity": daily,
+            }),
+            ..Default::default()
+        };
+        let heading = claude_tab(&c, 87, &palette())
+            .iter()
+            .map(|r| bare(r))
+            .find(|r| r.contains("MESSAGES"))
+            .expect("the messages heading");
+        assert!(heading.contains("/usage"), "shed at a width that had room: {heading}");
+    }
+
+    /// The standing note, which is what makes the silent floor readable: it
+    /// names the four sections that come from the cache, separates them from
+    /// the ones that do not, and names the command.
+    #[test]
+    fn the_tab_says_which_figures_are_cached_and_how_to_refresh_them() {
+        let c = Data {
+            ok: true,
+            stats: cache_at("2026-09-15"),
+            quota: Some(measured()),
+            ..Default::default()
+        };
+        let joined = bare(&claude_tab(&c, 90, &palette()).join(" "));
+        assert!(joined.contains("/usage"), "no refresh named: {}", joined);
+        assert!(joined.contains("stats cache"), "{}", joined);
+        // The fresh half is named too, so it is not doubted along with the
+        // stale half.
+        assert!(joined.contains("transcripts"), "{}", joined);
+        // Nothing to describe when the cache was never read.
+        let none = Data { ok: false, ..Default::default() };
+        assert!(!bare(&claude_tab(&none, 90, &palette()).join(" ")).contains("/usage"));
+    }
+
+    /// The note sits under the quota heading and must not contradict it. It
+    /// used to say "fetched live" off `c.ok`, which is about the stats cache
+    /// - so a failed request drew `cached 10h ago` at the top of the tab and
+    /// `fetched live` at the foot of it, about the same numbers.
+    #[test]
+    fn the_note_does_not_call_a_cached_quota_live() {
+        let base = Data { ok: true, stats: cache_at("2026-09-15"), ..Default::default() };
+        let say = |c: &Data| bare(&stats_source_note(c, 90, &palette()).join(" "));
+
+        let live = Data { quota: Some(with_a_limit(measured())), quota_live: true, ..base.clone() };
+        assert!(say(&live).contains("fetched live"), "{}", say(&live));
+
+        let cached = Data {
+            quota: Some(with_a_limit(measured())),
+            quota_live: false,
+            quota_at: now() - 3600.0,
+            ..base.clone()
+        };
+        let got = say(&cached);
+        assert!(!got.contains("fetched live"), "a cached reading called live: {}", got);
+        assert!(got.contains("cached"), "{}", got);
+
+        // No quota at all: the clause goes entirely rather than describing a
+        // source that is not there. `why_no_limits` has already said why.
+        let absent = Data { quota: None, ..base.clone() };
+        let got = say(&absent);
+        assert!(!got.contains("quota above"), "described a quota there is none of: {}", got);
+        assert!(got.contains("/usage"), "the cache half went with it: {}", got);
+
+        // Spend-only: a payload arrived, and the tab still draws
+        // `no quota · published no limit percentages` in place of the
+        // heading. Calling that "the quota above" is the same lie.
+        let spend_only = Data {
+            quota: Some(measured()),
+            quota_live: true,
+            ..base
+        };
+        let got = say(&spend_only);
+        assert!(!got.contains("quota above"), "described a heading that was not drawn: {got}");
+        assert!(!got.contains("fetched live"), "a spend-only reading called live: {got}");
+        assert!(got.contains("/usage"), "the cache half went with it: {got}");
+    }
+
+    /// Wrapped to the width it is drawn at. The rows are indented two and
+    /// clipped at `w - 1`, so wrapping to anything wider cuts the sentence
+    /// mid-word and never moves the rest to a later line - which a floor of
+    /// twenty did to every pane under twenty-three cells.
+    #[test]
+    fn the_note_wraps_to_the_width_it_is_drawn_at() {
+        let c = Data {
+            ok: true,
+            stats: cache_at("2026-09-15"),
+            quota: Some(with_a_limit(measured())),
+            quota_live: true,
+            ..Default::default()
+        };
+        let mut drawn_at = 0;
+        for w in 8..=120 {
+            let rows = stats_source_note(&c, w, &palette());
+            let lines: Vec<String> =
+                rows.iter().map(|r| bare(r)).filter(|r| !r.trim().is_empty()).collect();
+            if lines.is_empty() {
+                continue;
+            }
+            drawn_at += 1;
+            for line in &lines {
+                assert!(line.chars().count() <= w - 1, "width {}: {:?}", w, line);
+            }
+            // Drawn at all means drawn whole. Every word of the sentence
+            // survives somewhere in the block - no word is cut by the frame,
+            // at any width where the note appears.
+            let joined = lines.join(" ");
+            for word in ["stats", "cache,", "/usage", "transcripts,", "live"] {
+                assert!(joined.contains(word), "width {} lost {:?}: {}", w, word, joined);
+            }
+        }
+        // And it is not simply never drawn, which would satisfy the above.
+        assert!(drawn_at > 90, "the note stood down almost everywhere: {}", drawn_at);
+        assert!(stats_source_note(&c, 12, &palette()).is_empty(), "shredded at 12 cells");
+    }
+
     /// A drawn row without its colour escapes, so a length means cells on
     /// screen rather than bytes in the string.
     fn bare(row: &str) -> String {
@@ -1993,6 +2392,21 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The spend-only payload plus a session limit, so the quota heading
+    /// is actually drawn. `measured()` itself is the spend-only shape:
+    /// a response with money and no `limits[].percent`, which is the
+    /// path that used to make the source note describe a heading that
+    /// was never there.
+    fn with_a_limit(mut u: serde_json::Value) -> serde_json::Value {
+        u["limits"] = serde_json::json!([{
+            "group": "session",
+            "kind": "session",
+            "percent": 20,
+            "resets_at": null
+        }]);
+        u
     }
 
     /// The spend and extra-usage blocks exactly as the account measured here

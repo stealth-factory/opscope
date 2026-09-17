@@ -127,12 +127,44 @@ reads without colour. A `·` marks an agent that is installed.
 token counts (input, output, cache read, cache written), total sessions and
 messages, and around four weeks of daily activity. All of it is spend.
 
-The summary block mirrors Claude Code's own `/stats`, from the same file:
+The summary block mirrors Claude Code's own `/usage`, from the same file:
 favourite model by output tokens, total across all four token kinds, sessions,
 longest session, active days, both streaks and the most active day. Rendering
-it against a `/stats` screenshot taken the same week agrees on every figure the
+it against a `/usage` screenshot taken the same week agrees on every figure the
 cache had settled — 31 sessions, a longest session of `4d 10h 52m`, a longest
 streak of 21 days, Aug 1 as the busiest day.
+
+### The cache only moves when you open `/usage`
+
+This is the one thing to know about the four sections that read that file —
+summary, by model, and the two per-day charts. **Claude Code rebuilds
+`stats-cache.json` when its own `/usage` screen is opened, and at no other
+time.** Not on a schedule, not on startup, and not from a headless session.
+Measured here: the file sat untouched for three days across a version upgrade
+and five live sessions, then refreshed the moment that screen was opened.
+`/stats` and `/cost` are aliases for the same command.
+
+So those four sections can be days behind while everything else on the tab is
+current, and nothing this widget does can move them — the refresh is the
+reader's to trigger. The tab says so in as many words at its foot, and the two
+per-day charts carry the lag in their headings when there is one:
+
+```
+ ── MESSAGES / DAY ── 60d · peak 12444   cache 5d behind, to Sep 12 · /usage refreshes
+```
+
+**`lastComputedDate` is the last complete UTC day**, so the cache never holds
+today and is always at least one day back. That floor is silent, because a
+caveat that is permanently on is one people learn to stop reading; the
+standing note at the foot of the tab covers it instead.
+
+The count is taken **in UTC**, which is the calendar the date is stated in.
+Subtracting it from the local date compared two calendars and was wrong for
+part of every day: east of UTC it overstated the lag for the first hours of
+each local day, and west of UTC the count reached zero and the caveat vanished
+while days were genuinely missing — a chart short of data with nothing on
+screen saying so, which is the founding hazard wearing the face of a pane that
+is fine.
 
 The **tokens-per-day calendar** is laid out like the contribution calendar in
 `github` — weekdays down the side, weeks across — so the two read the same
@@ -1273,7 +1305,7 @@ something its own dollar line already says.
 **Every quota bar is drawn in its own agent's colour**, dark at the left of the
 fill and full at the right, so a row says whose it is before you read the
 heading — and on the `+` tab, where six agents share a screen, without one.
-Claude keeps the terracotta of its own `/stats`, Codex its dark-grey-to-white,
+Claude keeps the terracotta of its own `/usage`, Codex its dark-grey-to-white,
 Grok its blue, Cursor its green; Copilot and Antigravity have no calendar to
 borrow from and were given hues clear of the amber and red reserved below.
 
