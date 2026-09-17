@@ -29,6 +29,8 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as Days, NaiveDate, Utc};
 use opscope_core as tc;
 
+mod parse;
+
 /// The environment variable a GitHub token is read from when `token_env`
 /// says nothing. Named once so the code and the schema cannot drift: the
 /// settings screen draws its default from `settings.json`, and a screen
@@ -689,7 +691,192 @@ fn flow_body(
     rows
 }
 
-/// How many of the longest-open PRs an account's own screen names.
+/// Nodes per merged-PR search page. GitHub's own cap.
+const TIMING_PAGE: usize = 100;
+/// Reviews asked with each merged node. Past this we page by id.
+const REVIEW_PAGE: usize = 20;
+
+/// One page of PRs merged on or after `since`, for the timing enricher.
+///
+/// Counts stay on [`build_query`]; this is the later pass that reads
+/// `createdAt`, `mergedAt` and reviews. Do not add these fields as aliases
+/// on the eight-count headline request.
+fn build_merged_page_query(q: &str, since: &str, after: Option<&str>) -> String {
+    let after_arg = match after {
+        Some(c) if !c.is_empty() => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        _ => String::new(),
+    };
+    format!(
+        r#"{{
+  search(query:"{q} is:pr is:merged merged:>={since}", type:ISSUE, first:{n}{after}) {{
+    issueCount
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
+      ... on PullRequest {{
+        id
+        createdAt
+        mergedAt
+        reviews(first:{rev}) {{
+          pageInfo {{ hasNextPage endCursor }}
+          nodes {{ submittedAt author {{ __typename login }} }}
+        }}
+      }}
+    }}
+  }}
+}}"#,
+        q = q,
+        since = since,
+        n = TIMING_PAGE,
+        after = after_arg,
+        rev = REVIEW_PAGE,
+    )
+}
+
+fn build_reviews_page_query(id: &str, after: Option<&str>) -> String {
+    let after_arg = match after {
+        Some(c) if !c.is_empty() => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        _ => String::new(),
+    };
+    format!(
+        r#"{{
+  node(id: {id}) {{
+    ... on PullRequest {{
+      reviews(first:{rev}{after}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{ submittedAt author {{ __typename login }} }}
+      }}
+    }}
+  }}
+}}"#,
+        id = serde_json::Value::String(id.to_string()),
+        after = after_arg,
+        rev = REVIEW_PAGE,
+    )
+}
+
+/// Page every merged-in-window PR for one account, then the landed-set %.
+///
+/// Stops when the expected `issueCount` is reached, the search says there
+/// is no next page, or the 1000-node cap is hit. A short page is handed to
+/// [`parse::parse_land_timing`] as incomplete — it will not print a %.
+fn fetch_land_timing(
+    acc: &str,
+    viewer: &str,
+    days: i64,
+    expected: i64,
+    tok: &str,
+    scopes: &Arc<Mutex<Scopes>>,
+) -> Result<parse::LandTiming, String> {
+    if expected <= 0 {
+        return Ok(parse::parse_land_timing(0, &[]));
+    }
+    let since = (today() - Days::days(days - 1)).format("%Y-%m-%d").to_string();
+    let q = scope_of(acc, viewer);
+    let mut prs: Vec<parse::MergedPr> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let raw = graphql(
+            &build_merged_page_query(&q, &since, cursor.as_deref()),
+            tok,
+            scopes,
+        )?;
+        let page = parse::parse_merged_search_page(&raw.to_string())
+            .ok_or_else(|| "unreadable merged page".to_string())?;
+        for mut pr in page.prs {
+            fill_reviews(&mut pr, tok, scopes);
+            prs.push(pr);
+            if prs.len() as i64 >= expected {
+                break;
+            }
+        }
+        let next = page.end_cursor;
+        if (prs.len() as i64) >= expected
+            || !page.has_next_page
+            || next.is_empty()
+            || Some(&next) == cursor.as_ref()
+            || (prs.len() as i64) >= parse::SEARCH_NODE_CAP
+        {
+            break;
+        }
+        cursor = Some(next);
+    }
+    Ok(parse::parse_land_timing(expected, &prs))
+}
+
+/// Keep paging a PR's reviews while the first page is all bots.
+fn fill_reviews(pr: &mut parse::MergedPr, tok: &str, scopes: &Arc<Mutex<Scopes>>) {
+    if !pr.reviews_incomplete || pr.id.is_empty() {
+        return;
+    }
+    if parse::parse_first_human_review_hours(&pr.created_at, pr).is_some() {
+        pr.reviews_incomplete = false;
+        return;
+    }
+    let mut cursor = if pr.reviews_cursor.is_empty() {
+        None
+    } else {
+        Some(pr.reviews_cursor.clone())
+    };
+    loop {
+        let Ok(raw) = graphql(&build_reviews_page_query(&pr.id, cursor.as_deref()), tok, scopes)
+        else {
+            return;
+        };
+        let Some((more, has_next, next)) = parse::parse_review_page(&raw.to_string()) else {
+            return;
+        };
+        pr.reviews.extend(more);
+        if parse::parse_first_human_review_hours(&pr.created_at, pr).is_some() {
+            pr.reviews_incomplete = false;
+            return;
+        }
+        if !has_next || next.is_empty() || Some(&next) == cursor.as_ref() {
+            pr.reviews_incomplete = has_next;
+            return;
+        }
+        cursor = Some(next);
+    }
+}
+
+/// Which extra BY ACCOUNT columns the pane has room for.
+///
+/// HELD is always drawn. R24 from 50, T2D from 56, ISSUES + spark from 62
+/// so the spark keeps `w − 64`. Extra width buys another column, then
+/// more spark days — never padding, never a truncated number.
+fn by_account_cols(w: usize) -> (bool, bool, bool) {
+    (w >= 50, w >= 56, w >= 62)
+}
+
+fn land_of(
+    a: &Account,
+    overlay: &HashMap<String, (i64, parse::LandTiming)>,
+    want: i64,
+) -> Option<parse::LandTiming> {
+    if a.window != want {
+        return None;
+    }
+    if a.timing_window == Some(want) {
+        if let Some(t) = &a.timing {
+            return Some(t.clone());
+        }
+    }
+    overlay
+        .get(&a.key)
+        .and_then(|(w, t)| (*w == want).then(|| t.clone()))
+}
+
+fn fmt_hours(h: f64) -> String {
+    if (h - h.round()).abs() < 0.05 || h >= 10.0 {
+        format!("{:.0}h", h)
+    } else {
+        format!("{:.1}h", h)
+    }
+}
+
+fn fmt_days(d: f64) -> String {
+    format!("{:.1}d", d)
+}
+
 /// How long ago an ISO-8601 stamp was, coarse on purpose: "47d" answers the
 /// question a queue raises and a timestamp does not.
 fn age_since(iso: &str) -> String {
@@ -776,6 +963,138 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
     }
 }
 
+/// `── TO LAND ──` — held among closed, then the two landed-set %.
+///
+/// Held is the row's RATE under its new name. R24 / T2D are % of *merged*
+/// PRs in the window; a dropped PR never lands. Incomplete paging prints
+/// `···` and says so — never a sample as the window.
+fn to_land_rows(
+    a: &Account,
+    land: Option<&parse::LandTiming>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── TO LAND ── ".into()),
+            (
+                p.dim.as_str(),
+                format!("last {}d · merged in window, except held", a.window),
+            ),
+        ],
+        w - 1,
+    ));
+    let label_w = 22usize;
+    let mut field = |name: &str, value: String, aside: String, colour: &str| {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad(name, label_w))),
+                (colour, format!("{:>7}", value)),
+                (p.dim.as_str(), format!("   {}", aside)),
+            ],
+            w - 1,
+        ));
+    };
+
+    let held_txt = match a.held {
+        Some(r) => format!("{:.0}%", r),
+        None => "--".into(),
+    };
+    let held_aside = match a.dropped {
+        0 => format!("{} merged", a.merged),
+        n => format!("{} merged / {} closed unmerged", a.merged, n),
+    };
+    let held_c = match a.held {
+        Some(r) => tc::health(r / 100.0),
+        None => p.dim.clone(),
+    };
+    field("held", held_txt, held_aside, held_c.as_str());
+
+    let (r24, t2d, r24_aside, t2d_aside, no_human, no_aside) = match land {
+        None => (
+            "···".to_string(),
+            "···".to_string(),
+            String::new(),
+            String::new(),
+            "···".to_string(),
+            String::new(),
+        ),
+        Some(t) if !t.complete || t.r24 == parse::PctCell::Incomplete => {
+            let why = format!("incomplete · {} of {} paged", t.fetched, t.expected);
+            let t2d_txt = parse::parse_pct_text(false, Some(t.t2d));
+            let t2d_aside = match t.t2d {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_merge_days
+                        .map(|d| format!(" · median {} · includes draft", fmt_days(d)))
+                        .unwrap_or_else(|| " · includes draft".into());
+                    format!("{} of {}{}", t.t2d_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => why.clone(),
+            };
+            (
+                "···".to_string(),
+                t2d_txt,
+                why.clone(),
+                t2d_aside,
+                "···".to_string(),
+                why,
+            )
+        }
+        Some(t) => {
+            let r24_txt = parse::parse_pct_text(false, Some(t.r24));
+            let t2d_txt = parse::parse_pct_text(false, Some(t.t2d));
+            let r24_aside = match t.r24 {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_review_hours
+                        .map(|h| format!(" · median {} · bots skipped", fmt_hours(h)))
+                        .unwrap_or_else(|| " · bots skipped".into());
+                    format!("{} of {}{}", t.r24_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => String::new(),
+            };
+            let t2d_aside = match t.t2d {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_merge_days
+                        .map(|d| format!(" · median {} · includes draft", fmt_days(d)))
+                        .unwrap_or_else(|| " · includes draft".into());
+                    format!("{} of {}{}", t.t2d_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => String::new(),
+            };
+            let (no_txt, no_aside) = match t.no_human {
+                Some(n) => (n.to_string(), format!("of {} merged", t.expected)),
+                None => ("···".into(), String::new()),
+            };
+            (r24_txt, t2d_txt, r24_aside, t2d_aside, no_txt, no_aside)
+        }
+    };
+    let r24_c = match land.and_then(|t| match t.r24 {
+        parse::PctCell::Value(v) => Some(v),
+        _ => None,
+    }) {
+        Some(v) => tc::health(v / 100.0),
+        None => p.dim.clone(),
+    };
+    let t2d_c = match land.and_then(|t| match t.t2d {
+        parse::PctCell::Value(v) => Some(v),
+        _ => None,
+    }) {
+        Some(v) => tc::health(v / 100.0),
+        None => p.dim.clone(),
+    };
+    field("first review ≤24h", r24, r24_aside, r24_c.as_str());
+    field("opened → merged ≤2d", t2d, t2d_aside, t2d_c.as_str());
+    field("no human review", no_human, no_aside, p.dim.as_str());
+    rows
+}
+
 /// One account in full.
 ///
 /// Everything here is already on the board somewhere - the row it came from
@@ -787,7 +1106,8 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 /// queue growing in one account is invisible in a total that six others
 /// are also feeding.
 ///
-/// No new request. The figures were fetched for the row.
+/// Held comes from the row's issueCount pair. R24 / T2D wait on the
+/// timing enricher, or on a fetch started when this screen opens.
 /// Built at whatever height it needs, and the caller windows it.
 ///
 /// It used to take the pane's height and drop the state bar, the oldest
@@ -800,6 +1120,7 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 fn account_detail(
     a: &Account,
     oldest: Option<&serde_json::Value>,
+    land: Option<&parse::LandTiming>,
     pick: usize,
     w: usize,
     tick: usize,
@@ -903,22 +1224,8 @@ fn account_detail(
             );
         }
     }
-    if let Some(rate) = a.rate {
-        let bar = tc::meter(rate / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24));
-        // The board's ramp, not a flat green: a screen where every account's
-        // merge rate is the same colour whatever it is cannot warn at all,
-        // and it disagreed with the figure two screens up.
-        let hot = tc::health(rate / 100.0);
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!("  {}", tc::pad("merge rate", label_w))),
-                (hot.as_str(), format!("{:>6.0}%", rate)),
-                (p.dim.as_str(), "   ".into()),
-                (hot.as_str(), bar),
-            ],
-            w - 1,
-        ));
-    }
+
+    rows.extend(to_land_rows(a, land, w, p));
 
     // The same bar the board draws for everything at once, for this account
     // alone: a queue is a different shape depending on whether it is waiting
@@ -1313,7 +1620,13 @@ struct Account {
     issues: i64,
     merged: i64,
     dropped: i64,
-    rate: Option<f64>,
+    /// Of PRs that closed in `window`, the share that merged. Same formula
+    /// the board's MERGE RATE uses. Drawn as HELD.
+    held: Option<f64>,
+    /// First-review and time-to-merge among PRs *merged* in the window.
+    /// `None` until the enricher (or an opened detail) has paged them.
+    timing: Option<parse::LandTiming>,
+    timing_window: Option<i64>,
     hist: HashMap<String, i64>,
     opened_hist: HashMap<String, i64>,
     hist_window: Option<i64>,
@@ -1336,6 +1649,10 @@ struct State {
     days: i64,
     /// Set by [r]: drop the day cache and refetch even past days.
     bust: bool,
+    /// Landed-set timing, keyed by account. The enricher and an opened
+    /// detail both write here so a fetch started from one screen is not
+    /// lost when the other publishes.
+    timing_overlay: HashMap<String, (i64, parse::LandTiming)>,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -1687,6 +2004,9 @@ fn one_pass(
         }
         let (merged, dropped) = (count_at(d, "o0_merged"), count_at(d, "o0_dropped"));
         let prev = by_acc.get(acc).cloned().unwrap_or_default();
+        let keep_timing = prev.window == days_now
+            && prev.merged == merged
+            && prev.timing_window == Some(days_now);
         by_acc.insert(
             acc.clone(),
             Account {
@@ -1700,11 +2020,9 @@ fn one_pass(
                 issues: count_at(d, "o0_issues"),
                 merged,
                 dropped,
-                rate: if merged + dropped > 0 {
-                    Some(100.0 * merged as f64 / (merged + dropped) as f64)
-                } else {
-                    None
-                },
+                held: parse::parse_held(merged, dropped),
+                timing: if keep_timing { prev.timing } else { None },
+                timing_window: if keep_timing { prev.timing_window } else { None },
                 hist: prev.hist,
                 opened_hist: prev.opened_hist,
                 hist_window: prev.hist_window,
@@ -1764,6 +2082,38 @@ fn one_pass(
         publish(state, &accounts, &by_acc, rate);
     }
 
+    // Timing for R24 / T2D. The headline aliases stay at eight; this pass
+    // pages the merged-in-window nodes the aggregates cannot time. While
+    // it is short the new cells stay ···, never a sample dressed as a total.
+    for acc in &accounts {
+        let Some(row) = by_acc.get(acc) else {
+            continue;
+        };
+        if row.window != days_now {
+            continue;
+        }
+        let have = !bust
+            && row.timing_window == Some(days_now)
+            && row.timing.is_some();
+        if have {
+            continue;
+        }
+        let expected = row.merged;
+        match fetch_land_timing(acc, viewer, days_now, expected, tok, scopes) {
+            Ok(t) => {
+                if let Ok(mut g) = state.lock() {
+                    g.timing_overlay.insert(acc.clone(), (days_now, t.clone()));
+                }
+                if let Some(row) = by_acc.get_mut(acc) {
+                    row.timing = Some(t);
+                    row.timing_window = Some(days_now);
+                }
+                publish(state, &accounts, &by_acc, rate);
+            }
+            Err(_) => continue,
+        }
+    }
+
     if let Ok(mut g) = state.lock() {
         // With nothing else to report, surface a token sitting in a file
         // other users on the box can read.
@@ -1794,6 +2144,15 @@ fn publish(
             .iter()
             .filter_map(|a| by_acc.get(a).cloned())
             .collect();
+        let overlay = g.timing_overlay.clone();
+        for row in &mut g.stats {
+            if let Some((w, t)) = overlay.get(&row.key) {
+                if *w == row.window {
+                    row.timing = Some(t.clone());
+                    row.timing_window = Some(*w);
+                }
+            }
+        }
         if rate.is_some() {
             g.rate = rate;
         }
@@ -1915,6 +2274,7 @@ fn main() {
     // is opened and kept after.
     let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let timing_asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
@@ -2042,7 +2402,8 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want, watched) = match state.lock() {
+        let (mut stats, rate, err, fetched, calendar, want, watched, overlay) = match state.lock()
+        {
             Ok(g) => (
                 g.stats.clone(),
                 g.rate,
@@ -2051,6 +2412,7 @@ fn main() {
                 g.calendar.clone(),
                 g.days,
                 g.accounts.len(),
+                g.timing_overlay.clone(),
             ),
             Err(_) => return,
         };
@@ -2119,11 +2481,7 @@ fn main() {
             sum(|a| a.merged),
             sum(|a| a.dropped),
         );
-        let rate_pct = if merged + dropped > 0 {
-            Some(100.0 * merged as f64 / (merged + dropped) as f64)
-        } else {
-            None
-        };
+        let rate_pct = parse::parse_held(merged, dropped);
         // What is outstanding right now leads the board: it is the question
         // asked most often, and the only section that is not windowed.
         if open > 0 {
@@ -2468,20 +2826,29 @@ fn main() {
             ],
             w - 1,
         ));
-        let wide = w >= 62;
+        let (show_r24, show_t2d, wide) = by_account_cols(w);
         let bar_cols = w.saturating_sub(64).max(4);
         // No separators between these fields: the row emits its widths
         // back-to-back, so a space here drifts the header one column per
         // field. MRG takes seven, since "MRG60D" is six characters and would
         // sit flush against REVW in every window but the seven-day one.
+        // HELD keeps RATE's six-cell slot. R24 / T2D spend the padding
+        // that used to sit idle between 44 and 62; ISSUES + spark still
+        // appear at 62 so the spark keeps `w − 64`.
         let mut head = format!(
             " {:<20}{:>5}{:>5}{:>7}{:>6}",
             "ACCOUNT",
             "OPEN",
             "REVW",
             format!("MRG{}D", want),
-            "RATE"
+            "HELD"
         );
+        if show_r24 {
+            head += &format!("{:>6}", "R24");
+        }
+        if show_t2d {
+            head += &format!("{:>6}", "T2D");
+        }
         let spark_days: Vec<String> = (0..(want as usize).min(bar_cols) as i64)
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
@@ -2542,9 +2909,25 @@ fn main() {
             // the plain ramp's hot end measures 3.18 there. `health` sends a
             // *low* rate to that end, so the unreadable colour was the
             // struggling account rather than the healthy one.
-            let hot = match s.rate {
+            let hot = match s.held {
                 Some(r) if !old => tc::health_on(r / 100.0, here),
                 _ => p.dim.clone(),
+            };
+            let land = land_of(s, &overlay, want);
+            let land_cell = |cell: Option<parse::PctCell>| -> String {
+                if old {
+                    return "···".into();
+                }
+                if s.merged == 0 {
+                    return parse::parse_pct_text(false, Some(parse::PctCell::Empty));
+                }
+                parse::parse_pct_text(false, cell)
+            };
+            let land_hot = |cell: Option<parse::PctCell>| -> String {
+                match cell {
+                    Some(parse::PctCell::Value(r)) if !old => tc::health_on(r / 100.0, here),
+                    _ => p.dim.clone(),
+                }
             };
             let mut line = vec![
                 (
@@ -2574,7 +2957,7 @@ fn main() {
                         if old {
                             "···".to_string()
                         } else {
-                            match s.rate {
+                            match s.held {
                                 Some(r) => format!("{:.0}%", r),
                                 None => "--".into(),
                             }
@@ -2582,6 +2965,20 @@ fn main() {
                     ),
                 ),
             ];
+            if show_r24 {
+                let cell = land.as_ref().map(|t| t.r24);
+                line.push((
+                    c(&land_hot(cell)),
+                    format!("{:>6}", land_cell(cell)),
+                ));
+            }
+            if show_t2d {
+                let cell = land.as_ref().map(|t| t.t2d);
+                line.push((
+                    c(&land_hot(cell)),
+                    format!("{:>6}", land_cell(cell)),
+                ));
+            }
             if wide {
                 line.push((c(&p.dim), format!("{:>7}", s.issues)));
                 // Each account's own merged-per-day. The columns carry
@@ -2654,7 +3051,40 @@ fn main() {
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 osel = osel.min(nodes.len().saturating_sub(1));
-                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, tick, &p);
+                let land = land_of(a, &overlay, want).or_else(|| {
+                    (a.window == want && a.merged == 0)
+                        .then(|| parse::parse_land_timing(0, &[]))
+                });
+                if land.is_none() && a.window == want {
+                    let start = timing_asking
+                        .lock()
+                        .map(|mut g| g.insert(key.clone()))
+                        .unwrap_or(false);
+                    if start {
+                        let (acc, viewer, tok, scopes, days, expected, poll) = (
+                            a.key.clone(),
+                            a.account.clone(),
+                            ui_tok.clone(),
+                            Arc::clone(&ui_scopes),
+                            a.window,
+                            a.merged,
+                            Arc::clone(&state),
+                        );
+                        let asking = Arc::clone(&timing_asking);
+                        std::thread::spawn(move || {
+                            if let Ok(got) = fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes)
+                            {
+                                if let Ok(mut g) = poll.lock() {
+                                    g.timing_overlay.insert(acc.clone(), (days, got));
+                                }
+                            }
+                            if let Ok(mut g) = asking.lock() {
+                                g.remove(&acc);
+                            }
+                        });
+                    }
+                }
+                let (body, cursor) = account_detail(a, held.as_ref(), land.as_ref(), osel, w, tick, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -3501,6 +3931,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn by_account_spends_padding_on_r24_then_t2d() {
+        assert_eq!(by_account_cols(49), (false, false, false));
+        assert_eq!(by_account_cols(50), (true, false, false));
+        assert_eq!(by_account_cols(55), (true, false, false));
+        assert_eq!(by_account_cols(56), (true, true, false));
+        assert_eq!(by_account_cols(61), (true, true, false));
+        assert_eq!(by_account_cols(62), (true, true, true));
+    }
+
+    #[test]
+    fn timing_is_not_crammed_into_the_headline_query() {
+        // Eight aliases is the measured ceiling. Timing pages merged
+        // nodes later; a ninth issueCount here is how 502s come back.
+        let q = build_query("acme", 7, "w", Utc::now());
+        assert_eq!(q.matches("search(").count(), 8, "{}", q);
+        assert!(!q.contains("reviews("), "{}", q);
+        assert!(!q.contains("createdAt"), "{}", q);
+        let page = build_merged_page_query("org:acme", "2026-09-01", None);
+        assert!(page.contains("reviews(") && page.contains("createdAt"));
+        assert!(page.contains("mergedAt"));
+        assert!(!page.contains("o0_merged"), "{}", page);
+    }
+
+    #[test]
+    fn to_land_does_not_print_a_sample_as_the_window() {
+        let a = Account {
+            window: 14,
+            merged: 247,
+            dropped: 3,
+            held: parse::parse_held(247, 3),
+            ..Default::default()
+        };
+        let sample = parse::parse_land_timing(
+            247,
+            &vec![
+                parse::MergedPr {
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    merged_at: "2026-09-01T12:00:00Z".into(),
+                    reviews: vec![parse::Review {
+                        submitted_at: "2026-09-01T10:30:00Z".into(),
+                        author_login: "ada".into(),
+                        author_type: "User".into(),
+                    }],
+                    ..Default::default()
+                };
+                100
+            ],
+        );
+        assert!(!sample.complete);
+        let p = palette();
+        let rows = to_land_rows(&a, Some(&sample), 80, &p);
+        let body: String = rows.join("\n");
+        assert!(body.contains("TO LAND"), "{}", body);
+        assert!(body.contains("held"), "{}", body);
+        assert!(body.contains("incomplete"), "{}", body);
+        assert!(
+            !body.contains("100%"),
+            "a 100-node sample was drawn as the window: {}",
+            body
+        );
     }
 
 }
