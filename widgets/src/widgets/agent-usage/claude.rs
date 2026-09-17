@@ -37,10 +37,10 @@ const MIN_GAP: f64 = 1.0;
 
 /// One Claude Code config directory the widget should read.
 ///
-/// `path` is expanded (`~` resolved). `label` is what the extra tab and the
-/// `{label} - CLAUDE` summary group show when more than one directory is
-/// in play. A single default `~/.claude` keeps today's CLAUDE heading and
-/// never prints this label.
+/// `path` is expanded (`~` resolved). `label` is the directory's basename,
+/// used only when more than one directory is in play: extra tabs and the
+/// `{label} - CLAUDE` summary group. A single directory keeps today's
+/// CLAUDE heading and never prints this label.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClaudeDir {
     pub path: String,
@@ -96,83 +96,37 @@ impl Data {
     }
 }
 
-/// Config entries as written: `{ "path", "label" }`, or a bare path string.
+/// Directories to read, in the order they were named.
 ///
-/// Empty path is dropped. A missing label is filled in later from the
-/// basename — extras are expected to name themselves; the fallback is so a
-/// typo does not hide a second Max.
-pub fn parse_claude_dir_specs(raw: &serde_json::Value) -> Vec<(String, String)> {
-    let Some(items) = raw.get("claude_config_dirs").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    items
+/// `agent_usage.claude_config_dirs` is an optional list of paths. Unset or
+/// empty is today's one directory, `~/.claude`. When the list names any
+/// path, those directories are watched in that order and no others — the
+/// environment is not a source, and `~/.claude-*` is not scanned.
+///
+/// Paths are expanded (`~` / `~/…`) against `home`. The same expanded path
+/// listed twice collapses to the first entry. Labels are the basename, so
+/// two directories can share a name without sharing a bar.
+pub fn resolve_claude_dirs(configured: &[String], home: &str) -> Vec<ClaudeDir> {
+    let specs: Vec<String> = configured
         .iter()
-        .filter_map(|item| {
-            if let Some(path) = item.as_str() {
-                let path = path.trim();
-                return (!path.is_empty()).then(|| (path.to_string(), String::new()));
-            }
-            let obj = item.as_object()?;
-            let path = obj.get("path").and_then(|v| v.as_str())?.trim();
-            if path.is_empty() {
-                return None;
-            }
-            let label = obj
-                .get("label")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            Some((path.to_string(), label))
-        })
-        .collect()
-}
-
-/// Directories to read, in the order they should appear.
-///
-/// Precedence:
-/// 1. `agent_usage.claude_config_dirs` when it names at least one path.
-/// 2. Otherwise the single default `~/.claude` — today's behaviour.
-/// 3. `$CLAUDE_CONFIG_DIR` is then appended when it is set and is not
-///    already in that list, labelled from its basename.
-///
-/// Paths are expanded (`~` / `~/…`) against `home`. Duplicates collapse to
-/// the first entry, so listing the env dir by hand does not draw it twice.
-pub fn resolve_claude_dirs(
-    configured: &[(String, String)],
-    env_dir: Option<&str>,
-    home: &str,
-) -> Vec<ClaudeDir> {
-    let mut specs: Vec<(String, String)> = configured
-        .iter()
-        .filter(|(path, _)| !path.trim().is_empty())
-        .cloned()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .map(|path| path.to_string())
         .collect();
-    if specs.is_empty() {
-        specs.push((format!("{}/.claude", home.trim_end_matches('/')), String::new()));
-    }
-    if let Some(env) = env_dir.map(str::trim).filter(|s| !s.is_empty()) {
-        let env_path = normalize_dir(&expand_user(env, home));
-        let already = specs
-            .iter()
-            .any(|(path, _)| normalize_dir(&expand_user(path, home)) == env_path);
-        if !already {
-            specs.push((env.to_string(), String::new()));
-        }
-    }
+    let specs = if specs.is_empty() {
+        vec!["~/.claude".into()]
+    } else {
+        specs
+    };
     let mut seen = std::collections::HashSet::new();
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (path, label) in specs {
+    for path in specs {
         let expanded = normalize_dir(&expand_user(&path, home));
         if expanded.is_empty() || !seen.insert(expanded.clone()) {
             continue;
         }
-        let wanted = if label.is_empty() {
-            fallback_label(&expanded, home)
-        } else {
-            label
-        };
+        let wanted = fallback_label(&expanded, home);
         out.push(ClaudeDir {
             path: expanded,
             label: unique_label(&wanted, &mut used),
@@ -191,9 +145,8 @@ pub fn resolve_claude_dirs(
 /// True when the pane should keep today's single CLAUDE tab / CLAUDE group.
 ///
 /// Extra tabs and `{label} - CLAUDE` groups exist only when more than one
-/// directory is configured (or the env dir added a second one). One custom
-/// directory still reads as CLAUDE: a lone profile does not need a label
-/// to tell itself apart from nobody.
+/// directory is configured. One custom directory still reads as CLAUDE: a
+/// lone profile does not need a label to tell itself apart from nobody.
 pub fn single_claude_profile(dirs: &[ClaudeDir]) -> bool {
     dirs.len() <= 1
 }
@@ -221,7 +174,7 @@ pub fn summary_heading(label: &str, multi: bool) -> String {
 /// test `Config` never filled the field.
 pub fn dirs_of(cfg: &Config) -> Vec<ClaudeDir> {
     if cfg.claude_dirs.is_empty() {
-        resolve_claude_dirs(&[], None, &home())
+        resolve_claude_dirs(&[], &home())
     } else {
         cfg.claude_dirs.clone()
     }
@@ -3279,7 +3232,7 @@ mod tests {
     #[test]
     fn an_empty_config_is_the_single_default_claude_dir() {
         let home = "/home/someone";
-        let got = resolve_claude_dirs(&[], None, home);
+        let got = resolve_claude_dirs(&[], home);
         assert_eq!(
             got,
             vec![ClaudeDir {
@@ -3290,74 +3243,53 @@ mod tests {
         assert!(single_claude_profile(&got));
         assert_eq!(tab_id(&got[0], false), "claude");
         assert_eq!(summary_heading(&got[0].label, false), "CLAUDE");
+        assert_eq!(
+            resolve_claude_dirs(&[String::new(), "   ".into()], home),
+            got,
+            "empty entries are the same as an unset list"
+        );
     }
 
     #[test]
-    fn tilde_paths_expand_against_home() {
+    fn tilde_paths_expand_against_home_and_keep_order() {
         let got = resolve_claude_dirs(
-            &[
-                ("~/.claude".into(), "main".into()),
-                ("~/.claude-overflow".into(), "overflow".into()),
-            ],
-            None,
+            &["~/.claude-overflow".into(), "~/.claude".into()],
             "/Users/x",
         );
-        assert_eq!(got[0].path, "/Users/x/.claude");
-        assert_eq!(got[1].path, "/Users/x/.claude-overflow");
-        assert_eq!(got[0].label, "main");
-        assert_eq!(got[1].label, "overflow");
+        assert_eq!(got[0].path, "/Users/x/.claude-overflow");
+        assert_eq!(got[1].path, "/Users/x/.claude");
+        assert_eq!(got[0].label, ".claude-overflow");
+        assert_eq!(got[1].label, "claude");
         assert!(!single_claude_profile(&got));
-        assert_eq!(tab_id(&got[0], true), "claude:main");
-        assert_eq!(summary_heading("overflow", true), "overflow - CLAUDE");
+        assert_eq!(tab_id(&got[0], true), "claude:.claude-overflow");
+        assert_eq!(
+            summary_heading(".claude-overflow", true),
+            ".claude-overflow - CLAUDE"
+        );
     }
 
     #[test]
-    fn env_dir_is_appended_when_it_is_not_already_listed() {
+    fn a_named_list_is_watched_exactly() {
         let home = "/home/someone";
-        let one = resolve_claude_dirs(&[], Some("~/.claude-overflow"), home);
-        assert_eq!(one.len(), 2, "{one:?}");
-        assert_eq!(one[0].path, "/home/someone/.claude");
-        assert_eq!(one[1].path, "/home/someone/.claude-overflow");
-        assert_eq!(one[1].label, ".claude-overflow");
+        let only = resolve_claude_dirs(&["~/.claude-overflow".into()], home);
+        assert_eq!(only.len(), 1, "{only:?}");
+        assert_eq!(only[0].path, "/home/someone/.claude-overflow");
+        assert_eq!(only[0].label, ".claude-overflow");
+        assert!(single_claude_profile(&only));
 
-        let listed = resolve_claude_dirs(
-            &[("~/.claude-overflow".into(), "overflow".into())],
-            Some("~/.claude-overflow/"),
+        let listed_twice = resolve_claude_dirs(
+            &["~/.claude".into(), "~/.claude/".into()],
             home,
         );
-        assert_eq!(listed.len(), 1, "the env dir was added twice: {listed:?}");
-        assert_eq!(listed[0].label, "overflow");
-
-        let same_as_default = resolve_claude_dirs(&[], Some("~/.claude"), home);
-        assert_eq!(same_as_default.len(), 1);
-        assert!(single_claude_profile(&same_as_default));
+        assert_eq!(listed_twice.len(), 1, "{listed_twice:?}");
+        assert_eq!(listed_twice[0].path, "/home/someone/.claude");
     }
 
     #[test]
-    fn a_missing_label_falls_back_to_the_basename() {
-        let got = resolve_claude_dirs(
-            &[("/var/lib/claude-work".into(), String::new())],
-            None,
-            "/home/someone",
-        );
+    fn labels_are_the_basename() {
+        let got = resolve_claude_dirs(&["/var/lib/claude-work".into()], "/home/someone");
         assert_eq!(got[0].label, "claude-work");
-        let specs = parse_claude_dir_specs(&serde_json::json!({
-            "claude_config_dirs": [
-                { "path": "~/.claude", "label": "main" },
-                { "path": "~/.claude-overflow" },
-                " /opt/other ",
-                { "path": "" },
-                3
-            ]
-        }));
-        assert_eq!(
-            specs,
-            vec![
-                ("~/.claude".into(), "main".into()),
-                ("~/.claude-overflow".into(), String::new()),
-                ("/opt/other".into(), String::new()),
-            ]
-        );
+        assert_eq!(got[0].path, "/var/lib/claude-work");
     }
 
     #[test]

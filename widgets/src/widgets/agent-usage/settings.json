@@ -87,7 +87,7 @@
       "unit": "minutes"
     },
     "claude_config_dirs": {
-      "items": "object"
+      "items": "string"
     }
   },
   "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named — it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
@@ -110,6 +110,6 @@
   "grok_ping": true,
   "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls. Thirty is the most it will take. A reading older than thirty-one minutes is drawn with the cached mark, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used.",
   "grok_ping_minutes": 15.0,
-  "_claude_config_dirs_comment": "Claude Code config directories to read, as {path, label} objects. Empty (the default) is one entry at ~/.claude and today's single CLAUDE tab / CLAUDE group. ~ is expanded. $CLAUDE_CONFIG_DIR is then appended when it is set and is not already in the list, labelled from its basename. A second Max lives in its own directory; give that extra a short label — extras without one fall back to the path's basename, which is not what you want on the strip. Two or more directories become extra tabs titled with the label (not CLAUDE) and extra [+] groups titled {label} - CLAUDE. They are never merged into one bar. CLI Proxy, ~/.claude-* scanning, Desktop and VS Code are out of scope.",
-  "claude_config_dirs": []
+  "_claude_config_dirs_comment": "Claude Code config directories to read, as a list of paths. Unset or empty is [\"~/.claude\"] — today's single CLAUDE tab / CLAUDE group. When the list is set, those directories are watched in this order and no others. ~ is expanded. A second Max lives in its own directory; two or more become extra tabs titled with the path's basename (not CLAUDE) and extra [+] groups titled {basename} - CLAUDE. They are never merged into one bar. $CLAUDE_CONFIG_DIR, CLI Proxy, ~/.claude-* scanning, Desktop and VS Code are out of scope.",
+  "claude_config_dirs": ["~/.claude"]
 }

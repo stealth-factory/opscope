@@ -120,13 +120,13 @@ gauge.
 
 `←` `→` or `tab` switch. The active tab is bracketed as well as tinted, so it
 reads without colour. A `·` marks an agent that is installed. Extra Claude
-profiles from `claude_config_dirs` sit on that strip under their label, not
-under a second CLAUDE.
+profiles from `claude_config_dirs` sit on that strip under the directory's
+basename, not under a second CLAUDE.
 
 ## What each tab can actually show
 
 **Claude Code** — the real one. `~/.claude/stats-cache.json` (or the same
-file under each configured `CLAUDE_CONFIG_DIR`) carries per-model
+file under each configured `claude_config_dirs` entry) carries per-model
 token counts (input, output, cache read, cache written), total sessions and
 messages, and around four weeks of daily activity. All of it is spend.
 
@@ -1406,38 +1406,28 @@ Neither is paid again.
 
 ## More than one Claude Max
 
-A second Max seat is a second Claude Code config directory, set with the
-official `CLAUDE_CONFIG_DIR`. This widget does not invent that layout and
-does not scan `~/.claude-*`. Name the directories:
+A second Max seat is a second Claude Code config directory. This widget
+does not invent that layout, does not read `$CLAUDE_CONFIG_DIR`, and does
+not scan `~/.claude-*`. Name the directories:
 
 ```json
 "agent_usage": {
-  "claude_config_dirs": [
-    { "path": "~/.claude", "label": "main" },
-    { "path": "~/.claude-overflow", "label": "overflow" }
-  ]
+  "claude_config_dirs": ["~/.claude", "~/.claude-overflow"]
 }
 ```
 
-`~` is expanded. Empty or unset is today's one directory, `~/.claude`, and
+`~` is expanded. Unset or empty is today's one directory, `~/.claude`, and
 the tab and `[+]` group stay **CLAUDE** — a lone profile does not grow a
 label to tell itself apart from nobody.
 
-**Precedence.** The configured list wins when it names at least one path.
-Otherwise the default `~/.claude` is used. `$CLAUDE_CONFIG_DIR` is then
-appended when it is set and is not already in that list, labelled from its
-basename. Duplicates collapse to the first entry.
-
-**Labels.** Extra directories are expected to carry a short `label`. A
-missing one falls back to the path's basename, which is how an env-only
-second dir appears, and is not what you want on a strip you look at every
-day.
+When the list is set, those directories are watched in that order and no
+others. Duplicates collapse to the first entry.
 
 **What the pane does with two.** Each profile is its own tab, titled with
-just the label (`main`, `overflow` — the strip uppercases them like the
-others, and does not put CLAUDE in the title). On `[+]` each is its own
-group, labelled `{label} - CLAUDE`, ranked with the other agents. Two
-accounts never share one bar.
+the path's basename (`claude` for `~/.claude`, otherwise the directory
+name — the strip uppercases them like the others, and does not put CLAUDE
+in the title). On `[+]` each is its own group, labelled `{basename} -
+CLAUDE`, ranked with the other agents. Two accounts never share one bar.
 
 Credentials, `stats-cache.json` and `projects/` are read from each
 directory. The OAuth/app-state file is the sibling `{dir}.json` — the same

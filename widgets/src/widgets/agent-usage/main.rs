@@ -349,7 +349,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
 }
 
 /// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
-/// only the configured label, uppercased like every other tab.
+/// only the directory's basename, uppercased like every other tab.
 fn tab_title(name: &str) -> String {
     match name.strip_prefix("claude:") {
         Some(label) => label.to_uppercase(),
@@ -1693,8 +1693,7 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .unwrap_or(true),
         legacy_section,
         claude_dirs: crate::claude::resolve_claude_dirs(
-            &crate::claude::parse_claude_dir_specs(raw),
-            std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            &tc::cfg_strings(&raw, "claude_config_dirs", &["~/.claude"]),
             &home(),
         ),
     }
@@ -3244,22 +3243,52 @@ mod tests {
     fn claude_config_dirs_are_read_from_the_section() {
         let cfg = config_from(
             &serde_json::json!({
+                "claude_config_dirs": ["~/.claude", "~/.claude-overflow"]
+            }),
+            false,
+        );
+        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(
+            paths.len() == 2
+                && paths[0].ends_with("/.claude")
+                && paths[1].ends_with("/.claude-overflow"),
+            "{paths:?}"
+        );
+        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["claude", ".claude-overflow"]);
+        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
+    }
+
+    #[test]
+    fn an_empty_claude_config_dirs_list_is_the_default() {
+        let missing = config_from(&serde_json::json!({}), false);
+        let empty = config_from(
+            &serde_json::json!({ "claude_config_dirs": [] }),
+            false,
+        );
+        assert_eq!(missing.claude_dirs.len(), 1);
+        assert_eq!(empty.claude_dirs.len(), 1);
+        assert!(missing.claude_dirs[0].path.ends_with("/.claude"));
+        assert_eq!(missing.claude_dirs[0].path, empty.claude_dirs[0].path);
+        assert!(crate::claude::single_claude_profile(&empty.claude_dirs));
+    }
+
+    #[test]
+    fn object_entries_are_not_a_directory_list() {
+        let cfg = config_from(
+            &serde_json::json!({
                 "claude_config_dirs": [
-                    { "path": "~/.claude", "label": "main" },
                     { "path": "~/.claude-overflow", "label": "overflow" }
                 ]
             }),
             false,
         );
-        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
-        assert!(paths.iter().any(|p| p.ends_with("/.claude")), "{paths:?}");
+        assert_eq!(cfg.claude_dirs.len(), 1, "{:?}", cfg.claude_dirs);
         assert!(
-            paths.iter().any(|p| p.ends_with("/.claude-overflow")),
-            "{paths:?}"
+            cfg.claude_dirs[0].path.ends_with("/.claude"),
+            "{:?}",
+            cfg.claude_dirs
         );
-        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
-        assert!(labels.contains(&"main"), "{labels:?}");
-        assert!(labels.contains(&"overflow"), "{labels:?}");
-        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
+        assert!(crate::claude::single_claude_profile(&cfg.claude_dirs));
     }
 }

@@ -20,7 +20,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 1. Inspect which supported agents are installed or have local state. Do not read or print their credential contents.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
-3. Ask before fixing the agent list, naming extra Claude config dirs, setting personal plan costs/rates, turning `grok_ping` off, or changing whether another CLI may be started. Extra Claude directories are `{path, label}` objects on `claude_config_dirs`; empty keeps the single `~/.claude` tab.
+3. Ask before fixing the agent list, naming extra Claude config dirs, setting personal plan costs/rates, turning `grok_ping` off, or changing whether another CLI may be started. Extra Claude directories are a string list on `claude_config_dirs`; unset or empty keeps the single `~/.claude` tab.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
 5. Save through the settings screen and leave it — the widget reloads itself on the way out, so no restart is needed. Then verify that the real source answers, or that the pane gives a specific reason why it cannot.
 
