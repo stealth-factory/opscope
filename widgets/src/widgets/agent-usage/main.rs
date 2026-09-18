@@ -1794,9 +1794,19 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
         .map(|name| {
             let (_, bins, mut paths) = agent_spec(name);
             if *name == "claude" {
+                // The family key is what `visible_agents` looks at. A
+                // custom profile can exist with only `.credentials.json`,
+                // so a scan that names only `stats-cache.json` leaves
+                // `claude` false and hides every Claude tab the moment
+                // another agent is present.
                 paths = crate::claude::dirs_of(cfg)
                     .iter()
-                    .map(|d| format!("{}/stats-cache.json", d.path))
+                    .flat_map(|d| {
+                        [
+                            format!("{}/stats-cache.json", d.path),
+                            format!("{}/.credentials.json", d.path),
+                        ]
+                    })
                     .collect();
             }
             let has_bin = bins.iter().any(|b| tc::missing(&[b]).is_empty());
@@ -1822,6 +1832,12 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
             // Claude tab with it.
             let held = found.get(&id).is_some_and(|x| x.present);
             found.insert(id, Presence { present: present || held });
+            // Per-profile ids are `claude:{label}`. The family key stays
+            // the one `visible_agents` filters on, so a credential-only
+            // extra account must still mark `claude` present.
+            if present {
+                found.insert("claude".into(), Presence { present: true });
+            }
         }
     }
     found
@@ -1972,7 +1988,7 @@ fn tab_bar(
         // Both forms are the name plus two columns - `[NAME]` and ` NAME `
         // - which is what lets the brackets mark the open tab without the
         // strip shifting under them.
-        let wide = tab_title(name).chars().count() + 2;
+        let wide = tc::display_width(&tab_title(name)) + 2;
         // A tab is never split across lines, for the reason `pack_hints`
         // never splits a key hint: half a name teaches an agent that does
         // not exist. It goes to the next line whole, or - where a single
@@ -2418,7 +2434,10 @@ mod tests {
         for w in [40usize, 60, 80, 120] {
             let (lines, placed) = tab_bar("claude", &installed, &tabs, w, &palette());
             for line in &lines {
-                assert!(plain(line).chars().count() <= w - 1, "width {w}: {line:?}");
+                assert!(
+                    tc::display_width(&plain(line)) <= w - 1,
+                    "width {w}: {line:?}"
+                );
             }
             // Every tab is somewhere, and each is on exactly one line -
             // a name split across two would teach an agent that does not
@@ -2433,7 +2452,11 @@ mod tests {
                 assert!(rows.iter().all(|r| *r == rows[0]), "width {w} split {name}");
                 // And the columns it claims spell the whole title.
                 let cols = placed.iter().filter(|(_, _, at)| *at == i).count();
-                assert_eq!(cols, tab_title(name).chars().count() + 2, "width {w}, {name}");
+                assert_eq!(
+                    cols,
+                    tc::display_width(&tab_title(name)) + 2,
+                    "width {w}, {name}"
+                );
                 // Claiming the columns is not the same as being drawn in
                 // them: a tab that starts inside the pane and runs past it
                 // is clipped by `seg`, which keeps the line short enough
@@ -2481,6 +2504,46 @@ mod tests {
             if let Some(above) = above {
                 assert_ne!(above, at, "column {col} means the same tab on both lines");
             }
+        }
+    }
+
+    /// `seg` clips by cell width. Counting scalars for wrap and hitboxes
+    /// lets a CJK label sit on a line it does not fit, which then eats
+    /// the tabs after it and maps clicks to the wrong columns.
+    #[test]
+    fn a_wide_glyph_tab_wraps_instead_of_clipping_the_next_one() {
+        let tabs: Vec<String> = ["+", "claude", "claude:工作", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // After `+` and `CLAUDE`, a 19-column pane has 4 cells left —
+        // enough for two scalars plus brackets, not enough for 工作.
+        let w = 19;
+        let (lines, placed) = tab_bar("claude", &HashMap::new(), &tabs, w, &palette());
+        assert!(lines.len() > 1, "the CJK tab stayed on a line it does not fit: {lines:?}");
+        for line in &lines {
+            assert!(
+                tc::display_width(&plain(line)) <= w - 1,
+                "overflowed: {line:?}"
+            );
+        }
+        for (i, name) in tabs.iter().enumerate() {
+            let rows: Vec<usize> = placed
+                .iter()
+                .filter(|(_, _, at)| *at == i)
+                .map(|(row, _, _)| *row)
+                .collect();
+            assert!(!rows.is_empty(), "lost {name}");
+            assert_eq!(
+                placed.iter().filter(|(_, _, at)| *at == i).count(),
+                tc::display_width(&tab_title(name)) + 2,
+                "{name} hitbox used scalar count"
+            );
+            assert!(
+                plain(&lines[rows[0]]).contains(&tab_title(name)),
+                "{name} was cut from {:?}",
+                plain(&lines[rows[0]])
+            );
         }
     }
 
@@ -3379,6 +3442,54 @@ mod tests {
         assert!(
             tabs.iter().any(|t| t == "claude" || t == "claude:work"),
             "no Claude tab survived: {tabs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A custom profile can exist with only `.credentials.json`. The
+    /// family key used to stay false because the first scan named only
+    /// `stats-cache.json`, and `visible_agents` then dropped every
+    /// Claude tab the moment another agent was present.
+    #[test]
+    fn a_credential_only_profile_still_shows_the_claude_tabs() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-creds-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let work = root.join("work");
+        let _ = std::fs::create_dir_all(&work);
+        std::fs::write(work.join(".credentials.json"), "{}").expect("credentials");
+        let cfg = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: root.join("missing").to_string_lossy().into(),
+                    label: String::new(),
+                },
+                crate::claude::ClaudeDir {
+                    path: work.to_string_lossy().into(),
+                    label: "work".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let mut found = detect_agents(&cfg);
+        assert!(
+            found.get("claude").is_some_and(|p| p.present),
+            "the family presence stayed false: {found:?}"
+        );
+        assert!(
+            found.get("claude:work").is_some_and(|p| p.present),
+            "the credential-only profile went: {found:?}"
+        );
+        found.insert("cursor".into(), Presence { present: true });
+        let tabs = visible_agents(&found, &cfg);
+        assert!(
+            tabs.iter().any(|t| t == "claude" || t == "claude:work"),
+            "no Claude tab survived beside another agent: {tabs:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
