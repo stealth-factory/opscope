@@ -2684,12 +2684,20 @@ fn the_wheel_is_asked_for_unconditionally() {
     // Read as MOUSE_ON present and no config read in the same body,
     // because putting the conditional back means reading a key here - and
     // a reinstated `if` that happens to spell the key some other way still
-    // has to fetch it from somewhere.
+    // has to fetch it from somewhere. `config` is broad enough to catch a
+    // spelling nobody has thought of yet, which is only safe with the
+    // comments dropped first: a note *about* the config in this body would
+    // otherwise fire it, and a checker that cries wolf gets turned off.
     let src = std::fs::read_to_string(root().join("core/src/lib.rs")).expect("core");
     let at = src
         .find("pub fn claim_screen()")
         .expect("claim_screen moved or was renamed");
-    let body = &src[at..at + src[at..].find("\n}\n").expect("claim_screen's body ends")];
+    let whole = &src[at..at + src[at..].find("\n}\n").expect("claim_screen's body ends")];
+    let body: String = whole
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         body.contains("MOUSE_ON"),
         "claim_screen does not send MOUSE_ON, so no widget can scroll under the wheel"
