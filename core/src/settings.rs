@@ -1783,9 +1783,13 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
     match declared {
         Some("integer") => "integer",
         Some("number") => "number",
-        // A typed entry is the plain form. The object form is written by
-        // hand, in the file, and this screen never composes one.
-        Some("string" | "string-or-object") => "string",
+        Some("string") => "string",
+        // Both forms are typeable. `parse_free_entry` decides which one a
+        // line is, so the box takes a bare path or a path and the name its
+        // tab should read - the object form used to be file-only, which
+        // made a documented setting unreachable from the screen that
+        // exists to reach it.
+        Some("string-or-object") => "string-or-object",
         _ => match field.default.as_array() {
             Some(items) if !items.is_empty() && items.iter().all(Value::is_number) => {
                 if items.iter().all(|v| v.is_i64() || v.is_u64()) {
@@ -1806,6 +1810,29 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
 /// counts for nothing is worse than one that was refused.
 fn parse_free_entry(kind: &str, typed: &str) -> Result<Value, String> {
     match kind {
+        // `<value> = <name>`, which is the only punctuation a path is
+        // unlikely to carry and a name has no reason to. Without the
+        // separator it is the plain string form, so the simple case stays
+        // one word and nothing already typeable changes meaning.
+        "string-or-object" => match typed.split_once('=') {
+            None => Ok(Value::String(typed.trim().to_string())),
+            Some((path, label)) => {
+                let (path, label) = (path.trim(), label.trim());
+                if path.is_empty() {
+                    return Err("a name needs something to name - type the path first.".into());
+                }
+                if label.is_empty() {
+                    return Err(format!("{path} = what? type a name after the =."));
+                }
+                // A second `=` is almost certainly a typo rather than a
+                // name containing one, and a silently truncated path is
+                // worse than a refusal.
+                if label.contains('=') {
+                    return Err("one = per entry: the path, then the name.".into());
+                }
+                Ok(serde_json::json!({ "path": path, "label": label }))
+            }
+        },
         "integer" => typed
             .parse::<i64>()
             .map(|n| Value::Number(n.into()))
@@ -2017,14 +2044,19 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                     Value::String(one) => Some((one.clone(), one.clone())),
                     // And a number, which reads back as what was typed.
                     Value::Number(n) => Some((n.to_string(), n.to_string())),
-                    // An entry with fields of its own, shown as it is
-                    // written. Listed rather than dropped: a row the file
-                    // holds and the screen does not show is an entry
-                    // somebody has to remember is there, and the count
-                    // above it would say two where the file says three.
-                    // It is its own identity, so removing it still works
-                    // and adding never collides with it.
-                    Value::Object(_) => Some((compact(row), compact(row))),
+                    // An entry with fields of its own. Listed rather than
+                    // dropped: a row the file holds and the screen does not
+                    // show is an entry somebody has to remember is there,
+                    // and the count above it would say two where the file
+                    // says three.
+                    //
+                    // Its identity stays the JSON, so removing it still
+                    // works and adding never collides with it - but what is
+                    // *shown* is the pair a reader typed, because
+                    // `{"label":"work","path":"~/.claude-work"}` is a row
+                    // nobody can read at a glance and the screen now
+                    // composes these itself.
+                    Value::Object(_) => Some((compact(row), entry_shown(row))),
                     _ => None,
                 })
                 .collect()
@@ -2247,6 +2279,29 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 /// Appended rather than sorted: the widget decides what order means, and for
 /// a list of hosts the order somebody typed them in is the one they expect
 /// to see back.
+/// How one list entry reads on screen.
+///
+/// A plain row is itself. A named row is the pair somebody typed, because
+/// `{"label":"work","path":"~/.claude-work"}` is not something anyone reads
+/// at a glance - and the screen composes that form now, so it should say it
+/// back the way it was asked for. Anything else falls back to its JSON,
+/// which is still better than dropping the row.
+fn entry_shown(row: &Value) -> String {
+    match row {
+        Value::String(one) => one.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Object(fields) => match (
+            fields.get("path").and_then(Value::as_str),
+            fields.get("label").and_then(Value::as_str),
+        ) {
+            (Some(path), Some(label)) => format!("{path} = {label}"),
+            (Some(path), None) => path.to_string(),
+            _ => compact(row),
+        },
+        _ => compact(row),
+    }
+}
+
 fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
     let Some(field) = app.fields.get(index) else {
         return false;
@@ -2264,9 +2319,29 @@ fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
             return false;
         }
     };
+    // Same entry twice is refused by value; the same *path* twice under two
+    // names is refused too, because the widget collapses duplicate paths
+    // and the loser would sit in the file forever doing nothing. Naming a
+    // path already listed plainly is the ordinary way someone adds a label
+    // to it, so the refusal says to remove the old row rather than just
+    // "already in the list".
+    let path_of = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("path").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    };
     if rows.iter().any(|v| *v == value) {
         app.status = Some(format!("{entry} is already in the list."));
         return false;
+    }
+    if let Some(path) = path_of(&value) {
+        if let Some(held) = rows.iter().find(|v| path_of(v).as_deref() == Some(path.as_str())) {
+            app.status = Some(format!(
+                "{path} is already listed, as {} - remove that row first.",
+                entry_shown(held)
+            ));
+            return false;
+        }
     }
     rows.push(value);
     match write_field(app, index, Value::Array(rows)) {
@@ -4518,12 +4593,10 @@ mod tests {
     /// A list that takes a path, or a path with a name of its own.
     ///
     /// Both forms in one list, because the plain one shipped first and
-    /// nothing already written may break. The screen stays a list of the
-    /// plain form: it adds and removes entries, it never composes an
-    /// object, and the labelled entries a file already holds are listed
-    /// and left alone rather than dropped - a row the file has and the
-    /// screen does not show is an entry somebody has to remember, and the
-    /// count above it would understate the list.
+    /// nothing already written may break. The labelled entries a file
+    /// already holds are listed and left alone rather than dropped - a row
+    /// the file has and the screen does not show is an entry somebody has
+    /// to remember, and the count above it would understate the list.
     #[test]
     fn a_list_may_hold_a_name_beside_a_plain_entry() {
         let rule = serde_json::json!({"items": "string-or-object"});
@@ -4533,9 +4606,11 @@ mod tests {
         ]);
         let app = field_app("dirs", mixed.clone(), Some(rule.clone()));
         assert!(matches!(picker_kind(&app, "dirs"), Some(PickKind::Free)));
-        // What is typed is a path, so the box asks for a string.
-        assert_eq!(free_item_kind(&app, &app.fields[0]), "string");
-        // Both entries are on screen, the labelled one as it is written.
+        // Both forms are typeable, so the box says so rather than asking
+        // for a plain string and quietly refusing half the shape.
+        assert_eq!(free_item_kind(&app, &app.fields[0]), "string-or-object");
+        // A row's identity is still what the file holds, so remove and the
+        // collision checks keep working on it.
         let rows = picked_zones(&app, 0);
         assert_eq!(
             rows,
@@ -4544,6 +4619,15 @@ mod tests {
                 r#"{"label":"two","path":"~/.agent-two"}"#.to_string(),
             ],
             "{rows:?}"
+        );
+        // What is *shown* is the pair somebody typed. The raw JSON was a
+        // row nobody could read at a glance, and this screen composes
+        // these itself now.
+        let shown: Vec<String> = picked_pairs(&app, 0).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(
+            shown,
+            vec!["~/.agent".to_string(), "~/.agent-two = two".to_string()],
+            "{shown:?}"
         );
         // And neither form is refused on the way to the file.
         assert_eq!(validate_value(&mixed, &mixed, Some(&rule)), Ok(()));
@@ -4555,6 +4639,91 @@ mod tests {
         assert_eq!(
             constraint_summary(Some(&rule)),
             "string or object items"
+        );
+    }
+
+    /// The screen composes the named form, which is the whole point of
+    /// extending it: a documented setting reachable only by hand-editing
+    /// the file is not reachable from the screen that exists to reach it.
+    ///
+    /// Tested at the parser rather than through `add_free_entry`, because
+    /// the write it ends in refuses against a config file this test does
+    /// not own - which is also why no test here has ever covered a
+    /// successful add. The end-to-end write is covered by driving the real
+    /// screen, not from here.
+    #[test]
+    fn a_name_can_be_typed_beside_the_path() {
+        let named = |typed| parse_free_entry("string-or-object", typed);
+        assert_eq!(
+            named("~/.agent-work = work"),
+            Ok(serde_json::json!({"path": "~/.agent-work", "label": "work"}))
+        );
+        // The plain form still means what it meant, so nothing anyone has
+        // already typed changes shape under them.
+        assert_eq!(named("~/.agent-three"), Ok(serde_json::json!("~/.agent-three")));
+        // Spaces around the separator are the natural way to type it and
+        // must not end up inside the path or the name.
+        assert_eq!(
+            named("  ~/.a   =   spaced  "),
+            Ok(serde_json::json!({"path": "~/.a", "label": "spaced"}))
+        );
+        // A path with no name is still a path, even one that looks like it
+        // wants to be clever.
+        assert_eq!(named("  ~/.plain  "), Ok(serde_json::json!("~/.plain")));
+        // And a plain list is untouched by any of this.
+        assert_eq!(
+            parse_free_entry("string", "~/.agent = work"),
+            Ok(serde_json::json!("~/.agent = work")),
+            "a string list must keep taking the whole line"
+        );
+    }
+
+    /// Half an entry is refused and says which half is missing. A path
+    /// silently truncated at a stray `=` would point somewhere real and
+    /// wrong, which is worse than being told to type it again.
+    #[test]
+    fn half_a_named_entry_is_refused_and_says_which_half() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        for (typed, expect) in [
+            ("~/.agent =", "type a name after"),
+            ("= work", "type the path first"),
+            ("~/.agent = a = b", "one = per entry"),
+        ] {
+            let mut app = field_app("dirs", serde_json::json!([]), Some(rule.clone()));
+            assert!(!add_free_entry(&mut app, 0, typed), "{typed} was accepted");
+            let said = app.status.clone().unwrap_or_default();
+            assert!(said.contains(expect), "{typed}: {said}");
+            // Nothing was written on the way to refusing.
+            assert!(
+                current_of(&app.live, &app.fields[0], app.legacy_section)
+                    .and_then(Value::as_array)
+                    .is_none_or(|r| r.is_empty()),
+                "{typed} wrote a row anyway"
+            );
+        }
+    }
+
+    /// Naming a path already in the list is the ordinary way somebody adds
+    /// a label to it, and it cannot just be appended: the widget collapses
+    /// duplicate paths, so the loser would sit in the file forever doing
+    /// nothing. The refusal names the row to remove.
+    #[test]
+    fn the_same_path_cannot_be_listed_twice_under_two_names() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        let mut app = field_app("dirs", serde_json::json!(["~/.agent"]), Some(rule.clone()));
+        assert!(!add_free_entry(&mut app, 0, "~/.agent = mine"));
+        let said = app.status.clone().unwrap_or_default();
+        assert!(said.contains("already listed"), "{said}");
+        assert!(said.contains("~/.agent"), "{said}");
+
+        // And the other way round: a plain path over a named one.
+        let named = serde_json::json!([{ "path": "~/.agent", "label": "mine" }]);
+        let mut app = field_app("dirs", named, Some(rule));
+        assert!(!add_free_entry(&mut app, 0, "~/.agent"));
+        assert!(
+            app.status.clone().unwrap_or_default().contains("already listed"),
+            "{:?}",
+            app.status
         );
     }
 

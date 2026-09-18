@@ -1454,11 +1454,29 @@ Two entries wanting the same name are told apart the same way two
 directories with the same basename always were: the second becomes
 `work-2`. Compared without case, because the tab strip uppercases.
 
-**The settings screen (`,`) cannot write a label.** It has no picker for an
-array of objects, and no other setting in this repo has that shape. What it
-does do: it lists every entry — a labelled one shown as the JSON it is
-written as — and it adds and removes plain paths without disturbing the
-labelled ones. Setting or changing a label is an edit to `config.json`.
+**The settings screen (`,`) writes both forms.** Type a path on its own for
+an unnamed entry, or `<path> = <name>` to name one:
+
+```
+~/.claude-work = work
+```
+
+and the file gets `{ "path": "~/.claude-work", "label": "work" }`. The list
+reads a named entry back the way it was typed rather than as the JSON it is
+stored as, because `{"label":"work","path":"~/.claude-work"}` is not a row
+anyone reads at a glance.
+
+Half an entry is refused and says which half is missing, since a path
+truncated at a stray `=` would point somewhere real and wrong. The same path
+cannot be listed twice under two names either — the widget collapses
+duplicate paths, so the loser would sit in the file forever doing nothing;
+the refusal names the row to remove.
+
+This was the one gap worth closing by hand: `claude_config_dirs` is the only
+setting here whose items are objects, and the screen used to flatten the
+shape to a plain string and quietly refuse half of it. A documented setting
+reachable only by editing the file is not reachable from the screen that
+exists to reach it.
 
 **What the pane does with two.** Each profile is its own tab, titled with
 its label — the one the entry names, or the one the path implies: `claude`
