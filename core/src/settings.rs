@@ -2632,20 +2632,23 @@ fn row_is_abandoned(row: &Value) -> bool {
     }
 }
 
-fn drop_empty_row(app: &mut App) {
+/// `true` when there is nothing to drop, or the write landed. `false`
+/// when the placeholder is still in the file — the caller must stay
+/// on this screen and not pretend the row is gone.
+fn drop_empty_row(app: &mut App) -> bool {
     let Some(field) = app.fields.first().cloned() else {
-        return;
+        return true;
     };
     let Some((parent, at)) = row_parent_of(app, &field) else {
-        return;
+        return true;
     };
     let rows = match current_of(&app.live, &parent, app.legacy_section) {
         Some(Value::Array(rows)) => rows.clone(),
-        _ => return,
+        _ => return true,
     };
     let empty = rows.get(at).is_some_and(row_is_abandoned);
     if !empty {
-        return;
+        return true;
     }
     let kept: Vec<Value> = rows
         .iter()
@@ -2654,8 +2657,15 @@ fn drop_empty_row(app: &mut App) {
         .map(|(_, row)| row.clone())
         .collect();
     let stood = std::mem::replace(&mut app.fields, vec![parent]);
-    let _ = write_field(app, 0, Value::Array(kept));
+    let outcome = write_field(app, 0, Value::Array(kept));
     app.fields = stood;
+    match outcome {
+        Ok(()) => true,
+        Err(e) => {
+            app.status = Some(e);
+            false
+        }
+    }
 }
 
 /// Open one entry of a list as a screen of its own fields.
@@ -2671,8 +2681,12 @@ fn open_row_entry(app: &mut App, index: usize, parent: &Field, at: usize) {
         let mut rows = held_rows(app, index);
         rows[at] = serde_json::json!({ "path": path });
         let stood = std::mem::replace(&mut app.fields, vec![parent.clone()]);
-        let _ = write_field(app, 0, Value::Array(rows));
+        let outcome = write_field(app, 0, Value::Array(rows));
         app.fields = stood;
+        if let Err(e) = outcome {
+            app.status = Some(e);
+            return;
+        }
     }
     let fields = row_fields(app, parent, at);
     app.stack
@@ -3119,7 +3133,12 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         // Coming out of a declared object is not leaving the screen. Only
         // the outermost list quits.
         "esc" | "," if !app.stack.is_empty() => {
-            drop_empty_row(app);
+            if !drop_empty_row(app) {
+                // The placeholder is still in the file. Stay here so the
+                // status can say why, rather than walking back as if it
+                // had gone.
+                return false;
+            }
             if let Some((fields, sel, mode)) = app.stack.pop() {
                 app.fields = fields;
                 app.selected = sel;
@@ -3134,7 +3153,9 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         // was appended empty. Drop that placeholder first or `{}` stays
         // in the file and `configured_dirs` silently ignores it.
         "q" | "Q" => {
-            drop_empty_row(app);
+            if !drop_empty_row(app) {
+                return false;
+            }
             return true;
         }
         "esc" | "," => return true,
@@ -5244,6 +5265,75 @@ mod tests {
         );
         app.fields = vec![parent];
         assert_eq!(held_rows(&app, 0).len(), 1, "the refusal cost the entry");
+    }
+
+    /// Abandoned-row cleanup used to swallow the write error and walk
+    /// off the screen as if the placeholder were gone. The file still
+    /// holds `{}`, so stay and say why.
+    #[test]
+    fn dropping_an_abandoned_row_says_when_the_write_fails() {
+        let rows = serde_json::json!([{}]);
+        let mut app = field_app(
+            "dirs",
+            rows.clone(),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.live = serde_json::json!({ "w": { "dirs": rows } });
+        let parent = app.fields[0].clone();
+        app.fields = row_fields(&app, &parent, 0);
+        app.stack.push((vec![parent], 0, None));
+
+        assert!(
+            !handle_list_key(&mut app, "esc"),
+            "esc walked back as if the placeholder had gone"
+        );
+        let said = app.status.clone().expect("the write error must reach the screen");
+        assert!(
+            said.contains("reload before writing"),
+            "{said}"
+        );
+        assert_eq!(app.stack.len(), 1, "the row screen was left");
+        assert_eq!(app.fields[0].key, "path");
+        assert_eq!(
+            current_of(&app.live, &app.stack[0].0[0], app.legacy_section),
+            Some(&serde_json::json!([{}])),
+            "live was rewritten as if the write had landed"
+        );
+
+        assert!(
+            !handle_list_key(&mut app, "q"),
+            "q quit as if the placeholder had gone"
+        );
+        assert_eq!(app.stack.len(), 1, "q left the row screen");
+    }
+
+    /// Opening a string row used to swallow the normalisation write
+    /// and then open the editor as if the file now held an object.
+    /// Leave the list as it is and say why.
+    #[test]
+    fn opening_a_string_row_says_when_normalising_it_fails() {
+        let rows = serde_json::json!(["~/.claude"]);
+        let mut app = field_app(
+            "dirs",
+            rows.clone(),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.live = serde_json::json!({ "w": { "dirs": rows } });
+        let parent = app.fields[0].clone();
+        open_row_entry(&mut app, 0, &parent, 0);
+        let said = app.status.clone().expect("the write error must reach the screen");
+        assert!(
+            said.contains("reload before writing"),
+            "{said}"
+        );
+        assert!(app.stack.is_empty(), "the editor opened over a write that failed");
+        assert_eq!(app.fields.len(), 1);
+        assert_eq!(app.fields[0].key, "dirs");
+        assert_eq!(
+            current_of(&app.live, &app.fields[0], app.legacy_section),
+            Some(&serde_json::json!(["~/.claude"])),
+            "live was rewritten as if the row were already an object"
+        );
     }
 
     /// A list of numbers is filled in the same way a list of strings is.
