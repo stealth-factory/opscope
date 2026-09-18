@@ -3336,7 +3336,6 @@ mod tests {
         assert!(got.len() > 1);
     }
 
-    #[test]
     /// The default profile reuses the `claude` id. A directory with no
     /// files of its own must not overwrite the family presence that the
     /// binary — or a sibling directory — already established, or every

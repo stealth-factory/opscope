@@ -242,10 +242,17 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 
 /// The rule across the top of every widget.
 pub fn title(text: &str, w: usize, colour: &str) -> String {
-    let t = format!(" {} ", text.to_uppercase());
     let left = "╺━";
-    let used = display_width(&t) + display_width(left) + 1;
-    let fill = "━".repeat(w.saturating_sub(used));
+    let chrome = display_width(left) + 1;
+    if w <= chrome {
+        let deco = format!("{left}╸");
+        let (cut, _, _) = clip_width(&deco, w);
+        return format!("{colour}{cut}{RST}");
+    }
+    let room = w - chrome;
+    let wanted = format!(" {} ", text.to_uppercase());
+    let (t, t_w, _) = clip_width(&wanted, room);
+    let fill = "━".repeat(room.saturating_sub(t_w));
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
         colour,
@@ -2393,6 +2400,20 @@ mod guard_tests {
         assert!(!rows.is_empty(), "a zero-wide fault drew nothing");
     }
 
+    /// A name longer than the pane must not wrap the recovery frame.
+    #[test]
+    fn a_narrow_fault_frame_stays_inside_its_width() {
+        for w in 1..=16 {
+            let rows = guard_frame("netwatch", w, 8, || panic!("boom"));
+            for row in &rows {
+                assert!(
+                    display_width(&plain(row)) <= w,
+                    "w={w} overflowed: {row:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_fault_says_how_to_get_out_of_it() {
         let joined = guard_rows("w", 90, || panic!("boom"))
@@ -3850,6 +3871,12 @@ mod tests {
             display_width(&strip(&title("月", 20, &rgb(0, 255, 170)))),
             20
         );
+        for w in 0..=12 {
+            assert!(
+                display_width(&strip(&title("netwatch", w, &rgb(0, 255, 170)))) <= w,
+                "title overflowed a {w}-wide pane"
+            );
+        }
     }
 
     /// One poll's worth of input, decoded from a fresh keyboard.

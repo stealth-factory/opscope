@@ -1254,6 +1254,13 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
             }
         }
         match value {
+            // Path is the one field an entry cannot do without. Clearing it
+            // would leave `{"label":"…"}` in the file, which the widget
+            // ignores, and `drop_empty_row` would keep because it is not
+            // an abandoned placeholder. Delete the row instead.
+            Value::String(ref s) if s.is_empty() && named == "path" => {
+                return Err("An entry needs a path - [d]elete removes the entry.".into());
+            }
             // Clearing a field takes it off the row rather than writing an
             // empty string, so a row with nothing but a path goes back to
             // being the plain form it started as.
@@ -5364,6 +5371,30 @@ mod tests {
             "a file row with no path was treated as a placeholder"
         );
         assert!(!row_is_abandoned(&serde_json::json!({ "path": "~/.claude" })));
+    }
+
+    /// Clearing path used to write `{"label":"…"}`, which the widget
+    /// ignores and `drop_empty_row` keeps. The row must stay, and the
+    /// refusal must name `[d]elete`.
+    #[test]
+    fn clearing_path_is_refused_so_the_row_stays() {
+        let rows = serde_json::json!([{ "path": "~/.a", "label": "one" }]);
+        let mut app = field_app(
+            "dirs",
+            rows,
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        let parent = app.fields[0].clone();
+        app.fields = row_fields(&app, &parent, 0);
+        app.stack.push((vec![parent.clone()], 0, None));
+        let err = write_field(&mut app, 0, Value::String(String::new()))
+            .expect_err("clearing path was written");
+        assert!(
+            err.contains("An entry needs a path") && err.contains("[d]elete"),
+            "{err}"
+        );
+        app.fields = vec![parent];
+        assert_eq!(held_rows(&app, 0).len(), 1, "the refusal cost the entry");
     }
 
     #[test]
