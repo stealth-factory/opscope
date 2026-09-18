@@ -2712,6 +2712,20 @@ fn the_wheel_is_asked_for_unconditionally() {
              the_wheel_is_turned_off_on_every_way_out and it stays.",
         );
     }
+    // And no branch at all, because the key does not have to be read *here*
+    // to be read again: a helper called `wants_mouse` a year from now names
+    // none of the words above, and the `if` in front of it is the whole of
+    // what came out. The body is one `out` and one `flush`; nothing
+    // legitimate in it needs to choose between two things.
+    for branch in ["if ", "match ", "let "] {
+        assert!(
+            !body.contains(branch),
+            "claim_screen branches on {branch:?}: the only decision this \
+             function ever made was whether to ask for mouse reports, and \
+             that is not a decision any more. If it has grown one for some \
+             other reason, say so here and let this check see it.",
+        );
+    }
 }
 
 #[test]
