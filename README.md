@@ -264,9 +264,11 @@ that will not fit is *below the fold* rather than dropped — a chart that is
 not drawn looks exactly like a chart with no data, and only one of those is
 your problem to fix.
 
-Mouse reporting takes drag-to-select away from the terminal while a widget is
-running: the drag belongs to your terminal multiplexer, and the way to copy a
-value out of a widget is that widget's own copy key — eight of them have one.
+Mouse reporting takes drag-to-select away while a widget is running: a drag
+belongs to the host rather than to the terminal's own selection. In an
+ordinary terminal that is the terminal's selection; in a multiplexer or pane
+host it is that host's copy gesture. The way to copy a value out of a widget
+is that widget's own copy key — eight of them have one.
 There was a `terminal.mouse` key that turned reporting off, on by default; it
 is retired, because the only thing turning it off ever did was leave somebody
 with a pane whose wheel had stopped. `Ctrl-Y`, `Ctrl-E` and the arrows scroll
@@ -288,9 +290,10 @@ There are two ways in, and they write the same file.
 
 ### The settings screen
 
-Press `,` in any configurable widget, or in the launcher for the settings
-every widget shares. It is one screen, owned by `opscope-core` rather than
-written sixteen times, so it behaves the same everywhere.
+Press `,` in any configurable widget. The launcher has no settings of its
+own — that screen lives on the widget that reads the keys. It is one
+screen, owned by `opscope-core` rather than written sixteen times, so it
+behaves the same everywhere.
 
 The list shows every key that widget answers to, and for each one the value
 in force, the default it falls back to, and what the key means. The file
@@ -357,7 +360,7 @@ holding the single key that decided whether widgets asked for mouse reports —
 and it is gone. Reporting is unconditional now: the key was on by default, on
 is what everybody got, and turning it off only ever cost somebody their wheel.
 What it costs while it is on is real and small: dragging in a widget's pane
-selects nothing, so a drag belongs to your multiplexer and the way to copy a
+selects nothing, so a drag belongs to the host and the way to copy a
 value out of a widget is that widget's own copy key.
 
 ### Credentials
