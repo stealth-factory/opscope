@@ -1257,10 +1257,14 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
                 row.insert(named, other);
             }
         }
-        rows[at] = match (row.len(), row.get("path")) {
-            (1, Some(Value::String(path))) => Value::String(path.clone()),
-            _ => Value::Object(row),
-        };
+        // Always the object form. Collapsing a row back to a plain string
+        // when it had nothing but a path left two shapes in one list, and
+        // then a row's identity depended on which shape it happened to be
+        // in - which is how the default profile, the one entry that
+        // naturally has only a path, became the one entry that could not be
+        // opened. A list still *reads* both forms, because files already
+        // hold the plain one; this screen only ever writes the one.
+        rows[at] = Value::Object(row);
         // Written through the parent by standing on it for one call, the
         // same way a map entry is: one writer, one validation, one atomic
         // replace, and no second implementation of the pathing.
@@ -2144,9 +2148,9 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                         Some((value.to_string(), label))
                     }
                     // A bare string, as every other list writes its entries.
-                    Value::String(one) => Some((one.clone(), one.clone())),
-                    // And a number, which reads back as what was typed.
-                    Value::Number(n) => Some((n.to_string(), n.to_string())),
+                    Value::String(_) | Value::Number(_) => {
+                        Some((row_identity(row), entry_shown(row)))
+                    }
                     // An entry with fields of its own. Listed rather than
                     // dropped: a row the file holds and the screen does not
                     // show is an entry somebody has to remember is there,
@@ -2159,7 +2163,7 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                     // `{"label":"work","path":"~/.claude-work"}` is a row
                     // nobody can read at a glance and the screen now
                     // composes these itself.
-                    Value::Object(_) => Some((compact(row), entry_shown(row))),
+                    Value::Object(_) => Some((row_identity(row), entry_shown(row))),
                     _ => None,
                 })
                 .collect()
@@ -2382,6 +2386,23 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 /// Appended rather than sorted: the widget decides what order means, and for
 /// a list of hosts the order somebody typed them in is the one they expect
 /// to see back.
+/// What a list row is known by.
+///
+/// The same string `picked_pairs` hands out as a row's identity, so the
+/// cursor, remove and edit all agree on which row is which. A plain entry
+/// is known by itself and an entry with fields of its own by its JSON -
+/// comparing the JSON in both cases looked right and silently failed for
+/// every plain row, because `"~/.claude"` with the quotes is not the string
+/// `~/.claude`. The default profile is exactly the row that has no fields
+/// beyond its path, so it was the one that could not be opened.
+fn row_identity(row: &Value) -> String {
+    match row {
+        Value::String(one) => one.clone(),
+        Value::Number(n) => n.to_string(),
+        other => compact(other),
+    }
+}
+
 /// How one list entry reads on screen.
 ///
 /// A plain row is itself. A named row is the pair somebody typed, because
@@ -2454,7 +2475,7 @@ fn amend_free_entry(app: &mut App, index: usize, id: &str, typed: &str) -> bool 
         }
     };
     let rows = held_rows(app, index);
-    let Some(at) = rows.iter().position(|row| compact(row) == id) else {
+    let Some(at) = rows.iter().position(|row| row_identity(row) == id) else {
         // The row went while the box was open. Adding it is the closer
         // answer to what was asked for than silently doing nothing.
         return add_free_entry(app, index, typed);
@@ -2675,7 +2696,21 @@ fn drop_empty_row(app: &mut App) {
 }
 
 /// Open one entry of a list as a screen of its own fields.
+///
+/// A row still held as a plain string is written as `{ "path": ... }`
+/// first. The fields address their values by name, so a string row showed
+/// an empty `path` - the entry looked as though it had lost the one thing
+/// it cannot do without. Normalising on the way in keeps one shape in the
+/// file and makes the screen tell the truth; it is lossless, since a plain
+/// entry was only ever its path.
 fn open_row_entry(app: &mut App, index: usize, parent: &Field, at: usize) {
+    if let Some(Value::String(path)) = held_rows(app, index).get(at).cloned() {
+        let mut rows = held_rows(app, index);
+        rows[at] = serde_json::json!({ "path": path });
+        let stood = std::mem::replace(&mut app.fields, vec![parent.clone()]);
+        let _ = write_field(app, 0, Value::Array(rows));
+        app.fields = stood;
+    }
     let fields = row_fields(app, parent, at);
     app.stack
         .push((app.fields.clone(), index, Some(app.mode.clone())));
@@ -3013,7 +3048,7 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         "enter" if free && rows => {
             if let Some((entry, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 let held = held_rows(app, index);
-                let at = held.iter().position(|row| compact(row) == entry);
+                let at = held.iter().position(|row| row_identity(row) == entry);
                 let parent = app.fields.get(index).cloned();
                 if let (Some(at), Some(parent)) = (at, parent) {
                     // Put it back where the caller left it before opening a

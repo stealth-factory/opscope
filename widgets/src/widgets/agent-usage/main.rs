@@ -1948,16 +1948,36 @@ fn tab_bar(
     tabs: &[String],
     w: usize,
     p: &Palette,
-) -> (String, Vec<(usize, usize)>) {
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    let room = w.saturating_sub(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
     // Brackets as well as the tint: which tab is open must not depend on a
     // background colour surviving. A dot marks an agent that is installed.
     let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
     // The leading space above, so the first tab starts one column in.
     let mut at = 1usize;
-    let mut placed: Vec<(usize, usize)> = Vec::new();
+    let flush = |parts: &mut Vec<(String, String)>, lines: &mut Vec<String>| {
+        let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        lines.push(tc::seg(&refs, w - 1));
+        *parts = vec![(tc::RST.to_string(), " ".into())];
+    };
     for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
         let have = installed.get(name).is_some_and(|x| x.present);
+        // Both forms are the name plus two columns - `[NAME]` and ` NAME `
+        // - which is what lets the brackets mark the open tab without the
+        // strip shifting under them.
+        let wide = tab_title(name).chars().count() + 2;
+        // A tab is never split across lines, for the reason `pack_hints`
+        // never splits a key hint: half a name teaches an agent that does
+        // not exist. It goes to the next line whole, or - where a single
+        // tab is wider than the pane - it stays on a line of its own and
+        // `seg` clips it, which is the safe end of it.
+        if at > 1 && at + wide > room {
+            flush(&mut parts, &mut lines);
+            at = 1;
+        }
         parts.push((
             if here {
                 format!("{}{}", tc::bg(38, 56, 76), p.accent)
@@ -1970,11 +1990,9 @@ fn tab_bar(
                 format!(" {} ", tab_title(name))
             },
         ));
-        // Both forms are the name plus two columns - `[NAME]` and ` NAME `
-        // - which is what lets the brackets mark the open tab without the
-        // strip shifting under them.
-        let wide = tab_title(name).chars().count() + 2;
-        placed.extend((at..at + wide).map(|col| (col, i)));
+        // The line as well as the column now: the strip is as many rows as
+        // it needs, and a click is answered against the one it landed on.
+        placed.extend((at..at + wide).map(|col| (lines.len(), col, i)));
         at += wide + 1; // every branch below adds exactly one column
         if name == SUMMARY_TAB {
             parts.push((p.grid.clone(), " ".into()));
@@ -1985,8 +2003,8 @@ fn tab_bar(
             if have { "·".into() } else { " ".to_string() },
         ));
     }
-    let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-    (tc::seg(&refs, w - 1), placed)
+    flush(&mut parts, &mut lines);
+    (lines, placed)
 }
 
 /// Where a tab cursor lands after moving `by` tabs among `count`.
@@ -2097,7 +2115,7 @@ fn main() {
     let (mut active, mut tick) = (0i64, 0usize);
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
-    let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize)>) = (0, Vec::new());
+    let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
     // Switching tabs lands at the top of the new one.
     //
     // This used to be one offset per tab, kept so that switching away and
@@ -2152,8 +2170,15 @@ fn main() {
                 // list: the column decides, and the row has to match.
                 other => {
                     if let Some((x, y)) = tc::click_at(other) {
-                        if y == tab_row {
-                            if let Some(&(_, i)) = tabs_at.iter().find(|(col, _)| *col == x) {
+                        // The strip is as many rows as it needs, so a
+                        // click is answered against the line it landed on
+                        // as well as the column.
+                        if y >= tab_row {
+                            let line = y - tab_row;
+                            if let Some(&(_, _, i)) = tabs_at
+                                .iter()
+                                .find(|(row, col, _)| *row == line && *col == x)
+                            {
                                 active = i as i64;
                             }
                         }
@@ -2198,7 +2223,7 @@ fn main() {
         tab_row = rows.len();
         let (strip, strip_at) = tab_bar(&name, &snapshot.installed, &tabs, w, &p);
         tabs_at = strip_at;
-        rows.push(strip);
+        rows.extend(strip);
         rows.push(String::new());
 
         let body = if snapshot.fetched <= 0.0 {
@@ -2359,6 +2384,88 @@ mod tests {
 
     /// What a row says once its colours are taken off, which is the only
     /// half a reader sees and the only half a width can be measured in.
+    /// The strip wraps rather than losing the tabs past the edge.
+    ///
+    /// Extra Claude profiles make this reachable on an ordinary pane: six
+    /// profiles and five other agents do not fit a narrow one, and a tab
+    /// nobody can see is an agent the reader thinks is missing.
+    #[test]
+    fn the_tab_strip_wraps_instead_of_running_off_the_pane() {
+        let tabs: Vec<String> = ["+", "claude", "claude:alpha", "claude:bravo",
+            "claude:charlie", "codex", "cursor", "grok", "copilot", "antigravity"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let installed = HashMap::new();
+        for w in [40usize, 60, 80, 120] {
+            let (lines, placed) = tab_bar("claude", &installed, &tabs, w, &palette());
+            for line in &lines {
+                assert!(plain(line).chars().count() <= w - 1, "width {w}: {line:?}");
+            }
+            // Every tab is somewhere, and each is on exactly one line -
+            // a name split across two would teach an agent that does not
+            // exist, which is why hints are packed the same way.
+            for (i, name) in tabs.iter().enumerate() {
+                let rows: Vec<usize> = placed
+                    .iter()
+                    .filter(|(_, _, at)| *at == i)
+                    .map(|(row, _, _)| *row)
+                    .collect();
+                assert!(!rows.is_empty(), "width {w} lost {name}");
+                assert!(rows.iter().all(|r| *r == rows[0]), "width {w} split {name}");
+                // And the columns it claims spell the whole title.
+                let cols = placed.iter().filter(|(_, _, at)| *at == i).count();
+                assert_eq!(cols, tab_title(name).chars().count() + 2, "width {w}, {name}");
+                // Claiming the columns is not the same as being drawn in
+                // them: a tab that starts inside the pane and runs past it
+                // is clipped by `seg`, which keeps the line short enough
+                // while cutting the name in half. The title has to be on
+                // the line whole.
+                assert!(
+                    plain(&lines[rows[0]]).contains(&tab_title(name)),
+                    "width {w}: {name} was cut from {:?}",
+                    plain(&lines[rows[0]])
+                );
+            }
+            // Wide enough for everything is still one line.
+            if w == 120 {
+                assert_eq!(lines.len(), 1, "{lines:?}");
+            }
+        }
+        // Narrow enough, it takes more than one.
+        let (lines, _) = tab_bar("claude", &installed, &tabs, 40, &palette());
+        assert!(lines.len() > 1, "{lines:?}");
+    }
+
+    /// A click is answered against the line it landed on as well as the
+    /// column, or every tab on the second row would open the one above it.
+    #[test]
+    fn a_click_on_a_wrapped_tab_finds_that_tab() {
+        let tabs: Vec<String> = ["+", "claude", "codex", "cursor", "grok", "copilot"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (lines, placed) = tab_bar("claude", &HashMap::new(), &tabs, 34, &palette());
+        assert!(lines.len() > 1, "the fixture did not wrap: {lines:?}");
+        // Two placements on different lines never share an index, and the
+        // same column on two lines points at two different tabs.
+        let second: Vec<(usize, usize)> = placed
+            .iter()
+            .filter(|(row, _, _)| *row == 1)
+            .map(|(_, col, at)| (*col, *at))
+            .collect();
+        assert!(!second.is_empty(), "nothing on the second line: {placed:?}");
+        for (col, at) in second {
+            let above = placed
+                .iter()
+                .find(|(row, c, _)| *row == 0 && *c == col)
+                .map(|(_, _, at)| *at);
+            if let Some(above) = above {
+                assert_ne!(above, at, "column {col} means the same tab on both lines");
+            }
+        }
+    }
+
     fn plain(s: &str) -> String {
         let mut out = String::new();
         let mut rest = s.chars();
