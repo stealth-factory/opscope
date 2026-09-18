@@ -2380,7 +2380,16 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
         })
         .collect();
     match write_field(app, index, Value::Array(kept)) {
-        Ok(()) => app.status = Some(format!("Removed {entry}.")),
+        // Said back the way the row read, not the way it is stored. The
+        // reader picked `~/.claude-bbi = bbi` off the list; being told
+        // `Removed {"label":"bbi","path":"~/.claude-bbi"}` is the screen
+        // answering in a different language from the one it asked in.
+        Ok(()) => {
+            let said = serde_json::from_str::<Value>(entry)
+                .map(|row| entry_shown(&row))
+                .unwrap_or_else(|_| entry.to_string());
+            app.status = Some(format!("Removed {said}."));
+        }
         Err(e) => app.status = Some(e),
     }
 }
@@ -3584,9 +3593,22 @@ format!(
     // as the same row. The column takes what the longest row needs, up to
     // what the pane can spare for one; past that `seg` clips, which is the
     // safe end of it.
+    // What each row *reads* as, which is not always what it is. A free
+    // list's entries are identified by what the file holds - for an entry
+    // with fields of its own that is its JSON - and drawing that identity
+    // put `{"label":"main","path":"~/.claude"}` on screen in a list whose
+    // whole job is to be read. The identity is still what `sel` and remove
+    // work on; only the text changes.
+    let shown_at = |zone: &str| -> String {
+        picked_pairs(app, *index)
+            .into_iter()
+            .find(|(id, _)| id == zone)
+            .map(|(_, text)| text)
+            .unwrap_or_else(|| zone.to_string())
+    };
     let widest = choices
         .iter()
-        .map(|(zone, _)| zone.chars().count())
+        .map(|(zone, _)| shown_at(zone).chars().count())
         .max()
         .unwrap_or(0);
     let column = widest.clamp(34, w.saturating_sub(26).max(34));
@@ -3612,7 +3634,7 @@ format!(
                     lead.as_str(),
                     format!(" {} {} ", if here { "▸" } else { " " }, mark),
                 ),
-                (name.as_str(), crate::pad(zone, column)),
+                (name.as_str(), crate::pad(&shown_at(zone), column)),
                 (
                     note.as_str(),
                     match (alias_hit(zone, query), *on) {
@@ -4727,6 +4749,21 @@ mod tests {
         );
     }
 
+    /// The screen answers in the language it asked in. A reader picks
+    /// `~/.claude-bbi = bbi` off the list, so being told
+    /// `Removed {"label":"bbi","path":"~/.claude-bbi"}` is the screen
+    /// changing language halfway through the exchange.
+    #[test]
+    fn a_row_reads_the_same_in_the_list_and_in_what_it_says_back() {
+        let row = serde_json::json!({ "path": "~/.claude-bbi", "label": "bbi" });
+        assert_eq!(entry_shown(&row), "~/.claude-bbi = bbi");
+        // A plain row is itself, and an unrecognised shape still says
+        // something rather than vanishing.
+        assert_eq!(entry_shown(&serde_json::json!("~/.claude")), "~/.claude");
+        let odd = serde_json::json!({ "label": "nameless" });
+        assert_eq!(entry_shown(&odd), compact(&odd));
+    }
+
     /// A list of numbers is filled in the same way a list of strings is.
     #[test]
     fn a_list_of_numbers_is_a_list() {
@@ -4795,10 +4832,15 @@ mod tests {
     /// than the pane could hold.
     #[test]
     fn a_long_entry_is_drawn_whole_where_there_is_room_for_it() {
-        let long = r#"{"label":"work","path":"/tmp/somewhere/claude-work"}"#;
+        // The pair as it reads, not the JSON it is stored as - a row in a
+        // list whose whole job is to be read should be readable.
+        let long = "/tmp/somewhere/deeper/still/claude-work = work";
         let mut app = field_app(
             "dirs",
-            serde_json::json!(["~/.claude", { "path": "/tmp/somewhere/claude-work", "label": "work" }]),
+            serde_json::json!([
+                "~/.claude",
+                { "path": "/tmp/somewhere/deeper/still/claude-work", "label": "work" }
+            ]),
             Some(serde_json::json!({"items": "string-or-object"})),
         );
         app.mode = Mode::Pick {
@@ -4817,8 +4859,13 @@ mod tests {
         let narrow = draw_pick(&app, 44, 24, &palette()).0.join("\n");
         assert!(!narrow.contains(long), "nothing to clip at 44:\n{narrow}");
         assert!(
-            narrow.contains(r#"{"label":"work""#),
+            narrow.contains("/tmp/somewhere/deeper"),
             "and clipped at the edge rather than dropped:\n{narrow}"
+        );
+        // The JSON itself never reaches the screen for this shape.
+        assert!(
+            !wide.contains(r#"{"label""#),
+            "the stored form was drawn instead of the readable one:\n{wide}"
         );
     }
 
