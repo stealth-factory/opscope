@@ -56,8 +56,10 @@ files.
 
 The public `opscope` binary is different. Its source is
 `widgets/src/launcher/`: it launches widgets and embeds their help and README
-previews, but is not counted or packaged as a widget. Its own `,` screen holds
-only shared terminal behaviour such as mouse reporting.
+previews, but is not counted or packaged as a widget. It has no settings and
+no `,` screen — it owned one shared key, `terminal.mouse`, and that was
+retired, so every setting in the tree now belongs to the widget that reads
+it.
 
 ## Platforms: `cfg` decides where bytes come from
 
@@ -548,7 +550,9 @@ Two traps, both paid for:
 **Turn the mouse off on every way out** — not just `q`, the panic path too.
 `Keyboard::restore()` sends `MOUSE_OFF` and `SCREEN_RESTORE` leads with it. A
 widget that exits without it leaves the terminal emitting escape noise on
-every scroll.
+every scroll. Asking for reporting is unconditional (`claim_screen`, and
+`the_wheel_is_asked_for_unconditionally` holds it there); turning it off is
+not optional either. The two are separate checks because they fail apart.
 
 **Do not let a chart eat the slack.** `link` and `latency` scrolled nowhere
 because their charts were sized `h - rows.len() - N`, absorbing every spare
@@ -573,9 +577,10 @@ You do not decode anything. `poll()` hands you `click:<col>,<row>`,
 zero-based and in your own coordinates — `(0, 0)` is the first cell of
 `rows[0]` as you hand it to `draw()`. Only the left button going down gets
 that far. The release, a drag, and the middle and right buttons are eaten
-rather than acted on: with reporting on, an ordinary drag selects nothing.
-Shift-drag, or `"terminal": {"mouse": false}`, gives the terminal its
-selection back.
+rather than acted on: with reporting on, an ordinary drag selects nothing, so
+the drag belongs to the host. Give a widget whose values are worth copying an
+OSC 52 copy key — eight widgets have one — rather than expecting a reader to
+drag.
 
 **The footer is free.** Swap `pack_hints` for `pack_hints_placed`, draw
 `.lines` exactly as before, and register where it landed:
