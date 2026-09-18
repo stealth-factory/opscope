@@ -85,6 +85,9 @@
       "minimum": 0.1,
       "maximum": 30,
       "unit": "minutes"
+    },
+    "claude_config_dirs": {
+      "items": "string-or-object"
     }
   },
   "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named — it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",
@@ -106,5 +109,7 @@
   "_grok_ping_comment": "Grok is the only agent with no live quota: its figures come from the log its own CLI writes, so they move only when you use Grok on this machine. Turn grok_ping on to ask x.ai instead, using the token the CLI leaves in ~/.grok/auth.json. That also runs the Grok CLI once after a session goes quiet, which is what refreshes the token — without it the asking works until the token lapses and then silently stops. On by default: the request goes to the endpoint the Grok CLI itself bills through, with that CLI's own token, and the alternative is a figure that moves only when you use Grok on this machine and is marked cached. Turn it off to keep the widget from talking to x.ai or starting the CLI; the tab then says so and names this key.",
   "grok_ping": true,
   "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls. Thirty is the most it will take. A reading older than thirty-one minutes is drawn with the cached mark, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used.",
-  "grok_ping_minutes": 15.0
+  "grok_ping_minutes": 15.0,
+  "_claude_config_dirs_comment": "Claude Code config directories to read. Type a path on its own, or `<path> = <name>` to give it the name its tab should read — this screen writes both, and lists a named entry back the way it was typed. Unset or empty is [\"~/.claude\"] — today's single CLAUDE tab / CLAUDE group. When the list is set, those directories are watched in this order and no others. ~ is expanded. A second Max lives in its own directory; two or more become extra tabs and extra [+] groups titled with each entry's label (not CLAUDE) — the label written, or the directory's own name with any leading dot dropped. ~/.claude is always CLAUDE: it carries no label, and a label written on it is ignored rather than refused, so it survives being moved down the list. No other entry may take that name either; a second one asking for it becomes claude-2. They are never merged into one bar. With one directory the label is unused: the tab and the group read CLAUDE, so a label set today survives a second directory added later. Two entries wanting the same name are told apart with -2 on the second. The same path cannot be listed twice under two names; remove the row it is on first. $CLAUDE_CONFIG_DIR, CLI Proxy, ~/.claude-* scanning, Desktop and VS Code are out of scope.",
+  "claude_config_dirs": ["~/.claude"]
 }
