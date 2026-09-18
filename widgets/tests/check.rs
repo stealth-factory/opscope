@@ -333,38 +333,23 @@ fn every_widget_owns_its_complete_folder() {
             wrong.push(format!("{name}: opens a settings screen with no declaration"));
         }
     }
+    // The launcher's folder, which is not a widget's: no settings.json,
+    // because it declares no settings. It owned exactly one, the shared
+    // `terminal.mouse`, and that was retired - reporting is unconditional,
+    // so there is no shared section left for it to offer and no screen for
+    // it to open. A settings.json here would be a key nothing reads.
     let launcher = root().join("widgets/src/launcher");
-    for required in [
-        "main.rs",
-        "help.txt",
-        "README.md",
-        "CONFIGURE.md",
-        "settings.json",
-    ] {
+    for required in ["main.rs", "help.txt", "README.md", "CONFIGURE.md"] {
         if !launcher.join(required).is_file() {
             wrong.push(format!("launcher: missing {required}"));
         }
     }
-    let launcher_source =
-        std::fs::read_to_string(launcher.join("main.rs")).unwrap_or_default();
-    if !launcher_source.contains("tc::run_settings") {
-        wrong.push("launcher: does not expose shared terminal settings".into());
-    }
-    let core = std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap_or_default();
-    let terminal =
-        std::fs::read_to_string(launcher.join("settings.json")).unwrap_or_default();
-    let terminal: serde_json::Value =
-        serde_json::from_str(&terminal).expect("launcher settings are valid JSON");
-    for key in terminal
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(key, _)| key)
-        .filter(|key| !key.starts_with('_'))
-    {
-        if !core.contains(&format!("\"{}\"", key)) {
-            wrong.push(format!("launcher: terminal.{key} is never read by core"));
-        }
+    if launcher.join("settings.json").is_file() {
+        wrong.push(
+            "launcher: has a settings.json, and the launcher declares no settings - \
+             a shared section here is a key no widget reads"
+                .into(),
+        );
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
@@ -436,8 +421,8 @@ fn only_core_draws_the_settings_screen() {
 }
 
 /// The header the generated file carries, naming what regenerates it.
-const CONFIG_EXAMPLE_COMMENT: &str = "Generated from the launcher's \
-settings.json and each widget's settings.json by widgets/tests/check.rs - \
+const CONFIG_EXAMPLE_COMMENT: &str = "Generated from each widget's \
+settings.json by widgets/tests/check.rs - \
 rewrite it with \
 `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. \
 Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every \
@@ -578,14 +563,12 @@ fn render_config_example() -> String {
         "_comment".to_string(),
         Ordered::Leaf(serde_json::Value::String(CONFIG_EXAMPLE_COMMENT.to_string())),
     )];
-    // Shared terminal settings first, out of alphabetical position on
-    // purpose: they are not a widget's and they belong at the top.
-    top.push((
-        "terminal".to_string(),
-        without_schema(read_ordered(
-            &root.join("widgets/src/launcher/settings.json"),
-        )),
-    ));
+    // Every section is a widget's. A shared `terminal` one used to lead
+    // the file, out of alphabetical position, carrying the single key that
+    // decided whether widgets asked for mouse reports. That key is gone
+    // and nothing replaced it - and nothing here would have caught it
+    // being left behind, because the two checks that read this file skip
+    // any section whose name is not a widget folder.
     // Sorted by folder, which is the order the file has always been in:
     // `github`, `github-actions`, `github-prs` sort by the hyphenated name
     // rather than by the underscored section it becomes.
@@ -2685,6 +2668,40 @@ fn the_wheel_is_turned_off_on_every_way_out() {
             "{} does not send MOUSE_OFF. A widget leaving by that path hands \
              back a terminal that is still reporting.",
             what
+        );
+    }
+}
+
+#[test]
+fn the_wheel_is_asked_for_unconditionally() {
+    // The other half of the pair above, and the half that has no history
+    // of shipping broken - it has history of being *configurable*. There
+    // was a `terminal.mouse` key, on by default, and the only thing
+    // turning it off ever did was leave somebody with a pane whose wheel
+    // did nothing. Reporting is unconditional now: `claim_screen` sends
+    // MOUSE_ON and asks nobody.
+    //
+    // Read as MOUSE_ON present and no config read in the same body,
+    // because putting the conditional back means reading a key here - and
+    // a reinstated `if` that happens to spell the key some other way still
+    // has to fetch it from somewhere.
+    let src = std::fs::read_to_string(root().join("core/src/lib.rs")).expect("core");
+    let at = src
+        .find("pub fn claim_screen()")
+        .expect("claim_screen moved or was renamed");
+    let body = &src[at..at + src[at..].find("\n}\n").expect("claim_screen's body ends")];
+    assert!(
+        body.contains("MOUSE_ON"),
+        "claim_screen does not send MOUSE_ON, so no widget can scroll under the wheel"
+    );
+    for asked in ["load_config", "mouse_wanted", "cfg_bool", "config"] {
+        assert!(
+            !body.contains(asked),
+            "claim_screen reads {asked}: mouse reporting is not a setting. \
+             The key was right by default and only ever turned off by mistake, \
+             which is a way to break a pane rather than a way to help. \
+             Every teardown path still turns reporting off - that half is \
+             the_wheel_is_turned_off_on_every_way_out and it stays.",
         );
     }
 }

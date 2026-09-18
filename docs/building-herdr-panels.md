@@ -89,10 +89,19 @@ a line off a panel with the mouse stops working. In Luvus the drag is not the
 terminal's own selection but Luvus's copy gesture, with a flash and a clipboard
 write, so the loss is that host's feature rather than a generic one.
 
-Which is why it is a config key rather than a trade made on the reader's
-behalf — `terminal.mouse`, offered by every widget's settings screen, so the
-reader can give it back on the pane they are looking at without editing JSON
-or restarting anything else.
+It was a config key for a while — `terminal.mouse`, on by default, offered by
+every widget's settings screen. That is retired. The key was right by default
+and the only thing anyone ever did with it was turn their own wheel off, which
+does not clear the bar for a setting: it has to make somebody's life easier.
+
+So the cost is paid rather than offered, and what pays it is the keyboard.
+Eight widgets carry an OSC 52 copy key — github-actions, github, netwatch,
+tailnet, vercel-deployments, linear, ports, github-prs — which is the repo's
+own rule that nothing is reachable by mouse that a key cannot reach. Copying a
+hostname never needed a drag in the widgets where copying is the point. (A
+bare terminal also gives its selection back under Shift-drag; whether either
+host passes that through has not been tested here, and a drag cannot be
+injected into your own terminal, so it is not a claim this file makes.)
 
 **`pane send-text` will not deliver an arrow; `pane send-keys` will.** Testing
 a panel's key handling from the CLI, `herdr pane send-keys <pane> Down` works

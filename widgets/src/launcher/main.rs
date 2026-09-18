@@ -24,14 +24,6 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
-const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
-    widget: "opscope",
-    section: "terminal",
-    legacy_section: None,
-    schema: include_str!("settings.json"),
-    catalogues: &[],
-};
-
 /// Each widget's own words, taken from that widget's folder.
 struct Widget {
     stem: &'static str,
@@ -391,10 +383,9 @@ fn run_widget(keyboard: &mut tc::Keyboard, stem: &str) {
     }
     // The widget left the terminal however it left it, so take it back
     // rather than assuming: cbreak again, cursor away again, screen
-    // clear, and mouse reporting on if the setting still wants it.
-    // restore_screen turned it off on the way out of the child, and
-    // without putting it back the menu's wheel does nothing after the
-    // first launch even though the config never changed.
+    // clear, and mouse reporting on again. restore_screen turned it off on
+    // the way out of the child, and without putting it back the menu's
+    // wheel does nothing after the first launch.
     keyboard.reclaim();
     tc::claim_screen();
 }
@@ -502,7 +493,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
+    tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), false);
     let p = palette();
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
@@ -537,10 +528,6 @@ fn main() -> std::process::ExitCode {
         }
         for key in keys {
             match key.as_str() {
-                "," => {
-                    tc::run_settings(&mut keyboard, SETTINGS);
-                    continue;
-                }
                 "q" | "Q" => {
                     keyboard.restore();
                     tc::restore_screen();
@@ -577,7 +564,6 @@ fn main() -> std::process::ExitCode {
         let hints: Vec<Vec<(&str, String)>> = vec![
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![(p.accent.as_str(), "↵".into()), (p.dim.as_str(), " launch".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");

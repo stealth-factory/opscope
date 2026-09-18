@@ -255,10 +255,8 @@ selected row is tinted anyway — you can see that the next click will open it,
 where a double-click shows nothing before it fires.
 
 Every widget with a cursor answers a click, and every footer is clickable —
-two checks in `cargo test` fail the build when one is not. Turning mouse
-reporting off is now in **every** widget's settings screen under `,`, not
-only the launcher's: toggle it and that pane restarts without reporting,
-which gives drag-to-select back where you are rather than where you are not.
+two checks in `cargo test` fail the build when one is not. None of it is a
+setting: reporting is on wherever a widget runs.
 
 Nothing is ever hidden because a pane is short. Each widget builds its frame
 at whatever height it needs and the pane shows a window onto it, so a section
@@ -266,10 +264,13 @@ that will not fit is *below the fold* rather than dropped — a chart that is
 not drawn looks exactly like a chart with no data, and only one of those is
 your problem to fix.
 
-Mouse reporting is on by default and takes drag-to-select away from the
-terminal while it is. `"terminal": {"mouse": false}` in your config turns it
-off, and so does the `mouse` row in any widget's settings screen; the keys are
-unaffected either way. See [Configuration](#configuration).
+Mouse reporting takes drag-to-select away from the terminal while a widget is
+running: the drag belongs to your terminal multiplexer, and the way to copy a
+value out of a widget is that widget's own copy key — eight of them have one.
+There was a `terminal.mouse` key that turned reporting off, on by default; it
+is retired, because the only thing turning it off ever did was leave somebody
+with a pane whose wheel had stopped. `Ctrl-Y`, `Ctrl-E` and the arrows scroll
+from the keyboard regardless.
 
 ## Configuration
 
@@ -351,18 +352,13 @@ Section names are the widget's name with hyphens turned to underscores, so
 silent** — a section no widget reads is simply never read, and the widget
 goes on using its defaults as though you had written nothing.
 
-`terminal` is the one section that is not a widget's. It applies to all of
-them, and `,` in the launcher edits it:
-
-```json
-"terminal": { "mouse": false }
-```
-
-turns off mouse reporting, which is what makes the scroll wheel scroll a
-widget. It is on by default and costs a real thing while it is: with the
-terminal reporting, dragging selects nothing, so copying a line off a panel
-with the mouse stops working. Turn it off if you copy more often than you
-scroll — `Ctrl-Y` and `Ctrl-E` still scroll either way, and so do the arrows.
+**Every section is a widget's.** There was one that was not — `terminal`,
+holding the single key that decided whether widgets asked for mouse reports —
+and it is gone. Reporting is unconditional now: the key was on by default, on
+is what everybody got, and turning it off only ever cost somebody their wheel.
+What it costs while it is on is real and small: dragging in a widget's pane
+selects nothing, so a drag belongs to your multiplexer and the way to copy a
+value out of a widget is that widget's own copy key.
 
 ### Credentials
 
