@@ -3258,7 +3258,7 @@ mod tests {
             "{paths:?}"
         );
         let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["claude", "claude-overflow"]);
+        assert_eq!(labels, vec!["", "claude-overflow"], "the default carries no label");
         assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
     }
 
@@ -3301,9 +3301,12 @@ mod tests {
             "{paths:?}"
         );
         let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["claude", "bbi"]);
+        assert_eq!(labels, vec!["", "bbi"], "the default carries no label");
         assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
-        assert_eq!(claude_tab_ids(&cfg), vec!["claude:claude", "claude:bbi"]);
+        // The default keeps the id it has always had, so anything holding
+        // on to a selected tab still finds it.
+        assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
         assert_eq!(tab_title("claude:bbi"), "BBI");
         // The default profile's group keeps the plain heading rather than
         // stuttering `claude - CLAUDE`.

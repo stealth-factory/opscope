@@ -203,30 +203,51 @@ pub fn resolve_claude_dirs(configured: &[ClaudeDirSpec], home: &str) -> Vec<Clau
         specs
     };
     let mut seen = std::collections::HashSet::new();
-    let mut used = std::collections::HashSet::new();
+    // `claude` is spoken for: it is what the unlabelled default shows as,
+    // so another entry asking for it becomes `claude-2` rather than a
+    // second tab reading CLAUDE.
+    let mut used: std::collections::HashSet<String> =
+        std::iter::once("claude".to_string()).collect();
     let mut out = Vec::new();
     for spec in specs {
         let expanded = normalize_dir(&expand_user(&spec.path, home));
         if expanded.is_empty() || !seen.insert(expanded.clone()) {
             continue;
         }
-        let wanted = spec
-            .label
-            .as_deref()
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| fallback_label(&expanded, home));
-        out.push(ClaudeDir {
-            path: expanded,
-            label: unique_label(&wanted, &mut used),
-        });
+        // `~/.claude` carries no label at all, and an absent label reads
+        // as plain CLAUDE everywhere it is shown. Labels exist to tell the
+        // *extra* accounts apart; the default one is already told apart by
+        // being the one everybody has, and renaming it costs the familiar
+        // heading to buy a second name for the same thing.
+        //
+        // Empty rather than the word "claude", so there is no magic string
+        // to collide with somebody who genuinely names a directory that. A
+        // label written on the default is inert rather than an error, the
+        // same way one on a single-entry list is, so it survives being
+        // moved down the list later.
+        let wanted = match is_default_dir(&expanded, home) {
+            true => String::new(),
+            false => spec
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| fallback_label(&expanded, home)),
+        };
+        let label = match wanted.is_empty() {
+            // Nothing to tell apart: there is one default directory and it
+            // is already reserved above.
+            true => String::new(),
+            false => unique_label(&wanted, &mut used),
+        };
+        out.push(ClaudeDir { path: expanded, label });
     }
     if out.is_empty() {
         let path = normalize_dir(&format!("{}/.claude", home.trim_end_matches('/')));
         out.push(ClaudeDir {
             path,
-            label: "claude".into(),
+            label: String::new(),
         });
     }
     out
@@ -244,7 +265,12 @@ pub fn single_claude_profile(dirs: &[ClaudeDir]) -> bool {
 /// Tab strip id. One profile stays `claude`; extras are `claude:{label}`.
 pub fn tab_id(dir: &ClaudeDir, multi: bool) -> String {
     if multi {
-        format!("claude:{}", dir.label)
+        match dir.label.is_empty() {
+            // The default profile keeps the id it has always had, so
+            // anything remembering a selected tab still finds it.
+            true => "claude".into(),
+            false => format!("claude:{}", dir.label),
+        }
     } else {
         "claude".into()
     }
@@ -257,7 +283,7 @@ pub fn tab_id(dir: &ClaudeDir, multi: bool) -> String {
 /// default `~/.claude` beside a second directory read `claude - CLAUDE`,
 /// which stutters and says nothing the plain heading did not.
 pub fn summary_heading(label: &str, multi: bool) -> String {
-    if multi && !label.eq_ignore_ascii_case("claude") {
+    if multi && !label.is_empty() {
         format!("{label} - CLAUDE")
     } else {
         "CLAUDE".into()
@@ -299,8 +325,13 @@ fn normalize_dir(path: &str) -> String {
 /// The leading dot of a hidden directory goes: `~/.claude-bbi` put
 /// `.CLAUDE-BBI` on the tab strip, where the dot reads as a stray
 /// character rather than as part of a name.
+/// Whether this is the `~/.claude` every machine already has.
+fn is_default_dir(path: &str, home: &str) -> bool {
+    normalize_dir(path) == normalize_dir(&format!("{}/.claude", home.trim_end_matches('/')))
+}
+
 fn fallback_label(path: &str, home: &str) -> String {
-    if normalize_dir(path) == normalize_dir(&format!("{}/.claude", home.trim_end_matches('/'))) {
+    if is_default_dir(path, home) {
         return "claude".into();
     }
     let name = std::path::Path::new(path)
@@ -3338,6 +3369,67 @@ mod tests {
         }
     }
 
+    /// The default account is CLAUDE and stays CLAUDE, however many
+    /// profiles sit beside it and whatever anyone writes on it.
+    ///
+    /// Carried as an *absent* label rather than the word "claude", so there
+    /// is no magic string to collide with somebody who genuinely names a
+    /// directory that - and a label written on the default is inert rather
+    /// than an error, the same way one on a single-entry list is, so it
+    /// survives being moved down the list later.
+    #[test]
+    fn the_default_account_is_claude_whatever_is_written_on_it() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::named("~/.claude", "mine"),
+                ClaudeDirSpec::named("~/.claude-work", "work"),
+            ],
+            "/home/someone",
+        );
+        assert_eq!(got[0].label, "", "a label on the default was kept");
+        assert_eq!(summary_heading(&got[0].label, true), "CLAUDE");
+        assert_eq!(tab_id(&got[0], true), "claude");
+        // The extra one is unaffected.
+        assert_eq!(got[1].label, "work");
+        assert_eq!(summary_heading(&got[1].label, true), "work - CLAUDE");
+    }
+
+    /// Nothing else may show CLAUDE, or two tabs would read the same and
+    /// the pane would be telling two accounts apart by nothing at all.
+    #[test]
+    fn another_directory_cannot_take_the_default_name() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-two", "claude"),
+                ClaudeDirSpec::named("~/.claude-three", "CLAUDE"),
+            ],
+            "/home/someone",
+        );
+        let shown: Vec<String> = got
+            .iter()
+            .map(|d| summary_heading(&d.label, true))
+            .collect();
+        // Told apart without case, because the tab strip uppercases - and
+        // the case somebody typed is kept, so the heading reads back the
+        // way it was written.
+        assert_eq!(
+            shown,
+            vec![
+                "CLAUDE".to_string(),
+                "claude-2 - CLAUDE".to_string(),
+                "CLAUDE-3 - CLAUDE".to_string()
+            ],
+            "{got:?}"
+        );
+        // And no two tabs share an id either.
+        let ids: Vec<String> = got.iter().map(|d| tab_id(d, true)).collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    }
+
     #[test]
     fn an_empty_config_is_the_single_default_claude_dir() {
         let home = "/home/someone";
@@ -3346,7 +3438,9 @@ mod tests {
             got,
             vec![ClaudeDir {
                 path: "/home/someone/.claude".into(),
-                label: "claude".into(),
+                // No label at all: an absent one reads as plain CLAUDE,
+                // which is what the default account has always been called.
+                label: String::new(),
             }]
         );
         assert!(single_claude_profile(&got));
@@ -3375,7 +3469,7 @@ mod tests {
         assert_eq!(got[1].path, "/Users/x/.claude");
         // The hidden directory's dot is not part of its name.
         assert_eq!(got[0].label, "claude-overflow");
-        assert_eq!(got[1].label, "claude");
+        assert_eq!(got[1].label, "", "the default carries no label");
         assert!(!single_claude_profile(&got));
         assert_eq!(tab_id(&got[0], true), "claude:claude-overflow");
         assert_eq!(
@@ -3455,10 +3549,14 @@ mod tests {
             "/home/someone",
         );
         let labels: Vec<&str> = got.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["claude", "bbi"], "{got:?}");
+        assert_eq!(labels, vec!["", "bbi"], "{got:?}");
         assert_eq!(got[1].path, "/home/someone/.claude-bbi");
         assert_eq!(tab_id(&got[1], true), "claude:bbi");
         assert_eq!(summary_heading(&got[1].label, true), "bbi - CLAUDE");
+        // The default keeps the plain heading and the plain id even with a
+        // second profile beside it.
+        assert_eq!(summary_heading(&got[0].label, true), "CLAUDE");
+        assert_eq!(tab_id(&got[0], true), "claude");
     }
 
     #[test]

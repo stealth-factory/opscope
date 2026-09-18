@@ -1478,6 +1478,16 @@ shape to a plain string and quietly refuse half of it. A documented setting
 reachable only by editing the file is not reachable from the screen that
 exists to reach it.
 
+**`~/.claude` is always CLAUDE.** It carries no label at all — an absent one
+reads as the plain heading everywhere it is shown — and a label written on it
+is ignored rather than refused, so one set today survives the directory being
+moved down the list tomorrow. Labels are for telling the *extra* accounts
+apart; the default is already told apart by being the one everybody has, and
+renaming it would cost the familiar heading to buy a second name for the same
+thing. No other entry may take that name either: a second one asking for
+`claude` becomes `claude-2`, because two tabs reading CLAUDE would be telling
+two accounts apart by nothing at all.
+
 **What the pane does with two.** Each profile is its own tab, titled with
 its label — the one the entry names, or the one the path implies: `claude`
 for `~/.claude`, otherwise the directory's own name with any leading dot
