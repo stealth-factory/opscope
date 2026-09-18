@@ -205,6 +205,14 @@ fn named_kind(value: &Value, kind: &str) -> bool {
         "number" => value.is_number(),
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),
+        // A list whose entries may carry a name of their own. Either form
+        // is legal in the same list, because the plain one shipped first:
+        // agent_usage's `claude_config_dirs` takes a path, or a path with
+        // the label its tab should read. Without this kind the screen has
+        // to be told the list is all strings, and then adding a path to a
+        // list that already holds one labelled entry is refused - a write
+        // turned down over an entry nobody typed on this screen.
+        "string-or-object" => value.is_string() || value.is_object(),
         "number-map" => value
             .as_object()
             .is_some_and(|map| map.values().all(Value::is_number)),
@@ -222,7 +230,20 @@ fn validate_value(
     // is the type it wants - a model the rate card does not carry has every
     // kind and a price for none of them. Demanding null back made those rows
     // unwritable, so the one case config exists for could not be configured.
-    if !expected.is_null() && !same_kind(value, expected) {
+    //
+    // A list that declares its `items` is judged by that declaration and
+    // not by the shipped default, because `same_kind` reads element one as
+    // the shape of every element. A list whose entries may take more than
+    // one form - a path, or a path with the label its tab should read -
+    // was refused before the declared kind was ever looked at, and refused
+    // saying `expected array, got array`, which names nothing anybody can
+    // act on. The `items` check below is the stricter one and says which
+    // entry is wrong.
+    let declares_items = value.is_array()
+        && rule
+            .and_then(Value::as_object)
+            .is_some_and(|rule| rule.contains_key("items"));
+    if !expected.is_null() && !declares_items && !same_kind(value, expected) {
         return Err(format!(
             "expected {}, got {}",
             kind_name(expected),
@@ -299,7 +320,12 @@ fn constraint_summary(rule: Option<&Value>) -> String {
         ));
     }
     if let Some(kind) = rule.get("items").and_then(Value::as_str) {
-        parts.push(format!("{kind} items"));
+        // Said as English, not as the schema spells it: a reader of
+        // `string-or-object items` has to guess where the words end.
+        parts.push(match kind {
+            "string-or-object" => "string or object items".to_string(),
+            _ => format!("{kind} items"),
+        });
     }
     if let Some(kind) = rule.get("values").and_then(Value::as_str) {
         parts.push(format!("{kind} values"));
@@ -1693,7 +1719,11 @@ fn free_list_kind(app: &App, key: &str) -> Option<PickKind> {
     }
     let declared = rule.and_then(|r| r.get("items")).and_then(Value::as_str);
     let listable = match declared {
-        Some("string" | "integer" | "number") => true,
+        // `string-or-object` is listable on its string half: the picker
+        // adds and removes entries, and an object entry rides along
+        // untouched - what it holds beyond a name is the widget's business
+        // and there is no field on this screen to set it with.
+        Some("string" | "integer" | "number" | "string-or-object") => true,
         Some(_) => false,
         None => {
             // Nothing declared: a shipped default of all strings or all
@@ -1753,7 +1783,9 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
     match declared {
         Some("integer") => "integer",
         Some("number") => "number",
-        Some("string") => "string",
+        // A typed entry is the plain form. The object form is written by
+        // hand, in the file, and this screen never composes one.
+        Some("string" | "string-or-object") => "string",
         _ => match field.default.as_array() {
             Some(items) if !items.is_empty() && items.iter().all(Value::is_number) => {
                 if items.iter().all(|v| v.is_i64() || v.is_u64()) {
@@ -1985,6 +2017,14 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                     Value::String(one) => Some((one.clone(), one.clone())),
                     // And a number, which reads back as what was typed.
                     Value::Number(n) => Some((n.to_string(), n.to_string())),
+                    // An entry with fields of its own, shown as it is
+                    // written. Listed rather than dropped: a row the file
+                    // holds and the screen does not show is an entry
+                    // somebody has to remember is there, and the count
+                    // above it would say two where the file says three.
+                    // It is its own identity, so removing it still works
+                    // and adding never collides with it.
+                    Value::Object(_) => Some((compact(row), compact(row))),
                     _ => None,
                 })
                 .collect()
@@ -2258,6 +2298,9 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
         .filter(|v| match v {
             Value::String(text) => text != entry,
             Value::Number(n) => n.to_string() != entry,
+            // Matched the way it is listed, or a row on screen would
+            // refuse to go and say it had.
+            Value::Object(_) => compact(v) != entry,
             _ => true,
         })
         .collect();
@@ -4456,6 +4499,49 @@ mod tests {
             .insert("sources".into(), serde_json::json!({"values": "string"}));
         assert_eq!(map_value_of(&app, 0, "orgs"), "is:open");
         assert_eq!(map_value_of(&app, 0, "new"), "— not set");
+    }
+
+    /// A list that takes a path, or a path with a name of its own.
+    ///
+    /// Both forms in one list, because the plain one shipped first and
+    /// nothing already written may break. The screen stays a list of the
+    /// plain form: it adds and removes entries, it never composes an
+    /// object, and the labelled entries a file already holds are listed
+    /// and left alone rather than dropped - a row the file has and the
+    /// screen does not show is an entry somebody has to remember, and the
+    /// count above it would understate the list.
+    #[test]
+    fn a_list_may_hold_a_name_beside_a_plain_entry() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        let mixed = serde_json::json!([
+            "~/.agent",
+            { "path": "~/.agent-two", "label": "two" }
+        ]);
+        let app = field_app("dirs", mixed.clone(), Some(rule.clone()));
+        assert!(matches!(picker_kind(&app, "dirs"), Some(PickKind::Free)));
+        // What is typed is a path, so the box asks for a string.
+        assert_eq!(free_item_kind(&app, &app.fields[0]), "string");
+        // Both entries are on screen, the labelled one as it is written.
+        let rows = picked_zones(&app, 0);
+        assert_eq!(
+            rows,
+            vec![
+                "~/.agent".to_string(),
+                r#"{"label":"two","path":"~/.agent-two"}"#.to_string(),
+            ],
+            "{rows:?}"
+        );
+        // And neither form is refused on the way to the file.
+        assert_eq!(validate_value(&mixed, &mixed, Some(&rule)), Ok(()));
+        assert!(
+            validate_value(&mixed, &mixed, Some(&serde_json::json!({"items": "string"})))
+                .is_err(),
+            "a string-only list is what refused the labelled entry"
+        );
+        assert_eq!(
+            constraint_summary(Some(&rule)),
+            "string or object items"
+        );
     }
 
     /// A list of numbers is filled in the same way a list of strings is.
