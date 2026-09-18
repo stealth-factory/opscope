@@ -2229,7 +2229,16 @@ fn main() {
         let body = if snapshot.fetched <= 0.0 {
             loading_rows(w, tick, &p)
         } else {
-            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
+            // The body is the part that reads the data, so it is the part
+            // that can be brought down by one bad value. Guarded on its
+            // own rather than the whole frame: the title, the tab strip
+            // and the footer are cheap and almost never the thing that
+            // fails, and leaving them drawn leaves a pane the reader can
+            // still steer - the other tabs still open, and `q` still
+            // quits.
+            tc::guard_rows(&name, w, || {
+                vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
+            })
         };
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![

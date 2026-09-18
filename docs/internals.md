@@ -196,6 +196,52 @@ Tracking itself is asked for in `claim_screen()` unless
 ways out: a normal quit, `SCREEN_RESTORE` in the signal handler, and
 `Keyboard::restore()` on the unwind from a panic.
 
+## A panic while drawing is a row, not the end of the pane
+
+`Drop` putting the terminal back on an unwind is the *last* thing that
+happens, and until now it was also the only thing: one bad value in one
+section took the whole pane with it, the process exited, and the reader got
+a shell prompt where a widget had been. Everything else the widget knew went
+with it — the other sections, the quota that was fine, the keys.
+
+`guard_rows(what, w, build)` wraps the part that reads the data, and
+`guard_frame(widget, w, h, build)` wraps a whole frame for a widget with no
+natural section to guard. Reach for the first: a widget's chrome is cheap and
+almost never the thing that fails, so leaving the title, the tab strip and
+the footer drawn leaves a pane the reader can still steer — the other tabs
+still open, `q` still quits, and `r` gets a fresh attempt.
+
+**The frame is the right thing to guard, and nearly the only thing.** It is
+rebuilt from scratch every tick from whatever the pollers left behind, so
+nothing carries over from the attempt that failed and there is no
+half-written state to reason about. That is what makes catching a panic here
+honest rather than reckless. A poller keeps its own `catch_unwind`, because
+it owns state that *does* carry over — and it records its reason for the same
+purpose this does.
+
+The failure is drawn, never swallowed. An empty section and a section that
+could not be built look identical on screen, which is the founding hazard of
+the collection wearing another hat, so the rows say what broke and where:
+
+```
+ codex could not draw this frame.
+
+  no rate for gpt-5.6-sol (widgets/src/widgets/agent-usage/vendors.rs:462)
+```
+
+The location comes from a panic hook, because `catch_unwind` hands back the
+payload — the message — and not where it came from, and a panic nobody can
+locate is a bug report nobody can act on. The hook also stops the default
+one writing to stderr, which on a full-screen widget lands on top of the
+frame in the wrong colours and survives the redraw. `RUST_BACKTRACE` puts
+the default behaviour back, because somebody who asked for a backtrace wants
+Rust's, not a one-line summary of it.
+
+What it records is **per-thread**, which is the scope a panic actually has:
+it unwinds on the thread that panicked and is caught on the same one. Shared,
+a poller dying in the background would overwrite what the frame was about to
+say about itself — two failures, one row, and the wrong one drawn.
+
 That key is the runtime toggle. The launcher has owned the shared
 `terminal` section since the wheel landed, and `load` in `settings.rs` now
 wraps it alongside whichever section the widget asked for — so every
