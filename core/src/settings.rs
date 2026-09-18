@@ -3501,6 +3501,20 @@ format!(
     // One row per choice, so the placements are the first choice's row plus
     // the index - shifted by the pinned title where the frame is built.
     let mut rows_at: Vec<(usize, usize)> = Vec::new();
+    // Thirty-four columns is what a city needs, and it was the whole
+    // budget: a row longer than that was cut on a pane with sixty columns
+    // going spare. A path is often longer, and an entry carrying fields of
+    // its own - a path and the label its tab reads - always is, so two
+    // labelled entries were cut to the same thirty-four characters and read
+    // as the same row. The column takes what the longest row needs, up to
+    // what the pane can spare for one; past that `seg` clips, which is the
+    // safe end of it.
+    let widest = choices
+        .iter()
+        .map(|(zone, _)| zone.chars().count())
+        .max()
+        .unwrap_or(0);
+    let column = widest.clamp(34, w.saturating_sub(26).max(34));
     for (i, (zone, on)) in choices.iter().enumerate() {
         rows_at.push((body.len(), i));
         // A free list hands focus back and forth, and only the side holding
@@ -3523,7 +3537,7 @@ format!(
                     lead.as_str(),
                     format!(" {} {} ", if here { "▸" } else { " " }, mark),
                 ),
-                (name.as_str(), crate::pad(zone, 34)),
+                (name.as_str(), crate::pad(zone, column)),
                 (
                     note.as_str(),
                     match (alias_hit(zone, query), *on) {
@@ -4599,6 +4613,43 @@ mod tests {
         assert!(
             drawn.contains("whole number"),
             "the refusal has to reach the screen:\n{drawn}"
+        );
+    }
+
+    /// A row takes the width it needs, out of the width there is.
+    ///
+    /// The name column was thirty-four characters whatever the pane was, so
+    /// a path longer than that was cut on a screen with sixty columns going
+    /// spare - and two entries carrying fields of their own were cut to the
+    /// same thirty-four and read as the same row. Clipping at the pane's
+    /// edge is safe; clipping in the middle of it is a row that says less
+    /// than the pane could hold.
+    #[test]
+    fn a_long_entry_is_drawn_whole_where_there_is_room_for_it() {
+        let long = r#"{"label":"work","path":"/tmp/somewhere/claude-work"}"#;
+        let mut app = field_app(
+            "dirs",
+            serde_json::json!(["~/.claude", { "path": "/tmp/somewhere/claude-work", "label": "work" }]),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        let wide = draw_pick(&app, 120, 24, &palette()).0.join("\n");
+        assert!(wide.contains(long), "cut on a wide pane:\n{wide}");
+        // And narrow enough, it is cut at the edge rather than overflowing
+        // it - every row of the frame still measures inside the width.
+        let narrow = draw_pick(&app, 44, 24, &palette()).0.join("\n");
+        assert!(!narrow.contains(long), "nothing to clip at 44:\n{narrow}");
+        assert!(
+            narrow.contains(r#"{"label":"work""#),
+            "and clipped at the edge rather than dropped:\n{narrow}"
         );
     }
 
