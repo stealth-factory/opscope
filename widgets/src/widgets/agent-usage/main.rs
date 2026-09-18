@@ -1994,7 +1994,10 @@ fn tab_bar(
         // not exist. It goes to the next line whole, or - where a single
         // tab is wider than the pane - it stays on a line of its own and
         // `seg` clips it, which is the safe end of it.
-        if at > 1 && at + wide > room {
+        // The +1 is the detection marker that every non-summary tab
+        // appends: leaving it out of the fit check let `seg` clip a `·`
+        // and a present profile read as absent.
+        if at > 1 && at + wide + 1 > room {
             flush(&mut parts, &mut lines);
             at = 1;
         }
@@ -2543,6 +2546,40 @@ mod tests {
                 plain(&lines[rows[0]]).contains(&tab_title(name)),
                 "{name} was cut from {:?}",
                 plain(&lines[rows[0]])
+            );
+        }
+    }
+
+    /// The fit check has to count the `·` a detected tab appends.
+    /// After `+`, `CLAUDE` plus its marker sits exactly on a 14-column
+    /// pane's last cell; wrapping one column late lets `seg` clip the
+    /// dot and the profile reads as undetected.
+    #[test]
+    fn a_detected_tabs_dot_wraps_instead_of_being_clipped() {
+        let tabs: Vec<String> = ["+", "claude", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let installed = HashMap::from([("claude".into(), Presence { present: true })]);
+        let w = 14;
+        let (lines, _) = tab_bar("codex", &installed, &tabs, w, &palette());
+        let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+        assert!(
+            lines.len() > 1,
+            "CLAUDE stayed on a line that has no room for its marker: {text:?}"
+        );
+        let claude = text
+            .iter()
+            .find(|l| l.contains("CLAUDE"))
+            .expect("lost CLAUDE");
+        assert!(
+            claude.contains('·'),
+            "the detection marker was clipped: {text:?}"
+        );
+        for line in &lines {
+            assert!(
+                tc::display_width(&plain(line)) <= w - 1,
+                "overflowed: {line:?}"
             );
         }
     }
