@@ -2145,17 +2145,21 @@ pub fn unsupported() -> String {
 }
 
 
-/// The last panic this process caught, as a line worth putting on screen.
-///
-/// Filled by the hook `guard_frame` installs. `catch_unwind` hands back the
-/// payload, which is the message, but not where it came from - and a panic
-/// with no location is a bug report nobody can act on. The hook is the only
-/// place the location exists.
-/// Per-thread, because that is the scope a panic actually has: it unwinds
-/// on the thread that panicked and `catch_unwind` catches it on the same
-/// one. Shared, a poller dying in the background would overwrite what the
-/// frame was about to say about itself - two failures, one row, and the
-/// wrong one drawn.
+// The last panic this thread caught, as a line worth putting on screen.
+//
+// Filled by the hook `guard_frame` installs. `catch_unwind` hands back the
+// payload, which is the message, but not where it came from - and a panic
+// with no location is a bug report nobody can act on. The hook is the only
+// place the location exists.
+//
+// Per-thread, because that is the scope a panic actually has: it unwinds on
+// the thread that panicked and `catch_unwind` catches it on the same one.
+// Shared, a poller dying in the background would overwrite what the frame
+// was about to say about itself - two failures, one row, and the wrong one
+// drawn.
+//
+// A plain comment, not a doc comment: rustc does not attach one to a
+// `thread_local!` invocation and warns that it is unused.
 thread_local! {
     static LAST_PANIC: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };

@@ -1025,14 +1025,6 @@ struct Clickable {
 }
 
 struct App {
-    /// The list entry the box is amending, by the identity the file holds.
-    ///
-    /// `↵` on a row pulls it into the box to be edited rather than retyped,
-    /// and committing replaces that row instead of adding beside it. `None`
-    /// is the ordinary case: whatever is typed is a new entry. Cleared
-    /// whenever the box is abandoned, so an amend never outlives the screen
-    /// it started on.
-    amending: Option<String>,
     widget: &'static str,
     section: &'static str,
     legacy_section: Option<&'static str>,
@@ -1131,7 +1123,6 @@ fn load(spec: SettingsSpec) -> App {
         chase: true,
         mode: Mode::List,
         status: None,
-        amending: None,
         stack: Vec::new(),
     }
 }
@@ -2477,70 +2468,6 @@ fn held_rows(app: &App, index: usize) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The list as it would be with one row swapped for another.
-///
-/// Split out because it is the whole of what "in place" means, and the
-/// write it feeds refuses against a config file the tests do not own - so
-/// this is the only place the order can actually be checked.
-fn rows_with(rows: &[Value], at: usize, value: Value) -> Vec<Value> {
-    let mut out = rows.to_vec();
-    match out.get_mut(at) {
-        Some(slot) => *slot = value,
-        // Past the end is not a position to keep, so the closest honest
-        // thing is the end.
-        None => out.push(value),
-    }
-    out
-}
-
-/// Replace one row of a list with what the box now holds.
-///
-/// In place, keeping its position, because the order of this list is the
-/// order the tabs appear in: a row that moved to the end because somebody
-/// corrected its name would be a change nobody asked for. Nothing is
-/// removed until the new text parses, so a typo costs the edit and never
-/// the entry.
-fn amend_free_entry(app: &mut App, index: usize, id: &str, typed: &str) -> bool {
-    let Some(field) = app.fields.get(index) else {
-        return false;
-    };
-    if typed.is_empty() {
-        app.status = Some("An entry cannot be empty - [d]elete removes one.".into());
-        return false;
-    }
-    let value = match parse_free_entry(free_item_kind(app, field), typed) {
-        Ok(value) => value,
-        Err(why) => {
-            app.status = Some(why);
-            return false;
-        }
-    };
-    let rows = held_rows(app, index);
-    let Some(at) = rows.iter().position(|row| row_identity(row) == id) else {
-        // The row went while the box was open. Adding it is the closer
-        // answer to what was asked for than silently doing nothing.
-        return add_free_entry(app, index, typed);
-    };
-    // Against the other rows only: an entry is allowed to keep its own path
-    // while its name changes, which is the ordinary reason to be here.
-    if let Some(path) = row_path(&value) {
-        if sibling_holds_path(&rows, at, &path) {
-            app.status = Some(format!("{path} is already on another row."));
-            return false;
-        }
-    }
-    match write_field(app, index, Value::Array(rows_with(&rows, at, value))) {
-        Ok(()) => {
-            app.status = Some(format!("Changed to {typed}."));
-            true
-        }
-        Err(e) => {
-            app.status = Some(e);
-            false
-        }
-    }
-}
-
 fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
     let Some(field) = app.fields.get(index) else {
         return false;
@@ -2893,10 +2820,6 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
     let total = zone_choices(app, index, &q, all).len();
     match key {
         "esc" => {
-            // An amend abandoned leaves the row it came from exactly as it
-            // was - the box was a copy, nothing was taken out of the list -
-            // so there is only the intent to forget.
-            app.amending = None;
             app.mode = Mode::List;
             return false;
         }
@@ -2949,9 +2872,6 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         }
         // Back to your own list in one key rather than one per character.
         "ctrl-u" => {
-            // Clearing the box is giving up on the amend too: what is left
-            // is an empty box, which means a new entry.
-            app.amending = None;
             q.clear();
             cur = 0;
             s_ = 0;
@@ -3057,19 +2977,10 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             // first, so the path it carries cannot collide with itself.
             // Put back if the new text is refused, or a typo would cost the
             // entry rather than the edit.
-            // An amend is a replacement in place, not a removal and an
-            // add. This list's order is the order the tabs appear in, so a
-            // row that moved to the end because its name was corrected
-            // would be a change nobody asked for.
-            let took = match app.amending.clone() {
-                Some(id) => amend_free_entry(app, index, &id, &typed),
-                None => !typed.is_empty() && add_free_entry(app, index, &typed),
-            };
             // Only clear it if it was taken. A refused entry is one somebody
             // is about to correct, and emptying the box makes them type it
             // again from memory to find out what was wrong with it.
-            if took {
-                app.amending = None;
+            if !typed.is_empty() && add_free_entry(app, index, &typed) {
                 q.clear();
                 cur = 0;
                 s_ = 0;
@@ -4168,17 +4079,7 @@ format!(
             } else {
                 h.push(vec![
                     (p.accent.as_str(), "↵".into()),
-                    (
-                        p.dim.as_str(),
-                        // The same box does both, so it has to say which one
-                        // this is - "add it" over an amend would be a second
-                        // entry, which is the thing the amend exists to
-                        // avoid.
-                        match app.amending.is_some() {
-                            true => " save the change".into(),
-                            false => " add it".into(),
-                        },
-                    ),
+                    (p.dim.as_str(), " add it".into()),
                 ]);
                 h.push(vec![
                     (p.accent.as_str(), "ctrl-u".into()),
@@ -4482,7 +4383,6 @@ mod tests {
             chase: false,
             mode: Mode::List,
             status: None,
-        amending: None,
             wrote: false,
             stack: Vec::new(),
         }
@@ -5292,57 +5192,6 @@ mod tests {
         assert_eq!(row_index("#-1"), None);
     }
 
-    /// An amend replaces the row in place.    /// An amend replaces the row in place. This list's order is the order
-    /// the tabs appear in, so a row moving to the end because somebody
-    /// corrected its name would be a change nobody asked for.
-    #[test]
-    fn an_amended_row_keeps_its_place_in_the_order() {
-        let rows = serde_json::json!([
-            { "path": "~/.a", "label": "one" },
-            { "path": "~/.b", "label": "two" },
-            { "path": "~/.c", "label": "three" }
-        ]);
-        let mut app = field_app("dirs", rows, Some(serde_json::json!({"items": "string-or-object"})));
-        let id = r#"{"label":"two","path":"~/.b"}"#;
-        // `write_field` refuses against a config file this test does not
-        // own, so the write is not what is checked here - the position it
-        // would have written is.
-        let held = held_rows(&app, 0);
-        let at = held.iter().position(|r| compact(r) == id).expect("the middle row");
-        assert_eq!(at, 1, "the fixture moved");
-        let after = rows_with(&held, at, serde_json::json!({"path": "~/.b", "label": "second"}));
-        let names: Vec<String> = after.iter().map(|r| entry_shown(r)).collect();
-        assert_eq!(
-            names,
-            vec![
-                "~/.a = one".to_string(),
-                "~/.b = second".to_string(),
-                "~/.c = three".to_string()
-            ],
-            "the amended row left its place: {names:?}"
-        );
-        amend_free_entry(&mut app, 0, id, "~/.b = second");
-        // Refused or not, nothing may be dropped on the way.
-        assert_eq!(held_rows(&app, 0).len(), 3);
-    }
-
-    /// A name that will not parse costs the edit, never the entry.
-    #[test]
-    fn a_refused_amend_leaves_the_row_alone() {
-        let rows = serde_json::json!([{ "path": "~/.a", "label": "one" }]);
-        let mut app = field_app("dirs", rows, Some(serde_json::json!({"items": "string-or-object"})));
-        let id = r#"{"label":"one","path":"~/.a"}"#;
-        for (typed, expect) in [("~/.a =", "type a name after"), ("", "cannot be empty")] {
-            assert!(!amend_free_entry(&mut app, 0, id, typed), "{typed} was taken");
-            assert!(
-                app.status.clone().unwrap_or_default().contains(expect),
-                "{typed}: {:?}",
-                app.status
-            );
-            assert_eq!(held_rows(&app, 0).len(), 1, "{typed} cost the entry");
-        }
-    }
-
     /// An entry keeps its own path while its name changes - that is the
     /// ordinary reason to open one - but may not take a path another row
     /// already holds.
@@ -5395,31 +5244,6 @@ mod tests {
         );
         app.fields = vec![parent];
         assert_eq!(held_rows(&app, 0).len(), 1, "the refusal cost the entry");
-    }
-
-    #[test]
-    fn an_amend_may_keep_its_own_path_but_not_take_anothers() {
-        let rows = serde_json::json!([
-            { "path": "~/.a", "label": "one" },
-            { "path": "~/.b", "label": "two" }
-        ]);
-        let mut app = field_app("dirs", rows, Some(serde_json::json!({"items": "string-or-object"})));
-        let id = r#"{"label":"one","path":"~/.a"}"#;
-        // Its own path, a new name: allowed as far as the write, which is
-        // where this test's config runs out.
-        amend_free_entry(&mut app, 0, id, "~/.a = renamed");
-        assert!(
-            !app.status.clone().unwrap_or_default().contains("already on another row"),
-            "keeping its own path was read as a clash: {:?}",
-            app.status
-        );
-        // Another row's path: refused before anything is written.
-        assert!(!amend_free_entry(&mut app, 0, id, "~/.b = pinched"));
-        assert!(
-            app.status.clone().unwrap_or_default().contains("already on another row"),
-            "{:?}",
-            app.status
-        );
     }
 
     /// A list of numbers is filled in the same way a list of strings is.
