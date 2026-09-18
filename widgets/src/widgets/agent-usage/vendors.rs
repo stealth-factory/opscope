@@ -57,6 +57,12 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
 fn claude_of<'a>(s: &'a State, tab: &str) -> Option<&'a crate::claude::Data> {
     if let Some(label) = tab.strip_prefix("claude:") {
         s.claude.iter().find(|p| p.label == label)
+    } else if let Some(default) = s.claude.iter().find(|p| p.label.is_empty()) {
+        // The default `~/.claude` keeps the bare `claude` tab even when it
+        // is not first on the list. `first()` would then hand that tab the
+        // custom account sitting above it, and the default would be
+        // unreachable from the heading that still names it.
+        Some(default)
     } else {
         s.claude.first()
     }
@@ -721,5 +727,30 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn the_bare_claude_tab_is_the_default_account_even_when_it_is_not_first() {
+        let s = State {
+            claude: vec![
+                crate::claude::Data::with_session_quota("work", 80),
+                crate::claude::Data::with_session_quota("", 25),
+            ],
+            ..State::default()
+        };
+        let default = claude_of(&s, "claude").expect("the CLAUDE tab");
+        assert_eq!(default.label, "", "{:?}", default.label);
+        assert_eq!(crate::claude::lanes(default)[0].pct, 25.0);
+        let extra = claude_of(&s, "claude:work").expect("the work tab");
+        assert_eq!(extra.label, "work");
+        assert_eq!(crate::claude::lanes(extra)[0].pct, 80.0);
+
+        // One custom directory still uses the bare tab, and still has a
+        // label of its own — first() is then the only profile there is.
+        let one = State {
+            claude: vec![crate::claude::Data::with_session_quota("work", 40)],
+            ..State::default()
+        };
+        assert_eq!(claude_of(&one, "claude").expect("lone tab").label, "work");
     }
 }
