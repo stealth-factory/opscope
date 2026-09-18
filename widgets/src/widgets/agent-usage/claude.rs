@@ -399,7 +399,7 @@ fn projects_path(dir: &str) -> String {
     format!("{dir}/projects")
 }
 
-fn snapshot_slug(dir: &str) -> String {
+fn snapshot_slug_plain(dir: &str) -> String {
     let slug: String = dir
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -410,6 +410,22 @@ fn snapshot_slug(dir: &str) -> String {
     } else {
         slug
     }
+}
+
+/// A short digest of the whole path, so `/a-bc` and `/a/bc` cannot share a
+/// file. FNV-1a is enough: it is stable, has no crate, and two distinct
+/// directories hashing the same is not a thing this pane will see.
+fn snapshot_digest(dir: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in dir.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn snapshot_slug(dir: &str) -> String {
+    format!("{}-{:016x}", snapshot_slug_plain(dir), snapshot_digest(dir))
 }
 
 /// The OAuth token Claude Code already holds.
@@ -539,6 +555,27 @@ fn snapshot_path_for(dir: &str) -> String {
     }
 }
 
+/// The file this directory writes to, then the name a build before the
+/// digest used, so a snapshot already on disk is still the fallback for
+/// the profile that wrote it. The default `~/.claude` has always had its
+/// own name and is not in this list twice.
+fn snapshot_paths_for(dir: &str) -> Vec<String> {
+    let current = snapshot_path_for(dir);
+    if normalize_dir(dir) == normalize_dir(&under_home(".claude")) {
+        return vec![current];
+    }
+    let previous = format!(
+        "{}/opscope/claude-usage-{}.json",
+        snapshot_state_home(),
+        snapshot_slug_plain(dir)
+    );
+    if previous == current {
+        vec![current]
+    } else {
+        vec![current, previous]
+    }
+}
+
 /// The account the reading belongs to, so switching accounts does not show
 /// the old one's figures. Claude Code guards its cache the same way; we
 /// borrow its marker because the usage response carries no account of its
@@ -626,10 +663,10 @@ fn claude_code_cache_at(path: &str) -> Option<(serde_json::Value, f64)> {
 /// taken more recently.
 fn claude_stale_for(dir: &str) -> Option<(serde_json::Value, f64)> {
     let json = claude_json_for(dir);
-    fresher(
-        read_snapshot_for(&snapshot_path_for(dir), &json),
-        claude_code_cache_at(&json),
-    )
+    let ours = snapshot_paths_for(dir)
+        .into_iter()
+        .find_map(|path| read_snapshot_for(&path, &json));
+    fresher(ours, claude_code_cache_at(&json))
 }
 
 /// The whole fallback against two named files, so a test can put a fossil
@@ -2465,6 +2502,25 @@ mod tests {
         assert!(stale_from(&nowhere, &nowhere).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn distinct_directories_do_not_share_a_snapshot_name() {
+        assert_ne!(
+            snapshot_slug("/tmp/a-b"),
+            snapshot_slug("/tmp/a/b"),
+            "/tmp/a-b and /tmp/a/b collapsed to one slug"
+        );
+        assert_ne!(
+            snapshot_slug("/home/u/.claude-work"),
+            snapshot_slug("/home/u/.claude.work"),
+            "a hyphen and a dot became the same file"
+        );
+        assert_eq!(
+            snapshot_slug("/tmp/a-b"),
+            snapshot_slug("/tmp/a-b"),
+            "the same path must keep the same file"
+        );
     }
 
     #[test]

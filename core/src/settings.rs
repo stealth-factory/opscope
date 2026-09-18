@@ -1246,6 +1246,13 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
             }
             _ => serde_json::Map::new(),
         };
+        if named == "path" {
+            if let Value::String(path) = &value {
+                if !path.is_empty() && sibling_holds_path(&rows, at, path) {
+                    return Err(format!("{path} is already on another row."));
+                }
+            }
+        }
         match value {
             // Clearing a field takes it off the row rather than writing an
             // empty string, so a row with nothing but a path goes back to
@@ -1345,6 +1352,19 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
 /// place. Un-setting one number is most of what `d` is for on a screen of
 /// numbers, so it has to follow the same path the write took.
 fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
+    // A row field is addressed as `parent.#N.key`. `Value::get("#N")` on
+    // the array always misses, so the walk below would conclude the field
+    // was already at its default and write nothing — notably, `[d]` could
+    // not clear a custom label. The row writer already knows how to take
+    // one key off.
+    if app
+        .fields
+        .get(index)
+        .and_then(|f| row_parent_of(app, f))
+        .is_some()
+    {
+        return write_field(app, index, Value::String(String::new()));
+    }
     let field = app.fields.get(index).ok_or("no such field")?;
     let steps: Vec<String> = field.steps().iter().map(|s| s.to_string()).collect();
     let schema_path = field.path();
@@ -2395,6 +2415,20 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 /// every plain row, because `"~/.claude"` with the quotes is not the string
 /// `~/.claude`. The default profile is exactly the row that has no fields
 /// beyond its path, so it was the one that could not be opened.
+fn row_path(row: &Value) -> Option<String> {
+    match row {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("path").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+fn sibling_holds_path(rows: &[Value], at: usize, path: &str) -> bool {
+    rows.iter()
+        .enumerate()
+        .any(|(i, row)| i != at && row_path(row).as_deref() == Some(path))
+}
+
 fn row_identity(row: &Value) -> String {
     match row {
         Value::String(one) => one.clone(),
@@ -2482,16 +2516,8 @@ fn amend_free_entry(app: &mut App, index: usize, id: &str, typed: &str) -> bool 
     };
     // Against the other rows only: an entry is allowed to keep its own path
     // while its name changes, which is the ordinary reason to be here.
-    let path_of = |v: &Value| match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Object(o) => o.get("path").and_then(Value::as_str).map(str::to_string),
-        _ => None,
-    };
-    if let Some(path) = path_of(&value) {
-        let clash = rows.iter().enumerate().any(|(i, row)| {
-            i != at && path_of(row).as_deref() == Some(path.as_str())
-        });
-        if clash {
+    if let Some(path) = row_path(&value) {
+        if sibling_holds_path(&rows, at, &path) {
             app.status = Some(format!("{path} is already on another row."));
             return false;
         }
@@ -2531,17 +2557,12 @@ fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
     // path already listed plainly is the ordinary way someone adds a label
     // to it, so the refusal says to remove the old row rather than just
     // "already in the list".
-    let path_of = |v: &Value| match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Object(o) => o.get("path").and_then(Value::as_str).map(str::to_string),
-        _ => None,
-    };
     if rows.iter().any(|v| *v == value) {
         app.status = Some(format!("{entry} is already in the list."));
         return false;
     }
-    if let Some(path) = path_of(&value) {
-        if let Some(held) = rows.iter().find(|v| path_of(v).as_deref() == Some(path.as_str())) {
+    if let Some(path) = row_path(&value) {
+        if let Some(held) = rows.iter().find(|v| row_path(v).as_deref() == Some(path.as_str())) {
             app.status = Some(format!(
                 "{path} is already listed, as {} - remove that row first.",
                 entry_shown(held)
@@ -2638,7 +2659,7 @@ fn row_fields(app: &App, parent: &Field, at: usize) -> Vec<Field> {
     )];
     out.push(named(
         "label",
-        "What this entry is called on screen. Left empty, a name is taken          from the path itself.",
+        "What this entry is called on screen. Left empty, a name is taken from the path itself.",
     ));
     // Anything else the row already carries, so a field this screen does
     // not know about is still editable rather than invisible - and a row
@@ -2660,6 +2681,23 @@ fn row_fields(app: &App, parent: &Field, at: usize) -> Vec<Field> {
 /// which means an abandoned "add a new one" would otherwise leave a blank
 /// entry behind - a profile with no directory, which the widget would then
 /// have to have an opinion about.
+/// A row this screen just appended and then abandoned: `{}` or `{path:""}`.
+/// A file row that already held other keys — even without a path — is
+/// not abandoned; opening it and pressing esc must not delete it.
+fn row_is_abandoned(row: &Value) -> bool {
+    match row {
+        Value::Object(map) => {
+            let path_empty = map
+                .get("path")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
+            let extras = map.keys().any(|k| k != "path");
+            path_empty && !extras
+        }
+        _ => false,
+    }
+}
+
 fn drop_empty_row(app: &mut App) {
     let Some(field) = app.fields.first().cloned() else {
         return;
@@ -2671,16 +2709,7 @@ fn drop_empty_row(app: &mut App) {
         Some(Value::Array(rows)) => rows.clone(),
         _ => return,
     };
-    let empty = match rows.get(at) {
-        Some(Value::Object(map)) => {
-            map.is_empty()
-                || map
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-        }
-        _ => false,
-    };
+    let empty = rows.get(at).is_some_and(row_is_abandoned);
     if !empty {
         return;
     }
@@ -3183,7 +3212,14 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 }
             }
         }
-        "q" | "Q" | "esc" | "," => return true,
+        // `q` leaves the whole screen, including from a nested row that
+        // was appended empty. Drop that placeholder first or `{}` stays
+        // in the file and `configured_dirs` silently ignores it.
+        "q" | "Q" => {
+            drop_empty_row(app);
+            return true;
+        }
+        "esc" | "," => return true,
         "up" | "k" | "K" => move_sel(app, -1),
         "down" | "j" | "J" => move_sel(app, 1),
         "ctrl-y" | "wheel-up" => {
@@ -5303,6 +5339,33 @@ mod tests {
     /// An entry keeps its own path while its name changes - that is the
     /// ordinary reason to open one - but may not take a path another row
     /// already holds.
+    #[test]
+    fn a_structured_edit_must_not_take_a_siblings_path() {
+        let rows = [
+            serde_json::json!({ "path": "~/.a", "label": "one" }),
+            serde_json::json!({ "path": "~/.b", "label": "two" }),
+        ];
+        assert!(
+            !sibling_holds_path(&rows, 0, "~/.a"),
+            "a row's own path is not a clash"
+        );
+        assert!(
+            sibling_holds_path(&rows, 0, "~/.b"),
+            "another row's path was allowed through"
+        );
+    }
+
+    #[test]
+    fn only_a_blank_placeholder_is_abandoned() {
+        assert!(row_is_abandoned(&serde_json::json!({})));
+        assert!(row_is_abandoned(&serde_json::json!({ "path": "" })));
+        assert!(
+            !row_is_abandoned(&serde_json::json!({ "label": "bbi", "colour": "green" })),
+            "a file row with no path was treated as a placeholder"
+        );
+        assert!(!row_is_abandoned(&serde_json::json!({ "path": "~/.claude" })));
+    }
+
     #[test]
     fn an_amend_may_keep_its_own_path_but_not_take_anothers() {
         let rows = serde_json::json!([

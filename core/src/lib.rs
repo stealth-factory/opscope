@@ -2155,6 +2155,22 @@ thread_local! {
 }
 static HOOK: std::sync::Once = std::sync::Once::new();
 
+/// Arm the hook that records a panic as a line, rather than writing it to
+/// stderr over a full-screen widget.
+pub fn record_panics() {
+    arm_panic_hook();
+}
+
+/// The panic this thread just caught, if the hook saw it. Taken so a
+/// poller's `catch_unwind` can put the reason on the pane it feeds, instead
+/// of a generic "poller stopped" that looks like a quiet source.
+pub fn take_panic_reason() -> Option<String> {
+    LAST_PANIC
+        .try_with(|held| held.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
 /// Take the panic hook over, so a panic is a row rather than a mess.
 ///
 /// The default hook writes to stderr, which on a full-screen widget lands on
@@ -2255,23 +2271,20 @@ pub fn guard_rows(what: &str, w: usize, build: impl FnOnce() -> Vec<String>) -> 
 
 /// The rows drawn where something that panicked would have been.
 fn fault_rows(widget: &str, w: usize) -> Vec<String> {
-    let said = LAST_PANIC
-        .try_with(|held| held.borrow_mut().take())
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "panicked, with nothing recorded".into());
+    let said = take_panic_reason().unwrap_or_else(|| "panicked, with nothing recorded".into());
+    let width = w.saturating_sub(1);
     let mut rows = vec![
         seg(
             &[(
                 rgb(255, 120, 110).as_str(),
                 format!(" {widget} could not draw this frame."),
             )],
-            w - 1,
+            width,
         ),
         String::new(),
     ];
     for line in wrap(&said, w.saturating_sub(3).max(12)) {
-        rows.push(seg(&[(rgb(180, 190, 205).as_str(), format!("  {line}"))], w - 1));
+        rows.push(seg(&[(rgb(180, 190, 205).as_str(), format!("  {line}"))], width));
     }
     rows.push(String::new());
     for line in wrap(
@@ -2279,7 +2292,7 @@ fn fault_rows(widget: &str, w: usize) -> Vec<String> {
          its own. [r] tries again now, [q] quits.",
         w.saturating_sub(3).max(12),
     ) {
-        rows.push(seg(&[(rgb(127, 147, 172).as_str(), format!("  {line}"))], w - 1));
+        rows.push(seg(&[(rgb(127, 147, 172).as_str(), format!("  {line}"))], width));
     }
     rows
 }
@@ -2371,6 +2384,15 @@ mod guard_tests {
 
     /// And the way out is on screen, because a pane the reader cannot steer
     /// is one they will kill from another window.
+    /// A zero-wide pane used to underflow `w - 1` while drawing the
+    /// recovery rows, so the recovery itself panicked and the original
+    /// reason never reached the screen.
+    #[test]
+    fn a_zero_wide_fault_still_draws() {
+        let rows = guard_rows("w", 0, || panic!("boom"));
+        assert!(!rows.is_empty(), "a zero-wide fault drew nothing");
+    }
+
     #[test]
     fn the_fault_says_how_to_get_out_of_it() {
         let joined = guard_rows("w", 90, || panic!("boom"))

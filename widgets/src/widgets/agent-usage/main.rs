@@ -1783,7 +1783,7 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct Presence {
     present: bool,
 }
@@ -1814,10 +1814,14 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
         for dir in &dirs {
             let present = std::path::Path::new(&format!("{}/stats-cache.json", dir.path)).exists()
                 || std::path::Path::new(&format!("{}/.credentials.json", dir.path)).exists();
-            found.insert(
-                crate::claude::tab_id(dir, true),
-                Presence { present },
-            );
+            let id = crate::claude::tab_id(dir, true);
+            // The default profile's id is `claude`, which is the base
+            // entry: a directory with no files of its own must not
+            // unsay the binary on PATH — or a sibling directory that
+            // already proved the family is here — and take every
+            // Claude tab with it.
+            let held = found.get(&id).is_some_and(|x| x.present);
+            found.insert(id, Presence { present: present || held });
         }
     }
     found
@@ -2071,6 +2075,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_cfg = cfg.clone();
     std::thread::spawn(move || {
+        tc::record_panics();
         let mut caches = shared::Caches::default();
         loop {
             // A poller that dies takes its explanation with it, and an empty
@@ -2087,7 +2092,11 @@ fn main() {
                 }
                 Err(_) => {
                     if let Ok(mut g) = poller.lock() {
-                        g.err = "poller stopped - see the pane it was started from".into();
+                        g.err = tc::take_panic_reason()
+                            .map(|why| format!("poller stopped: {why}"))
+                            .unwrap_or_else(|| {
+                                "poller stopped - see the pane it was started from".into()
+                            });
                     }
                     return;
                 }
@@ -3325,6 +3334,54 @@ mod tests {
         assert_eq!(got[0].0, "plan");
         assert_eq!(got[1].0, "");
         assert!(got.len() > 1);
+    }
+
+    #[test]
+    /// The default profile reuses the `claude` id. A directory with no
+    /// files of its own must not overwrite the family presence that the
+    /// binary — or a sibling directory — already established, or every
+    /// Claude tab disappears.
+    #[test]
+    fn a_default_dir_with_no_files_does_not_hide_the_other_profiles() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-presence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let work = root.join("work");
+        let _ = std::fs::create_dir_all(&work);
+        std::fs::write(work.join("stats-cache.json"), "{}").expect("a stats cache");
+        let cfg = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: root.join("missing").to_string_lossy().into(),
+                    label: String::new(),
+                },
+                crate::claude::ClaudeDir {
+                    path: work.to_string_lossy().into(),
+                    label: "work".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let found = detect_agents(&cfg);
+        assert!(
+            found.get("claude").is_some_and(|p| p.present),
+            "the family presence went: {found:?}"
+        );
+        assert!(
+            found.get("claude:work").is_some_and(|p| p.present),
+            "the custom profile went: {found:?}"
+        );
+        let tabs = visible_agents(&found, &cfg);
+        assert!(
+            tabs.iter().any(|t| t == "claude" || t == "claude:work"),
+            "no Claude tab survived: {tabs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
