@@ -120,8 +120,8 @@ gauge.
 
 `←` `→` or `tab` switch. The active tab is bracketed as well as tinted, so it
 reads without colour. A `·` marks an agent that is installed. Extra Claude
-profiles from `claude_config_dirs` sit on that strip under the directory's
-basename, not under a second CLAUDE.
+profiles from `claude_config_dirs` sit on that strip under their own label,
+not under a second CLAUDE.
 
 ## What each tab can actually show
 
@@ -1423,11 +1423,52 @@ label to tell itself apart from nobody.
 When the list is set, those directories are watched in that order and no
 others. Duplicates collapse to the first entry.
 
+### Naming a profile
+
+An entry can also be an object, and then it names the label its tab and its
+`[+]` group read. Both forms in one list:
+
+```json
+"agent_usage": {
+  "claude_config_dirs": [
+    "~/.claude",
+    { "path": "~/.claude-work", "label": "work" }
+  ]
+}
+```
+
+`label` is optional; absent, empty or whitespace falls back to the label the
+path implies. A path says where the files are, not whose seat it is, which
+is the whole reason to write one.
+
+It stays a **list**, not a map keyed by label: `serde_json` is taken here
+without `preserve_order`, so a map would iterate alphabetically and the tab
+order would stop being the order you wrote.
+
+With **one** directory the label is not used at all — the tab and the group
+read `CLAUDE`, exactly as they do with no list at all. A label on a
+single-entry list is inert rather than an error, so one set today still
+means something the day a second directory is added.
+
+Two entries wanting the same name are told apart the same way two
+directories with the same basename always were: the second becomes
+`work-2`. Compared without case, because the tab strip uppercases.
+
+**The settings screen (`,`) cannot write a label.** It has no picker for an
+array of objects, and no other setting in this repo has that shape. What it
+does do: it lists every entry — a labelled one shown as the JSON it is
+written as — and it adds and removes plain paths without disturbing the
+labelled ones. Setting or changing a label is an edit to `config.json`.
+
 **What the pane does with two.** Each profile is its own tab, titled with
-the path's basename (`claude` for `~/.claude`, otherwise the directory
-name — the strip uppercases them like the others, and does not put CLAUDE
-in the title). On `[+]` each is its own group, labelled `{basename} -
-CLAUDE`, ranked with the other agents. Two accounts never share one bar.
+its label — the one the entry names, or the one the path implies: `claude`
+for `~/.claude`, otherwise the directory's own name with any leading dot
+dropped, because `.CLAUDE-BBI` on a tab reads as a stray character rather
+than as a name. The strip uppercases them like the others and does not put
+CLAUDE in the title. On `[+]` each is its own group, labelled `{label} -
+CLAUDE`, ranked with the other agents; the default profile's group stays
+plain `CLAUDE` rather than stuttering `claude - CLAUDE`. Two accounts never
+share one bar.
 
 Credentials, `stats-cache.json` and `projects/` are read from each
 directory. The OAuth/app-state file is the sibling `{dir}.json` — the same

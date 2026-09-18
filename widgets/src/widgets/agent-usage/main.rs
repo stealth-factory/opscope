@@ -1692,8 +1692,11 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         legacy_section,
+        // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
+        // labelled entry is an object, and dropping it in silence would
+        // draw a profile nobody configured.
         claude_dirs: crate::claude::resolve_claude_dirs(
-            &tc::cfg_strings(&raw, "claude_config_dirs", &["~/.claude"]),
+            &crate::claude::configured_dirs(&raw),
             &home(),
         ),
     }
@@ -3255,7 +3258,7 @@ mod tests {
             "{paths:?}"
         );
         let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["claude", ".claude-overflow"]);
+        assert_eq!(labels, vec!["claude", "claude-overflow"]);
         assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
     }
 
@@ -3273,22 +3276,68 @@ mod tests {
         assert!(crate::claude::single_claude_profile(&empty.claude_dirs));
     }
 
+    /// A bare string and an object in one list, both read, in order.
+    ///
+    /// The reader this is really about is `config_from`: `tc::cfg_strings`
+    /// keeps only the `as_str` entries, so on that call the object half of
+    /// this list arrives as nothing and the pane draws one profile out of
+    /// two - a directory nobody listed and no error anywhere.
     #[test]
-    fn object_entries_are_not_a_directory_list() {
+    fn a_mixed_list_reads_both_forms() {
         let cfg = config_from(
             &serde_json::json!({
                 "claude_config_dirs": [
-                    { "path": "~/.claude-overflow", "label": "overflow" }
+                    "~/.claude",
+                    { "path": "~/.claude-bbi", "label": "bbi" }
+                ]
+            }),
+            false,
+        );
+        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(
+            paths.len() == 2
+                && paths[0].ends_with("/.claude")
+                && paths[1].ends_with("/.claude-bbi"),
+            "{paths:?}"
+        );
+        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["claude", "bbi"]);
+        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
+        assert_eq!(claude_tab_ids(&cfg), vec!["claude:claude", "claude:bbi"]);
+        assert_eq!(tab_title("claude:bbi"), "BBI");
+        // The default profile's group keeps the plain heading rather than
+        // stuttering `claude - CLAUDE`.
+        let headings: Vec<String> = cfg
+            .claude_dirs
+            .iter()
+            .map(|d| crate::claude::summary_heading(&d.label, true))
+            .collect();
+        assert_eq!(headings, vec!["CLAUDE", "bbi - CLAUDE"]);
+    }
+
+    /// One directory, labelled, still draws the tab it always drew.
+    #[test]
+    fn one_labelled_directory_still_reads_as_claude() {
+        let cfg = config_from(
+            &serde_json::json!({
+                "claude_config_dirs": [
+                    { "path": "~/.claude-bbi", "label": "bbi" }
                 ]
             }),
             false,
         );
         assert_eq!(cfg.claude_dirs.len(), 1, "{:?}", cfg.claude_dirs);
         assert!(
-            cfg.claude_dirs[0].path.ends_with("/.claude"),
+            cfg.claude_dirs[0].path.ends_with("/.claude-bbi"),
             "{:?}",
             cfg.claude_dirs
         );
         assert!(crate::claude::single_claude_profile(&cfg.claude_dirs));
+        assert_eq!(claude_tab_ids(&cfg), vec!["claude"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
+        assert_eq!(
+            crate::claude::summary_heading(&cfg.claude_dirs[0].label, false),
+            "CLAUDE"
+        );
     }
 }

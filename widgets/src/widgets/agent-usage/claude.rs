@@ -96,37 +96,127 @@ impl Data {
     }
 }
 
+/// One `claude_config_dirs` entry as it was written.
+///
+/// A bare string is a path with no label; an object may name one. The label
+/// is what a tab and a summary group are titled with, and it is optional -
+/// absent, empty or whitespace falls back to the label derived from the
+/// path. It stays a *list* of these rather than a map keyed by label:
+/// serde_json is taken here without `preserve_order`, so a map would
+/// iterate alphabetically and take the tab order away from whoever wrote
+/// the config.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClaudeDirSpec {
+    pub path: String,
+    pub label: Option<String>,
+}
+
+impl ClaudeDirSpec {
+    /// A path with no label of its own.
+    pub fn at(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            label: None,
+        }
+    }
+
+    /// A path and the name it should answer to.
+    #[allow(dead_code)]
+    pub fn named(path: &str, label: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            label: Some(label.to_string()),
+        }
+    }
+}
+
+/// The `claude_config_dirs` entries, in the order they were written.
+///
+/// Read here rather than through `tc::cfg_strings`, which keeps only the
+/// `as_str` entries: left on that call an object form would be dropped in
+/// silence, and a dropped entry reads on screen as a directory nobody
+/// listed - this repo's founding hazard.
+///
+/// The receiver is spelt `cfg` on purpose. `config_use` in `check.rs` counts
+/// a config read only through `cfg_f64(`, `cfg_usize(`, `cfg_str(`,
+/// `cfg_strings(` or a `cfg.get("` whose receiver is that name, so renaming
+/// this parameter hides the key from the check that fails the build when a
+/// setting is undocumented.
+pub fn configured_dirs(cfg: &serde_json::Value) -> Vec<ClaudeDirSpec> {
+    let rows = cfg
+        .get("claude_config_dirs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    rows.iter().filter_map(spec_of).collect()
+}
+
+/// One entry, as a string or as `{ "path": ..., "label": ... }`.
+///
+/// Anything else - a number, a nested list, an object with no `path` - is
+/// no directory at all and is left out, the same as an empty string.
+fn spec_of(row: &serde_json::Value) -> Option<ClaudeDirSpec> {
+    let (path, label) = match row {
+        serde_json::Value::String(path) => (path.as_str(), None),
+        serde_json::Value::Object(_) => (
+            row.get("path").and_then(|v| v.as_str())?,
+            row.get("label").and_then(|v| v.as_str()),
+        ),
+        _ => return None,
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(ClaudeDirSpec {
+        path: path.to_string(),
+        label: label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string),
+    })
+}
+
 /// Directories to read, in the order they were named.
 ///
-/// `agent_usage.claude_config_dirs` is an optional list of paths. Unset or
-/// empty is today's one directory, `~/.claude`. When the list names any
-/// path, those directories are watched in that order and no others — the
-/// environment is not a source, and `~/.claude-*` is not scanned.
+/// `agent_usage.claude_config_dirs` is an optional list of entries, each a
+/// path or a path with a label. Unset or empty is today's one directory,
+/// `~/.claude`. When the list names any path, those directories are watched
+/// in that order and no others — the environment is not a source, and
+/// `~/.claude-*` is not scanned.
 ///
 /// Paths are expanded (`~` / `~/…`) against `home`. The same expanded path
-/// listed twice collapses to the first entry. Labels are the basename, so
-/// two directories can share a name without sharing a bar.
-pub fn resolve_claude_dirs(configured: &[String], home: &str) -> Vec<ClaudeDir> {
-    let specs: Vec<String> = configured
+/// listed twice collapses to the first entry. An entry's own `label` is the
+/// name it answers to; without one the label is derived from the path. Two
+/// directories can want the same name - derived or written by hand - and
+/// `unique_label` settles it, so two seats both called `work` cannot share
+/// a tab.
+pub fn resolve_claude_dirs(configured: &[ClaudeDirSpec], home: &str) -> Vec<ClaudeDir> {
+    let specs: Vec<ClaudeDirSpec> = configured
         .iter()
-        .map(|path| path.trim())
-        .filter(|path| !path.is_empty())
-        .map(|path| path.to_string())
+        .filter(|spec| !spec.path.trim().is_empty())
+        .cloned()
         .collect();
     let specs = if specs.is_empty() {
-        vec!["~/.claude".into()]
+        vec![ClaudeDirSpec::at("~/.claude")]
     } else {
         specs
     };
     let mut seen = std::collections::HashSet::new();
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for path in specs {
-        let expanded = normalize_dir(&expand_user(&path, home));
+    for spec in specs {
+        let expanded = normalize_dir(&expand_user(&spec.path, home));
         if expanded.is_empty() || !seen.insert(expanded.clone()) {
             continue;
         }
-        let wanted = fallback_label(&expanded, home);
+        let wanted = spec
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback_label(&expanded, home));
         out.push(ClaudeDir {
             path: expanded,
             label: unique_label(&wanted, &mut used),
@@ -162,8 +252,12 @@ pub fn tab_id(dir: &ClaudeDir, multi: bool) -> String {
 
 /// Summary group heading. One profile stays `CLAUDE`; extras are
 /// `{label} - CLAUDE` so two Max accounts cannot share one bar.
+///
+/// A profile whose label is already the word does not repeat it: the
+/// default `~/.claude` beside a second directory read `claude - CLAUDE`,
+/// which stutters and says nothing the plain heading did not.
 pub fn summary_heading(label: &str, multi: bool) -> String {
-    if multi {
+    if multi && !label.eq_ignore_ascii_case("claude") {
         format!("{label} - CLAUDE")
     } else {
         "CLAUDE".into()
@@ -200,25 +294,40 @@ fn normalize_dir(path: &str) -> String {
     path.trim_end_matches('/').to_string()
 }
 
+/// The label a path implies, for an entry that named none.
+///
+/// The leading dot of a hidden directory goes: `~/.claude-bbi` put
+/// `.CLAUDE-BBI` on the tab strip, where the dot reads as a stray
+/// character rather than as part of a name.
 fn fallback_label(path: &str, home: &str) -> String {
     if normalize_dir(path) == normalize_dir(&format!("{}/.claude", home.trim_end_matches('/'))) {
         return "claude".into();
     }
-    std::path::Path::new(path)
+    let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("claude")
-        .to_string()
+        .unwrap_or("");
+    let name = name.strip_prefix('.').unwrap_or(name);
+    if name.is_empty() {
+        "claude".into()
+    } else {
+        name.to_string()
+    }
 }
 
+/// The wanted label, or the next free `{wanted}-{n}`.
+///
+/// Compared without case, because `tab_title` uppercases: `Work` and `work`
+/// are two ids and one tab, which is the collision this exists to prevent
+/// wearing a disguise. The case that was typed is kept - it is what the
+/// group heading says.
 fn unique_label(wanted: &str, used: &mut std::collections::HashSet<String>) -> String {
-    if used.insert(wanted.to_string()) {
+    if used.insert(wanted.to_lowercase()) {
         return wanted.to_string();
     }
     for n in 2.. {
         let candidate = format!("{wanted}-{n}");
-        if used.insert(candidate.clone()) {
+        if used.insert(candidate.to_lowercase()) {
             return candidate;
         }
     }
@@ -3244,7 +3353,10 @@ mod tests {
         assert_eq!(tab_id(&got[0], false), "claude");
         assert_eq!(summary_heading(&got[0].label, false), "CLAUDE");
         assert_eq!(
-            resolve_claude_dirs(&[String::new(), "   ".into()], home),
+            resolve_claude_dirs(
+                &[ClaudeDirSpec::at(""), ClaudeDirSpec::at("   ")],
+                home
+            ),
             got,
             "empty entries are the same as an unset list"
         );
@@ -3253,32 +3365,41 @@ mod tests {
     #[test]
     fn tilde_paths_expand_against_home_and_keep_order() {
         let got = resolve_claude_dirs(
-            &["~/.claude-overflow".into(), "~/.claude".into()],
+            &[
+                ClaudeDirSpec::at("~/.claude-overflow"),
+                ClaudeDirSpec::at("~/.claude"),
+            ],
             "/Users/x",
         );
         assert_eq!(got[0].path, "/Users/x/.claude-overflow");
         assert_eq!(got[1].path, "/Users/x/.claude");
-        assert_eq!(got[0].label, ".claude-overflow");
+        // The hidden directory's dot is not part of its name.
+        assert_eq!(got[0].label, "claude-overflow");
         assert_eq!(got[1].label, "claude");
         assert!(!single_claude_profile(&got));
-        assert_eq!(tab_id(&got[0], true), "claude:.claude-overflow");
+        assert_eq!(tab_id(&got[0], true), "claude:claude-overflow");
         assert_eq!(
-            summary_heading(".claude-overflow", true),
-            ".claude-overflow - CLAUDE"
+            summary_heading("claude-overflow", true),
+            "claude-overflow - CLAUDE"
         );
+        // And the default profile does not say the word twice.
+        assert_eq!(summary_heading(&got[1].label, true), "CLAUDE");
     }
 
     #[test]
     fn a_named_list_is_watched_exactly() {
         let home = "/home/someone";
-        let only = resolve_claude_dirs(&["~/.claude-overflow".into()], home);
+        let only = resolve_claude_dirs(&[ClaudeDirSpec::at("~/.claude-overflow")], home);
         assert_eq!(only.len(), 1, "{only:?}");
         assert_eq!(only[0].path, "/home/someone/.claude-overflow");
-        assert_eq!(only[0].label, ".claude-overflow");
+        assert_eq!(only[0].label, "claude-overflow");
         assert!(single_claude_profile(&only));
 
         let listed_twice = resolve_claude_dirs(
-            &["~/.claude".into(), "~/.claude/".into()],
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::at("~/.claude/"),
+            ],
             home,
         );
         assert_eq!(listed_twice.len(), 1, "{listed_twice:?}");
@@ -3287,9 +3408,92 @@ mod tests {
 
     #[test]
     fn labels_are_the_basename() {
-        let got = resolve_claude_dirs(&["/var/lib/claude-work".into()], "/home/someone");
+        let got = resolve_claude_dirs(
+            &[ClaudeDirSpec::at("/var/lib/claude-work")],
+            "/home/someone",
+        );
         assert_eq!(got[0].label, "claude-work");
         assert_eq!(got[0].path, "/var/lib/claude-work");
+    }
+
+    #[test]
+    fn an_entry_is_a_path_or_a_path_with_a_label() {
+        let read = configured_dirs(&serde_json::json!({
+            "claude_config_dirs": [
+                "~/.claude",
+                { "path": "~/.claude-bbi", "label": "bbi" },
+                { "path": "  ~/.claude-spare  ", "label": "   " },
+                { "label": "no path of its own" },
+                17,
+                ["~/.claude-nested"],
+            ]
+        }));
+        assert_eq!(
+            read,
+            vec![
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-bbi", "bbi"),
+                // Trimmed, and a whitespace label is no label.
+                ClaudeDirSpec::at("~/.claude-spare"),
+            ],
+            "{read:?}"
+        );
+        assert!(configured_dirs(&serde_json::json!({})).is_empty());
+        assert!(
+            configured_dirs(&serde_json::json!({ "claude_config_dirs": "~/.claude" })).is_empty(),
+            "a string where a list belongs is no list"
+        );
+    }
+
+    #[test]
+    fn a_written_label_beats_the_derived_one() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-bbi", "bbi"),
+            ],
+            "/home/someone",
+        );
+        let labels: Vec<&str> = got.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["claude", "bbi"], "{got:?}");
+        assert_eq!(got[1].path, "/home/someone/.claude-bbi");
+        assert_eq!(tab_id(&got[1], true), "claude:bbi");
+        assert_eq!(summary_heading(&got[1].label, true), "bbi - CLAUDE");
+    }
+
+    #[test]
+    fn two_written_labels_cannot_share_a_tab() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::named("~/.claude-one", "work"),
+                ClaudeDirSpec::named("~/.claude-two", "work"),
+                // Same name to the tab strip, which uppercases both.
+                ClaudeDirSpec::named("~/.claude-three", "Work"),
+            ],
+            "/home/someone",
+        );
+        let labels: Vec<&str> = got.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["work", "work-2", "Work-3"], "{got:?}");
+        let ids: Vec<String> = got.iter().map(|d| tab_id(d, true)).collect();
+        assert_eq!(ids.len(), 3);
+        let mut seen: Vec<String> = ids.iter().map(|id| id.to_uppercase()).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "{ids:?}");
+    }
+
+    #[test]
+    fn one_directory_ignores_its_label() {
+        let got = resolve_claude_dirs(
+            &[ClaudeDirSpec::named("~/.claude-bbi", "bbi")],
+            "/home/someone",
+        );
+        assert!(single_claude_profile(&got));
+        // Set, and inert: it is there for the day a second directory is
+        // added, and until then there is nobody to tell apart.
+        assert_eq!(got[0].label, "bbi");
+        assert_eq!(tab_id(&got[0], false), "claude");
+        assert_eq!(summary_heading(&got[0].label, false), "CLAUDE");
     }
 
     #[test]
