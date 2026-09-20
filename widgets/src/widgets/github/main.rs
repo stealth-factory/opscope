@@ -740,6 +740,14 @@ fn build_merged_page_query(q: &str, since: &str, after: Option<&str>) -> String 
     )
 }
 
+/// One page of a single PR's reviews, by node id.
+///
+/// The merged-node query brings the first [`REVIEW_PAGE`] reviews with each
+/// PR, which is enough unless every one of them is a bot. This is how the
+/// rest are reached, and [`fill_reviews`] stops asking the moment a human
+/// turns up: the reading wanted is the *first* human review, so a PR with
+/// forty bot reviews and a person on page three costs three requests and a
+/// PR reviewed by a person costs none.
 fn build_reviews_page_query(id: &str, after: Option<&str>) -> String {
     let after_arg = match after {
         Some(c) if !c.is_empty() => format!(", after: {}", serde_json::Value::String(c.to_string())),
@@ -1130,6 +1138,10 @@ fn land_of(
         .and_then(|(w, _, t)| (*w == want && mine(t)).then(|| t.clone()))
 }
 
+/// Hours, with a decimal only where one says something.
+///
+/// A value already on a whole hour does not need `.0` after it, and past ten
+/// hours the tenth is noise beside the figure it is qualifying.
 fn fmt_hours(h: f64) -> String {
     if (h - h.round()).abs() < 0.05 || h >= 10.0 {
         format!("{:.0}h", h)
@@ -1138,6 +1150,8 @@ fn fmt_hours(h: f64) -> String {
     }
 }
 
+/// Days, always to a tenth: the T2D bar sits at two days, so whether a median
+/// is 1.9 or 2.1 is the whole reading and rounding it away answers nothing.
 fn fmt_days(d: f64) -> String {
     format!("{:.1}d", d)
 }
