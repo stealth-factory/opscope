@@ -1103,15 +1103,15 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
     if r24 {
         say(&[
             "R24   of those merged, first human review within 24h".to_string(),
-            "R24   merged, first human review within 24h".to_string(),
-            "R24   reviewed within 24h".to_string(),
+            "R24   of merged, first human review within 24h".to_string(),
+            "R24   of merged, reviewed within 24h".to_string(),
         ]);
     }
     if t2d {
         say(&[
             "T2D   of those merged, opened to merged within 2 days".to_string(),
-            "T2D   merged within 2 days of opening".to_string(),
-            "T2D   merged within 2 days".to_string(),
+            "T2D   of merged, within 2 days of opening".to_string(),
+            "T2D   of merged, within 2 days".to_string(),
         ]);
     }
     out
@@ -3676,6 +3676,28 @@ mod tests {
         assert!(names_the_key(45));
     }
 
+    /// The denominator survives the shortening, at the width the
+    /// shortening happens. `R24` is drawn from 51 columns and its longest
+    /// wording only fits from 55, so 51 to 54 is the band nobody looks at
+    /// - and the line there read "merged, first human review within 24h",
+    /// which is a description of merged PRs rather than a share of them.
+    /// That is the one misreading this pane exists not to draw.
+    #[test]
+    fn a_shortened_note_still_names_its_denominator() {
+        for w in 45..=140 {
+            for line in column_notes(true, 18, w) {
+                assert!(
+                    ["of PRs", "of those merged", "of merged", "share of closed"]
+                        .iter()
+                        .any(|d| line.contains(d)),
+                    "w={w}: {line:?} names no population"
+                );
+            }
+        }
+        let tight = column_notes(true, 18, 51);
+        assert!(tight.iter().any(|l| l.contains("R24")), "{tight:?}");
+    }
+
     /// Both thresholds count their own boundary - `hours <=
     /// FIRST_REVIEW_HOURS`, `days <= TIME_TO_MERGE_DAYS` - so a note that
     /// says "under" describes a percentage the widget does not draw: the
@@ -4792,4 +4814,5 @@ mod tests {
     }
 
 }
+
 
