@@ -703,6 +703,15 @@ const REVIEW_PAGE: usize = 20;
 /// not reach stays incomplete, so R24 says `···` rather than a number short
 /// of its window.
 const REVIEW_PAGE_BUDGET: usize = 120;
+/// How long a detail screen waits before asking for timing again after a
+/// failed request.
+///
+/// The in-flight guard alone is not enough: a failure writes no overlay
+/// entry, so the next frame sees the same gap and asks again - and the render
+/// loop is a 300ms tick, which makes a refused token three requests a second
+/// against a quota the whole board shares. `fetch_oldest` cannot go this way
+/// because it caches its failure, and the gap being filled is what stops it.
+const TIMING_RETRY_SECS: f64 = 30.0;
 
 /// One page of PRs merged on or after `since`, for the timing enricher.
 ///
@@ -2577,6 +2586,11 @@ fn main() {
     let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let timing_asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Earliest time an account's timing may be asked for again, set only
+    // where a request failed. The poller fills the same gap on its own
+    // schedule, so this delays the detail screen's shortcut rather than
+    // giving up on it.
+    let timing_backoff: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
@@ -3204,7 +3218,11 @@ fn main() {
                     (a.window == want && a.merged == 0)
                         .then(|| parse::parse_land_timing(0, &[]))
                 });
-                if land.is_none() && a.window == want {
+                let ready = timing_backoff
+                    .lock()
+                    .map(|g| g.get(&key).is_none_or(|at| tc::now() >= *at))
+                    .unwrap_or(true);
+                if land.is_none() && a.window == want && ready {
                     let start = timing_asking
                         .lock()
                         .map(|mut g| g.insert(key.clone()))
@@ -3220,12 +3238,25 @@ fn main() {
                             Arc::clone(&state),
                         );
                         let asking = Arc::clone(&timing_asking);
+                        let backoff = Arc::clone(&timing_backoff);
                         std::thread::spawn(move || {
-                            if let Ok(got) = fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes)
-                            {
-                                if let Ok(mut g) = poll.lock() {
-                                    g.timing_overlay
-                                        .insert(acc.clone(), (days, got.retry, got.timing));
+                            match fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes) {
+                                Ok(got) => {
+                                    if let Ok(mut g) = poll.lock() {
+                                        g.timing_overlay
+                                            .insert(acc.clone(), (days, got.retry, got.timing));
+                                    }
+                                    if let Ok(mut g) = backoff.lock() {
+                                        g.remove(&acc);
+                                    }
+                                }
+                                // Releasing the in-flight guard on a failure
+                                // hands the next frame the same empty cell to
+                                // chase. Say when it may be chased again.
+                                Err(_) => {
+                                    if let Ok(mut g) = backoff.lock() {
+                                        g.insert(acc.clone(), tc::now() + TIMING_RETRY_SECS);
+                                    }
                                 }
                             }
                             if let Ok(mut g) = asking.lock() {
