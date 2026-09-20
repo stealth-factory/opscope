@@ -20,7 +20,7 @@ The front door: every widget, what it does, and a preview before it runs.
  ── AGENT-USAGE ──
    How much each coding agent on the machine has been used…
 
- ↑↓ select  ↵ launch  [,] settings  [q]uit
+ ↑↓ select  ↵ launch  [q]uit
 ```
 
 Sixteen widget binaries in a directory are a list you have to already know. Pick one
@@ -41,8 +41,8 @@ rather than keeping another description:
   cannot enumerate its siblings the way a directory of scripts could.
 
 So a widget's description here and its own `--help` cannot disagree: they are
-the same words. The settings this screen opens are the shared `terminal`
-section only — a widget's own settings belong to the widget.
+the same words. Settings are not written down here either: every one of them
+belongs to the widget that reads it, and is edited in that widget.
 
 ## The version on the title row
 
@@ -162,16 +162,17 @@ opscope doctor
 It prints only. Neither the launcher nor a widget invokes a package manager,
 asks for `sudo`, or installs anything during download or first run.
 
-## Shared terminal settings
+## Settings
 
-Mouse reporting belongs to the terminal experience rather than to any one
-widget. Press `,` here to open the shared settings screen for
-`terminal.mouse`; it shows the resolved config file, current value, default,
-and field help. `opscope --configure-help` prints the launcher-owned guide.
+The launcher has none, and shows no settings action. Each widget owns its
+own settings and opens them with `,` in that widget.
 
-The setting defaults to `true`, which enables wheel events but prevents
-drag-to-select in the terminal. Turning it off restores drag selection;
-`Ctrl-Y`, `Ctrl-E`, and the arrow keys still work.
+Mouse reporting is on, always. It was the launcher's one shared setting
+until it was retired: on by default, and turning it off only ever cost
+somebody their wheel. While reporting is on, a drag belongs to the host
+rather than to the terminal's own selection, so the way to copy a value out
+of a widget is that widget's own copy key. `Ctrl-Y`, `Ctrl-E` and the
+arrows scroll from the keyboard regardless.
 
 ## Launching
 
@@ -209,12 +210,10 @@ The suffix is stripped and the binary of the same stem runs.
 | `↑` `↓` / `j` `k` | select a widget |
 | `↵` / `→` | launch it, and come back here when it quits |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the whole view a line at a time — the pane moves, the selection stays where it is |
-| `,` | open shared terminal settings |
 | `q` | quit |
 
 ## Cost
 
 **Browsing costs nothing.** It starts no widget, calls no API, discovers no
 files and polls nothing. It touches the filesystem only when you launch the
-selected sibling binary or open the settings screen, which reads the resolved
-config and writes only after you confirm a change.
+selected sibling binary.

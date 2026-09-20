@@ -119,11 +119,14 @@ nothing **say so**, which is the honest answer and more useful than a blank
 gauge.
 
 `←` `→` or `tab` switch. The active tab is bracketed as well as tinted, so it
-reads without colour. A `·` marks an agent that is installed.
+reads without colour. A `·` marks an agent that is installed. Extra Claude
+profiles from `claude_config_dirs` sit on that strip under their own label,
+not under a second CLAUDE.
 
 ## What each tab can actually show
 
-**Claude Code** — the real one. `~/.claude/stats-cache.json` carries per-model
+**Claude Code** — the real one. `~/.claude/stats-cache.json` (or the same
+file under each configured `claude_config_dirs` entry) carries per-model
 token counts (input, output, cache read, cache written), total sessions and
 messages, and around four weeks of daily activity. All of it is spend.
 
@@ -1400,6 +1403,107 @@ The first paint is the slow one: a freshly started widget takes **roughly
 fifteen seconds** to put anything on any tab, because Claude's transcripts and
 Cursor's spend history are both read through before there is anything to draw.
 Neither is paid again.
+
+## More than one Claude Max
+
+A second Max seat is a second Claude Code config directory. This widget
+does not invent that layout, does not read `$CLAUDE_CONFIG_DIR`, and does
+not scan `~/.claude-*`. Name the directories:
+
+```json
+"agent_usage": {
+  "claude_config_dirs": ["~/.claude", "~/.claude-overflow"]
+}
+```
+
+`~` is expanded. Unset or empty is today's one directory, `~/.claude`, and
+the tab and `[+]` group stay **CLAUDE** — a lone profile does not grow a
+label to tell itself apart from nobody.
+
+When the list is set, those directories are watched in that order and no
+others. Duplicates collapse to the first entry.
+
+### Naming a profile
+
+An entry can also be an object, and then it names the label its tab and its
+`[+]` group read. Both forms in one list:
+
+```json
+"agent_usage": {
+  "claude_config_dirs": [
+    "~/.claude",
+    { "path": "~/.claude-work", "label": "work" }
+  ]
+}
+```
+
+`label` is optional; absent, empty or whitespace falls back to the label the
+path implies. A path says where the files are, not whose seat it is, which
+is the whole reason to write one.
+
+It stays a **list**, not a map keyed by label: `serde_json` is taken here
+without `preserve_order`, so a map would iterate alphabetically and the tab
+order would stop being the order you wrote.
+
+With **one** directory the label is not used at all — the tab and the group
+read `CLAUDE`, exactly as they do with no list at all. A label on a
+single-entry list is inert rather than an error, so one set today still
+means something the day a second directory is added.
+
+Two entries wanting the same name are told apart the same way two
+directories with the same basename always were: the second becomes
+`work-2`. Compared without case, because the tab strip uppercases.
+
+**The settings screen (`,`) writes both forms.** Type a path on its own for
+an unnamed entry, or `<path> = <name>` to name one:
+
+```
+~/.claude-work = work
+```
+
+and the file gets `{ "path": "~/.claude-work", "label": "work" }`. The list
+reads a named entry back the way it was typed rather than as the JSON it is
+stored as, because `{"label":"work","path":"~/.claude-work"}` is not a row
+anyone reads at a glance.
+
+Half an entry is refused and says which half is missing, since a path
+truncated at a stray `=` would point somewhere real and wrong. The same path
+cannot be listed twice under two names either — the widget collapses
+duplicate paths, so the loser would sit in the file forever doing nothing;
+the refusal names the row to remove.
+
+This was the one gap worth closing by hand: `claude_config_dirs` is the only
+setting here whose items are objects, and the screen used to flatten the
+shape to a plain string and quietly refuse half of it. A documented setting
+reachable only by editing the file is not reachable from the screen that
+exists to reach it.
+
+**`~/.claude` is always CLAUDE.** It carries no label at all — an absent one
+reads as the plain heading everywhere it is shown — and a label written on it
+is ignored rather than refused, so one set today survives the directory being
+moved down the list tomorrow. Labels are for telling the *extra* accounts
+apart; the default is already told apart by being the one everybody has, and
+renaming it would cost the familiar heading to buy a second name for the same
+thing. No other entry may take that name either: a second one asking for
+`claude` becomes `claude-2`, because two tabs reading CLAUDE would be telling
+two accounts apart by nothing at all.
+
+**What the pane does with two.** Each profile is its own tab, titled with
+its label — the one the entry names, or the one the path implies: `claude`
+for `~/.claude`, otherwise the directory's own name with any leading dot
+dropped, because `.CLAUDE-BBI` on a tab reads as a stray character rather
+than as a name. The strip uppercases them like the others and does not put
+CLAUDE in the title. On `[+]` each is its own group, labelled `{label} -
+CLAUDE`, ranked with the other agents; the default profile's group stays
+plain `CLAUDE` rather than stuttering `claude - CLAUDE`. Two accounts never
+share one bar.
+
+Credentials, `stats-cache.json` and `projects/` are read from each
+directory. The OAuth/app-state file is the sibling `{dir}.json` — the same
+pairing as `~/.claude` beside `~/.claude.json` — or `{dir}/.claude.json` if
+that is what is on disk. A custom dir never falls back to `~/.claude.json`.
+
+CLI Proxy, Desktop and VS Code are out of scope.
 
 ## Which agents appear
 

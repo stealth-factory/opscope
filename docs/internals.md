@@ -57,8 +57,9 @@ there is no second input type and no widget decoding escape sequences.
 `(0, 0)` is the first cell of `rows[0]` as handed to `draw()`. Only the left
 button going down becomes a click. The release, a drag, and the middle and
 right buttons are eaten rather than acted on: with reporting on, an ordinary
-drag selects nothing — Shift-drag, or `"terminal": {"mouse": false}`, gives
-the terminal its selection back. An action bound only to the right button
+drag selects nothing, so the drag belongs to the host and the way to copy a
+value out of a widget is that widget's own copy key. An action bound only to
+the right button
 would have no hint, no `--help` line and no doc row, and is invisible to the
 check that would have caught that.
 
@@ -191,18 +192,67 @@ does not, and `luvus-panes` is the one widget shaped that way. Its spans are
 it every click landed a header's height further down and the first entries
 could not be reached at all.
 
-Tracking itself is asked for in `claim_screen()` unless
-`"terminal": {"mouse": false}` says otherwise, and given back on all three
-ways out: a normal quit, `SCREEN_RESTORE` in the signal handler, and
-`Keyboard::restore()` on the unwind from a panic.
+Tracking itself is asked for in `claim_screen()`, unconditionally, and given
+back on all three ways out: a normal quit, `SCREEN_RESTORE` in the signal
+handler, and `Keyboard::restore()` on the unwind from a panic. The asking is
+what has no condition on it; the three ways out are not up for negotiation,
+because a terminal left reporting outlives the process that asked for it.
 
-That key is the runtime toggle. The launcher has owned the shared
-`terminal` section since the wheel landed, and `load` in `settings.rs` now
-wraps it alongside whichever section the widget asked for — so every
-settings screen offers it, and leaving the screen relaunches *that* widget
-with the new setting. The schema is read out of the launcher's own
-`settings.json` rather than copied, because two records of the same
-defaults is one record and one thing that used to be true.
+It was a config key once, `terminal.mouse`, spliced into every widget's
+settings screen out of a `terminal` section the launcher owned. It is gone.
+The key was on by default, on is what everybody got, and the only thing
+turning it off ever did was leave somebody with a pane whose wheel had
+stopped working — a way to break your own pane rather than a way to make
+anything easier. `the_wheel_is_asked_for_unconditionally` in `check.rs`
+reads `claim_screen`'s body for MOUSE_ON and for any config read, so
+putting the condition back fails the build; `the_wheel_is_turned_off_on_every_way_out`
+is the other half and covers the exits.
+
+## A panic while drawing is a row, not the end of the pane
+
+`Drop` putting the terminal back on an unwind is the *last* thing that
+happens, and until now it was also the only thing: one bad value in one
+section took the whole pane with it, the process exited, and the reader got
+a shell prompt where a widget had been. Everything else the widget knew went
+with it — the other sections, the quota that was fine, the keys.
+
+`guard_rows(what, w, build)` wraps the part that reads the data, and
+`guard_frame(widget, w, h, build)` wraps a whole frame for a widget with no
+natural section to guard. Reach for the first: a widget's chrome is cheap and
+almost never the thing that fails, so leaving the title, the tab strip and
+the footer drawn leaves a pane the reader can still steer — the other tabs
+still open, `q` still quits, and `r` gets a fresh attempt.
+
+**The frame is the right thing to guard, and nearly the only thing.** It is
+rebuilt from scratch every tick from whatever the pollers left behind, so
+nothing carries over from the attempt that failed and there is no
+half-written state to reason about. That is what makes catching a panic here
+honest rather than reckless. A poller keeps its own `catch_unwind`, because
+it owns state that *does* carry over — and it records its reason for the same
+purpose this does.
+
+The failure is drawn, never swallowed. An empty section and a section that
+could not be built look identical on screen, which is the founding hazard of
+the collection wearing another hat, so the rows say what broke and where:
+
+```
+ codex could not draw this frame.
+
+  no rate for gpt-5.6-sol (widgets/src/widgets/agent-usage/vendors.rs:462)
+```
+
+The location comes from a panic hook, because `catch_unwind` hands back the
+payload — the message — and not where it came from, and a panic nobody can
+locate is a bug report nobody can act on. The hook also stops the default
+one writing to stderr, which on a full-screen widget lands on top of the
+frame in the wrong colours and survives the redraw. `RUST_BACKTRACE` puts
+the default behaviour back, because somebody who asked for a backtrace wants
+Rust's, not a one-line summary of it.
+
+What it records is **per-thread**, which is the scope a panic actually has:
+it unwinds on the thread that panicked and is caught on the same one. Shared,
+a poller dying in the background would overwrite what the frame was about to
+say about itself — two failures, one row, and the wrong one drawn.
 
 Two checks enforce all of it, and they are separate on purpose because a
 widget can satisfy either without the other: `every_widget_registers_its_footer`
