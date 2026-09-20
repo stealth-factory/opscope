@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.23.0] - 2026-09-20
+
+### Features
+
+- **agent-usage**: Named Claude profiles, and a settings screen that can edit them (#251)
+
 ## [0.22.1] - 2026-09-17
 
 ### Bug Fixes
