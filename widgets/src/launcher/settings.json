@@ -1,5 +1,0 @@
-{
-  "_comment": "Shared by every widget rather than set per panel: this is a property of how you use the terminal, not of one widget.",
-  "_mouse_comment": "Shared by every widget, not set per panel - every settings screen offers this same key. Whether widgets ask the terminal for mouse reports, so the wheel scrolls and a click moves the cursor. While reporting is on, dragging selects nothing; turn it off if copying terminal text matters more. Every key still works either way - the mouse never reaches anything the keyboard cannot.",
-  "mouse": true
-}

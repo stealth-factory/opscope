@@ -1,10 +1,5 @@
 {
-  "_comment": "Generated from the launcher's settings.json and each widget's settings.json by widgets/tests/check.rs - rewrite it with `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the widget's default.",
-  "terminal": {
-    "_comment": "Shared by every widget rather than set per panel: this is a property of how you use the terminal, not of one widget.",
-    "_mouse_comment": "Shared by every widget, not set per panel - every settings screen offers this same key. Whether widgets ask the terminal for mouse reports, so the wheel scrolls and a click moves the cursor. While reporting is on, dragging selects nothing; turn it off if copying terminal text matters more. Every key still works either way - the mouse never reaches anything the keyboard cannot.",
-    "mouse": true
-  },
+  "_comment": "Generated from each widget's settings.json by widgets/tests/check.rs - rewrite it with `UPDATE_CONFIG_EXAMPLE=1 cargo test --test check generated_config_example_matches_widget_settings`. Copy to config.json (git-ignored) or ~/.config/opscope/config.json. Every key is optional; anything omitted keeps the widget's default.",
   "agent_usage": {
     "_comment": "Reads local agent state, plus remaining quota from each agent's own host with that agent's own credential. Grok's quota call is on by default and may start the Grok CLI to refresh its token; turn grok_ping off to keep those off. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
     "_auto_detect_agent_comment": "Show whatever agents this machine turns out to have. On, which is what has always happened when no set was named — it was simply spelt as an empty list, which nothing on screen could name. While it is on, agents below is ignored; exclude_agents still applies, so dropping one does not mean naming all the others. Turn it off to show exactly the agents picked, in that order. Leave the key out entirely and the old rule decides: a named list wins, an empty one discovers.",

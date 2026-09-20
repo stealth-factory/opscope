@@ -30,17 +30,6 @@ use std::time::Duration;
 use serde_json::Value;
 
 /// Everything shared code needs to open one widget's settings.
-/// The section every widget shares, and the schema describing it.
-///
-/// Read from the launcher's own `settings.json` rather than copied here,
-/// because two records of the same defaults is one record and one thing
-/// that used to be true. The launcher owns the file - that is where
-/// `check.rs` looks for it, and it is the launcher's settings screen this
-/// section belongs to first - while core is what actually reads the keys,
-/// which is why core is what offers them to every other widget.
-pub const TERMINAL_SECTION: &str = "terminal";
-pub const TERMINAL_SCHEMA: &str = include_str!("../../widgets/src/launcher/settings.json");
-
 #[derive(Clone, Copy)]
 pub struct SettingsSpec {
     /// Binary name shown in the settings title.
@@ -1064,27 +1053,14 @@ fn load(spec: SettingsSpec) -> App {
         .cloned()
         .unwrap_or_default();
     let section = serde_json::to_string(spec.section).expect("a section name is JSON");
-    // The widget's own section, and under it the shared terminal one.
+    // The widget's own section, and nothing else.
     //
-    // `terminal.mouse` is the setting that decides whether a widget asks
-    // for mouse reports at all, and turning reporting off is how somebody
-    // gets drag-to-select back. Before this it was reachable only from the
-    // launcher's settings screen, which is the wrong place for it: the
-    // launcher is not the pane you are trying to copy a hostname out of,
-    // and a widget already running in another pane would not have picked
-    // the change up anyway. Offered here, `,` then a toggle relaunches
-    // *this* widget with the new setting, which is what a runtime toggle
-    // has to mean on a wall of panes.
-    //
-    // Skipped for the launcher itself, whose own section is this one.
-    let wrapped = if spec.section == TERMINAL_SECTION {
-        format!("{{{section}:{}}}", spec.schema)
-    } else {
-        format!(
-            "{{{section}:{}, {TERMINAL_SECTION:?}:{}}}",
-            spec.schema, TERMINAL_SCHEMA
-        )
-    };
+    // A shared `terminal` section used to be spliced in under it, carrying
+    // the one key that decided whether a widget asked for mouse reports.
+    // Reporting is unconditional now: the option was right by default and
+    // only ever turned off by mistake, so every screen here shows the
+    // keys the widget itself owns and no others.
+    let wrapped = format!("{{{section}:{}}}", spec.schema);
     let fields = fields_from_example(&wrapped).expect("the baked-in settings schema is valid JSON");
     let mut skipped = Vec::new();
     let mut found = None;

@@ -312,11 +312,13 @@ pub fn draw(rows: &[String], _w: usize, h: usize) {
 
 /// Hide the cursor and clear, and put it all back on the way out.
 ///
-/// Mouse reporting is asked for here unless the config turns it off. It
-/// costs something real: with the terminal reporting, a drag selects
-/// nothing, so copying a line off a panel with the mouse stops working.
-/// Anyone who copies more often than they scroll wants it off, and the
-/// keys are unaffected either way - ctrl-y and ctrl-e still scroll.
+/// Mouse reporting is asked for here, always. It was a setting once, on by
+/// default and only ever turned off by mistake, which is a way to break
+/// your own pane rather than a way to make anything easier. What it costs
+/// is real and small: while the terminal is reporting, a drag belongs to
+/// the host rather than to the terminal's own selection, so the way to
+/// copy a line out of a widget is that widget's own copy key. Every key is
+/// unaffected either way - ctrl-y and ctrl-e still scroll.
 pub fn setup() {
     unsafe {
         let handler = handle_signal as *const () as libc::sighandler_t;
@@ -326,29 +328,20 @@ pub fn setup() {
     claim_screen();
 }
 
-/// Hide the cursor, clear, and ask for mouse reports if they are wanted.
+/// Hide the cursor, clear, and ask for mouse reports.
 ///
 /// `setup` does this once at start. A launcher that handed the terminal to
 /// a child has to do it again: `restore_screen` (and the child's own exit)
 /// turn reporting off, and without this the menu comes back unable to
-/// scroll even though the setting never changed.
-pub fn claim_screen() {
-    let mouse = if mouse_wanted() { MOUSE_ON } else { "" };
-    out(&format!("{}{}{}{}", mouse, HIDE, CLEAR, HOME));
-    flush();
-}
-
-/// Whether to ask the terminal for mouse reports.
+/// scroll.
 ///
-/// Shared rather than per-widget: it is a property of how someone uses a
-/// terminal, not of any one panel, and having to turn it off in fourteen
-/// places is having to turn it off in thirteen and forget the fourteenth.
-/// On unless `"terminal": {"mouse": false}` says otherwise.
-fn mouse_wanted() -> bool {
-    load_config("terminal")
-        .get("mouse")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
+/// Unconditional, and no config decides it - see `setup`. Asking for
+/// reports is the only conditional that went: every teardown path still
+/// turns them off, because a terminal left reporting outlives the process
+/// that asked for it.
+pub fn claim_screen() {
+    out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
+    flush();
 }
 
 /// The bytes `handle_signal` writes. Built as a constant so the handler
