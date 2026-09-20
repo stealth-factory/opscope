@@ -1111,7 +1111,7 @@ fn by_account_row(
 /// answer — which is worse than the cell that admits it does not know yet.
 fn land_of(
     a: &Account,
-    overlay: &HashMap<String, (i64, parse::LandTiming)>,
+    overlay: &HashMap<String, (i64, bool, parse::LandTiming)>,
     want: i64,
 ) -> Option<parse::LandTiming> {
     if a.window != want {
@@ -1123,9 +1123,11 @@ fn land_of(
             return Some(t.clone());
         }
     }
+    // Retry says whether to ask again, not whether to draw: an incomplete
+    // reading already draws as `···` in the cells it could not fill.
     overlay
         .get(&a.key)
-        .and_then(|(w, t)| (*w == want && mine(t)).then(|| t.clone()))
+        .and_then(|(w, _, t)| (*w == want && mine(t)).then(|| t.clone()))
 }
 
 fn fmt_hours(h: f64) -> String {
@@ -1915,10 +1917,17 @@ struct State {
     days: i64,
     /// Set by [r]: drop the day cache and refetch even past days.
     bust: bool,
-    /// Landed-set timing, keyed by account. The enricher and an opened
-    /// detail both write here so a fetch started from one screen is not
-    /// lost when the other publishes.
-    timing_overlay: HashMap<String, (i64, parse::LandTiming)>,
+    /// Landed-set timing, keyed by account: the window, whether a request
+    /// failed while it was read, and the reading. The enricher and an opened
+    /// detail both write here so a fetch started from one screen is not lost
+    /// when the other publishes.
+    ///
+    /// The flag travels with the reading because `by_acc` is seeded from
+    /// `stats`, so an overlay entry becomes the poller's own state on the
+    /// next pass. Dropping it there let an incomplete reading arrive as a
+    /// settled one and the retry never happened - which is the freeze this
+    /// flag exists to prevent, reached through the detail screen instead.
+    timing_overlay: HashMap<String, (i64, bool, parse::LandTiming)>,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -2371,7 +2380,7 @@ fn one_pass(
             Ok(got) => {
                 if let Ok(mut g) = state.lock() {
                     g.timing_overlay
-                        .insert(acc.clone(), (days_now, got.timing.clone()));
+                        .insert(acc.clone(), (days_now, got.retry, got.timing.clone()));
                 }
                 if let Some(row) = by_acc.get_mut(acc) {
                     row.timing = Some(got.timing);
@@ -2416,7 +2425,7 @@ fn publish(
             .collect();
         let overlay = g.timing_overlay.clone();
         for row in &mut g.stats {
-            if let Some((w, t)) = overlay.get(&row.key) {
+            if let Some((w, retry, t)) = overlay.get(&row.key) {
                 // The merged count as well as the window: `one_pass` drops a
                 // row's timing when its merged count moves, and restoring the
                 // overlay on the window alone put the old reading straight
@@ -2425,6 +2434,10 @@ fn publish(
                 if *w == row.window && t.expected == row.merged {
                     row.timing = Some(t.clone());
                     row.timing_window = Some(*w);
+                    // With the reading, not beside it. `by_acc` starts each
+                    // pass from these rows, so a reading applied without its
+                    // flag arrives as settled and is never asked for again.
+                    row.timing_retry = *retry;
                 }
             }
         }
@@ -3197,7 +3210,8 @@ fn main() {
                             if let Ok(got) = fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes)
                             {
                                 if let Ok(mut g) = poll.lock() {
-                                    g.timing_overlay.insert(acc.clone(), (days, got.timing));
+                                    g.timing_overlay
+                                        .insert(acc.clone(), (days, got.retry, got.timing));
                                 }
                             }
                             if let Ok(mut g) = asking.lock() {
@@ -4256,7 +4270,7 @@ mod tests {
         );
         assert!(stale.complete);
         let mut overlay = HashMap::new();
-        overlay.insert("acme".to_string(), (14i64, stale.clone()));
+        overlay.insert("acme".to_string(), (14i64, false, stale.clone()));
         let moved = Account {
             key: "acme".into(),
             account: "acme".into(),
@@ -4270,6 +4284,68 @@ mod tests {
         assert_eq!(land_of(&moved, &overlay, 14), None);
         let same = Account { merged: 1, ..moved.clone() };
         assert_eq!(land_of(&same, &overlay, 14), Some(stale));
+    }
+
+    #[test]
+    fn a_reading_that_wants_another_go_says_so_through_the_overlay() {
+        // `by_acc` is seeded from `stats` at the top of every pass, so an
+        // overlay entry becomes the poller's own state. Applying a reading
+        // without the flag that says a request failed while taking it
+        // delivered an incomplete reading as a settled one, and the retry the
+        // flag exists to trigger never happened - the same freeze, reached
+        // through the detail screen, which writes the overlay too.
+        let unfinished = parse::parse_land_timing(
+            2,
+            &[parse::MergedPr {
+                created_at: "2026-09-01T10:00:00Z".into(),
+                merged_at: "2026-09-01T12:00:00Z".into(),
+                reviews_incomplete: true,
+                ..Default::default()
+            }],
+        );
+        let state = Arc::new(Mutex::new(State {
+            stats: vec![Account {
+                key: "acme".into(),
+                account: "acme".into(),
+                window: 14,
+                merged: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let mut by_acc = HashMap::new();
+        by_acc.insert(
+            "acme".to_string(),
+            Account {
+                key: "acme".into(),
+                account: "acme".into(),
+                window: 14,
+                merged: 2,
+                ..Default::default()
+            },
+        );
+        if let Ok(mut g) = state.lock() {
+            g.timing_overlay
+                .insert("acme".to_string(), (14, true, unfinished.clone()));
+        }
+        publish(&state, &["acme".to_string()], &by_acc, None);
+        let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
+        assert_eq!(row.timing, Some(unfinished));
+        assert_eq!(row.timing_window, Some(14));
+        assert!(row.timing_retry, "the reading arrived as settled");
+
+        // And a reading with nothing outstanding leaves the row settled, so
+        // the pass is not asked for again on every poll.
+        if let Ok(mut g) = state.lock() {
+            g.stats[0].timing_retry = false;
+            let done = parse::parse_land_timing(0, &[]);
+            g.stats[0].merged = 0;
+            g.timing_overlay.insert("acme".to_string(), (14, false, done));
+        }
+        by_acc.get_mut("acme").unwrap().merged = 0;
+        publish(&state, &["acme".to_string()], &by_acc, None);
+        let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
+        assert!(!row.timing_retry);
     }
 
     #[test]
