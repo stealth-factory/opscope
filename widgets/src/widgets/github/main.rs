@@ -1103,15 +1103,15 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
     if r24 {
         say(&[
             "R24   of those merged, first human review within 24h".to_string(),
-            "R24   of merged, first human review within 24h".to_string(),
-            "R24   of merged, reviewed within 24h".to_string(),
+            "R24   of merged PRs, human review within 24h".to_string(),
+            "R24   of merged PRs, reviewed within 24h".to_string(),
         ]);
     }
     if t2d {
         say(&[
             "T2D   of those merged, opened to merged within 2 days".to_string(),
-            "T2D   of merged, within 2 days of opening".to_string(),
-            "T2D   of merged, within 2 days".to_string(),
+            "T2D   of merged PRs, within 2 days of opening".to_string(),
+            "T2D   of merged PRs, within 2 days".to_string(),
         ]);
     }
     out
@@ -3682,12 +3682,18 @@ mod tests {
     /// - and the line there read "merged, first human review within 24h",
     /// which is a description of merged PRs rather than a share of them.
     /// That is the one misreading this pane exists not to draw.
+    ///
+    /// The population is named rather than elided: 48 cells will not hold
+    /// "of merged PRs, first human review within 24h", and of the two
+    /// words that could go, "first" is the one that costs nothing - a
+    /// human review inside 24h is the first one by definition - while
+    /// "PRs" leaves the reader to carry the noun down from the line above.
     #[test]
     fn a_shortened_note_still_names_its_denominator() {
         for w in 45..=140 {
             for line in column_notes(true, 18, w) {
                 assert!(
-                    ["of PRs", "of those merged", "of merged", "share of closed"]
+                    ["of PRs", "of those merged", "of merged PRs", "share of closed"]
                         .iter()
                         .any(|d| line.contains(d)),
                     "w={w}: {line:?} names no population"
@@ -4814,5 +4820,6 @@ mod tests {
     }
 
 }
+
 
 
