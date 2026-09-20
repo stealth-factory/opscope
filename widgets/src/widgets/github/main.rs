@@ -940,6 +940,21 @@ fn by_account_cols(w: usize) -> (bool, bool, bool) {
     )
 }
 
+/// Whether the pane draws `HELD` whole.
+///
+/// `by_account_cols` starts from `HELD` already being on the row - extra
+/// width buys the columns after it - so the width at which `HELD` itself
+/// stops fitting sits below everything that function answers. Under
+/// `ACCT_FIXED` the header clips mid-column, `HEL` over a cut percentage,
+/// and the row clips with it. The clipping predates the optional columns
+/// and is what `pad` and `seg` are there to survive; what must not survive
+/// it is a note under the table explaining a column the reader cannot see
+/// whole, which sends them looking for it exactly as a note for a column
+/// that is not there at all would.
+fn by_account_held(w: usize) -> bool {
+    w.saturating_sub(1) >= ACCT_FIXED
+}
+
 /// The spark cells left once every column in front of it has been paid for.
 fn by_account_bar_cols(w: usize) -> usize {
     w.saturating_sub(1)
@@ -953,8 +968,8 @@ fn by_account_bar_cols(w: usize) -> usize {
 /// packing this footer and counting the lines. A second copy would let the
 /// footer that is measured drift from the footer that is drawn, and the
 /// measurement is only worth anything while the two are the same.
-fn board_hints<'a>(p: &'a Palette, info: String) -> Vec<Vec<(&'a str, String)>> {
-    vec![
+fn board_hints(p: &Palette, info: Option<String>) -> Vec<Vec<(&str, String)>> {
+    let mut out = vec![
         vec![
             (p.accent.as_str(), "↑↓".into()),
             (p.dim.as_str(), " account".into()),
@@ -963,12 +978,26 @@ fn board_hints<'a>(p: &'a Palette, info: String) -> Vec<Vec<(&'a str, String)>> 
             (p.accent.as_str(), "→/↵".into()),
             (p.dim.as_str(), " account".into()),
         ],
-        vec![(p.dim.as_str(), info)],
+    ];
+    // Left out entirely where the notes have nothing to draw: a key
+    // offered in the footer that answers with an unchanged pane is worse
+    // than no offer, and it would spend footer width to do it.
+    out.extend(info.map(|t| vec![(p.dim.as_str(), t)]));
+    out.extend([
         vec![(p.dim.as_str(), "[w]indow".into())],
         vec![(p.dim.as_str(), "[r]efresh".into())],
         vec![(p.dim.as_str(), "[,] settings".into())],
         vec![(p.dim.as_str(), "[q]uit".into())],
-    ]
+    ]);
+    out
+}
+
+/// The board's footer, with the `[i]` hint only where it leads somewhere.
+///
+/// One function rather than the condition written out at each call, since
+/// what is at stake is a footer offering a key that draws nothing.
+fn board_foot(p: &Palette, notes: bool, w: usize) -> Vec<Vec<(&str, String)>> {
+    board_hints(p, by_account_held(w).then(|| info_hint(notes, p, w)))
 }
 
 /// What `[i]` does next, which is not what it did last.
@@ -1012,8 +1041,9 @@ fn info_hint(open: bool, p: &Palette, w: usize) -> String {
             "[i]nfo hide".to_string(),
         ],
     };
-    let lines =
-        |t: &String| tc::pack_hints(&board_hints(p, t.clone()), w.saturating_sub(2), "  ").len();
+    let lines = |t: &String| {
+        tc::pack_hints(&board_hints(p, Some(t.clone())), w.saturating_sub(2), "  ").len()
+    };
     // The shortest wording cannot cost more lines than any other, so what
     // it packs to is the floor the rest are held to.
     let floor = tries.last().map(&lines).unwrap_or(1);
@@ -1050,6 +1080,11 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
         // Nothing at all. The footer says the notes are there, so a line
         // here would be a second copy of the same offer, charged a row on
         // every frame.
+        return Vec::new();
+    }
+    if !by_account_held(w) {
+        // Every note is about a column, and at this width the first of
+        // them is already being cut in half on the row above.
         return Vec::new();
     }
     let (r24, t2d, _) = by_account_cols(w);
@@ -3488,7 +3523,7 @@ fn main() {
             detail = false;
         }
 
-        let hints = board_hints(&p, info_hint(notes, &p, w));
+        let hints = board_foot(&p, notes, w);
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> =
             packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3522,7 +3557,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{board_hints, by_account_cols, column_notes, info_hint, palette};
+    use super::{
+        board_foot, board_hints, by_account_cols, by_account_held, column_notes, info_hint,
+        palette,
+    };
 
     /// The footer carries the whole affordance now, so closed it has to say
     /// what the press is *for* - nothing on the pane does any more. Open it
@@ -3550,7 +3588,8 @@ mod tests {
         for w in 30..=140usize {
             for open in [false, true] {
                 let bare = if open { "[i]nfo hide" } else { "[i]nfo show" };
-                let foot = |t: String| tc::pack_hints(&board_hints(&p, t), w - 2, "  ").len();
+                let foot =
+                    |t: String| tc::pack_hints(&board_hints(&p, Some(t)), w - 2, "  ").len();
                 let chosen = foot(info_hint(open, &p, w));
                 assert_eq!(
                     chosen,
@@ -3562,7 +3601,7 @@ mod tests {
         }
         // The one Codex found: the whole footer fits 81 columns on one
         // line, and only with a wording that leaves room for the rest.
-        let foot = |t: String| tc::pack_hints(&board_hints(&p, t), 79, "  ").len();
+        let foot = |t: String| tc::pack_hints(&board_hints(&p, Some(t)), 79, "  ").len();
         assert_eq!(foot(info_hint(false, &p, 81)), 1);
     }
 
@@ -3601,17 +3640,40 @@ mod tests {
     /// reader looking for something that is not there.
     #[test]
     fn only_the_columns_on_screen_are_explained() {
-        for w in [44usize, 52, 58, 70, 100] {
+        for w in [44usize, 46, 52, 58, 70, 100] {
             let (r24, t2d, _) = by_account_cols(w);
+            let held = by_account_held(w);
             let got = column_notes(true, 18, w);
             assert_eq!(
                 got.len(),
-                1 + usize::from(r24) + usize::from(t2d),
+                usize::from(held) * (1 + usize::from(r24) + usize::from(t2d)),
                 "w={w}: {got:?}"
             );
             assert_eq!(got.iter().any(|l| l.contains("R24")), r24, "w={w}");
             assert_eq!(got.iter().any(|l| l.contains("T2D")), t2d, "w={w}");
         }
+    }
+
+    /// A note explains a column, so there is nothing to say while the
+    /// first of them is itself being cut in half on the row above - the
+    /// header reads `HEL` at 44 columns over a percentage clipped with it.
+    /// No key is offered in the footer there either: a press that answers
+    /// with an unchanged pane teaches worse than no offer at all.
+    #[test]
+    fn nothing_is_explained_while_held_itself_is_clipped() {
+        let p = palette();
+        let names_the_key = |w: usize| {
+            board_foot(&p, true, w)
+                .iter()
+                .flatten()
+                .any(|(_, t)| t.contains("[i]"))
+        };
+        for w in 20..45usize {
+            assert!(column_notes(true, 18, w).is_empty(), "w={w}");
+            assert!(!names_the_key(w), "w={w} offers a key that draws nothing");
+        }
+        assert!(!column_notes(true, 18, 45).is_empty());
+        assert!(names_the_key(45));
     }
 
     /// Both thresholds count their own boundary - `hours <=
@@ -3654,7 +3716,7 @@ mod tests {
             }
         }
         let wide = column_notes(true, 18, 90).remove(0);
-        let tight = column_notes(true, 18, 44).remove(0);
+        let tight = column_notes(true, 18, 45).remove(0);
         assert!(wide.len() > tight.len(), "{wide:?} vs {tight:?}");
         assert!(tight.contains("HELD") && tight.contains("merged"), "{tight:?}");
     }
@@ -4730,3 +4792,4 @@ mod tests {
     }
 
 }
+
