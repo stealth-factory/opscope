@@ -35,7 +35,6 @@ is actually moving.
 
  ── BY ACCOUNT ──   1-6 of 9
  ACCOUNT              OPEN REVW  MRG7D  HELD   R24   T2D ISSUES  MERGED/DAY
-  [i] what HELD, R24 and T2D mean
 ▸example-corp          628  486     15   83%   71%   40%    162  ▇▂▂ ▃█
  wiiiimm (you)          34    0      2   67%   ···   ···     28       █
  example-labs           20    0      0    --    --    --      0
@@ -44,7 +43,7 @@ is actually moving.
  example-old             0    0      0    --    --    --      0
 
 
- ↑↓ account  [i]nfo show  [w]indow  [r]efresh  [q]uit
+ ↑↓ account  [i] what HELD, R24 and T2D mean  [w]indow  [r]efresh  [q]uit
 ```
 
 ## What is windowed and what is not
@@ -194,11 +193,12 @@ been refetched for the current window.
 **`i` says what the short names mean**, under the heading that owns them.
 The three do not carry their own meaning the way `MRG18D` carries its
 window, and nothing else on screen explains them — this widget's footer
-names no help key, and a README is not on the pane. Closed it is one line
-offering the answer; open it is one line per column *actually drawn*,
-decided by the same rule the header uses, because explaining a column too
-narrow to appear would send a reader looking for something that is not
-there:
+names no help key, and a README is not on the pane. Closed it draws nothing
+at all — the footer carries the offer, and a line on the pane would be a
+second copy of it charged a row on every frame. Open it is one line per
+column *actually drawn*, under the table, decided by the same rule the
+header uses, because explaining a column too narrow to appear would send a
+reader looking for something that is not there:
 
 ```
   HELD  of PRs closed in 18d, the share that merged
@@ -206,7 +206,12 @@ there:
   T2D   of those merged, opened to merged within 2 days
 ```
 
-Each names the population its percentage is of, which is the part the
+The footer hint is doing the work the removed line used to: closed it says
+what the press is *for*, since nothing on the pane does any more, and it
+shortens on a narrow pane rather than being cut, because `pack_hints` wraps
+a footer without splitting a hint.
+
+Each note names the population its percentage is of, which is the part the
 abbreviation hides: `HELD` is of PRs that **closed**, the other two of PRs
 that **merged**. Each picks the longest wording that fits and is dropped
 whole rather than cut, since half a note says less than none.

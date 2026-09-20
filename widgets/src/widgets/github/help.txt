@@ -26,7 +26,8 @@ not fail, it silently undercounts, so the granted scopes are checked and named.
 The API is called directly, so the `gh` CLI is not required.
 
 Keys: up/down select an account, i shows what the HELD, R24 and T2D
-columns mean and hides it again, r refreshes now, w cycles the window
+columns mean under the table and hides it again, r refreshes now, w
+cycles the window
 (7/14/30/60/90 days), comma opens settings, q quits.
 
 ctrl-y and ctrl-e scroll the view a line at a time, as in vim, and the

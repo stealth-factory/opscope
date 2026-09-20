@@ -949,12 +949,32 @@ fn by_account_bar_cols(w: usize) -> usize {
 
 /// What `[i]` does next, which is not what it did last.
 ///
-/// A two-way toggle names the state the next press moves to, and prefers a
-/// verb: `hide`/`show` reads as an action where `on`/`off` reads as a
-/// state, and a wall of panes cannot afford one hint meaning the opposite
-/// of its neighbour.
-fn info_hint(open: bool) -> String {
-    format!("[i]nfo {}", if open { "hide" } else { "show" })
+/// This hint carries the whole affordance. The notes used to leave a line
+/// on the pane offering themselves, which cost a row on every frame to say
+/// something a reader needs once - so the offer moved here, where a footer
+/// is already a list of what the keys do and costs nothing extra.
+///
+/// That puts the burden on the wording: closed, it has to say what the
+/// press is *for*, since nothing on screen does any more. Long enough to
+/// name the columns where the pane can afford it, shortened where it
+/// cannot, and never truncated - `pack_hints` wraps a footer without
+/// splitting a hint, and a hint cut in half teaches a key that does not
+/// exist.
+fn info_hint(open: bool, w: usize) -> String {
+    let room = w.saturating_sub(4);
+    let tries = match open {
+        false => [
+            "[i] what HELD, R24 and T2D mean".to_string(),
+            "[i] what the columns mean".to_string(),
+            "[i]nfo show".to_string(),
+        ],
+        true => [
+            "[i] hide what the columns mean".to_string(),
+            "[i] hide the column notes".to_string(),
+            "[i]nfo hide".to_string(),
+        ],
+    };
+    fitting(room, &tries).unwrap_or_else(|| "[i]nfo".to_string())
 }
 
 /// The longest of these that fits the pane, or nothing at all.
@@ -971,29 +991,22 @@ fn fitting(room: usize, tries: &[String]) -> Option<String> {
 /// window, and nothing else on screen explains them: this widget's footer
 /// names no help key, and a README is not on the pane.
 ///
-/// Closed, it is the one line saying the answer is a keypress away. Open,
-/// one line per column *actually drawn* - `by_account_cols` decides that,
+/// Closed, nothing is drawn: the footer carries the offer. Open, one line
+/// per column *actually drawn* - `by_account_cols` decides that,
 /// so the notes cannot describe a column the pane is too narrow to show.
 /// Each names the population its percentage is of, which is the part the
 /// abbreviation hides: `HELD` is of PRs that *closed*, the other two of PRs
 /// that *merged*, and reading either against the wrong denominator is the
 /// kind of confident wrong number this pane exists not to draw.
 fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
+    if !open {
+        // Nothing at all. The footer says the notes are there, so a line
+        // here would be a second copy of the same offer, charged a row on
+        // every frame.
+        return Vec::new();
+    }
     let (r24, t2d, _) = by_account_cols(w);
     let room = w.saturating_sub(3);
-    if !open {
-        return fitting(
-            room,
-            &[
-                "[i] what HELD, R24 and T2D mean".to_string(),
-                "[i] what these columns mean".to_string(),
-                "[i] columns".to_string(),
-            ],
-        )
-        .map(|t| format!("  {t}"))
-        .into_iter()
-        .collect();
-    }
     let mut out = Vec::new();
     let mut say = |tries: &[String]| {
         if let Some(t) = fitting(room, tries) {
@@ -3229,9 +3242,6 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
-        for line in column_notes(notes, want, w) {
-            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
-        }
         let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
@@ -3255,6 +3265,15 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
             rows_at.extend((from..rows.len()).map(|row| (row, i)));
+        }
+        // Under the table rather than above it. A note between the heading
+        // and the column header pushed the accounts down by a row closed
+        // and three open, so opening it moved the rows a reader was
+        // looking at - and the thing being explained is the table, which
+        // now sits between the reader and the explanation of it rather
+        // than below it.
+        for line in column_notes(notes, want, w) {
+            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
         }
 
         // One account in full, opened from the row it belongs to.
@@ -3423,7 +3442,7 @@ fn main() {
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " account".into()),
             ],
-            vec![(p.dim.as_str(), info_hint(notes))],
+            vec![(p.dim.as_str(), info_hint(notes, w))],
             vec![(p.dim.as_str(), "[w]indow".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -3464,21 +3483,46 @@ fn main() {
 mod tests {
     use super::{by_account_cols, column_notes, info_hint};
 
-    /// A two-way toggle names the state the next press moves to. Naming the
-    /// one in force reads as an instruction to turn on what is already on.
+    /// The footer carries the whole affordance now, so closed it has to say
+    /// what the press is *for* - nothing on the pane does any more. Open it
+    /// names the other state, which is the convention for a two-way toggle.
     #[test]
-    fn the_info_hint_names_what_the_next_press_does() {
-        assert_eq!(info_hint(false), "[i]nfo show");
-        assert_eq!(info_hint(true), "[i]nfo hide");
+    fn the_footer_hint_says_what_the_press_is_for() {
+        let closed = info_hint(false, 90);
+        assert!(closed.contains("HELD"), "{closed}");
+        assert!(closed.starts_with("[i]"), "{closed}");
+        let open = info_hint(true, 90);
+        assert!(open.contains("hide"), "{open}");
+        assert!(open.starts_with("[i]"), "{open}");
     }
 
-    /// Closed, it is one line, and it names the key - or it is an offer
-    /// nobody can accept.
+    /// Shortened, never truncated: `pack_hints` wraps a footer without
+    /// splitting a hint, and a hint cut in half teaches a key that is not
+    /// there. It always names its key, however narrow the pane.
     #[test]
-    fn the_closed_note_offers_the_key() {
-        let got = column_notes(false, 18, 70);
-        assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("[i]"), "{got:?}");
+    fn the_footer_hint_shortens_rather_than_being_cut() {
+        for w in 16..=120 {
+            for open in [false, true] {
+                let hint = info_hint(open, w);
+                assert!(hint.starts_with("[i]"), "w={w}: {hint}");
+                assert!(
+                    hint.chars().count() <= w.saturating_sub(4).max(6),
+                    "w={w} open={open}: {hint:?} is {} cells",
+                    hint.chars().count()
+                );
+            }
+        }
+        assert!(info_hint(false, 120).len() > info_hint(false, 30).len());
+    }
+
+    /// Closed draws nothing at all. A line offering the notes would be a
+    /// second copy of what the footer already says, charged a row on every
+    /// frame to tell a reader something they need once.
+    #[test]
+    fn closed_costs_the_pane_no_rows() {
+        for w in [30usize, 46, 58, 70, 110] {
+            assert!(column_notes(false, 18, w).is_empty(), "w={w}");
+        }
     }
 
     /// One line per column *actually drawn*, decided by the same function
