@@ -29,6 +29,8 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as Days, NaiveDate, Utc};
 use opscope_core as tc;
 
+mod parse;
+
 /// The environment variable a GitHub token is read from when `token_env`
 /// says nothing. Named once so the code and the schema cannot drift: the
 /// settings screen draws its default from `settings.json`, and a screen
@@ -689,7 +691,480 @@ fn flow_body(
     rows
 }
 
-/// How many of the longest-open PRs an account's own screen names.
+/// Nodes per merged-PR search page. GitHub's own cap.
+const TIMING_PAGE: usize = 100;
+/// Reviews asked with each merged node. Past this we page by id.
+const REVIEW_PAGE: usize = 20;
+/// Review pages one timing pass may spend, across every PR in it.
+///
+/// The pass walks up to a thousand merged PRs and each one whose first page
+/// is all bots pages again, serially, inside the poll. Unbounded that is
+/// hundreds of requests and the next poll never starts. What the budget does
+/// not reach stays incomplete, so R24 says `···` rather than a number short
+/// of its window.
+const REVIEW_PAGE_BUDGET: usize = 120;
+/// How long a detail screen waits before asking for timing again after a
+/// failed request.
+///
+/// The in-flight guard alone is not enough: a failure writes no overlay
+/// entry, so the next frame sees the same gap and asks again - and the render
+/// loop is a 300ms tick, which makes a refused token three requests a second
+/// against a quota the whole board shares. `fetch_oldest` cannot go this way
+/// because it caches its failure, and the gap being filled is what stops it.
+const TIMING_RETRY_SECS: f64 = 30.0;
+
+/// One page of PRs merged on or after `since`, for the timing enricher.
+///
+/// Counts stay on [`build_query`]; this is the later pass that reads
+/// `createdAt`, `mergedAt` and reviews. Do not add these fields as aliases
+/// on the eight-count headline request.
+fn build_merged_page_query(q: &str, since: &str, after: Option<&str>) -> String {
+    let after_arg = match after {
+        Some(c) if !c.is_empty() => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        _ => String::new(),
+    };
+    format!(
+        r#"{{
+  search(query:"{q} is:pr is:merged merged:>={since}", type:ISSUE, first:{n}{after}) {{
+    issueCount
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
+      ... on PullRequest {{
+        id
+        createdAt
+        mergedAt
+        reviews(first:{rev}) {{
+          pageInfo {{ hasNextPage endCursor }}
+          nodes {{ submittedAt author {{ __typename login }} }}
+        }}
+      }}
+    }}
+  }}
+}}"#,
+        q = q,
+        since = since,
+        n = TIMING_PAGE,
+        after = after_arg,
+        rev = REVIEW_PAGE,
+    )
+}
+
+/// One page of a single PR's reviews, by node id.
+///
+/// The merged-node query brings the first [`REVIEW_PAGE`] reviews with each
+/// PR, which is enough unless every one of them is a bot. This is how the
+/// rest are reached, and [`fill_reviews`] stops asking the moment a human
+/// turns up: the reading wanted is the *first* human review, so a PR with
+/// forty bot reviews and a person on page three costs three requests and a
+/// PR reviewed by a person costs none.
+fn build_reviews_page_query(id: &str, after: Option<&str>) -> String {
+    let after_arg = match after {
+        Some(c) if !c.is_empty() => format!(", after: {}", serde_json::Value::String(c.to_string())),
+        _ => String::new(),
+    };
+    format!(
+        r#"{{
+  node(id: {id}) {{
+    ... on PullRequest {{
+      reviews(first:{rev}{after}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{ submittedAt author {{ __typename login }} }}
+      }}
+    }}
+  }}
+}}"#,
+        id = serde_json::Value::String(id.to_string()),
+        after = after_arg,
+        rev = REVIEW_PAGE,
+    )
+}
+
+/// One timing pass, and whether asking again could still improve it.
+struct Timed {
+    timing: parse::LandTiming,
+    /// A request failed rather than the reviews running out. The pass is
+    /// still worth drawing — T2D reads off merge stamps alone — but the next
+    /// poll asks again rather than leaving R24 at `···` until the window or
+    /// the merged count changes, which is where a single dropped request used
+    /// to freeze the cell with nothing on screen saying so.
+    retry: bool,
+}
+
+/// Page every merged-in-window PR for one account, then the landed-set %.
+///
+/// Stops when the live `issueCount` is reached, the search says there is no
+/// next page, or the 1000-node cap is hit. A short page is handed to
+/// [`parse::parse_land_timing`] as incomplete — it will not print a %.
+///
+/// `expected` is the headline query's count and is already minutes old here,
+/// so it is a floor rather than the answer: every page carries the count as
+/// it is now, and certifying a subset against the stale, smaller number is a
+/// sample dressed as a total.
+fn fetch_land_timing(
+    acc: &str,
+    viewer: &str,
+    days: i64,
+    expected: i64,
+    tok: &str,
+    scopes: &Arc<Mutex<Scopes>>,
+) -> Result<Timed, String> {
+    if expected <= 0 {
+        return Ok(Timed {
+            timing: parse::parse_land_timing(0, &[]),
+            retry: false,
+        });
+    }
+    let since = (today() - Days::days(days - 1)).format("%Y-%m-%d").to_string();
+    let q = scope_of(acc, viewer);
+    let mut prs: Vec<parse::MergedPr> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut want = expected;
+    let mut budget = REVIEW_PAGE_BUDGET;
+    let mut retry = false;
+    loop {
+        let raw = graphql(
+            &build_merged_page_query(&q, &since, cursor.as_deref()),
+            tok,
+            scopes,
+        )?;
+        let page = parse::parse_merged_search_page(&raw.to_string())
+            .ok_or_else(|| "unreadable merged page".to_string())?;
+        // Never downward: a count that shrinks mid-walk would let the set be
+        // certified on fewer nodes than the pass set out to read.
+        if let Some(live) = page.issue_count {
+            want = want.max(live);
+        }
+        for mut pr in page.prs {
+            if !fill_reviews(&mut pr, tok, scopes, &mut budget) {
+                retry = true;
+            }
+            prs.push(pr);
+            if prs.len() as i64 >= want {
+                break;
+            }
+        }
+        let next = page.end_cursor;
+        if (prs.len() as i64) >= want
+            || !page.has_next_page
+            || next.is_empty()
+            || Some(&next) == cursor.as_ref()
+            || (prs.len() as i64) >= parse::SEARCH_NODE_CAP
+        {
+            break;
+        }
+        cursor = Some(next);
+    }
+    Ok(Timed {
+        timing: parse::parse_land_timing(want, &prs),
+        retry,
+    })
+}
+
+/// Keep paging a PR's reviews while the first page is all bots, spending
+/// from the pass's shared page budget.
+///
+/// `false` means a request failed rather than the reviews running out. The PR
+/// stays `reviews_incomplete` either way, but only a failure is worth asking
+/// about again: a budget that ran out will run out the same way next time.
+fn fill_reviews(
+    pr: &mut parse::MergedPr,
+    tok: &str,
+    scopes: &Arc<Mutex<Scopes>>,
+    budget: &mut usize,
+) -> bool {
+    if !pr.reviews_incomplete || pr.id.is_empty() {
+        return true;
+    }
+    if parse::parse_first_human_review_hours(&pr.created_at, pr).is_some() {
+        pr.reviews_incomplete = false;
+        return true;
+    }
+    let mut cursor = if pr.reviews_cursor.is_empty() {
+        None
+    } else {
+        Some(pr.reviews_cursor.clone())
+    };
+    loop {
+        if *budget == 0 {
+            return true;
+        }
+        *budget -= 1;
+        let Ok(raw) = graphql(&build_reviews_page_query(&pr.id, cursor.as_deref()), tok, scopes)
+        else {
+            return false;
+        };
+        let Some((more, has_next, next)) = parse::parse_review_page(&raw.to_string()) else {
+            return false;
+        };
+        pr.reviews.extend(more);
+        if parse::parse_first_human_review_hours(&pr.created_at, pr).is_some() {
+            pr.reviews_incomplete = false;
+            return true;
+        }
+        if !has_next || next.is_empty() || Some(&next) == cursor.as_ref() {
+            pr.reviews_incomplete = has_next;
+            return true;
+        }
+        cursor = Some(next);
+    }
+}
+
+/// What a BY ACCOUNT row spends before any optional column: the cursor mark
+/// and twenty for the name, then OPEN, REVW, MRG*D and HELD.
+const ACCT_FIXED: usize = 1 + 20 + 5 + 5 + 7 + 6;
+/// R24, and T2D, one cell slot each.
+const ACCT_PCT: usize = 6;
+const ACCT_ISSUES: usize = 7;
+/// The two spaces between ISSUES and the spark.
+const ACCT_SPARK_GAP: usize = 2;
+/// A spark shorter than this says nothing, so it is all or nothing.
+const ACCT_SPARK_MIN: usize = 4;
+
+/// Which extra BY ACCOUNT columns the pane has room for.
+///
+/// Measured against the `w − 1` budget `seg` clips the row to, not against
+/// `w`: a column that fits `w` exactly loses its last cell, and `80%` drawn
+/// as `80` is the one thing this pane must never do. The thresholds were a
+/// column short of that on all three counts — R24 at 50 needed 50 cells and
+/// had 49 — and the spark was sized as though R24 and T2D had not been added
+/// in front of it, so every row from 62 up overran its budget by two.
+///
+/// HELD is always drawn. Extra width buys another column, then more spark
+/// days — never padding, never a truncated number.
+fn by_account_cols(w: usize) -> (bool, bool, bool) {
+    let budget = w.saturating_sub(1);
+    (
+        budget >= ACCT_FIXED + ACCT_PCT,
+        budget >= ACCT_FIXED + 2 * ACCT_PCT,
+        budget >= ACCT_FIXED + 2 * ACCT_PCT + ACCT_ISSUES + ACCT_SPARK_GAP + ACCT_SPARK_MIN,
+    )
+}
+
+/// The spark cells left once every column in front of it has been paid for.
+fn by_account_bar_cols(w: usize) -> usize {
+    w.saturating_sub(1)
+        .saturating_sub(ACCT_FIXED + 2 * ACCT_PCT + ACCT_ISSUES + ACCT_SPARK_GAP)
+        .max(ACCT_SPARK_MIN)
+}
+
+/// The BY ACCOUNT heading, on the cell plan its rows are built to.
+///
+/// No separators between these fields: the row emits its widths back-to-back,
+/// so a space here drifts the header one column per field. MRG takes seven,
+/// since "MRG60D" is six characters and would sit flush against REVW in every
+/// window but the seven-day one. HELD keeps RATE's six-cell slot. R24 and T2D
+/// spend the padding that used to sit idle in front of ISSUES.
+fn by_account_head(w: usize, want: i64, bar_cols: usize) -> String {
+    let (show_r24, show_t2d, wide) = by_account_cols(w);
+    let mut head = format!(
+        " {:<20}{:>5}{:>5}{:>7}{:>6}",
+        "ACCOUNT",
+        "OPEN",
+        "REVW",
+        format!("MRG{}D", want),
+        "HELD"
+    );
+    if show_r24 {
+        head += &format!("{:>6}", "R24");
+    }
+    if show_t2d {
+        head += &format!("{:>6}", "T2D");
+    }
+    if wide {
+        head += &format!("{:>7}", "ISSUES");
+        // Each row is scaled to its own busiest day, so say what the
+        // reader may do with it - read the shape - rather than naming
+        // the mechanism. Pick the longest label that fits rather than
+        // clipping one: a truncated hint is worse than a shorter one.
+        let label = [
+            "MERGED/DAY · SHAPE ONLY, NOT TO SCALE",
+            "MERGED/DAY · SHAPE ONLY",
+            "MERGED/DAY (shape)",
+            "MERGED/DAY",
+            "",
+        ]
+        .into_iter()
+        .find(|l| l.len() <= bar_cols)
+        .unwrap_or("");
+        if !label.is_empty() {
+            head += &format!("  {}", label);
+        }
+    }
+    head
+}
+
+/// One account's BY ACCOUNT row, without the selected row's trailing tint
+/// fill - that one is padding the caller adds and `seg` clips.
+///
+/// Built here rather than inline so a test can measure it against the `w - 1`
+/// budget at every width, which is the only thing that catches a column
+/// arriving one cell short of its own threshold.
+fn by_account_row(
+    s: &Account,
+    land: Option<&parse::LandTiming>,
+    want: i64,
+    w: usize,
+    here: bool,
+    spark_days: &[String],
+    p: &Palette,
+) -> Vec<(String, String)> {
+    let (show_r24, show_t2d, wide) = by_account_cols(w);
+    let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
+    let c = |colour: &str| {
+        // Same shape as the other widgets that do this, so one rule
+        // reads them all: a guard per colour, each reaching its own
+        // lighter twin.
+        let colour = if tint.is_empty() {
+            colour
+        } else if colour == p.dim {
+            p.dim_lit.as_str()
+        } else {
+            colour
+        };
+        format!("{}{}", tint, colour)
+    };
+    // This row's own staleness: accounts land one at a time, so an
+    // account already refetched for the new window shows real numbers
+    // while the ones behind it still shimmer.
+    let old = s.window != want;
+    // The same high-is-good ramp as the section above it, so one
+    // rate reads as one colour wherever it is drawn - and the lifted
+    // form of it, because this one goes through the tint closure and
+    // the plain ramp's hot end measures 3.18 there. `health` sends a
+    // *low* rate to that end, so the unreadable colour was the
+    // struggling account rather than the healthy one.
+    let hot = match s.held {
+        Some(r) if !old => tc::health_on(r / 100.0, here),
+        _ => p.dim.clone(),
+    };
+    let land_cell = |cell: Option<parse::PctCell>| -> String {
+        if old {
+            return "···".into();
+        }
+        if s.merged == 0 {
+            return parse::parse_pct_text(false, Some(parse::PctCell::Empty));
+        }
+        parse::parse_pct_text(false, cell)
+    };
+    let land_hot = |cell: Option<parse::PctCell>| -> String {
+        match cell {
+            Some(parse::PctCell::Value(r)) if !old => tc::health_on(r / 100.0, here),
+            _ => p.dim.clone(),
+        }
+    };
+    let mut line = vec![
+        (
+            c(if here { &p.accent } else { &p.txt }),
+            format!(
+                "{}{}",
+                if here { "▸" } else { " " },
+                tc::pad(
+                    &format!("{}{}", s.account, if s.is_me { " (you)" } else { "" }),
+                    20
+                )
+            ),
+        ),
+        (c(&p.pr), format!("{:>5}", s.open)),
+        (
+            c(if s.review > 0 { &p.warn } else { &p.dim }),
+            format!("{:>5}", s.review),
+        ),
+        (
+            c(if old { &p.dim } else { &p.ok }),
+            format!("{:>7}", if old { "···".to_string() } else { s.merged.to_string() }),
+        ),
+        (
+            c(&hot),
+            format!(
+                "{:>6}",
+                if old {
+                    "···".to_string()
+                } else {
+                    match s.held {
+                        Some(r) => format!("{:.0}%", r),
+                        None => "--".into(),
+                    }
+                }
+            ),
+        ),
+    ];
+    if show_r24 {
+        let cell = land.map(|t| t.r24);
+        line.push((c(&land_hot(cell)), format!("{:>6}", land_cell(cell))));
+    }
+    if show_t2d {
+        let cell = land.map(|t| t.t2d);
+        line.push((c(&land_hot(cell)), format!("{:>6}", land_cell(cell))));
+    }
+    if wide {
+        line.push((c(&p.dim), format!("{:>7}", s.issues)));
+        // Each account's own merged-per-day. The columns carry
+        // totals but no shape, and a fortnight of nothing ending in
+        // a spike reads very differently from a steady trickle.
+        if s.hist_window != Some(want) {
+            line.push((c(&p.grid), format!("  {}", "·".repeat(spark_days.len()))));
+        } else {
+            let top = s.hist.values().copied().max().unwrap_or(0);
+            let mut marks = String::new();
+            for d in spark_days {
+                let v = s.hist.get(d).copied().unwrap_or(0);
+                marks.push(if v > 0 && top > 0 {
+                    tc::SPARK[(((v as f64 / top as f64) * 7.99) as usize).min(7)]
+                } else {
+                    ' '
+                });
+            }
+            line.push((c(&p.ok), format!("  {}", marks)));
+        }
+    }
+    line
+}
+
+/// The timing to draw for one account, or `None` for `···`.
+///
+/// A window that matches is not enough. `LandTiming::expected` is the merged
+/// count the numbers were computed against, and a reading taken over a
+/// different set of PRs than the row is showing is a plausible-looking wrong
+/// answer — which is worse than the cell that admits it does not know yet.
+fn land_of(
+    a: &Account,
+    overlay: &HashMap<String, (i64, bool, parse::LandTiming)>,
+    want: i64,
+) -> Option<parse::LandTiming> {
+    if a.window != want {
+        return None;
+    }
+    let mine = |t: &parse::LandTiming| t.expected == a.merged;
+    if a.timing_window == Some(want) {
+        if let Some(t) = a.timing.as_ref().filter(|t| mine(t)) {
+            return Some(t.clone());
+        }
+    }
+    // Retry says whether to ask again, not whether to draw: an incomplete
+    // reading already draws as `···` in the cells it could not fill.
+    overlay
+        .get(&a.key)
+        .and_then(|(w, _, t)| (*w == want && mine(t)).then(|| t.clone()))
+}
+
+/// Hours, with a decimal only where one says something.
+///
+/// A value already on a whole hour does not need `.0` after it, and past ten
+/// hours the tenth is noise beside the figure it is qualifying.
+fn fmt_hours(h: f64) -> String {
+    if (h - h.round()).abs() < 0.05 || h >= 10.0 {
+        format!("{:.0}h", h)
+    } else {
+        format!("{:.1}h", h)
+    }
+}
+
+/// Days, always to a tenth: the T2D bar sits at two days, so whether a median
+/// is 1.9 or 2.1 is the whole reading and rounding it away answers nothing.
+fn fmt_days(d: f64) -> String {
+    format!("{:.1}d", d)
+}
+
 /// How long ago an ISO-8601 stamp was, coarse on purpose: "47d" answers the
 /// question a queue raises and a timestamp does not.
 fn age_since(iso: &str) -> String {
@@ -776,6 +1251,138 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
     }
 }
 
+/// `── TO LAND ──` — held among closed, then the two landed-set %.
+///
+/// Held is the row's RATE under its new name. R24 / T2D are % of *merged*
+/// PRs in the window; a dropped PR never lands. Incomplete paging prints
+/// `···` and says so — never a sample as the window.
+fn to_land_rows(
+    a: &Account,
+    land: Option<&parse::LandTiming>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    rows.push(tc::seg(
+        &[
+            (p.lbl.as_str(), " ── TO LAND ── ".into()),
+            (
+                p.dim.as_str(),
+                format!("last {}d · merged in window, except held", a.window),
+            ),
+        ],
+        w - 1,
+    ));
+    let label_w = 22usize;
+    let mut field = |name: &str, value: String, aside: String, colour: &str| {
+        rows.push(tc::seg(
+            &[
+                (p.dim.as_str(), format!("  {}", tc::pad(name, label_w))),
+                (colour, format!("{:>7}", value)),
+                (p.dim.as_str(), format!("   {}", aside)),
+            ],
+            w - 1,
+        ));
+    };
+
+    let held_txt = match a.held {
+        Some(r) => format!("{:.0}%", r),
+        None => "--".into(),
+    };
+    let held_aside = match a.dropped {
+        0 => format!("{} merged", a.merged),
+        n => format!("{} merged / {} closed unmerged", a.merged, n),
+    };
+    let held_c = match a.held {
+        Some(r) => tc::health(r / 100.0),
+        None => p.dim.clone(),
+    };
+    field("held", held_txt, held_aside, held_c.as_str());
+
+    let (r24, t2d, r24_aside, t2d_aside, no_human, no_aside) = match land {
+        None => (
+            "···".to_string(),
+            "···".to_string(),
+            String::new(),
+            String::new(),
+            "···".to_string(),
+            String::new(),
+        ),
+        Some(t) if !t.complete || t.r24 == parse::PctCell::Incomplete => {
+            let why = format!("incomplete · {} of {} paged", t.fetched, t.expected);
+            let t2d_txt = parse::parse_pct_text(false, Some(t.t2d));
+            let t2d_aside = match t.t2d {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_merge_days
+                        .map(|d| format!(" · median {} · includes draft", fmt_days(d)))
+                        .unwrap_or_else(|| " · includes draft".into());
+                    format!("{} of {}{}", t.t2d_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => why.clone(),
+            };
+            (
+                "···".to_string(),
+                t2d_txt,
+                why.clone(),
+                t2d_aside,
+                "···".to_string(),
+                why,
+            )
+        }
+        Some(t) => {
+            let r24_txt = parse::parse_pct_text(false, Some(t.r24));
+            let t2d_txt = parse::parse_pct_text(false, Some(t.t2d));
+            let r24_aside = match t.r24 {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_review_hours
+                        .map(|h| format!(" · median {} · bots skipped", fmt_hours(h)))
+                        .unwrap_or_else(|| " · bots skipped".into());
+                    format!("{} of {}{}", t.r24_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => String::new(),
+            };
+            let t2d_aside = match t.t2d {
+                parse::PctCell::Value(_) => {
+                    let med = t
+                        .median_merge_days
+                        .map(|d| format!(" · median {} · includes draft", fmt_days(d)))
+                        .unwrap_or_else(|| " · includes draft".into());
+                    format!("{} of {}{}", t.t2d_count, t.expected, med)
+                }
+                parse::PctCell::Empty => String::new(),
+                parse::PctCell::Incomplete => String::new(),
+            };
+            let (no_txt, no_aside) = match t.no_human {
+                Some(n) => (n.to_string(), format!("of {} merged", t.expected)),
+                None => ("···".into(), String::new()),
+            };
+            (r24_txt, t2d_txt, r24_aside, t2d_aside, no_txt, no_aside)
+        }
+    };
+    let r24_c = match land.and_then(|t| match t.r24 {
+        parse::PctCell::Value(v) => Some(v),
+        _ => None,
+    }) {
+        Some(v) => tc::health(v / 100.0),
+        None => p.dim.clone(),
+    };
+    let t2d_c = match land.and_then(|t| match t.t2d {
+        parse::PctCell::Value(v) => Some(v),
+        _ => None,
+    }) {
+        Some(v) => tc::health(v / 100.0),
+        None => p.dim.clone(),
+    };
+    field("first review ≤24h", r24, r24_aside, r24_c.as_str());
+    field("opened → merged ≤2d", t2d, t2d_aside, t2d_c.as_str());
+    field("no human review", no_human, no_aside, p.dim.as_str());
+    rows
+}
+
 /// One account in full.
 ///
 /// Everything here is already on the board somewhere - the row it came from
@@ -787,7 +1394,8 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 /// queue growing in one account is invisible in a total that six others
 /// are also feeding.
 ///
-/// No new request. The figures were fetched for the row.
+/// Held comes from the row's issueCount pair. R24 / T2D wait on the
+/// timing enricher, or on a fetch started when this screen opens.
 /// Built at whatever height it needs, and the caller windows it.
 ///
 /// It used to take the pane's height and drop the state bar, the oldest
@@ -800,6 +1408,7 @@ fn fetch_oldest(acc: &str, viewer: &str, tok: &str, scopes: &Arc<Mutex<Scopes>>)
 fn account_detail(
     a: &Account,
     oldest: Option<&serde_json::Value>,
+    land: Option<&parse::LandTiming>,
     pick: usize,
     w: usize,
     tick: usize,
@@ -903,22 +1512,8 @@ fn account_detail(
             );
         }
     }
-    if let Some(rate) = a.rate {
-        let bar = tc::meter(rate / 100.0, w.saturating_sub(label_w + 22).clamp(6, 24));
-        // The board's ramp, not a flat green: a screen where every account's
-        // merge rate is the same colour whatever it is cannot warn at all,
-        // and it disagreed with the figure two screens up.
-        let hot = tc::health(rate / 100.0);
-        rows.push(tc::seg(
-            &[
-                (p.dim.as_str(), format!("  {}", tc::pad("merge rate", label_w))),
-                (hot.as_str(), format!("{:>6.0}%", rate)),
-                (p.dim.as_str(), "   ".into()),
-                (hot.as_str(), bar),
-            ],
-            w - 1,
-        ));
-    }
+
+    rows.extend(to_land_rows(a, land, w, p));
 
     // The same bar the board draws for everything at once, for this account
     // alone: a queue is a different shape depending on whether it is waiting
@@ -1313,7 +1908,16 @@ struct Account {
     issues: i64,
     merged: i64,
     dropped: i64,
-    rate: Option<f64>,
+    /// Of PRs that closed in `window`, the share that merged. Same formula
+    /// the board's MERGE RATE uses. Drawn as HELD.
+    held: Option<f64>,
+    /// First-review and time-to-merge among PRs *merged* in the window.
+    /// `None` until the enricher (or an opened detail) has paged them.
+    timing: Option<parse::LandTiming>,
+    timing_window: Option<i64>,
+    /// A request failed while the timing was being read, so the pass is worth
+    /// asking for again on the next poll even though `timing` is set.
+    timing_retry: bool,
     hist: HashMap<String, i64>,
     opened_hist: HashMap<String, i64>,
     hist_window: Option<i64>,
@@ -1336,6 +1940,17 @@ struct State {
     days: i64,
     /// Set by [r]: drop the day cache and refetch even past days.
     bust: bool,
+    /// Landed-set timing, keyed by account: the window, whether a request
+    /// failed while it was read, and the reading. The enricher and an opened
+    /// detail both write here so a fetch started from one screen is not lost
+    /// when the other publishes.
+    ///
+    /// The flag travels with the reading because `by_acc` is seeded from
+    /// `stats`, so an overlay entry becomes the poller's own state on the
+    /// next pass. Dropping it there let an incomplete reading arrive as a
+    /// settled one and the retry never happened - which is the freeze this
+    /// flag exists to prevent, reached through the detail screen instead.
+    timing_overlay: HashMap<String, (i64, bool, parse::LandTiming)>,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -1687,6 +2302,9 @@ fn one_pass(
         }
         let (merged, dropped) = (count_at(d, "o0_merged"), count_at(d, "o0_dropped"));
         let prev = by_acc.get(acc).cloned().unwrap_or_default();
+        let keep_timing = prev.window == days_now
+            && prev.merged == merged
+            && prev.timing_window == Some(days_now);
         by_acc.insert(
             acc.clone(),
             Account {
@@ -1700,11 +2318,10 @@ fn one_pass(
                 issues: count_at(d, "o0_issues"),
                 merged,
                 dropped,
-                rate: if merged + dropped > 0 {
-                    Some(100.0 * merged as f64 / (merged + dropped) as f64)
-                } else {
-                    None
-                },
+                held: parse::parse_held(merged, dropped),
+                timing: if keep_timing { prev.timing } else { None },
+                timing_window: if keep_timing { prev.timing_window } else { None },
+                timing_retry: keep_timing && prev.timing_retry,
                 hist: prev.hist,
                 opened_hist: prev.opened_hist,
                 hist_window: prev.hist_window,
@@ -1764,6 +2381,41 @@ fn one_pass(
         publish(state, &accounts, &by_acc, rate);
     }
 
+    // Timing for R24 / T2D. The headline aliases stay at eight; this pass
+    // pages the merged-in-window nodes the aggregates cannot time. While
+    // it is short the new cells stay ···, never a sample dressed as a total.
+    for acc in &accounts {
+        let Some(row) = by_acc.get(acc) else {
+            continue;
+        };
+        if row.window != days_now {
+            continue;
+        }
+        let have = !bust
+            && row.timing_window == Some(days_now)
+            && !row.timing_retry
+            && row.timing.as_ref().is_some_and(|t| t.expected == row.merged);
+        if have {
+            continue;
+        }
+        let expected = row.merged;
+        match fetch_land_timing(acc, viewer, days_now, expected, tok, scopes) {
+            Ok(got) => {
+                if let Ok(mut g) = state.lock() {
+                    g.timing_overlay
+                        .insert(acc.clone(), (days_now, got.retry, got.timing.clone()));
+                }
+                if let Some(row) = by_acc.get_mut(acc) {
+                    row.timing = Some(got.timing);
+                    row.timing_window = Some(days_now);
+                    row.timing_retry = got.retry;
+                }
+                publish(state, &accounts, &by_acc, rate);
+            }
+            Err(_) => continue,
+        }
+    }
+
     if let Ok(mut g) = state.lock() {
         // With nothing else to report, surface a token sitting in a file
         // other users on the box can read.
@@ -1794,6 +2446,24 @@ fn publish(
             .iter()
             .filter_map(|a| by_acc.get(a).cloned())
             .collect();
+        let overlay = g.timing_overlay.clone();
+        for row in &mut g.stats {
+            if let Some((w, retry, t)) = overlay.get(&row.key) {
+                // The merged count as well as the window: `one_pass` drops a
+                // row's timing when its merged count moves, and restoring the
+                // overlay on the window alone put the old reading straight
+                // back on the new count - after which `keep_timing` accepted
+                // it and the enricher never ran again.
+                if *w == row.window && t.expected == row.merged {
+                    row.timing = Some(t.clone());
+                    row.timing_window = Some(*w);
+                    // With the reading, not beside it. `by_acc` starts each
+                    // pass from these rows, so a reading applied without its
+                    // flag arrives as settled and is never asked for again.
+                    row.timing_retry = *retry;
+                }
+            }
+        }
         if rate.is_some() {
             g.rate = rate;
         }
@@ -1915,6 +2585,12 @@ fn main() {
     // is opened and kept after.
     let oldest: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let timing_asking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Earliest time an account's timing may be asked for again, set only
+    // where a request failed. The poller fills the same gap on its own
+    // schedule, so this delays the detail screen's shortcut rather than
+    // giving up on it.
+    let timing_backoff: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
@@ -2042,7 +2718,8 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want, watched) = match state.lock() {
+        let (mut stats, rate, err, fetched, calendar, want, watched, overlay) = match state.lock()
+        {
             Ok(g) => (
                 g.stats.clone(),
                 g.rate,
@@ -2051,6 +2728,7 @@ fn main() {
                 g.calendar.clone(),
                 g.days,
                 g.accounts.len(),
+                g.timing_overlay.clone(),
             ),
             Err(_) => return,
         };
@@ -2119,11 +2797,7 @@ fn main() {
             sum(|a| a.merged),
             sum(|a| a.dropped),
         );
-        let rate_pct = if merged + dropped > 0 {
-            Some(100.0 * merged as f64 / (merged + dropped) as f64)
-        } else {
-            None
-        };
+        let rate_pct = parse::parse_held(merged, dropped);
         // What is outstanding right now leads the board: it is the question
         // asked most often, and the only section that is not windowed.
         if open > 0 {
@@ -2468,44 +3142,12 @@ fn main() {
             ],
             w - 1,
         ));
-        let wide = w >= 62;
-        let bar_cols = w.saturating_sub(64).max(4);
-        // No separators between these fields: the row emits its widths
-        // back-to-back, so a space here drifts the header one column per
-        // field. MRG takes seven, since "MRG60D" is six characters and would
-        // sit flush against REVW in every window but the seven-day one.
-        let mut head = format!(
-            " {:<20}{:>5}{:>5}{:>7}{:>6}",
-            "ACCOUNT",
-            "OPEN",
-            "REVW",
-            format!("MRG{}D", want),
-            "RATE"
-        );
+        let bar_cols = by_account_bar_cols(w);
         let spark_days: Vec<String> = (0..(want as usize).min(bar_cols) as i64)
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
-        if wide {
-            head += &format!("{:>7}", "ISSUES");
-            // Each row is scaled to its own busiest day, so say what the
-            // reader may do with it - read the shape - rather than naming
-            // the mechanism. Pick the longest label that fits rather than
-            // clipping one: a truncated hint is worse than a shorter one.
-            let label = [
-                "MERGED/DAY · SHAPE ONLY, NOT TO SCALE",
-                "MERGED/DAY · SHAPE ONLY",
-                "MERGED/DAY (shape)",
-                "MERGED/DAY",
-                "",
-            ]
-            .into_iter()
-            .find(|l| l.len() <= bar_cols)
-            .unwrap_or("");
-            if !label.is_empty() {
-                head += &format!("  {}", label);
-            }
-        }
+        let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
         // The span each account covers, taken from where its rows started
@@ -2519,90 +3161,8 @@ fn main() {
                 cursor = Some(rows.len());
             }
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
-            let c = |colour: &str| {
-                // Same shape as the other widgets that do this, so one rule
-                // reads them all: a guard per colour, each reaching its own
-                // lighter twin.
-                let colour = if tint.is_empty() {
-                    colour
-                } else if colour == p.dim {
-                    p.dim_lit.as_str()
-                } else {
-                    colour
-                };
-                format!("{}{}", tint, colour)
-            };
-            // This row's own staleness: accounts land one at a time, so an
-            // account already refetched for the new window shows real numbers
-            // while the ones behind it still shimmer.
-            let old = s.window != want;
-            // The same high-is-good ramp as the section above it, so one
-            // rate reads as one colour wherever it is drawn - and the lifted
-            // form of it, because this one goes through the tint closure and
-            // the plain ramp's hot end measures 3.18 there. `health` sends a
-            // *low* rate to that end, so the unreadable colour was the
-            // struggling account rather than the healthy one.
-            let hot = match s.rate {
-                Some(r) if !old => tc::health_on(r / 100.0, here),
-                _ => p.dim.clone(),
-            };
-            let mut line = vec![
-                (
-                    c(if here { &p.accent } else { &p.txt }),
-                    format!(
-                        "{}{}",
-                        if here { "▸" } else { " " },
-                        tc::pad(
-                            &format!("{}{}", s.account, if s.is_me { " (you)" } else { "" }),
-                            20
-                        )
-                    ),
-                ),
-                (c(&p.pr), format!("{:>5}", s.open)),
-                (
-                    c(if s.review > 0 { &p.warn } else { &p.dim }),
-                    format!("{:>5}", s.review),
-                ),
-                (
-                    c(if old { &p.dim } else { &p.ok }),
-                    format!("{:>7}", if old { "···".to_string() } else { s.merged.to_string() }),
-                ),
-                (
-                    c(&hot),
-                    format!(
-                        "{:>6}",
-                        if old {
-                            "···".to_string()
-                        } else {
-                            match s.rate {
-                                Some(r) => format!("{:.0}%", r),
-                                None => "--".into(),
-                            }
-                        }
-                    ),
-                ),
-            ];
-            if wide {
-                line.push((c(&p.dim), format!("{:>7}", s.issues)));
-                // Each account's own merged-per-day. The columns carry
-                // totals but no shape, and a fortnight of nothing ending in
-                // a spike reads very differently from a steady trickle.
-                if s.hist_window != Some(want) {
-                    line.push((c(&p.grid), format!("  {}", "·".repeat(spark_days.len()))));
-                } else {
-                    let top = s.hist.values().copied().max().unwrap_or(0);
-                    let mut marks = String::new();
-                    for d in &spark_days {
-                        let v = s.hist.get(d).copied().unwrap_or(0);
-                        marks.push(if v > 0 && top > 0 {
-                            tc::SPARK[(((v as f64 / top as f64) * 7.99) as usize).min(7)]
-                        } else {
-                            ' '
-                        });
-                    }
-                    line.push((c(&p.ok), format!("  {}", marks)));
-                }
-            }
+            let land = land_of(s, &overlay, want);
+            let mut line = by_account_row(s, land.as_ref(), want, w, here, &spark_days, &p);
             if here {
                 line.push((tint.clone(), " ".repeat(w)));
             }
@@ -2654,7 +3214,58 @@ fn main() {
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 osel = osel.min(nodes.len().saturating_sub(1));
-                let (body, cursor) = account_detail(a, held.as_ref(), osel, w, tick, &p);
+                let land = land_of(a, &overlay, want).or_else(|| {
+                    (a.window == want && a.merged == 0)
+                        .then(|| parse::parse_land_timing(0, &[]))
+                });
+                let ready = timing_backoff
+                    .lock()
+                    .map(|g| g.get(&key).is_none_or(|at| tc::now() >= *at))
+                    .unwrap_or(true);
+                if land.is_none() && a.window == want && ready {
+                    let start = timing_asking
+                        .lock()
+                        .map(|mut g| g.insert(key.clone()))
+                        .unwrap_or(false);
+                    if start {
+                        let (acc, viewer, tok, scopes, days, expected, poll) = (
+                            a.key.clone(),
+                            a.account.clone(),
+                            ui_tok.clone(),
+                            Arc::clone(&ui_scopes),
+                            a.window,
+                            a.merged,
+                            Arc::clone(&state),
+                        );
+                        let asking = Arc::clone(&timing_asking);
+                        let backoff = Arc::clone(&timing_backoff);
+                        std::thread::spawn(move || {
+                            match fetch_land_timing(&acc, &viewer, days, expected, &tok, &scopes) {
+                                Ok(got) => {
+                                    if let Ok(mut g) = poll.lock() {
+                                        g.timing_overlay
+                                            .insert(acc.clone(), (days, got.retry, got.timing));
+                                    }
+                                    if let Ok(mut g) = backoff.lock() {
+                                        g.remove(&acc);
+                                    }
+                                }
+                                // Releasing the in-flight guard on a failure
+                                // hands the next frame the same empty cell to
+                                // chase. Say when it may be chased again.
+                                Err(_) => {
+                                    if let Ok(mut g) = backoff.lock() {
+                                        g.insert(acc.clone(), tc::now() + TIMING_RETRY_SECS);
+                                    }
+                                }
+                            }
+                            if let Ok(mut g) = asking.lock() {
+                                g.remove(&acc);
+                            }
+                        });
+                    }
+                }
+                let (body, cursor) = account_detail(a, held.as_ref(), land.as_ref(), osel, w, tick, &p);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -3501,6 +4112,338 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn by_account_spends_padding_on_r24_then_t2d() {
+        // One column later than the widths the columns cost, because the row
+        // is clipped to `w - 1`: at 50 the fixed 44 plus R24's 6 is exactly
+        // 50 cells against a 49-cell budget, and the `%` goes.
+        assert_eq!(by_account_cols(50), (false, false, false));
+        assert_eq!(by_account_cols(51), (true, false, false));
+        assert_eq!(by_account_cols(56), (true, false, false));
+        assert_eq!(by_account_cols(57), (true, true, false));
+        assert_eq!(by_account_cols(69), (true, true, false));
+        assert_eq!(by_account_cols(70), (true, true, true));
+        // The spark is what is left after every column in front of it, not
+        // `w - 64`: that figure was measured before R24 and T2D went in and
+        // left every row from 62 up two cells over its budget.
+        assert_eq!(by_account_bar_cols(70), 4);
+        assert_eq!(by_account_bar_cols(71), 5);
+        assert_eq!(by_account_bar_cols(100), 34);
+    }
+
+    /// Accounts covering the shapes a row takes: fresh and stale, a long
+    /// name, four-figure counts, nothing merged, and timing that has landed.
+    fn account_shapes(want: i64) -> Vec<Account> {
+        let timing = parse::parse_land_timing(
+            1,
+            &[parse::MergedPr {
+                created_at: "2026-09-01T10:00:00Z".into(),
+                merged_at: "2026-09-01T12:00:00Z".into(),
+                reviews: vec![parse::Review {
+                    submitted_at: "2026-09-01T10:30:00Z".into(),
+                    author_login: "ada".into(),
+                    author_type: "User".into(),
+                }],
+                ..Default::default()
+            }],
+        );
+        let hist: HashMap<String, i64> =
+            (1..=28).map(|n| (format!("2026-09-{:02}", n), n as i64)).collect();
+        vec![
+            Account {
+                account: "acme".into(),
+                window: want,
+                open: 12,
+                review: 3,
+                merged: 1,
+                dropped: 1,
+                held: parse::parse_held(1, 1),
+                issues: 41,
+                timing: Some(timing),
+                timing_window: Some(want),
+                hist: hist.clone(),
+                hist_window: Some(want),
+                ..Default::default()
+            },
+            Account {
+                // A name past the twenty cells the column pads to, and the
+                // "(you)" suffix on top of it.
+                account: "an-organisation-with-a-very-long-name".into(),
+                is_me: true,
+                window: want,
+                open: 9999,
+                review: 9999,
+                merged: 9999,
+                dropped: 1,
+                held: parse::parse_held(9999, 1),
+                issues: 99999,
+                hist: hist.clone(),
+                hist_window: Some(want),
+                ..Default::default()
+            },
+            Account {
+                // Stale: every figure is dots until this row is refetched.
+                account: "behind".into(),
+                window: want + 1,
+                ..Default::default()
+            },
+            Account {
+                // Nothing merged, so HELD is `--` and the two bars `--`.
+                account: "quiet".into(),
+                window: want,
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn no_account_row_overflows_the_pane_it_was_built_for() {
+        // `seg` clips to `w - 1`, so an overrun is not a wrapped row here -
+        // it is a number with its last digit or its `%` taken off, which
+        // reads as a different number. Measure the heading too: it is built
+        // to the same plan and drifts with it.
+        let p = palette();
+        // From the width the fixed columns themselves fit. Below that the
+        // ACCOUNT name and then the figures are clipped, which predates the
+        // optional columns and is what `pad` and `seg` are there to survive;
+        // it is the *optional* columns arriving a column early that this
+        // measures.
+        for w in (ACCT_FIXED + 1)..=200usize {
+            for want in [7i64, 14, 60, 90] {
+                let bar_cols = by_account_bar_cols(w);
+                let spark_days: Vec<String> = (0..(want as usize).min(bar_cols))
+                    .map(|n| format!("2026-09-{:02}", (n % 28) + 1))
+                    .collect();
+                let head = by_account_head(w, want, bar_cols);
+                assert!(
+                    tc::display_width(&head) <= w - 1,
+                    "width {} want {}: heading drew {} cells: {:?}",
+                    w,
+                    want,
+                    tc::display_width(&head),
+                    head
+                );
+                for s in account_shapes(want) {
+                    for here in [false, true] {
+                        let land = land_of(&s, &HashMap::new(), want);
+                        let line =
+                            by_account_row(&s, land.as_ref(), want, w, here, &spark_days, &p);
+                        let text: String = line.iter().map(|(_, t)| t.as_str()).collect();
+                        assert!(
+                            tc::display_width(&text) <= w - 1,
+                            "width {} want {} here {} drew {} cells: {:?}",
+                            w,
+                            want,
+                            here,
+                            tc::display_width(&text),
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_percentage_keeps_its_last_cell_at_every_threshold() {
+        // The defect the thresholds above exist to stop: R24 arriving one
+        // column early clipped `100%` to `100`, which is a different reading
+        // and not a visibly broken one.
+        let p = palette();
+        let want = 14;
+        for w in [51usize, 57, 70, 71] {
+            let bar_cols = by_account_bar_cols(w);
+            let spark_days: Vec<String> = (0..(want as usize).min(bar_cols))
+                .map(|n| format!("2026-09-{:02}", (n % 28) + 1))
+                .collect();
+            let full = parse::parse_land_timing(
+                1,
+                &[parse::MergedPr {
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    merged_at: "2026-09-01T12:00:00Z".into(),
+                    reviews: vec![parse::Review {
+                        submitted_at: "2026-09-01T10:30:00Z".into(),
+                        author_login: "ada".into(),
+                        author_type: "User".into(),
+                    }],
+                    ..Default::default()
+                }],
+            );
+            let s = Account {
+                account: "acme".into(),
+                window: want,
+                merged: 1,
+                held: parse::parse_held(1, 0),
+                timing: Some(full),
+                timing_window: Some(want),
+                ..Default::default()
+            };
+            let line = by_account_row(&s, s.timing.as_ref(), want, w, false, &spark_days, &p);
+            let text: String = line.iter().map(|(_, t)| t.as_str()).collect();
+            let (r24, t2d, _) = by_account_cols(w);
+            let cells = 1 + usize::from(r24) + usize::from(t2d);
+            assert_eq!(
+                text.matches("100%").count(),
+                cells,
+                "width {} lost a percent sign: {:?}",
+                w,
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn timing_read_over_another_merged_set_is_not_drawn() {
+        // `one_pass` drops a row's timing when its merged count moves, and
+        // the overlay used to put it straight back on the strength of the
+        // window alone. `keep_timing` then accepted the row and the enricher
+        // never ran again, so R24 and T2D sat frozen on the old set.
+        let stale = parse::parse_land_timing(
+            1,
+            &[parse::MergedPr {
+                created_at: "2026-09-01T10:00:00Z".into(),
+                merged_at: "2026-09-01T12:00:00Z".into(),
+                reviews: vec![parse::Review {
+                    submitted_at: "2026-09-01T10:30:00Z".into(),
+                    author_login: "ada".into(),
+                    author_type: "User".into(),
+                }],
+                ..Default::default()
+            }],
+        );
+        assert!(stale.complete);
+        let mut overlay = HashMap::new();
+        overlay.insert("acme".to_string(), (14i64, false, stale.clone()));
+        let moved = Account {
+            key: "acme".into(),
+            account: "acme".into(),
+            window: 14,
+            // One more PR merged since that reading was taken.
+            merged: 2,
+            timing: Some(stale.clone()),
+            timing_window: Some(14),
+            ..Default::default()
+        };
+        assert_eq!(land_of(&moved, &overlay, 14), None);
+        let same = Account { merged: 1, ..moved.clone() };
+        assert_eq!(land_of(&same, &overlay, 14), Some(stale));
+    }
+
+    #[test]
+    fn a_reading_that_wants_another_go_says_so_through_the_overlay() {
+        // `by_acc` is seeded from `stats` at the top of every pass, so an
+        // overlay entry becomes the poller's own state. Applying a reading
+        // without the flag that says a request failed while taking it
+        // delivered an incomplete reading as a settled one, and the retry the
+        // flag exists to trigger never happened - the same freeze, reached
+        // through the detail screen, which writes the overlay too.
+        let unfinished = parse::parse_land_timing(
+            2,
+            &[parse::MergedPr {
+                created_at: "2026-09-01T10:00:00Z".into(),
+                merged_at: "2026-09-01T12:00:00Z".into(),
+                reviews_incomplete: true,
+                ..Default::default()
+            }],
+        );
+        let state = Arc::new(Mutex::new(State {
+            stats: vec![Account {
+                key: "acme".into(),
+                account: "acme".into(),
+                window: 14,
+                merged: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let mut by_acc = HashMap::new();
+        by_acc.insert(
+            "acme".to_string(),
+            Account {
+                key: "acme".into(),
+                account: "acme".into(),
+                window: 14,
+                merged: 2,
+                ..Default::default()
+            },
+        );
+        if let Ok(mut g) = state.lock() {
+            g.timing_overlay
+                .insert("acme".to_string(), (14, true, unfinished.clone()));
+        }
+        publish(&state, &["acme".to_string()], &by_acc, None);
+        let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
+        assert_eq!(row.timing, Some(unfinished));
+        assert_eq!(row.timing_window, Some(14));
+        assert!(row.timing_retry, "the reading arrived as settled");
+
+        // And a reading with nothing outstanding leaves the row settled, so
+        // the pass is not asked for again on every poll.
+        if let Ok(mut g) = state.lock() {
+            g.stats[0].timing_retry = false;
+            let done = parse::parse_land_timing(0, &[]);
+            g.stats[0].merged = 0;
+            g.timing_overlay.insert("acme".to_string(), (14, false, done));
+        }
+        by_acc.get_mut("acme").unwrap().merged = 0;
+        publish(&state, &["acme".to_string()], &by_acc, None);
+        let row = state.lock().map(|g| g.stats[0].clone()).unwrap();
+        assert!(!row.timing_retry);
+    }
+
+    #[test]
+    fn timing_is_not_crammed_into_the_headline_query() {
+        // Eight aliases is the measured ceiling. Timing pages merged
+        // nodes later; a ninth issueCount here is how 502s come back.
+        let q = build_query("acme", 7, "w", Utc::now());
+        assert_eq!(q.matches("search(").count(), 8, "{}", q);
+        assert!(!q.contains("reviews("), "{}", q);
+        assert!(!q.contains("createdAt"), "{}", q);
+        let page = build_merged_page_query("org:acme", "2026-09-01", None);
+        assert!(page.contains("reviews(") && page.contains("createdAt"));
+        assert!(page.contains("mergedAt"));
+        assert!(!page.contains("o0_merged"), "{}", page);
+    }
+
+    #[test]
+    fn to_land_does_not_print_a_sample_as_the_window() {
+        let a = Account {
+            window: 14,
+            merged: 247,
+            dropped: 3,
+            held: parse::parse_held(247, 3),
+            ..Default::default()
+        };
+        let sample = parse::parse_land_timing(
+            247,
+            &vec![
+                parse::MergedPr {
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    merged_at: "2026-09-01T12:00:00Z".into(),
+                    reviews: vec![parse::Review {
+                        submitted_at: "2026-09-01T10:30:00Z".into(),
+                        author_login: "ada".into(),
+                        author_type: "User".into(),
+                    }],
+                    ..Default::default()
+                };
+                100
+            ],
+        );
+        assert!(!sample.complete);
+        let p = palette();
+        let rows = to_land_rows(&a, Some(&sample), 80, &p);
+        let body: String = rows.join("\n");
+        assert!(body.contains("TO LAND"), "{}", body);
+        assert!(body.contains("held"), "{}", body);
+        assert!(body.contains("incomplete"), "{}", body);
+        assert!(
+            !body.contains("100%"),
+            "a 100-node sample was drawn as the window: {}",
+            body
+        );
     }
 
 }

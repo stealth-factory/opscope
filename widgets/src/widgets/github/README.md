@@ -34,13 +34,13 @@ is actually moving.
  busiest 2025-08-30 (241)              most on Tue (1031)
 
  ── BY ACCOUNT ──   1-6 of 9
- ACCOUNT              OPEN REVW  MRG7D  RATE ISSUES  MERGED/DAY
-▸example-corp          628  486     15   83%    162  ▇▂▂ ▃█
- wiiiimm (you)          34    0      2   67%     28       █
- example-labs           20    0      0    --      0
- example-tools           0    0      0    --      4
- example-web             0    0      0    --      0
- example-old             0    0      0    --      0
+ ACCOUNT              OPEN REVW  MRG7D  HELD   R24   T2D ISSUES  MERGED/DAY
+▸example-corp          628  486     15   83%   71%   40%    162  ▇▂▂ ▃█
+ wiiiimm (you)          34    0      2   67%   ···   ···     28       █
+ example-labs           20    0      0    --    --    --      0
+ example-tools           0    0      0    --    --    --      4
+ example-web             0    0      0    --    --    --      0
+ example-old             0    0      0    --    --    --      0
 
 
  ↑↓ account  [w]indow  [r]efresh  [q]uit
@@ -54,7 +54,9 @@ Worth holding onto, because the two kinds of number answer different questions:
   "How much is outstanding right now." This is the top section, and it never
   changes when you change the window.
 - **Windowed** — everything else: the merge rate, the PR flow chart, and the
-  per-account `MRG*D` and `RATE` columns. "How did the last N days go."
+  per-account `MRG*D`, `HELD`, `R24` and `T2D` columns. "How did the last N
+  days go." `w` changes that sample. The R24 bar is still 24 hours and the
+  T2D bar is still 2 days.
 
 The window is **N days ending today**, and both the aggregate and the chart use
 exactly that span. They are drawn next to each other, so an off-by-one would be
@@ -71,10 +73,10 @@ often.
 **Merge rate** — of the PRs that *closed* in the window, the share that merged,
 on the same green→amber→red ramp as everything else — read the other way up,
 because here a high number is the healthy one: a rate near 100% draws green and
-a rate near zero draws red. The per-account column uses the identical ramp, so
-the same rate is the same colour on both screens. `dropped` means closed
-without merging; GitHub's `is:closed` includes merged ones, which is why the two
-are counted separately rather than subtracted.
+a rate near zero draws red. The per-account `HELD` column is this number. The
+board section keeps the heading `── MERGE RATE ──` and still spells the
+formula. `dropped` means closed without merging; GitHub's `is:closed` includes
+merged ones, which is why the two are counted separately rather than subtracted.
 
 **PR flow** — one diverging chart: PRs opened grow up in purple, PRs merged grow
 down in green, from a shared baseline. Read together they answer whether the
@@ -181,8 +183,38 @@ ending in a spike reads very differently from a steady trickle.
 **Each row is scaled to its own busiest day**, which is what the `SHAPE ONLY,
 NOT TO SCALE` heading is warning about: on one board here a full block meant 31
 merged in one org's row and 16 in another's. Read a row left-to-right for its
-trend; do not read heights across rows. The comparable number is the `MRG`
-column two to its left.
+trend; do not read heights across rows. The comparable number is the `MRG*D`
+column to its left.
+
+`HELD` is always on the row: of PRs that **closed** in the window, the share
+that merged. `--` means nothing closed; `···` means that account has not yet
+been refetched for the current window.
+
+`R24` appears from 51 columns, `T2D` from 57. Both are % of PRs that
+**merged** in the window — a dropped PR never lands, so it is not "slow to
+merge." `R24` is the share whose first **human** review arrived within 24
+hours of `createdAt` (bot reviews are skipped, or every CodeRabbit pass
+looks instant). `T2D` is the share with `mergedAt − createdAt` at most two
+days, including time spent in draft. `[w]` changes which PRs are in the
+sample; it does not change those two bars.
+
+Those two wait on a later paging pass. While that pass is short, or if the
+merged count is larger than the nodes fetched, the cells stay `···` — a
+partial page is not a total. `--` when nothing merged.
+
+The count the pass measures against is the one the paging search itself
+reports, not the headline query's: a PR that merges between the two requests
+would otherwise let a subset be certified as the whole window. A reading is
+kept only for the merged count it was taken over, so a count that moves sends
+the pass back out rather than leaving the old percentages on the new total.
+A request that fails is asked again on the next poll — a dropped request used
+to leave `···` in place until the window changed, with nothing saying why.
+
+ISSUES and the spark appear from 70 columns, and extra width after that buys
+more spark days rather than another metric. Every threshold is measured
+against the row's real budget, which is one cell less than the pane: the two
+new columns cost twelve cells and only ten were idle in front of ISSUES, so
+below 70 the board spends its width on `R24` and `T2D` instead.
 
 A blank row genuinely means nothing merged. Dots mean that account has not yet
 reported for the selected window.
@@ -200,7 +232,9 @@ so the chart can be trusted on a busy account as readily as a slow one.
 
 **The headline figures land before the chart does** — the merge rate and open
 state are live within seconds while the chart is still counting, because the
-chart is ninety days of counting and they are not.
+chart is ninety days of counting and they are not. R24 and T2D wait on a
+third pass that pages the merged PRs; they stay `···` until that set is
+complete.
 
 The two therefore go stale independently, and each says so rather than showing a
 number it cannot justify:
@@ -271,6 +305,20 @@ was closed unmerged — plus a few figures worth deriving:
 - **merged/day**, with the open queue restated as time at that rate. *"110d
   of open PRs"* is the number people estimate and get wrong.
 - **busiest day** and **days with none** — the shape of the window.
+
+**TO LAND** sits after those unlabeled fields and before OPEN PR STATE.
+Held moves here (the standalone merge-rate field is gone). Then the two
+landed-set percentages, with the median and the count the compact row
+cannot hold:
+
+- **first review ≤24h** — `12 of 15 · median 6h · bots skipped`
+- **opened → merged ≤2d** — `6 of 15 · median 3.2d · includes draft`
+- **no human review** — a count, not a third compact %. How many of the
+  merged set never saw a human reviewer.
+
+The heading says `last {N}d · merged in window, except held`. Incomplete
+paging writes `···` and `incomplete · 100 of 247 paged` rather than a
+sample percent.
 
 The **OPEN PR STATE** bar and the **PR FLOW** chart are the two the board
 draws for every account added together, drawn here for one. That is the

@@ -12,6 +12,10 @@ The owned section is `github`.
 
 Declared fields: `token`, `token_env`, `accounts`, `window_days`, `refresh`
 
+`window_days` is the sample for HELD (closed in the window), R24 and T2D
+(merged in the window). It does not change the 24-hour first-review bar or
+the 2-day opened-to-merged bar. `[w]` cycles the same sample.
+
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 
 ## Safe configuration process
