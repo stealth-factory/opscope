@@ -947,34 +947,81 @@ fn by_account_bar_cols(w: usize) -> usize {
         .max(ACCT_SPARK_MIN)
 }
 
+/// The board footer, given the `[i]` wording to put in it.
+///
+/// One list rather than two, because `info_hint` picks that wording by
+/// packing this footer and counting the lines. A second copy would let the
+/// footer that is measured drift from the footer that is drawn, and the
+/// measurement is only worth anything while the two are the same.
+fn board_hints<'a>(p: &'a Palette, info: String) -> Vec<Vec<(&'a str, String)>> {
+    vec![
+        vec![
+            (p.accent.as_str(), "↑↓".into()),
+            (p.dim.as_str(), " account".into()),
+        ],
+        vec![
+            (p.accent.as_str(), "→/↵".into()),
+            (p.dim.as_str(), " account".into()),
+        ],
+        vec![(p.dim.as_str(), info)],
+        vec![(p.dim.as_str(), "[w]indow".into())],
+        vec![(p.dim.as_str(), "[r]efresh".into())],
+        vec![(p.dim.as_str(), "[,] settings".into())],
+        vec![(p.dim.as_str(), "[q]uit".into())],
+    ]
+}
+
 /// What `[i]` does next, which is not what it did last.
 ///
 /// This hint carries the whole affordance. The notes used to leave a line
 /// on the pane offering themselves, which cost a row on every frame to say
 /// something a reader needs once - so the offer moved here, where a footer
-/// is already a list of what the keys do and costs nothing extra.
+/// is already a list of what the keys do.
 ///
-/// That puts the burden on the wording: closed, it has to say what the
-/// press is *for*, since nothing on screen does any more. Long enough to
-/// name the columns where the pane can afford it, shortened where it
-/// cannot, and never truncated - `pack_hints` wraps a footer without
-/// splitting a hint, and a hint cut in half teaches a key that does not
-/// exist.
-fn info_hint(open: bool, w: usize) -> String {
+/// "Costs nothing extra" holds only while the footer still fits the lines
+/// it already had. A wording can fit the pane several times over and still
+/// be the hint that pushes the footer onto a second line - at 81 columns
+/// the longest one did - and that second line costs the body exactly the
+/// row this whole move was meant to save. So the wording is chosen against
+/// the footer it shares rather than against the pane: widest first, taking
+/// the first that leaves the footer no longer than the shortest wording
+/// would, measured by packing the real footer rather than by adding the
+/// widths up a second time here.
+///
+/// That is not monotonic in the pane width, and should not be. A footer
+/// that already wraps has a part-used last line to spend, while one that
+/// only just fits on a single line has nothing; the wording follows the
+/// room, not the width.
+///
+/// On top of that is the old cap: shortened, never truncated, because
+/// `pack_hints` wraps a footer without splitting a hint and a hint cut in
+/// half teaches a key that does not exist. It always names its key.
+fn info_hint(open: bool, p: &Palette, w: usize) -> String {
     let room = w.saturating_sub(4);
     let tries = match open {
         false => [
             "[i] what HELD, R24 and T2D mean".to_string(),
             "[i] what the columns mean".to_string(),
+            "[i] column notes".to_string(),
             "[i]nfo show".to_string(),
         ],
         true => [
             "[i] hide what the columns mean".to_string(),
             "[i] hide the column notes".to_string(),
+            "[i] hide notes".to_string(),
             "[i]nfo hide".to_string(),
         ],
     };
-    fitting(room, &tries).unwrap_or_else(|| "[i]nfo".to_string())
+    let lines =
+        |t: &String| tc::pack_hints(&board_hints(p, t.clone()), w.saturating_sub(2), "  ").len();
+    // The shortest wording cannot cost more lines than any other, so what
+    // it packs to is the floor the rest are held to.
+    let floor = tries.last().map(&lines).unwrap_or(1);
+    tries
+        .iter()
+        .find(|t| t.chars().count() <= room && lines(t) <= floor)
+        .cloned()
+        .unwrap_or_else(|| "[i]nfo".to_string())
 }
 
 /// The longest of these that fits the pane, or nothing at all.
@@ -988,8 +1035,8 @@ fn fitting(room: usize, tries: &[String]) -> Option<String> {
 /// What `HELD`, `R24` and `T2D` mean, under the heading that owns them.
 ///
 /// These three do not carry their own meaning the way `MRG18D` carries its
-/// window, and nothing else on screen explains them: this widget's footer
-/// names no help key, and a README is not on the pane.
+/// window, and nothing else on screen explains them: the footer names the
+/// key but not the columns, and a README is not on the pane.
 ///
 /// Closed, nothing is drawn: the footer carries the offer. Open, one line
 /// per column *actually drawn* - `by_account_cols` decides that,
@@ -1021,15 +1068,15 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
     if r24 {
         say(&[
             "R24   of those merged, first human review within 24h".to_string(),
-            "R24   merged, first human review under 24h".to_string(),
-            "R24   reviewed under 24h".to_string(),
+            "R24   merged, first human review within 24h".to_string(),
+            "R24   reviewed within 24h".to_string(),
         ]);
     }
     if t2d {
         say(&[
             "T2D   of those merged, opened to merged within 2 days".to_string(),
             "T2D   merged within 2 days of opening".to_string(),
-            "T2D   merged under 2 days".to_string(),
+            "T2D   merged within 2 days".to_string(),
         ]);
     }
     out
@@ -2720,7 +2767,12 @@ fn main() {
                         cond.notify_all();
                     }
                 }
-                "i" | "I" => {
+                // The board's key, not the detail screen's: that screen
+                // neither draws the notes nor names `[i]`, so a press
+                // there would silently arm or disarm help text the reader
+                // only meets on the way back. The detail-only bindings
+                // below are scoped the same way, in the other direction.
+                "i" | "I" if !detail => {
                     notes = !notes;
                 }
                 "w" | "W" => {
@@ -3436,18 +3488,7 @@ fn main() {
             detail = false;
         }
 
-        let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " account".into())],
-            vec![
-                (p.accent.as_str(), "→/↵".into()),
-                (p.dim.as_str(), " account".into()),
-            ],
-            vec![(p.dim.as_str(), info_hint(notes, w))],
-            vec![(p.dim.as_str(), "[w]indow".into())],
-            vec![(p.dim.as_str(), "[r]efresh".into())],
-            vec![(p.dim.as_str(), "[,] settings".into())],
-            vec![(p.dim.as_str(), "[q]uit".into())],
-        ];
+        let hints = board_hints(&p, info_hint(notes, &p, w));
         let packed = tc::pack_hints_placed(&hints, w - 2, "  ");
         let footer: Vec<String> =
             packed.lines.iter().map(|l| format!(" {}", l)).collect();
@@ -3481,19 +3522,48 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{by_account_cols, column_notes, info_hint};
+    use super::{board_hints, by_account_cols, column_notes, info_hint, palette};
 
     /// The footer carries the whole affordance now, so closed it has to say
     /// what the press is *for* - nothing on the pane does any more. Open it
     /// names the other state, which is the convention for a two-way toggle.
     #[test]
     fn the_footer_hint_says_what_the_press_is_for() {
-        let closed = info_hint(false, 90);
+        let p = palette();
+        // Wide enough that the whole footer sits on one line with the
+        // longest wording in it, which is where that wording belongs.
+        let closed = info_hint(false, &p, 110);
         assert!(closed.contains("HELD"), "{closed}");
         assert!(closed.starts_with("[i]"), "{closed}");
-        let open = info_hint(true, 90);
+        let open = info_hint(true, &p, 110);
         assert!(open.contains("hide"), "{open}");
         assert!(open.starts_with("[i]"), "{open}");
+    }
+
+    /// The wording is the footer's to afford, not the pane's. A hint that
+    /// fits the pane four times over can still be the one that wraps the
+    /// footer, and that second line costs the body exactly the row moving
+    /// the offer into the footer was meant to save - at 81 columns it did.
+    #[test]
+    fn the_hint_never_costs_the_footer_a_line() {
+        let p = palette();
+        for w in 30..=140usize {
+            for open in [false, true] {
+                let bare = if open { "[i]nfo hide" } else { "[i]nfo show" };
+                let foot = |t: String| tc::pack_hints(&board_hints(&p, t), w - 2, "  ").len();
+                let chosen = foot(info_hint(open, &p, w));
+                assert_eq!(
+                    chosen,
+                    foot(bare.to_string()),
+                    "w={w} open={open}: {:?} wraps the footer further than {bare:?}",
+                    info_hint(open, &p, w)
+                );
+            }
+        }
+        // The one Codex found: the whole footer fits 81 columns on one
+        // line, and only with a wording that leaves room for the rest.
+        let foot = |t: String| tc::pack_hints(&board_hints(&p, t), 79, "  ").len();
+        assert_eq!(foot(info_hint(false, &p, 81)), 1);
     }
 
     /// Shortened, never truncated: `pack_hints` wraps a footer without
@@ -3503,7 +3573,7 @@ mod tests {
     fn the_footer_hint_shortens_rather_than_being_cut() {
         for w in 16..=120 {
             for open in [false, true] {
-                let hint = info_hint(open, w);
+                let hint = info_hint(open, &palette(), w);
                 assert!(hint.starts_with("[i]"), "w={w}: {hint}");
                 assert!(
                     hint.chars().count() <= w.saturating_sub(4).max(6),
@@ -3512,7 +3582,8 @@ mod tests {
                 );
             }
         }
-        assert!(info_hint(false, 120).len() > info_hint(false, 30).len());
+        let p = palette();
+        assert!(info_hint(false, &p, 120).len() > info_hint(false, &p, 16).len());
     }
 
     /// Closed draws nothing at all. A line offering the notes would be a
@@ -3540,6 +3611,20 @@ mod tests {
             );
             assert_eq!(got.iter().any(|l| l.contains("R24")), r24, "w={w}");
             assert_eq!(got.iter().any(|l| l.contains("T2D")), t2d, "w={w}");
+        }
+    }
+
+    /// Both thresholds count their own boundary - `hours <=
+    /// FIRST_REVIEW_HOURS`, `days <= TIME_TO_MERGE_DAYS` - so a note that
+    /// says "under" describes a percentage the widget does not draw: the
+    /// PR reviewed at exactly 24 hours is inside R24 and outside that
+    /// sentence. Every width says "within".
+    #[test]
+    fn the_notes_read_the_thresholds_as_inclusive() {
+        for w in 20..=110 {
+            for line in column_notes(true, 18, w) {
+                assert!(!line.contains("under"), "w={w}: {line:?}");
+            }
         }
     }
 
