@@ -183,14 +183,14 @@ ending in a spike reads very differently from a steady trickle.
 **Each row is scaled to its own busiest day**, which is what the `SHAPE ONLY,
 NOT TO SCALE` heading is warning about: on one board here a full block meant 31
 merged in one org's row and 16 in another's. Read a row left-to-right for its
-trend; do not read heights across rows. The comparable number is the `MRG`
+trend; do not read heights across rows. The comparable number is the `MRG*D`
 column to its left.
 
 `HELD` is always on the row: of PRs that **closed** in the window, the share
 that merged. `--` means nothing closed; `···` means that account has not yet
 been refetched for the current window.
 
-`R24` appears from 50 columns, `T2D` from 56. Both are % of PRs that
+`R24` appears from 51 columns, `T2D` from 57. Both are % of PRs that
 **merged** in the window — a dropped PR never lands, so it is not "slow to
 merge." `R24` is the share whose first **human** review arrived within 24
 hours of `createdAt` (bot reviews are skipped, or every CodeRabbit pass
@@ -198,12 +198,23 @@ looks instant). `T2D` is the share with `mergedAt − createdAt` at most two
 days, including time spent in draft. `[w]` changes which PRs are in the
 sample; it does not change those two bars.
 
-Those two wait on a later paging pass. While that pass is short, or if
-`o0_merged` is larger than the nodes fetched, the cells stay `···` — a
+Those two wait on a later paging pass. While that pass is short, or if the
+merged count is larger than the nodes fetched, the cells stay `···` — a
 partial page is not a total. `--` when nothing merged.
 
-ISSUES and the spark still appear at 62 columns. Extra width after that
-buys more spark days, not another metric.
+The count the pass measures against is the one the paging search itself
+reports, not the headline query's: a PR that merges between the two requests
+would otherwise let a subset be certified as the whole window. A reading is
+kept only for the merged count it was taken over, so a count that moves sends
+the pass back out rather than leaving the old percentages on the new total.
+A request that fails is asked again on the next poll — a dropped request used
+to leave `···` in place until the window changed, with nothing saying why.
+
+ISSUES and the spark appear from 70 columns, and extra width after that buys
+more spark days rather than another metric. Every threshold is measured
+against the row's real budget, which is one cell less than the pane: the two
+new columns cost twelve cells and only ten were idle in front of ISSUES, so
+below 70 the board spends its width on `R24` and `T2D` instead.
 
 A blank row genuinely means nothing merged. Dots mean that account has not yet
 reported for the selected window.
