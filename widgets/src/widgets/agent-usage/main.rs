@@ -332,8 +332,12 @@ const CURSOR_STEPS: [(u8, u8, u8); 4] =
 /// uses, so the same agent looks the same wherever you meet it. Copilot and
 /// Antigravity have no calendar to borrow from and get their own, chosen to
 /// sit clear of the amber and red this widget reserves for trouble.
+fn agent_family(name: &str) -> &str {
+    name.split_once(':').map(|(head, _)| head).unwrap_or(name)
+}
+
 fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
-    Some(match name {
+    Some(match agent_family(name) {
         "claude" => (240, 132, 84),
         "codex" => (206, 214, 228),
         "cursor" => (126, 208, 176),
@@ -342,6 +346,15 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         _ => return None,
     })
+}
+
+/// What the tab strip prints. Extra Claude profiles drop CLAUDE and show
+/// only the directory's basename, uppercased like every other tab.
+fn tab_title(name: &str) -> String {
+    match name.strip_prefix("claude:") {
+        Some(label) => label.to_uppercase(),
+        None => name.to_uppercase(),
+    }
 }
 
 #[allow(dead_code)]
@@ -1623,6 +1636,9 @@ struct Config {
     /// than `agent_usage`. The pane says so, because a silent fallback is
     /// how a rename looks like nothing changed.
     legacy_section: bool,
+    /// Claude Code config directories, already expanded. Empty on a
+    /// `Default` used by a test, which then means the single `~/.claude`.
+    claude_dirs: Vec<crate::claude::ClaudeDir>,
 }
 
 fn read_config() -> Config {
@@ -1676,6 +1692,13 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         legacy_section,
+        // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
+        // labelled entry is an object, and dropping it in silence would
+        // draw a profile nobody configured.
+        claude_dirs: crate::claude::resolve_claude_dirs(
+            &crate::claude::configured_dirs(&raw),
+            &home(),
+        ),
     }
 }
 
@@ -1760,16 +1783,32 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct Presence {
     present: bool,
 }
 
-fn detect_agents() -> HashMap<String, Presence> {
-    ORDER
+fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
+    let mut found: HashMap<String, Presence> = ORDER
         .iter()
         .map(|name| {
-            let (_, bins, paths) = agent_spec(name);
+            let (_, bins, mut paths) = agent_spec(name);
+            if *name == "claude" {
+                // The family key is what `visible_agents` looks at. A
+                // custom profile can exist with only `.credentials.json`,
+                // so a scan that names only `stats-cache.json` leaves
+                // `claude` false and hides every Claude tab the moment
+                // another agent is present.
+                paths = crate::claude::dirs_of(cfg)
+                    .iter()
+                    .flat_map(|d| {
+                        [
+                            format!("{}/stats-cache.json", d.path),
+                            format!("{}/.credentials.json", d.path),
+                        ]
+                    })
+                    .collect();
+            }
             let has_bin = bins.iter().any(|b| tc::missing(&[b]).is_empty());
             let has_data = paths.iter().any(|p| std::path::Path::new(p).exists());
             (
@@ -1779,7 +1818,29 @@ fn detect_agents() -> HashMap<String, Presence> {
                 },
             )
         })
-        .collect()
+        .collect();
+    let dirs = crate::claude::dirs_of(cfg);
+    if !crate::claude::single_claude_profile(&dirs) {
+        for dir in &dirs {
+            let present = std::path::Path::new(&format!("{}/stats-cache.json", dir.path)).exists()
+                || std::path::Path::new(&format!("{}/.credentials.json", dir.path)).exists();
+            let id = crate::claude::tab_id(dir, true);
+            // The default profile's id is `claude`, which is the base
+            // entry: a directory with no files of its own must not
+            // unsay the binary on PATH — or a sibling directory that
+            // already proved the family is here — and take every
+            // Claude tab with it.
+            let held = found.get(&id).is_some_and(|x| x.present);
+            found.insert(id, Presence { present: present || held });
+            // Per-profile ids are `claude:{label}`. The family key stays
+            // the one `visible_agents` filters on, so a credential-only
+            // extra account must still mark `claude` present.
+            if present {
+                found.insert("claude".into(), Presence { present: true });
+            }
+        }
+    }
+    found
 }
 
 /// The tabs to draw.
@@ -1817,12 +1878,27 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
     // The summary leads and is never discovered or excluded: it is not an
     // agent, it is the view across whichever agents there turn out to be.
     let mut out = vec![SUMMARY_TAB.to_string()];
-    if shown.is_empty() {
-        out.extend(ORDER.iter().map(|n| n.to_string()));
+    let chosen = if shown.is_empty() {
+        ORDER.iter().map(|n| n.to_string()).collect()
     } else {
-        out.extend(shown);
+        shown
+    };
+    for name in chosen {
+        if name == "claude" {
+            out.extend(claude_tab_ids(cfg));
+        } else {
+            out.push(name);
+        }
     }
     out
+}
+
+fn claude_tab_ids(cfg: &Config) -> Vec<String> {
+    let dirs = crate::claude::dirs_of(cfg);
+    let multi = !crate::claude::single_claude_profile(&dirs);
+    dirs.iter()
+        .map(|d| crate::claude::tab_id(d, multi))
+        .collect()
 }
 
 /// Names in the config that match no agent we know how to read.
@@ -1892,16 +1968,39 @@ fn tab_bar(
     tabs: &[String],
     w: usize,
     p: &Palette,
-) -> (String, Vec<(usize, usize)>) {
+) -> (Vec<String>, Vec<(usize, usize, usize)>) {
+    let room = w.saturating_sub(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
     // Brackets as well as the tint: which tab is open must not depend on a
     // background colour surviving. A dot marks an agent that is installed.
     let mut parts: Vec<(String, String)> = vec![(tc::RST.to_string(), " ".into())];
     // The leading space above, so the first tab starts one column in.
     let mut at = 1usize;
-    let mut placed: Vec<(usize, usize)> = Vec::new();
+    let flush = |parts: &mut Vec<(String, String)>, lines: &mut Vec<String>| {
+        let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+        lines.push(tc::seg(&refs, w - 1));
+        *parts = vec![(tc::RST.to_string(), " ".into())];
+    };
     for (i, name) in tabs.iter().enumerate() {
         let here = name == active;
         let have = installed.get(name).is_some_and(|x| x.present);
+        // Both forms are the name plus two columns - `[NAME]` and ` NAME `
+        // - which is what lets the brackets mark the open tab without the
+        // strip shifting under them.
+        let wide = tc::display_width(&tab_title(name)) + 2;
+        // A tab is never split across lines, for the reason `pack_hints`
+        // never splits a key hint: half a name teaches an agent that does
+        // not exist. It goes to the next line whole, or - where a single
+        // tab is wider than the pane - it stays on a line of its own and
+        // `seg` clips it, which is the safe end of it.
+        // The +1 is the detection marker that every non-summary tab
+        // appends: leaving it out of the fit check let `seg` clip a `·`
+        // and a present profile read as absent.
+        if at > 1 && at + wide + 1 > room {
+            flush(&mut parts, &mut lines);
+            at = 1;
+        }
         parts.push((
             if here {
                 format!("{}{}", tc::bg(38, 56, 76), p.accent)
@@ -1909,16 +2008,14 @@ fn tab_bar(
                 p.dim.clone()
             },
             if here {
-                format!("[{}]", name.to_uppercase())
+                format!("[{}]", tab_title(name))
             } else {
-                format!(" {} ", name.to_uppercase())
+                format!(" {} ", tab_title(name))
             },
         ));
-        // Both forms are the name plus two columns - `[NAME]` and ` NAME `
-        // - which is what lets the brackets mark the open tab without the
-        // strip shifting under them.
-        let wide = name.to_uppercase().chars().count() + 2;
-        placed.extend((at..at + wide).map(|col| (col, i)));
+        // The line as well as the column now: the strip is as many rows as
+        // it needs, and a click is answered against the one it landed on.
+        placed.extend((at..at + wide).map(|col| (lines.len(), col, i)));
         at += wide + 1; // every branch below adds exactly one column
         if name == SUMMARY_TAB {
             parts.push((p.grid.clone(), " ".into()));
@@ -1929,8 +2026,8 @@ fn tab_bar(
             if have { "·".into() } else { " ".to_string() },
         ));
     }
-    let refs: Vec<(&str, String)> = parts.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-    (tc::seg(&refs, w - 1), placed)
+    flush(&mut parts, &mut lines);
+    (lines, placed)
 }
 
 /// Where a tab cursor lands after moving `by` tabs among `count`.
@@ -1997,6 +2094,7 @@ fn main() {
     let poller_wake = Arc::clone(&wake);
     let poller_cfg = cfg.clone();
     std::thread::spawn(move || {
+        tc::record_panics();
         let mut caches = shared::Caches::default();
         loop {
             // A poller that dies takes its explanation with it, and an empty
@@ -2013,7 +2111,11 @@ fn main() {
                 }
                 Err(_) => {
                     if let Ok(mut g) = poller.lock() {
-                        g.err = "poller stopped - see the pane it was started from".into();
+                        g.err = tc::take_panic_reason()
+                            .map(|why| format!("poller stopped: {why}"))
+                            .unwrap_or_else(|| {
+                                "poller stopped - see the pane it was started from".into()
+                            });
                     }
                     return;
                 }
@@ -2041,7 +2143,7 @@ fn main() {
     let (mut active, mut tick) = (0i64, 0usize);
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
-    let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize)>) = (0, Vec::new());
+    let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
     // Switching tabs lands at the top of the new one.
     //
     // This used to be one offset per tab, kept so that switching away and
@@ -2096,8 +2198,15 @@ fn main() {
                 // list: the column decides, and the row has to match.
                 other => {
                     if let Some((x, y)) = tc::click_at(other) {
-                        if y == tab_row {
-                            if let Some(&(_, i)) = tabs_at.iter().find(|(col, _)| *col == x) {
+                        // The strip is as many rows as it needs, so a
+                        // click is answered against the line it landed on
+                        // as well as the column.
+                        if y >= tab_row {
+                            let line = y - tab_row;
+                            if let Some(&(_, _, i)) = tabs_at
+                                .iter()
+                                .find(|(row, col, _)| *row == line && *col == x)
+                            {
                                 active = i as i64;
                             }
                         }
@@ -2120,7 +2229,7 @@ fn main() {
             .iter()
             .filter(|n| {
                 snapshot.installed.get(**n).is_some_and(|x| x.present)
-                    && !tabs.contains(&n.to_string())
+                    && !tabs.iter().any(|t| t == *n || t.starts_with(&format!("{n}:")))
             })
             .count();
 
@@ -2142,13 +2251,22 @@ fn main() {
         tab_row = rows.len();
         let (strip, strip_at) = tab_bar(&name, &snapshot.installed, &tabs, w, &p);
         tabs_at = strip_at;
-        rows.push(strip);
+        rows.extend(strip);
         rows.push(String::new());
 
         let body = if snapshot.fetched <= 0.0 {
             loading_rows(w, tick, &p)
         } else {
-            vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
+            // The body is the part that reads the data, so it is the part
+            // that can be brought down by one bad value. Guarded on its
+            // own rather than the whole frame: the title, the tab strip
+            // and the footer are cheap and almost never the thing that
+            // fails, and leaving them drawn leaves a pane the reader can
+            // still steer - the other tabs still open, and `q` still
+            // quits.
+            tc::guard_rows(&name, w, || {
+                vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
+            })
         };
 
         let mut hints: Vec<Vec<(&str, String)>> = vec![
@@ -2303,6 +2421,169 @@ mod tests {
 
     /// What a row says once its colours are taken off, which is the only
     /// half a reader sees and the only half a width can be measured in.
+    /// The strip wraps rather than losing the tabs past the edge.
+    ///
+    /// Extra Claude profiles make this reachable on an ordinary pane: six
+    /// profiles and five other agents do not fit a narrow one, and a tab
+    /// nobody can see is an agent the reader thinks is missing.
+    #[test]
+    fn the_tab_strip_wraps_instead_of_running_off_the_pane() {
+        let tabs: Vec<String> = ["+", "claude", "claude:alpha", "claude:bravo",
+            "claude:charlie", "codex", "cursor", "grok", "copilot", "antigravity"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let installed = HashMap::new();
+        for w in [40usize, 60, 80, 120] {
+            let (lines, placed) = tab_bar("claude", &installed, &tabs, w, &palette());
+            for line in &lines {
+                assert!(
+                    tc::display_width(&plain(line)) <= w - 1,
+                    "width {w}: {line:?}"
+                );
+            }
+            // Every tab is somewhere, and each is on exactly one line -
+            // a name split across two would teach an agent that does not
+            // exist, which is why hints are packed the same way.
+            for (i, name) in tabs.iter().enumerate() {
+                let rows: Vec<usize> = placed
+                    .iter()
+                    .filter(|(_, _, at)| *at == i)
+                    .map(|(row, _, _)| *row)
+                    .collect();
+                assert!(!rows.is_empty(), "width {w} lost {name}");
+                assert!(rows.iter().all(|r| *r == rows[0]), "width {w} split {name}");
+                // And the columns it claims spell the whole title.
+                let cols = placed.iter().filter(|(_, _, at)| *at == i).count();
+                assert_eq!(
+                    cols,
+                    tc::display_width(&tab_title(name)) + 2,
+                    "width {w}, {name}"
+                );
+                // Claiming the columns is not the same as being drawn in
+                // them: a tab that starts inside the pane and runs past it
+                // is clipped by `seg`, which keeps the line short enough
+                // while cutting the name in half. The title has to be on
+                // the line whole.
+                assert!(
+                    plain(&lines[rows[0]]).contains(&tab_title(name)),
+                    "width {w}: {name} was cut from {:?}",
+                    plain(&lines[rows[0]])
+                );
+            }
+            // Wide enough for everything is still one line.
+            if w == 120 {
+                assert_eq!(lines.len(), 1, "{lines:?}");
+            }
+        }
+        // Narrow enough, it takes more than one.
+        let (lines, _) = tab_bar("claude", &installed, &tabs, 40, &palette());
+        assert!(lines.len() > 1, "{lines:?}");
+    }
+
+    /// A click is answered against the line it landed on as well as the
+    /// column, or every tab on the second row would open the one above it.
+    #[test]
+    fn a_click_on_a_wrapped_tab_finds_that_tab() {
+        let tabs: Vec<String> = ["+", "claude", "codex", "cursor", "grok", "copilot"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (lines, placed) = tab_bar("claude", &HashMap::new(), &tabs, 34, &palette());
+        assert!(lines.len() > 1, "the fixture did not wrap: {lines:?}");
+        // Two placements on different lines never share an index, and the
+        // same column on two lines points at two different tabs.
+        let second: Vec<(usize, usize)> = placed
+            .iter()
+            .filter(|(row, _, _)| *row == 1)
+            .map(|(_, col, at)| (*col, *at))
+            .collect();
+        assert!(!second.is_empty(), "nothing on the second line: {placed:?}");
+        for (col, at) in second {
+            let above = placed
+                .iter()
+                .find(|(row, c, _)| *row == 0 && *c == col)
+                .map(|(_, _, at)| *at);
+            if let Some(above) = above {
+                assert_ne!(above, at, "column {col} means the same tab on both lines");
+            }
+        }
+    }
+
+    /// `seg` clips by cell width. Counting scalars for wrap and hitboxes
+    /// lets a CJK label sit on a line it does not fit, which then eats
+    /// the tabs after it and maps clicks to the wrong columns.
+    #[test]
+    fn a_wide_glyph_tab_wraps_instead_of_clipping_the_next_one() {
+        let tabs: Vec<String> = ["+", "claude", "claude:工作", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // After `+` and `CLAUDE`, a 19-column pane has 4 cells left —
+        // enough for two scalars plus brackets, not enough for 工作.
+        let w = 19;
+        let (lines, placed) = tab_bar("claude", &HashMap::new(), &tabs, w, &palette());
+        assert!(lines.len() > 1, "the CJK tab stayed on a line it does not fit: {lines:?}");
+        for line in &lines {
+            assert!(
+                tc::display_width(&plain(line)) <= w - 1,
+                "overflowed: {line:?}"
+            );
+        }
+        for (i, name) in tabs.iter().enumerate() {
+            let rows: Vec<usize> = placed
+                .iter()
+                .filter(|(_, _, at)| *at == i)
+                .map(|(row, _, _)| *row)
+                .collect();
+            assert!(!rows.is_empty(), "lost {name}");
+            assert_eq!(
+                placed.iter().filter(|(_, _, at)| *at == i).count(),
+                tc::display_width(&tab_title(name)) + 2,
+                "{name} hitbox used scalar count"
+            );
+            assert!(
+                plain(&lines[rows[0]]).contains(&tab_title(name)),
+                "{name} was cut from {:?}",
+                plain(&lines[rows[0]])
+            );
+        }
+    }
+
+    /// The fit check has to count the `·` a detected tab appends.
+    /// After `+`, `CLAUDE` plus its marker sits exactly on a 14-column
+    /// pane's last cell; wrapping one column late lets `seg` clip the
+    /// dot and the profile reads as undetected.
+    #[test]
+    fn a_detected_tabs_dot_wraps_instead_of_being_clipped() {
+        let tabs: Vec<String> = ["+", "claude", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let installed = HashMap::from([("claude".into(), Presence { present: true })]);
+        let w = 14;
+        let (lines, _) = tab_bar("codex", &installed, &tabs, w, &palette());
+        let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+        assert!(
+            lines.len() > 1,
+            "CLAUDE stayed on a line that has no room for its marker: {text:?}"
+        );
+        let claude = text
+            .iter()
+            .find(|l| l.contains("CLAUDE"))
+            .expect("lost CLAUDE");
+        assert!(
+            claude.contains('·'),
+            "the detection marker was clipped: {text:?}"
+        );
+        for line in &lines {
+            assert!(
+                tc::display_width(&plain(line)) <= w - 1,
+                "overflowed: {line:?}"
+            );
+        }
+    }
+
     fn plain(s: &str) -> String {
         let mut out = String::new();
         let mut rest = s.chars();
@@ -3153,5 +3434,233 @@ mod tests {
         assert_eq!(got[0].0, "plan");
         assert_eq!(got[1].0, "");
         assert!(got.len() > 1);
+    }
+
+    /// The default profile reuses the `claude` id. A directory with no
+    /// files of its own must not overwrite the family presence that the
+    /// binary — or a sibling directory — already established, or every
+    /// Claude tab disappears.
+    #[test]
+    fn a_default_dir_with_no_files_does_not_hide_the_other_profiles() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-presence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let work = root.join("work");
+        let _ = std::fs::create_dir_all(&work);
+        std::fs::write(work.join("stats-cache.json"), "{}").expect("a stats cache");
+        let cfg = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: root.join("missing").to_string_lossy().into(),
+                    label: String::new(),
+                },
+                crate::claude::ClaudeDir {
+                    path: work.to_string_lossy().into(),
+                    label: "work".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let found = detect_agents(&cfg);
+        assert!(
+            found.get("claude").is_some_and(|p| p.present),
+            "the family presence went: {found:?}"
+        );
+        assert!(
+            found.get("claude:work").is_some_and(|p| p.present),
+            "the custom profile went: {found:?}"
+        );
+        let tabs = visible_agents(&found, &cfg);
+        assert!(
+            tabs.iter().any(|t| t == "claude" || t == "claude:work"),
+            "no Claude tab survived: {tabs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A custom profile can exist with only `.credentials.json`. The
+    /// family key used to stay false because the first scan named only
+    /// `stats-cache.json`, and `visible_agents` then dropped every
+    /// Claude tab the moment another agent was present.
+    #[test]
+    fn a_credential_only_profile_still_shows_the_claude_tabs() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-creds-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let work = root.join("work");
+        let _ = std::fs::create_dir_all(&work);
+        std::fs::write(work.join(".credentials.json"), "{}").expect("credentials");
+        let cfg = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: root.join("missing").to_string_lossy().into(),
+                    label: String::new(),
+                },
+                crate::claude::ClaudeDir {
+                    path: work.to_string_lossy().into(),
+                    label: "work".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let mut found = detect_agents(&cfg);
+        assert!(
+            found.get("claude").is_some_and(|p| p.present),
+            "the family presence stayed false: {found:?}"
+        );
+        assert!(
+            found.get("claude:work").is_some_and(|p| p.present),
+            "the credential-only profile went: {found:?}"
+        );
+        found.insert("cursor".into(), Presence { present: true });
+        let tabs = visible_agents(&found, &cfg);
+        assert!(
+            tabs.iter().any(|t| t == "claude" || t == "claude:work"),
+            "no Claude tab survived beside another agent: {tabs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extra_claude_dirs_become_their_own_tabs() {
+        let found = HashMap::from([
+            ("claude".into(), Presence { present: true }),
+            ("codex".into(), Presence { present: true }),
+        ]);
+        let one = Config::default();
+        let tabs = visible_agents(&found, &one);
+        assert_eq!(tabs, vec!["+", "claude", "codex"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
+
+        let multi = Config {
+            claude_dirs: vec![
+                crate::claude::ClaudeDir {
+                    path: "/tmp/main".into(),
+                    label: "main".into(),
+                },
+                crate::claude::ClaudeDir {
+                    path: "/tmp/overflow".into(),
+                    label: "overflow".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let tabs = visible_agents(&found, &multi);
+        assert_eq!(tabs, vec!["+", "claude:main", "claude:overflow", "codex"]);
+        assert_eq!(tab_title("claude:main"), "MAIN");
+        assert_eq!(tab_title("claude:overflow"), "OVERFLOW");
+        assert!(!tabs.iter().any(|t| t == "claude"), "{tabs:?}");
+    }
+
+    #[test]
+    fn claude_config_dirs_are_read_from_the_section() {
+        let cfg = config_from(
+            &serde_json::json!({
+                "claude_config_dirs": ["~/.claude", "~/.claude-overflow"]
+            }),
+            false,
+        );
+        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(
+            paths.len() == 2
+                && paths[0].ends_with("/.claude")
+                && paths[1].ends_with("/.claude-overflow"),
+            "{paths:?}"
+        );
+        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["", "claude-overflow"], "the default carries no label");
+        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
+    }
+
+    #[test]
+    fn an_empty_claude_config_dirs_list_is_the_default() {
+        let missing = config_from(&serde_json::json!({}), false);
+        let empty = config_from(
+            &serde_json::json!({ "claude_config_dirs": [] }),
+            false,
+        );
+        assert_eq!(missing.claude_dirs.len(), 1);
+        assert_eq!(empty.claude_dirs.len(), 1);
+        assert!(missing.claude_dirs[0].path.ends_with("/.claude"));
+        assert_eq!(missing.claude_dirs[0].path, empty.claude_dirs[0].path);
+        assert!(crate::claude::single_claude_profile(&empty.claude_dirs));
+    }
+
+    /// A bare string and an object in one list, both read, in order.
+    ///
+    /// The reader this is really about is `config_from`: `tc::cfg_strings`
+    /// keeps only the `as_str` entries, so on that call the object half of
+    /// this list arrives as nothing and the pane draws one profile out of
+    /// two - a directory nobody listed and no error anywhere.
+    #[test]
+    fn a_mixed_list_reads_both_forms() {
+        let cfg = config_from(
+            &serde_json::json!({
+                "claude_config_dirs": [
+                    "~/.claude",
+                    { "path": "~/.claude-bbi", "label": "bbi" }
+                ]
+            }),
+            false,
+        );
+        let paths: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(
+            paths.len() == 2
+                && paths[0].ends_with("/.claude")
+                && paths[1].ends_with("/.claude-bbi"),
+            "{paths:?}"
+        );
+        let labels: Vec<&str> = cfg.claude_dirs.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["", "bbi"], "the default carries no label");
+        assert!(!crate::claude::single_claude_profile(&cfg.claude_dirs));
+        // The default keeps the id it has always had, so anything holding
+        // on to a selected tab still finds it.
+        assert_eq!(claude_tab_ids(&cfg), vec!["claude", "claude:bbi"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
+        assert_eq!(tab_title("claude:bbi"), "BBI");
+        // The default profile's group keeps the plain heading rather than
+        // stuttering `claude - CLAUDE`.
+        let headings: Vec<String> = cfg
+            .claude_dirs
+            .iter()
+            .map(|d| crate::claude::summary_heading(&d.label, true))
+            .collect();
+        assert_eq!(headings, vec!["CLAUDE", "bbi - CLAUDE"]);
+    }
+
+    /// One directory, labelled, still draws the tab it always drew.
+    #[test]
+    fn one_labelled_directory_still_reads_as_claude() {
+        let cfg = config_from(
+            &serde_json::json!({
+                "claude_config_dirs": [
+                    { "path": "~/.claude-bbi", "label": "bbi" }
+                ]
+            }),
+            false,
+        );
+        assert_eq!(cfg.claude_dirs.len(), 1, "{:?}", cfg.claude_dirs);
+        assert!(
+            cfg.claude_dirs[0].path.ends_with("/.claude-bbi"),
+            "{:?}",
+            cfg.claude_dirs
+        );
+        assert!(crate::claude::single_claude_profile(&cfg.claude_dirs));
+        assert_eq!(claude_tab_ids(&cfg), vec!["claude"]);
+        assert_eq!(tab_title("claude"), "CLAUDE");
+        assert_eq!(
+            crate::claude::summary_heading(&cfg.claude_dirs[0].label, false),
+            "CLAUDE"
+        );
     }
 }
