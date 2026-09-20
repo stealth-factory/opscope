@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.24.0] - 2026-09-20
+
+### Features
+
+- **core**: Retire the terminal.mouse option (#255) — **breaking**
+
 ## [0.23.0] - 2026-09-20
 
 ### Features
