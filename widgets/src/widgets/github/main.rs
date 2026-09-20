@@ -947,6 +947,81 @@ fn by_account_bar_cols(w: usize) -> usize {
         .max(ACCT_SPARK_MIN)
 }
 
+/// What `[i]` does next, which is not what it did last.
+///
+/// A two-way toggle names the state the next press moves to, and prefers a
+/// verb: `hide`/`show` reads as an action where `on`/`off` reads as a
+/// state, and a wall of panes cannot afford one hint meaning the opposite
+/// of its neighbour.
+fn info_hint(open: bool) -> String {
+    format!("[i]nfo {}", if open { "hide" } else { "show" })
+}
+
+/// The longest of these that fits the pane, or nothing at all.
+///
+/// Written widest-first. A note cut in half says less than no note, and
+/// `seg` would clip one rather than wrap it.
+fn fitting(room: usize, tries: &[String]) -> Option<String> {
+    tries.iter().find(|t| t.chars().count() <= room).cloned()
+}
+
+/// What `HELD`, `R24` and `T2D` mean, under the heading that owns them.
+///
+/// These three do not carry their own meaning the way `MRG18D` carries its
+/// window, and nothing else on screen explains them: this widget's footer
+/// names no help key, and a README is not on the pane.
+///
+/// Closed, it is the one line saying the answer is a keypress away. Open,
+/// one line per column *actually drawn* - `by_account_cols` decides that,
+/// so the notes cannot describe a column the pane is too narrow to show.
+/// Each names the population its percentage is of, which is the part the
+/// abbreviation hides: `HELD` is of PRs that *closed*, the other two of PRs
+/// that *merged*, and reading either against the wrong denominator is the
+/// kind of confident wrong number this pane exists not to draw.
+fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
+    let (r24, t2d, _) = by_account_cols(w);
+    let room = w.saturating_sub(3);
+    if !open {
+        return fitting(
+            room,
+            &[
+                "[i] what HELD, R24 and T2D mean".to_string(),
+                "[i] what these columns mean".to_string(),
+                "[i] columns".to_string(),
+            ],
+        )
+        .map(|t| format!("  {t}"))
+        .into_iter()
+        .collect();
+    }
+    let mut out = Vec::new();
+    let mut say = |tries: &[String]| {
+        if let Some(t) = fitting(room, tries) {
+            out.push(format!("  {t}"));
+        }
+    };
+    say(&[
+        format!("HELD  of PRs closed in {want}d, the share that merged"),
+        format!("HELD  of PRs closed in {want}d, share merged"),
+        "HELD  share of closed that merged".to_string(),
+    ]);
+    if r24 {
+        say(&[
+            "R24   of those merged, first human review within 24h".to_string(),
+            "R24   merged, first human review under 24h".to_string(),
+            "R24   reviewed under 24h".to_string(),
+        ]);
+    }
+    if t2d {
+        say(&[
+            "T2D   of those merged, opened to merged within 2 days".to_string(),
+            "T2D   merged within 2 days of opening".to_string(),
+            "T2D   merged under 2 days".to_string(),
+        ]);
+    }
+    out
+}
+
 /// The BY ACCOUNT heading, on the cell plan its rows are built to.
 ///
 /// No separators between these fields: the row emits its widths back-to-back,
@@ -2578,6 +2653,10 @@ fn main() {
     let mut moved = false;
     // One account on its own screen, and how far down it is scrolled.
     let (mut detail, mut dscroll) = (false, 0usize);
+    // Whether the column notes under BY ACCOUNT are open. Closed by
+    // default: a note is worth a row the first time and nothing on every
+    // frame after it.
+    let mut notes = false;
     // Which of the oldest PRs the cursor is on, and what [c] last said.
     let mut osel = 0usize;
     let (mut note, mut note_at) = (String::new(), 0.0f64);
@@ -2627,6 +2706,9 @@ fn main() {
                         *asked = true;
                         cond.notify_all();
                     }
+                }
+                "i" | "I" => {
+                    notes = !notes;
                 }
                 "w" | "W" => {
                     if let Ok(mut g) = state.lock() {
@@ -3147,6 +3229,9 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
+        for line in column_notes(notes, want, w) {
+            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
+        }
         let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
@@ -3338,6 +3423,7 @@ fn main() {
                 (p.accent.as_str(), "→/↵".into()),
                 (p.dim.as_str(), " account".into()),
             ],
+            vec![(p.dim.as_str(), info_hint(notes))],
             vec![(p.dim.as_str(), "[w]indow".into())],
             vec![(p.dim.as_str(), "[r]efresh".into())],
             vec![(p.dim.as_str(), "[,] settings".into())],
@@ -3376,6 +3462,74 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{by_account_cols, column_notes, info_hint};
+
+    /// A two-way toggle names the state the next press moves to. Naming the
+    /// one in force reads as an instruction to turn on what is already on.
+    #[test]
+    fn the_info_hint_names_what_the_next_press_does() {
+        assert_eq!(info_hint(false), "[i]nfo show");
+        assert_eq!(info_hint(true), "[i]nfo hide");
+    }
+
+    /// Closed, it is one line, and it names the key - or it is an offer
+    /// nobody can accept.
+    #[test]
+    fn the_closed_note_offers_the_key() {
+        let got = column_notes(false, 18, 70);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("[i]"), "{got:?}");
+    }
+
+    /// One line per column *actually drawn*, decided by the same function
+    /// the header uses - explaining a column too narrow to appear sends a
+    /// reader looking for something that is not there.
+    #[test]
+    fn only_the_columns_on_screen_are_explained() {
+        for w in [44usize, 52, 58, 70, 100] {
+            let (r24, t2d, _) = by_account_cols(w);
+            let got = column_notes(true, 18, w);
+            assert_eq!(
+                got.len(),
+                1 + usize::from(r24) + usize::from(t2d),
+                "w={w}: {got:?}"
+            );
+            assert_eq!(got.iter().any(|l| l.contains("R24")), r24, "w={w}");
+            assert_eq!(got.iter().any(|l| l.contains("T2D")), t2d, "w={w}");
+        }
+    }
+
+    /// Each names the population its percentage is of, and the window is
+    /// the one in use rather than a hardcoded one.
+    #[test]
+    fn each_note_names_the_population_it_is_a_share_of() {
+        let got = column_notes(true, 18, 70).join("\n");
+        assert!(got.contains("closed in 18d"), "{got}");
+        assert!(got.contains("of those merged"), "{got}");
+        assert!(column_notes(true, 7, 70)[0].contains("7d"));
+    }
+
+    /// Shortened to fit, dropped rather than cut. Half a note says less
+    /// than none, and `seg` clips a row rather than wrapping it.
+    #[test]
+    fn a_note_is_shortened_to_fit_and_never_cut() {
+        for w in 20..=110 {
+            for open in [false, true] {
+                for line in column_notes(open, 18, w) {
+                    assert!(
+                        line.chars().count() <= w - 1,
+                        "w={w} open={open}: {line:?} is {} cells",
+                        line.chars().count()
+                    );
+                }
+            }
+        }
+        let wide = column_notes(true, 18, 90).remove(0);
+        let tight = column_notes(true, 18, 44).remove(0);
+        assert!(wide.len() > tight.len(), "{wide:?} vs {tight:?}");
+        assert!(tight.contains("HELD") && tight.contains("merged"), "{tight:?}");
+    }
+
     use super::*;
 
     #[test]
