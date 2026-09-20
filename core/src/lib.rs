@@ -242,10 +242,17 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 
 /// The rule across the top of every widget.
 pub fn title(text: &str, w: usize, colour: &str) -> String {
-    let t = format!(" {} ", text.to_uppercase());
     let left = "╺━";
-    let used = display_width(&t) + display_width(left) + 1;
-    let fill = "━".repeat(w.saturating_sub(used));
+    let chrome = display_width(left) + 1;
+    if w <= chrome {
+        let deco = format!("{left}╸");
+        let (cut, _, _) = clip_width(&deco, w);
+        return format!("{colour}{cut}{RST}");
+    }
+    let room = w - chrome;
+    let wanted = format!(" {} ", text.to_uppercase());
+    let (t, t_w, _) = clip_width(&wanted, room);
+    let fill = "━".repeat(room.saturating_sub(t_w));
     format!(
         "{}{}{}{}{}{}{}{}╸{}",
         colour,
@@ -2130,6 +2137,328 @@ pub fn unsupported() -> String {
     format!("does not run on {}", std::env::consts::OS)
 }
 
+
+// The last panic this thread caught, as a line worth putting on screen.
+//
+// Filled by the hook `guard_frame` installs. `catch_unwind` hands back the
+// payload, which is the message, but not where it came from - and a panic
+// with no location is a bug report nobody can act on. The hook is the only
+// place the location exists.
+//
+// Per-thread, because that is the scope a panic actually has: it unwinds on
+// the thread that panicked and `catch_unwind` catches it on the same one.
+// Shared, a poller dying in the background would overwrite what the frame
+// was about to say about itself - two failures, one row, and the wrong one
+// drawn.
+//
+// A plain comment, not a doc comment: rustc does not attach one to a
+// `thread_local!` invocation and warns that it is unused.
+thread_local! {
+    static LAST_PANIC: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+static HOOK: std::sync::Once = std::sync::Once::new();
+
+/// Arm the hook that records a panic as a line, rather than writing it to
+/// stderr over a full-screen widget.
+pub fn record_panics() {
+    arm_panic_hook();
+}
+
+/// The panic this thread just caught, if the hook saw it. Taken so a
+/// poller's `catch_unwind` can put the reason on the pane it feeds, instead
+/// of a generic "poller stopped" that looks like a quiet source.
+pub fn take_panic_reason() -> Option<String> {
+    LAST_PANIC
+        .try_with(|held| held.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
+/// Take the panic hook over, so a panic is a row rather than a mess.
+///
+/// The default hook writes to stderr, which on a full-screen widget lands on
+/// top of the frame in the wrong colours and survives the redraw. Recorded
+/// instead, and drawn where it can be read.
+///
+/// `RUST_BACKTRACE` puts the default behaviour back, because somebody who
+/// asked for a backtrace wants the one Rust writes, not a one-line summary
+/// of it.
+fn arm_panic_hook() {
+    HOOK.call_once(|| {
+        if std::env::var_os("RUST_BACKTRACE").is_some() {
+            return;
+        }
+        std::panic::set_hook(Box::new(|info| {
+            let where_ = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "somewhere".into());
+            // The payload is the message for the two shapes `panic!` and
+            // `unwrap` produce; anything else is a type nobody can print.
+            let what = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".into());
+            // A hook runs on the panicking thread, so this lands in that
+            // thread's own slot.
+            let said = format!("{what} ({where_})");
+            let _ = LAST_PANIC.try_with(|held| *held.borrow_mut() = Some(said));
+        }));
+    });
+}
+
+/// Build a frame, and draw the reason instead if building it panics.
+///
+/// A widget's frame is built fresh every tick from whatever the pollers have
+/// left behind, and one bad value in one section used to take the whole pane
+/// with it: the panic unwound past the loop, `Drop` put the terminal back,
+/// and the pane went to a shell prompt. Everything else the widget knew went
+/// with it - the other sections, the quota that was fine, the keys - and
+/// what the reader got was a pane that had simply gone.
+///
+/// The frame is the right thing to guard, and the only thing. It is rebuilt
+/// from scratch each tick, so nothing carries over from the attempt that
+/// failed: there is no half-written state to reason about, which is what
+/// makes catching a panic here honest rather than reckless. A poller keeps
+/// its own guard, because it owns state that *does* carry over.
+///
+/// The failure is drawn, not swallowed. A pane that looks fine while a
+/// section is missing is the founding hazard here, so the frame says what
+/// broke and where, keeps the title, and keeps the footer - `q` still
+/// quits, and `r` gets a fresh attempt on the next tick, which is all a
+/// transient bad value needs.
+pub fn guard_frame(
+    widget: &str,
+    w: usize,
+    h: usize,
+    build: impl FnOnce() -> Vec<String>,
+) -> Vec<String> {
+    arm_panic_hook();
+    // `AssertUnwindSafe` because the closure borrows the widget's own state
+    // to read it. Nothing here writes it back on the failing path: the rows
+    // returned are the ones built below, and the next tick starts again
+    // from the state the pollers own.
+    let mut rows = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+        Ok(rows) => return rows,
+        Err(_) => {
+            let mut rows = vec![title(widget, w, &rgb(150, 210, 255)), String::new()];
+            rows.extend(fault_rows(widget, w));
+            rows
+        }
+    };
+    while rows.len() < h {
+        rows.push(String::new());
+    }
+    rows.truncate(h);
+    rows
+}
+
+/// Build one section of a frame, and say what broke instead if it panics.
+///
+/// The narrower half of the same idea, and the one worth reaching for
+/// first: a widget's chrome - its title, its tabs, its footer - is cheap
+/// and almost never the thing that fails, so wrapping only the part that
+/// reads the data leaves the reader a pane they can still steer. The keys
+/// keep working because the footer is still drawn, and the section that
+/// broke says so where it would have been, which is the one thing an empty
+/// section must never be mistaken for.
+pub fn guard_rows(what: &str, w: usize, build: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    arm_panic_hook();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+        Ok(rows) => rows,
+        Err(_) => fault_rows(what, w),
+    }
+}
+
+/// The rows drawn where something that panicked would have been.
+fn fault_rows(widget: &str, w: usize) -> Vec<String> {
+    let said = take_panic_reason().unwrap_or_else(|| "panicked, with nothing recorded".into());
+    let width = w.saturating_sub(1);
+    let mut rows = vec![
+        seg(
+            &[(
+                rgb(255, 120, 110).as_str(),
+                format!(" {widget} could not draw this frame."),
+            )],
+            width,
+        ),
+        String::new(),
+    ];
+    for line in wrap(&said, w.saturating_sub(3).max(12)) {
+        rows.push(seg(&[(rgb(180, 190, 205).as_str(), format!("  {line}"))], width));
+    }
+    rows.push(String::new());
+    for line in wrap(
+        "The data behind it is still being collected, so this may clear on \
+         its own. [r] tries again now, [q] quits.",
+        w.saturating_sub(3).max(12),
+    ) {
+        rows.push(seg(&[(rgb(127, 147, 172).as_str(), format!("  {line}"))], width));
+    }
+    rows
+}
+
+/// Break a sentence to a width, on spaces, without splitting a word.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let need = word.chars().count();
+        if !line.is_empty() && line.chars().count() + 1 + need > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn plain(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// A frame that panics is a frame that says so, not a pane that goes.
+    #[test]
+    fn a_panic_while_building_a_frame_becomes_the_frame() {
+        let rows = guard_frame("netwatch", 70, 12, || panic!("index 4 out of range"));
+        let joined = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("NETWATCH"), "the title went: {joined}");
+        assert!(joined.contains("could not draw this frame"), "{joined}");
+        // The reason reaches the reader, with where it came from - a panic
+        // nobody can locate is a bug report nobody can act on.
+        assert!(joined.contains("index 4 out of range"), "{joined}");
+        assert!(joined.contains("lib.rs:"), "no location: {joined}");
+        // And the way out is on screen.
+        assert!(joined.contains("[q] quits"), "{joined}");
+        // Exactly the height it was given, like any other frame.
+        assert_eq!(rows.len(), 12);
+        for row in &rows {
+            assert!(plain(row).chars().count() <= 70, "{row:?}");
+        }
+    }
+
+    /// A section that panicked must never come back empty.
+    ///
+    /// This is the founding hazard of the whole collection, reached from a
+    /// new direction: an empty section and a section that could not be
+    /// built look identical, and the reader would take "no data" from a
+    /// pane that actually hit a bug. `guard_rows` is the form the widgets
+    /// use, so it is the form this has to hold for.
+    #[test]
+    fn a_section_that_panicked_is_never_silently_empty() {
+        let rows = guard_rows("codex", 80, || panic!("no rate for gpt-5.6-sol"));
+        assert!(!rows.is_empty(), "a panic drew nothing at all");
+        let joined = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("codex"), "{joined}");
+        assert!(joined.contains("could not draw"), "{joined}");
+        assert!(joined.contains("no rate for gpt-5.6-sol"), "{joined}");
+        // No title and no padding: this goes inside a frame the widget is
+        // still drawing the rest of, so it must not claim the pane.
+        assert!(!joined.contains('╺'), "it drew a title over the widget's own");
+        assert!(rows.len() < 12, "it padded a section to a frame: {}", rows.len());
+        for row in &rows {
+            assert!(plain(row).chars().count() <= 80, "{row:?}");
+        }
+    }
+
+    /// And the way out is on screen, because a pane the reader cannot steer
+    /// is one they will kill from another window.
+    /// A zero-wide pane used to underflow `w - 1` while drawing the
+    /// recovery rows, so the recovery itself panicked and the original
+    /// reason never reached the screen.
+    #[test]
+    fn a_zero_wide_fault_still_draws() {
+        let rows = guard_rows("w", 0, || panic!("boom"));
+        assert!(!rows.is_empty(), "a zero-wide fault drew nothing");
+    }
+
+    /// A name longer than the pane must not wrap the recovery frame.
+    #[test]
+    fn a_narrow_fault_frame_stays_inside_its_width() {
+        for w in 1..=16 {
+            let rows = guard_frame("netwatch", w, 8, || panic!("boom"));
+            for row in &rows {
+                assert!(
+                    display_width(&plain(row)) <= w,
+                    "w={w} overflowed: {row:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_fault_says_how_to_get_out_of_it() {
+        let joined = guard_rows("w", 90, || panic!("boom"))
+            .iter()
+            .map(|r| plain(r))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("[q] quits"), "{joined}");
+        assert!(joined.contains("[r]"), "{joined}");
+    }
+
+    /// The ordinary path is untouched: the rows the widget built, as they
+    /// were, with nothing added and nothing measured twice.
+    #[test]
+    fn a_frame_that_builds_is_handed_back_unchanged() {
+        let built = vec!["one".to_string(), "two".to_string()];
+        let rows = guard_frame("ports", 40, 9, || built.clone());
+        assert_eq!(rows, built);
+    }
+
+    /// Whatever the payload is, something readable reaches the row. An
+    /// `unwrap` on a `None` panics with a `String`, `panic!` with a
+    /// `&str`, and a panic carrying neither still has to say something.
+    #[test]
+    fn every_shape_of_panic_says_something() {
+        for (name, rows) in [
+            ("str", guard_frame("w", 60, 8, || panic!("plain str"))),
+            (
+                "string",
+                guard_frame("w", 60, 8, || {
+                    let missing: Option<u8> = None;
+                    missing.expect("a value that was not there");
+                    Vec::new()
+                }),
+            ),
+            (
+                "other",
+                guard_frame("w", 60, 8, || std::panic::panic_any(7u8)),
+            ),
+        ] {
+            let joined = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+            assert!(joined.contains("could not draw"), "{name}: {joined}");
+            let said = joined.split("frame.").nth(1).unwrap_or("");
+            assert!(said.trim().len() > 4, "{name} said nothing: {joined}");
+        }
+    }
+}
+
 /// Non-blocking key input, decoding the sequences arrows arrive as.
 ///
 /// Returns names for special keys and the bare character otherwise, and
@@ -3539,6 +3868,12 @@ mod tests {
             display_width(&strip(&title("月", 20, &rgb(0, 255, 170)))),
             20
         );
+        for w in 0..=12 {
+            assert!(
+                display_width(&strip(&title("netwatch", w, &rgb(0, 255, 170)))) <= w,
+                "title overflowed a {w}-wide pane"
+            );
+        }
     }
 
     /// One poll's worth of input, decoded from a fresh keyboard.

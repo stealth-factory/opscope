@@ -35,9 +35,26 @@ const RATE_FILES: usize = 3;
 /// Seconds; below this the timestamps are not a turn.
 const MIN_GAP: f64 = 1.0;
 
+/// One Claude Code config directory the widget should read.
+///
+/// `path` is expanded (`~` resolved). `label` is the directory's basename,
+/// used only when more than one directory is in play: extra tabs and the
+/// `{label} - CLAUDE` summary group. A single directory keeps today's
+/// CLAUDE heading and never prints this label.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaudeDir {
+    pub path: String,
+    pub label: String,
+}
+
 /// What Claude Code has recorded, plus what is left of the limits.
 #[derive(Clone, Default)]
 pub struct Data {
+    /// Configured short name. The pane uses it only when two or more
+    /// profiles are on screen; one directory still says CLAUDE.
+    pub label: String,
+    /// Expanded config directory this reading came from.
+    pub dir: String,
     ok: bool,
     why: String,
     stats: serde_json::Value,
@@ -59,14 +76,366 @@ pub struct Data {
     daily: HashMap<String, HashMap<String, Tokens>>,
 }
 
+impl Data {
+    #[allow(dead_code)]
+    pub(crate) fn with_session_quota(label: &str, pct: i64) -> Self {
+        Self {
+            label: label.into(),
+            quota: Some(serde_json::json!({
+                "limits": [{
+                    "group": "session",
+                    "kind": "session",
+                    "percent": pct,
+                    "resets_at": "2126-01-01T00:00:00.000000+00:00"
+                }]
+            })),
+            quota_live: true,
+            quota_at: now(),
+            ..Self::default()
+        }
+    }
+}
+
+/// One `claude_config_dirs` entry as it was written.
+///
+/// A bare string is a path with no label; an object may name one. The label
+/// is what a tab and a summary group are titled with, and it is optional -
+/// absent, empty or whitespace falls back to the label derived from the
+/// path. It stays a *list* of these rather than a map keyed by label:
+/// serde_json is taken here without `preserve_order`, so a map would
+/// iterate alphabetically and take the tab order away from whoever wrote
+/// the config.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClaudeDirSpec {
+    pub path: String,
+    pub label: Option<String>,
+}
+
+impl ClaudeDirSpec {
+    /// A path with no label of its own.
+    pub fn at(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            label: None,
+        }
+    }
+
+    /// A path and the name it should answer to.
+    #[allow(dead_code)]
+    pub fn named(path: &str, label: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            label: Some(label.to_string()),
+        }
+    }
+}
+
+/// The `claude_config_dirs` entries, in the order they were written.
+///
+/// Read here rather than through `tc::cfg_strings`, which keeps only the
+/// `as_str` entries: left on that call an object form would be dropped in
+/// silence, and a dropped entry reads on screen as a directory nobody
+/// listed - this repo's founding hazard.
+///
+/// The receiver is spelt `cfg` on purpose. `config_use` in `check.rs` counts
+/// a config read only through `cfg_f64(`, `cfg_usize(`, `cfg_str(`,
+/// `cfg_strings(` or a `cfg.get("` whose receiver is that name, so renaming
+/// this parameter hides the key from the check that fails the build when a
+/// setting is undocumented.
+pub fn configured_dirs(cfg: &serde_json::Value) -> Vec<ClaudeDirSpec> {
+    let rows = cfg
+        .get("claude_config_dirs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    rows.iter().filter_map(spec_of).collect()
+}
+
+/// One entry, as a string or as `{ "path": ..., "label": ... }`.
+///
+/// Anything else - a number, a nested list, an object with no `path` - is
+/// no directory at all and is left out, the same as an empty string.
+fn spec_of(row: &serde_json::Value) -> Option<ClaudeDirSpec> {
+    let (path, label) = match row {
+        serde_json::Value::String(path) => (path.as_str(), None),
+        serde_json::Value::Object(_) => (
+            row.get("path").and_then(|v| v.as_str())?,
+            row.get("label").and_then(|v| v.as_str()),
+        ),
+        _ => return None,
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(ClaudeDirSpec {
+        path: path.to_string(),
+        label: label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// Directories to read, in the order they were named.
+///
+/// `agent_usage.claude_config_dirs` is an optional list of entries, each a
+/// path or a path with a label. Unset or empty is today's one directory,
+/// `~/.claude`. When the list names any path, those directories are watched
+/// in that order and no others — the environment is not a source, and
+/// `~/.claude-*` is not scanned.
+///
+/// Paths are expanded (`~` / `~/…`) against `home`. The same expanded path
+/// listed twice collapses to the first entry. An entry's own `label` is the
+/// name it answers to; without one the label is derived from the path. Two
+/// directories can want the same name - derived or written by hand - and
+/// `unique_label` settles it, so two seats both called `work` cannot share
+/// a tab.
+pub fn resolve_claude_dirs(configured: &[ClaudeDirSpec], home: &str) -> Vec<ClaudeDir> {
+    let specs: Vec<ClaudeDirSpec> = configured
+        .iter()
+        .filter(|spec| !spec.path.trim().is_empty())
+        .cloned()
+        .collect();
+    let specs = if specs.is_empty() {
+        vec![ClaudeDirSpec::at("~/.claude")]
+    } else {
+        specs
+    };
+    let mut seen = std::collections::HashSet::new();
+    // `claude` is spoken for: it is what the unlabelled default shows as,
+    // so another entry asking for it becomes `claude-2` rather than a
+    // second tab reading CLAUDE.
+    let mut used: std::collections::HashSet<String> =
+        std::iter::once("claude".to_string()).collect();
+    let mut out = Vec::new();
+    for spec in specs {
+        let expanded = normalize_dir(&expand_user(&spec.path, home));
+        if expanded.is_empty() || !seen.insert(expanded.clone()) {
+            continue;
+        }
+        // `~/.claude` carries no label at all, and an absent label reads
+        // as plain CLAUDE everywhere it is shown. Labels exist to tell the
+        // *extra* accounts apart; the default one is already told apart by
+        // being the one everybody has, and renaming it costs the familiar
+        // heading to buy a second name for the same thing.
+        //
+        // Empty rather than the word "claude", so there is no magic string
+        // to collide with somebody who genuinely names a directory that. A
+        // label written on the default is inert rather than an error, the
+        // same way one on a single-entry list is, so it survives being
+        // moved down the list later.
+        let wanted = match is_default_dir(&expanded, home) {
+            true => String::new(),
+            false => spec
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| fallback_label(&expanded, home)),
+        };
+        let label = match wanted.is_empty() {
+            // Nothing to tell apart: there is one default directory and it
+            // is already reserved above.
+            true => String::new(),
+            false => unique_label(&wanted, &mut used),
+        };
+        out.push(ClaudeDir { path: expanded, label });
+    }
+    if out.is_empty() {
+        let path = normalize_dir(&format!("{}/.claude", home.trim_end_matches('/')));
+        out.push(ClaudeDir {
+            path,
+            label: String::new(),
+        });
+    }
+    out
+}
+
+/// True when the pane should keep today's single CLAUDE tab / CLAUDE group.
+///
+/// Extra tabs and `{label} - CLAUDE` groups exist only when more than one
+/// directory is configured. One custom directory still reads as CLAUDE: a
+/// lone profile does not need a label to tell itself apart from nobody.
+pub fn single_claude_profile(dirs: &[ClaudeDir]) -> bool {
+    dirs.len() <= 1
+}
+
+/// Tab strip id. One profile stays `claude`; extras are `claude:{label}`.
+pub fn tab_id(dir: &ClaudeDir, multi: bool) -> String {
+    if multi {
+        match dir.label.is_empty() {
+            // The default profile keeps the id it has always had, so
+            // anything remembering a selected tab still finds it.
+            true => "claude".into(),
+            false => format!("claude:{}", dir.label),
+        }
+    } else {
+        "claude".into()
+    }
+}
+
+/// Summary group heading. One profile stays `CLAUDE`; extras are
+/// `{label} - CLAUDE` so two Max accounts cannot share one bar.
+///
+/// A profile whose label is already the word does not repeat it: the
+/// default `~/.claude` beside a second directory read `claude - CLAUDE`,
+/// which stutters and says nothing the plain heading did not.
+pub fn summary_heading(label: &str, multi: bool) -> String {
+    if multi && !label.is_empty() {
+        format!("{label} - CLAUDE")
+    } else {
+        "CLAUDE".into()
+    }
+}
+
+/// The resolved list on this config, or the default `~/.claude` when a
+/// test `Config` never filled the field.
+pub fn dirs_of(cfg: &Config) -> Vec<ClaudeDir> {
+    if cfg.claude_dirs.is_empty() {
+        resolve_claude_dirs(&[], &home())
+    } else {
+        cfg.claude_dirs.clone()
+    }
+}
+
+fn expand_user(path: &str, home: &str) -> String {
+    let path = path.trim();
+    let home = home.trim_end_matches('/');
+    if path == "~" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+fn normalize_dir(path: &str) -> String {
+    let path = path.trim();
+    if path == "/" {
+        return path.to_string();
+    }
+    path.trim_end_matches('/').to_string()
+}
+
+/// The label a path implies, for an entry that named none.
+///
+/// The leading dot of a hidden directory goes: `~/.claude-bbi` put
+/// `.CLAUDE-BBI` on the tab strip, where the dot reads as a stray
+/// character rather than as part of a name.
+/// Whether this is the `~/.claude` every machine already has.
+fn is_default_dir(path: &str, home: &str) -> bool {
+    normalize_dir(path) == normalize_dir(&format!("{}/.claude", home.trim_end_matches('/')))
+}
+
+fn fallback_label(path: &str, home: &str) -> String {
+    if is_default_dir(path, home) {
+        return "claude".into();
+    }
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let name = name.strip_prefix('.').unwrap_or(name);
+    if name.is_empty() {
+        "claude".into()
+    } else {
+        name.to_string()
+    }
+}
+
+/// The wanted label, or the next free `{wanted}-{n}`.
+///
+/// Compared without case, because `tab_title` uppercases: `Work` and `work`
+/// are two ids and one tab, which is the collision this exists to prevent
+/// wearing a disguise. The case that was typed is kept - it is what the
+/// group heading says.
+fn unique_label(wanted: &str, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(wanted.to_lowercase()) {
+        return wanted.to_string();
+    }
+    for n in 2.. {
+        let candidate = format!("{wanted}-{n}");
+        if used.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    wanted.to_string()
+}
+
+/// Claude Code's OAuth/app-state file for this config dir.
+///
+/// The default pairing is `~/.claude` beside `~/.claude.json` — a sibling
+/// named `{dir}.json`, not a file inside the directory. Official docs still
+/// describe `~/.claude.json` that way, and `CLAUDE_CONFIG_DIR` profiles
+/// follow the same shape (`~/.claude-overflow.json`). Some installs also
+/// write `{dir}/.claude.json`. Whichever of those two exists is preferred;
+/// if neither does, the sibling is the path Claude Code itself would use.
+/// A custom dir never falls back to `~/.claude.json`, which would mix two
+/// accounts' cached usage.
+pub fn claude_json_for(dir: &str) -> String {
+    let sibling = format!("{dir}.json");
+    let nested = format!("{dir}/.claude.json");
+    if std::path::Path::new(&sibling).is_file() {
+        sibling
+    } else if std::path::Path::new(&nested).is_file() {
+        nested
+    } else {
+        sibling
+    }
+}
+
+fn creds_path(dir: &str) -> String {
+    format!("{dir}/.credentials.json")
+}
+
+fn stats_path(dir: &str) -> String {
+    format!("{dir}/stats-cache.json")
+}
+
+fn projects_path(dir: &str) -> String {
+    format!("{dir}/projects")
+}
+
+fn snapshot_slug_plain(dir: &str) -> String {
+    let slug: String = dir
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "dir".into()
+    } else {
+        slug
+    }
+}
+
+/// A short digest of the whole path, so `/a-bc` and `/a/bc` cannot share a
+/// file. FNV-1a is enough: it is stable, has no crate, and two distinct
+/// directories hashing the same is not a thing this pane will see.
+fn snapshot_digest(dir: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in dir.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn snapshot_slug(dir: &str) -> String {
+    format!("{}-{:016x}", snapshot_slug_plain(dir), snapshot_digest(dir))
+}
+
 /// The OAuth token Claude Code already holds.
 ///
 /// It goes only to Anthropic, is never printed, and an expired one is not
 /// used at all: the refresh token sits beside it, but spending it would
 /// race Claude Code's own credential handling for a number that has a local
 /// cache anyway.
-pub fn claude_token() -> Option<(String, String)> {
-    let creds = read_json(&under_home(".claude/.credentials.json"))?;
+fn claude_token_at(dir: &str) -> Option<(String, String)> {
+    let creds = read_json(&creds_path(dir))?;
     let o = &creds["claudeAiOauth"];
     let tok = text(o, "accessToken");
     if tok.is_empty() || num(o, "expiresAt") / 1000.0 <= now() {
@@ -161,11 +530,50 @@ fn reading_is_old(taken_at: f64) -> bool {
 /// being maintained. CodexBar does the same and for the same reason: its
 /// Claude sources are the API and the CLI, never that file, with its own
 /// snapshot shown by capture age when they all fail.
-fn snapshot_path() -> String {
-    let base = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+fn snapshot_state_home() -> String {
+    std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
         format!("{}/.local/state", std::env::var("HOME").unwrap_or_default())
-    });
-    format!("{}/opscope/claude-usage.json", base)
+    })
+}
+
+fn snapshot_path() -> String {
+    format!("{}/opscope/claude-usage.json", snapshot_state_home())
+}
+
+/// One file per config dir so two Max accounts cannot overwrite each other.
+/// The default `~/.claude` keeps the original name, so a snapshot already
+/// on disk stays the fallback for the profile that wrote it.
+fn snapshot_path_for(dir: &str) -> String {
+    if normalize_dir(dir) == normalize_dir(&under_home(".claude")) {
+        snapshot_path()
+    } else {
+        format!(
+            "{}/opscope/claude-usage-{}.json",
+            snapshot_state_home(),
+            snapshot_slug(dir)
+        )
+    }
+}
+
+/// The file this directory writes to, then the name a build before the
+/// digest used, so a snapshot already on disk is still the fallback for
+/// the profile that wrote it. The default `~/.claude` has always had its
+/// own name and is not in this list twice.
+fn snapshot_paths_for(dir: &str) -> Vec<String> {
+    let current = snapshot_path_for(dir);
+    if normalize_dir(dir) == normalize_dir(&under_home(".claude")) {
+        return vec![current];
+    }
+    let previous = format!(
+        "{}/opscope/claude-usage-{}.json",
+        snapshot_state_home(),
+        snapshot_slug_plain(dir)
+    );
+    if previous == current {
+        vec![current]
+    } else {
+        vec![current, previous]
+    }
 }
 
 /// The account the reading belongs to, so switching accounts does not show
@@ -174,18 +582,27 @@ fn snapshot_path() -> String {
 /// own. Absent on a machine whose Claude Code has never written the key, and
 /// then the guard is simply not applied - a missing marker is not a mismatch.
 fn account_marker() -> Option<String> {
-    let config = read_json(&under_home(".claude.json"))?;
+    account_marker_at(&under_home(".claude.json"))
+}
+
+fn account_marker_at(json_path: &str) -> Option<String> {
+    let config = read_json(json_path)?;
     let uuid = text(&config["cachedUsageUtilization"], "accountUuid");
     (!uuid.is_empty()).then_some(uuid)
 }
 
-fn save_snapshot(utilization: &serde_json::Value) {
-    save_snapshot_at(&snapshot_path(), utilization)
+#[allow(dead_code)]
+fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
+    write_snapshot(path, utilization, account_marker())
+}
+
+fn save_snapshot_for(path: &str, json_path: &str, utilization: &serde_json::Value) {
+    write_snapshot(path, utilization, account_marker_at(json_path))
 }
 
 /// The write, against a named path so it can be tested without reaching for
 /// the real one or rewriting the environment out from under other tests.
-fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
+fn write_snapshot(path: &str, utilization: &serde_json::Value, uuid: Option<String>) {
     if let Some(dir) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -193,20 +610,32 @@ fn save_snapshot_at(path: &str, utilization: &serde_json::Value) {
         "fetchedAtMs": now() * 1000.0,
         "utilization": utilization,
     });
-    if let Some(uuid) = account_marker() {
+    if let Some(uuid) = uuid {
         body["accountUuid"] = serde_json::json!(uuid);
     }
     let _ = std::fs::write(path, body.to_string());
 }
 
+#[allow(dead_code)]
 fn read_snapshot_at(path: &str) -> Option<(serde_json::Value, f64)> {
+    read_snapshot_against(path, account_marker())
+}
+
+fn read_snapshot_for(path: &str, json_path: &str) -> Option<(serde_json::Value, f64)> {
+    read_snapshot_against(path, account_marker_at(json_path))
+}
+
+fn read_snapshot_against(
+    path: &str,
+    now_uuid: Option<String>,
+) -> Option<(serde_json::Value, f64)> {
     let saved = read_json(path)?;
     let u = saved["utilization"].clone();
     if u.is_null() {
         return None;
     }
     let held = text(&saved, "accountUuid");
-    if let (false, Some(now_uuid)) = (held.is_empty(), account_marker()) {
+    if let (false, Some(now_uuid)) = (held.is_empty(), now_uuid) {
         if held != now_uuid {
             return None;
         }
@@ -232,12 +661,17 @@ fn claude_code_cache_at(path: &str) -> Option<(serde_json::Value, f64)> {
 /// The best reading we have that is not live: ours if we have one, Claude
 /// Code's while it is still within the hour it trusts it for, whichever was
 /// taken more recently.
-pub fn claude_stale() -> Option<(serde_json::Value, f64)> {
-    stale_from(&snapshot_path(), &under_home(".claude.json"))
+fn claude_stale_for(dir: &str) -> Option<(serde_json::Value, f64)> {
+    let json = claude_json_for(dir);
+    let ours = snapshot_paths_for(dir)
+        .into_iter()
+        .find_map(|path| read_snapshot_for(&path, &json));
+    fresher(ours, claude_code_cache_at(&json))
 }
 
 /// The whole fallback against two named files, so a test can put a fossil
 /// and a fresh reading on disk and check which one comes back.
+#[allow(dead_code)]
 fn stale_from(ours: &str, theirs: &str) -> Option<(serde_json::Value, f64)> {
     fresher(read_snapshot_at(ours), claude_code_cache_at(theirs))
 }
@@ -346,11 +780,14 @@ pub fn scan_transcript(
 /// day - and input, output and the two cache kinds differ in price by up to
 /// fifty times, so a total cannot be costed. The transcripts carry the
 /// split, which is why the money comes from here and not from the cache.
-pub fn claude_daily(caches: &mut Caches) -> HashMap<String, HashMap<String, Tokens>> {
+fn claude_daily_at(
+    caches: &mut Caches,
+    projects: &str,
+) -> HashMap<String, HashMap<String, Tokens>> {
     let mut files = Vec::new();
     // Recursive on purpose: subagent transcripts live a further two levels
     // down, and that is where most of the smaller models actually run.
-    walk(&under_home(".claude/projects"), ".jsonl", &mut files);
+    walk(projects, ".jsonl", &mut files);
     let mut seen: HashMap<String, (String, String, Tokens)> = HashMap::new();
     for path in &files {
         seen.extend(scan_transcript(caches, path));
@@ -404,9 +841,9 @@ pub fn window_models(
 /// The median is what gets shown: it barely moves whichever way the outliers
 /// are trimmed, which is the reason to trust it, while the maximum moves by
 /// a factor of twenty on the same data, which is the reason not to show one.
-pub fn claude_rates() -> (Vec<f64>, usize) {
+fn claude_rates_at(projects: &str) -> (Vec<f64>, usize) {
     let mut files = Vec::new();
-    walk(&under_home(".claude/projects"), ".jsonl", &mut files);
+    walk(projects, ".jsonl", &mut files);
     let mut with_time: Vec<(u64, String)> = files
         .into_iter()
         .filter_map(|path| {
@@ -454,13 +891,26 @@ pub fn claude_rates() -> (Vec<f64>, usize) {
     (out, sampled)
 }
 
-pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
-    let mut claude = Data::default();
+pub fn read(caches: &mut Caches, cfg: &Config) -> Vec<Data> {
+    dirs_of(cfg)
+        .into_iter()
+        .map(|dir| read_one(caches, &dir))
+        .collect()
+}
+
+fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
+    let mut claude = Data {
+        label: dir.label.clone(),
+        dir: dir.path.clone(),
+        ..Data::default()
+    };
+    let json = claude_json_for(&dir.path);
     // The reason rides along in the cached value, so it is held and shown
     // for as long as the failure it describes rather than only on the frame
-    // the request happened to be made.
-    let live = cached(caches, "claude", CLAUDE_LIVE_TTL, || {
-        let Some((tok, plan)) = claude_token() else {
+    // the request happened to be made. The key includes the dir so two
+    // Max accounts cannot share one held reading.
+    let live = cached(caches, &format!("claude:{}", dir.path), CLAUDE_LIVE_TTL, || {
+        let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
         };
         match claude_try("https://api.anthropic.com/api/oauth/usage", &tok) {
@@ -485,27 +935,32 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             // Kept for the next refresh that cannot reach the endpoint. The
             // reading is held for LIVE_TTL either way, so this writes about
             // once every two minutes rather than on every frame.
-            save_snapshot(&got["u"]);
+            save_snapshot_for(&snapshot_path_for(&dir.path), &json, &got["u"]);
         }
         None => {
-            if let Some((u, at)) = claude_stale() {
+            if let Some((u, at)) = claude_stale_for(&dir.path) {
                 claude.quota = Some(u);
                 claude.quota_live = false;
                 claude.quota_at = at;
             }
         }
     }
-    claude.profile = cached(caches, "claude-plan", PLAN_TTL, || {
-        let (tok, plan) = claude_token()?;
-        let mut d = claude_get("https://api.anthropic.com/api/oauth/profile", &tok)?;
-        d["_plan"] = serde_json::Value::String(plan);
-        Some(d)
-    });
+    claude.profile = cached(
+        caches,
+        &format!("claude-plan:{}", dir.path),
+        PLAN_TTL,
+        || {
+            let (tok, plan) = claude_token_at(&dir.path)?;
+            let mut d = claude_get("https://api.anthropic.com/api/oauth/profile", &tok)?;
+            d["_plan"] = serde_json::Value::String(plan);
+            Some(d)
+        },
+    );
     if claude.profile.is_none() {
         // The profile endpoint is richer, but the credentials file needs no
         // network and is always there, so the section degrades to two true
         // lines instead of vanishing.
-        if let Some(creds) = read_json(&under_home(".claude/.credentials.json")) {
+        if let Some(creds) = read_json(&creds_path(&dir.path)) {
             let o = &creds["claudeAiOauth"];
             let plan = text(o, "subscriptionType");
             if !plan.is_empty() {
@@ -517,14 +972,14 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             }
         }
     }
-    match read_json(&under_home(".claude/stats-cache.json")) {
+    match read_json(&stats_path(&dir.path)) {
         Some(stats) => {
             claude.ok = true;
             claude.stats = stats;
-            let (rates, sampled) = claude_rates();
+            let (rates, sampled) = claude_rates_at(&projects_path(&dir.path));
             claude.rates = rates;
             claude.sampled = sampled;
-            claude.daily = claude_daily(caches);
+            claude.daily = claude_daily_at(caches, &projects_path(&dir.path));
         }
         None => claude.why = "no stats cache".into(),
     }
@@ -2050,6 +2505,25 @@ mod tests {
     }
 
     #[test]
+    fn distinct_directories_do_not_share_a_snapshot_name() {
+        assert_ne!(
+            snapshot_slug("/tmp/a-b"),
+            snapshot_slug("/tmp/a/b"),
+            "/tmp/a-b and /tmp/a/b collapsed to one slug"
+        );
+        assert_ne!(
+            snapshot_slug("/home/u/.claude-work"),
+            snapshot_slug("/home/u/.claude.work"),
+            "a hyphen and a dot became the same file"
+        );
+        assert_eq!(
+            snapshot_slug("/tmp/a-b"),
+            snapshot_slug("/tmp/a-b"),
+            "the same path must keep the same file"
+        );
+    }
+
+    #[test]
     fn a_saved_reading_comes_back_the_way_it_went_in() {
         let dir = std::env::temp_dir().join(format!("tt-claude-{}", std::process::id()));
         let path = dir.join("claude-usage.json");
@@ -2949,5 +3423,299 @@ mod tests {
         for w in 30..=120 {
             assert!(extra_line(&off, w).contains("10.00"), "width {}", w);
         }
+    }
+
+    /// The default account is CLAUDE and stays CLAUDE, however many
+    /// profiles sit beside it and whatever anyone writes on it.
+    ///
+    /// Carried as an *absent* label rather than the word "claude", so there
+    /// is no magic string to collide with somebody who genuinely names a
+    /// directory that - and a label written on the default is inert rather
+    /// than an error, the same way one on a single-entry list is, so it
+    /// survives being moved down the list later.
+    #[test]
+    fn the_default_account_is_claude_whatever_is_written_on_it() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::named("~/.claude", "mine"),
+                ClaudeDirSpec::named("~/.claude-work", "work"),
+            ],
+            "/home/someone",
+        );
+        assert_eq!(got[0].label, "", "a label on the default was kept");
+        assert_eq!(summary_heading(&got[0].label, true), "CLAUDE");
+        assert_eq!(tab_id(&got[0], true), "claude");
+        // The extra one is unaffected.
+        assert_eq!(got[1].label, "work");
+        assert_eq!(summary_heading(&got[1].label, true), "work - CLAUDE");
+    }
+
+    /// Nothing else may show CLAUDE, or two tabs would read the same and
+    /// the pane would be telling two accounts apart by nothing at all.
+    #[test]
+    fn another_directory_cannot_take_the_default_name() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-two", "claude"),
+                ClaudeDirSpec::named("~/.claude-three", "CLAUDE"),
+            ],
+            "/home/someone",
+        );
+        let shown: Vec<String> = got
+            .iter()
+            .map(|d| summary_heading(&d.label, true))
+            .collect();
+        // Told apart without case, because the tab strip uppercases - and
+        // the case somebody typed is kept, so the heading reads back the
+        // way it was written.
+        assert_eq!(
+            shown,
+            vec![
+                "CLAUDE".to_string(),
+                "claude-2 - CLAUDE".to_string(),
+                "CLAUDE-3 - CLAUDE".to_string()
+            ],
+            "{got:?}"
+        );
+        // And no two tabs share an id either.
+        let ids: Vec<String> = got.iter().map(|d| tab_id(d, true)).collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    }
+
+    #[test]
+    fn an_empty_config_is_the_single_default_claude_dir() {
+        let home = "/home/someone";
+        let got = resolve_claude_dirs(&[], home);
+        assert_eq!(
+            got,
+            vec![ClaudeDir {
+                path: "/home/someone/.claude".into(),
+                // No label at all: an absent one reads as plain CLAUDE,
+                // which is what the default account has always been called.
+                label: String::new(),
+            }]
+        );
+        assert!(single_claude_profile(&got));
+        assert_eq!(tab_id(&got[0], false), "claude");
+        assert_eq!(summary_heading(&got[0].label, false), "CLAUDE");
+        assert_eq!(
+            resolve_claude_dirs(
+                &[ClaudeDirSpec::at(""), ClaudeDirSpec::at("   ")],
+                home
+            ),
+            got,
+            "empty entries are the same as an unset list"
+        );
+    }
+
+    #[test]
+    fn tilde_paths_expand_against_home_and_keep_order() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude-overflow"),
+                ClaudeDirSpec::at("~/.claude"),
+            ],
+            "/Users/x",
+        );
+        assert_eq!(got[0].path, "/Users/x/.claude-overflow");
+        assert_eq!(got[1].path, "/Users/x/.claude");
+        // The hidden directory's dot is not part of its name.
+        assert_eq!(got[0].label, "claude-overflow");
+        assert_eq!(got[1].label, "", "the default carries no label");
+        assert!(!single_claude_profile(&got));
+        assert_eq!(tab_id(&got[0], true), "claude:claude-overflow");
+        assert_eq!(
+            summary_heading("claude-overflow", true),
+            "claude-overflow - CLAUDE"
+        );
+        // And the default profile does not say the word twice.
+        assert_eq!(summary_heading(&got[1].label, true), "CLAUDE");
+    }
+
+    #[test]
+    fn a_named_list_is_watched_exactly() {
+        let home = "/home/someone";
+        let only = resolve_claude_dirs(&[ClaudeDirSpec::at("~/.claude-overflow")], home);
+        assert_eq!(only.len(), 1, "{only:?}");
+        assert_eq!(only[0].path, "/home/someone/.claude-overflow");
+        assert_eq!(only[0].label, "claude-overflow");
+        assert!(single_claude_profile(&only));
+
+        let listed_twice = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::at("~/.claude/"),
+            ],
+            home,
+        );
+        assert_eq!(listed_twice.len(), 1, "{listed_twice:?}");
+        assert_eq!(listed_twice[0].path, "/home/someone/.claude");
+    }
+
+    #[test]
+    fn labels_are_the_basename() {
+        let got = resolve_claude_dirs(
+            &[ClaudeDirSpec::at("/var/lib/claude-work")],
+            "/home/someone",
+        );
+        assert_eq!(got[0].label, "claude-work");
+        assert_eq!(got[0].path, "/var/lib/claude-work");
+    }
+
+    #[test]
+    fn an_entry_is_a_path_or_a_path_with_a_label() {
+        let read = configured_dirs(&serde_json::json!({
+            "claude_config_dirs": [
+                "~/.claude",
+                { "path": "~/.claude-bbi", "label": "bbi" },
+                { "path": "  ~/.claude-spare  ", "label": "   " },
+                { "label": "no path of its own" },
+                17,
+                ["~/.claude-nested"],
+            ]
+        }));
+        assert_eq!(
+            read,
+            vec![
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-bbi", "bbi"),
+                // Trimmed, and a whitespace label is no label.
+                ClaudeDirSpec::at("~/.claude-spare"),
+            ],
+            "{read:?}"
+        );
+        assert!(configured_dirs(&serde_json::json!({})).is_empty());
+        assert!(
+            configured_dirs(&serde_json::json!({ "claude_config_dirs": "~/.claude" })).is_empty(),
+            "a string where a list belongs is no list"
+        );
+    }
+
+    #[test]
+    fn a_written_label_beats_the_derived_one() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::at("~/.claude"),
+                ClaudeDirSpec::named("~/.claude-bbi", "bbi"),
+            ],
+            "/home/someone",
+        );
+        let labels: Vec<&str> = got.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["", "bbi"], "{got:?}");
+        assert_eq!(got[1].path, "/home/someone/.claude-bbi");
+        assert_eq!(tab_id(&got[1], true), "claude:bbi");
+        assert_eq!(summary_heading(&got[1].label, true), "bbi - CLAUDE");
+        // The default keeps the plain heading and the plain id even with a
+        // second profile beside it.
+        assert_eq!(summary_heading(&got[0].label, true), "CLAUDE");
+        assert_eq!(tab_id(&got[0], true), "claude");
+    }
+
+    #[test]
+    fn two_written_labels_cannot_share_a_tab() {
+        let got = resolve_claude_dirs(
+            &[
+                ClaudeDirSpec::named("~/.claude-one", "work"),
+                ClaudeDirSpec::named("~/.claude-two", "work"),
+                // Same name to the tab strip, which uppercases both.
+                ClaudeDirSpec::named("~/.claude-three", "Work"),
+            ],
+            "/home/someone",
+        );
+        let labels: Vec<&str> = got.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, vec!["work", "work-2", "Work-3"], "{got:?}");
+        let ids: Vec<String> = got.iter().map(|d| tab_id(d, true)).collect();
+        assert_eq!(ids.len(), 3);
+        let mut seen: Vec<String> = ids.iter().map(|id| id.to_uppercase()).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "{ids:?}");
+    }
+
+    #[test]
+    fn one_directory_ignores_its_label() {
+        let got = resolve_claude_dirs(
+            &[ClaudeDirSpec::named("~/.claude-bbi", "bbi")],
+            "/home/someone",
+        );
+        assert!(single_claude_profile(&got));
+        // Set, and inert: it is there for the day a second directory is
+        // added, and until then there is nobody to tell apart.
+        assert_eq!(got[0].label, "bbi");
+        assert_eq!(tab_id(&got[0], false), "claude");
+        assert_eq!(summary_heading(&got[0].label, false), "CLAUDE");
+    }
+
+    #[test]
+    fn claude_json_prefers_the_sibling_then_a_file_inside_the_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-json-{}-{}",
+            std::process::id(),
+            now() as u64
+        ));
+        let dir = root.join("profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().to_string();
+        // Neither file exists: the default pairing is the sibling, the same
+        // shape as ~/.claude beside ~/.claude.json.
+        assert_eq!(claude_json_for(&dir_s), format!("{dir_s}.json"));
+
+        let nested = dir.join(".claude.json");
+        std::fs::write(&nested, "{}").unwrap();
+        assert_eq!(claude_json_for(&dir_s), nested.to_string_lossy());
+
+        let sibling = root.join("profile.json");
+        std::fs::write(&sibling, "{}").unwrap();
+        assert_eq!(claude_json_for(&dir_s), sibling.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_dirs_are_read_apart_and_never_merged() {
+        let root = std::env::temp_dir().join(format!(
+            "tt-claude-multi-{}-{}",
+            std::process::id(),
+            now() as u64
+        ));
+        let a = root.join("main");
+        let b = root.join("overflow");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            a.join("stats-cache.json"),
+            r#"{"totalSessions":1,"modelUsage":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            b.join("stats-cache.json"),
+            r#"{"totalSessions":9,"modelUsage":{}}"#,
+        )
+        .unwrap();
+        let cfg = Config {
+            claude_dirs: vec![
+                ClaudeDir {
+                    path: a.to_string_lossy().into(),
+                    label: "main".into(),
+                },
+                ClaudeDir {
+                    path: b.to_string_lossy().into(),
+                    label: "overflow".into(),
+                },
+            ],
+            ..Config::default()
+        };
+        let mut caches = Caches::default();
+        let got = read(&mut caches, &cfg);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].label, "main");
+        assert_eq!(got[1].label, "overflow");
+        assert!(got[0].ok && got[1].ok);
+        assert_eq!(num(&got[0].stats, "totalSessions") as i64, 1);
+        assert_eq!(num(&got[1].stats, "totalSessions") as i64, 9);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

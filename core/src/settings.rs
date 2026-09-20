@@ -108,6 +108,12 @@ impl Field {
     fn under_section(&self) -> String {
         let mut out = String::new();
         for step in &self.parents {
+            // A row's position is how this screen finds the entry, not
+            // something to read: `CLAUDE_CONFIG_DIRS.#0.PATH` names an
+            // index nobody counted and nothing on screen shows.
+            if row_index(step).is_some() {
+                continue;
+            }
             out.push_str(step);
             out.push('.');
         }
@@ -119,9 +125,15 @@ impl Field {
     /// enclosing key is part of the name, because `input` alone appears
     /// five times over and says nothing about which model it prices.
     fn label(&self) -> String {
-        match self.parents.len() {
-            0 | 1 => self.key.clone(),
-            _ => format!("{} · {}", self.parents[self.parents.len() - 1], self.key),
+        match self.parents.last() {
+            // The enclosing key is part of the name where it says something
+            // - `input` alone appears five times over and never says which
+            // model it prices. A row's index says nothing, and the screen
+            // showing these is already about one entry.
+            Some(last) if row_index(last).is_none() && self.parents.len() > 1 => {
+                format!("{last} · {}", self.key)
+            }
+            _ => self.key.clone(),
         }
     }
 
@@ -194,6 +206,14 @@ fn named_kind(value: &Value, kind: &str) -> bool {
         "number" => value.is_number(),
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),
+        // A list whose entries may carry a name of their own. Either form
+        // is legal in the same list, because the plain one shipped first:
+        // agent_usage's `claude_config_dirs` takes a path, or a path with
+        // the label its tab should read. Without this kind the screen has
+        // to be told the list is all strings, and then adding a path to a
+        // list that already holds one labelled entry is refused - a write
+        // turned down over an entry nobody typed on this screen.
+        "string-or-object" => value.is_string() || value.is_object(),
         "number-map" => value
             .as_object()
             .is_some_and(|map| map.values().all(Value::is_number)),
@@ -211,7 +231,20 @@ fn validate_value(
     // is the type it wants - a model the rate card does not carry has every
     // kind and a price for none of them. Demanding null back made those rows
     // unwritable, so the one case config exists for could not be configured.
-    if !expected.is_null() && !same_kind(value, expected) {
+    //
+    // A list that declares its `items` is judged by that declaration and
+    // not by the shipped default, because `same_kind` reads element one as
+    // the shape of every element. A list whose entries may take more than
+    // one form - a path, or a path with the label its tab should read -
+    // was refused before the declared kind was ever looked at, and refused
+    // saying `expected array, got array`, which names nothing anybody can
+    // act on. The `items` check below is the stricter one and says which
+    // entry is wrong.
+    let declares_items = value.is_array()
+        && rule
+            .and_then(Value::as_object)
+            .is_some_and(|rule| rule.contains_key("items"));
+    if !expected.is_null() && !declares_items && !same_kind(value, expected) {
         return Err(format!(
             "expected {}, got {}",
             kind_name(expected),
@@ -288,7 +321,12 @@ fn constraint_summary(rule: Option<&Value>) -> String {
         ));
     }
     if let Some(kind) = rule.get("items").and_then(Value::as_str) {
-        parts.push(format!("{kind} items"));
+        // Said as English, not as the schema spells it: a reader of
+        // `string-or-object items` has to guess where the words end.
+        parts.push(match kind {
+            "string-or-object" => "string or object items".to_string(),
+            _ => format!("{kind} items"),
+        });
     }
     if let Some(kind) = rule.get("values").and_then(Value::as_str) {
         parts.push(format!("{kind} values"));
@@ -870,6 +908,11 @@ fn live_section<'a>(
     canonical
 }
 
+/// The row a `#N` path step points at, if it is one.
+fn row_index(step: &str) -> Option<usize> {
+    step.strip_prefix('#')?.parse().ok()
+}
+
 fn current_of<'a>(
     live: &'a Value,
     field: &Field,
@@ -877,7 +920,13 @@ fn current_of<'a>(
 ) -> Option<&'a Value> {
     let mut at = live.get(live_section(live, &field.section, legacy))?;
     for step in field.steps() {
-        at = at.get(step)?;
+        // `#3` is the fourth row of a list, not a key called "#3". An array
+        // entry has no name to be addressed by, and this is what lets one
+        // be edited as a screen of named fields like everything else.
+        at = match row_index(step) {
+            Some(i) => at.get(i)?,
+            None => at.get(step)?,
+        };
     }
     Some(at)
 }
@@ -1093,6 +1142,31 @@ fn fresh_config(app: &App) -> Result<(String, Value), String> {
 /// config's sources or its own three, never a mixture - so a write that
 /// touched a single key of an absent map would create it holding only that
 /// key and drop every sibling the screen had just shown.
+/// The list a row-field belongs to, and which row it is.
+///
+/// A field whose parents end `[..., "#2"]` is one named value inside the
+/// third entry of a list. It is written the way a map entry is - read the
+/// whole list, set this one thing, write the list back - because an array
+/// element has no key path a deep writer could address, and doing it in one
+/// write leaves no window in which a sibling row can be lost.
+fn row_parent_of(app: &App, field: &Field) -> Option<(Field, usize)> {
+    let [list, row] = field.parents.as_slice() else {
+        return None;
+    };
+    let at = row_index(row)?;
+    let parent = app
+        .fields
+        .iter()
+        .find(|f| f.key == *list)
+        .or_else(|| {
+            app.stack
+                .last()
+                .and_then(|(fields, _, _)| fields.iter().find(|f| f.key == *list))
+        })?
+        .clone();
+    Some((parent, at))
+}
+
 fn map_parent_of(app: &App, field: &Field) -> Option<Field> {
     let [only] = field.parents.as_slice() else {
         return None;
@@ -1116,6 +1190,70 @@ fn map_parent_of(app: &App, field: &Field) -> Option<Field> {
 }
 
 fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> {
+    // One field of one row is written as the whole list, for the reason
+    // `row_parent_of` gives.
+    if let Some((parent, at)) = app.fields.get(index).and_then(|f| row_parent_of(app, f)) {
+        let named = app.fields[index].key.clone();
+        let mut rows: Vec<Value> =
+            match current_of(&app.live, &parent, app.legacy_section).or(Some(&parent.default)) {
+                Some(Value::Array(rows)) => rows.clone(),
+                _ => Vec::new(),
+            };
+        if at >= rows.len() {
+            return Err("that entry is no longer in the list.".into());
+        }
+        let mut row = match rows[at].clone() {
+            Value::Object(map) => map,
+            // A plain entry gaining a second field becomes the named form,
+            // keeping what it already said as its path.
+            Value::String(path) => {
+                let mut map = serde_json::Map::new();
+                map.insert("path".into(), Value::String(path));
+                map
+            }
+            _ => serde_json::Map::new(),
+        };
+        if named == "path" {
+            if let Value::String(path) = &value {
+                if !path.is_empty() && sibling_holds_path(&rows, at, path) {
+                    return Err(format!("{path} is already on another row."));
+                }
+            }
+        }
+        match value {
+            // Path is the one field an entry cannot do without. Clearing it
+            // would leave `{"label":"…"}` in the file, which the widget
+            // ignores, and `drop_empty_row` would keep because it is not
+            // an abandoned placeholder. Delete the row instead.
+            Value::String(ref s) if s.is_empty() && named == "path" => {
+                return Err("An entry needs a path - [d]elete removes the entry.".into());
+            }
+            // Clearing a field takes it off the row rather than writing an
+            // empty string, so a row with nothing but a path goes back to
+            // being the plain form it started as.
+            Value::String(ref s) if s.is_empty() => {
+                row.remove(&named);
+            }
+            other => {
+                row.insert(named, other);
+            }
+        }
+        // Always the object form. Collapsing a row back to a plain string
+        // when it had nothing but a path left two shapes in one list, and
+        // then a row's identity depended on which shape it happened to be
+        // in - which is how the default profile, the one entry that
+        // naturally has only a path, became the one entry that could not be
+        // opened. A list still *reads* both forms, because files already
+        // hold the plain one; this screen only ever writes the one.
+        rows[at] = Value::Object(row);
+        // Written through the parent by standing on it for one call, the
+        // same way a map entry is: one writer, one validation, one atomic
+        // replace, and no second implementation of the pathing.
+        let stood = std::mem::replace(&mut app.fields, vec![parent]);
+        let outcome = write_field(app, 0, Value::Array(rows));
+        app.fields = stood;
+        return outcome;
+    }
     // One entry of a map is written as the whole map: read what is there or
     // what the widget ships, set this key, write the object. One write, and
     // no window in which a sibling can be lost.
@@ -1188,6 +1326,19 @@ fn write_field(app: &mut App, index: usize, value: Value) -> Result<(), String> 
 /// place. Un-setting one number is most of what `d` is for on a screen of
 /// numbers, so it has to follow the same path the write took.
 fn reset_field(app: &mut App, index: usize) -> Result<(), String> {
+    // A row field is addressed as `parent.#N.key`. `Value::get("#N")` on
+    // the array always misses, so the walk below would conclude the field
+    // was already at its default and write nothing — notably, `[d]` could
+    // not clear a custom label. The row writer already knows how to take
+    // one key off.
+    if app
+        .fields
+        .get(index)
+        .and_then(|f| row_parent_of(app, f))
+        .is_some()
+    {
+        return write_field(app, index, Value::String(String::new()));
+    }
     let field = app.fields.get(index).ok_or("no such field")?;
     let steps: Vec<String> = field.steps().iter().map(|s| s.to_string()).collect();
     let schema_path = field.path();
@@ -1669,7 +1820,11 @@ fn free_list_kind(app: &App, key: &str) -> Option<PickKind> {
     }
     let declared = rule.and_then(|r| r.get("items")).and_then(Value::as_str);
     let listable = match declared {
-        Some("string" | "integer" | "number") => true,
+        // `string-or-object` is listable on its string half: the picker
+        // adds and removes entries, and an object entry rides along
+        // untouched - what it holds beyond a name is the widget's business
+        // and there is no field on this screen to set it with.
+        Some("string" | "integer" | "number" | "string-or-object") => true,
         Some(_) => false,
         None => {
             // Nothing declared: a shipped default of all strings or all
@@ -1730,6 +1885,12 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
         Some("integer") => "integer",
         Some("number") => "number",
         Some("string") => "string",
+        // Both forms are typeable. `parse_free_entry` decides which one a
+        // line is, so the box takes a bare path or a path and the name its
+        // tab should read - the object form used to be file-only, which
+        // made a documented setting unreachable from the screen that
+        // exists to reach it.
+        Some("string-or-object") => "string-or-object",
         _ => match field.default.as_array() {
             Some(items) if !items.is_empty() && items.iter().all(Value::is_number) => {
                 if items.iter().all(|v| v.is_i64() || v.is_u64()) {
@@ -1750,6 +1911,29 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
 /// counts for nothing is worse than one that was refused.
 fn parse_free_entry(kind: &str, typed: &str) -> Result<Value, String> {
     match kind {
+        // `<value> = <name>`, which is the only punctuation a path is
+        // unlikely to carry and a name has no reason to. Without the
+        // separator it is the plain string form, so the simple case stays
+        // one word and nothing already typeable changes meaning.
+        "string-or-object" => match typed.split_once('=') {
+            None => Ok(Value::String(typed.trim().to_string())),
+            Some((path, label)) => {
+                let (path, label) = (path.trim(), label.trim());
+                if path.is_empty() {
+                    return Err("a name needs something to name - type the path first.".into());
+                }
+                if label.is_empty() {
+                    return Err(format!("{path} = what? type a name after the =."));
+                }
+                // A second `=` is almost certainly a typo rather than a
+                // name containing one, and a silently truncated path is
+                // worse than a refusal.
+                if label.contains('=') {
+                    return Err("one = per entry: the path, then the name.".into());
+                }
+                Ok(serde_json::json!({ "path": path, "label": label }))
+            }
+        },
         "integer" => typed
             .parse::<i64>()
             .map(|n| Value::Number(n.into()))
@@ -1958,9 +2142,22 @@ fn picked_pairs(app: &App, index: usize) -> Vec<(String, String)> {
                         Some((value.to_string(), label))
                     }
                     // A bare string, as every other list writes its entries.
-                    Value::String(one) => Some((one.clone(), one.clone())),
-                    // And a number, which reads back as what was typed.
-                    Value::Number(n) => Some((n.to_string(), n.to_string())),
+                    Value::String(_) | Value::Number(_) => {
+                        Some((row_identity(row), entry_shown(row)))
+                    }
+                    // An entry with fields of its own. Listed rather than
+                    // dropped: a row the file holds and the screen does not
+                    // show is an entry somebody has to remember is there,
+                    // and the count above it would say two where the file
+                    // says three.
+                    //
+                    // Its identity stays the JSON, so removing it still
+                    // works and adding never collides with it - but what is
+                    // *shown* is the pair a reader typed, because
+                    // `{"label":"work","path":"~/.claude-work"}` is a row
+                    // nobody can read at a glance and the screen now
+                    // composes these itself.
+                    Value::Object(_) => Some((row_identity(row), entry_shown(row))),
                     _ => None,
                 })
                 .collect()
@@ -2183,6 +2380,70 @@ fn toggle_zone(app: &mut App, index: usize, zone: &str, label: Option<String>) {
 /// Appended rather than sorted: the widget decides what order means, and for
 /// a list of hosts the order somebody typed them in is the one they expect
 /// to see back.
+/// What a list row is known by.
+///
+/// The same string `picked_pairs` hands out as a row's identity, so the
+/// cursor, remove and edit all agree on which row is which. A plain entry
+/// is known by itself and an entry with fields of its own by its JSON -
+/// comparing the JSON in both cases looked right and silently failed for
+/// every plain row, because `"~/.claude"` with the quotes is not the string
+/// `~/.claude`. The default profile is exactly the row that has no fields
+/// beyond its path, so it was the one that could not be opened.
+fn row_path(row: &Value) -> Option<String> {
+    match row {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("path").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+fn sibling_holds_path(rows: &[Value], at: usize, path: &str) -> bool {
+    rows.iter()
+        .enumerate()
+        .any(|(i, row)| i != at && row_path(row).as_deref() == Some(path))
+}
+
+fn row_identity(row: &Value) -> String {
+    match row {
+        Value::String(one) => one.clone(),
+        Value::Number(n) => n.to_string(),
+        other => compact(other),
+    }
+}
+
+/// How one list entry reads on screen.
+///
+/// A plain row is itself. A named row is the pair somebody typed, because
+/// `{"label":"work","path":"~/.claude-work"}` is not something anyone reads
+/// at a glance - and the screen composes that form now, so it should say it
+/// back the way it was asked for. Anything else falls back to its JSON,
+/// which is still better than dropping the row.
+fn entry_shown(row: &Value) -> String {
+    match row {
+        Value::String(one) => one.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Object(fields) => match (
+            fields.get("path").and_then(Value::as_str),
+            fields.get("label").and_then(Value::as_str),
+        ) {
+            (Some(path), Some(label)) => format!("{path} = {label}"),
+            (Some(path), None) => path.to_string(),
+            _ => compact(row),
+        },
+        _ => compact(row),
+    }
+}
+
+/// The rows a list field currently holds.
+fn held_rows(app: &App, index: usize) -> Vec<Value> {
+    app.fields
+        .get(index)
+        .and_then(|field| current_of(&app.live, field, app.legacy_section).or(Some(&field.default)))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
     let Some(field) = app.fields.get(index) else {
         return false;
@@ -2200,9 +2461,24 @@ fn add_free_entry(app: &mut App, index: usize, entry: &str) -> bool {
             return false;
         }
     };
+    // Same entry twice is refused by value; the same *path* twice under two
+    // names is refused too, because the widget collapses duplicate paths
+    // and the loser would sit in the file forever doing nothing. Naming a
+    // path already listed plainly is the ordinary way someone adds a label
+    // to it, so the refusal says to remove the old row rather than just
+    // "already in the list".
     if rows.iter().any(|v| *v == value) {
         app.status = Some(format!("{entry} is already in the list."));
         return false;
+    }
+    if let Some(path) = row_path(&value) {
+        if let Some(held) = rows.iter().find(|v| row_path(v).as_deref() == Some(path.as_str())) {
+            app.status = Some(format!(
+                "{path} is already listed, as {} - remove that row first.",
+                entry_shown(held)
+            ));
+            return false;
+        }
     }
     rows.push(value);
     match write_field(app, index, Value::Array(rows)) {
@@ -2234,11 +2510,23 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
         .filter(|v| match v {
             Value::String(text) => text != entry,
             Value::Number(n) => n.to_string() != entry,
+            // Matched the way it is listed, or a row on screen would
+            // refuse to go and say it had.
+            Value::Object(_) => compact(v) != entry,
             _ => true,
         })
         .collect();
     match write_field(app, index, Value::Array(kept)) {
-        Ok(()) => app.status = Some(format!("Removed {entry}.")),
+        // Said back the way the row read, not the way it is stored. The
+        // reader picked `~/.claude-bbi = bbi` off the list; being told
+        // `Removed {"label":"bbi","path":"~/.claude-bbi"}` is the screen
+        // answering in a different language from the one it asked in.
+        Ok(()) => {
+            let said = serde_json::from_str::<Value>(entry)
+                .map(|row| entry_shown(&row))
+                .unwrap_or_else(|_| entry.to_string());
+            app.status = Some(format!("Removed {said}."));
+        }
         Err(e) => app.status = Some(e),
     }
 }
@@ -2249,6 +2537,143 @@ fn remove_free_entry(app: &mut App, index: usize, entry: &str) {
 /// nothing to select on that list, and its [d]efault key removed the entry
 /// and then described what was left as a default, which a wholesale-read map
 /// does not have.
+/// The named fields one list entry is made of.
+///
+/// Taken from the shape the list declares, so this is not a list about
+/// Claude directories: any `string-or-object` list gets the same screen, and
+/// a widget adding one gets the editor for free. `path` leads because it is
+/// the entry - the rest describe it.
+fn row_fields(app: &App, parent: &Field, at: usize) -> Vec<Field> {
+    // The file first, then what the widget ships - the same order every
+    // other reader here uses. Reading only the file meant a row that came
+    // from the shipped default offered no fields at all.
+    let held = current_of(&app.live, parent, app.legacy_section)
+        .or(Some(&parent.default))
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.get(at))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let named = |key: &str, help: &str| Field {
+        section: parent.section.clone(),
+        key: key.to_string(),
+        parents: vec![parent.key.clone(), format!("#{at}")],
+        help: help.to_string(),
+        // Empty rather than the row's current value: a default is what the
+        // field falls back to when nothing is written, and every one of
+        // these is the reader's own.
+        default: Value::String(String::new()),
+    };
+    let mut out = vec![named(
+        "path",
+        "Where this entry points. The one field an entry cannot do without.",
+    )];
+    out.push(named(
+        "label",
+        "What this entry is called on screen. Left empty, a name is taken from the path itself.",
+    ));
+    // Anything else the row already carries, so a field this screen does
+    // not know about is still editable rather than invisible - and a row
+    // holding one is not quietly rewritten without it.
+    if let Value::Object(map) = &held {
+        for key in map.keys() {
+            if key != "path" && key != "label" {
+                out.push(named(key, "Kept from the file as it was written."));
+            }
+        }
+    }
+    out
+}
+
+/// Take an entry back out of the list if the screen that opened it was left
+/// with nothing put in.
+///
+/// `↵` on an empty box appends a row so the fields have somewhere to write,
+/// which means an abandoned "add a new one" would otherwise leave a blank
+/// entry behind - a profile with no directory, which the widget would then
+/// have to have an opinion about.
+/// A row this screen just appended and then abandoned: `{}` or `{path:""}`.
+/// A file row that already held other keys — even without a path — is
+/// not abandoned; opening it and pressing esc must not delete it.
+fn row_is_abandoned(row: &Value) -> bool {
+    match row {
+        Value::Object(map) => {
+            let path_empty = map
+                .get("path")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
+            let extras = map.keys().any(|k| k != "path");
+            path_empty && !extras
+        }
+        _ => false,
+    }
+}
+
+/// `true` when there is nothing to drop, or the write landed. `false`
+/// when the placeholder is still in the file — the caller must stay
+/// on this screen and not pretend the row is gone.
+fn drop_empty_row(app: &mut App) -> bool {
+    let Some(field) = app.fields.first().cloned() else {
+        return true;
+    };
+    let Some((parent, at)) = row_parent_of(app, &field) else {
+        return true;
+    };
+    let rows = match current_of(&app.live, &parent, app.legacy_section) {
+        Some(Value::Array(rows)) => rows.clone(),
+        _ => return true,
+    };
+    let empty = rows.get(at).is_some_and(row_is_abandoned);
+    if !empty {
+        return true;
+    }
+    let kept: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, row)| row.clone())
+        .collect();
+    let stood = std::mem::replace(&mut app.fields, vec![parent]);
+    let outcome = write_field(app, 0, Value::Array(kept));
+    app.fields = stood;
+    match outcome {
+        Ok(()) => true,
+        Err(e) => {
+            app.status = Some(e);
+            false
+        }
+    }
+}
+
+/// Open one entry of a list as a screen of its own fields.
+///
+/// A row still held as a plain string is written as `{ "path": ... }`
+/// first. The fields address their values by name, so a string row showed
+/// an empty `path` - the entry looked as though it had lost the one thing
+/// it cannot do without. Normalising on the way in keeps one shape in the
+/// file and makes the screen tell the truth; it is lossless, since a plain
+/// entry was only ever its path.
+fn open_row_entry(app: &mut App, index: usize, parent: &Field, at: usize) {
+    if let Some(Value::String(path)) = held_rows(app, index).get(at).cloned() {
+        let mut rows = held_rows(app, index);
+        rows[at] = serde_json::json!({ "path": path });
+        let stood = std::mem::replace(&mut app.fields, vec![parent.clone()]);
+        let outcome = write_field(app, 0, Value::Array(rows));
+        app.fields = stood;
+        if let Err(e) = outcome {
+            app.status = Some(e);
+            return;
+        }
+    }
+    let fields = row_fields(app, parent, at);
+    app.stack
+        .push((app.fields.clone(), index, Some(app.mode.clone())));
+    app.fields = fields;
+    app.selected = 0;
+    app.scroll = 0;
+    app.status = None;
+    app.mode = Mode::List;
+}
+
 fn open_map_entry(app: &mut App, index: usize, parent: &Field, named: &str) {
     let field = map_entry_field(parent, named);
     let seed = edit_seed(&field, current_of(&app.live, &field, app.legacy_section));
@@ -2505,9 +2930,43 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
             rows = !rows;
         }
         // What is typed is the entry. There is nothing to search, so enter
-        // on an empty box would have nothing to mean.
-        "enter" if free => {
+        // on an empty box would have nothing to mean. Guarded on the box
+        // holding focus, because the same key on a row opens that row in
+        // here instead - and the arm below would never be reached without
+        // it, since both are a free list.
+        // An empty box and `↵` means "a new one, please": the same screen of
+        // named fields an existing row opens, which is the point - one
+        // editor, whether the entry exists yet or not. A row is appended
+        // first so the fields have somewhere to write, and dropped again on
+        // the way out if nothing was put in it.
+        "enter" if free && !rows && q.trim().is_empty() => {
+            let parent = app.fields.get(index).cloned();
+            if let Some(parent) = parent {
+                let mut held = held_rows(app, index);
+                let at = held.len();
+                held.push(Value::Object(serde_json::Map::new()));
+                if write_field(app, index, Value::Array(held)).is_ok() {
+                    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } =
+                        &mut app.mode
+                    {
+                        *query = q.clone();
+                        *sel = s_;
+                        *scroll = sc;
+                        *show_all = all;
+                        *on_list = rows;
+                        *cursor = cur;
+                    }
+                    open_row_entry(app, index, &parent, at);
+                }
+            }
+            return false;
+        }
+        "enter" if free && !rows => {
             let typed = q.trim().to_string();
+            // An amend replaces the row it came from: the old one goes
+            // first, so the path it carries cannot collide with itself.
+            // Put back if the new text is refused, or a typo would cost the
+            // entry rather than the edit.
             // Only clear it if it was taken. A refused entry is one somebody
             // is about to correct, and emptying the box makes them type it
             // again from memory to find out what was wrong with it.
@@ -2516,6 +2975,35 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 cur = 0;
                 s_ = 0;
                 sc = 0;
+            }
+        }
+        // `↵` on a row opens it in the box, which is the same box a new
+        // entry is typed into - one editor for both, so there is nothing to
+        // learn twice and a long path never has to be retyped to change the
+        // name beside it. Committing replaces the row rather than adding
+        // next to it.
+        "enter" if free && rows => {
+            if let Some((entry, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
+                let held = held_rows(app, index);
+                let at = held.iter().position(|row| row_identity(row) == entry);
+                let parent = app.fields.get(index).cloned();
+                if let (Some(at), Some(parent)) = (at, parent) {
+                    // Put it back where the caller left it before opening a
+                    // screen over the top: the picker is restored from the
+                    // stack when that screen closes.
+                    if let Mode::Pick { query, sel, scroll, show_all, on_list, cursor, .. } =
+                        &mut app.mode
+                    {
+                        *query = q.clone();
+                        *sel = s_;
+                        *scroll = sc;
+                        *show_all = all;
+                        *on_list = rows;
+                        *cursor = cur;
+                    }
+                    open_row_entry(app, index, &parent, at);
+                    return false;
+                }
             }
         }
         // Only with the rows in focus. In the box it is a letter, always -
@@ -2621,6 +3109,12 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
         // Coming out of a declared object is not leaving the screen. Only
         // the outermost list quits.
         "esc" | "," if !app.stack.is_empty() => {
+            if !drop_empty_row(app) {
+                // The placeholder is still in the file. Stay here so the
+                // status can say why, rather than walking back as if it
+                // had gone.
+                return false;
+            }
             if let Some((fields, sel, mode)) = app.stack.pop() {
                 app.fields = fields;
                 app.selected = sel;
@@ -2631,7 +3125,16 @@ fn handle_list_key(app: &mut App, key: &str) -> bool {
                 }
             }
         }
-        "q" | "Q" | "esc" | "," => return true,
+        // `q` leaves the whole screen, including from a nested row that
+        // was appended empty. Drop that placeholder first or `{}` stays
+        // in the file and `configured_dirs` silently ignores it.
+        "q" | "Q" => {
+            if !drop_empty_row(app) {
+                return false;
+            }
+            return true;
+        }
+        "esc" | "," => return true,
         "up" | "k" | "K" => move_sel(app, -1),
         "down" | "j" | "J" => move_sel(app, 1),
         "ctrl-y" | "wheel-up" => {
@@ -3434,6 +3937,33 @@ format!(
     // One row per choice, so the placements are the first choice's row plus
     // the index - shifted by the pinned title where the frame is built.
     let mut rows_at: Vec<(usize, usize)> = Vec::new();
+    // Thirty-four columns is what a city needs, and it was the whole
+    // budget: a row longer than that was cut on a pane with sixty columns
+    // going spare. A path is often longer, and an entry carrying fields of
+    // its own - a path and the label its tab reads - always is, so two
+    // labelled entries were cut to the same thirty-four characters and read
+    // as the same row. The column takes what the longest row needs, up to
+    // what the pane can spare for one; past that `seg` clips, which is the
+    // safe end of it.
+    // What each row *reads* as, which is not always what it is. A free
+    // list's entries are identified by what the file holds - for an entry
+    // with fields of its own that is its JSON - and drawing that identity
+    // put `{"label":"main","path":"~/.claude"}` on screen in a list whose
+    // whole job is to be read. The identity is still what `sel` and remove
+    // work on; only the text changes.
+    let shown_at = |zone: &str| -> String {
+        picked_pairs(app, *index)
+            .into_iter()
+            .find(|(id, _)| id == zone)
+            .map(|(_, text)| text)
+            .unwrap_or_else(|| zone.to_string())
+    };
+    let widest = choices
+        .iter()
+        .map(|(zone, _)| shown_at(zone).chars().count())
+        .max()
+        .unwrap_or(0);
+    let column = widest.clamp(34, w.saturating_sub(26).max(34));
     for (i, (zone, on)) in choices.iter().enumerate() {
         rows_at.push((body.len(), i));
         // A free list hands focus back and forth, and only the side holding
@@ -3456,7 +3986,7 @@ format!(
                     lead.as_str(),
                     format!(" {} {} ", if here { "▸" } else { " " }, mark),
                 ),
-                (name.as_str(), crate::pad(zone, 34)),
+                (name.as_str(), crate::pad(&shown_at(zone), column)),
                 (
                     note.as_str(),
                     match (alias_hit(zone, query), *on) {
@@ -3531,6 +4061,10 @@ format!(
     } else if matches!(kind, PickKind::Free) {
         let mut h: Vec<Vec<(&str, String)>> = Vec::new();
         if *on_list {
+            h.push(vec![
+                (p.accent.as_str(), "↵".into()),
+                (p.dim.as_str(), " edit the entry".into()),
+            ]);
             h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
@@ -4434,6 +4968,350 @@ mod tests {
         assert_eq!(map_value_of(&app, 0, "new"), "— not set");
     }
 
+    /// A list that takes a path, or a path with a name of its own.
+    ///
+    /// Both forms in one list, because the plain one shipped first and
+    /// nothing already written may break. The labelled entries a file
+    /// already holds are listed and left alone rather than dropped - a row
+    /// the file has and the screen does not show is an entry somebody has
+    /// to remember, and the count above it would understate the list.
+    #[test]
+    fn a_list_may_hold_a_name_beside_a_plain_entry() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        let mixed = serde_json::json!([
+            "~/.agent",
+            { "path": "~/.agent-two", "label": "two" }
+        ]);
+        let app = field_app("dirs", mixed.clone(), Some(rule.clone()));
+        assert!(matches!(picker_kind(&app, "dirs"), Some(PickKind::Free)));
+        // Both forms are typeable, so the box says so rather than asking
+        // for a plain string and quietly refusing half the shape.
+        assert_eq!(free_item_kind(&app, &app.fields[0]), "string-or-object");
+        // A row's identity is still what the file holds, so remove and the
+        // collision checks keep working on it.
+        let rows = picked_zones(&app, 0);
+        assert_eq!(
+            rows,
+            vec![
+                "~/.agent".to_string(),
+                r#"{"label":"two","path":"~/.agent-two"}"#.to_string(),
+            ],
+            "{rows:?}"
+        );
+        // What is *shown* is the pair somebody typed. The raw JSON was a
+        // row nobody could read at a glance, and this screen composes
+        // these itself now.
+        let shown: Vec<String> = picked_pairs(&app, 0).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(
+            shown,
+            vec!["~/.agent".to_string(), "~/.agent-two = two".to_string()],
+            "{shown:?}"
+        );
+        // And neither form is refused on the way to the file.
+        assert_eq!(validate_value(&mixed, &mixed, Some(&rule)), Ok(()));
+        assert!(
+            validate_value(&mixed, &mixed, Some(&serde_json::json!({"items": "string"})))
+                .is_err(),
+            "a string-only list is what refused the labelled entry"
+        );
+        assert_eq!(
+            constraint_summary(Some(&rule)),
+            "string or object items"
+        );
+    }
+
+    /// The screen composes the named form, which is the whole point of
+    /// extending it: a documented setting reachable only by hand-editing
+    /// the file is not reachable from the screen that exists to reach it.
+    ///
+    /// Tested at the parser rather than through `add_free_entry`, because
+    /// the write it ends in refuses against a config file this test does
+    /// not own - which is also why no test here has ever covered a
+    /// successful add. The end-to-end write is covered by driving the real
+    /// screen, not from here.
+    #[test]
+    fn a_name_can_be_typed_beside_the_path() {
+        let named = |typed| parse_free_entry("string-or-object", typed);
+        assert_eq!(
+            named("~/.agent-work = work"),
+            Ok(serde_json::json!({"path": "~/.agent-work", "label": "work"}))
+        );
+        // The plain form still means what it meant, so nothing anyone has
+        // already typed changes shape under them.
+        assert_eq!(named("~/.agent-three"), Ok(serde_json::json!("~/.agent-three")));
+        // Spaces around the separator are the natural way to type it and
+        // must not end up inside the path or the name.
+        assert_eq!(
+            named("  ~/.a   =   spaced  "),
+            Ok(serde_json::json!({"path": "~/.a", "label": "spaced"}))
+        );
+        // A path with no name is still a path, even one that looks like it
+        // wants to be clever.
+        assert_eq!(named("  ~/.plain  "), Ok(serde_json::json!("~/.plain")));
+        // And a plain list is untouched by any of this.
+        assert_eq!(
+            parse_free_entry("string", "~/.agent = work"),
+            Ok(serde_json::json!("~/.agent = work")),
+            "a string list must keep taking the whole line"
+        );
+    }
+
+    /// Half an entry is refused and says which half is missing. A path
+    /// silently truncated at a stray `=` would point somewhere real and
+    /// wrong, which is worse than being told to type it again.
+    #[test]
+    fn half_a_named_entry_is_refused_and_says_which_half() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        for (typed, expect) in [
+            ("~/.agent =", "type a name after"),
+            ("= work", "type the path first"),
+            ("~/.agent = a = b", "one = per entry"),
+        ] {
+            let mut app = field_app("dirs", serde_json::json!([]), Some(rule.clone()));
+            assert!(!add_free_entry(&mut app, 0, typed), "{typed} was accepted");
+            let said = app.status.clone().unwrap_or_default();
+            assert!(said.contains(expect), "{typed}: {said}");
+            // Nothing was written on the way to refusing.
+            assert!(
+                current_of(&app.live, &app.fields[0], app.legacy_section)
+                    .and_then(Value::as_array)
+                    .is_none_or(|r| r.is_empty()),
+                "{typed} wrote a row anyway"
+            );
+        }
+    }
+
+    /// Naming a path already in the list is the ordinary way somebody adds
+    /// a label to it, and it cannot just be appended: the widget collapses
+    /// duplicate paths, so the loser would sit in the file forever doing
+    /// nothing. The refusal names the row to remove.
+    #[test]
+    fn the_same_path_cannot_be_listed_twice_under_two_names() {
+        let rule = serde_json::json!({"items": "string-or-object"});
+        let mut app = field_app("dirs", serde_json::json!(["~/.agent"]), Some(rule.clone()));
+        assert!(!add_free_entry(&mut app, 0, "~/.agent = mine"));
+        let said = app.status.clone().unwrap_or_default();
+        assert!(said.contains("already listed"), "{said}");
+        assert!(said.contains("~/.agent"), "{said}");
+
+        // And the other way round: a plain path over a named one.
+        let named = serde_json::json!([{ "path": "~/.agent", "label": "mine" }]);
+        let mut app = field_app("dirs", named, Some(rule));
+        assert!(!add_free_entry(&mut app, 0, "~/.agent"));
+        assert!(
+            app.status.clone().unwrap_or_default().contains("already listed"),
+            "{:?}",
+            app.status
+        );
+    }
+
+    /// The screen answers in the language it asked in. A reader picks
+    /// `~/.claude-bbi = bbi` off the list, so being told
+    /// `Removed {"label":"bbi","path":"~/.claude-bbi"}` is the screen
+    /// changing language halfway through the exchange.
+    #[test]
+    fn a_row_reads_the_same_in_the_list_and_in_what_it_says_back() {
+        let row = serde_json::json!({ "path": "~/.claude-bbi", "label": "bbi" });
+        assert_eq!(entry_shown(&row), "~/.claude-bbi = bbi");
+        // A plain row is itself, and an unrecognised shape still says
+        // something rather than vanishing.
+        assert_eq!(entry_shown(&serde_json::json!("~/.claude")), "~/.claude");
+        let odd = serde_json::json!({ "label": "nameless" });
+        assert_eq!(entry_shown(&odd), compact(&odd));
+    }
+
+    /// `↵` on a row opens it as a screen of its own named fields, so a path
+    /// and the name beside it are two things to fill in rather than one
+    /// line to get the punctuation right in.
+    ///
+    /// Driven by the shape the list declares, not by anything about Claude
+    /// directories: any `string-or-object` list gets the same screen.
+    #[test]
+    fn a_row_opens_as_a_screen_of_its_own_fields() {
+        let rows = serde_json::json!(["~/.claude", { "path": "~/.claude-bbi", "label": "bbi" }]);
+        let mut app = field_app(
+            "dirs",
+            rows.clone(),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        // In the file as well as shipped, which is where a row being edited
+        // actually lives.
+        app.live = serde_json::json!({ "w": { "dirs": rows } });
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 1,
+            scroll: 0,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        handle_pick_key(&mut app, "enter");
+        assert!(matches!(app.mode, Mode::List), "it did not open a screen");
+        let names: Vec<String> = app.fields.iter().map(|f| f.key.clone()).collect();
+        assert_eq!(names, vec!["path".to_string(), "label".to_string()]);
+        // Both point into the second row of the list, which is the only way
+        // an array entry can be addressed - it has no key of its own.
+        assert_eq!(app.fields[0].parents, vec!["dirs".to_string(), "#1".to_string()]);
+        // And the index is how the screen finds it, not something to read.
+        assert_eq!(app.fields[0].label(), "path");
+        assert!(!app.fields[0].under_section().contains('#'));
+        // The values come from the row itself.
+        assert_eq!(
+            current_of(&app.live, &app.fields[1], app.legacy_section),
+            Some(&serde_json::json!("bbi"))
+        );
+        // Coming back out is not leaving the screen.
+        assert_eq!(app.stack.len(), 1);
+    }
+
+    /// A field a row already carries that this screen has no opinion about
+    /// is still offered, so an entry is never quietly rewritten without it.
+    #[test]
+    fn a_row_keeps_the_fields_this_screen_did_not_expect() {
+        let app = field_app(
+            "dirs",
+            serde_json::json!([{ "path": "~/.a", "label": "one", "colour": "green" }]),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        let fields = row_fields(&app, &app.fields[0], 0);
+        let names: Vec<String> = fields.iter().map(|f| f.key.clone()).collect();
+        assert_eq!(names, vec!["path".to_string(), "label".to_string(), "colour".to_string()]);
+    }
+
+    /// A `#N` step is a position in a list, not a key called "#N".
+    #[test]
+    fn a_row_step_indexes_the_list() {
+        assert_eq!(row_index("#0"), Some(0));
+        assert_eq!(row_index("#12"), Some(12));
+        assert_eq!(row_index("path"), None);
+        assert_eq!(row_index("#"), None);
+        assert_eq!(row_index("#-1"), None);
+    }
+
+    /// An entry keeps its own path while its name changes - that is the
+    /// ordinary reason to open one - but may not take a path another row
+    /// already holds.
+    #[test]
+    fn a_structured_edit_must_not_take_a_siblings_path() {
+        let rows = [
+            serde_json::json!({ "path": "~/.a", "label": "one" }),
+            serde_json::json!({ "path": "~/.b", "label": "two" }),
+        ];
+        assert!(
+            !sibling_holds_path(&rows, 0, "~/.a"),
+            "a row's own path is not a clash"
+        );
+        assert!(
+            sibling_holds_path(&rows, 0, "~/.b"),
+            "another row's path was allowed through"
+        );
+    }
+
+    #[test]
+    fn only_a_blank_placeholder_is_abandoned() {
+        assert!(row_is_abandoned(&serde_json::json!({})));
+        assert!(row_is_abandoned(&serde_json::json!({ "path": "" })));
+        assert!(
+            !row_is_abandoned(&serde_json::json!({ "label": "bbi", "colour": "green" })),
+            "a file row with no path was treated as a placeholder"
+        );
+        assert!(!row_is_abandoned(&serde_json::json!({ "path": "~/.claude" })));
+    }
+
+    /// Clearing path used to write `{"label":"…"}`, which the widget
+    /// ignores and `drop_empty_row` keeps. The row must stay, and the
+    /// refusal must name `[d]elete`.
+    #[test]
+    fn clearing_path_is_refused_so_the_row_stays() {
+        let rows = serde_json::json!([{ "path": "~/.a", "label": "one" }]);
+        let mut app = field_app(
+            "dirs",
+            rows,
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        let parent = app.fields[0].clone();
+        app.fields = row_fields(&app, &parent, 0);
+        app.stack.push((vec![parent.clone()], 0, None));
+        let err = write_field(&mut app, 0, Value::String(String::new()))
+            .expect_err("clearing path was written");
+        assert!(
+            err.contains("An entry needs a path") && err.contains("[d]elete"),
+            "{err}"
+        );
+        app.fields = vec![parent];
+        assert_eq!(held_rows(&app, 0).len(), 1, "the refusal cost the entry");
+    }
+
+    /// Abandoned-row cleanup used to swallow the write error and walk
+    /// off the screen as if the placeholder were gone. The file still
+    /// holds `{}`, so stay and say why.
+    #[test]
+    fn dropping_an_abandoned_row_says_when_the_write_fails() {
+        let rows = serde_json::json!([{}]);
+        let mut app = field_app(
+            "dirs",
+            rows.clone(),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.live = serde_json::json!({ "w": { "dirs": rows } });
+        let parent = app.fields[0].clone();
+        app.fields = row_fields(&app, &parent, 0);
+        app.stack.push((vec![parent], 0, None));
+
+        assert!(
+            !handle_list_key(&mut app, "esc"),
+            "esc walked back as if the placeholder had gone"
+        );
+        let said = app.status.clone().expect("the write error must reach the screen");
+        assert!(
+            said.contains("reload before writing"),
+            "{said}"
+        );
+        assert_eq!(app.stack.len(), 1, "the row screen was left");
+        assert_eq!(app.fields[0].key, "path");
+        assert_eq!(
+            current_of(&app.live, &app.stack[0].0[0], app.legacy_section),
+            Some(&serde_json::json!([{}])),
+            "live was rewritten as if the write had landed"
+        );
+
+        assert!(
+            !handle_list_key(&mut app, "q"),
+            "q quit as if the placeholder had gone"
+        );
+        assert_eq!(app.stack.len(), 1, "q left the row screen");
+    }
+
+    /// Opening a string row used to swallow the normalisation write
+    /// and then open the editor as if the file now held an object.
+    /// Leave the list as it is and say why.
+    #[test]
+    fn opening_a_string_row_says_when_normalising_it_fails() {
+        let rows = serde_json::json!(["~/.claude"]);
+        let mut app = field_app(
+            "dirs",
+            rows.clone(),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.live = serde_json::json!({ "w": { "dirs": rows } });
+        let parent = app.fields[0].clone();
+        open_row_entry(&mut app, 0, &parent, 0);
+        let said = app.status.clone().expect("the write error must reach the screen");
+        assert!(
+            said.contains("reload before writing"),
+            "{said}"
+        );
+        assert!(app.stack.is_empty(), "the editor opened over a write that failed");
+        assert_eq!(app.fields.len(), 1);
+        assert_eq!(app.fields[0].key, "dirs");
+        assert_eq!(
+            current_of(&app.live, &app.fields[0], app.legacy_section),
+            Some(&serde_json::json!(["~/.claude"])),
+            "live was rewritten as if the row were already an object"
+        );
+    }
+
     /// A list of numbers is filled in the same way a list of strings is.
     #[test]
     fn a_list_of_numbers_is_a_list() {
@@ -4489,6 +5367,53 @@ mod tests {
         assert!(
             drawn.contains("whole number"),
             "the refusal has to reach the screen:\n{drawn}"
+        );
+    }
+
+    /// A row takes the width it needs, out of the width there is.
+    ///
+    /// The name column was thirty-four characters whatever the pane was, so
+    /// a path longer than that was cut on a screen with sixty columns going
+    /// spare - and two entries carrying fields of their own were cut to the
+    /// same thirty-four and read as the same row. Clipping at the pane's
+    /// edge is safe; clipping in the middle of it is a row that says less
+    /// than the pane could hold.
+    #[test]
+    fn a_long_entry_is_drawn_whole_where_there_is_room_for_it() {
+        // The pair as it reads, not the JSON it is stored as - a row in a
+        // list whose whole job is to be read should be readable.
+        let long = "/tmp/somewhere/deeper/still/claude-work = work";
+        let mut app = field_app(
+            "dirs",
+            serde_json::json!([
+                "~/.claude",
+                { "path": "/tmp/somewhere/deeper/still/claude-work", "label": "work" }
+            ]),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        app.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        let wide = draw_pick(&app, 120, 24, &palette()).0.join("\n");
+        assert!(wide.contains(long), "cut on a wide pane:\n{wide}");
+        // And narrow enough, it is cut at the edge rather than overflowing
+        // it - every row of the frame still measures inside the width.
+        let narrow = draw_pick(&app, 44, 24, &palette()).0.join("\n");
+        assert!(!narrow.contains(long), "nothing to clip at 44:\n{narrow}");
+        assert!(
+            narrow.contains("/tmp/somewhere/deeper"),
+            "and clipped at the edge rather than dropped:\n{narrow}"
+        );
+        // The JSON itself never reaches the screen for this shape.
+        assert!(
+            !wide.contains(r#"{"label""#),
+            "the stored form was drawn instead of the readable one:\n{wide}"
         );
     }
 

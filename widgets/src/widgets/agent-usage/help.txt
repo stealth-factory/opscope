@@ -4,7 +4,10 @@ One tab per agent, because they do not agree on what usage even means: one
 counts tokens, another counts lines it wrote, and several publish nothing at
 all outside their own session. A single table would need a shared schema that
 does not exist, so each tab shows that agent's own shape - and an agent that
-exposes nothing says so rather than showing a plausible zero.
+exposes nothing says so rather than showing a plausible zero. Extra Claude
+Max profiles from agent_usage.claude_config_dirs get their own tab, titled
+with the label the entry names or, failing that, with the directory's own
+name.
 
     agent-usage [-n SECONDS]
 
