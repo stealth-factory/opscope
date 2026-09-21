@@ -1114,6 +1114,27 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
     out
 }
 
+/// The legend and the blank line under it, as one block.
+///
+/// Above the table, under the heading that owns the columns: read top to
+/// bottom the section says what it is, what its short names mean, then the
+/// numbers. The blank line is what keeps the legend from reading as a first
+/// row of the table, which is the whole reason it can sit above rather than
+/// below.
+///
+/// The spacer lives here rather than at the call site so it is part of what
+/// a test can hold. Left there it was untestable, and the test that claimed
+/// to cover it only checked that the closed legend was empty - a name
+/// promising more than the body delivered, which is the shape of test this
+/// repo has been bitten by before.
+fn legend_block(open: bool, want: i64, w: usize) -> Vec<String> {
+    let mut out = column_notes(open, want, w);
+    if !out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// The BY ACCOUNT heading, on the cell plan its rows are built to.
 ///
 /// No separators between these fields: the row emits its widths back-to-back,
@@ -3326,17 +3347,11 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
-        // Above the table, under the heading that owns the columns, with a
-        // blank line under it: read top to bottom, the section says what
-        // it is, what its short names mean, and then the numbers. The
-        // blank keeps the legend from reading as a first row of the table.
-        let legend = column_notes(notes, want, w);
-        let opened = !legend.is_empty();
-        for line in legend {
-            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
-        }
-        if opened {
-            rows.push(String::new());
+        for line in legend_block(notes, want, w) {
+            rows.push(match line.is_empty() {
+                true => String::new(),
+                false => tc::seg(&[(p.dim.as_str(), line)], w - 1),
+            });
         }
         let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
@@ -3583,8 +3598,20 @@ mod tests {
     /// under it so it does not read as a first row of the table.
     #[test]
     fn the_legend_is_separated_from_the_table_it_explains() {
-        // Closed there is nothing to separate, so no blank either.
-        assert!(column_notes(false, 18, 90).is_empty());
+        let open = legend_block(true, 18, 90);
+        assert!(open.len() >= 2, "{open:?}");
+        // The separator, and only at the end: a blank between the notes
+        // would read as two blocks rather than one.
+        assert_eq!(open.last().map(String::as_str), Some(""), "{open:?}");
+        assert!(
+            open[..open.len() - 1].iter().all(|l| !l.is_empty()),
+            "a gap inside the legend: {open:?}"
+        );
+        // The notes themselves are unchanged by being wrapped.
+        assert_eq!(open[..open.len() - 1], column_notes(true, 18, 90)[..]);
+        // Closed there is nothing to separate, so no blank either - a bare
+        // spacer would be a row charged for nothing.
+        assert!(legend_block(false, 18, 90).is_empty());
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that
