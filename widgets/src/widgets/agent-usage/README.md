@@ -1454,21 +1454,31 @@ Two entries wanting the same name are told apart the same way two
 directories with the same basename always were: the second becomes
 `work-2`. Compared without case, because the tab strip uppercases.
 
-**The settings screen (`,`) writes both forms.** Type a path on its own for
-an unnamed entry, or `<path> = <name>` to name one:
+**The settings screen builds these, and it is the only thing that does.**
+Type a path to add an entry. Press `↵` on its row to open it as a screen of
+its own — `path` and `label` as named fields — and `↵` on the empty box
+opens that screen blank for a new one:
 
 ```
-~/.claude-work = work
+▸ path      "~/.claude-work"
+  label     "work"
 ```
 
-and the file gets `{ "path": "~/.claude-work", "label": "work" }`. The list
-reads a named entry back the way it was typed rather than as the JSON it is
-stored as, because `{"label":"work","path":"~/.claude-work"}` is not a row
-anyone reads at a glance.
+and the file gets `{ "path": "~/.claude-work", "label": "work" }`. In the
+list that entry reads as `~/.claude-work = work` rather than as the JSON it
+is stored as, because `{"label":"work","path":"~/.claude-work"}` is not a
+row anyone reads at a glance.
 
-Half an entry is refused and says which half is missing, since a path
-truncated at a stray `=` would point somewhere real and wrong. The same path
-cannot be listed twice under two names either — the widget collapses
+**The box takes a path and nothing else.** It used to accept
+`<path> = <name>` too, a second route to what the entry's own screen already
+does — and a worse one: a punctuation rule to learn, invisible until
+somebody guessed at it, in a box whose every other field takes a value
+literally. A typed line carrying `=` is now refused and points at the row,
+rather than being read as a path with an `=` in it — which is legal, almost
+certainly not meant, and would draw on the pane as a profile that simply
+found nothing.
+
+A path cannot be listed twice under two names — the widget collapses
 duplicate paths, so the loser would sit in the file forever doing nothing;
 the refusal names the row to remove.
 
