@@ -1885,11 +1885,12 @@ fn free_item_kind(app: &App, field: &Field) -> &'static str {
         Some("integer") => "integer",
         Some("number") => "number",
         Some("string") => "string",
-        // Both forms are typeable. `parse_free_entry` decides which one a
-        // line is, so the box takes a bare path or a path and the name its
-        // tab should read - the object form used to be file-only, which
-        // made a documented setting unreachable from the screen that
-        // exists to reach it.
+        // Either shape is legal in the file, but only one of them is
+        // typed: the box takes a bare path, and a path with a name beside
+        // it is built on the entry's own screen, where the fields are
+        // named. `parse_free_entry` refuses a typed name rather than
+        // taking it literally, and `takes_objects` is what opens that
+        // screen - this kind is the only one that has one.
         Some("string-or-object") => "string-or-object",
         _ => match field.default.as_array() {
             Some(items) if !items.is_empty() && items.iter().all(Value::is_number) => {
@@ -2973,10 +2974,6 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
         }
         "enter" if free && !rows => {
             let typed = q.trim().to_string();
-            // An amend replaces the row it came from: the old one goes
-            // first, so the path it carries cannot collide with itself.
-            // Put back if the new text is refused, or a typo would cost the
-            // entry rather than the edit.
             // Only clear it if it was taken. A refused entry is one somebody
             // is about to correct, and emptying the box makes them type it
             // again from memory to find out what was wrong with it.
@@ -2987,12 +2984,22 @@ fn handle_pick_key(app: &mut App, key: &str) -> bool {
                 sc = 0;
             }
         }
-        // `↵` on a row opens it in the box, which is the same box a new
-        // entry is typed into - one editor for both, so there is nothing to
-        // learn twice and a long path never has to be retyped to change the
-        // name beside it. Committing replaces the row rather than adding
-        // next to it.
+        // `↵` on a row opens that row as a screen of its own named fields -
+        // the same screen an empty box opens for a new one, so there is
+        // nothing to learn twice and a long path never has to be retyped to
+        // change the name beside it.
+        //
+        // Only where the entries have fields. A row of a plain list is a
+        // string and has none, and opening it wrote `{ "path": ... }` over
+        // the string, which the list's own `items: string` then refused -
+        // leaving an error under a footer that had just offered the edit.
+        // Matched here rather than guarded in the arm's condition, because
+        // falling through lands on the catch-all `enter` below, which
+        // toggles a zone.
         "enter" if free && rows => {
+            if !takes_objects(app, index) {
+                return false;
+            }
             if let Some((entry, _)) = zone_choices(app, index, &q, all).get(s_).cloned() {
                 let held = held_rows(app, index);
                 let at = held.iter().position(|row| row_identity(row) == entry);
@@ -4071,10 +4078,15 @@ format!(
     } else if matches!(kind, PickKind::Free) {
         let mut h: Vec<Vec<(&str, String)>> = Vec::new();
         if *on_list {
-            h.push(vec![
-                (p.accent.as_str(), "↵".into()),
-                (p.dim.as_str(), " edit the entry".into()),
-            ]);
+            // Only where the entry has fields to open. A plain list's row
+            // is a string with nothing inside it, and the key does nothing
+            // there - so this offered an edit that ended in an error.
+            if takes_objects(app, *index) {
+                h.push(vec![
+                    (p.accent.as_str(), "↵".into()),
+                    (p.dim.as_str(), " edit the entry".into()),
+                ]);
+            }
             h.push(vec![(p.dim.as_str(), "[d]elete the entry".into())]);
             h.push(vec![
                 (p.accent.as_str(), "tab".into()),
@@ -4988,7 +5000,7 @@ mod tests {
         assert_eq!(map_value_of(&app, 0, "new"), "— not set");
     }
 
-    /// A list that takes a path, or a path with a name of its own.
+    /// A list that holds a path, or a path with a name of its own.
     ///
     /// Both forms in one list, because the plain one shipped first and
     /// nothing already written may break. The labelled entries a file
@@ -5004,8 +5016,10 @@ mod tests {
         ]);
         let app = field_app("dirs", mixed.clone(), Some(rule.clone()));
         assert!(matches!(picker_kind(&app, "dirs"), Some(PickKind::Free)));
-        // Both forms are typeable, so the box says so rather than asking
-        // for a plain string and quietly refusing half the shape.
+        // The kind the list declares, which is what the file may hold -
+        // not what the box takes. Only the plain form is typed; the named
+        // one is built on the entry's own screen, which this kind is the
+        // only one to have.
         assert_eq!(free_item_kind(&app, &app.fields[0]), "string-or-object");
         // A row's identity is still what the file holds, so remove and the
         // collision checks keep working on it.
@@ -5072,6 +5086,69 @@ mod tests {
         handle_pick_key(&mut plain, "enter");
         assert!(plain.stack.is_empty(), "a plain list opened a screen");
         assert_eq!(held_rows(&plain, 0), vec![serde_json::json!("1.1.1.1")]);
+    }
+
+    /// And the same key on an existing row of a plain list.
+    ///
+    /// A row of `latency.hosts` is a string with no fields in it. Opening
+    /// one wrote `{ "path": "1.1.1.1" }` over the string first, so the
+    /// fields would have somewhere to write - which the list's own
+    /// `items: string` then refused, leaving an error on the picker under
+    /// a footer that had just offered the edit. The key does nothing there
+    /// now, and the footer says nothing about it.
+    #[test]
+    fn a_plain_row_has_no_screen_to_open_and_says_nothing_about_one() {
+        let mut plain = field_app(
+            "hosts",
+            serde_json::json!(["1.1.1.1"]),
+            Some(serde_json::json!({"items": "string"})),
+        );
+        plain.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        handle_pick_key(&mut plain, "enter");
+        assert!(plain.stack.is_empty(), "a plain row opened a screen");
+        assert_eq!(
+            plain.status, None,
+            "the row was rewritten as an object and the write refused"
+        );
+        assert_eq!(held_rows(&plain, 0), vec![serde_json::json!("1.1.1.1")]);
+        // Nor is the edit offered. A hint bound to nothing says the
+        // feature is there.
+        let footer = draw_pick(&plain, 60, 24, &palette()).0.join("\n");
+        assert!(
+            !footer.contains("edit the entry"),
+            "the footer offered an edit that does nothing:\n{footer}"
+        );
+        assert!(footer.contains("[d]elete the entry"), "{footer}");
+
+        // And the guard did not take the screen away from the list that
+        // has one: the same key, on a row with fields in it, opens them.
+        let mut named = field_app(
+            "dirs",
+            serde_json::json!([{ "path": "~/.agent", "label": "one" }]),
+            Some(serde_json::json!({"items": "string-or-object"})),
+        );
+        named.mode = Mode::Pick {
+            index: 0,
+            query: String::new(),
+            sel: 0,
+            scroll: 0,
+            show_all: false,
+            on_list: true,
+            cursor: 0,
+        };
+        handle_pick_key(&mut named, "enter");
+        assert_eq!(named.status, None);
+        assert!(!named.stack.is_empty(), "the named row opened nothing");
+        let fields: Vec<&str> = named.fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(fields, vec!["path", "label"], "{fields:?}");
     }
 
     /// The box takes a plain value and nothing else.
