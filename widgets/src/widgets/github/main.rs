@@ -1027,31 +1027,44 @@ fn board_foot(p: &Palette, notes: bool, w: usize) -> Vec<Vec<(&str, String)>> {
 /// half teaches a key that does not exist. It always names its key.
 fn info_hint(open: bool, p: &Palette, w: usize) -> String {
     let room = w.saturating_sub(4);
-    let tries = match open {
-        false => [
-            "[i] what HELD, R24 and T2D mean".to_string(),
-            "[i] what the columns mean".to_string(),
-            "[i] column notes".to_string(),
-            "[i]nfo show".to_string(),
-        ],
-        true => [
-            "[i] hide what the columns mean".to_string(),
-            "[i] hide the column notes".to_string(),
-            "[i] hide notes".to_string(),
-            "[i]nfo hide".to_string(),
-        ],
-    };
+    // A legend, not a key: this footer is a list of keyboard keys, and
+    // "column key" in it reads as the key that opens a column. Not a
+    // ledger either - that is a record of entries, where this explains
+    // what the entries mean.
+    let verb = if open { "hide" } else { "show" };
+    // Ordered by how much they say, not by length, because the shorter of
+    // two candidates is not always the poorer one to lose. `[i] show` is
+    // three cells shorter than `[i]nfo show` and says strictly less - a
+    // verb with nothing to act on - so it must never win while the other
+    // still fits. It did: between 81 and 84 columns the two longest
+    // wordings would have wrapped the footer and this one would not, so
+    // the footer advertised `[i] show` at exactly the widths where it was
+    // the only thing naming the legend. `[i]nfo show` packs to one line
+    // there too, and was simply never reached.
+    let tries = [
+        format!("[i] {verb} column legend"),
+        format!("[i] {verb} legend"),
+        format!("[i]nfo {verb}"),
+    ];
     let lines = |t: &String| {
         tc::pack_hints(&board_hints(p, Some(t.clone())), w.saturating_sub(2), "  ").len()
     };
     // The shortest wording cannot cost more lines than any other, so what
-    // it packs to is the floor the rest are held to.
+    // it packs to is the floor the rest are held to. The shortest is the
+    // last, so the floor moves with the list - which is why the objectless
+    // verb is gone from it rather than parked at the end: sitting there it
+    // dragged the floor down to its own one-line cost and disqualified the
+    // full wording at three widths where it had been fitting.
     let floor = tries.last().map(&lines).unwrap_or(1);
     tries
         .iter()
         .find(|t| t.chars().count() <= room && lines(t) <= floor)
         .cloned()
-        .unwrap_or_else(|| "[i]nfo".to_string())
+        // Narrower than any of them fits, the shortest wording goes out
+        // anyway and the footer wraps. A hint that names only the verb
+        // would keep the footer at one line and say nothing about what the
+        // press acts on, which is the one thing this hint exists to carry.
+        .unwrap_or_else(|| format!("[i]nfo {verb}"))
 }
 
 /// The longest of these that fits the pane, or nothing at all.
@@ -1113,6 +1126,27 @@ fn column_notes(open: bool, want: i64, w: usize) -> Vec<String> {
             "T2D   of merged PRs, within 2 days of opening".to_string(),
             "T2D   of merged PRs, within 2 days".to_string(),
         ]);
+    }
+    out
+}
+
+/// The legend and the blank line under it, as one block.
+///
+/// Above the table, under the heading that owns the columns: read top to
+/// bottom the section says what it is, what its short names mean, then the
+/// numbers. The blank line is what keeps the legend from reading as a first
+/// row of the table, which is the whole reason it can sit above rather than
+/// below.
+///
+/// The spacer lives here rather than at the call site so it is part of what
+/// a test can hold. Left there it was untestable, and the test that claimed
+/// to cover it only checked that the closed legend was empty - a name
+/// promising more than the body delivered, which is the shape of test this
+/// repo has been bitten by before.
+fn legend_block(open: bool, want: i64, w: usize) -> Vec<String> {
+    let mut out = column_notes(open, want, w);
+    if !out.is_empty() {
+        out.push(String::new());
     }
     out
 }
@@ -3329,6 +3363,12 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
+        for line in legend_block(notes, want, w) {
+            rows.push(match line.is_empty() {
+                true => String::new(),
+                false => tc::seg(&[(p.dim.as_str(), line)], w - 1),
+            });
+        }
         let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
@@ -3352,15 +3392,6 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
             rows_at.extend((from..rows.len()).map(|row| (row, i)));
-        }
-        // Under the table rather than above it. A note between the heading
-        // and the column header pushed the accounts down by a row closed
-        // and three open, so opening it moved the rows a reader was
-        // looking at - and the thing being explained is the table, which
-        // now sits between the reader and the explanation of it rather
-        // than below it.
-        for line in column_notes(notes, want, w) {
-            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
         }
 
         // One account in full, opened from the row it belongs to.
@@ -3571,11 +3602,66 @@ mod tests {
         // Wide enough that the whole footer sits on one line with the
         // longest wording in it, which is where that wording belongs.
         let closed = info_hint(false, &p, 110);
-        assert!(closed.contains("HELD"), "{closed}");
-        assert!(closed.starts_with("[i]"), "{closed}");
+        assert_eq!(closed, "[i] show column legend");
         let open = info_hint(true, &p, 110);
-        assert!(open.contains("hide"), "{open}");
-        assert!(open.starts_with("[i]"), "{open}");
+        assert_eq!(open, "[i] hide column legend");
+        // A legend, not a key: this footer is a list of keyboard keys, so
+        // "column key" in it reads as the key that opens a column.
+        assert!(!closed.contains("key"), "{closed}");
+    }
+
+    /// The legend sits above the table it explains, with a blank line
+    /// under it so it does not read as a first row of the table.
+    #[test]
+    fn the_legend_is_separated_from_the_table_it_explains() {
+        let open = legend_block(true, 18, 90);
+        assert!(open.len() >= 2, "{open:?}");
+        // The separator, and only at the end: a blank between the notes
+        // would read as two blocks rather than one.
+        assert_eq!(open.last().map(String::as_str), Some(""), "{open:?}");
+        assert!(
+            open[..open.len() - 1].iter().all(|l| !l.is_empty()),
+            "a gap inside the legend: {open:?}"
+        );
+        // The notes themselves are unchanged by being wrapped.
+        assert_eq!(open[..open.len() - 1], column_notes(true, 18, 90)[..]);
+        // Closed there is nothing to separate, so no blank either - a bare
+        // spacer would be a row charged for nothing.
+        assert!(legend_block(false, 18, 90).is_empty());
+    }
+
+    /// Whatever the width, the hint names what the press acts on.
+    ///
+    /// It did not. Between 81 and 84 columns the two fullest wordings
+    /// would have wrapped the footer, and the candidate that fitted was
+    /// `[i] show` - a verb with nothing to act on, at exactly the widths
+    /// where the footer is the only thing naming the legend. Codex caught
+    /// it on #261.
+    ///
+    /// The objectless wording is gone from the list rather than demoted
+    /// within it: the floor every candidate is held to is read off the
+    /// *last* one, so parked at the end it dragged that floor down to its
+    /// own one-line cost and disqualified the full wording at three more
+    /// widths.
+    #[test]
+    fn the_hint_always_names_what_it_acts_on() {
+        let p = palette();
+        for w in 20..=140 {
+            for open in [false, true] {
+                let hint = info_hint(open, &p, w);
+                assert!(
+                    hint.contains("legend") || hint.contains("[i]nfo"),
+                    "w={w} open={open}: {hint:?} names no object"
+                );
+            }
+        }
+        // The band that was wrong, named so a regression points at itself.
+        for w in 81..=84 {
+            assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
+        }
+        // And the band either side of it keeps the fuller wording it had.
+        assert_eq!(info_hint(false, &p, 80), "[i] show column legend");
+        assert_eq!(info_hint(false, &p, 85), "[i] show legend");
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that
@@ -4820,6 +4906,3 @@ mod tests {
     }
 
 }
-
-
-
