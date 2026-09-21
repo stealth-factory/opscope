@@ -43,7 +43,7 @@ is actually moving.
  example-old             0    0      0    --    --    --      0
 
 
- ↑↓ account  [w]indow  [r]efresh  [q]uit
+ ↑↓ account  [i] what HELD, R24 and T2D mean  [w]indow  [r]efresh  [q]uit
 ```
 
 ## What is windowed and what is not
@@ -189,6 +189,38 @@ column to its left.
 `HELD` is always on the row: of PRs that **closed** in the window, the share
 that merged. `--` means nothing closed; `···` means that account has not yet
 been refetched for the current window.
+
+**`i` says what the short names mean**, under the heading that owns them.
+The three do not carry their own meaning the way `MRG18D` carries its
+window, and nothing else on screen explains them — the footer names the key
+but not the columns, and a README is not on the pane. Closed it draws
+nothing at all — the footer carries the offer, and a line on the pane would
+be a second copy of it charged a row on every frame. Open it is one line per
+column *actually drawn*, under the table, decided by the same rule the
+header uses, because explaining a column too narrow to appear would send a
+reader looking for something that is not there:
+
+```
+  HELD  of PRs closed in 18d, the share that merged
+  R24   of those merged, first human review within 24h
+  T2D   of those merged, opened to merged within 2 days
+```
+
+The footer hint is doing the work the removed line used to: closed it says
+what the press is *for*, since nothing on the pane does any more, and it
+shortens rather than being cut, because `pack_hints` wraps a footer without
+splitting a hint. Which wording it gets is the footer's to afford, not the
+pane's — the longest one fits a pane of 81 columns four times over and would
+still be the hint that pushes the footer onto a second line, which costs the
+body exactly the row moving the offer off it was meant to save. So the
+wording is the widest that leaves the footer no longer than a bare
+`[i]nfo show` would, which is why a pane whose footer already wraps can
+carry a fuller wording than one that only just fits on a single line.
+
+Each note names the population its percentage is of, which is the part the
+abbreviation hides: `HELD` is of PRs that **closed**, the other two of PRs
+that **merged**. Each picks the longest wording that fits and is dropped
+whole rather than cut, since half a note says less than none.
 
 `R24` appears from 51 columns, `T2D` from 57. Both are % of PRs that
 **merged** in the window — a dropped PR never lands, so it is not "slow to
