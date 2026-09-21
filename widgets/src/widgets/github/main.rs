@@ -1032,23 +1032,39 @@ fn info_hint(open: bool, p: &Palette, w: usize) -> String {
     // ledger either - that is a record of entries, where this explains
     // what the entries mean.
     let verb = if open { "hide" } else { "show" };
+    // Ordered by how much they say, not by length, because the shorter of
+    // two candidates is not always the poorer one to lose. `[i] show` is
+    // three cells shorter than `[i]nfo show` and says strictly less - a
+    // verb with nothing to act on - so it must never win while the other
+    // still fits. It did: between 81 and 84 columns the two longest
+    // wordings would have wrapped the footer and this one would not, so
+    // the footer advertised `[i] show` at exactly the widths where it was
+    // the only thing naming the legend. `[i]nfo show` packs to one line
+    // there too, and was simply never reached.
     let tries = [
         format!("[i] {verb} column legend"),
         format!("[i] {verb} legend"),
-        format!("[i] {verb}"),
-        format!("[i]{}", if open { "nfo hide" } else { "nfo show" }),
+        format!("[i]nfo {verb}"),
     ];
     let lines = |t: &String| {
         tc::pack_hints(&board_hints(p, Some(t.clone())), w.saturating_sub(2), "  ").len()
     };
     // The shortest wording cannot cost more lines than any other, so what
-    // it packs to is the floor the rest are held to.
+    // it packs to is the floor the rest are held to. The shortest is the
+    // last, so the floor moves with the list - which is why the objectless
+    // verb is gone from it rather than parked at the end: sitting there it
+    // dragged the floor down to its own one-line cost and disqualified the
+    // full wording at three widths where it had been fitting.
     let floor = tries.last().map(&lines).unwrap_or(1);
     tries
         .iter()
         .find(|t| t.chars().count() <= room && lines(t) <= floor)
         .cloned()
-        .unwrap_or_else(|| "[i]nfo".to_string())
+        // Narrower than any of them fits, the shortest wording goes out
+        // anyway and the footer wraps. A hint that names only the verb
+        // would keep the footer at one line and say nothing about what the
+        // press acts on, which is the one thing this hint exists to carry.
+        .unwrap_or_else(|| format!("[i]nfo {verb}"))
 }
 
 /// The longest of these that fits the pane, or nothing at all.
@@ -3614,6 +3630,40 @@ mod tests {
         assert!(legend_block(false, 18, 90).is_empty());
     }
 
+    /// Whatever the width, the hint names what the press acts on.
+    ///
+    /// It did not. Between 81 and 84 columns the two fullest wordings
+    /// would have wrapped the footer, and the candidate that fitted was
+    /// `[i] show` - a verb with nothing to act on, at exactly the widths
+    /// where the footer is the only thing naming the legend. Codex caught
+    /// it on #261.
+    ///
+    /// The objectless wording is gone from the list rather than demoted
+    /// within it: the floor every candidate is held to is read off the
+    /// *last* one, so parked at the end it dragged that floor down to its
+    /// own one-line cost and disqualified the full wording at three more
+    /// widths.
+    #[test]
+    fn the_hint_always_names_what_it_acts_on() {
+        let p = palette();
+        for w in 20..=140 {
+            for open in [false, true] {
+                let hint = info_hint(open, &p, w);
+                assert!(
+                    hint.contains("legend") || hint.contains("[i]nfo"),
+                    "w={w} open={open}: {hint:?} names no object"
+                );
+            }
+        }
+        // The band that was wrong, named so a regression points at itself.
+        for w in 81..=84 {
+            assert_eq!(info_hint(false, &p, w), "[i]nfo show", "w={w}");
+        }
+        // And the band either side of it keeps the fuller wording it had.
+        assert_eq!(info_hint(false, &p, 80), "[i] show column legend");
+        assert_eq!(info_hint(false, &p, 85), "[i] show legend");
+    }
+
     /// The wording is the footer's to afford, not the pane's. A hint that
     /// fits the pane four times over can still be the one that wraps the
     /// footer, and that second line costs the body exactly the row moving
@@ -4856,6 +4906,3 @@ mod tests {
     }
 
 }
-
-
-
