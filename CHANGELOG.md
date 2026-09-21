@@ -3,6 +3,14 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.25.0] - 2026-09-21
+
+### Features
+
+- **github**: Rename RATE to HELD and add R24 T2D (#252)
+- **github**: Say what HELD, R24 and T2D mean, behind [i] (#260)
+- **github**: The legend sits above the table, and the footer names it (#261)
+
 ## [0.24.0] - 2026-09-20
 
 ### Features
