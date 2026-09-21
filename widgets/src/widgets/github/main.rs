@@ -1027,20 +1027,17 @@ fn board_foot(p: &Palette, notes: bool, w: usize) -> Vec<Vec<(&str, String)>> {
 /// half teaches a key that does not exist. It always names its key.
 fn info_hint(open: bool, p: &Palette, w: usize) -> String {
     let room = w.saturating_sub(4);
-    let tries = match open {
-        false => [
-            "[i] what HELD, R24 and T2D mean".to_string(),
-            "[i] what the columns mean".to_string(),
-            "[i] column notes".to_string(),
-            "[i]nfo show".to_string(),
-        ],
-        true => [
-            "[i] hide what the columns mean".to_string(),
-            "[i] hide the column notes".to_string(),
-            "[i] hide notes".to_string(),
-            "[i]nfo hide".to_string(),
-        ],
-    };
+    // A legend, not a key: this footer is a list of keyboard keys, and
+    // "column key" in it reads as the key that opens a column. Not a
+    // ledger either - that is a record of entries, where this explains
+    // what the entries mean.
+    let verb = if open { "hide" } else { "show" };
+    let tries = [
+        format!("[i] {verb} column legend"),
+        format!("[i] {verb} legend"),
+        format!("[i] {verb}"),
+        format!("[i]{}", if open { "nfo hide" } else { "nfo show" }),
+    ];
     let lines = |t: &String| {
         tc::pack_hints(&board_hints(p, Some(t.clone())), w.saturating_sub(2), "  ").len()
     };
@@ -3329,6 +3326,18 @@ fn main() {
             .rev()
             .map(|n| (base - Days::days(n)).format("%Y-%m-%d").to_string())
             .collect();
+        // Above the table, under the heading that owns the columns, with a
+        // blank line under it: read top to bottom, the section says what
+        // it is, what its short names mean, and then the numbers. The
+        // blank keeps the legend from reading as a first row of the table.
+        let legend = column_notes(notes, want, w);
+        let opened = !legend.is_empty();
+        for line in legend {
+            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
+        }
+        if opened {
+            rows.push(String::new());
+        }
         let head = by_account_head(w, want, bar_cols);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
@@ -3352,15 +3361,6 @@ fn main() {
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
             rows.push(tc::seg(&refs, w - 1));
             rows_at.extend((from..rows.len()).map(|row| (row, i)));
-        }
-        // Under the table rather than above it. A note between the heading
-        // and the column header pushed the accounts down by a row closed
-        // and three open, so opening it moved the rows a reader was
-        // looking at - and the thing being explained is the table, which
-        // now sits between the reader and the explanation of it rather
-        // than below it.
-        for line in column_notes(notes, want, w) {
-            rows.push(tc::seg(&[(p.dim.as_str(), line)], w - 1));
         }
 
         // One account in full, opened from the row it belongs to.
@@ -3571,11 +3571,20 @@ mod tests {
         // Wide enough that the whole footer sits on one line with the
         // longest wording in it, which is where that wording belongs.
         let closed = info_hint(false, &p, 110);
-        assert!(closed.contains("HELD"), "{closed}");
-        assert!(closed.starts_with("[i]"), "{closed}");
+        assert_eq!(closed, "[i] show column legend");
         let open = info_hint(true, &p, 110);
-        assert!(open.contains("hide"), "{open}");
-        assert!(open.starts_with("[i]"), "{open}");
+        assert_eq!(open, "[i] hide column legend");
+        // A legend, not a key: this footer is a list of keyboard keys, so
+        // "column key" in it reads as the key that opens a column.
+        assert!(!closed.contains("key"), "{closed}");
+    }
+
+    /// The legend sits above the table it explains, with a blank line
+    /// under it so it does not read as a first row of the table.
+    #[test]
+    fn the_legend_is_separated_from_the_table_it_explains() {
+        // Closed there is nothing to separate, so no blank either.
+        assert!(column_notes(false, 18, 90).is_empty());
     }
 
     /// The wording is the footer's to afford, not the pane's. A hint that

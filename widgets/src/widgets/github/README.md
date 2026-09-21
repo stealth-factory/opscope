@@ -43,7 +43,7 @@ is actually moving.
  example-old             0    0      0    --    --    --      0
 
 
- ↑↓ account  [i] what HELD, R24 and T2D mean  [w]indow  [r]efresh  [q]uit
+ ↑↓ account  [i] show column legend  [w]indow  [r]efresh  [q]uit
 ```
 
 ## What is windowed and what is not
@@ -192,13 +192,14 @@ been refetched for the current window.
 
 **`i` says what the short names mean**, under the heading that owns them.
 The three do not carry their own meaning the way `MRG18D` carries its
-window, and nothing else on screen explains them — the footer names the key
-but not the columns, and a README is not on the pane. Closed it draws
-nothing at all — the footer carries the offer, and a line on the pane would
-be a second copy of it charged a row on every frame. Open it is one line per
-column *actually drawn*, under the table, decided by the same rule the
-header uses, because explaining a column too narrow to appear would send a
-reader looking for something that is not there:
+window, and nothing else on screen explains them — and a README is not on
+the pane. Closed it draws nothing at all: the footer carries the offer, and
+a line on the pane would be a second copy of it charged a row on every
+frame. Open it is a legend above the table, one line per column *actually
+drawn*, with a blank line under it so it does not read as a first row — and
+the columns are decided by the same rule the header uses, because explaining
+one too narrow to appear would send a reader looking for something that is
+not there:
 
 ```
   HELD  of PRs closed in 18d, the share that merged
