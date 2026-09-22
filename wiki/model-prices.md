@@ -142,6 +142,7 @@ record which was taken, so both are carried.
 
 | model | input | output | cache_read |
 |---|--:|--:|--:|
+| `grok-4.7` | 2 | 6 | 0.50 |
 | `grok-4.6` | 2 | 6 | 0.50 |
 | `grok-4.5` | 2 | 6 | 0.30 |
 | `grok-4.3` | 1.25 | 2.50 | 0.20 |
@@ -211,6 +212,28 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 21 Sep 2026
+
+**Added `grok-4.7`,** at 2 / 6 / 0.50 — the same three numbers as `grok-4.6`,
+which is exactly why the row is easy to think unnecessary and is not.
+`rate_for` matches by *substring*, and `grok-4.6` is not a substring of
+`grok-4.7`, so without a line of its own the model resolves to no price at
+all and its tokens cost zero.
+
+Confirmed 21 Sep 2026 on the live xAI
+[model page](https://docs.x.ai/developers/models/grok-4.7) and
+[pricing page](https://docs.x.ai/developers/pricing). Below 200k prompt
+tokens: input $2.00, cached input $0.50, output $6.00 per million. At or
+above 200k the whole request bills at $4.00 / $1.00 / $12.00. The table
+carries the below-200k triple only, the same limit it already has for
+`grok-4.6`. No cache-write price is published.
+
+**Grok 4.7 Fast stays off this card.** The pricing page publishes a
+separate schedule — twice the below-200k rates, and $6 / $1.50 / $18 above
+200k — for Cursor and Grok Build only, and it names no `grok-4.7-fast` id.
+No key was added for it. Long-context doubling and the US regional 1.1×
+endpoint stay out too, the same as `grok-4.6`.
 
 ### 4 Sep 2026
 

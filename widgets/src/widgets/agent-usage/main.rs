@@ -275,6 +275,14 @@ const LIST_RATES: tc::Catalogue = &[
     // xAI publishes no cache-write price for any model, so those are absent
     // rather than zero. grok-code-fast-1 and grok-code-fast are priced only
     // under grok-build-0.1 now; both old names reach it by substring.
+    //
+    // grok-4.7's below-200k rates are the same three numbers as grok-4.6.
+    // It still needs its own row: rate_for matches by substring, and
+    // grok-4.6 is not a substring of grok-4.7, so without this line the
+    // model is unpriced and its tokens cost zero. Above 200k prompt tokens
+    // the whole request doubles; that second tier is in wiki/model-prices.md,
+    // the same limit this table already cannot express for grok-4.6.
+    ("grok-4.7", "xAI", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.50)]),
     ("grok-4.6", "xAI", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.50)]),
     ("grok-4.5", "xAI", &[("input", 2.0), ("output", 6.0), ("cache_read", 0.30)]),
     ("grok-4.3", "xAI", &[("input", 1.25), ("output", 2.50), ("cache_read", 0.20)]),
@@ -3067,6 +3075,37 @@ mod tests {
         // NO_PUBLISHED_PRICE and pinned here.
         assert!(rate_for("gemini-9.9-flash", &none).0.is_none());
         assert!(rate_for("gemini-3.8-flash-lite", &none).0.is_none());
+    }
+
+    #[test]
+    fn grok_4_7_is_priced_on_its_own_row_at_grok_4_6_rates() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        // grok-4.6 is not a substring of grok-4.7, so without its own line
+        // the model resolves to nothing and its tokens cost zero. The three
+        // numbers are grok-4.6's published below-200k rates.
+        let (rate, origin) = rate_for("grok-4.7", &none);
+        let rate = rate.expect("grok-4.7 must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&6.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.50));
+        assert!(
+            !rate.contains_key("cache_write"),
+            "xAI publishes no cache-write price"
+        );
+
+        // A dated snapshot still reaches the row.
+        let (dated, dated_origin) = rate_for("grok-4.7-20260921", &none);
+        assert_eq!(dated_origin, "list");
+        assert_eq!(dated.unwrap().get("output"), Some(&6.0));
+
+        // 4.6 keeps its own row and is untouched by the addition.
+        let (older, _) = rate_for("grok-4.6", &none);
+        let older = older.expect("grok-4.6 was already priced");
+        assert_eq!(older.get("input"), Some(&2.0));
+        assert_eq!(older.get("output"), Some(&6.0));
+        assert_eq!(older.get("cache_read"), Some(&0.50));
     }
 
     #[test]
