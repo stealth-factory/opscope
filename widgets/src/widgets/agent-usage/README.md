@@ -688,7 +688,11 @@ are already written down, so the row moves on the day rather than being
 rediscovered after a month of half-price totals. `grok-4.7` carries the same
 below-200k rates as `grok-4.6` — 2 / 6 / 0.50 — and still needs its own row:
 no existing key is a substring of `grok-4.7`, so without one the model costs
-nothing.
+nothing. `gpt-6-sol` and `gpt-6-luna` are the same shape of gap against the
+5.6 rows — the short-context rates are 2 / 10 / 0.20 / 2.50 and
+0.10 / 0.50 / 0.01 / 0.125 — and `claude-opus-5` is a prefix of
+`claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
+would inherit Opus 5, cache reads at $0.50 against the published $0.20.
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never

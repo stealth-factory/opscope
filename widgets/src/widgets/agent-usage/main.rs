@@ -120,6 +120,24 @@ const LIST_RATES: tc::Catalogue = &[
         &[("input", 10.0), ("output", 50.0), ("cache_read", 1.0), ("cache_write", 12.50)],
     ),
     (
+        // Short-context standard rates. Above 272K the whole request is
+        // 4 / 15 / 0.40 / 5 — output 1.5x, the rest double — which this
+        // table cannot express; that column is in wiki/model-prices.md.
+        // gpt-5.6-sol is not a substring of this id, so the 5.6 row cannot
+        // price it, and a missing line costs the tokens zero.
+        "gpt-6-sol",
+        "OpenAI",
+        &[("input", 2.0), ("output", 10.0), ("cache_read", 0.20), ("cache_write", 2.50)],
+    ),
+    (
+        // Same shape as sol: short context only, long context (0.20 / 0.75 /
+        // 0.02 / 0.25 above 272K) in the wiki. gpt-5.6-luna is not a
+        // substring of this id, so the 5.6 row cannot price it.
+        "gpt-6-luna",
+        "OpenAI",
+        &[("input", 0.10), ("output", 0.50), ("cache_read", 0.01), ("cache_write", 0.125)],
+    ),
+    (
         "gpt-5.6-sol",
         "OpenAI",
         &[("input", 4.0), ("output", 20.0), ("cache_read", 0.40), ("cache_write", 5.0)],
@@ -202,6 +220,15 @@ const LIST_RATES: tc::Catalogue = &[
         "claude-mythos-5",
         "Anthropic",
         &[("input", 10.0), ("output", 50.0), ("cache_write", 12.50), ("cache_read", 1.0), ("cache_write_1h", 20.0)],
+    ),
+    (
+        // claude-opus-5 is a prefix of this id. Without the row, 5.5 inherits
+        // Opus 5 and every kind is high — cache reads most of all, $0.50
+        // against the published $0.20, which is 0.05x input rather than the
+        // 0.1x every earlier Opus follows. Fast mode ($8/$40) is not carried.
+        "claude-opus-5-5",
+        "Anthropic",
+        &[("input", 4.0), ("output", 20.0), ("cache_write", 5.0), ("cache_read", 0.20), ("cache_write_1h", 8.0)],
     ),
     (
         "claude-opus-5",
@@ -3106,6 +3133,65 @@ mod tests {
         assert_eq!(older.get("input"), Some(&2.0));
         assert_eq!(older.get("output"), Some(&6.0));
         assert_eq!(older.get("cache_read"), Some(&0.50));
+    }
+
+    /// Short-context standard rates from the vendors' pages on 22 Sep 2026.
+    ///
+    /// Each id needs its own row. `gpt-5.6-sol` is not a substring of
+    /// `gpt-6-sol`, and the same is true of the two Lunas, so a missing line
+    /// prices those tokens at zero. `claude-opus-5` is a prefix of
+    /// `claude-opus-5-5`, so a missing line prices 5.5 at Opus 5: high on
+    /// every kind, and cache reads at $0.50 against the published $0.20.
+    #[test]
+    fn gpt_6_sol_luna_and_opus_5_5_are_priced_on_their_own_rows() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        let (sol, origin) = rate_for("gpt-6-sol", &none);
+        let sol = sol.expect("gpt-6-sol must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(sol.get("input"), Some(&2.0));
+        assert_eq!(sol.get("output"), Some(&10.0));
+        assert_eq!(sol.get("cache_read"), Some(&0.20));
+        assert_eq!(sol.get("cache_write"), Some(&2.50));
+        assert!(!sol.contains_key("cache_write_1h"), "OpenAI publishes no 1h cache write");
+
+        let (luna, luna_origin) = rate_for("gpt-6-luna", &none);
+        let luna = luna.expect("gpt-6-luna must be priced, not free");
+        assert_eq!(luna_origin, "list");
+        assert_eq!(luna.get("input"), Some(&0.10));
+        assert_eq!(luna.get("output"), Some(&0.50));
+        assert_eq!(luna.get("cache_read"), Some(&0.01));
+        assert_eq!(luna.get("cache_write"), Some(&0.125));
+
+        let (opus, opus_origin) = rate_for("claude-opus-5-5", &none);
+        let opus = opus.expect("claude-opus-5-5 must be priced, not free");
+        assert_eq!(opus_origin, "list");
+        assert_eq!(opus.get("input"), Some(&4.0));
+        assert_eq!(opus.get("output"), Some(&20.0));
+        assert_eq!(opus.get("cache_read"), Some(&0.20));
+        assert_eq!(opus.get("cache_write"), Some(&5.0));
+        assert_eq!(opus.get("cache_write_1h"), Some(&8.0));
+
+        // A dated snapshot still reaches its own row, not a neighbour's.
+        let (dated_sol, _) = rate_for("gpt-6-sol-20260922", &none);
+        assert_eq!(dated_sol.unwrap().get("output"), Some(&10.0));
+        let (dated_opus, _) = rate_for("claude-opus-5-5-20260922", &none);
+        assert_eq!(dated_opus.unwrap().get("cache_read"), Some(&0.20));
+
+        // The families these names sit beside keep the rates they already had.
+        let (older_sol, _) = rate_for("gpt-5.6-sol", &none);
+        assert_eq!(older_sol.unwrap().get("output"), Some(&20.0));
+        let (older_luna, _) = rate_for("gpt-5.6-luna", &none);
+        let older_luna = older_luna.expect("gpt-5.6-luna was already priced");
+        assert_eq!(older_luna.get("input"), Some(&0.20));
+        assert_eq!(older_luna.get("output"), Some(&1.20));
+        let (astra, _) = rate_for("gpt-6-astra", &none);
+        assert_eq!(astra.unwrap().get("input"), Some(&10.0));
+        let (opus5, _) = rate_for("claude-opus-5", &none);
+        let opus5 = opus5.expect("claude-opus-5 was already priced");
+        assert_eq!(opus5.get("input"), Some(&5.0));
+        assert_eq!(opus5.get("output"), Some(&25.0));
+        assert_eq!(opus5.get("cache_read"), Some(&0.50));
     }
 
     #[test]
