@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.27.0] - 2026-09-22
+
+### Features
+
+- **agent-usage**: Price gpt-6-sol, gpt-6-luna, and claude-opus-5-5 (#266)
+
 ## [0.26.0] - 2026-09-22
 
 ### Features
