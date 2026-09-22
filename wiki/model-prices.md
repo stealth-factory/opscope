@@ -40,6 +40,7 @@ record which was taken, so both are carried.
 | `claude-mythos-5-1` | 10 | 50 | 0.25 | 12.50 | 20 |
 | `claude-fable-5` | 10 | 50 | 1 | 12.50 | 20 |
 | `claude-mythos-5` | 10 | 50 | 1 | 12.50 | 20 |
+| `claude-opus-5-5` | 4 | 20 | 0.20 | 5 | 8 |
 | `claude-opus-5` | 5 | 25 | 0.50 | 6.25 | 10 |
 | `claude-opus-4-8` | 5 | 25 | 0.50 | 6.25 | 10 |
 | `claude-opus-4-7` | 5 | 25 | 0.50 | 6.25 | 10 |
@@ -59,10 +60,14 @@ record which was taken, so both are carried.
   other model is 0.1×. The page footnotes it; it is not a typo for $1.
   `claude-fable-5` is a prefix of `claude-fable-5-1`, so the 5.1 row has to
   exist or 5.1 inherits Fable 5's reads at four times the price.
+- **Opus 5.5 reads cache at 0.05× input**, $0.20. The pricing page footnotes
+  it. `claude-opus-5` is a prefix of `claude-opus-5-5`, so the 5.5 row has to
+  exist or 5.5 inherits Opus 5 — $5/$25 and cache reads at $0.50.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
-- Fast mode, where offered, is a different rate — `claude-opus-5` and
-  `claude-opus-4-8` are $10/$50 in fast mode, first-party only. Not modelled.
+- Fast mode, where offered, is a different rate — `claude-opus-5-5` is
+  $8/$40, and `claude-opus-5` and `claude-opus-4-8` are $10/$50, first-party
+  only. Not modelled.
 - A US `inference_geo` carries a 1.1x multiplier on 4.6 and later.
 - The tokenizer changed: 4.7+, Mythos and Fable produce roughly 30% more
   tokens for the same text than Sonnet 4.6 and earlier, so a per-token
@@ -75,6 +80,8 @@ record which was taken, so both are carried.
 | model | input | output | cache_read | cache_write |
 |---|--:|--:|--:|--:|
 | `gpt-6-astra` | 10 | 50 | 1 | 12.50 |
+| `gpt-6-sol` | 2 | 10 | 0.20 | 2.50 |
+| `gpt-6-luna` | 0.10 | 0.50 | 0.01 | 0.125 |
 | `gpt-5.6-sol` | 4 | 20 | 0.40 | 5 |
 | `gpt-5.6-terra` | 2 | 12 | 0.20 | 2.50 |
 | `gpt-5.6-luna` | 0.20 | 1.20 | 0.02 | 0.25 |
@@ -130,6 +137,9 @@ record which was taken, so both are carried.
   `gpt-6-astra` above the line: 20 / 75 / 2 / 25 — output is 1.5x rather
   than the usual 2x. The threshold is **272K** input tokens, named on the
   model page (`developers.openai.com/api/docs/models/gpt-6-astra`).
+  `gpt-6-sol` above the line: 4 / 15 / 0.40 / 5, and `gpt-6-luna`
+  0.20 / 0.75 / 0.02 / 0.25 — the same 272K boundary, output 1.5x, the
+  rest double. Both model pages name it.
 - `gpt-5.6` and `gpt-daybreak-blue-latest` alias `gpt-5.6-sol`;
   `gpt-daybreak-red-latest` aliases `gpt-5.6-cyber`.
 - Reasoning tokens bill as output. Regional data-residency endpoints add 10%
@@ -212,6 +222,36 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 22 Sep 2026
+
+**Added `gpt-6-sol`, `gpt-6-luna`, and `claude-opus-5-5`.** Short-context
+standard rates only. Confirmed 22 Sep 2026 on the live vendor pages.
+
+`gpt-6-sol` is 2 / 10 / 0.20 / 2.50. `gpt-6-luna` is 0.10 / 0.50 / 0.01 /
+0.125. OpenAI's
+[pricing page](https://developers.openai.com/api/docs/pricing) lists both
+tiers; the
+[sol](https://developers.openai.com/api/docs/models/gpt-6-sol) and
+[luna](https://developers.openai.com/api/docs/models/gpt-6-luna) model pages
+publish the short-context four and say prompts over 272K input tokens bill
+the whole request at 2x input and cache rates and 1.5x output. That second
+tier stays off the card, the same limit `gpt-6-astra` already has. Batch,
+Flex, Fast (2x) and the regional 10% stay off too: a mode is not a model id.
+Neither 5.6 key is a substring of these ids, so without a line of its own
+each model resolves to no price and its tokens cost zero.
+
+`claude-opus-5-5` is 4 / 20 / 0.20 / 5 / 8 (input, output, cache read, 5m
+cache write, 1h cache write). The
+[model page](https://platform.claude.com/docs/en/models/opus-5-5/overview)
+and the
+[pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+agree, and the pricing page footnotes cache hits at 0.05× input. The API id
+is `claude-opus-5-5`. `claude-opus-5` is a prefix of that id, so without
+this row 5.5 inherits Opus 5. Fast mode ($8 / $40, first-party only) is not
+carried. Claude 4.6 and later, including this model, bill the full 1M window
+at the standard per-token rate, so there is no long-context column to leave
+out.
 
 ### 21 Sep 2026
 
