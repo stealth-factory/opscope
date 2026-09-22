@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.26.0] - 2026-09-22
+
+### Features
+
+- **agent-usage**: Price grok-4.7 on its own row (#264)
+
+### Refactor
+
+- **settings**: A name is set on the entry's screen, not typed as punctuation (#262)
+
 ## [0.25.0] - 2026-09-21
 
 ### Features
