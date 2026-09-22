@@ -685,7 +685,10 @@ through 21 Nov 2026, and is carried because it is the only price published and
 the one the meter bills at. `gemini-3.8-flash` is **introductory**: input,
 output and cached input all double on 1 January 2027, and the successor figures
 are already written down, so the row moves on the day rather than being
-rediscovered after a month of half-price totals.
+rediscovered after a month of half-price totals. `grok-4.7` carries the same
+below-200k rates as `grok-4.6` — 2 / 6 / 0.50 — and still needs its own row:
+no existing key is a substring of `grok-4.7`, so without one the model costs
+nothing.
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
