@@ -120,10 +120,7 @@ fn codex_live() -> Option<serde_json::Value> {
         _ => text(&auth, "account_id"),
     };
     let authz = format!("Bearer {}", tok);
-    let usage_headers = [
-        ("Authorization", authz.as_str()),
-        ("User-Agent", "opscope"),
-    ];
+    let usage_headers = [("Authorization", authz.as_str()), ("User-Agent", "opscope")];
     // The usage call stays as it was. The inventory is account-scoped, so
     // the account id rides on that request only, and only when it is a
     // header the client can send.
@@ -144,24 +141,12 @@ fn codex_live() -> Option<serde_json::Value> {
     Some(serde_json::json!({"u": usage, "bank": bank}))
 }
 
-/// The bank to draw, from the inventory body when it parses and from the
-/// usage payload's summary count when that is the only number that arrived.
-fn bank_of(
-    usage: &serde_json::Value,
-    inventory: Option<&str>,
-    now: f64,
-) -> Option<crate::parse::ResetBank> {
-    if let Some(text) = inventory {
-        if let Some(bank) = crate::parse::parse_codex_reset_credits(text, now) {
-            return Some(bank);
-        }
-    }
-    let summary = usage.get("rate_limit_reset_credits")?;
-    if !summary.is_object() {
-        return None;
-    }
-    let text = serde_json::to_string(summary).ok()?;
-    crate::parse::parse_codex_reset_credits(&text, now)
+/// The bank to draw. The only source is the inventory body from
+/// `GET /wham/rate-limit-reset-credits`. A usage payload that happens to
+/// carry a summary count is not read: that number did not come from the
+/// inventory.
+fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank> {
+    crate::parse::parse_codex_reset_credits(inventory?, now)
 }
 
 /// Per-turn, per-model token counts from one rollout's text.
@@ -236,7 +221,10 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
             .single()
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        records.insert(format!("{}\u{0}{}", session, stamp), (day, model.clone(), got));
+        records.insert(
+            format!("{}\u{0}{}", session, stamp),
+            (day, model.clone(), got),
+        );
     }
     records
 }
@@ -410,12 +398,12 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             None
         }
         Some(got) if got.get("u").is_some() => {
-            bank = bank_of(&got["u"], got["bank"].as_str(), now());
+            bank = bank_of(got["bank"].as_str(), now());
             Some(got["u"].clone())
         }
         other => {
             if let Some(got) = other.as_ref() {
-                bank = bank_of(got, got["bank"].as_str(), now());
+                bank = bank_of(got["bank"].as_str(), now());
             }
             other
         }
@@ -515,7 +503,11 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         // Spark is one - and each arrives named, with its own window and
         // reset. Rendering the list rather than the one name we know keeps
         // any future feature working without an edit.
-        for extra in live["additional_rate_limits"].as_array().into_iter().flatten() {
+        for extra in live["additional_rate_limits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             let win = &extra["rate_limit"]["primary_window"];
             if win["used_percent"].is_null() {
                 continue;
@@ -549,12 +541,20 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     if wins.is_empty() {
         return Vec::new();
     }
-    let source = if live_answered { "live" } else { "from the last session" };
+    let source = if live_answered {
+        "live"
+    } else {
+        "from the last session"
+    };
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
             (
-                if live_answered { p.ok.as_str() } else { p.warn.as_str() },
+                if live_answered {
+                    p.ok.as_str()
+                } else {
+                    p.warn.as_str()
+                },
                 source.into(),
             ),
             (
@@ -648,7 +648,11 @@ fn codex_totals_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     // Two columns while both fit; one when they do not. Spending extra width
     // on more content rather than on padding is the house rule, and a value
     // column under eight cells cannot hold "1.2M".
-    let ncols = if (w as i64 - 2) / 2 - label_w as i64 - 3 >= 8 { 2 } else { 1 };
+    let ncols = if (w as i64 - 2) / 2 - label_w as i64 - 3 >= 8 {
+        2
+    } else {
+        1
+    };
     let val_w = ((w - 2) / ncols).saturating_sub(label_w + 3).max(5);
     for chunk in cells.chunks(ncols) {
         let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
@@ -705,7 +709,10 @@ fn codex_rate_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         buckets[at] += 1.0;
     }
     let mut cols: Vec<(f64, String)> = Vec::new();
-    for (b, wide) in buckets.iter().zip(tc::spread(count, w.saturating_sub(3).max(10))) {
+    for (b, wide) in buckets
+        .iter()
+        .zip(tc::spread(count, w.saturating_sub(3).max(10)))
+    {
         cols.extend(std::iter::repeat_n((*b, p.agent.clone()), wide));
     }
     for line in tc::vbars(&cols, 3, 0.0) {
@@ -777,7 +784,10 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         rows.push(tc::seg(&refs, w - 1));
     }
     let mut legend: Vec<(&str, String)> = vec![(p.dim.as_str(), "  Less ".into())];
-    let swatches: Vec<String> = CODEX_STEPS.iter().map(|(r, g, b)| tc::rgb(*r, *g, *b)).collect();
+    let swatches: Vec<String> = CODEX_STEPS
+        .iter()
+        .map(|(r, g, b)| tc::rgb(*r, *g, *b))
+        .collect();
     for colour in &swatches {
         legend.push((colour.as_str(), "█".into()));
     }
@@ -789,8 +799,14 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     metered_rows(
         &[
-            ("today".to_string(), crate::claude::window_models(&d.daily, 1)),
-            ("30 days".to_string(), crate::claude::window_models(&d.daily, 30)),
+            (
+                "today".to_string(),
+                crate::claude::window_models(&d.daily, 1),
+            ),
+            (
+                "30 days".to_string(),
+                crate::claude::window_models(&d.daily, 30),
+            ),
         ],
         w,
         "",
@@ -806,9 +822,10 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
 
 /// Unused reset credits still in the account.
 ///
-/// Drawn under the quota windows and worded as a bank, because those windows
-/// already say when the allowance resets. This is how many credits are left
-/// to spend on a reset, and when each one expires.
+/// Drawn under the quota windows. The count is how many are still available.
+/// When at least one of them has an expiry, the next line is how long until
+/// the soonest and, when a later one exists, the latest. A credit with no
+/// expiry is not given an invented end.
 fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let Some(bank) = d.bank.as_ref() else {
         return Vec::new();
@@ -816,44 +833,85 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── BANK ── ".into()),
-            (p.dim.as_str(), "reset credits left".into()),
+            (p.dim.as_str(), "limit reset credits".into()),
         ],
         w - 1,
     )];
     rows.push(tc::seg(
-        &[(p.txt.as_str(), format!("  {} left", bank.left))],
+        &[(p.txt.as_str(), format!("  {} available", bank.left))],
         w - 1,
     ));
-    for expiry in &bank.expiries {
-        let line = match expiry {
-            None => "does not expire".to_string(),
-            Some(at) => {
-                let left = at - now();
-                // The count was taken when the body was read. A credit that
-                // crosses its expiry before the next read stays on the row,
-                // so the number and the lines under it still agree.
-                if left <= 0.0 {
-                    "just expired".into()
-                } else {
-                    format!("expires in {}", left_span(left))
-                }
-            }
+    let mut dated: Vec<f64> = bank.expiries.iter().copied().flatten().collect();
+    dated.sort_by(f64::total_cmp);
+    let undated = bank
+        .expiries
+        .iter()
+        .filter(|expiry| expiry.is_none())
+        .count();
+    if let Some(span) = expiry_span(&dated) {
+        // The clock is the marker beside the span. It is dropped when the
+        // line would no longer fit, so a narrow pane keeps both ends of the
+        // span instead of clipping the later one into a different number.
+        let plain = format!("  {span}");
+        let marked = format!("  ⏱ {span}");
+        let room = w.saturating_sub(1);
+        let line = if tc::display_width(&marked) <= room {
+            marked
+        } else {
+            plain
+        };
+        rows.push(tc::seg(&[(p.dim.as_str(), line)], room));
+    }
+    if undated > 0 {
+        let line = if undated == 1 {
+            "does not expire".to_string()
+        } else {
+            format!("{undated} do not expire")
         };
         rows.push(tc::seg(
-            &[(p.dim.as_str(), format!("  {}", line))],
-            w - 1,
+            &[(p.dim.as_str(), format!("  {line}"))],
+            w.saturating_sub(1),
         ));
     }
-    for line in wrap_text(
-        "Unused reset credits in the account. The quota rows above are the usage windows.",
-        w.saturating_sub(4).max(20),
-    ) {
+    let note = match dated.len() {
+        0 => "Still available in the account. The quota rows above are the usage windows.",
+        1 => {
+            "Still available in the account. That is how long until it expires. \
+             The quota rows above are the usage windows."
+        }
+        _ => {
+            "Still available in the account. The span is the soonest expiry to \
+             the latest. The quota rows above are the usage windows."
+        }
+    };
+    for line in wrap_text(note, w.saturating_sub(4).max(20)) {
         rows.push(tc::seg(
-            &[(p.dim.as_str(), format!("  {}", line))],
-            w - 1,
+            &[(p.dim.as_str(), format!("  {line}"))],
+            w.saturating_sub(1),
         ));
     }
     rows
+}
+
+/// `10d 8h`, or `10d 8h - 28d 1h` when a later credit expires after the first.
+///
+/// A credit that crosses its expiry between reads stays on the row as
+/// `just expired`, so the count taken at read time and the span still agree.
+fn expiry_span(dated: &[f64]) -> Option<String> {
+    let soon = end_label(*dated.first()?);
+    if dated.len() == 1 {
+        return Some(soon);
+    }
+    Some(format!("{soon} - {}", end_label(*dated.last()?)))
+}
+
+fn end_label(at: f64) -> String {
+    let left = at - now();
+    if left <= 0.0 {
+        "just expired".into()
+    } else {
+        left_span(left)
+    }
 }
 
 /// Plan type and a credit balance - all Codex publishes about the plan.
@@ -913,8 +971,7 @@ pub fn why_no_lane(d: &Data) -> String {
                 .into()
         }
         (false, true) => {
-            "no quota · no live account window, and the last session left no used_percent."
-                .into()
+            "no quota · no live account window, and the last session left no used_percent.".into()
         }
         (true, _) => {
             "no quota · Codex answered, and published no used_percent for this period.".into()
@@ -947,7 +1004,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["resets_at"].as_f64(),
             stale: true,
             projected: false,
-                    apart: false,
+            apart: false,
         }];
     };
     let mut out: Vec<Lane> = Vec::new();
@@ -964,10 +1021,14 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
         });
     }
-    for extra in live["additional_rate_limits"].as_array().into_iter().flatten() {
+    for extra in live["additional_rate_limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
         let win = &extra["rate_limit"]["primary_window"];
         if win["used_percent"].is_null() {
             continue;
@@ -978,13 +1039,17 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         };
         let secs = win["limit_window_seconds"].as_f64();
         out.push(Lane {
-            label: format!("{} {}", name.rsplit('-').next().unwrap_or("?"), window_name(secs)),
+            label: format!(
+                "{} {}",
+                name.rsplit('-').next().unwrap_or("?"),
+                window_name(secs)
+            ),
             pct: num(win, "used_percent"),
             window_secs: secs,
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
         });
     }
     out
@@ -1200,10 +1265,8 @@ mod tests {
         let p = palette();
         let d = Data {
             limits: Some(
-                serde_json::from_str(
-                    r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#,
-                )
-                .expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#)
+                    .expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1231,8 +1294,7 @@ mod tests {
         // and the summary draws no pace mark rather than an invented one.
         let d = Data {
             limits: Some(
-                serde_json::from_str(r#"{"primary":{"used_percent":40.0}}"#)
-                    .expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"used_percent":40.0}}"#).expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1247,7 +1309,8 @@ mod tests {
         let p = palette();
         let d = Data {
             limits: Some(
-                serde_json::from_str(r#"{"primary":{"window_minutes":10080}}"#).expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"window_minutes":10080}}"#)
+                    .expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1308,7 +1371,13 @@ mod tests {
         for w in [20usize, 40, 80, 200] {
             let rows = tab(&d, w, 40, &cfg, &p);
             let plain = rows.join("\n");
-            for want in ["QUOTA", "TOTALS", "OUTPUT RATE", "TOKENS / DAY", "SUBSCRIPTION"] {
+            for want in [
+                "QUOTA",
+                "TOTALS",
+                "OUTPUT RATE",
+                "TOKENS / DAY",
+                "SUBSCRIPTION",
+            ] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
             }
         }
@@ -1380,11 +1449,13 @@ mod tests {
     }
 
     #[test]
-    fn the_bank_is_the_credits_left_and_not_the_window_countdown() {
+    fn the_bank_is_how_many_are_available_and_the_soonest_to_latest_span() {
         let p = palette();
         let cfg = Config::default();
-        let soon = now() + 11.0 * 86400.0;
-        let later = now() + 40.0 * 86400.0;
+        // Half an hour inside the bucket, so a second spent drawing the
+        // pane does not drop the span to the previous hour.
+        let soon = now() + 10.0 * 86400.0 + 8.0 * 3600.0 + 1800.0;
+        let later = now() + 28.0 * 86400.0 + 3600.0 + 1800.0;
         let d = Data {
             ok: true,
             live: Some(
@@ -1395,32 +1466,79 @@ mod tests {
                 .expect("a live reading"),
             ),
             bank: Some(crate::parse::ResetBank {
-                left: 3,
-                expiries: vec![Some(soon), Some(later), None],
+                left: 2,
+                expiries: vec![Some(later), Some(soon)],
             }),
             ..Data::default()
         };
+        let span = "10d 8h - 28d 1h";
         for w in [20usize, 40, 80, 200] {
             let rows = tab(&d, w, 40, &cfg, &p);
             let plain = rows.join("\n");
             assert!(plain.contains("BANK"), "bank missing at width {w}: {plain}");
-            assert!(plain.contains("3 left"), "count missing at width {w}: {plain}");
             assert!(
-                plain.contains("does not expire"),
-                "a credit with no expiry at width {w}: {plain}"
+                plain.contains("2 available"),
+                "count missing at width {w}: {plain}"
             );
-            // The quota row keeps its own countdown. The bank does not reuse
-            // that sentence for a credit's expiry.
-            assert!(plain.contains("expires in"), "{plain}");
+            assert!(
+                plain.contains(span),
+                "soonest-to-latest span missing at width {w}: {plain}"
+            );
+            // Both ends have to survive the clip. A cut latest end would
+            // still contain the soonest half and look like a shorter span.
+            assert!(
+                plain.contains("28d 1h"),
+                "latest end clipped at width {w}: {plain}"
+            );
+            let count_at = plain.find("2 available").expect("the count");
+            let span_at = plain.find(span).expect("the span");
+            assert!(count_at < span_at, "the count sits above the span");
+            // The quota row keeps its own countdown. The bank does not
+            // reuse that sentence, and it does not list one line per credit.
+            assert!(!plain.contains("expires in"), "{plain}");
+            assert!(!plain.contains("2 left"), "{plain}");
         }
-        let wide = tab(&d, 90, 40, &cfg, &p).join("\n");
-        let first = wide.find("expires in").expect("an expiry");
-        let second = wide[first + "expires in".len()..]
-            .find("expires in")
-            .map(|at| at + first + "expires in".len())
-            .expect("the later expiry");
-        let open = wide.find("does not expire").expect("the credit with no expiry");
-        assert!(first < second && second < open, "dated credits come before one with no expiry");
+        let wide = tab(&d, 40, 40, &cfg, &p).join("\n");
+        assert!(
+            wide.contains("⏱"),
+            "the clock fits beside the span at width 40: {wide}"
+        );
+        // One column short of the clock plus both ends: the span stays,
+        // the clock goes, and neither end is shortened.
+        let tight = tab(&d, 18, 40, &cfg, &p).join("\n");
+        assert!(tight.contains(span), "{tight}");
+        assert!(
+            !tight.contains("⏱"),
+            "a clock that does not fit must not clip the span: {tight}"
+        );
+        let one = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 1,
+                expiries: vec![Some(soon)],
+            }),
+            ..d.clone()
+        };
+        let one = tab(&one, 80, 40, &cfg, &p).join("\n");
+        assert!(one.contains("1 available"), "{one}");
+        assert!(one.contains("10d 8h"), "{one}");
+        assert!(
+            !one.contains("10d 8h - "),
+            "one credit is not a span of itself: {one}"
+        );
+        let open = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 3,
+                expiries: vec![Some(soon), Some(later), None],
+            }),
+            ..d.clone()
+        };
+        let open = tab(&open, 80, 40, &cfg, &p).join("\n");
+        assert!(open.contains("3 available"), "{open}");
+        assert!(open.contains(span), "{open}");
+        assert!(
+            open.contains("does not expire"),
+            "a credit with no expiry is not given an end: {open}"
+        );
         // And it is on the pane even when this machine has no rollouts.
         let bare = Data {
             bank: Some(crate::parse::ResetBank {
@@ -1431,9 +1549,13 @@ mod tests {
         };
         let bare = Data { ok: false, ..bare };
         let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
-        assert!(rows.contains("0 left"), "{rows}");
+        assert!(rows.contains("0 available"), "{rows}");
         assert!(rows.contains("No session rollouts"), "{rows}");
-        assert!(!rows.contains("expires in"), "zero credits have no expiry to invent");
+        assert!(
+            !rows.contains(span),
+            "zero credits have no expiry span to invent"
+        );
+        assert!(!rows.contains("expires in"), "{rows}");
     }
 
     #[test]
@@ -1456,26 +1578,24 @@ mod tests {
     }
 
     #[test]
-    fn the_inventory_wins_and_a_failed_inventory_keeps_the_summary_count() {
+    fn the_inventory_is_the_only_source_of_the_count() {
         let now = 1_780_000_000.0;
-        let usage = serde_json::json!({
-            "rate_limit_reset_credits": { "available_count": 4 }
-        });
         let inventory = r#"{"available_count":1,"credits":[
             {"status":"available","expires_at":"2026-08-01T00:00:00Z"}
         ]}"#;
-        let from_list = bank_of(&usage, Some(inventory), now).expect("the list");
+        let from_list = bank_of(Some(inventory), now).expect("the list");
         assert_eq!(from_list.left, 1);
         assert_eq!(from_list.expiries.len(), 1);
 
-        let from_summary = bank_of(&usage, Some("not json"), now).expect("the summary");
-        assert_eq!(from_summary.left, 4);
-        assert!(from_summary.expiries.is_empty());
+        // A usage payload can carry `rate_limit_reset_credits.available_count`.
+        // That number is not the inventory, so a failed inventory stays blank
+        // rather than becoming that count.
+        assert!(bank_of(Some("not json"), now).is_none());
+        assert!(bank_of(None, now).is_none());
 
         let empty = r#"{"credits":[],"available_count":0}"#;
-        let zero = bank_of(&usage, Some(empty), now).expect("a real zero");
-        assert_eq!(zero.left, 0, "an empty inventory is not replaced by the summary");
-
-        assert!(bank_of(&serde_json::json!({}), None, now).is_none());
+        let zero = bank_of(Some(empty), now).expect("a real zero");
+        assert_eq!(zero.left, 0);
+        assert!(zero.expiries.is_empty());
     }
 }

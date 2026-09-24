@@ -1040,14 +1040,18 @@ source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
 Under the windows, **BANK** is the unused rate-limit reset credits still in
-the account. Each line under the count is when one of those credits expires.
+the account. The count is how many are still available. When two or more of
+those credits have an expiry, the line under the count is the span from the
+soonest to the latest, written like `10d 8h - 28d 1h`, with a clock beside
+it when the pane is wide enough for both ends. One dated credit is that
+duration on its own. A credit with no expiry is not given an invented end.
 It is not another usage window, and it is not the `resets in` countdown on
-the quota rows. The inventory is a second request to the same host, on the
-same credential. A credit counts only while it is still available and its
-expiry, if it has one, is still ahead. An inventory that answers `0` shows
-`0 left`. A request that does not answer leaves the section out, unless the
-usage payload itself already carried a non-negative count, in which case the
-count is shown with no expiry. Claude publishes no such count.
+the quota rows. Every one of these numbers comes from
+`GET /wham/rate-limit-reset-credits` on the same host and credential. A
+credit counts only while it is still available and its expiry, if it has
+one, is still ahead. An inventory that answers `0` shows `0 available`. A
+request that does not answer leaves the section out. The usage payload is
+not a source for the count or the span. Claude publishes no such count.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that

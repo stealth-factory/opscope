@@ -31,8 +31,10 @@ pub struct ResetBank {
     pub expiries: Vec<Option<f64>>,
 }
 
-/// Codex `GET /wham/rate-limit-reset-credits`, or the usage payload's
-/// `rate_limit_reset_credits` summary when that is all that arrived.
+/// Codex `GET /wham/rate-limit-reset-credits`.
+///
+/// The body is a `credits` list plus `available_count`, or a count with no
+/// list. A count that arrived on some other payload is not this body.
 ///
 /// A credit is still in the bank when its status is `available` and its
 /// expiry is either absent or still ahead of `now`. Anything else in the
@@ -147,14 +149,11 @@ mod tests {
         // one is redeemed, and one has a status this pane does not know.
         // The two that remain, plus the one with no expiry, are what is left.
         assert_eq!(bank.left, 3);
-        assert_eq!(
-            bank.expiries,
-            vec![
-                Some(at("2026-07-12T04:03:43.263391Z")),
-                Some(at("2026-07-18T00:39:53.731630Z")),
-                None,
-            ]
-        );
+        assert_eq!(bank.expiries, vec![
+            Some(at("2026-07-12T04:03:43.263391Z")),
+            Some(at("2026-07-18T00:39:53.731630Z")),
+            None,
+        ]);
     }
 
     #[test]
@@ -194,11 +193,13 @@ mod tests {
 
     #[test]
     fn a_negative_count_is_not_a_bank() {
-        assert!(parse_codex_reset_credits(
-            r#"{"credits":[{"status":"available","expires_at":null}],"available_count":-1}"#,
-            0.0
-        )
-        .is_none());
+        assert!(
+            parse_codex_reset_credits(
+                r#"{"credits":[{"status":"available","expires_at":null}],"available_count":-1}"#,
+                0.0
+            )
+            .is_none()
+        );
         assert!(parse_codex_reset_credits(r#"{"available_count":2.5}"#, 0.0).is_none());
         assert!(parse_codex_reset_credits("not json", 0.0).is_none());
         assert!(parse_codex_reset_credits("{}", 0.0).is_none());
@@ -220,10 +221,12 @@ mod tests {
             bank.expiries.is_empty(),
             "a partial list must not be drawn as the whole bank"
         );
-        assert!(parse_codex_reset_credits(
-            r#"{"credits":[{"status":"available","expires_at":"not-a-time"}]}"#,
-            now
-        )
-        .is_none());
+        assert!(
+            parse_codex_reset_credits(
+                r#"{"credits":[{"status":"available","expires_at":"not-a-time"}]}"#,
+                now
+            )
+            .is_none()
+        );
     }
 }
