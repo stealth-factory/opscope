@@ -482,7 +482,7 @@ fn ago(when: f64) -> String {
 ///
 /// These APIs mix a trailing Z with +00:00 in the same response, and Go
 /// writes nanoseconds where the parsers take three or six digits.
-fn iso_epoch(s: &str) -> Option<f64> {
+pub(crate) fn iso_epoch(s: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
     }
@@ -2405,6 +2405,7 @@ fn main() {
 // module per agent, because they share only the shape the summary screen
 // compares them in - and because five readers being written at once should
 // not be five edits to the same file.
+mod parse;
 mod shared;
 mod antigravity;
 mod claude;

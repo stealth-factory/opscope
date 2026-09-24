@@ -1039,6 +1039,16 @@ reading is missing the separately-metered lanes entirely — which is why the
 source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
+Under the windows, **BANK** is the unused rate-limit reset credits still in
+the account. Each line under the count is when one of those credits expires.
+It is not another usage window, and it is not the `resets in` countdown on
+the quota rows. The inventory is a second request to the same host, on the
+same credential. A credit counts only while it is still available and its
+expiry, if it has one, is still ahead. An inventory that answers `0` shows
+`0 left`. A request that does not answer leaves the section out, unless the
+usage payload itself already carried a non-negative count, in which case the
+count is shown with no expiry. Claude publishes no such count.
+
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
 covers twenty-odd providers, and the obvious thing to reach for if this ever
