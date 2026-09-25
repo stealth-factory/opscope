@@ -72,8 +72,9 @@ pub struct Data {
     ok: bool,
     /// The live account-wide reading from the endpoint the CLI uses.
     live: Option<serde_json::Value>,
-    /// Reset credits still in the account. Absent when neither the inventory
-    /// nor the usage summary could be read — never a guessed zero.
+    /// Reset credits still in the account. Absent when the reset-credit
+    /// inventory could not be read — never a guessed zero. The usage payload
+    /// is not a source.
     bank: Option<crate::parse::ResetBank>,
     /// Why there is no live reading, when there is none. Empty while the
     /// endpoint is answering, or when nothing has been asked yet.
@@ -132,13 +133,29 @@ fn codex_live() -> Option<serde_json::Value> {
     {
         inventory_headers.push(("ChatGPT-Account-Id", account.as_str()));
     }
-    let Some(usage) = get_json(CODEX_USAGE_API, &usage_headers, 20) else {
-        return None;
-    };
-    // Best effort. A miss here must not throw away the usage reading the
-    // quota rows already depend on, and it must not become a bank of zero.
+    let usage = get_json(CODEX_USAGE_API, &usage_headers, 20);
+    // Same bound as the usage call, and still best effort. A miss here must
+    // not throw away a usage reading, and it must not become a bank of zero.
+    // A miss on usage must not skip this call either: the bank has its own
+    // source.
     let bank = tc::get(CODEX_RESET_CREDITS_API, &inventory_headers, 20).ok();
-    Some(serde_json::json!({"u": usage, "bank": bank}))
+    live_payload(usage, bank)
+}
+
+/// Pair a usage reading with an inventory body.
+///
+/// The two calls are independent. When usage did not answer and the
+/// inventory did, the body rides along as `usage_miss` so the caller can
+/// keep the bank and still treat the usage call as a refusal. When neither
+/// answered there is nothing to draw.
+fn live_payload(
+    usage: Option<serde_json::Value>,
+    bank: Option<String>,
+) -> Option<serde_json::Value> {
+    match usage {
+        Some(usage) => Some(serde_json::json!({"u": usage, "bank": bank})),
+        None => bank.map(|bank| serde_json::json!({"usage_miss": true, "bank": bank})),
+    }
 }
 
 /// The bank to draw. The only source is the inventory body from
@@ -386,7 +403,15 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut refuse = String::new();
     let mut live_why = String::new();
     let mut bank = None;
+    // Set inside the fetch, which `cached` does not run on a held reading.
+    // A usage miss still carries the inventory body for this frame.
+    let mut carried_bank: Option<String> = None;
     let live = match cached(caches, "codex", LIVE_TTL, || match codex_live() {
+        Some(got) if got.get("usage_miss").is_some() => {
+            carried_bank = got["bank"].as_str().map(str::to_string);
+            refuse = "ChatGPT's usage endpoint did not answer".into();
+            None
+        }
         None => {
             refuse = "ChatGPT's usage endpoint did not answer".into();
             None
@@ -395,6 +420,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             live_why = text(&got, "why");
+            bank = bank_of(got["bank"].as_str(), now());
             None
         }
         Some(got) if got.get("u").is_some() => {
@@ -411,6 +437,21 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     if !refuse.is_empty() {
         live_why = refuse.clone();
         remember_refusal(caches, "codex", &refuse);
+        // The refusal hold is `{"why"}` only. Put the inventory beside it
+        // so the frames inside the backoff still draw the bank that arrived.
+        if let Some(body) = carried_bank.clone() {
+            if let Some((when, _, held)) = caches.live.get("codex").cloned() {
+                caches.live.insert(
+                    "codex".to_string(),
+                    (
+                        when,
+                        Some(serde_json::json!({"why": &refuse, "bank": body})),
+                        held,
+                    ),
+                );
+            }
+            bank = bank_of(Some(&body), now());
+        }
     }
     let mut codex = Data {
         live,
@@ -849,18 +890,7 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         .filter(|expiry| expiry.is_none())
         .count();
     if let Some(span) = expiry_span(&dated) {
-        // The clock is the marker beside the span. It is dropped when the
-        // line would no longer fit, so a narrow pane keeps both ends of the
-        // span instead of clipping the later one into a different number.
-        let plain = format!("  {span}");
-        let marked = format!("  ⏱ {span}");
-        let room = w.saturating_sub(1);
-        let line = if tc::display_width(&marked) <= room {
-            marked
-        } else {
-            plain
-        };
-        rows.push(tc::seg(&[(p.dim.as_str(), line)], room));
+        push_expiry_span(&mut rows, &span, w.saturating_sub(1), p.dim.as_str());
     }
     if undated > 0 {
         let line = if undated == 1 {
@@ -873,15 +903,19 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             w.saturating_sub(1),
         ));
     }
-    let note = match dated.len() {
-        0 => "Still available in the account. The quota rows above are the usage windows.",
-        1 => {
-            "Still available in the account. That is how long until it expires. \
-             The quota rows above are the usage windows."
-        }
-        _ => {
-            "Still available in the account. The span is the soonest expiry to \
-             the latest. The quota rows above are the usage windows."
+    let note = if bank.left == 0 {
+        "None in the account. The quota rows above are the usage windows."
+    } else {
+        match dated.len() {
+            0 => "Still available in the account. The quota rows above are the usage windows.",
+            1 => {
+                "Still available in the account. That is how long until it expires. \
+                 The quota rows above are the usage windows."
+            }
+            _ => {
+                "Still available in the account. The span is the soonest expiry to \
+                 the latest. The quota rows above are the usage windows."
+            }
         }
     };
     for line in wrap_text(note, w.saturating_sub(4).max(20)) {
@@ -912,6 +946,45 @@ fn end_label(at: f64) -> String {
     } else {
         left_span(left)
     }
+}
+
+/// Draw the span without cutting either duration.
+///
+/// The clock stays only while the whole line fits. Otherwise the two ends
+/// share a line, and when that line would clip the later end they wrap.
+/// A duration that still cannot fit is left off: a shortened `28d 1` is a
+/// different number from `28d 1h`.
+fn push_expiry_span(rows: &mut Vec<String>, span: &str, room: usize, colour: &str) {
+    let marked = format!("  ⏱ {span}");
+    if push_whole(rows, colour, &marked, room) {
+        return;
+    }
+    let plain = format!("  {span}");
+    if push_whole(rows, colour, &plain, room) {
+        return;
+    }
+    let Some((soon, later)) = span.split_once(" - ") else {
+        return;
+    };
+    let soon_with_dash = format!("  {soon} -");
+    if !push_whole(rows, colour, &soon_with_dash, room) {
+        let soon_line = format!("  {soon}");
+        if !push_whole(rows, colour, &soon_line, room) {
+            push_whole(rows, colour, soon, room);
+        }
+    }
+    let later_line = format!("  {later}");
+    if !push_whole(rows, colour, &later_line, room) {
+        push_whole(rows, colour, later, room);
+    }
+}
+
+fn push_whole(rows: &mut Vec<String>, colour: &str, text: &str, room: usize) -> bool {
+    if room == 0 || tc::display_width(text) > room {
+        return false;
+    }
+    rows.push(tc::seg(&[(colour, text.to_string())], room));
+    true
 }
 
 /// Plan type and a credit balance - all Codex publishes about the plan.
@@ -1511,6 +1584,15 @@ mod tests {
             !tight.contains("⏱"),
             "a clock that does not fit must not clip the span: {tight}"
         );
+        // Narrower than the one-line span. Both durations have to appear
+        // whole; clipping the last `h` would leave `28d 1`.
+        let narrow = tab(&d, 17, 40, &cfg, &p).join("\n");
+        assert!(narrow.contains("10d 8h"), "{narrow}");
+        assert!(narrow.contains("28d 1h"), "{narrow}");
+        assert!(
+            !narrow.contains("28d 1\n") && !narrow.ends_with("28d 1"),
+            "the later end was clipped: {narrow}"
+        );
         let one = Data {
             bank: Some(crate::parse::ResetBank {
                 left: 1,
@@ -1550,6 +1632,10 @@ mod tests {
         let bare = Data { ok: false, ..bare };
         let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
         assert!(rows.contains("0 available"), "{rows}");
+        assert!(
+            !rows.contains("Still available"),
+            "a real zero is not described as still available: {rows}"
+        );
         assert!(rows.contains("No session rollouts"), "{rows}");
         assert!(
             !rows.contains(span),
@@ -1597,5 +1683,23 @@ mod tests {
         let zero = bank_of(Some(empty), now).expect("a real zero");
         assert_eq!(zero.left, 0);
         assert!(zero.expiries.is_empty());
+    }
+
+    #[test]
+    fn a_usage_miss_keeps_an_inventory_that_answered() {
+        let inventory = r#"{"credits":[],"available_count":2}"#;
+        let missed = live_payload(None, Some(inventory.to_string())).expect("the inventory");
+        assert!(missed.get("u").is_none(), "usage did not answer");
+        assert!(missed.get("usage_miss").is_some());
+        let bank = bank_of(missed["bank"].as_str(), 0.0).expect("the count");
+        assert_eq!(bank.left, 2);
+        assert!(bank.expiries.is_empty());
+
+        let usage = serde_json::json!({"plan_type": "pro"});
+        let both = live_payload(Some(usage), Some(inventory.to_string())).expect("both");
+        assert!(both.get("u").is_some());
+        assert!(both.get("usage_miss").is_none());
+
+        assert!(live_payload(None, None).is_none(), "neither call answered");
     }
 }

@@ -53,13 +53,17 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
         None => None,
         Some(value) => Some(whole_count(value)?),
     };
-    let Some(credits) = obj.get("credits") else {
+    // Null is a count with no list, same as the key being absent. An
+    // unreadable list falls through to the count alone below.
+    let Some(credits) = obj.get("credits").filter(|value| !value.is_null()) else {
         return Some(ResetBank {
             left: reported?,
             expiries: Vec::new(),
         });
     };
-    let credits = credits.as_array()?;
+    let Some(credits) = credits.as_array() else {
+        return count_only(reported);
+    };
     // An empty list published a count and no credits to classify. The
     // count is the bank. Zero, when that is the count, is a real empty bank.
     if credits.is_empty() {
@@ -166,6 +170,15 @@ mod tests {
         let bank = parse_codex_reset_credits(body, now).expect("the list was readable");
         assert_eq!(bank.left, 0);
         assert!(bank.expiries.is_empty());
+    }
+
+    #[test]
+    fn a_null_credit_list_keeps_the_count_and_invents_no_expiry() {
+        let bank = parse_codex_reset_credits(r#"{"available_count":2,"credits":null}"#, 0.0)
+            .expect("the count");
+        assert_eq!(bank.left, 2);
+        assert!(bank.expiries.is_empty(), "null is not a list of expiries");
+        assert!(parse_codex_reset_credits(r#"{"credits":null}"#, 0.0).is_none());
     }
 
     #[test]
