@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.29.0] - 2026-09-25
+
+### Features
+
+- **agent-usage**: Lay out Codex reset credits under the title (#271)
+
 ## [0.28.0] - 2026-09-25
 
 ### Features
