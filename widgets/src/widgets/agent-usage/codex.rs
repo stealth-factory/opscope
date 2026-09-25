@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use opscope_core as tc;
 
 use crate::shared::*;
@@ -91,6 +91,38 @@ pub struct Data {
     rates: Vec<f64>,
     /// day -> model -> tokens by priced kind, plus reasoning.
     daily: HashMap<String, HashMap<String, Tokens>>,
+}
+
+impl Data {
+    /// How many reset credits are still available, when the inventory was read.
+    ///
+    /// `None` means the inventory was not read. Zero is a real empty bank,
+    /// not a stand-in for a call that failed.
+    pub(crate) fn reset_credits_left(&self) -> Option<u64> {
+        self.bank.as_ref().map(|bank| bank.left)
+    }
+
+    /// A live window, and a bank only when `bank` is `Some`.
+    #[cfg(test)]
+    pub(crate) fn with_window_and_bank(pct: Option<f64>, bank: Option<u64>) -> Self {
+        Self {
+            live: pct.map(|pct| {
+                serde_json::json!({
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": pct,
+                            "limit_window_seconds": 604800
+                        }
+                    }
+                })
+            }),
+            bank: bank.map(|left| crate::parse::ResetBank {
+                left,
+                expiries: Vec::new(),
+            }),
+            ..Self::default()
+        }
+    }
 }
 
 /// Account-wide quota, live from the same endpoint the Codex CLI uses.
@@ -864,118 +896,95 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
 /// Unused reset credits still in the account.
 ///
 /// Drawn under the quota windows. The count is how many are still available.
-/// When at least one of them has an expiry, the next line is how long until
-/// the soonest and, when a later one exists, the latest. A credit with no
-/// expiry is not given an invented end.
+/// Each credit the inventory listed is its own row: the expiry as a datetime
+/// in this machine's local zone, with the zone named, or `date unknown` when
+/// `expires_at` could not be read. A count with no list draws no date rows.
 fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let Some(bank) = d.bank.as_ref() else {
         return Vec::new();
     };
+    let room = w.saturating_sub(1);
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── BANK ── ".into()),
             (p.dim.as_str(), "limit reset credits".into()),
         ],
-        w - 1,
+        room,
     )];
-    rows.push(tc::seg(
-        &[(p.txt.as_str(), format!("  {} available", bank.left))],
-        w - 1,
-    ));
-    let mut dated: Vec<f64> = bank.expiries.iter().copied().flatten().collect();
-    dated.sort_by(f64::total_cmp);
-    let undated = bank
-        .expiries
-        .iter()
-        .filter(|expiry| expiry.is_none())
-        .count();
-    if let Some(span) = expiry_span(&dated) {
-        push_expiry_span(&mut rows, &span, w.saturating_sub(1), p.dim.as_str());
-    }
-    if undated > 0 {
-        let line = if undated == 1 {
-            "does not expire".to_string()
-        } else {
-            format!("{undated} do not expire")
+    // Left off when the pane cannot hold the whole count. Clipping
+    // `12 available` to `1` would be a different number.
+    let count = format!("  {} available", bank.left);
+    push_whole(&mut rows, p.txt.as_str(), &count, room);
+    for expiry in &bank.expiries {
+        let line = match expiry.and_then(local_expiry) {
+            Some(stamp) => stamp,
+            None => "date unknown".to_string(),
         };
-        rows.push(tc::seg(
-            &[(p.dim.as_str(), format!("  {line}"))],
-            w.saturating_sub(1),
-        ));
+        push_wrapped(&mut rows, &line, room, p.dim.as_str());
     }
+    let dated = bank.expiries.iter().any(|expiry| expiry.is_some());
     let note = if bank.left == 0 {
         "None in the account. The quota rows above are the usage windows."
+    } else if dated {
+        "Each time is when that credit expires, in this machine's local zone. \
+         The quota rows above are the usage windows."
+    } else if bank.expiries.is_empty() {
+        "Still available in the account. The quota rows above are the usage windows."
     } else {
-        match dated.len() {
-            0 => "Still available in the account. The quota rows above are the usage windows.",
-            1 => {
-                "Still available in the account. That is how long until it expires. \
-                 The quota rows above are the usage windows."
-            }
-            _ => {
-                "Still available in the account. The span is the soonest expiry to \
-                 the latest. The quota rows above are the usage windows."
-            }
-        }
+        "The expiry could not be read. The quota rows above are the usage windows."
     };
     for line in wrap_text(note, w.saturating_sub(4).max(20)) {
-        rows.push(tc::seg(
-            &[(p.dim.as_str(), format!("  {line}"))],
-            w.saturating_sub(1),
-        ));
+        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], room));
     }
     rows
 }
 
-/// `10d 8h`, or `10d 8h - 28d 1h` when a later credit expires after the first.
+/// `expires_at` as a local datetime, with the zone named.
 ///
-/// A credit that crosses its expiry between reads stays on the row as
-/// `just expired`, so the count taken at read time and the span still agree.
-fn expiry_span(dated: &[f64]) -> Option<String> {
-    let soon = end_label(*dated.first()?);
-    if dated.len() == 1 {
-        return Some(soon);
+/// The instant is the one the inventory sent. The calendar fields are this
+/// machine's zone, and the offset is always on the row so the zone is
+/// labeled even when it has no abbreviation.
+fn local_expiry(at: f64) -> Option<String> {
+    if !at.is_finite() {
+        return None;
     }
-    Some(format!("{soon} - {}", end_label(*dated.last()?)))
-}
-
-fn end_label(at: f64) -> String {
-    let left = at - now();
-    if left <= 0.0 {
-        "just expired".into()
+    let local = Local.timestamp_opt(at.trunc() as i64, 0).single()?;
+    let stamp = format!(
+        "{} {} {} {:02}:{:02}:{:02}",
+        local.day(),
+        MONTHS[local.month0() as usize],
+        local.year(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+    );
+    let zone = local.format("%Z").to_string();
+    let offset = local.format("%:z").to_string();
+    let zone_is_offset = zone.is_empty()
+        || zone == offset
+        || zone
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | ':'));
+    if zone_is_offset {
+        Some(format!("{stamp} {offset}"))
     } else {
-        left_span(left)
+        Some(format!("{stamp} {zone} ({offset})"))
     }
 }
 
-/// Draw the span without cutting either duration.
+/// Draw `text` indented, wrapping on spaces.
 ///
-/// The clock stays only while the whole line fits. Otherwise the two ends
-/// share a line, and when that line would clip the later end they wrap.
-/// A duration that still cannot fit is left off: a shortened `28d 1` is a
-/// different number from `28d 1h`.
-fn push_expiry_span(rows: &mut Vec<String>, span: &str, room: usize, colour: &str) {
-    let marked = format!("  ⏱ {span}");
-    if push_whole(rows, colour, &marked, room) {
+/// A piece that cannot fit whole is left off. Shortening `04:03:43` to
+/// `04:03` would be a different time.
+fn push_wrapped(rows: &mut Vec<String>, text: &str, room: usize, colour: &str) {
+    let line = format!("  {text}");
+    if push_whole(rows, colour, &line, room) {
         return;
     }
-    let plain = format!("  {span}");
-    if push_whole(rows, colour, &plain, room) {
-        return;
-    }
-    let Some((soon, later)) = span.split_once(" - ") else {
-        return;
-    };
-    let soon_with_dash = format!("  {soon} -");
-    if !push_whole(rows, colour, &soon_with_dash, room) {
-        let soon_line = format!("  {soon}");
-        if !push_whole(rows, colour, &soon_line, room) {
-            push_whole(rows, colour, soon, room);
-        }
-    }
-    let later_line = format!("  {later}");
-    if !push_whole(rows, colour, &later_line, room) {
-        push_whole(rows, colour, later, room);
+    let budget = room.saturating_sub(2).max(1);
+    for piece in wrap_text(text, budget) {
+        let drawn = format!("  {piece}");
+        push_whole(rows, colour, &drawn, room);
     }
 }
 
@@ -1521,14 +1530,59 @@ mod tests {
         assert!(note.contains("did not answer"), "{note}");
     }
 
+    fn shown(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|s| {
+                let mut out = String::new();
+                let mut chars = s.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\u{1b}' {
+                        for c in chars.by_ref() {
+                            if c.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out.trim_end().to_string()
+            })
+            .collect()
+    }
+
     #[test]
-    fn the_bank_is_how_many_are_available_and_the_soonest_to_latest_span() {
+    fn the_bank_lists_each_credit_with_its_local_expiry() {
         let p = palette();
         let cfg = Config::default();
-        // Half an hour inside the bucket, so a second spent drawing the
-        // pane does not drop the span to the previous hour.
-        let soon = now() + 10.0 * 86400.0 + 8.0 * 3600.0 + 1800.0;
-        let later = now() + 28.0 * 86400.0 + 3600.0 + 1800.0;
+        let soon = iso_epoch("2026-07-12T04:03:43Z").expect("soon");
+        let later = iso_epoch("2026-07-18T00:39:53Z").expect("later");
+        let soon_row = local_expiry(soon).expect("a local soon expiry");
+        let later_row = local_expiry(later).expect("a local later expiry");
+        // The offset is the zone label. A name, when the zone has one, sits
+        // beside it. Neither is invented: both come from this machine's zone
+        // applied to the instant the inventory sent.
+        let soon_local = Local
+            .timestamp_opt(soon as i64, 0)
+            .single()
+            .expect("soon local");
+        let offset = soon_local.format("%:z").to_string();
+        assert!(
+            soon_row.contains(&offset),
+            "the zone is not labeled: {soon_row}"
+        );
+        assert!(
+            soon_row.contains(&format!(
+                "{} {} {} {:02}:{:02}:{:02}",
+                soon_local.day(),
+                MONTHS[soon_local.month0() as usize],
+                soon_local.year(),
+                soon_local.hour(),
+                soon_local.minute(),
+                soon_local.second(),
+            )),
+            "the datetime is not this machine's local time: {soon_row}"
+        );
         let d = Data {
             ok: true,
             live: Some(
@@ -1539,97 +1593,84 @@ mod tests {
                 .expect("a live reading"),
             ),
             bank: Some(crate::parse::ResetBank {
-                left: 2,
-                expiries: vec![Some(later), Some(soon)],
-            }),
-            ..Data::default()
-        };
-        let span = "10d 8h - 28d 1h";
-        for w in [20usize, 40, 80, 200] {
-            let rows = tab(&d, w, 40, &cfg, &p);
-            let plain = rows.join("\n");
-            assert!(plain.contains("BANK"), "bank missing at width {w}: {plain}");
-            assert!(
-                plain.contains("2 available"),
-                "count missing at width {w}: {plain}"
-            );
-            assert!(
-                plain.contains(span),
-                "soonest-to-latest span missing at width {w}: {plain}"
-            );
-            // Both ends have to survive the clip. A cut latest end would
-            // still contain the soonest half and look like a shorter span.
-            assert!(
-                plain.contains("28d 1h"),
-                "latest end clipped at width {w}: {plain}"
-            );
-            let count_at = plain.find("2 available").expect("the count");
-            let span_at = plain.find(span).expect("the span");
-            assert!(count_at < span_at, "the count sits above the span");
-            // The quota row keeps its own countdown. The bank does not
-            // reuse that sentence, and it does not list one line per credit.
-            assert!(!plain.contains("expires in"), "{plain}");
-            assert!(!plain.contains("2 left"), "{plain}");
-        }
-        let wide = tab(&d, 40, 40, &cfg, &p).join("\n");
-        assert!(
-            wide.contains("⏱"),
-            "the clock fits beside the span at width 40: {wide}"
-        );
-        // One column short of the clock plus both ends: the span stays,
-        // the clock goes, and neither end is shortened.
-        let tight = tab(&d, 18, 40, &cfg, &p).join("\n");
-        assert!(tight.contains(span), "{tight}");
-        assert!(
-            !tight.contains("⏱"),
-            "a clock that does not fit must not clip the span: {tight}"
-        );
-        // Narrower than the one-line span. Both durations have to appear
-        // whole; clipping the last `h` would leave `28d 1`.
-        let narrow = tab(&d, 17, 40, &cfg, &p).join("\n");
-        assert!(narrow.contains("10d 8h"), "{narrow}");
-        assert!(narrow.contains("28d 1h"), "{narrow}");
-        assert!(
-            !narrow.contains("28d 1\n") && !narrow.ends_with("28d 1"),
-            "the later end was clipped: {narrow}"
-        );
-        let one = Data {
-            bank: Some(crate::parse::ResetBank {
-                left: 1,
-                expiries: vec![Some(soon)],
-            }),
-            ..d.clone()
-        };
-        let one = tab(&one, 80, 40, &cfg, &p).join("\n");
-        assert!(one.contains("1 available"), "{one}");
-        assert!(one.contains("10d 8h"), "{one}");
-        assert!(
-            !one.contains("10d 8h - "),
-            "one credit is not a span of itself: {one}"
-        );
-        let open = Data {
-            bank: Some(crate::parse::ResetBank {
                 left: 3,
                 expiries: vec![Some(soon), Some(later), None],
             }),
+            ..Data::default()
+        };
+        let wide = shown(&codex_bank_rows(&d, 200, &p));
+        assert_eq!(
+            wide,
+            vec![
+                " ── BANK ── limit reset credits".to_string(),
+                "  3 available".to_string(),
+                format!("  {soon_row}"),
+                format!("  {later_row}"),
+                "  date unknown".to_string(),
+                "  Each time is when that credit expires, in this machine's local zone. The quota rows above are the usage windows.".to_string(),
+            ]
+        );
+        let on_tab = tab(&d, 200, 40, &cfg, &p).join("\n");
+        let count_at = on_tab.find("3 available").expect("the count");
+        let soon_at = on_tab.find(&soon_row).expect("the soon expiry");
+        let later_at = on_tab.find(&later_row).expect("the later expiry");
+        let unknown_at = on_tab.find("date unknown").expect("the unknown date");
+        assert!(count_at < soon_at && soon_at < later_at && later_at < unknown_at);
+        assert!(!on_tab.contains("⏱"), "{on_tab}");
+        assert!(!on_tab.contains("does not expire"), "{on_tab}");
+        assert!(!on_tab.contains("10d"), "{on_tab}");
+
+        // A pane too narrow to hold the clock leaves that piece off rather
+        // than shortening it. `04:03` is not `04:03:43`. The count is left
+        // off the same way: a clipped `3 avail` is not `3 available`.
+        let narrow = shown(&codex_bank_rows(&d, 8, &p)).join("\n");
+        assert!(
+            !narrow.contains("04:03") && !narrow.contains("00:39"),
+            "a clock was shortened: {narrow}"
+        );
+        assert!(
+            !narrow.contains("available"),
+            "the count was clipped onto a line that cannot hold it: {narrow}"
+        );
+
+        let count_only = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 2,
+                expiries: Vec::new(),
+            }),
             ..d.clone()
         };
-        let open = tab(&open, 80, 40, &cfg, &p).join("\n");
-        assert!(open.contains("3 available"), "{open}");
-        assert!(open.contains(span), "{open}");
+        let count_only = shown(&codex_bank_rows(&count_only, 200, &p));
+        assert_eq!(count_only, vec![
+            " ── BANK ── limit reset credits".to_string(),
+            "  2 available".to_string(),
+            "  Still available in the account. The quota rows above are the usage windows."
+                .to_string(),
+        ]);
+
+        let unreadable = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 1,
+                expiries: vec![None],
+            }),
+            ..d.clone()
+        };
+        let unreadable = shown(&codex_bank_rows(&unreadable, 200, &p)).join("\n");
+        assert!(unreadable.contains("1 available"), "{unreadable}");
+        assert!(unreadable.contains("date unknown"), "{unreadable}");
         assert!(
-            open.contains("does not expire"),
-            "a credit with no expiry is not given an end: {open}"
+            !unreadable.contains(&soon_row),
+            "an unreadable expiry was given a date: {unreadable}"
         );
-        // And it is on the pane even when this machine has no rollouts.
+
         let bare = Data {
+            ok: false,
             bank: Some(crate::parse::ResetBank {
                 left: 0,
                 expiries: Vec::new(),
             }),
             ..d.clone()
         };
-        let bare = Data { ok: false, ..bare };
         let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
         assert!(rows.contains("0 available"), "{rows}");
         assert!(
@@ -1637,10 +1678,7 @@ mod tests {
             "a real zero is not described as still available: {rows}"
         );
         assert!(rows.contains("No session rollouts"), "{rows}");
-        assert!(
-            !rows.contains(span),
-            "zero credits have no expiry span to invent"
-        );
+        assert!(!rows.contains("date unknown"), "{rows}");
         assert!(!rows.contains("expires in"), "{rows}");
     }
 

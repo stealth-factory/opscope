@@ -157,10 +157,38 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
         .iter()
         .map(|(heading, id)| {
             let (note, warn) = quiet_of(id, s);
-            (heading.clone(), note, warn)
+            // The roll-call uses the bare name. The heading is the line
+            // on screen, and that is where a real bank count belongs.
+            let shown = if note.is_empty() {
+                heading.clone()
+            } else {
+                heading_with_bank(heading, id, s, w)
+            };
+            (shown, note, warn)
         })
         .collect();
     quiet_block(&said, w, p)
+}
+
+/// The Codex name on `[+]`, with the bank count when the inventory was read.
+///
+/// The count is the same `N available` the Codex tab draws. A missing
+/// inventory adds nothing: a blank is not drawn as zero. The suffix is left
+/// off when the line would have to clip it, so a narrow pane cannot turn
+/// the count into a shorter number.
+fn heading_with_bank(heading: &str, agent_id: &str, s: &State, w: usize) -> String {
+    if agent_id != "codex" {
+        return heading.to_string();
+    }
+    let Some(left) = s.codex.reset_credits_left() else {
+        return heading.to_string();
+    };
+    let with = format!("{heading}  {left} available");
+    if tc::display_width(&format!("  {with}")) <= w.saturating_sub(1) {
+        with
+    } else {
+        heading.to_string()
+    }
 }
 
 /// Split out from summary_tab because the State it needs cannot be built
@@ -174,11 +202,12 @@ fn quiet_block(said: &[(String, String, bool)], w: usize, p: &Palette) -> Vec<St
             unexplained.push(name);
             continue;
         }
-        rows.push(tc::seg(
-            &[(p.lbl.as_str(), format!("  {}", name))],
-            w - 1,
-        ));
-        let tone = if *warn { p.warn.as_str() } else { p.dim.as_str() };
+        rows.push(tc::seg(&[(p.lbl.as_str(), format!("  {}", name))], w - 1));
+        let tone = if *warn {
+            p.warn.as_str()
+        } else {
+            p.dim.as_str()
+        };
         rows.extend(
             wrap_text(note, w.saturating_sub(5).max(20))
                 .into_iter()
@@ -300,8 +329,9 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         let hue = agent_hue(&group_agent(name));
         rows.push(tc::seg(
             &[(
-                &hue.map(|(r, g, b)| tc::rgb(r, g, b)).unwrap_or_else(|| p.txt.clone()),
-                format!("  {}", name),
+                &hue.map(|(r, g, b)| tc::rgb(r, g, b))
+                    .unwrap_or_else(|| p.txt.clone()),
+                format!("  {}", heading_with_bank(name, &group_agent(name), s, w)),
             )],
             w - 1,
         ));
@@ -347,7 +377,11 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                             if lane.projected { "~" } else { "" },
                             left_span(left)
                         ),
-                        if lane.stale { p.warn.clone() } else { p.dim.clone() },
+                        if lane.stale {
+                            p.warn.clone()
+                        } else {
+                            p.dim.clone()
+                        },
                     ),
                     Some(_) => ("  resetting".to_string(), p.dim.clone()),
                     None => (String::new(), p.dim.clone()),
@@ -386,7 +420,11 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                 // column whether the row beside them is cached or not.
                 line.push((
                     p.warn.clone(),
-                    if lane.stale { " *".into() } else { "  ".to_string() },
+                    if lane.stale {
+                        " *".into()
+                    } else {
+                        "  ".to_string()
+                    },
                 ));
             }
             line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
@@ -418,14 +456,16 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                 w - 1,
             ));
             let said = tc::missing_config("Set agent_usage.grok_ping to poll x.ai instead.");
-            rows.extend(tc::wrap_words(&said, w.saturating_sub(6).max(1)).into_iter().map(
-                |line| {
-                    tc::seg(
-                        &[(p.dim.as_str(), format!("     {line}"))],
-                        w.saturating_sub(1).max(1),
-                    )
-                },
-            ));
+            rows.extend(
+                tc::wrap_words(&said, w.saturating_sub(6).max(1))
+                    .into_iter()
+                    .map(|line| {
+                        tc::seg(
+                            &[(p.dim.as_str(), format!("     {line}"))],
+                            w.saturating_sub(1).max(1),
+                        )
+                    }),
+            );
         }
     }
     if any_stale {
@@ -493,7 +533,12 @@ pub fn tab_body(
 
 /// A backstop for an agent added to the list without a reader: it says so
 /// rather than raising in the draw loop.
-fn unknown(name: &str, installed: &HashMap<String, Presence>, w: usize, p: &Palette) -> Vec<String> {
+fn unknown(
+    name: &str,
+    installed: &HashMap<String, Presence>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
     let (label, _, _) = agent_spec(name);
     let have = installed.get(name).is_some_and(|x| x.present);
     let mut rows = vec![
@@ -563,7 +608,11 @@ mod tests {
             .iter()
             .position(|r| r.contains("publishes none"))
             .expect("the reason");
-        assert!(head < line, "the sentence came before the name it is about:\n{:#?}", rows);
+        assert!(
+            head < line,
+            "the sentence came before the name it is about:\n{:#?}",
+            rows
+        );
 
         // And when every quiet agent has said why, the roll-call that used
         // to lead is gone rather than repeating them.
@@ -579,7 +628,11 @@ mod tests {
         // The roll-call is not dropped, only reduced to what is left.
         let p = palette();
         let said = vec![
-            ("ANTIGRAVITY".into(), "no quota - the app is closed.".to_string(), true),
+            (
+                "ANTIGRAVITY".into(),
+                "no quota - the app is closed.".to_string(),
+                true,
+            ),
             ("COPILOT".into(), String::new(), false),
         ];
         let rows = plain(&quiet_block(&said, 90, &p));
@@ -588,11 +641,22 @@ mod tests {
             .find(|r| r.contains("No quota published by"))
             .expect("a roll-call for the one with no reason");
         assert!(roll.contains("COPILOT"), "{}", roll);
-        assert!(!roll.contains("antigravity"), "explained and listed: {}", roll);
+        assert!(
+            !roll.contains("antigravity"),
+            "explained and listed: {}",
+            roll
+        );
         // The explained one still leads with its heading.
         let head = rows.iter().position(|r| r.contains("ANTIGRAVITY")).unwrap();
-        let rollat = rows.iter().position(|r| r.contains("No quota published by")).unwrap();
-        assert!(head < rollat, "roll-call above the explanations:\n{:#?}", rows);
+        let rollat = rows
+            .iter()
+            .position(|r| r.contains("No quota published by"))
+            .unwrap();
+        assert!(
+            head < rollat,
+            "roll-call above the explanations:\n{:#?}",
+            rows
+        );
     }
 
     #[test]
@@ -604,7 +668,14 @@ mod tests {
         let p = palette();
         let s = State::default();
         let rows = plain(&summary_tab(&s, 90, &p));
-        for name in ["CLAUDE", "CODEX", "CURSOR", "GROK", "COPILOT", "ANTIGRAVITY"] {
+        for name in [
+            "CLAUDE",
+            "CODEX",
+            "CURSOR",
+            "GROK",
+            "COPILOT",
+            "ANTIGRAVITY",
+        ] {
             assert!(
                 rows.iter().any(|r| r.contains(name)),
                 "quiet {name} had no section:\n{rows:#?}"
@@ -615,7 +686,9 @@ mod tests {
             "explained agents still in the roll-call:\n{rows:#?}"
         );
         assert!(
-            !rows.iter().any(|r| r.contains("No agent is publishing a quota")),
+            !rows
+                .iter()
+                .any(|r| r.contains("No agent is publishing a quota")),
             "generic empty-screen line hid the per-agent reasons:\n{rows:#?}"
         );
     }
@@ -673,7 +746,7 @@ mod tests {
             reset: None,
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
         };
         // grok has more lanes and a higher total, and still ranks below the
         // provider with the single worst one - which a flat sort by
@@ -711,8 +784,14 @@ mod tests {
         );
         assert!(joined.contains("CURSOR"), "{joined}");
         // Ranked as extra entries: overflow at 80% sits above main at 25%.
-        let overflow = rows.iter().position(|r| r.contains("overflow - CLAUDE")).unwrap();
-        let main = rows.iter().position(|r| r.contains("main - CLAUDE")).unwrap();
+        let overflow = rows
+            .iter()
+            .position(|r| r.contains("overflow - CLAUDE"))
+            .unwrap();
+        let main = rows
+            .iter()
+            .position(|r| r.contains("main - CLAUDE"))
+            .unwrap();
         assert!(overflow < main, "profiles were not ranked apart:\n{joined}");
     }
 
@@ -727,6 +806,71 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn the_codex_summary_line_shows_the_bank_only_when_it_was_read() {
+        let p = palette();
+        let with = State {
+            codex: crate::codex::Data::with_window_and_bank(Some(29.0), Some(2)),
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&with, 90, &p, &["codex"]));
+        let head = rows
+            .iter()
+            .find(|r| r.contains("CODEX"))
+            .expect("a Codex line");
+        assert_eq!(
+            head, "  CODEX  2 available",
+            "the bank count is missing from the Codex line: {head}"
+        );
+
+        let unread = State {
+            codex: crate::codex::Data::with_window_and_bank(Some(29.0), None),
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&unread, 90, &p, &["codex"]));
+        assert!(
+            !rows.iter().any(|r| r.contains("available")),
+            "a count was drawn without an inventory:\n{rows:#?}"
+        );
+
+        let zero = State {
+            codex: crate::codex::Data::with_window_and_bank(Some(29.0), Some(0)),
+            ..State::default()
+        };
+        let head = plain(&summary_for(&zero, 90, &p, &["codex"]))
+            .into_iter()
+            .find(|r| r.contains("CODEX"))
+            .expect("a Codex line");
+        assert!(
+            head.contains("0 available"),
+            "a real zero was omitted: {head}"
+        );
+
+        // No quota lanes, so Codex is the quiet heading. The count is still
+        // that heading, because the inventory was read.
+        let quiet = State {
+            codex: crate::codex::Data::with_window_and_bank(None, Some(2)),
+            ..State::default()
+        };
+        let head = plain(&summary_for(&quiet, 90, &p, &["codex"]))
+            .into_iter()
+            .find(|r| r.contains("CODEX"))
+            .expect("a quiet Codex line");
+        assert!(head.contains("2 available"), "{head}");
+
+        // Narrower than the name plus the count: the count is left off
+        // rather than clipped into a different number.
+        let tight = plain(&summary_for(&with, 8, &p, &["codex"]));
+        let head = tight
+            .iter()
+            .find(|r| r.contains("CODEX"))
+            .expect("a Codex line");
+        assert!(
+            !head.contains("available"),
+            "the count was clipped onto a line that cannot hold it: {head}"
+        );
     }
 
     #[test]

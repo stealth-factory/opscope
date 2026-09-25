@@ -15,10 +15,10 @@ Most of this is read from local state files. The exception is the remaining
 quota, which no agent writes to disk in a current form: Claude, Codex, Cursor
 and Copilot each publish one over an endpoint, fetched with the credential
 that agent already holds and sent only to that agent's own host. Codex also
-publishes how many reset credits are still available, and the span from
-the soonest of those expiries to the latest. That is separate from the
-usage-window countdown. Nothing here is inferred from a number that was
-not published.
+publishes how many reset credits are still available, and each credit's
+expiry as a date and time in this machine's local zone. That is separate
+from the usage-window countdown. Nothing here is inferred from a number
+that was not published.
 
 Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
 the page, home/end to either edge, comma opens settings, r refreshes now,

@@ -21,10 +21,10 @@ use crate::iso_epoch;
 /// Reset credits still usable on a Codex account.
 ///
 /// `left` is a count the body supports. `expiries` is one entry per credit
-/// that count was taken from, soonest first, and only when every credit in
-/// the list could be read. `None` means that credit has no expiry. An empty
-/// `expiries` with a non-zero `left` is a count the server stated without
-/// listing the credits, so no expiry is invented to go with it.
+/// that count was taken from, soonest first. `Some` is that credit's
+/// `expires_at`. `None` means the date could not be read, so the pane says
+/// it is unknown rather than inventing one. An empty `expiries` is a count
+/// the server stated without listing the credits, so no date row is drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResetBank {
     pub left: u64,
@@ -37,15 +37,16 @@ pub struct ResetBank {
 /// list. A count that arrived on some other payload is not this body.
 ///
 /// A credit is still in the bank when its status is `available` and its
-/// expiry is either absent or still ahead of `now`. Anything else in the
-/// list is spent, unknown, or already past its expiry, and is not part of
+/// expiry is either unreadable or still ahead of `now`. A spent credit, an
+/// unknown status, or a credit already past its expiry is not part of
 /// `left`. `now` is an argument so the same body parses the same way in a
 /// test as on the pane.
 ///
-/// A list that cannot be read credit by credit does not yield a partial
-/// count. The server's `available_count` is used on its own in that case,
-/// with no expiries, and only when it is a non-negative whole number. A
-/// negative count makes the body unusable.
+/// An `expires_at` that is missing, null, or not a time stays in the bank
+/// with no date. A credit that is not an object cannot be classified, so
+/// the server's `available_count` is used on its own, with no dates, and
+/// only when it is a non-negative whole number. A negative count makes the
+/// body unusable.
 pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     let body: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = body.as_object()?;
@@ -80,13 +81,12 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
         if credit.get("status").and_then(|v| v.as_str()) != Some("available") {
             continue;
         }
+        // Missing, null, a non-string, or a string that is not a time is
+        // still this credit. The date is unknown. It is not dropped, and
+        // it is not given an invented expiry.
         let expiry = match credit.get("expires_at") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(raw)) => match iso_epoch(raw) {
-                Some(at) => Some(at),
-                None => return count_only(reported),
-            },
-            Some(_) => return count_only(reported),
+            Some(serde_json::Value::String(raw)) => iso_epoch(raw),
+            _ => None,
         };
         if expiry.is_some_and(|at| at <= now) {
             continue;
@@ -151,7 +151,8 @@ mod tests {
         let bank = parse_codex_reset_credits(body, now).expect("a readable inventory");
         // The reported 9 is not the bank: one credit has already expired,
         // one is redeemed, and one has a status this pane does not know.
-        // The two that remain, plus the one with no expiry, are what is left.
+        // The two that remain, plus the one whose date could not be read,
+        // are what is left.
         assert_eq!(bank.left, 3);
         assert_eq!(bank.expiries, vec![
             Some(at("2026-07-12T04:03:43.263391Z")),
@@ -219,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn an_expiry_that_cannot_be_read_drops_the_list_and_keeps_the_count() {
+    fn an_expiry_that_cannot_be_read_still_counts_and_keeps_the_other_dates() {
         let now = at("2026-07-01T00:00:00Z");
         let bank = parse_codex_reset_credits(
             r#"{"available_count":2,"credits":[
@@ -228,18 +229,24 @@ mod tests {
             ]}"#,
             now,
         )
-        .expect("the count is still a number");
+        .expect("both credits stay in the bank");
         assert_eq!(bank.left, 2);
-        assert!(
-            bank.expiries.is_empty(),
-            "a partial list must not be drawn as the whole bank"
-        );
-        assert!(
-            parse_codex_reset_credits(
-                r#"{"credits":[{"status":"available","expires_at":"not-a-time"}]}"#,
-                now
-            )
-            .is_none()
-        );
+        assert_eq!(bank.expiries, vec![Some(at("2026-07-12T00:00:00Z")), None]);
+        let only = parse_codex_reset_credits(
+            r#"{"credits":[{"status":"available","expires_at":"not-a-time"}]}"#,
+            now,
+        )
+        .expect("one credit with an unreadable date still counts");
+        assert_eq!(only.left, 1);
+        assert_eq!(only.expiries, vec![None]);
+        // A number is not the string the inventory sends. It is not turned
+        // into a datetime.
+        let numbered = parse_codex_reset_credits(
+            r#"{"available_count":1,"credits":[{"status":"available","expires_at":1780000000}]}"#,
+            now,
+        )
+        .expect("the credit still counts");
+        assert_eq!(numbered.left, 1);
+        assert_eq!(numbered.expiries, vec![None]);
     }
 }
