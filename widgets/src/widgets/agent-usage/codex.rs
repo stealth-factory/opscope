@@ -94,17 +94,37 @@ pub struct Data {
 }
 
 impl Data {
-    /// How many reset credits are still available, when the inventory was read.
+    /// `N reset available (soonest expiry)` when the inventory was read and
+    /// the count is greater than zero.
     ///
-    /// `None` means the inventory was not read. Zero is a real empty bank,
-    /// not a stand-in for a call that failed.
-    pub(crate) fn reset_credits_left(&self) -> Option<u64> {
-        self.bank.as_ref().map(|bank| bank.left)
+    /// `None` when the inventory was not read, or when it was read and the
+    /// count is zero. The parenthetical is the soonest credit's expiry.
+    /// A count with no readable expiry has no parenthetical, because a date
+    /// was not in the payload.
+    pub(crate) fn reset_summary_line(&self) -> Option<String> {
+        let bank = self.bank.as_ref()?;
+        if bank.left == 0 {
+            return None;
+        }
+        let soonest = bank
+            .credits
+            .iter()
+            .find_map(|credit| credit.expiry.and_then(local_expiry));
+        Some(match soonest {
+            Some(stamp) => format!("{} reset available ({stamp})", bank.left),
+            None => format!("{} reset available", bank.left),
+        })
     }
 
     /// A live window, and a bank only when `bank` is `Some`.
     #[cfg(test)]
     pub(crate) fn with_window_and_bank(pct: Option<f64>, bank: Option<u64>) -> Self {
+        Self::with_reset(pct, bank.map(|left| (left, None)))
+    }
+
+    /// A live window and, when `soonest` is set, that many dated credits.
+    #[cfg(test)]
+    pub(crate) fn with_reset(pct: Option<f64>, bank: Option<(u64, Option<f64>)>) -> Self {
         Self {
             live: pct.map(|pct| {
                 serde_json::json!({
@@ -116,9 +136,17 @@ impl Data {
                     }
                 })
             }),
-            bank: bank.map(|left| crate::parse::ResetBank {
+            bank: bank.map(|(left, soonest)| crate::parse::ResetBank {
                 left,
-                expiries: Vec::new(),
+                credits: match soonest {
+                    Some(expiry) if left > 0 => (0..left)
+                        .map(|i| crate::parse::ResetCredit {
+                            title: None,
+                            expiry: Some(expiry + i as f64 * 86_400.0),
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
             }),
             ..Self::default()
         }
@@ -895,46 +923,39 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
 
 /// Unused reset credits still in the account.
 ///
-/// Drawn under the quota windows. The count is how many are still available.
-/// Each credit the inventory listed is its own row: the expiry as a datetime
-/// in this machine's local zone, with the zone named, or `date unknown` when
-/// `expires_at` could not be read. A count with no list draws no date rows.
+/// Drawn under the quota windows. The section is one row pair per credit the
+/// inventory listed: that credit's `title`, then `Expires` and the local
+/// datetime. A credit with no title gets no title line. A credit with no
+/// readable expiry still has its row, and the date says it is unknown.
+/// Rows inside a section sit together, the same way the quota lanes do, so
+/// there is no blank line between credits.
 fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let Some(bank) = d.bank.as_ref() else {
         return Vec::new();
     };
     let room = w.saturating_sub(1);
     let mut rows = vec![tc::seg(
-        &[
-            (p.lbl.as_str(), " ── BANK ── ".into()),
-            (p.dim.as_str(), "limit reset credits".into()),
-        ],
+        &[(p.lbl.as_str(), " ── BANK RESET ── ".into())],
         room,
     )];
-    // Left off when the pane cannot hold the whole count. Clipping
-    // `12 available` to `1` would be a different number.
-    let count = format!("  {} available", bank.left);
-    push_whole(&mut rows, p.txt.as_str(), &count, room);
-    for expiry in &bank.expiries {
-        let line = match expiry.and_then(local_expiry) {
-            Some(stamp) => stamp,
-            None => "date unknown".to_string(),
+    if bank.credits.is_empty() {
+        let line = if bank.left == 0 {
+            "None in the account.".to_string()
+        } else {
+            format!("{} reset available", bank.left)
         };
         push_wrapped(&mut rows, &line, room, p.dim.as_str());
+        return rows;
     }
-    let dated = bank.expiries.iter().any(|expiry| expiry.is_some());
-    let note = if bank.left == 0 {
-        "None in the account. The quota rows above are the usage windows."
-    } else if dated {
-        "Each time is when that credit expires, in this machine's local zone. \
-         The quota rows above are the usage windows."
-    } else if bank.expiries.is_empty() {
-        "Still available in the account. The quota rows above are the usage windows."
-    } else {
-        "The expiry could not be read. The quota rows above are the usage windows."
-    };
-    for line in wrap_text(note, w.saturating_sub(4).max(20)) {
-        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], room));
+    for credit in &bank.credits {
+        if let Some(title) = &credit.title {
+            push_wrapped(&mut rows, title, room, p.txt.as_str());
+        }
+        let when = match credit.expiry.and_then(local_expiry) {
+            Some(stamp) => format!("Expires {stamp}"),
+            None => "Expires date unknown".to_string(),
+        };
+        push_wrapped(&mut rows, &when, room, p.dim.as_str());
     }
     rows
 }
@@ -942,21 +963,21 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// `expires_at` as a local datetime, with the zone named.
 ///
 /// The instant is the one the inventory sent. The calendar fields are this
-/// machine's zone, and the offset is always on the row so the zone is
-/// labeled even when it has no abbreviation.
-fn local_expiry(at: f64) -> Option<String> {
+/// machine's zone. Minutes are the resolution the row shows. The offset is
+/// in parentheses, and a zone abbreviation sits in front of it when this
+/// machine has one that is not the offset itself.
+pub(crate) fn local_expiry(at: f64) -> Option<String> {
     if !at.is_finite() {
         return None;
     }
     let local = Local.timestamp_opt(at.trunc() as i64, 0).single()?;
     let stamp = format!(
-        "{} {} {} {:02}:{:02}:{:02}",
+        "{} {} {} {:02}:{:02}",
         local.day(),
         MONTHS[local.month0() as usize],
         local.year(),
         local.hour(),
         local.minute(),
-        local.second(),
     );
     let zone = local.format("%Z").to_string();
     let offset = local.format("%:z").to_string();
@@ -966,7 +987,7 @@ fn local_expiry(at: f64) -> Option<String> {
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | ':'));
     if zone_is_offset {
-        Some(format!("{stamp} {offset}"))
+        Some(format!("{stamp} ({offset})"))
     } else {
         Some(format!("{stamp} {zone} ({offset})"))
     }
@@ -1573,15 +1594,23 @@ mod tests {
         );
         assert!(
             soon_row.contains(&format!(
-                "{} {} {} {:02}:{:02}:{:02}",
+                "{} {} {} {:02}:{:02}",
                 soon_local.day(),
                 MONTHS[soon_local.month0() as usize],
                 soon_local.year(),
                 soon_local.hour(),
                 soon_local.minute(),
-                soon_local.second(),
             )),
             "the datetime is not this machine's local time: {soon_row}"
+        );
+        assert!(
+            !soon_row.contains(&format!(
+                "{:02}:{:02}:{:02}",
+                soon_local.hour(),
+                soon_local.minute(),
+                soon_local.second(),
+            )),
+            "seconds are not part of this row: {soon_row}"
         );
         let d = Data {
             ok: true,
@@ -1594,70 +1623,86 @@ mod tests {
             ),
             bank: Some(crate::parse::ResetBank {
                 left: 3,
-                expiries: vec![Some(soon), Some(later), None],
+                credits: vec![
+                    crate::parse::ResetCredit {
+                        title: Some("Full reset".into()),
+                        expiry: Some(soon),
+                    },
+                    crate::parse::ResetCredit {
+                        title: Some("Full reset".into()),
+                        expiry: Some(later),
+                    },
+                    crate::parse::ResetCredit {
+                        title: None,
+                        expiry: None,
+                    },
+                ],
             }),
             ..Data::default()
         };
         let wide = shown(&codex_bank_rows(&d, 200, &p));
-        assert_eq!(
-            wide,
-            vec![
-                " ── BANK ── limit reset credits".to_string(),
-                "  3 available".to_string(),
-                format!("  {soon_row}"),
-                format!("  {later_row}"),
-                "  date unknown".to_string(),
-                "  Each time is when that credit expires, in this machine's local zone. The quota rows above are the usage windows.".to_string(),
-            ]
-        );
+        assert_eq!(wide, vec![
+            " ── BANK RESET ──".to_string(),
+            "  Full reset".to_string(),
+            format!("  Expires {soon_row}"),
+            "  Full reset".to_string(),
+            format!("  Expires {later_row}"),
+            "  Expires date unknown".to_string(),
+        ]);
         let on_tab = tab(&d, 200, 40, &cfg, &p).join("\n");
-        let count_at = on_tab.find("3 available").expect("the count");
         let soon_at = on_tab.find(&soon_row).expect("the soon expiry");
         let later_at = on_tab.find(&later_row).expect("the later expiry");
         let unknown_at = on_tab.find("date unknown").expect("the unknown date");
-        assert!(count_at < soon_at && soon_at < later_at && later_at < unknown_at);
+        assert!(soon_at < later_at && later_at < unknown_at);
         assert!(!on_tab.contains("⏱"), "{on_tab}");
         assert!(!on_tab.contains("does not expire"), "{on_tab}");
         assert!(!on_tab.contains("10d"), "{on_tab}");
 
-        // A pane too narrow to hold the clock leaves that piece off rather
-        // than shortening it. `04:03` is not `04:03:43`. The count is left
-        // off the same way: a clipped `3 avail` is not `3 available`.
+        // A pane too narrow to hold a clock token leaves that token off
+        // rather than shortening it. `04:0` is not `04:03`.
         let narrow = shown(&codex_bank_rows(&d, 8, &p)).join("\n");
         assert!(
-            !narrow.contains("04:03") && !narrow.contains("00:39"),
+            !narrow.contains("04:0") || narrow.contains("04:03"),
             "a clock was shortened: {narrow}"
         );
         assert!(
-            !narrow.contains("available"),
-            "the count was clipped onto a line that cannot hold it: {narrow}"
+            !narrow.contains("00:3") || narrow.contains("00:39"),
+            "a clock was shortened: {narrow}"
+        );
+        assert!(
+            !narrow.contains("04:03:"),
+            "seconds are not on this row: {narrow}"
         );
 
         let count_only = Data {
             bank: Some(crate::parse::ResetBank {
                 left: 2,
-                expiries: Vec::new(),
+                credits: Vec::new(),
             }),
             ..d.clone()
         };
         let count_only = shown(&codex_bank_rows(&count_only, 200, &p));
         assert_eq!(count_only, vec![
-            " ── BANK ── limit reset credits".to_string(),
-            "  2 available".to_string(),
-            "  Still available in the account. The quota rows above are the usage windows."
-                .to_string(),
+            " ── BANK RESET ──".to_string(),
+            "  2 reset available".to_string(),
         ]);
 
         let unreadable = Data {
             bank: Some(crate::parse::ResetBank {
                 left: 1,
-                expiries: vec![None],
+                credits: vec![crate::parse::ResetCredit {
+                    title: None,
+                    expiry: None,
+                }],
             }),
             ..d.clone()
         };
         let unreadable = shown(&codex_bank_rows(&unreadable, 200, &p)).join("\n");
-        assert!(unreadable.contains("1 available"), "{unreadable}");
-        assert!(unreadable.contains("date unknown"), "{unreadable}");
+        assert!(unreadable.contains("Expires date unknown"), "{unreadable}");
+        assert!(
+            !unreadable.contains("Full reset"),
+            "a missing title was invented: {unreadable}"
+        );
         assert!(
             !unreadable.contains(&soon_row),
             "an unreadable expiry was given a date: {unreadable}"
@@ -1667,12 +1712,17 @@ mod tests {
             ok: false,
             bank: Some(crate::parse::ResetBank {
                 left: 0,
-                expiries: Vec::new(),
+                credits: Vec::new(),
             }),
             ..d.clone()
         };
         let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
-        assert!(rows.contains("0 available"), "{rows}");
+        assert!(rows.contains("BANK RESET"), "{rows}");
+        assert!(rows.contains("None in the account"), "{rows}");
+        assert!(
+            !rows.contains("reset available"),
+            "a real zero is not described as available: {rows}"
+        );
         assert!(
             !rows.contains("Still available"),
             "a real zero is not described as still available: {rows}"
@@ -1709,7 +1759,7 @@ mod tests {
         ]}"#;
         let from_list = bank_of(Some(inventory), now).expect("the list");
         assert_eq!(from_list.left, 1);
-        assert_eq!(from_list.expiries.len(), 1);
+        assert_eq!(from_list.credits.len(), 1);
 
         // A usage payload can carry `rate_limit_reset_credits.available_count`.
         // That number is not the inventory, so a failed inventory stays blank
@@ -1720,7 +1770,7 @@ mod tests {
         let empty = r#"{"credits":[],"available_count":0}"#;
         let zero = bank_of(Some(empty), now).expect("a real zero");
         assert_eq!(zero.left, 0);
-        assert!(zero.expiries.is_empty());
+        assert!(zero.credits.is_empty());
     }
 
     #[test]
@@ -1731,7 +1781,7 @@ mod tests {
         assert!(missed.get("usage_miss").is_some());
         let bank = bank_of(missed["bank"].as_str(), 0.0).expect("the count");
         assert_eq!(bank.left, 2);
-        assert!(bank.expiries.is_empty());
+        assert!(bank.credits.is_empty());
 
         let usage = serde_json::json!({"plan_type": "pro"});
         let both = live_payload(Some(usage), Some(inventory.to_string())).expect("both");

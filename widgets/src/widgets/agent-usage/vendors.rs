@@ -157,44 +157,42 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
         .iter()
         .map(|(heading, id)| {
             let (note, warn) = quiet_of(id, s);
-            // The roll-call uses the bare name. The heading is the line
-            // on screen, and that is where a real bank count belongs.
-            let shown = if note.is_empty() {
-                heading.clone()
-            } else {
-                heading_with_bank(heading, id, s, w)
-            };
-            (shown, note, warn)
+            (heading.clone(), note, warn)
         })
         .collect();
-    quiet_block(&said, w, p)
+    quiet_block(&said, s, w, p)
 }
 
-/// The Codex name on `[+]`, with the bank count when the inventory was read.
+/// The reset line under Codex on `[+]`, when the inventory was read and the
+/// count is greater than zero.
 ///
-/// The count is the same `N available` the Codex tab draws. A missing
-/// inventory adds nothing: a blank is not drawn as zero. The suffix is left
-/// off when the line would have to clip it, so a narrow pane cannot turn
-/// the count into a shorter number.
-fn heading_with_bank(heading: &str, agent_id: &str, s: &State, w: usize) -> String {
-    if agent_id != "codex" {
-        return heading.to_string();
-    }
-    let Some(left) = s.codex.reset_credits_left() else {
-        return heading.to_string();
+/// A blank line comes first, and only then. Zero and an unread inventory
+/// add neither the line nor that blank. The datetime is wrapped on spaces
+/// and a piece that cannot fit is left off, so a clock is not shortened.
+fn push_reset_summary(rows: &mut Vec<String>, s: &State, w: usize, p: &Palette) {
+    let Some(line) = s.codex.reset_summary_line() else {
+        return;
     };
-    let with = format!("{heading}  {left} available");
-    if tc::display_width(&format!("  {with}")) <= w.saturating_sub(1) {
-        with
-    } else {
-        heading.to_string()
+    rows.push(String::new());
+    let room = w.saturating_sub(1);
+    let whole = format!("  {line}");
+    if room > 0 && tc::display_width(&whole) <= room {
+        rows.push(tc::seg(&[(p.txt.as_str(), whole)], room));
+        return;
+    }
+    let budget = room.saturating_sub(2).max(1);
+    for piece in wrap_text(&line, budget) {
+        let drawn = format!("  {piece}");
+        if room > 0 && tc::display_width(&drawn) <= room {
+            rows.push(tc::seg(&[(p.txt.as_str(), drawn)], room));
+        }
     }
 }
 
 /// Split out from summary_tab because the State it needs cannot be built
 /// from another module - every agent's Data keeps its fields private - so
 /// this is the only shape the ordering is testable in.
-fn quiet_block(said: &[(String, String, bool)], w: usize, p: &Palette) -> Vec<String> {
+fn quiet_block(said: &[(String, String, bool)], s: &State, w: usize, p: &Palette) -> Vec<String> {
     let mut rows = Vec::new();
     let mut unexplained: Vec<&str> = Vec::new();
     for (name, note, warn) in said {
@@ -213,6 +211,9 @@ fn quiet_block(said: &[(String, String, bool)], w: usize, p: &Palette) -> Vec<St
                 .into_iter()
                 .map(|l| tc::seg(&[(tone, format!("   {}", l))], w - 1)),
         );
+        if name == "CODEX" {
+            push_reset_summary(&mut rows, s, w, p);
+        }
         rows.push(String::new());
     }
     if !unexplained.is_empty() {
@@ -331,7 +332,7 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
             &[(
                 &hue.map(|(r, g, b)| tc::rgb(r, g, b))
                     .unwrap_or_else(|| p.txt.clone()),
-                format!("  {}", heading_with_bank(name, &group_agent(name), s, w)),
+                format!("  {}", name),
             )],
             w - 1,
         ));
@@ -467,6 +468,9 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                     }),
             );
         }
+        if group_agent(name) == "codex" {
+            push_reset_summary(&mut rows, s, w, p);
+        }
     }
     if any_stale {
         rows.push(String::new());
@@ -599,7 +603,7 @@ mod tests {
             "no quota - it publishes none to any server.".to_string(),
             true,
         )];
-        let rows = plain(&quiet_block(&said, 90, &p));
+        let rows = plain(&quiet_block(&said, &State::default(), 90, &p));
         let head = rows
             .iter()
             .position(|r| r.contains("ANTIGRAVITY"))
@@ -635,7 +639,7 @@ mod tests {
             ),
             ("COPILOT".into(), String::new(), false),
         ];
-        let rows = plain(&quiet_block(&said, 90, &p));
+        let rows = plain(&quiet_block(&said, &State::default(), 90, &p));
         let roll = rows
             .iter()
             .find(|r| r.contains("No quota published by"))
@@ -809,67 +813,92 @@ mod tests {
     }
 
     #[test]
-    fn the_codex_summary_line_shows_the_bank_only_when_it_was_read() {
+    fn the_codex_summary_keeps_its_title_and_states_the_resets_under_it() {
         let p = palette();
+        let soon = crate::iso_epoch("2026-10-04T11:03:00Z").expect("soon");
+        let stamp = crate::codex::local_expiry(soon).expect("a local expiry");
         let with = State {
-            codex: crate::codex::Data::with_window_and_bank(Some(29.0), Some(2)),
+            codex: crate::codex::Data::with_reset(Some(29.0), Some((2, Some(soon)))),
             ..State::default()
         };
-        let rows = plain(&summary_for(&with, 90, &p, &["codex"]));
+        let rows = plain(&summary_for(&with, 120, &p, &["codex"]));
         let head = rows
             .iter()
             .find(|r| r.contains("CODEX"))
             .expect("a Codex line");
-        assert_eq!(
-            head, "  CODEX  2 available",
-            "the bank count is missing from the Codex line: {head}"
+        assert_eq!(head, "  CODEX", "the title gained a count: {head}");
+        let line = format!("2 reset available ({stamp})");
+        let at = rows.iter().position(|r| r.contains(&line)).expect("the reset line");
+        assert_eq!(rows[at], format!("  {line}"));
+        assert!(
+            rows[at - 1].is_empty(),
+            "the reset line was not set off by a blank line: {rows:#?}"
+        );
+        assert!(at > rows.iter().position(|r| r.contains("CODEX")).unwrap());
+
+        let one = State {
+            codex: crate::codex::Data::with_reset(Some(29.0), Some((1, Some(soon)))),
+            ..State::default()
+        };
+        let one_line = crate::codex::Data::with_reset(Some(29.0), Some((1, Some(soon))))
+            .reset_summary_line()
+            .expect("one credit");
+        assert_eq!(one_line, format!("1 reset available ({stamp})"));
+        assert!(
+            plain(&summary_for(&one, 120, &p, &["codex"]))
+                .iter()
+                .any(|r| r == &format!("  {one_line}")),
+            "one credit was not worded the same way"
         );
 
         let unread = State {
             codex: crate::codex::Data::with_window_and_bank(Some(29.0), None),
             ..State::default()
         };
-        let rows = plain(&summary_for(&unread, 90, &p, &["codex"]));
+        let unread = plain(&summary_for(&unread, 120, &p, &["codex"]));
         assert!(
-            !rows.iter().any(|r| r.contains("available")),
-            "a count was drawn without an inventory:\n{rows:#?}"
+            !unread.iter().any(|r| r.contains("reset available")),
+            "a count was drawn without an inventory:\n{unread:#?}"
+        );
+        assert!(
+            !unread.windows(2).any(|pair| pair[0].is_empty() && pair[1].is_empty()),
+            "an unread inventory added a blank line:\n{unread:#?}"
         );
 
         let zero = State {
             codex: crate::codex::Data::with_window_and_bank(Some(29.0), Some(0)),
             ..State::default()
         };
-        let head = plain(&summary_for(&zero, 90, &p, &["codex"]))
-            .into_iter()
-            .find(|r| r.contains("CODEX"))
-            .expect("a Codex line");
+        let zero = plain(&summary_for(&zero, 120, &p, &["codex"]));
+        let head = zero.iter().find(|r| r.contains("CODEX")).expect("a Codex line");
+        assert_eq!(head, "  CODEX");
         assert!(
-            head.contains("0 available"),
-            "a real zero was omitted: {head}"
+            !zero.iter().any(|r| r.contains("reset available")),
+            "a zero bank drew a reset line:\n{zero:#?}"
         );
 
-        // No quota lanes, so Codex is the quiet heading. The count is still
-        // that heading, because the inventory was read.
+        // No quota lanes, so Codex is the quiet heading. The title stays
+        // the name, and the reset line follows it.
         let quiet = State {
-            codex: crate::codex::Data::with_window_and_bank(None, Some(2)),
+            codex: crate::codex::Data::with_reset(None, Some((2, Some(soon)))),
             ..State::default()
         };
-        let head = plain(&summary_for(&quiet, 90, &p, &["codex"]))
-            .into_iter()
-            .find(|r| r.contains("CODEX"))
-            .expect("a quiet Codex line");
-        assert!(head.contains("2 available"), "{head}");
+        let quiet = plain(&summary_for(&quiet, 120, &p, &["codex"]));
+        let head = quiet.iter().find(|r| r.contains("CODEX")).expect("a quiet Codex line");
+        assert_eq!(head, "  CODEX", "{head}");
+        let at = quiet.iter().position(|r| r.contains(&line)).expect("the reset line");
+        assert!(quiet[at - 1].is_empty(), "quiet reset line had no blank before it");
 
-        // Narrower than the name plus the count: the count is left off
-        // rather than clipped into a different number.
-        let tight = plain(&summary_for(&with, 8, &p, &["codex"]));
-        let head = tight
-            .iter()
-            .find(|r| r.contains("CODEX"))
-            .expect("a Codex line");
+        // Narrower than the datetime: the clock token stays whole.
+        let tight = plain(&summary_for(&with, 20, &p, &["codex"])).join("\n");
+        let clock = stamp
+            .split_whitespace()
+            .find(|word| word.contains(':'))
+            .expect("the clock");
+        let shortened = &clock[..clock.len() - 1];
         assert!(
-            !head.contains("available"),
-            "the count was clipped onto a line that cannot hold it: {head}"
+            !tight.contains(shortened) || tight.contains(clock),
+            "the clock was shortened: {tight}"
         );
     }
 
