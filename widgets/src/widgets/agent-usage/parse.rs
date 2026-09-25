@@ -50,8 +50,11 @@ pub struct ResetBank {
 pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
     let body: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = body.as_object()?;
+    // Missing or null is not a count, so a readable list can supply one.
+    // A number that is negative or not whole rejects the body: that count
+    // cannot sit beside the list, and it is not replaced with one.
     let reported = match obj.get("available_count") {
-        None => None,
+        None | Some(serde_json::Value::Null) => None,
         Some(value) => Some(whole_count(value)?),
     };
     // Null is a count with no list, same as the key being absent. An
@@ -180,6 +183,31 @@ mod tests {
         assert_eq!(bank.left, 2);
         assert!(bank.expiries.is_empty(), "null is not a list of expiries");
         assert!(parse_codex_reset_credits(r#"{"credits":null}"#, 0.0).is_none());
+    }
+
+    #[test]
+    fn a_null_count_lets_the_readable_list_supply_the_number() {
+        let now = at("2026-07-01T00:00:00Z");
+        let bank = parse_codex_reset_credits(
+            r#"{"available_count":null,"credits":[
+                {"status":"available","expires_at":"2026-07-12T00:00:00Z"},
+                {"status":"redeemed","expires_at":"2026-08-01T00:00:00Z"}
+            ]}"#,
+            now,
+        )
+        .expect("the list is the count");
+        assert_eq!(bank.left, 1);
+        assert_eq!(bank.expiries, vec![Some(at("2026-07-12T00:00:00Z"))]);
+        assert!(
+            parse_codex_reset_credits(
+                r#"{"available_count":2.5,"credits":[
+                    {"status":"available","expires_at":"2026-07-12T00:00:00Z"}
+                ]}"#,
+                now,
+            )
+            .is_none(),
+            "a fractional count is not replaced by the list"
+        );
     }
 
     #[test]
