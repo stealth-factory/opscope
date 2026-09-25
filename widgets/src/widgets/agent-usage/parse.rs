@@ -154,6 +154,12 @@ fn strip_controls(raw: &str) -> String {
             i = skip_csi(&chars, i + 1);
             continue;
         }
+        // C1 string introducers: DCS, SOS, OSC, PM, APC. Dropping only the
+        // introducer would leave the payload in the title.
+        if matches!(c, '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}') {
+            i = skip_string_sequence(&chars, i + 1);
+            continue;
+        }
         if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
             out.push(' ');
             i += 1;
@@ -332,6 +338,14 @@ mod tests {
         )
         .expect("the c1 title");
         assert_eq!(c1.credits[0].title.as_deref(), Some("Full reset"));
+
+        let c1_osc = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"Full\\u009d0;x\\u0007 reset\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("the c1 osc title");
+        assert_eq!(c1_osc.credits[0].title.as_deref(), Some("Full reset"));
     }
 
     #[test]
