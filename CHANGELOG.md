@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.28.0] - 2026-09-25
+
+### Features
+
+- **agent-usage**: Show Codex banked reset credits (#269)
+
 ## [0.27.0] - 2026-09-22
 
 ### Features

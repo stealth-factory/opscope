@@ -10,7 +10,7 @@
 id = "opscope.widgets"
 name = "opscope"
 description = "Terminal widgets that look like sci-fi movie panels and show only real data."
-version = "0.27.0"
+version = "0.28.0"
 min_luvus_version = "0.8.3"
 platforms = ["macos", "linux"]
 
