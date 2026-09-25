@@ -1039,6 +1039,21 @@ reading is missing the separately-metered lanes entirely — which is why the
 source label matters. A lane reading 0% there is a **real zero from the
 account**, not an absent number drawn as one.
 
+Under the windows, **BANK** is the unused rate-limit reset credits still in
+the account. The count is how many are still available. Under that count,
+each credit the inventory listed is one row: its expiry as a date and time
+in this machine's local zone, with the zone named, or `date unknown` when
+`expires_at` could not be read. A body that states a count and no list
+shows the count and no date rows. It is not another usage window, and it
+is not the `resets in` countdown on the quota rows. Every one of these
+numbers and dates comes from `GET /wham/rate-limit-reset-credits` on the
+same host and credential. A credit counts only while it is still available
+and its expiry, when one can be read, is still ahead. An inventory that
+answers `0` shows `0 available`. A request that does not answer leaves the
+section out. The usage payload is not a source for the count or the dates.
+On the `[+]` summary the Codex line carries the same count, and omits it
+when the inventory was not read. Claude publishes no such count.
+
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
 covers twenty-odd providers, and the obvious thing to reach for if this ever

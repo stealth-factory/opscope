@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use opscope_core as tc;
 
 use crate::shared::*;
@@ -38,6 +38,11 @@ use crate::*;
 /// reading how CodexBar does it (github.com/steipete/CodexBar), which
 /// documents it.
 const CODEX_USAGE_API: &str = "https://chatgpt.com/backend-api/wham/usage";
+/// Unused rate-limit reset credits still in the account. The same host and
+/// the same credential as the usage call, and a different body: a list of
+/// credits with expiries, not the 5h and 7d windows.
+const CODEX_RESET_CREDITS_API: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 /// Seconds; outside this range two `token_count` stamps do not bracket a turn.
 const MIN_GAP: f64 = 0.5;
 const MAX_GAP: f64 = 300.0;
@@ -67,6 +72,10 @@ pub struct Data {
     ok: bool,
     /// The live account-wide reading from the endpoint the CLI uses.
     live: Option<serde_json::Value>,
+    /// Reset credits still in the account. Absent when the reset-credit
+    /// inventory could not be read — never a guessed zero. The usage payload
+    /// is not a source.
+    bank: Option<crate::parse::ResetBank>,
     /// Why there is no live reading, when there is none. Empty while the
     /// endpoint is answering, or when nothing has been asked yet.
     live_why: String,
@@ -82,6 +91,38 @@ pub struct Data {
     rates: Vec<f64>,
     /// day -> model -> tokens by priced kind, plus reasoning.
     daily: HashMap<String, HashMap<String, Tokens>>,
+}
+
+impl Data {
+    /// How many reset credits are still available, when the inventory was read.
+    ///
+    /// `None` means the inventory was not read. Zero is a real empty bank,
+    /// not a stand-in for a call that failed.
+    pub(crate) fn reset_credits_left(&self) -> Option<u64> {
+        self.bank.as_ref().map(|bank| bank.left)
+    }
+
+    /// A live window, and a bank only when `bank` is `Some`.
+    #[cfg(test)]
+    pub(crate) fn with_window_and_bank(pct: Option<f64>, bank: Option<u64>) -> Self {
+        Self {
+            live: pct.map(|pct| {
+                serde_json::json!({
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": pct,
+                            "limit_window_seconds": 604800
+                        }
+                    }
+                })
+            }),
+            bank: bank.map(|left| crate::parse::ResetBank {
+                left,
+                expiries: Vec::new(),
+            }),
+            ..Self::default()
+        }
+    }
 }
 
 /// Account-wide quota, live from the same endpoint the Codex CLI uses.
@@ -107,15 +148,54 @@ fn codex_live() -> Option<serde_json::Value> {
     if tok.is_empty() {
         return Some(serde_json::json!({"why": "no token - Codex has not signed in here"}));
     }
-    get_json(
-        CODEX_USAGE_API,
-        &[
-            ("Authorization", &format!("Bearer {}", tok)),
-            ("User-Agent", "opscope"),
-        ],
-        20,
-    )
-    .map(|u| serde_json::json!({"u": u}))
+    let account = match text(&auth["tokens"], "account_id") {
+        s if !s.is_empty() => s,
+        _ => text(&auth, "account_id"),
+    };
+    let authz = format!("Bearer {}", tok);
+    let usage_headers = [("Authorization", authz.as_str()), ("User-Agent", "opscope")];
+    // The usage call stays as it was. The inventory is account-scoped, so
+    // the account id rides on that request only, and only when it is a
+    // header the client can send.
+    let mut inventory_headers = usage_headers.to_vec();
+    if account
+        .bytes()
+        .all(|b| (0x20..0x7f).contains(&b) && b != b'"')
+        && !account.is_empty()
+    {
+        inventory_headers.push(("ChatGPT-Account-Id", account.as_str()));
+    }
+    let usage = get_json(CODEX_USAGE_API, &usage_headers, 20);
+    // Same bound as the usage call, and still best effort. A miss here must
+    // not throw away a usage reading, and it must not become a bank of zero.
+    // A miss on usage must not skip this call either: the bank has its own
+    // source.
+    let bank = tc::get(CODEX_RESET_CREDITS_API, &inventory_headers, 20).ok();
+    live_payload(usage, bank)
+}
+
+/// Pair a usage reading with an inventory body.
+///
+/// The two calls are independent. When usage did not answer and the
+/// inventory did, the body rides along as `usage_miss` so the caller can
+/// keep the bank and still treat the usage call as a refusal. When neither
+/// answered there is nothing to draw.
+fn live_payload(
+    usage: Option<serde_json::Value>,
+    bank: Option<String>,
+) -> Option<serde_json::Value> {
+    match usage {
+        Some(usage) => Some(serde_json::json!({"u": usage, "bank": bank})),
+        None => bank.map(|bank| serde_json::json!({"usage_miss": true, "bank": bank})),
+    }
+}
+
+/// The bank to draw. The only source is the inventory body from
+/// `GET /wham/rate-limit-reset-credits`. A usage payload that happens to
+/// carry a summary count is not read: that number did not come from the
+/// inventory.
+fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank> {
+    crate::parse::parse_codex_reset_credits(inventory?, now)
 }
 
 /// Per-turn, per-model token counts from one rollout's text.
@@ -190,7 +270,10 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
             .single()
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        records.insert(format!("{}\u{0}{}", session, stamp), (day, model.clone(), got));
+        records.insert(
+            format!("{}\u{0}{}", session, stamp),
+            (day, model.clone(), got),
+        );
     }
     records
 }
@@ -351,7 +434,16 @@ fn newest_limits(files: &[String]) -> Option<serde_json::Value> {
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut refuse = String::new();
     let mut live_why = String::new();
+    let mut bank = None;
+    // Set inside the fetch, which `cached` does not run on a held reading.
+    // A usage miss still carries the inventory body for this frame.
+    let mut carried_bank: Option<String> = None;
     let live = match cached(caches, "codex", LIVE_TTL, || match codex_live() {
+        Some(got) if got.get("usage_miss").is_some() => {
+            carried_bank = got["bank"].as_str().map(str::to_string);
+            refuse = "ChatGPT's usage endpoint did not answer".into();
+            None
+        }
         None => {
             refuse = "ChatGPT's usage endpoint did not answer".into();
             None
@@ -360,18 +452,43 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             live_why = text(&got, "why");
+            bank = bank_of(got["bank"].as_str(), now());
             None
         }
-        Some(got) if got.get("u").is_some() => Some(got["u"].clone()),
-        other => other,
+        Some(got) if got.get("u").is_some() => {
+            bank = bank_of(got["bank"].as_str(), now());
+            Some(got["u"].clone())
+        }
+        other => {
+            if let Some(got) = other.as_ref() {
+                bank = bank_of(got["bank"].as_str(), now());
+            }
+            other
+        }
     };
     if !refuse.is_empty() {
         live_why = refuse.clone();
         remember_refusal(caches, "codex", &refuse);
+        // The refusal hold is `{"why"}` only. Put the inventory beside it
+        // so the frames inside the backoff still draw the bank that arrived.
+        if let Some(body) = carried_bank.clone() {
+            if let Some((when, _, held)) = caches.live.get("codex").cloned() {
+                caches.live.insert(
+                    "codex".to_string(),
+                    (
+                        when,
+                        Some(serde_json::json!({"why": &refuse, "bank": body})),
+                        held,
+                    ),
+                );
+            }
+            bank = bank_of(Some(&body), now());
+        }
     }
     let mut codex = Data {
         live,
         live_why,
+        bank,
         ..Data::default()
     };
     let files = rollout_files();
@@ -459,7 +576,11 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         // Spark is one - and each arrives named, with its own window and
         // reset. Rendering the list rather than the one name we know keeps
         // any future feature working without an edit.
-        for extra in live["additional_rate_limits"].as_array().into_iter().flatten() {
+        for extra in live["additional_rate_limits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             let win = &extra["rate_limit"]["primary_window"];
             if win["used_percent"].is_null() {
                 continue;
@@ -493,12 +614,20 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     if wins.is_empty() {
         return Vec::new();
     }
-    let source = if live_answered { "live" } else { "from the last session" };
+    let source = if live_answered {
+        "live"
+    } else {
+        "from the last session"
+    };
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
             (
-                if live_answered { p.ok.as_str() } else { p.warn.as_str() },
+                if live_answered {
+                    p.ok.as_str()
+                } else {
+                    p.warn.as_str()
+                },
                 source.into(),
             ),
             (
@@ -592,7 +721,11 @@ fn codex_totals_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     // Two columns while both fit; one when they do not. Spending extra width
     // on more content rather than on padding is the house rule, and a value
     // column under eight cells cannot hold "1.2M".
-    let ncols = if (w as i64 - 2) / 2 - label_w as i64 - 3 >= 8 { 2 } else { 1 };
+    let ncols = if (w as i64 - 2) / 2 - label_w as i64 - 3 >= 8 {
+        2
+    } else {
+        1
+    };
     let val_w = ((w - 2) / ncols).saturating_sub(label_w + 3).max(5);
     for chunk in cells.chunks(ncols) {
         let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
@@ -649,7 +782,10 @@ fn codex_rate_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         buckets[at] += 1.0;
     }
     let mut cols: Vec<(f64, String)> = Vec::new();
-    for (b, wide) in buckets.iter().zip(tc::spread(count, w.saturating_sub(3).max(10))) {
+    for (b, wide) in buckets
+        .iter()
+        .zip(tc::spread(count, w.saturating_sub(3).max(10)))
+    {
         cols.extend(std::iter::repeat_n((*b, p.agent.clone()), wide));
     }
     for line in tc::vbars(&cols, 3, 0.0) {
@@ -721,7 +857,10 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         rows.push(tc::seg(&refs, w - 1));
     }
     let mut legend: Vec<(&str, String)> = vec![(p.dim.as_str(), "  Less ".into())];
-    let swatches: Vec<String> = CODEX_STEPS.iter().map(|(r, g, b)| tc::rgb(*r, *g, *b)).collect();
+    let swatches: Vec<String> = CODEX_STEPS
+        .iter()
+        .map(|(r, g, b)| tc::rgb(*r, *g, *b))
+        .collect();
     for colour in &swatches {
         legend.push((colour.as_str(), "█".into()));
     }
@@ -733,8 +872,14 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
     metered_rows(
         &[
-            ("today".to_string(), crate::claude::window_models(&d.daily, 1)),
-            ("30 days".to_string(), crate::claude::window_models(&d.daily, 30)),
+            (
+                "today".to_string(),
+                crate::claude::window_models(&d.daily, 1),
+            ),
+            (
+                "30 days".to_string(),
+                crate::claude::window_models(&d.daily, 30),
+            ),
         ],
         w,
         "",
@@ -746,6 +891,109 @@ fn codex_metered(d: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<String> {
         cfg,
         p,
     )
+}
+
+/// Unused reset credits still in the account.
+///
+/// Drawn under the quota windows. The count is how many are still available.
+/// Each credit the inventory listed is its own row: the expiry as a datetime
+/// in this machine's local zone, with the zone named, or `date unknown` when
+/// `expires_at` could not be read. A count with no list draws no date rows.
+fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    let Some(bank) = d.bank.as_ref() else {
+        return Vec::new();
+    };
+    let room = w.saturating_sub(1);
+    let mut rows = vec![tc::seg(
+        &[
+            (p.lbl.as_str(), " ── BANK ── ".into()),
+            (p.dim.as_str(), "limit reset credits".into()),
+        ],
+        room,
+    )];
+    // Left off when the pane cannot hold the whole count. Clipping
+    // `12 available` to `1` would be a different number.
+    let count = format!("  {} available", bank.left);
+    push_whole(&mut rows, p.txt.as_str(), &count, room);
+    for expiry in &bank.expiries {
+        let line = match expiry.and_then(local_expiry) {
+            Some(stamp) => stamp,
+            None => "date unknown".to_string(),
+        };
+        push_wrapped(&mut rows, &line, room, p.dim.as_str());
+    }
+    let dated = bank.expiries.iter().any(|expiry| expiry.is_some());
+    let note = if bank.left == 0 {
+        "None in the account. The quota rows above are the usage windows."
+    } else if dated {
+        "Each time is when that credit expires, in this machine's local zone. \
+         The quota rows above are the usage windows."
+    } else if bank.expiries.is_empty() {
+        "Still available in the account. The quota rows above are the usage windows."
+    } else {
+        "The expiry could not be read. The quota rows above are the usage windows."
+    };
+    for line in wrap_text(note, w.saturating_sub(4).max(20)) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!("  {line}"))], room));
+    }
+    rows
+}
+
+/// `expires_at` as a local datetime, with the zone named.
+///
+/// The instant is the one the inventory sent. The calendar fields are this
+/// machine's zone, and the offset is always on the row so the zone is
+/// labeled even when it has no abbreviation.
+fn local_expiry(at: f64) -> Option<String> {
+    if !at.is_finite() {
+        return None;
+    }
+    let local = Local.timestamp_opt(at.trunc() as i64, 0).single()?;
+    let stamp = format!(
+        "{} {} {} {:02}:{:02}:{:02}",
+        local.day(),
+        MONTHS[local.month0() as usize],
+        local.year(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+    );
+    let zone = local.format("%Z").to_string();
+    let offset = local.format("%:z").to_string();
+    let zone_is_offset = zone.is_empty()
+        || zone == offset
+        || zone
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | ':'));
+    if zone_is_offset {
+        Some(format!("{stamp} {offset}"))
+    } else {
+        Some(format!("{stamp} {zone} ({offset})"))
+    }
+}
+
+/// Draw `text` indented, wrapping on spaces.
+///
+/// A piece that cannot fit whole is left off. Shortening `04:03:43` to
+/// `04:03` would be a different time.
+fn push_wrapped(rows: &mut Vec<String>, text: &str, room: usize, colour: &str) {
+    let line = format!("  {text}");
+    if push_whole(rows, colour, &line, room) {
+        return;
+    }
+    let budget = room.saturating_sub(2).max(1);
+    for piece in wrap_text(text, budget) {
+        let drawn = format!("  {piece}");
+        push_whole(rows, colour, &drawn, room);
+    }
+}
+
+fn push_whole(rows: &mut Vec<String>, colour: &str, text: &str, room: usize) -> bool {
+    if room == 0 || tc::display_width(text) > room {
+        return false;
+    }
+    rows.push(tc::seg(&[(colour, text.to_string())], room));
+    true
 }
 
 /// Plan type and a credit balance - all Codex publishes about the plan.
@@ -805,8 +1053,7 @@ pub fn why_no_lane(d: &Data) -> String {
                 .into()
         }
         (false, true) => {
-            "no quota · no live account window, and the last session left no used_percent."
-                .into()
+            "no quota · no live account window, and the last session left no used_percent.".into()
         }
         (true, _) => {
             "no quota · Codex answered, and published no used_percent for this period.".into()
@@ -839,7 +1086,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["resets_at"].as_f64(),
             stale: true,
             projected: false,
-                    apart: false,
+            apart: false,
         }];
     };
     let mut out: Vec<Lane> = Vec::new();
@@ -856,10 +1103,14 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
         });
     }
-    for extra in live["additional_rate_limits"].as_array().into_iter().flatten() {
+    for extra in live["additional_rate_limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
         let win = &extra["rate_limit"]["primary_window"];
         if win["used_percent"].is_null() {
             continue;
@@ -870,13 +1121,17 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         };
         let secs = win["limit_window_seconds"].as_f64();
         out.push(Lane {
-            label: format!("{} {}", name.rsplit('-').next().unwrap_or("?"), window_name(secs)),
+            label: format!(
+                "{} {}",
+                name.rsplit('-').next().unwrap_or("?"),
+                window_name(secs)
+            ),
             pct: num(win, "used_percent"),
             window_secs: secs,
             reset: win["reset_at"].as_f64(),
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
         });
     }
     out
@@ -893,6 +1148,7 @@ pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<Stri
             rows.push(String::new());
         }
     }
+    rows = add_section(rows, codex_bank_rows(d, w, p));
     if !d.ok {
         // The quota above is the account's and is true whatever this machine
         // has on disk, so it stays; only the local half is missing.
@@ -1091,10 +1347,8 @@ mod tests {
         let p = palette();
         let d = Data {
             limits: Some(
-                serde_json::from_str(
-                    r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#,
-                )
-                .expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#)
+                    .expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1122,8 +1376,7 @@ mod tests {
         // and the summary draws no pace mark rather than an invented one.
         let d = Data {
             limits: Some(
-                serde_json::from_str(r#"{"primary":{"used_percent":40.0}}"#)
-                    .expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"used_percent":40.0}}"#).expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1138,7 +1391,8 @@ mod tests {
         let p = palette();
         let d = Data {
             limits: Some(
-                serde_json::from_str(r#"{"primary":{"window_minutes":10080}}"#).expect("a snapshot"),
+                serde_json::from_str(r#"{"primary":{"window_minutes":10080}}"#)
+                    .expect("a snapshot"),
             ),
             ..Data::default()
         };
@@ -1199,7 +1453,13 @@ mod tests {
         for w in [20usize, 40, 80, 200] {
             let rows = tab(&d, w, 40, &cfg, &p);
             let plain = rows.join("\n");
-            for want in ["QUOTA", "TOTALS", "OUTPUT RATE", "TOKENS / DAY", "SUBSCRIPTION"] {
+            for want in [
+                "QUOTA",
+                "TOTALS",
+                "OUTPUT RATE",
+                "TOKENS / DAY",
+                "SUBSCRIPTION",
+            ] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
             }
         }
@@ -1268,5 +1528,216 @@ mod tests {
         };
         let note = why_no_lane(&refused);
         assert!(note.contains("did not answer"), "{note}");
+    }
+
+    fn shown(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|s| {
+                let mut out = String::new();
+                let mut chars = s.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\u{1b}' {
+                        for c in chars.by_ref() {
+                            if c.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_bank_lists_each_credit_with_its_local_expiry() {
+        let p = palette();
+        let cfg = Config::default();
+        let soon = iso_epoch("2026-07-12T04:03:43Z").expect("soon");
+        let later = iso_epoch("2026-07-18T00:39:53Z").expect("later");
+        let soon_row = local_expiry(soon).expect("a local soon expiry");
+        let later_row = local_expiry(later).expect("a local later expiry");
+        // The offset is the zone label. A name, when the zone has one, sits
+        // beside it. Neither is invented: both come from this machine's zone
+        // applied to the instant the inventory sent.
+        let soon_local = Local
+            .timestamp_opt(soon as i64, 0)
+            .single()
+            .expect("soon local");
+        let offset = soon_local.format("%:z").to_string();
+        assert!(
+            soon_row.contains(&offset),
+            "the zone is not labeled: {soon_row}"
+        );
+        assert!(
+            soon_row.contains(&format!(
+                "{} {} {} {:02}:{:02}:{:02}",
+                soon_local.day(),
+                MONTHS[soon_local.month0() as usize],
+                soon_local.year(),
+                soon_local.hour(),
+                soon_local.minute(),
+                soon_local.second(),
+            )),
+            "the datetime is not this machine's local time: {soon_row}"
+        );
+        let d = Data {
+            ok: true,
+            live: Some(
+                serde_json::from_str(
+                    r#"{"plan_type":"pro","rate_limit":{"primary_window":
+                        {"used_percent":26.0,"limit_window_seconds":604800,"reset_at":1000}}}"#,
+                )
+                .expect("a live reading"),
+            ),
+            bank: Some(crate::parse::ResetBank {
+                left: 3,
+                expiries: vec![Some(soon), Some(later), None],
+            }),
+            ..Data::default()
+        };
+        let wide = shown(&codex_bank_rows(&d, 200, &p));
+        assert_eq!(
+            wide,
+            vec![
+                " ── BANK ── limit reset credits".to_string(),
+                "  3 available".to_string(),
+                format!("  {soon_row}"),
+                format!("  {later_row}"),
+                "  date unknown".to_string(),
+                "  Each time is when that credit expires, in this machine's local zone. The quota rows above are the usage windows.".to_string(),
+            ]
+        );
+        let on_tab = tab(&d, 200, 40, &cfg, &p).join("\n");
+        let count_at = on_tab.find("3 available").expect("the count");
+        let soon_at = on_tab.find(&soon_row).expect("the soon expiry");
+        let later_at = on_tab.find(&later_row).expect("the later expiry");
+        let unknown_at = on_tab.find("date unknown").expect("the unknown date");
+        assert!(count_at < soon_at && soon_at < later_at && later_at < unknown_at);
+        assert!(!on_tab.contains("⏱"), "{on_tab}");
+        assert!(!on_tab.contains("does not expire"), "{on_tab}");
+        assert!(!on_tab.contains("10d"), "{on_tab}");
+
+        // A pane too narrow to hold the clock leaves that piece off rather
+        // than shortening it. `04:03` is not `04:03:43`. The count is left
+        // off the same way: a clipped `3 avail` is not `3 available`.
+        let narrow = shown(&codex_bank_rows(&d, 8, &p)).join("\n");
+        assert!(
+            !narrow.contains("04:03") && !narrow.contains("00:39"),
+            "a clock was shortened: {narrow}"
+        );
+        assert!(
+            !narrow.contains("available"),
+            "the count was clipped onto a line that cannot hold it: {narrow}"
+        );
+
+        let count_only = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 2,
+                expiries: Vec::new(),
+            }),
+            ..d.clone()
+        };
+        let count_only = shown(&codex_bank_rows(&count_only, 200, &p));
+        assert_eq!(count_only, vec![
+            " ── BANK ── limit reset credits".to_string(),
+            "  2 available".to_string(),
+            "  Still available in the account. The quota rows above are the usage windows."
+                .to_string(),
+        ]);
+
+        let unreadable = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 1,
+                expiries: vec![None],
+            }),
+            ..d.clone()
+        };
+        let unreadable = shown(&codex_bank_rows(&unreadable, 200, &p)).join("\n");
+        assert!(unreadable.contains("1 available"), "{unreadable}");
+        assert!(unreadable.contains("date unknown"), "{unreadable}");
+        assert!(
+            !unreadable.contains(&soon_row),
+            "an unreadable expiry was given a date: {unreadable}"
+        );
+
+        let bare = Data {
+            ok: false,
+            bank: Some(crate::parse::ResetBank {
+                left: 0,
+                expiries: Vec::new(),
+            }),
+            ..d.clone()
+        };
+        let rows = tab(&bare, 80, 40, &cfg, &p).join("\n");
+        assert!(rows.contains("0 available"), "{rows}");
+        assert!(
+            !rows.contains("Still available"),
+            "a real zero is not described as still available: {rows}"
+        );
+        assert!(rows.contains("No session rollouts"), "{rows}");
+        assert!(!rows.contains("date unknown"), "{rows}");
+        assert!(!rows.contains("expires in"), "{rows}");
+    }
+
+    #[test]
+    fn a_bank_that_was_not_read_is_left_off_the_pane() {
+        let p = palette();
+        let d = Data {
+            live: Some(
+                serde_json::from_str(
+                    r#"{"plan_type":"pro","rate_limit":{"primary_window":
+                        {"used_percent":26.0,"limit_window_seconds":604800}}}"#,
+                )
+                .expect("a live reading"),
+            ),
+            ..Data::default()
+        };
+        let rows = codex_bank_rows(&d, 80, &p);
+        assert!(rows.is_empty());
+        let plain = tab(&d, 80, 40, &Config::default(), &p).join("\n");
+        assert!(!plain.contains("BANK"), "{plain}");
+    }
+
+    #[test]
+    fn the_inventory_is_the_only_source_of_the_count() {
+        let now = 1_780_000_000.0;
+        let inventory = r#"{"available_count":1,"credits":[
+            {"status":"available","expires_at":"2026-08-01T00:00:00Z"}
+        ]}"#;
+        let from_list = bank_of(Some(inventory), now).expect("the list");
+        assert_eq!(from_list.left, 1);
+        assert_eq!(from_list.expiries.len(), 1);
+
+        // A usage payload can carry `rate_limit_reset_credits.available_count`.
+        // That number is not the inventory, so a failed inventory stays blank
+        // rather than becoming that count.
+        assert!(bank_of(Some("not json"), now).is_none());
+        assert!(bank_of(None, now).is_none());
+
+        let empty = r#"{"credits":[],"available_count":0}"#;
+        let zero = bank_of(Some(empty), now).expect("a real zero");
+        assert_eq!(zero.left, 0);
+        assert!(zero.expiries.is_empty());
+    }
+
+    #[test]
+    fn a_usage_miss_keeps_an_inventory_that_answered() {
+        let inventory = r#"{"credits":[],"available_count":2}"#;
+        let missed = live_payload(None, Some(inventory.to_string())).expect("the inventory");
+        assert!(missed.get("u").is_none(), "usage did not answer");
+        assert!(missed.get("usage_miss").is_some());
+        let bank = bank_of(missed["bank"].as_str(), 0.0).expect("the count");
+        assert_eq!(bank.left, 2);
+        assert!(bank.expiries.is_empty());
+
+        let usage = serde_json::json!({"plan_type": "pro"});
+        let both = live_payload(Some(usage), Some(inventory.to_string())).expect("both");
+        assert!(both.get("u").is_some());
+        assert!(both.get("usage_miss").is_none());
+
+        assert!(live_payload(None, None).is_none(), "neither call answered");
     }
 }
