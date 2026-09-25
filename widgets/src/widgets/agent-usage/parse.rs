@@ -124,13 +124,97 @@ pub fn parse_codex_reset_credits(text: &str, now: f64) -> Option<ResetBank> {
 }
 
 /// The credit's own title, or nothing. A blank or a non-string is not a title.
+///
+/// Control characters and terminal sequences are removed before the title
+/// is kept. What remains is the readable text. A title that was only a
+/// sequence is not a title.
 fn credit_title(credit: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    let raw = credit.get("title")?.as_str()?.trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_string())
+    let raw = credit.get("title")?.as_str()?;
+    let clean = strip_controls(raw);
+    let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() { None } else { Some(clean) }
+}
+
+/// Drop terminal sequences and other controls, and keep the readable text.
+///
+/// A newline or tab is a space, so words on either side stay words. An
+/// escape sequence is removed whole, parameters included, so `Full` plus a
+/// colour sequence plus `reset` stays `Full reset`.
+fn strip_controls(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\u{1b}' {
+            i = skip_escape(&chars, i);
+            continue;
+        }
+        if c == '\u{9b}' {
+            i = skip_csi(&chars, i + 1);
+            continue;
+        }
+        if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        if c.is_control() {
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
+    out
+}
+
+/// `ESC` and the sequence it introduces. The index returned is the first
+/// character that is not part of that sequence.
+fn skip_escape(chars: &[char], i: usize) -> usize {
+    let Some(next) = chars.get(i + 1).copied() else {
+        return chars.len();
+    };
+    match next {
+        '[' => skip_csi(chars, i + 2),
+        ']' | 'P' | 'X' | '^' | '_' => skip_string_sequence(chars, i + 2),
+        _ => i + 2,
+    }
+}
+
+fn skip_csi(chars: &[char], mut i: usize) -> usize {
+    while i < chars.len() {
+        let u = chars[i] as u32;
+        if (0x20..=0x3F).contains(&u) {
+            i += 1;
+            continue;
+        }
+        if (0x40..=0x7E).contains(&u) {
+            return i + 1;
+        }
+        return i;
+    }
+    chars.len()
+}
+
+/// OSC, DCS, and the other string sequences, through BEL or ST.
+///
+/// An `ESC` that starts a new sequence ends this one and is left for the
+/// caller. An unclosed sequence runs to the end of the title.
+fn skip_string_sequence(chars: &[char], mut i: usize) -> usize {
+    while i < chars.len() {
+        if chars[i] == '\u{7}' || chars[i] == '\u{9c}' {
+            return i + 1;
+        }
+        if chars[i] == '\u{1b}' {
+            if chars.get(i + 1) == Some(&'\\') {
+                return i + 2;
+            }
+            return i;
+        }
+        i += 1;
+    }
+    chars.len()
 }
 
 /// The count alone, once the list can no longer be trusted credit by credit.
@@ -195,6 +279,59 @@ mod tests {
                 expiry: None,
             },
         ]);
+    }
+
+    #[test]
+    fn a_title_keeps_its_words_and_drops_control_sequences() {
+        let now = at("2026-07-01T00:00:00Z");
+        let coloured = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"Full\\u001b[31m reset\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("the coloured title");
+        assert_eq!(coloured.credits[0].title.as_deref(), Some("Full reset"));
+
+        let only = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"\\u001b[31m\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("a sequence is not a title");
+        assert_eq!(only.credits[0].title, None);
+
+        let osc = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"Full\\u001b]0;x\\u0007 reset\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("the osc title");
+        assert_eq!(osc.credits[0].title.as_deref(), Some("Full reset"));
+
+        let broken = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"Full\\nreset\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("the broken title");
+        assert_eq!(broken.credits[0].title.as_deref(), Some("Full reset"));
+        assert!(
+            !broken.credits[0]
+                .title
+                .as_deref()
+                .unwrap()
+                .chars()
+                .any(char::is_control),
+            "a control reached the title"
+        );
+
+        let c1 = parse_codex_reset_credits(
+            "{\"available_count\":1,\"credits\":[{\"status\":\"available\",\
+             \"title\":\"Full\\u009b31m reset\",\"expires_at\":\"2026-07-12T00:00:00Z\"}]}",
+            now,
+        )
+        .expect("the c1 title");
+        assert_eq!(c1.credits[0].title.as_deref(), Some("Full reset"));
     }
 
     #[test]

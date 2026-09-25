@@ -94,23 +94,21 @@ pub struct Data {
 }
 
 impl Data {
-    /// `N reset available (soonest expiry)` when the inventory was read and
-    /// the count is greater than zero.
+    /// `N reset available` when the inventory was read and the count is
+    /// greater than zero.
     ///
     /// `None` when the inventory was not read, or when it was read and the
-    /// count is zero. The parenthetical is the soonest credit's expiry.
-    /// A count with no readable expiry has no parenthetical, because a date
-    /// was not in the payload.
+    /// count is zero. The parenthetical is the soonest expiry, and only
+    /// when every listed credit has a readable one. A credit with no
+    /// readable expiry keeps the count and drops the date: a dated
+    /// neighbour is not the soonest. A count with no list has no
+    /// parenthetical, because no date was in the payload.
     pub(crate) fn reset_summary_line(&self) -> Option<String> {
         let bank = self.bank.as_ref()?;
         if bank.left == 0 {
             return None;
         }
-        let soonest = bank
-            .credits
-            .iter()
-            .find_map(|credit| credit.expiry.and_then(local_expiry));
-        Some(match soonest {
+        Some(match soonest_when_every_credit_is_dated(bank) {
             Some(stamp) => format!("{} reset available ({stamp})", bank.left),
             None => format!("{} reset available", bank.left),
         })
@@ -944,18 +942,18 @@ fn codex_bank_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         } else {
             format!("{} reset available", bank.left)
         };
-        push_wrapped(&mut rows, &line, room, p.dim.as_str());
+        push_visible(&mut rows, &line, room, p.dim.as_str());
         return rows;
     }
     for credit in &bank.credits {
         if let Some(title) = &credit.title {
-            push_wrapped(&mut rows, title, room, p.txt.as_str());
+            push_visible(&mut rows, title, room, p.txt.as_str());
         }
         let when = match credit.expiry.and_then(local_expiry) {
             Some(stamp) => format!("Expires {stamp}"),
             None => "Expires date unknown".to_string(),
         };
-        push_wrapped(&mut rows, &when, room, p.dim.as_str());
+        push_visible(&mut rows, &when, room, p.dim.as_str());
     }
     rows
 }
@@ -995,26 +993,82 @@ pub(crate) fn local_expiry(at: f64) -> Option<String> {
 
 /// Draw `text` indented, wrapping on spaces.
 ///
-/// A piece that cannot fit whole is left off. Shortening `04:03:43` to
-/// `04:03` would be a different time.
-fn push_wrapped(rows: &mut Vec<String>, text: &str, room: usize, colour: &str) {
-    let line = format!("  {text}");
-    if push_whole(rows, colour, &line, room) {
+/// A word wider than the pane is broken by display width, so it stays on
+/// screen. Nothing is dropped, and no omission marker is added. A datetime
+/// is passed as its own parts (`4`, `Oct`, `2026`, `04:03`, `(+00:00)`),
+/// which stay whole unless one part is still wider than the pane. That
+/// part is broken by hand. A clock is not shortened into a different time.
+pub(crate) fn push_visible(rows: &mut Vec<String>, text: &str, room: usize, colour: &str) {
+    if room == 0 || text.is_empty() {
         return;
     }
-    let budget = room.saturating_sub(2).max(1);
-    for piece in wrap_text(text, budget) {
-        let drawn = format!("  {piece}");
-        push_whole(rows, colour, &drawn, room);
+    let indent = if room > 2 { 2 } else { 0 };
+    let budget = room - indent;
+    for piece in tc::wrap_words(text, budget) {
+        if piece.is_empty() {
+            continue;
+        }
+        let drawn = format!("{}{piece}", " ".repeat(indent));
+        rows.push(tc::seg(&[(colour, drawn)], room));
     }
 }
 
-fn push_whole(rows: &mut Vec<String>, colour: &str, text: &str, room: usize) -> bool {
-    if room == 0 || tc::display_width(text) > room {
-        return false;
+/// The summary sentence, wrapped so the count and `available` both stay,
+/// and so a parenthetical moves to the following lines when it does not
+/// fit beside them.
+///
+/// One line when the whole sentence fits. Otherwise the count phrase is
+/// drawn first, and the parenthetical follows, broken between the
+/// datetime's parts. A part wider than the pane is broken by hand.
+pub(crate) fn append_reset_summary(rows: &mut Vec<String>, line: &str, room: usize, colour: &str) {
+    let whole = format!("  {line}");
+    if room > 0 && tc::display_width(&whole) <= room {
+        rows.push(tc::seg(&[(colour, whole)], room));
+        return;
     }
-    rows.push(tc::seg(&[(colour, text.to_string())], room));
-    true
+    let (head, stamp) = split_summary(line);
+    push_visible(rows, &head, room, colour);
+    if let Some(stamp) = stamp {
+        push_visible(rows, &format!("({stamp})"), room, colour);
+    }
+}
+
+/// `{n} reset available` and, when present, the stamp inside the one pair
+/// of parentheses this sentence adds. The stamp's own offset parentheses
+/// stay inside it.
+fn split_summary(line: &str) -> (String, Option<String>) {
+    const MARK: &str = " reset available";
+    let Some(at) = line.find(MARK) else {
+        return (line.to_string(), None);
+    };
+    let head_end = at + MARK.len();
+    let rest = line[head_end..].trim();
+    let head = line[..head_end].to_string();
+    match rest
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        Some(stamp) if !stamp.is_empty() => (head, Some(stamp.to_string())),
+        _ => (head, None),
+    }
+}
+
+/// The soonest local expiry, or nothing when any listed credit has none.
+///
+/// An empty list is a count with no dates. The first dated credit is not
+/// called the soonest while a later credit's date is unknown.
+fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank) -> Option<String> {
+    if bank.credits.is_empty() {
+        return None;
+    }
+    let mut soonest = None;
+    for credit in &bank.credits {
+        let stamp = credit.expiry.and_then(local_expiry)?;
+        if soonest.is_none() {
+            soonest = Some(stamp);
+        }
+    }
+    soonest
 }
 
 /// Plan type and a credit balance - all Codex publishes about the plan.
@@ -1658,8 +1712,8 @@ mod tests {
         assert!(!on_tab.contains("does not expire"), "{on_tab}");
         assert!(!on_tab.contains("10d"), "{on_tab}");
 
-        // A pane too narrow to hold a clock token leaves that token off
-        // rather than shortening it. `04:0` is not `04:03`.
+        // A clock that fits stays whole. `04:0` is not `04:03`. A part
+        // wider than the pane is broken by hand further down.
         let narrow = shown(&codex_bank_rows(&d, 8, &p)).join("\n");
         assert!(
             !narrow.contains("04:0") || narrow.contains("04:03"),
@@ -1730,6 +1784,95 @@ mod tests {
         assert!(rows.contains("No session rollouts"), "{rows}");
         assert!(!rows.contains("date unknown"), "{rows}");
         assert!(!rows.contains("expires in"), "{rows}");
+    }
+
+    #[test]
+    fn an_undated_credit_is_not_called_the_soonest() {
+        let soon = iso_epoch("2026-10-04T11:03:00Z").expect("soon");
+        let stamp = local_expiry(soon).expect("a local expiry");
+        let mixed = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 2,
+                credits: vec![
+                    crate::parse::ResetCredit {
+                        title: Some("Full reset".into()),
+                        expiry: Some(soon),
+                    },
+                    crate::parse::ResetCredit {
+                        title: None,
+                        expiry: None,
+                    },
+                ],
+            }),
+            ..Data::default()
+        };
+        assert_eq!(
+            mixed.reset_summary_line().as_deref(),
+            Some("2 reset available"),
+            "a dated credit was called the soonest"
+        );
+        let dated = Data::with_reset(None, Some((2, Some(soon))));
+        assert_eq!(
+            dated.reset_summary_line().as_deref(),
+            Some(format!("2 reset available ({stamp})")).as_deref()
+        );
+    }
+
+    #[test]
+    fn a_narrow_bank_keeps_the_title_and_the_clock() {
+        let p = palette();
+        let soon = iso_epoch("2026-07-12T04:03:43Z").expect("soon");
+        let stamp = local_expiry(soon).expect("a local expiry");
+        let clock = stamp
+            .split_whitespace()
+            .find(|word| word.contains(':'))
+            .expect("the clock");
+        let offset = stamp
+            .split_whitespace()
+            .find(|word| word.starts_with('('))
+            .expect("the offset");
+        let d = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 1,
+                credits: vec![crate::parse::ResetCredit {
+                    title: Some("ABCDEFGHIJ".into()),
+                    expiry: Some(soon),
+                }],
+            }),
+            ..Data::default()
+        };
+        let rows = shown(&codex_bank_rows(&d, 8, &p));
+        let flat: String = rows.iter().map(|row| row.trim()).collect();
+        assert!(
+            flat.contains("ABCDEFGHIJ"),
+            "a wide title was dropped: {rows:#?}"
+        );
+        assert!(
+            !flat.contains('…'),
+            "an omission marker was added: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.trim() == clock),
+            "the clock was not kept whole: {rows:#?}"
+        );
+        assert!(
+            flat.contains(offset),
+            "the zone was skipped: {rows:#?} offset {offset}"
+        );
+
+        let count_only = Data {
+            bank: Some(crate::parse::ResetBank {
+                left: 2,
+                credits: Vec::new(),
+            }),
+            ..Data::default()
+        };
+        let count_only = shown(&codex_bank_rows(&count_only, 8, &p));
+        let flat: String = count_only.iter().map(|row| row.trim()).collect();
+        assert!(
+            flat.contains("2resetavailable"),
+            "the count lost its label: {count_only:#?}"
+        );
     }
 
     #[test]
