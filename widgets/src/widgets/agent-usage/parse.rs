@@ -301,6 +301,184 @@ pub fn coderabbit_signed_out(text: &str) -> bool {
     .any(|s| lower.contains(s))
 }
 
+/// One Notion AI allowance window, from `getCreditRateLimitStatus`.
+///
+/// Both numbers come from Notion; neither is assumed. `limit` has been 100
+/// in every answer seen, which makes `used` look like a percentage, but a
+/// window is kept only as a fraction of the limit it came with, so a
+/// different limit keeps working.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotionWindow {
+    pub used: f64,
+    pub limit: f64,
+    /// The rolling window's length in Notion's own form, `6h`. Empty on the
+    /// billing-period window, which states an end instead.
+    pub span: String,
+    /// When the billing period ends, as epoch seconds.
+    pub ends: Option<f64>,
+}
+
+impl NotionWindow {
+    pub fn pct(&self) -> f64 {
+        self.used / self.limit * 100.0
+    }
+}
+
+/// `getCreditRateLimitStatus`: the Notion AI usage allowance for one member
+/// of one workspace - a rolling window and the billing period.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotionAllowance {
+    /// `within_limit`, `not_applicable`, or whatever Notion says next.
+    pub status: String,
+    pub rolling: Option<NotionWindow>,
+    /// Seconds from when this was read until the rolling window resets.
+    pub resets_in: Option<f64>,
+    pub period: Option<NotionWindow>,
+    /// `preview` before Notion began enforcing the allowance.
+    pub enforcement: String,
+}
+
+impl NotionAllowance {
+    /// A plan with no allowance: Free, Plus and personal workspaces.
+    pub fn not_applicable(&self) -> bool {
+        self.status.eq_ignore_ascii_case("not_applicable")
+    }
+}
+
+/// `POST /api/v3/getCreditRateLimitStatus`.
+///
+/// None for a body with no window in it that is not a `not_applicable`.
+/// Every field is optional, so an error envelope or a changed shape would
+/// otherwise come through as an allowance with nothing used, which reads as
+/// plenty of room on a workspace that may be at its cap.
+pub fn parse_notion_allowance(text: &str) -> Option<NotionAllowance> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let window = |v: &serde_json::Value| -> Option<NotionWindow> {
+        let (used, limit) = (v["used"].as_f64()?, v["limit"].as_f64()?);
+        (limit > 0.0).then(|| NotionWindow {
+            used,
+            limit,
+            span: v["window"].as_str().unwrap_or_default().to_string(),
+            ends: v["periodEndMs"].as_f64().filter(|ms| *ms > 0.0).map(|ms| ms / 1000.0),
+        })
+    };
+    let out = NotionAllowance {
+        status: body["status"].as_str().unwrap_or_default().to_string(),
+        rolling: window(&body["window"]),
+        // Zero is a real answer, the window resetting now.
+        resets_in: body["resetsInSeconds"].as_f64().filter(|s| *s >= 0.0),
+        period: window(&body["billingPeriodWindow"]),
+        enforcement: body["enforcement"].as_str().unwrap_or_default().to_string(),
+    };
+    (out.not_applicable() || out.rolling.is_some() || out.period.is_some()).then_some(out)
+}
+
+/// `6h` as seconds. Notion states the rolling window as a number and a unit.
+pub fn notion_span_secs(span: &str) -> Option<f64> {
+    let span = span.trim().to_lowercase();
+    let unit = span.chars().last()?;
+    let n: f64 = span[..span.len() - unit.len_utf8()].parse().ok()?;
+    if n <= 0.0 {
+        return None;
+    }
+    Some(
+        n * match unit {
+            'm' => 60.0,
+            'h' => 3600.0,
+            'd' => 86400.0,
+            'w' => 7.0 * 86400.0,
+            _ => return None,
+        },
+    )
+}
+
+/// One workspace the signed-in account can see.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotionSpace {
+    pub id: String,
+    pub name: String,
+    /// `free`, `plus`, `business`, `enterprise`.
+    pub tier: String,
+}
+
+impl NotionSpace {
+    /// Only Business and Enterprise carry a Notion AI allowance.
+    pub fn has_allowance(&self) -> bool {
+        matches!(self.tier.to_lowercase().as_str(), "business" | "enterprise")
+    }
+}
+
+/// `POST /api/v3/getSpaces`: the account's email, and its workspaces.
+///
+/// The answer is a record map keyed by user id. The key used is the one
+/// whose own `notion_user` record names it, rather than the first key: a
+/// token that sees more than one user would otherwise report another
+/// account's allowance under this one's name. An answer naming none is
+/// still read when it has only one key, which is how older ones looked.
+pub fn parse_notion_spaces(text: &str) -> Option<(String, Vec<NotionSpace>)> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let root = body.as_object()?;
+    // Records arrive as `{"value": {..}}`, and on newer answers nested once more.
+    let record = |v: &serde_json::Value| -> serde_json::Value {
+        let inner = &v["value"];
+        if inner["value"].is_object() {
+            inner["value"].clone()
+        } else if inner.is_object() {
+            inner.clone()
+        } else {
+            v.clone()
+        }
+    };
+    let named: Vec<&String> = root
+        .iter()
+        .filter(|(id, v)| record(&v["notion_user"][id.as_str()])["id"].as_str() == Some(id.as_str()))
+        .map(|(id, _)| id)
+        .collect();
+    let user = match named.as_slice() {
+        [one] => *one,
+        [] if root.len() == 1 => root.keys().next()?,
+        _ => return None,
+    };
+    let held = &root[user];
+    let email = record(&held["notion_user"][user.as_str()])["email"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let mut spaces: Vec<NotionSpace> = held["space"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, v)| {
+            let r = record(v);
+            NotionSpace {
+                id: r["id"].as_str().unwrap_or(key).to_string(),
+                name: r["name"].as_str().unwrap_or_default().to_string(),
+                tier: r["subscription_tier"].as_str().unwrap_or_default().to_string(),
+            }
+        })
+        .collect();
+    // Map order is not an order anyone chose; the id is at least stable.
+    spaces.sort_by(|a, b| a.id.cmp(&b.id));
+    Some((email, spaces))
+}
+
+/// The workspace to ask about: the one named, when the account can see it;
+/// otherwise the first that has an allowance; otherwise the first.
+///
+/// A named id the account cannot see is almost always a typo, and asking
+/// about it gets only an opaque refusal - the caller says it was not found.
+/// Ids match with or without their dashes, in either case.
+pub fn pick_notion_space<'a>(spaces: &'a [NotionSpace], wanted: &str) -> Option<&'a NotionSpace> {
+    let bare = |s: &str| s.replace('-', "").to_lowercase();
+    let wanted = bare(wanted.trim());
+    if !wanted.is_empty() {
+        if let Some(hit) = spaces.iter().find(|s| bare(&s.id) == wanted) {
+            return Some(hit);
+        }
+    }
+    spaces.iter().find(|s| s.has_allowance()).or_else(|| spaces.first())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +750,96 @@ mod tests {
         assert!(!coderabbit_signed_out("Your reviews : 3"));
         // A count that is not a number does not make a report on its own.
         assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
+    }
+
+    const NOTION_STATUS: &str = r#"{
+      "status": "within_limit",
+      "window": { "creditType": "basic_ai_credits", "scope": "per_user", "window": "6h", "used": 42.5, "limit": 100 },
+      "resetsInSeconds": 12600,
+      "billingPeriodWindow": { "creditType": "basic_ai_credits", "scope": "per_user",
+        "cadence": "billing_period", "used": 18.0, "limit": 100, "periodEndMs": 1788000000000 },
+      "enforcement": "preview"
+    }"#;
+
+    #[test]
+    fn a_notion_allowance_gives_both_windows_against_their_own_limits() {
+        let a = parse_notion_allowance(NOTION_STATUS).unwrap();
+        let rolling = a.rolling.as_ref().unwrap();
+        assert_eq!((rolling.used, rolling.limit, rolling.span.as_str()), (42.5, 100.0, "6h"));
+        assert_eq!(a.resets_in, Some(12600.0));
+        let period = a.period.as_ref().unwrap();
+        assert_eq!(period.ends, Some(1_788_000_000.0));
+        assert_eq!(a.enforcement, "preview");
+        // A limit that is not 100 is still a fraction of that limit.
+        let other = NOTION_STATUS.replace("\"used\": 42.5, \"limit\": 100", "\"used\": 50, \"limit\": 200");
+        assert_eq!(parse_notion_allowance(&other).unwrap().rolling.unwrap().pct(), 25.0);
+    }
+
+    #[test]
+    fn a_notion_answer_with_no_window_is_not_an_allowance() {
+        // An error envelope must not read as nothing used.
+        assert!(parse_notion_allowance(r#"{"errorId":"x","name":"UnauthorizedError"}"#).is_none());
+        assert!(parse_notion_allowance("<html>").is_none());
+        // A zero limit has no fraction to draw.
+        assert!(parse_notion_allowance(r#"{"window":{"used":1,"limit":0}}"#).is_none());
+        // A plan with no allowance says so, and that is an answer.
+        let none = parse_notion_allowance(r#"{"status":"not_applicable"}"#).unwrap();
+        assert!(none.not_applicable() && none.rolling.is_none());
+    }
+
+    #[test]
+    fn a_notion_window_length_is_read_from_its_own_token() {
+        assert_eq!(notion_span_secs("6h"), Some(21600.0));
+        assert_eq!(notion_span_secs("30m"), Some(1800.0));
+        assert_eq!(notion_span_secs("1d"), Some(86400.0));
+        for bad in ["", "h", "6", "0h", "6y"] {
+            assert_eq!(notion_span_secs(bad), None, "{bad}");
+        }
+    }
+
+    const NOTION_SPACES: &str = r#"{
+      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": {
+        "notion_user": { "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee":
+          { "value": { "value": { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "email": "person@example.com" } } } },
+        "space": {
+          "66666666-7777-8888-9999-aaaaaaaaaaaa": { "value": { "value":
+            { "id": "66666666-7777-8888-9999-aaaaaaaaaaaa", "name": "Personal", "subscription_tier": "free" } } },
+          "11111111-2222-3333-4444-555555555555": { "value":
+            { "id": "11111111-2222-3333-4444-555555555555", "name": "Acme", "subscription_tier": "business" } }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn notion_spaces_are_read_for_the_user_the_answer_names() {
+        let (email, spaces) = parse_notion_spaces(NOTION_SPACES).unwrap();
+        assert_eq!(email, "person@example.com");
+        let names: Vec<&str> = spaces.iter().map(|s| s.name.as_str()).collect();
+        // Both record shapes, the nested and the flat one.
+        assert_eq!(names, ["Acme", "Personal"]);
+        // Two users and neither naming itself is ambiguous, so it is refused
+        // rather than guessed at.
+        let two = r#"{"u1":{"space":{}},"u2":{"space":{}}}"#;
+        assert!(parse_notion_spaces(two).is_none());
+        // One key naming nobody is how older answers looked.
+        assert_eq!(parse_notion_spaces(r#"{"u1":{"space":{}}}"#).unwrap().1.len(), 0);
+    }
+
+    #[test]
+    fn the_notion_workspace_asked_about_is_the_named_one_else_one_with_an_allowance() {
+        let (_, spaces) = parse_notion_spaces(NOTION_SPACES).unwrap();
+        assert_eq!(pick_notion_space(&spaces, "").unwrap().name, "Acme");
+        // Named, with or without dashes, in any case.
+        assert_eq!(
+            pick_notion_space(&spaces, "66666666777788889999AAAAAAAAAAAA").unwrap().name,
+            "Personal"
+        );
+        assert_eq!(
+            pick_notion_space(&spaces, "66666666-7777-8888-9999-aaaaaaaaaaaa").unwrap().name,
+            "Personal"
+        );
+        // A name the account cannot see falls back to the automatic choice.
+        assert_eq!(pick_notion_space(&spaces, "nope").unwrap().name, "Acme");
+        assert!(pick_notion_space(&[], "").is_none());
     }
 }

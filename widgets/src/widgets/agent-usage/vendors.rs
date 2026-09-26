@@ -36,6 +36,7 @@ pub struct State {
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
+    pub notion: crate::notion::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
@@ -50,9 +51,17 @@ fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool
     chosen_agents(installed, cfg).iter().any(|t| t == "coderabbit")
 }
 
+/// Whether Notion may be asked, on the same terms: it sends the reader's
+/// own session to Notion, so a tab the fallback brought back does not
+/// count as a choice.
+fn notion_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "notion")
+}
+
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
     let installed = detect_agents(cfg);
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
+    let notion_shown = notion_asked(&installed, cfg);
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -61,6 +70,7 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
+        notion: crate::notion::read(caches, cfg, notion_shown),
         installed,
         fetched: 0.0,
         err: String::new(),
@@ -93,6 +103,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
+        "notion" => crate::notion::lanes(&s.notion),
         _ => Vec::new(),
     }
 }
@@ -155,6 +166,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
+        "notion" => crate::notion::why_no_lane(&s.notion),
         _ => String::new(),
     };
     let warn = quiet_is_actionable(&note);
@@ -538,6 +550,7 @@ pub fn tab_body(
         "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
         "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
+        "notion" => crate::notion::tab(&s.notion, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
 }

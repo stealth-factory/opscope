@@ -380,6 +380,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
+        "notion" => (232, 226, 212),
         _ => return None,
     })
 }
@@ -405,7 +406,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
-    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit",
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1671,6 +1672,14 @@ struct Config {
     /// actually used. Fifteen leaves the mark for a reading that is
     /// genuinely late.
     grok_ping_minutes: f64,
+    /// Notion's `token_v2` session cookie. Empty reads `notion_token_env`.
+    notion_token: String,
+    /// The environment variable holding that cookie when `notion_token` is
+    /// empty. Empty means `NOTION_TOKEN_V2`.
+    notion_token_env: String,
+    /// The workspace to report, by id. Empty picks the first on a plan
+    /// that has an allowance.
+    notion_workspace: String,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
     /// how a rename looks like nothing changed.
@@ -1722,6 +1731,9 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         grok_ping_minutes: tc::cfg_f64(&raw, "grok_ping_minutes", 15.0),
+        notion_token: tc::cfg_str(&raw, "notion_token", ""),
+        notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
+        notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
         antigravity_remote: raw
             .get("antigravity_remote")
             .and_then(|v| v.as_bool())
@@ -1819,6 +1831,9 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec![under_home(".gemini/antigravity-cli")],
         ),
         "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
+        // Nothing on this machine to find: Notion AI is a web service, and
+        // it is here when a token for it is. `detect_agents` checks that.
+        "notion" => ("Notion AI", vec![], vec![]),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
@@ -1880,6 +1895,13 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
             }
         }
     }
+    // A web service leaves nothing on disk; a token for it is the sign.
+    found.insert(
+        "notion".into(),
+        Presence {
+            present: !crate::notion::token(cfg).0.is_empty(),
+        },
+    );
     found
 }
 
@@ -2421,6 +2443,7 @@ mod shared;
 mod antigravity;
 mod claude;
 mod coderabbit;
+mod notion;
 mod codex;
 mod copilot;
 mod cursor;
