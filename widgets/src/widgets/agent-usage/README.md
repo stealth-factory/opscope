@@ -1356,7 +1356,7 @@ something its own dollar line already says.
 
 **Every quota bar is drawn in its own agent's colour**, dark at the left of the
 fill and full at the right, so a row says whose it is before you read the
-heading — and on the `+` tab, where six agents share a screen, without one.
+heading — and on the `+` tab, where every agent shares a screen, without one.
 Claude keeps the terracotta of its own `/usage`, Codex its dark-grey-to-white,
 Grok its blue, Cursor its green; Copilot and Antigravity have no calendar to
 borrow from and were given hues clear of the amber and red reserved below.
