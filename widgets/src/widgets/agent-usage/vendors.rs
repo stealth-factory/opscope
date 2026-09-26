@@ -35,6 +35,7 @@ pub struct State {
     pub grok: crate::grok::Data,
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
+    pub jetbrains: crate::jetbrains::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
@@ -48,6 +49,7 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
+        jetbrains: crate::jetbrains::read(caches, cfg),
         installed: detect_agents(cfg),
         fetched: 0.0,
         err: String::new(),
@@ -79,6 +81,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "grok" => crate::grok::lanes(&s.grok),
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
+        "jetbrains" => crate::jetbrains::lanes(&s.jetbrains),
         _ => Vec::new(),
     }
 }
@@ -140,6 +143,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "grok" => crate::grok::why_no_lane(&s.grok),
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
+        "jetbrains" => crate::jetbrains::why_no_lane(&s.jetbrains),
         _ => String::new(),
     };
     let warn = quiet_is_actionable(&note);
@@ -522,6 +526,7 @@ pub fn tab_body(
         "grok" => crate::grok::tab(&s.grok, w, h, cfg, p),
         "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
+        "jetbrains" => crate::jetbrains::tab(&s.jetbrains, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
 }

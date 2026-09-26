@@ -4,7 +4,8 @@
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
-the four that publish one and a subscription for the five that do.
+the four that publish one, JetBrains AI's quota as its IDE last recorded it,
+and a subscription for the five that do.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -1123,6 +1124,31 @@ Four settings, all on by default except the interval:
 | `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
+
+### JetBrains AI is read from the IDE's own file
+
+JetBrains publishes no endpoint and no CLI for the AI Assistant quota. Every
+JetBrains IDE with AI Assistant signed in keeps one instead, in
+`options/AIAssistantQuotaManager2.xml` under its config directory, and
+rewrites it whenever it checks. The `jetbrains` tab reads that file and
+nothing else: no credential is touched and nothing leaves the machine.
+
+- **Where it looks**: `~/Library/Application Support/JetBrains` and
+  `…/Google` (Android Studio) on macOS, `~/.config/JetBrains`,
+  `~/.local/share/JetBrains` and `~/.config/Google` on Linux. Each directory
+  under them is an IDE and its version, `RustRover2026.2`.
+- **Which file**: the newest. Every IDE on one account records the same
+  quota, and the one written last had the latest look at it. The tab names
+  the IDE, and says so when there was more than one to pick from.
+- **What it shows**: credits used against the maximum, with the refill date
+  and period from `nextRefill` — so the pace mark is drawn against the real
+  cycle, and not drawn when the period is not a fixed length.
+- **How old it is**: the header says when the IDE wrote it. Past an hour the
+  lane is marked cached on `[+]`, because credits spent from another machine
+  would not show until an IDE here looks again.
+
+The tab appears when a quota file exists. It is the same source CodexBar
+reads for its JetBrains AI provider.
 
 ### Grok Bot (Cursor's weekly allowance)
 
