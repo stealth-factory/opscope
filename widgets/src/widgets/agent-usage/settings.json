@@ -10,7 +10,8 @@
           "cursor",
           "grok",
           "copilot",
-          "antigravity"
+          "antigravity",
+          "coderabbit"
         ]
       },
       "inactive_when": {
@@ -27,7 +28,8 @@
           "cursor",
           "grok",
           "copilot",
-          "antigravity"
+          "antigravity",
+          "coderabbit"
         ]
       }
     },

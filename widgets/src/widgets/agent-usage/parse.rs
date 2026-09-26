@@ -238,6 +238,69 @@ fn whole_count(value: &serde_json::Value) -> Option<u64> {
     value.as_i64().filter(|n| *n >= 0).map(|n| n as u64)
 }
 
+/// What `coderabbit usage` reports for the current billing period.
+///
+/// Every `label : value` line, in the order the CLI printed them, keyed by
+/// the label in lower case. The CLI documents the report as the review
+/// count, whether usage billing is on, and "when available" the spend and
+/// the reset date, so fields this does not name are kept rather than
+/// dropped: a spend line the widget has never seen still reaches the tab.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CodeRabbitUsage {
+    pub fields: Vec<(String, String)>,
+}
+
+impl CodeRabbitUsage {
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// `Your reviews`, when it is a whole number.
+    pub fn reviews(&self) -> Option<u64> {
+        self.get("your reviews")?.replace(',', "").parse().ok()
+    }
+}
+
+/// `coderabbit usage`, stdout and stderr together.
+///
+/// The report is aligned `Label  : value` lines under a title. None when it
+/// carries none of the three fields that make it a usage report, which is
+/// what a signed-out CLI, a self-hosted login or a changed format all look
+/// like - `coderabbit_signed_out` tells the first apart.
+pub fn parse_coderabbit_usage(text: &str) -> Option<CodeRabbitUsage> {
+    let mut out = CodeRabbitUsage::default();
+    for line in text.lines() {
+        let line = strip_controls(line);
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let (label, value) = (label.trim().to_lowercase(), value.trim());
+        if label.is_empty() || value.is_empty() || out.get(&label).is_some() {
+            continue;
+        }
+        out.fields.push((label, value.to_string()));
+    }
+    let known = out.reviews().is_some()
+        || out.get("usage billing").is_some()
+        || out.get("period resets").is_some();
+    known.then_some(out)
+}
+
+/// Whether the CLI's own words say it is not logged in.
+pub fn coderabbit_signed_out(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "not authenticated",
+        "please log in",
+        "auth login",
+        "authentication required",
+        "unauthorized",
+        "no session found",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +541,36 @@ mod tests {
             title: None,
             expiry: None,
         }]);
+    }
+
+    #[test]
+    fn a_coderabbit_report_gives_its_fields_in_order() {
+        // The shape the CLI prints, colour and all.
+        let text = "\u{1b}[1mCodeRabbit Usage — current billing period\u{1b}[0m\n\n\
+                    Organization  : Example Org\n\
+                    Usage billing : inactive\n\
+                    User          : example-user\n\
+                    Your reviews  : 1,025\n\
+                    Spend         : $4.20\n\
+                    Period resets : 2026-09-30\n";
+        let u = parse_coderabbit_usage(text).expect("parsed");
+        assert_eq!(u.reviews(), Some(1025));
+        assert_eq!(u.get("organization"), Some("Example Org"));
+        assert_eq!(u.get("usage billing"), Some("inactive"));
+        assert_eq!(u.get("period resets"), Some("2026-09-30"));
+        // A field this does not name is kept, not dropped.
+        assert_eq!(u.get("spend"), Some("$4.20"));
+        assert_eq!(u.fields[0].0, "organization");
+    }
+
+    #[test]
+    fn a_coderabbit_answer_with_no_usage_fields_is_not_a_report() {
+        // Signed out: an error line with a colon in it is still not a report.
+        let text = "Error: not authenticated. Run `coderabbit auth login`.";
+        assert_eq!(parse_coderabbit_usage(text), None);
+        assert!(coderabbit_signed_out(text));
+        assert!(!coderabbit_signed_out("Your reviews : 3"));
+        // A count that is not a number does not make a report on its own.
+        assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
     }
 }

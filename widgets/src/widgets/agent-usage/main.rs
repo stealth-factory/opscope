@@ -379,6 +379,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "grok" => (120, 196, 250),
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
+        "coderabbit" => (255, 112, 72),
         _ => return None,
     })
 }
@@ -403,7 +404,9 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 }
 
 const SUMMARY_TAB: &str = "+";
-const ORDER: &[&str] = &["claude", "codex", "cursor", "grok", "copilot", "antigravity"];
+const ORDER: &[&str] = &[
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit",
+];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -865,6 +868,7 @@ fn run_hint(name: &str) -> &'static str {
         "cursor" => "cursor-agent",
         "grok" => "grok",
         "copilot" => "copilot",
+        "coderabbit" => "coderabbit auth login",
         _ => "",
     }
 }
@@ -1814,6 +1818,7 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec!["antigravity"],
             vec![under_home(".gemini/antigravity-cli")],
         ),
+        "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
@@ -2409,6 +2414,7 @@ mod parse;
 mod shared;
 mod antigravity;
 mod claude;
+mod coderabbit;
 mod codex;
 mod copilot;
 mod cursor;
