@@ -41,14 +41,13 @@ pub struct State {
     pub err: String,
 }
 
-/// Whether `coderabbit usage` may run. Only CodeRabbit is gated on having a
-/// tab: it is the one reader that starts a program spending a request on the
-/// reader's login. `exclude_agents` is checked on its own as well, because
-/// when every chosen agent is excluded the tabs fall back to all of them, and
-/// that fallback must not run a CLI the reader switched off by name.
+/// Whether `coderabbit usage` may run. Only CodeRabbit is gated on being
+/// chosen: it is the one reader that starts a program spending a request on
+/// the reader's login. It is read before the fallback, because when nothing
+/// chosen is left `visible_agents` brings back every tab, and a tab that
+/// fallback adds was never picked.
 fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
-    !cfg.exclude_agents.iter().any(|n| n == "coderabbit")
-        && visible_agents(installed, cfg).iter().any(|t| t == "coderabbit")
+    chosen_agents(installed, cfg).iter().any(|t| t == "coderabbit")
 }
 
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
@@ -596,6 +595,21 @@ mod tests {
         assert!(!coderabbit_asked(&installed, &cfg));
         let named = Config { exclude_agents: Vec::new(), ..cfg };
         assert!(coderabbit_asked(&installed, &named));
+    }
+
+    #[test]
+    fn a_coderabbit_the_fallback_brings_back_is_never_asked() {
+        // A fixed list without CodeRabbit whose only agent is excluded: the
+        // fallback draws every tab, CodeRabbit's among them, unchosen.
+        let cfg = Config {
+            agents: vec!["codex".into()],
+            exclude_agents: vec!["codex".into()],
+            auto_detect_agent: Some(false),
+            ..Config::default()
+        };
+        let installed = HashMap::new();
+        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
+        assert!(!coderabbit_asked(&installed, &cfg));
     }
 
     /// Rendered rows with the colour escapes stripped, so a test can read

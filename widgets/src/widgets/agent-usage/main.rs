@@ -1891,6 +1891,28 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
 /// known if the result would be empty, because a widget with no tabs
 /// teaches nothing and the likeliest cause is a typo.
 fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String> {
+    let shown = chosen_agents(found, cfg);
+    // The summary leads and is never discovered or excluded: it is not an
+    // agent, it is the view across whichever agents there turn out to be.
+    let mut out = vec![SUMMARY_TAB.to_string()];
+    let chosen = if shown.is_empty() {
+        ORDER.iter().map(|n| n.to_string()).collect()
+    } else {
+        shown
+    };
+    for name in chosen {
+        if name == "claude" {
+            out.extend(claude_tab_ids(cfg));
+        } else {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The agents the reader's settings pick, before `visible_agents` falls
+/// back to everything known. A tab the fallback adds was not chosen.
+fn chosen_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String> {
     let known: Vec<&str> = ORDER.to_vec();
     let named: Vec<String> = cfg
         .agents
@@ -1911,26 +1933,10 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
     } else {
         named
     };
-    let shown: Vec<String> = chosen
+    chosen
         .into_iter()
         .filter(|n| !cfg.exclude_agents.contains(n))
-        .collect();
-    // The summary leads and is never discovered or excluded: it is not an
-    // agent, it is the view across whichever agents there turn out to be.
-    let mut out = vec![SUMMARY_TAB.to_string()];
-    let chosen = if shown.is_empty() {
-        ORDER.iter().map(|n| n.to_string()).collect()
-    } else {
-        shown
-    };
-    for name in chosen {
-        if name == "claude" {
-            out.extend(claude_tab_ids(cfg));
-        } else {
-            out.push(name);
-        }
-    }
-    out
+        .collect()
 }
 
 fn claude_tab_ids(cfg: &Config) -> Vec<String> {
