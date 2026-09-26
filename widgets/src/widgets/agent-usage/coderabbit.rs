@@ -55,7 +55,9 @@ fn ask() -> Result<serde_json::Value, String> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    if parse_coderabbit_usage(&text).is_some() {
+    // A partial report from a run that then failed is not a report: taking
+    // it would hold a failure as a reading for the full ten minutes.
+    if out.status.success() && parse_coderabbit_usage(&text).is_some() {
         return Ok(serde_json::json!({"text": text, "at": now()}));
     }
     Err(if coderabbit_signed_out(&text) {
@@ -67,13 +69,16 @@ fn ask() -> Result<serde_json::Value, String> {
     })
 }
 
-pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
+/// `shown` is whether CodeRabbit has a tab under the reader's settings.
+///
+/// Asked only where it could matter: the CLI is installed and the reader
+/// has a tab for it. Every other agent here reads a file or an endpoint;
+/// this one starts a program that spends a request on the reader's login,
+/// so a fixed `agents` list without it, or `exclude_agents` with it, means
+/// it is never run.
+pub fn read(caches: &mut Caches, shown: bool) -> Data {
     let mut d = Data::default();
-    // Asked only where it could matter: the CLI is installed and the reader
-    // has not excluded it. Every other agent here reads a file or an
-    // endpoint; this one starts a program that spends a request on the
-    // reader's login.
-    if !tc::missing(&[CLI]).is_empty() || cfg.exclude_agents.iter().any(|a| a == "coderabbit") {
+    if !shown || !tc::missing(&[CLI]).is_empty() {
         return d;
     }
     // A failure is held as a refusal, so it is retried on the backoff
@@ -190,11 +195,15 @@ fn plan(u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
 pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
     let Some(u) = d.usage.as_ref() else {
         let what = if d.why.is_empty() {
-            "The coderabbit CLI is not installed, so there is no report to read.".to_string()
+            "The coderabbit CLI is not installed, so there is no report to read. \
+             Install it from docs.coderabbit.ai/cli, then sign in."
+                .to_string()
         } else {
             d.why.clone()
         };
-        return no_local(&what, run_hint("coderabbit"), w, p);
+        // The login command fixes a sign-in failure and nothing else.
+        let run = if d.why.starts_with("not signed in") { run_hint("coderabbit") } else { "" };
+        return no_local(&what, run, w, p);
     };
     add_section(report_rows(d, u, w, p), plan(u, w, p))
 }
@@ -230,6 +239,25 @@ mod tests {
         assert!(why_no_lane(&d).contains("coderabbit auth login"));
         let rows = tab(&d, 60, 20, &Config::default(), &palette());
         assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn a_coderabbit_without_a_tab_is_never_asked() {
+        // Nothing is run and nothing is cached: no tab, no request.
+        let mut caches = Caches::default();
+        let d = read(&mut caches, false);
+        assert!(d.usage.is_none() && d.why.is_empty());
+        assert!(!caches.live.contains_key("coderabbit"));
+    }
+
+    #[test]
+    fn only_a_sign_in_failure_offers_the_login_command() {
+        let strip = |rows: Vec<String>| rows.join("\n");
+        let signed_out = Data { why: "not signed in · run coderabbit auth login".into(), ..Data::default() };
+        let other = Data { why: "coderabbit usage exited 2".into(), ..Data::default() };
+        let cfg = Config::default();
+        assert_eq!(strip(tab(&signed_out, 80, 20, &cfg, &palette())).matches("auth login").count(), 2);
+        assert!(!strip(tab(&other, 80, 20, &cfg, &palette())).contains("auth login"));
     }
 
     #[test]

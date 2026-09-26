@@ -42,6 +42,10 @@ pub struct State {
 }
 
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
+    let installed = detect_agents(cfg);
+    // Only CodeRabbit is gated on having a tab: it is the one reader that
+    // starts a program spending a request on the reader's login.
+    let coderabbit_shown = visible_agents(&installed, cfg).iter().any(|t| t == "coderabbit");
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -49,8 +53,8 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
-        coderabbit: crate::coderabbit::read(caches, cfg),
-        installed: detect_agents(cfg),
+        coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
+        installed,
         fetched: 0.0,
         err: String::new(),
     }
