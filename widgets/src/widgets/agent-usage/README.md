@@ -1146,6 +1146,44 @@ than drawn as an empty bar.
 
 This is the same command CodexBar runs for its CodeRabbit provider.
 
+### Notion AI asks Notion's web app, with a cookie you hand it
+
+Notion meters AI on Business and Enterprise workspaces in two windows: a
+rolling six hours, and the billing period. The `notion` tab draws both as
+bars, each against the limit Notion states, with its reset; `[+]` draws them
+beside every other agent's. The six-hour window is paced on its own length;
+the billing period on the calendar month that ends where Notion says it
+ends, since Notion gives the end and not the start.
+
+- **There is no public API for it.** Notion shows this allowance only in
+  its own Settings. The widget asks the two endpoints the web app uses,
+  `getSpaces` and `getCreditRateLimitStatus`, which are internal and can
+  change without notice. When one answers in a shape the widget cannot
+  read, the tab says so rather than drawing an empty bar.
+- **It needs your session cookie.** Copy `token_v2` from app.notion.com
+  (developer tools, then cookies) into `notion_token`, or into the variable
+  `notion_token_env` names (`NOTION_TOKEN_V2`). That cookie is a full
+  sign-in to your Notion account, not a scoped key, so keep `config.json`
+  `chmod 600`; the tab warns when it is not. The widget never reads it out
+  of a browser or the Notion app, for the reason given above.
+- **Notion is here when a token is.** It leaves nothing on this machine to
+  discover, so with no token it has no tab, and with one it is asked every
+  five minutes - and only while it is one of the agents you chose.
+- **The allowance is per member**, in one workspace. `notion_workspace`
+  picks it by id; empty takes the first on a Business or Enterprise plan. A
+  Free or Plus workspace answers that it has no allowance, and the tab says
+  that rather than showing a gauge.
+- **Custom Agents are not in it.** Notion bills those in Notion credits,
+  which this does not read.
+
+| key | default | what it does |
+|---|---|---|
+| `notion_token` | `""` | the `token_v2` cookie, or a whole `Cookie` header copied from a request |
+| `notion_token_env` | `NOTION_TOKEN_V2` | the variable read when `notion_token` is empty |
+| `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
+
+These are the same two requests CodexBar makes for its Notion AI provider.
+
 ### Grok Bot (Cursor's weekly allowance)
 
 Cursor grants a weekly included allowance for its Grok Bot, separate from
