@@ -41,11 +41,19 @@ pub struct State {
     pub err: String,
 }
 
+/// Whether `coderabbit usage` may run. Only CodeRabbit is gated on having a
+/// tab: it is the one reader that starts a program spending a request on the
+/// reader's login. `exclude_agents` is checked on its own as well, because
+/// when every chosen agent is excluded the tabs fall back to all of them, and
+/// that fallback must not run a CLI the reader switched off by name.
+fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    !cfg.exclude_agents.iter().any(|n| n == "coderabbit")
+        && visible_agents(installed, cfg).iter().any(|t| t == "coderabbit")
+}
+
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
     let installed = detect_agents(cfg);
-    // Only CodeRabbit is gated on having a tab: it is the one reader that
-    // starts a program spending a request on the reader's login.
-    let coderabbit_shown = visible_agents(&installed, cfg).iter().any(|t| t == "coderabbit");
+    let coderabbit_shown = coderabbit_asked(&installed, cfg);
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -572,6 +580,23 @@ fn unknown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_excluded_coderabbit_is_never_asked_even_when_every_agent_is_excluded() {
+        // Excluding every chosen agent falls back to showing all tabs; the
+        // exclusion still keeps CodeRabbit's CLI from running.
+        let cfg = Config {
+            agents: vec!["coderabbit".into()],
+            exclude_agents: vec!["coderabbit".into()],
+            auto_detect_agent: Some(false),
+            ..Config::default()
+        };
+        let installed = HashMap::new();
+        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
+        assert!(!coderabbit_asked(&installed, &cfg));
+        let named = Config { exclude_agents: Vec::new(), ..cfg };
+        assert!(coderabbit_asked(&installed, &named));
+    }
 
     /// Rendered rows with the colour escapes stripped, so a test can read
     /// what is on screen rather than how it was painted.
