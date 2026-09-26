@@ -78,7 +78,13 @@ fn ask() -> Result<serde_json::Value, String> {
 /// it is never run.
 pub fn read(caches: &mut Caches, shown: bool) -> Data {
     let mut d = Data::default();
-    if !shown || !tc::missing(&[CLI]).is_empty() {
+    if !shown {
+        // Can still be drawn: excluding every chosen agent brings all the
+        // tabs back, and this one must not then claim the CLI is missing.
+        d.why = "not asked · CodeRabbit is left out of this widget's agents".into();
+        return d;
+    }
+    if !tc::missing(&[CLI]).is_empty() {
         return d;
     }
     // A failure is held as a refusal, so it is retried on the backoff
@@ -246,8 +252,13 @@ mod tests {
         // Nothing is run and nothing is cached: no tab, no request.
         let mut caches = Caches::default();
         let d = read(&mut caches, false);
-        assert!(d.usage.is_none() && d.why.is_empty());
+        assert!(d.usage.is_none());
         assert!(!caches.live.contains_key("coderabbit"));
+        // And if its tab is drawn anyway, it says why rather than calling
+        // an installed CLI missing.
+        assert!(why_no_lane(&d).contains("left out"), "{}", why_no_lane(&d));
+        let rows = tab(&d, 80, 20, &Config::default(), &palette()).join("\n");
+        assert!(!rows.contains("not installed") && !rows.contains("auth login"), "{rows}");
     }
 
     #[test]
