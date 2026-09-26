@@ -193,7 +193,7 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
     // The IDE is named under SUBSCRIPTION, so the header keeps only what
     // decides how far to trust the figure, and adds the scope when it fits
     // rather than clipping the age off a narrow pane.
-    let age = format!("recorded {} ago", ago_short(d.written));
+    let age = format!("recorded {} ago", ago(d.written));
     let scope = " · account-wide";
     let fits = 13 + age.chars().count() + scope.chars().count() <= w - 1;
     let mut rows = vec![tc::seg(
@@ -263,13 +263,6 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
         w - 1,
     ));
     rows
-}
-
-/// `ago` with its own suffix taken off, so the header can say "recorded
-/// 4m ago" without it reading "4m ago ago".
-fn ago_short(when: f64) -> String {
-    let said = ago(when);
-    said.strip_suffix(" ago").unwrap_or(&said).to_string()
 }
 
 fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
