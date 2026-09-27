@@ -79,13 +79,21 @@ pub fn token(cfg: &Config) -> (String, &'static str) {
 }
 
 /// The `Cookie` header for a pasted value: the bare `token_v2`, or a whole
-/// cookie header copied from the browser, which is sent as it is.
-fn cookie_header(token: &str) -> String {
-    if token.contains("token_v2=") {
-        token.trim_start_matches("Cookie:").trim().to_string()
-    } else {
-        format!("token_v2={}", token)
+/// cookie header copied from the browser, which is sent as it is less its
+/// `Cookie:` name, in whatever case the browser wrote it.
+///
+/// A line break is refused rather than stripped. curl's config file turns
+/// an escaped one back into a real one, which would end the header early
+/// and start another, and a value that has one was not pasted as intended.
+fn cookie_header(token: &str) -> Result<String, String> {
+    if token.contains(['\r', '\n']) {
+        return Err("the token has a line break in it · paste it again as one line".into());
     }
+    if !token.contains("token_v2=") {
+        return Ok(format!("token_v2={}", token));
+    }
+    let named = token.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("cookie:"));
+    Ok(if named { &token[7..] } else { token }.trim().to_string())
 }
 
 /// One POST to the web app's API.
@@ -117,7 +125,7 @@ fn post(endpoint: &str, body: &str, cookie: &str) -> Result<String, String> {
 
 /// Both requests, as the raw answers, or why there was no reading.
 fn ask(token: &str, wanted: &str) -> Result<serde_json::Value, String> {
-    let cookie = cookie_header(token);
+    let cookie = cookie_header(token)?;
     let spaces = post("getSpaces", "{}", &cookie)?;
     let (_, list) = parse_notion_spaces(&spaces)
         .ok_or("getSpaces answered in a shape this widget cannot read")?;
@@ -265,11 +273,20 @@ fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<S
             ));
         }
     }
+    // The endpoint is unsupported and could change shape; a window that did
+    // not come back is said, so the one drawn is not taken for the whole.
+    let missing = match (&a.rolling, &a.period) {
+        (None, Some(_)) => Some("rolling window"),
+        (Some(_), None) => Some("billing period"),
+        _ => None,
+    };
+    if let Some(what) = missing {
+        let text = format!("Notion's answer had no {}, so it is not shown.", what);
+        rows.extend(note(&text, &p.warn, w));
+    }
     if a.enforcement.eq_ignore_ascii_case("preview") {
-        rows.push(tc::seg(
-            &[(p.dim.as_str(), "  Notion reports this allowance as a preview, not yet enforced.".into())],
-            w - 1,
-        ));
+        let text = "Notion reports this allowance as a preview, not yet enforced.";
+        rows.extend(note(text, &p.dim, w));
     }
     rows
 }
@@ -290,10 +307,19 @@ fn account_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 // The token is a full sign-in, so a config.json others can read is worth saying
 // on every reading, not only on the ones that failed.
-fn token_warning(d: &Data, w: usize, p: &Palette) -> Option<String> {
+fn token_warning(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     tc::config_token_warning()
         .filter(|_| d.source == "config")
-        .map(|warn| tc::seg(&[(p.warn.as_str(), format!("  {}", warn))], w - 1))
+        .map(|warn| note(&warn, &p.warn, w))
+        .unwrap_or_default()
+}
+
+/// A sentence under the bars, wrapped to the pane rather than cut by it.
+fn note(text: &str, colour: &str, w: usize) -> Vec<String> {
+    wrap_text(text, w.saturating_sub(4).max(20))
+        .into_iter()
+        .map(|line| tc::seg(&[(colour, format!("  {}", line))], w - 1))
+        .collect()
 }
 
 pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
@@ -431,9 +457,41 @@ mod tests {
 
     #[test]
     fn a_bare_token_and_a_copied_cookie_header_both_sign_in() {
-        assert_eq!(cookie_header("abc"), "token_v2=abc");
-        assert_eq!(cookie_header("Cookie: a=1; token_v2=abc"), "a=1; token_v2=abc");
-        assert_eq!(cookie_header("token_v2=abc; b=2"), "token_v2=abc; b=2");
+        let ok = |t: &str| cookie_header(t).unwrap();
+        assert_eq!(ok("abc"), "token_v2=abc");
+        assert_eq!(ok("Cookie: a=1; token_v2=abc"), "a=1; token_v2=abc");
+        // Browsers copy the header name in lower case too.
+        assert_eq!(ok("cookie: a=1; token_v2=abc"), "a=1; token_v2=abc");
+        assert_eq!(ok("token_v2=abc; b=2"), "token_v2=abc; b=2");
+    }
+
+    #[test]
+    fn a_token_with_a_line_break_is_refused_rather_than_sent() {
+        // curl would turn it into a second header line.
+        assert!(cookie_header("abc\r\nX-Other: 1").is_err());
+        assert!(cookie_header("token_v2=abc\n").is_err());
+    }
+
+    #[test]
+    fn an_answer_missing_one_window_says_so_on_the_tab() {
+        let mut d = reading();
+        d.allowance = parse_notion_allowance(
+            r#"{"status":"within_limit",
+                "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1788000000000}}"#,
+        );
+        assert_eq!(lanes(&d).len(), 1);
+        for w in [30usize, 60, 100] {
+            let rows = plain(&tab(&d, w, 30, &Config::default(), &palette()));
+            for r in rows.lines() {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            // Wrapped at a narrow width, so it is read as words.
+            let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("had no rolling window"), "{rows}");
+        }
+        // A whole answer carries no such note.
+        let rows = plain(&tab(&reading(), 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("had no"), "{rows}");
     }
 
     #[test]
