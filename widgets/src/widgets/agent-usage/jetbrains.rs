@@ -199,7 +199,7 @@ fn pick(mut files: Vec<(String, String, f64)>) -> Data {
 // refill that has since come due, so the figure belongs to a closed period.
 fn stale(d: &Data) -> bool {
     // A file whose time could not be read cannot vouch for being recent.
-    let written_long_ago = d.written <= 0.0 || now() - d.written > FRESH_SECS;
+    let written_long_ago = !written_known(d) || now() - d.written > FRESH_SECS;
     let refill_passed = d
         .quota
         .as_ref()
@@ -208,16 +208,34 @@ fn stale(d: &Data) -> bool {
     written_long_ago || refill_passed
 }
 
-/// A refill period as a reader would say it: days when it is a day or more,
-/// otherwise hours or minutes, so a twelve-hour period is not "0 days".
+/// Whether the file's time can be trusted as an age: unread (0) and ahead
+/// of this clock, after a clock correction or a copy that kept its
+/// timestamp, both vouch for nothing.
+fn written_known(d: &Data) -> bool {
+    d.written > 0.0 && d.written <= now()
+}
+
+/// A refill period as a reader would say it: in the largest unit it is a
+/// whole number of, so a twelve-hour period is not "0 days". A period that
+/// is none of those, such as `P1DT12H30M`, is given exactly in parts rather
+/// than rounded to a cadence the pace bar is not using.
 fn period_label(secs: f64) -> String {
     let plural = |n: i64, unit: &str| format!("{} {}{}", n, unit, if n == 1 { "" } else { "s" });
-    if secs >= 86400.0 {
-        plural((secs / 86400.0).round() as i64, "day")
-    } else if secs >= 3600.0 {
-        plural((secs / 3600.0).round() as i64, "hour")
+    let mins = (secs / 60.0).round().max(1.0) as i64;
+    if mins % 1440 == 0 {
+        plural(mins / 1440, "day")
+    } else if mins % 60 == 0 {
+        plural(mins / 60, "hour")
+    } else if mins < 60 {
+        plural(mins, "minute")
     } else {
-        plural((secs / 60.0).round().max(1.0) as i64, "minute")
+        let (d, h, m) = (mins / 1440, mins % 1440 / 60, mins % 60);
+        [(d, "d"), (h, "h"), (m, "m")]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, u)| format!("{n}{u}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -257,7 +275,7 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
     // The IDE is named under SUBSCRIPTION, so the header keeps only what
     // decides how far to trust the figure, and adds the scope when it fits
     // rather than clipping the age off a narrow pane.
-    let age = if d.written > 0.0 {
+    let age = if written_known(d) {
         format!("recorded {} ago", ago(d.written))
     } else {
         "age unknown".to_string()
@@ -504,6 +522,24 @@ mod tests {
         assert_eq!(period_label(86400.0), "1 day");
         assert_eq!(period_label(12.0 * 3600.0), "12 hours");
         assert_eq!(period_label(1800.0), "30 minutes");
+        // Not a whole number of any unit: exact, never rounded to "2 days".
+        assert_eq!(period_label(131_400.0), "1d 12h 30m");
+        assert_eq!(period_label(36.0 * 3600.0), "36 hours");
+        assert_eq!(period_label(5400.0), "1h 30m");
+    }
+
+    #[test]
+    fn a_file_dated_in_the_future_is_not_taken_as_fresh() {
+        // A clock correction or a copied timestamp would otherwise read as
+        // "recorded -300s ago" and be drawn as current.
+        let d = Data {
+            quota: Some(JetBrainsQuota { used: 1.0, maximum: 10.0, ..Default::default() }),
+            written: now() + 300.0,
+            ..Default::default()
+        };
+        assert!(stale(&d));
+        let rows = tab(&d, 60, 20, &Config::default(), &palette()).join("\n");
+        assert!(rows.contains("age unknown") && !rows.contains("ago"), "{rows}");
     }
 
     #[test]
