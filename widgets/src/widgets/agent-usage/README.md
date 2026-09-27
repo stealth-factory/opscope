@@ -1124,6 +1124,28 @@ Four settings, all on by default except the interval:
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
 
+### CodeRabbit has a count and no quota
+
+CodeRabbit publishes no limit to measure against. Its CLI's `coderabbit usage`
+reports your reviews this billing period, whether usage billing is on, and the
+date the period resets, and that is what the `coderabbit` tab shows: the count
+as a number with no bar under it, the reset with the days left, then the
+organisation, the login and any other line the report carried. On `[+]`
+CodeRabbit is named as publishing no quota, with the count beside it, rather
+than drawn as an empty bar.
+
+- **It runs a program.** Every other agent here reads a file or an endpoint;
+  this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
+  runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is
+  given 15 seconds, and a report is held for ten minutes.
+- **The CLI owns the login.** Nothing here reads or changes its credentials.
+  Signed out, the tab says so and names `coderabbit auth login`. A
+  self-hosted login gets no report from the CLI at all.
+- **The reset date has no zone**, so the days left are counted from today in
+  this machine's zone.
+
+This is the same command CodexBar runs for its CodeRabbit provider.
+
 ### Grok Bot (Cursor's weekly allowance)
 
 Cursor grants a weekly included allowance for its Grok Bot, separate from
@@ -1334,7 +1356,7 @@ something its own dollar line already says.
 
 **Every quota bar is drawn in its own agent's colour**, dark at the left of the
 fill and full at the right, so a row says whose it is before you read the
-heading — and on the `+` tab, where six agents share a screen, without one.
+heading — and on the `+` tab, where every agent shares a screen, without one.
 Claude keeps the terracotta of its own `/usage`, Codex its dark-grey-to-white,
 Grok its blue, Cursor its green; Copilot and Antigravity have no calendar to
 borrow from and were given hues clear of the amber and red reserved below.

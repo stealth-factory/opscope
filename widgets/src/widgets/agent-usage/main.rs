@@ -379,6 +379,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "grok" => (120, 196, 250),
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
+        "coderabbit" => (255, 112, 72),
         _ => return None,
     })
 }
@@ -403,7 +404,9 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 }
 
 const SUMMARY_TAB: &str = "+";
-const ORDER: &[&str] = &["claude", "codex", "cursor", "grok", "copilot", "antigravity"];
+const ORDER: &[&str] = &[
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit",
+];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -865,6 +868,7 @@ fn run_hint(name: &str) -> &'static str {
         "cursor" => "cursor-agent",
         "grok" => "grok",
         "copilot" => "copilot",
+        "coderabbit" => "coderabbit auth login",
         _ => "",
     }
 }
@@ -1814,6 +1818,7 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec!["antigravity"],
             vec![under_home(".gemini/antigravity-cli")],
         ),
+        "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
@@ -1886,6 +1891,28 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
 /// known if the result would be empty, because a widget with no tabs
 /// teaches nothing and the likeliest cause is a typo.
 fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String> {
+    let shown = chosen_agents(found, cfg);
+    // The summary leads and is never discovered or excluded: it is not an
+    // agent, it is the view across whichever agents there turn out to be.
+    let mut out = vec![SUMMARY_TAB.to_string()];
+    let chosen = if shown.is_empty() {
+        ORDER.iter().map(|n| n.to_string()).collect()
+    } else {
+        shown
+    };
+    for name in chosen {
+        if name == "claude" {
+            out.extend(claude_tab_ids(cfg));
+        } else {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The agents the reader's settings pick, before `visible_agents` falls
+/// back to everything known. A tab the fallback adds was not chosen.
+fn chosen_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String> {
     let known: Vec<&str> = ORDER.to_vec();
     let named: Vec<String> = cfg
         .agents
@@ -1906,26 +1933,10 @@ fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String
     } else {
         named
     };
-    let shown: Vec<String> = chosen
+    chosen
         .into_iter()
         .filter(|n| !cfg.exclude_agents.contains(n))
-        .collect();
-    // The summary leads and is never discovered or excluded: it is not an
-    // agent, it is the view across whichever agents there turn out to be.
-    let mut out = vec![SUMMARY_TAB.to_string()];
-    let chosen = if shown.is_empty() {
-        ORDER.iter().map(|n| n.to_string()).collect()
-    } else {
-        shown
-    };
-    for name in chosen {
-        if name == "claude" {
-            out.extend(claude_tab_ids(cfg));
-        } else {
-            out.push(name);
-        }
-    }
-    out
+        .collect()
 }
 
 fn claude_tab_ids(cfg: &Config) -> Vec<String> {
@@ -2409,6 +2420,7 @@ mod parse;
 mod shared;
 mod antigravity;
 mod claude;
+mod coderabbit;
 mod codex;
 mod copilot;
 mod cursor;
