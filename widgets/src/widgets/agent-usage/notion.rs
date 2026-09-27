@@ -138,6 +138,16 @@ fn ask(token: &str, wanted: &str) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "spaces": spaces, "status": status, "space": space.id, "at": now() }))
 }
 
+/// The cache slot for one account and workspace, so a token or workspace
+/// changed in settings is asked afresh rather than shown the last one's
+/// reading until it expires. Hashed, so the token is not kept as a key.
+fn cache_key(token: &str, workspace: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (token, workspace).hash(&mut h);
+    format!("notion:{:016x}", h.finish())
+}
+
 /// `shown` is whether Notion has a tab under the reader's settings; with no
 /// tab, or no cookie, nothing is sent.
 pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
@@ -152,15 +162,16 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         return d;
     }
     let wanted = cfg.notion_workspace.clone();
+    let key = cache_key(&token, &wanted);
     let mut refused = String::new();
-    let got = cached(caches, "notion", REPORT_TTL, || match ask(&token, &wanted) {
+    let got = cached(caches, &key, REPORT_TTL, || match ask(&token, &wanted) {
         Ok(v) => Some(v),
         Err(why) => {
             refused = why;
             None
         }
     });
-    remember_refusal(caches, "notion", &refused);
+    remember_refusal(caches, &key, &refused);
     if !refused.is_empty() {
         d.why = refused;
         return d;
@@ -285,25 +296,34 @@ fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<S
         rows.extend(note(&text, &p.warn, w));
     }
     // A window that came back without its clock still has a true share
-    // used, but no pace or reset can be drawn for it, and that is said.
-    let mut gaps: Vec<&str> = Vec::new();
+    // used. What it cannot have is said per window, and only what is
+    // actually missing from the lane drawn: a rolling window with a reset
+    // but no length still draws its reset, and loses only its pace.
     if let Some(r) = &a.rolling {
-        if notion_span_secs(&r.span).is_none() {
-            gaps.push("length for the rolling window");
-        }
-        if a.resets_in.is_none() {
-            gaps.push("reset time for the rolling window");
+        let span = notion_span_secs(&r.span).is_some();
+        let text = match (span, a.resets_in.is_some()) {
+            (false, true) => Some(
+                "Notion's answer had no length for the rolling window, so its pace is \
+                 not drawn.",
+            ),
+            (true, false) => Some(
+                "Notion's answer had no reset time for the rolling window, so neither \
+                 its pace nor its reset is drawn.",
+            ),
+            (false, false) => Some(
+                "Notion's answer had no length or reset time for the rolling window, so \
+                 neither its pace nor its reset is drawn.",
+            ),
+            (true, true) => None,
+        };
+        if let Some(text) = text {
+            rows.extend(note(text, &p.warn, w));
         }
     }
     if a.period.as_ref().is_some_and(|b| b.ends.is_none()) {
-        gaps.push("end date for the billing period");
-    }
-    if !gaps.is_empty() {
-        let text = format!(
-            "Notion's answer had no {}, so no pace or reset is drawn for it.",
-            gaps.join(" and no ")
-        );
-        rows.extend(note(&text, &p.warn, w));
+        let text = "Notion's answer had no end date for the billing period, so neither its \
+                    pace nor its reset is drawn.";
+        rows.extend(note(text, &p.warn, w));
     }
     if a.enforcement.eq_ignore_ascii_case("preview") {
         let text = "Notion reports this allowance as a preview, not yet enforced.";
@@ -450,7 +470,7 @@ mod tests {
         };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, true);
-        assert!(!caches.live.contains_key("notion"));
+        assert!(caches.live.keys().all(|k| !k.starts_with("notion")));
         assert!(why_no_lane(&d).contains("notion_token"));
         let all = plain(&tab(&d, 60, 20, &cfg, &palette()));
         assert!(all.contains("notion_token") && all.contains("token_v2"), "{all}");
@@ -461,7 +481,7 @@ mod tests {
         let cfg = Config { notion_token: "secret".into(), ..Config::default() };
         let mut caches = Caches::default();
         let d = read(&mut caches, &cfg, false);
-        assert!(!caches.live.contains_key("notion"));
+        assert!(caches.live.keys().all(|k| !k.starts_with("notion")));
         assert!(why_no_lane(&d).contains("left out"));
     }
 
@@ -504,12 +524,37 @@ mod tests {
         assert_eq!(lanes(&d).len(), 2);
         let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
         let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("no length for the rolling window"), "{rows}");
-        assert!(words.contains("no reset time for the rolling window"), "{rows}");
+        assert!(words.contains("no length or reset time for the rolling window"), "{rows}");
         assert!(words.contains("no end date for the billing period"), "{rows}");
         // A whole answer carries none of it.
         let rows = plain(&tab(&reading(), 100, 30, &Config::default(), &palette()));
-        assert!(!rows.contains("no pace or reset"), "{rows}");
+        assert!(!rows.contains("is drawn") && !rows.contains("not drawn"), "{rows}");
+    }
+
+    #[test]
+    fn a_rolling_window_with_a_reset_but_no_length_loses_only_its_pace() {
+        // The reset is still drawn, so the note must not say it is not.
+        let mut d = reading();
+        d.allowance = parse_notion_allowance(
+            r#"{"status":"within_limit","window":{"used":42,"limit":100},
+                "resetsInSeconds":3600,
+                "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1788000000000}}"#,
+        );
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("resets in"), "{rows}");
+        assert!(words.contains("no length for the rolling window, so its pace is not drawn"), "{rows}");
+        assert!(!words.contains("nor its reset"), "{rows}");
+    }
+
+    #[test]
+    fn a_changed_token_or_workspace_is_not_shown_the_last_reading() {
+        // One cache slot per account and workspace, and no token in the key.
+        let a = cache_key("one", "");
+        assert_ne!(a, cache_key("two", ""));
+        assert_ne!(a, cache_key("one", "space-b"));
+        assert_eq!(a, cache_key("one", ""));
+        assert!(!a.contains("one"));
     }
 
     #[test]
