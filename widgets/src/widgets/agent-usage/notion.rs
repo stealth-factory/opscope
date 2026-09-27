@@ -288,10 +288,20 @@ fn account_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     plan_rows(tier, &pairs, w, "", None, "", p)
 }
 
+// The token is a full sign-in, so a config.json others can read is worth saying
+// on every reading, not only on the ones that failed.
+fn token_warning(d: &Data, w: usize, p: &Palette) -> Option<String> {
+    tc::config_token_warning()
+        .filter(|_| d.source == "config")
+        .map(|warn| tc::seg(&[(p.warn.as_str(), format!("  {}", warn))], w - 1))
+}
+
 pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
     match d.allowance.as_ref() {
         Some(a) if !a.not_applicable() => {
-            add_section(allowance_rows(d, a, w, p), account_rows(d, w, p))
+            let mut rows = allowance_rows(d, a, w, p);
+            rows.extend(token_warning(d, w, p));
+            add_section(rows, account_rows(d, w, p))
         }
         _ => {
             let what = if d.source.is_empty() && d.why.is_empty() {
@@ -307,9 +317,7 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
                 why_no_lane(d).trim_start_matches("no quota · ").to_string()
             };
             let mut rows = no_local(&what, "", w, p);
-            if let Some(warn) = tc::config_token_warning().filter(|_| d.source == "config") {
-                rows.push(tc::seg(&[(p.warn.as_str(), format!("  {}", warn))], w - 1));
-            }
+            rows.extend(token_warning(d, w, p));
             add_section(rows, if d.space.is_some() { account_rows(d, w, p) } else { Vec::new() })
         }
     }
