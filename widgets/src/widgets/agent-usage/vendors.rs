@@ -35,13 +35,25 @@ pub struct State {
     pub grok: crate::grok::Data,
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
+    pub coderabbit: crate::coderabbit::Data,
     pub jetbrains: crate::jetbrains::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
 }
 
+/// Whether `coderabbit usage` may run. Only CodeRabbit is gated on being
+/// chosen: it is the one reader that starts a program spending a request on
+/// the reader's login. It is read before the fallback, because when nothing
+/// chosen is left `visible_agents` brings back every tab, and a tab that
+/// fallback adds was never picked.
+fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "coderabbit")
+}
+
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
+    let installed = detect_agents(cfg);
+    let coderabbit_shown = coderabbit_asked(&installed, cfg);
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -49,8 +61,9 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
+        coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
         jetbrains: crate::jetbrains::read(caches, cfg),
-        installed: detect_agents(cfg),
+        installed,
         fetched: 0.0,
         err: String::new(),
     }
@@ -81,6 +94,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "grok" => crate::grok::lanes(&s.grok),
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
+        "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
         "jetbrains" => crate::jetbrains::lanes(&s.jetbrains),
         _ => Vec::new(),
     }
@@ -143,6 +157,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "grok" => crate::grok::why_no_lane(&s.grok),
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
+        "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
         "jetbrains" => crate::jetbrains::why_no_lane(&s.jetbrains),
         _ => String::new(),
     };
@@ -526,6 +541,7 @@ pub fn tab_body(
         "grok" => crate::grok::tab(&s.grok, w, h, cfg, p),
         "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
+        "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
         "jetbrains" => crate::jetbrains::tab(&s.jetbrains, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
@@ -568,6 +584,38 @@ fn unknown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_excluded_coderabbit_is_never_asked_even_when_every_agent_is_excluded() {
+        // Excluding every chosen agent falls back to showing all tabs; the
+        // exclusion still keeps CodeRabbit's CLI from running.
+        let cfg = Config {
+            agents: vec!["coderabbit".into()],
+            exclude_agents: vec!["coderabbit".into()],
+            auto_detect_agent: Some(false),
+            ..Config::default()
+        };
+        let installed = HashMap::new();
+        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
+        assert!(!coderabbit_asked(&installed, &cfg));
+        let named = Config { exclude_agents: Vec::new(), ..cfg };
+        assert!(coderabbit_asked(&installed, &named));
+    }
+
+    #[test]
+    fn a_coderabbit_the_fallback_brings_back_is_never_asked() {
+        // A fixed list without CodeRabbit whose only agent is excluded: the
+        // fallback draws every tab, CodeRabbit's among them, unchosen.
+        let cfg = Config {
+            agents: vec!["codex".into()],
+            exclude_agents: vec!["codex".into()],
+            auto_detect_agent: Some(false),
+            ..Config::default()
+        };
+        let installed = HashMap::new();
+        assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
+        assert!(!coderabbit_asked(&installed, &cfg));
+    }
 
     /// Rendered rows with the colour escapes stripped, so a test can read
     /// what is on screen rather than how it was painted.
