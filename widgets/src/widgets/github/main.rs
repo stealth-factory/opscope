@@ -257,6 +257,31 @@ fn forget_24h(row: &mut Account) {
     row.merged_24h = None;
 }
 
+/// A rolling-day figure to draw this frame, holding the last good one
+/// through a refresh.
+///
+/// Every pass forgets the figures before any account lands, which is right
+/// for the sum and wrong for the screen: redrawn as `None`, both figures
+/// dropped back to the shimmer the first load uses and then came in again,
+/// once a minute, over numbers that had not changed. While a pass is still
+/// reading its aggregates the last complete figure stays up instead and the
+/// new one replaces it in place when it is whole. Outside a pass `None`
+/// means what it always has - nothing read yet, or a pass that failed - so
+/// the held figure goes with it rather than outliving the failure.
+fn steady_24h(live: Option<i64>, held: &mut Option<i64>, counting: bool) -> Option<i64> {
+    match live {
+        Some(v) => {
+            *held = Some(v);
+            Some(v)
+        }
+        None if counting => *held,
+        None => {
+            *held = None;
+            None
+        }
+    }
+}
+
 /// `tc::seg` over segments that own their colours.
 fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     let borrowed: Vec<(&str, String)> =
@@ -2155,6 +2180,11 @@ struct State {
     /// settled one and the retry never happened - which is the freeze this
     /// flag exists to prevent, reached through the detail screen instead.
     timing_overlay: HashMap<String, (i64, bool, parse::LandTiming)>,
+    /// Set while a pass is reading the aggregates, between forgetting the
+    /// last pass's rolling-day figures and the last account landing. The
+    /// screen holds the figures it already has for that stretch rather than
+    /// drawing it as a first load: see [`steady_24h`].
+    counting_24h: bool,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -2484,6 +2514,9 @@ fn one_pass(
     for row in by_acc.values_mut() {
         forget_24h(row);
     }
+    if let Ok(mut g) = state.lock() {
+        g.counting_24h = true;
+    }
     publish(state, &accounts, &by_acc, rate);
     for acc in &accounts {
         let data = match graphql(&build_query(acc, days_now, viewer, rolling_now), tok, scopes) {
@@ -2538,6 +2571,9 @@ fn one_pass(
             },
         );
         publish(state, &accounts, &by_acc, rate);
+    }
+    if let Ok(mut g) = state.lock() {
+        g.counting_24h = false;
     }
 
     // Then the per-day counts. A past day cannot change - a PR merged on the
@@ -2801,6 +2837,10 @@ fn main() {
     let timing_backoff: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
+    // The last complete rolling-day figures, for the board and for each
+    // account's own screen, drawn while a refresh is still reading them.
+    let mut held_board: (Option<i64>, Option<i64>) = (None, None);
+    let mut held_acc: HashMap<String, (Option<i64>, Option<i64>)> = HashMap::new();
 
     loop {
         tick += 1;
@@ -2934,20 +2974,42 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want, watched, overlay) = match state.lock()
-        {
-            Ok(g) => (
-                g.stats.clone(),
-                g.rate,
-                g.err.clone(),
-                g.fetched,
-                g.calendar.clone(),
-                g.days,
-                g.accounts.len(),
-                g.timing_overlay.clone(),
+        let (mut stats, rate, err, fetched, calendar, want, watched, overlay, counting) =
+            match state.lock() {
+                Ok(g) => (
+                    g.stats.clone(),
+                    g.rate,
+                    g.err.clone(),
+                    g.fetched,
+                    g.calendar.clone(),
+                    g.days,
+                    g.accounts.len(),
+                    g.timing_overlay.clone(),
+                    g.counting_24h,
+                ),
+                Err(_) => return,
+            };
+        // The board's pair is summed from the rows as they are, before any
+        // row is given back its held figure: a sum across two passes is two
+        // cutoffs wearing one label, so the board holds its own last whole
+        // sum instead of adding up held and fresh rows.
+        let board_figs = (
+            steady_24h(
+                board_24h(&stats, watched, |s| s.opened_24h),
+                &mut held_board.0,
+                counting,
             ),
-            Err(_) => return,
-        };
+            steady_24h(
+                board_24h(&stats, watched, |s| s.merged_24h),
+                &mut held_board.1,
+                counting,
+            ),
+        );
+        for s in stats.iter_mut() {
+            let held = held_acc.entry(s.key.clone()).or_default();
+            s.opened_24h = steady_24h(s.opened_24h, &mut held.0, counting);
+            s.merged_24h = steady_24h(s.merged_24h, &mut held.1, counting);
+        }
         // Busiest first: open PRs decide it, and merged-in-window breaks ties
         // so an idle backlog ranks below an account of the same size that is
         // actually moving. Name last, to keep the order steady frame to frame.
@@ -3226,10 +3288,7 @@ fn main() {
         rows.extend(flow_section(
             head,
             totals,
-            (
-                board_24h(&stats, watched, |s| s.opened_24h),
-                board_24h(&stats, watched, |s| s.merged_24h),
-            ),
+            board_figs,
             figw,
             &hu,
             &hd,
@@ -4013,6 +4072,27 @@ mod tests {
         ];
         assert_eq!(board_24h(&complete, 2, |s| s.opened_24h), Some(16));
         assert_eq!(board_24h(&complete, 2, |s| s.merged_24h), Some(5));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_figures_up_until_the_new_ones_land() {
+        // Every pass forgets the pair before any account lands, and the
+        // screen drew that as a first load: both figures back to the
+        // shimmer and in again, once a minute, over numbers that had not
+        // changed. The first load still shimmers - nothing is held yet.
+        let mut held = None;
+        assert_eq!(steady_24h(None, &mut held, true), None);
+        assert_eq!(steady_24h(Some(7), &mut held, false), Some(7));
+        // A pass starts and forgets: the old figure stays up.
+        assert_eq!(steady_24h(None, &mut held, true), Some(7));
+        // The new one lands and replaces it in place.
+        assert_eq!(steady_24h(Some(9), &mut held, true), Some(9));
+        assert_eq!(steady_24h(Some(9), &mut held, false), Some(9));
+        // A pass that ended without it is not a pass in flight: the held
+        // figure goes rather than outliving the failure, and does not come
+        // back on the next pass either.
+        assert_eq!(steady_24h(None, &mut held, false), None);
+        assert_eq!(steady_24h(None, &mut held, true), None);
     }
 
     #[test]
