@@ -43,6 +43,8 @@ const FRESH_SECS: f64 = 3600.0;
 const IDES: &[(&str, &str)] = &[
     ("IntelliJIdea", "IntelliJ IDEA"),
     ("IdeaIC", "IntelliJ IDEA CE"),
+    // PyCharm Community keeps its config as `PyCharmCE2024.1`.
+    ("PyCharmCE", "PyCharm CE"),
     ("PyCharm", "PyCharm"),
     ("WebStorm", "WebStorm"),
     ("GoLand", "GoLand"),
@@ -75,19 +77,27 @@ fn roots() -> Vec<String> {
 }
 
 /// Product name and version for a config directory, or None when it is
-/// not an IDE this knows.
+/// not an IDE this knows. The rest of the name has to be a version,
+/// `2026.2` or Android Studio's `Preview2026.2`, so a `RustRoverBackup`
+/// beside the real one is never read as an IDE.
 fn ide_of(dirname: &str) -> Option<String> {
     let lower = dirname.to_lowercase();
     IDES.iter().find_map(|(prefix, name)| {
-        lower.starts_with(&prefix.to_lowercase()).then(|| {
-            let version = &dirname[prefix.len()..];
-            if version.is_empty() {
-                name.to_string()
-            } else {
-                format!("{} {}", name, version)
-            }
-        })
+        if !lower.starts_with(&prefix.to_lowercase()) {
+            return None;
+        }
+        let version = &dirname[prefix.len()..];
+        match version.strip_prefix("Preview") {
+            Some(v) => is_version(v).then(|| format!("{} Preview {}", name, v)),
+            None => is_version(version).then(|| format!("{} {}", name, version)),
+        }
     })
+}
+
+/// `2026.2`: a four-digit year, a dot, and a release number.
+fn is_version(s: &str) -> bool {
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    matches!(s.split_once('.'), Some((year, release)) if year.len() == 4 && digits(year) && digits(release))
 }
 
 /// Every quota file on this machine, as (IDE, path, modified).
@@ -351,7 +361,16 @@ mod tests {
         assert_eq!(ide_of("RustRover2026.2").as_deref(), Some("RustRover 2026.2"));
         assert_eq!(ide_of("IntelliJIdea2026.1").as_deref(), Some("IntelliJ IDEA 2026.1"));
         assert_eq!(ide_of("AndroidStudio2025.1").as_deref(), Some("Android Studio 2025.1"));
-        // Directories beside them that are not IDEs.
+        assert_eq!(ide_of("PyCharmCE2024.1").as_deref(), Some("PyCharm CE 2024.1"));
+        assert_eq!(
+            ide_of("AndroidStudioPreview2025.2").as_deref(),
+            Some("Android Studio Preview 2025.2")
+        );
+        // Directories beside them that are not IDEs, including ones that
+        // start with a product name.
+        assert_eq!(ide_of("RustRoverBackup"), None);
+        assert_eq!(ide_of("RustRover"), None);
+        assert_eq!(ide_of("PyCharm2026"), None);
         assert_eq!(ide_of("consentOptions"), None);
         assert_eq!(ide_of("Toolbox"), None);
     }
