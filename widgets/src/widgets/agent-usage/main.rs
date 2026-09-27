@@ -1822,11 +1822,12 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
         "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
         // No binary either: an IDE is not on PATH under a name worth
         // guessing, and only one that has recorded a quota has anything to
-        // show, so the quota file is the proof.
+        // show, so the quota file is the proof - or a config folder that
+        // would not be listed, so the tab can say so.
         "jetbrains" => (
             "JetBrains AI",
             vec![],
-            crate::jetbrains::quota_files().into_iter().map(|(_, path, _)| path).collect(),
+            crate::jetbrains::detection_paths(),
         ),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
