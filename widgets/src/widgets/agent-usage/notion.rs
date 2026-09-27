@@ -164,13 +164,22 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     let wanted = cfg.notion_workspace.clone();
     let key = cache_key(&token, &wanted);
     let mut refused = String::new();
-    let got = cached(caches, &key, REPORT_TTL, || match ask(&token, &wanted) {
-        Ok(v) => Some(v),
-        Err(why) => {
-            refused = why;
-            None
+    let mut got = None;
+    for _ in 0..2 {
+        got = cached(caches, &key, REPORT_TTL, || match ask(&token, &wanted) {
+            Ok(v) => Some(v),
+            Err(why) => {
+                refused = why;
+                None
+            }
+        });
+        if !got.as_ref().is_some_and(reset_passed) {
+            break;
         }
-    });
+        // A reading held past a reset it reported is the last window's,
+        // so the cache gives way to a fresh one rather than outliving it.
+        caches.live.remove(&key);
+    }
     remember_refusal(caches, &key, &refused);
     if !refused.is_empty() {
         d.why = refused;
@@ -187,6 +196,16 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     d.allowance = parse_notion_allowance(&text(&got, "status"));
     d.read_at = num(&got, "at");
     d
+}
+
+/// Whether a cached answer reported a reset that has since passed.
+fn reset_passed(got: &serde_json::Value) -> bool {
+    let d = Data {
+        allowance: parse_notion_allowance(&text(got, "status")),
+        read_at: num(got, "at"),
+        ..Data::default()
+    };
+    lanes(&d).iter().any(|l| l.reset.is_some_and(|r| r <= now()))
 }
 
 /// The billing period's length: the calendar month ending where Notion says
@@ -210,7 +229,8 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             pct: w.pct(),
             window_secs: notion_span_secs(&w.span),
             reset: a.resets_in.map(|s| d.read_at + s),
-            stale: false,
+            // A reset since the reading means this is the last window's.
+            stale: a.resets_in.is_some_and(|s| d.read_at + s <= now()),
             projected: false,
             apart: false,
         });
@@ -224,7 +244,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             pct: w.pct(),
             window_secs: length,
             reset: length.and(w.ends),
-            stale: false,
+            stale: length.and(w.ends).is_some_and(|e| e <= now()),
             projected: false,
             apart: false,
         });
@@ -507,6 +527,26 @@ mod tests {
         // 2026-08-29 to 2026-09-29 is 31 days, not a flat 30.
         assert_eq!(lanes[1].window_secs, Some(31.0 * 86400.0));
         assert!(why_no_lane(&d).is_empty());
+    }
+
+    #[test]
+    fn a_cached_reading_gives_way_once_its_window_resets() {
+        // Read five minutes before the rolling window reset, a reading held
+        // for the full cache life would show the last window's usage as
+        // live after the reset.
+        let status = r#"{"window":{"window":"6h","used":90,"limit":100},"resetsInSeconds":300,
+            "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":4102444800000}}"#;
+        let got = |at: f64| serde_json::json!({ "status": status, "at": at });
+        assert!(!reset_passed(&got(now() - 60.0)));
+        assert!(reset_passed(&got(now() - 600.0)));
+        let d = Data {
+            allowance: parse_notion_allowance(status),
+            read_at: now() - 600.0,
+            ..Data::default()
+        };
+        let lanes = lanes(&d);
+        assert!(lanes[0].stale, "the rolling window reset since the reading");
+        assert!(!lanes[1].stale, "the month has not");
     }
 
     #[test]
