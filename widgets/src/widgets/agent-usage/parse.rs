@@ -140,7 +140,7 @@ fn credit_title(credit: &serde_json::Map<String, serde_json::Value>) -> Option<S
 /// A newline or tab is a space, so words on either side stay words. An
 /// escape sequence is removed whole, parameters included, so `Full` plus a
 /// colour sequence plus `reset` stays `Full reset`.
-fn strip_controls(raw: &str) -> String {
+pub(crate) fn strip_controls(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;
