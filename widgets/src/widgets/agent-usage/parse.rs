@@ -358,17 +358,19 @@ pub fn parse_notion_allowance(text: &str) -> Option<NotionAllowance> {
         (limit > 0.0).then(|| NotionWindow {
             used,
             limit,
-            span: v["window"].as_str().unwrap_or_default().to_string(),
+            // Drawn as the lane's label, so it may carry nothing the
+            // terminal would act on.
+            span: strip_controls(v["window"].as_str().unwrap_or_default()),
             ends: v["periodEndMs"].as_f64().filter(|ms| *ms > 0.0).map(|ms| ms / 1000.0),
         })
     };
     let out = NotionAllowance {
-        status: body["status"].as_str().unwrap_or_default().to_string(),
+        status: strip_controls(body["status"].as_str().unwrap_or_default()),
         rolling: window(&body["window"]),
         // Zero is a real answer, the window resetting now.
         resets_in: body["resetsInSeconds"].as_f64().filter(|s| *s >= 0.0),
         period: window(&body["billingPeriodWindow"]),
-        enforcement: body["enforcement"].as_str().unwrap_or_default().to_string(),
+        enforcement: strip_controls(body["enforcement"].as_str().unwrap_or_default()),
     };
     (out.not_applicable() || out.rolling.is_some() || out.period.is_some()).then_some(out)
 }
@@ -826,6 +828,17 @@ mod tests {
         assert!(parse_notion_spaces(two).is_none());
         // One key naming nobody is how older answers looked.
         assert_eq!(parse_notion_spaces(r#"{"u1":{"space":{}}}"#).unwrap().1.len(), 0);
+    }
+
+    #[test]
+    fn a_notion_window_label_cannot_drive_the_terminal() {
+        // The rolling window's length is drawn as its lane's label.
+        let raw = r#"{"status":"within_limit",
+            "window":{"window":"6\u001b]0;pwned\u0007h\n","used":1,"limit":10}}"#;
+        let a = parse_notion_allowance(raw).unwrap();
+        let span = a.rolling.unwrap().span;
+        assert!(!span.chars().any(char::is_control), "{span:?}");
+        assert!(span.starts_with("6h"), "{span:?}");
     }
 
     #[test]
