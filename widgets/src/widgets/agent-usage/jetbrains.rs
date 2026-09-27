@@ -60,29 +60,32 @@ const IDES: &[(&str, &str)] = &[
     ("DataSpell", "DataSpell"),
 ];
 
-/// Where JetBrains IDEs keep their config, checked at run time rather than
-/// by build target: only the ones that exist are read, and Android Studio
-/// lives under Google rather than JetBrains. On Linux the IDEs follow
-/// `XDG_CONFIG_HOME` when it is set, with `~/.config` as its default.
+/// Where JetBrains IDEs keep their config on this platform: only the ones
+/// that exist are read, and Android Studio lives under Google rather than
+/// JetBrains. On Linux the IDEs follow `XDG_CONFIG_HOME` when it is set,
+/// with `~/.config` as its default.
+///
+/// Only this platform's roots, so a home carried over from a Mac cannot
+/// offer a newer copied file than the quota the running IDE writes.
 fn roots() -> Vec<String> {
     let xdg = std::env::var("XDG_CONFIG_HOME").ok();
-    roots_under(xdg.as_deref())
+    roots_under(xdg.as_deref(), cfg!(target_os = "macos"))
 }
 
-fn roots_under(xdg: Option<&str>) -> Vec<String> {
+fn roots_under(xdg: Option<&str>, mac: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    if mac {
+        for r in ["Library/Application Support/JetBrains", "Library/Application Support/Google"] {
+            out.push(under_home(r));
+        }
+        return out;
+    }
     // An XDG_CONFIG_HOME that is relative is invalid by the spec and ignored.
     if let Some(x) = xdg.map(|x| x.trim_end_matches('/')).filter(|x| x.starts_with('/')) {
         out.push(format!("{}/JetBrains", x));
         out.push(format!("{}/Google", x));
     }
-    for r in [
-        "Library/Application Support/JetBrains",
-        "Library/Application Support/Google",
-        ".config/JetBrains",
-        ".local/share/JetBrains",
-        ".config/Google",
-    ] {
+    for r in [".config/JetBrains", ".local/share/JetBrains", ".config/Google"] {
         out.push(under_home(r));
     }
     // An XDG root that is ~/.config would otherwise count each IDE twice.
@@ -138,7 +141,16 @@ fn scan() -> (Vec<Found>, Vec<Unlisted>) {
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            // An entry that failed to come back could be the IDE with the
+            // newest quota, so the scan is said to be incomplete.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    unlisted.push((root.clone(), e.to_string()));
+                    continue;
+                }
+            };
             let dirname = entry.file_name().to_string_lossy().to_string();
             let Some(ide) = ide_of(&dirname) else {
                 continue;
@@ -167,9 +179,20 @@ fn scan() -> (Vec<Found>, Vec<Unlisted>) {
 
 /// What proves JetBrains AI is here: a quota file, or a config root or
 /// quota file that would not be read, so the tab appears and can say why.
+///
+/// Detection asks whether a path exists, which a file that refused to be
+/// looked at does not answer yes to; the nearest folder above it that does
+/// stands in for it, so the refusal still reaches the tab.
 pub fn detection_paths() -> Vec<String> {
     let (files, unlisted) = scan();
-    files.into_iter().map(|f| f.1).chain(unlisted.into_iter().map(|u| u.0)).collect()
+    let seen = |path: String| {
+        std::path::Path::new(&path)
+            .ancestors()
+            .find(|p| !p.as_os_str().is_empty() && p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or(path)
+    };
+    files.into_iter().map(|f| f.1).chain(unlisted.into_iter().map(|u| seen(u.0))).collect()
 }
 
 #[derive(Clone, Default)]
@@ -649,14 +672,24 @@ mod tests {
 
     #[test]
     fn xdg_config_home_is_searched_first_and_never_twice() {
-        let moved = roots_under(Some("/srv/cfg/"));
+        let moved = roots_under(Some("/srv/cfg/"), false);
         assert_eq!(&moved[..2], ["/srv/cfg/JetBrains", "/srv/cfg/Google"]);
         assert!(moved.contains(&under_home(".config/JetBrains")));
         // Pointing it at the default adds nothing to read twice.
         let default = under_home(".config");
-        assert_eq!(roots_under(Some(&default)).len(), roots_under(None).len());
+        assert_eq!(roots_under(Some(&default), false).len(), roots_under(None, false).len());
         // A relative value is not a valid XDG_CONFIG_HOME.
-        assert_eq!(roots_under(Some("cfg")), roots_under(None));
+        assert_eq!(roots_under(Some("cfg"), false), roots_under(None, false));
+    }
+
+    #[test]
+    fn only_the_running_platforms_config_is_read() {
+        // A home carried over from one platform to the other keeps the old
+        // tree, and a copied file there could outrank the live one.
+        let mac = roots_under(Some("/srv/cfg"), true);
+        assert!(mac.iter().all(|r| r.contains("Library/Application Support")), "{mac:?}");
+        let other = roots_under(None, false);
+        assert!(other.iter().all(|r| !r.contains("Library/Application Support")), "{other:?}");
     }
 
     #[test]
