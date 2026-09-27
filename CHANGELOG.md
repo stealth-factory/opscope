@@ -3,6 +3,13 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.30.0] - 2026-09-27
+
+### Features
+
+- **agent-usage**: Add a CodeRabbit tab from coderabbit usage (#274)
+- **agent-usage**: Add a Notion AI tab read with a pasted token_v2 (#275)
+
 ## [0.29.1] - 2026-09-27
 
 ### Bug Fixes
