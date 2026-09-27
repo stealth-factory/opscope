@@ -229,6 +229,47 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     out
 }
 
+impl Data {
+    /// A reading of whatever allowance answer `raw` is, taken a minute ago.
+    #[cfg(test)]
+    pub(crate) fn answered(raw: &str) -> Self {
+        Data {
+            allowance: parse_notion_allowance(raw),
+            read_at: now() - 60.0,
+            source: "config",
+            ..Data::default()
+        }
+    }
+}
+
+/// What Notion's answer left out of the lanes it did give, for `[+]`: a
+/// lane there looks the same whether it is the whole reading or part of it,
+/// and only the tab spelt the difference out.
+pub fn partial(d: &Data) -> Option<String> {
+    let a = d.allowance.as_ref()?;
+    if lanes(d).is_empty() {
+        return None;
+    }
+    let mut gaps: Vec<&str> = Vec::new();
+    match (&a.rolling, &a.period) {
+        (None, Some(_)) => gaps.push("no rolling window"),
+        (Some(_), None) => gaps.push("no billing period"),
+        _ => {}
+    }
+    if let Some(r) = &a.rolling {
+        if notion_span_secs(&r.span).is_none() {
+            gaps.push("no rolling-window length");
+        }
+        if a.resets_in.is_none() {
+            gaps.push("no rolling-window reset");
+        }
+    }
+    if a.period.as_ref().is_some_and(|b| b.ends.is_none()) {
+        gaps.push("no billing-period end");
+    }
+    (!gaps.is_empty()).then(|| gaps.join(" · "))
+}
+
 /// Why `[+]` has no bar for Notion.
 pub fn why_no_lane(d: &Data) -> String {
     if !lanes(d).is_empty() {
@@ -577,6 +618,8 @@ mod tests {
         // A whole answer carries no such note.
         let rows = plain(&tab(&reading(), 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("had no"), "{rows}");
+        assert_eq!(partial(&reading()), None);
+        assert_eq!(partial(&d).as_deref(), Some("no rolling window"));
     }
 
     #[test]

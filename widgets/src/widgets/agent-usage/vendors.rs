@@ -489,6 +489,24 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         if group_agent(name) == "codex" {
             push_reset_summary(&mut rows, s, w, p);
         }
+        // Notion's endpoint is unsupported and can answer with less than a
+        // whole reading; the lanes above are then a subset, said here so
+        // they are not read as all of it.
+        if group_agent(name) == "notion" {
+            if let Some(gaps) = crate::notion::partial(&s.notion) {
+                let said = format!("partial · {} · its tab says what that costs", gaps);
+                rows.extend(
+                    tc::wrap_words(&said, w.saturating_sub(6).max(1))
+                        .into_iter()
+                        .map(|line| {
+                            tc::seg(
+                                &[(p.warn.as_str(), format!("     {line}"))],
+                                w.saturating_sub(1).max(1),
+                            )
+                        }),
+                );
+            }
+        }
     }
     if any_stale {
         rows.push(String::new());
@@ -862,6 +880,41 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn a_partial_notion_reading_is_marked_on_the_summary() {
+        // The summary draws the lanes it is given, so one surviving window
+        // looked like the whole Notion reading there; only the tab said it
+        // was not.
+        let p = palette();
+        let part = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "billingPeriodWindow":{"used":18,"limit":100}}"#,
+            ),
+            ..State::default()
+        };
+        for w in [30usize, 60, 120] {
+            let rows = plain(&summary_for(&part, w, &p, &["notion"]));
+            for r in &rows {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            let words = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("partial · no rolling window"), "{words}");
+            assert!(words.contains("no billing-period end"), "{words}");
+        }
+        let whole = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "window":{"window":"6h","used":42,"limit":100},"resetsInSeconds":600,
+                    "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1788000000000}}"#,
+            ),
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&whole, 120, &p, &["notion"]));
+        assert!(rows.iter().any(|r| r.contains("NOTION")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("partial")), "{rows:?}");
     }
 
     #[test]
