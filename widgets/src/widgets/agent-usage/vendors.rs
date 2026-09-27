@@ -915,6 +915,21 @@ mod tests {
         let rows = plain(&summary_for(&whole, 120, &p, &["notion"]));
         assert!(rows.iter().any(|r| r.contains("NOTION")), "{rows:?}");
         assert!(!rows.iter().any(|r| r.contains("partial")), "{rows:?}");
+        // An end date past any month we can measure is a length we do not have.
+        let unread = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "window":{"window":"6h","used":42,"limit":100},"resetsInSeconds":600,
+                    "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1e20}}"#,
+            ),
+            ..State::default()
+        };
+        let words = plain(&summary_for(&unread, 120, &p, &["notion"]))
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(words.contains("no billing-period length"), "{words}");
     }
 
     #[test]

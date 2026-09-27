@@ -216,11 +216,14 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         });
     }
     if let Some(w) = &a.period {
+        // An end that is not a date we can turn into a month has no pace
+        // and no reset. Drawing the raw number would invent a countdown.
+        let length = w.ends.and_then(period_secs);
         out.push(Lane {
             label: "month".into(),
             pct: w.pct(),
-            window_secs: w.ends.and_then(period_secs),
-            reset: w.ends,
+            window_secs: length,
+            reset: length.and(w.ends),
             stale: false,
             projected: false,
             apart: false,
@@ -264,8 +267,12 @@ pub fn partial(d: &Data) -> Option<String> {
             gaps.push("no rolling-window reset");
         }
     }
-    if a.period.as_ref().is_some_and(|b| b.ends.is_none()) {
-        gaps.push("no billing-period end");
+    if let Some(b) = &a.period {
+        match b.ends {
+            None => gaps.push("no billing-period end"),
+            Some(ends) if period_secs(ends).is_none() => gaps.push("no billing-period length"),
+            Some(_) => {}
+        }
     }
     (!gaps.is_empty()).then(|| gaps.join(" · "))
 }
@@ -361,10 +368,21 @@ fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<S
             rows.extend(note(text, &p.warn, w));
         }
     }
-    if a.period.as_ref().is_some_and(|b| b.ends.is_none()) {
-        let text = "Notion's answer had no end date for the billing period, so neither its \
-                    pace nor its reset is drawn.";
-        rows.extend(note(text, &p.warn, w));
+    if let Some(b) = &a.period {
+        let text = match b.ends {
+            None => Some(
+                "Notion's answer had no end date for the billing period, so neither its \
+                 pace nor its reset is drawn.",
+            ),
+            Some(ends) if period_secs(ends).is_none() => Some(
+                "Notion's end date for the billing period is not one this widget can read, \
+                 so neither its pace nor its reset is drawn.",
+            ),
+            Some(_) => None,
+        };
+        if let Some(text) = text {
+            rows.extend(note(text, &p.warn, w));
+        }
     }
     if a.enforcement.eq_ignore_ascii_case("preview") {
         let text = "Notion reports this allowance as a preview, not yet enforced.";
@@ -570,6 +588,24 @@ mod tests {
         // A whole answer carries none of it.
         let rows = plain(&tab(&reading(), 100, 30, &Config::default(), &palette()));
         assert!(!rows.contains("is drawn") && !rows.contains("not drawn"), "{rows}");
+    }
+
+    #[test]
+    fn an_unreadable_billing_period_end_is_not_drawn_as_a_reset() {
+        // Positive, and far past any date the month length can be taken from.
+        let mut d = reading();
+        d.allowance = parse_notion_allowance(
+            r#"{"status":"within_limit","window":{"used":42,"limit":100,"window":"6h"},
+                "resetsInSeconds":3600,
+                "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1e20}}"#,
+        );
+        let month = lanes(&d).into_iter().find(|l| l.label == "month").unwrap();
+        assert!(month.window_secs.is_none() && month.reset.is_none());
+        assert_eq!(partial(&d).as_deref(), Some("no billing-period length"));
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("not one this widget can read"), "{rows}");
+        assert!(!words.contains("106751"), "{rows}");
     }
 
     #[test]
