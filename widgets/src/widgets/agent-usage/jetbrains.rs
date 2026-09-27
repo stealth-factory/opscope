@@ -115,15 +115,17 @@ fn is_version(s: &str) -> bool {
     matches!(s.split_once('.'), Some((year, release)) if year.len() == 4 && digits(year) && digits(release))
 }
 
-/// Every quota file on this machine, as (IDE, path, modified), and each
-/// config root that is there but could not be listed, with why. Only a root
-/// that does not exist is passed over in silence: one that refused to be
-/// read could hold the newest quota, and saying nothing would draw the pane
-/// as if no IDE had recorded one.
-/// A quota file as (IDE, path, modified), and a root as (path, why).
+/// A quota file as (IDE, path, modified).
 type Found = (String, String, f64);
+/// A config root or quota file that is there but could not be read, as
+/// (path, why).
 type Unlisted = (String, String);
 
+/// Every quota file on this machine, and each config root or quota file
+/// that is there but could not be read, with why. Only what does not exist
+/// is passed over in silence: what refused to be read could hold the newest
+/// quota, and saying nothing would draw the pane as if no IDE had recorded
+/// one.
 fn scan() -> (Vec<Found>, Vec<Unlisted>) {
     let mut out = Vec::new();
     let mut unlisted = Vec::new();
@@ -142,8 +144,15 @@ fn scan() -> (Vec<Found>, Vec<Unlisted>) {
                 continue;
             };
             let path = format!("{}/{}/{}", root, dirname, QUOTA_FILE);
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
+            // An IDE that has not recorded a quota has no file; one whose
+            // file cannot be looked at is said, like a root that cannot.
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    unlisted.push((path, e.to_string()));
+                    continue;
+                }
             };
             let modified = meta
                 .modified()
@@ -156,8 +165,8 @@ fn scan() -> (Vec<Found>, Vec<Unlisted>) {
     (out, unlisted)
 }
 
-/// What proves JetBrains AI is here: a quota file, or a config root that
-/// would not be listed, so the tab appears and can say why it is empty.
+/// What proves JetBrains AI is here: a quota file, or a config root or
+/// quota file that would not be read, so the tab appears and can say why.
 pub fn detection_paths() -> Vec<String> {
     let (files, unlisted) = scan();
     files.into_iter().map(|f| f.1).chain(unlisted.into_iter().map(|u| u.0)).collect()
@@ -178,8 +187,8 @@ pub struct Data {
     /// Another IDE's file has no readable time, so it cannot be ranked and
     /// the one shown cannot claim to be the newest look at the quota.
     undated: bool,
-    /// Config roots that are there but could not be listed, with why.
-    unlisted: Vec<(String, String)>,
+    /// Config roots and quota files that are there but could not be read.
+    unlisted: Vec<Unlisted>,
     why: String,
 }
 
@@ -192,13 +201,13 @@ pub fn read(_caches: &mut Caches, _cfg: &Config) -> Data {
     with_unlisted(pick(files), unlisted)
 }
 
-/// A root that could not be listed may hold a newer file than any read, so
+/// A root or file that could not be read may hold a newer quota, so
 /// the one shown is not called the newest; with nothing read at all, the
 /// refusal is the reason given rather than "no IDE recorded a quota".
-fn with_unlisted(mut d: Data, unlisted: Vec<(String, String)>) -> Data {
+fn with_unlisted(mut d: Data, unlisted: Vec<Unlisted>) -> Data {
     if d.quota.is_none() && d.why.is_empty() {
         if let Some((root, e)) = unlisted.first() {
-            d.why = format!("could not list {}: {}", root, e);
+            d.why = format!("could not read {}: {}", root, e);
         }
     }
     d.unlisted = unlisted;
@@ -264,7 +273,14 @@ fn stale(d: &Data) -> bool {
         .as_ref()
         .and_then(|q| q.until)
         .is_some_and(|at| at <= now());
-    written_long_ago || refill_passed || licence_ended || d.undated || !d.unlisted.is_empty()
+    // A newer file that held nothing readable may carry a newer look at the
+    // same account, so the older one shown is not the latest either.
+    written_long_ago
+        || refill_passed
+        || licence_ended
+        || d.undated
+        || d.skipped > 0
+        || !d.unlisted.is_empty()
 }
 
 /// Whether the file's time can be trusted as an age: unread (0) and ahead
@@ -453,7 +469,7 @@ fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
         pairs.push(("read from".into(), format!("{} of {} IDEs{}", which, d.ides, rest)));
     }
     for (root, e) in &d.unlisted {
-        pairs.push(("not listed".into(), format!("{} · {}", root, e)));
+        pairs.push(("not read".into(), format!("{} · {}", root, e)));
     }
     if let Some(until) = q.until {
         let day = chrono::Local
@@ -680,6 +696,10 @@ mod tests {
         assert!(!stale(&fresh));
         // An undated file among several cannot be ranked, so the one shown
         // cannot say it is the newest.
+        // A newer file passed over for holding nothing readable may have a
+        // newer look at the account, so the older one shown is not current.
+        let passed_over = Data { skipped: 1, ides: 2, ..fresh.clone() };
+        assert!(stale(&passed_over));
         let rival = Data { undated: true, ides: 2, ..fresh };
         assert!(stale(&rival));
         let all = tab(&rival, 100, 30, &Config::default(), &palette()).join(" ");
@@ -701,7 +721,7 @@ mod tests {
         // could not look in might hold the newest one.
         let refused = vec![("/cfg/JetBrains".to_string(), "Permission denied".to_string())];
         let d = with_unlisted(pick(Vec::new()), refused.clone());
-        assert!(d.why.contains("could not list /cfg/JetBrains: Permission denied"), "{}", d.why);
+        assert!(d.why.contains("could not read /cfg/JetBrains: Permission denied"), "{}", d.why);
         let all = tab(&d, 100, 30, &Config::default(), &palette()).join(" ");
         assert!(!all.contains("No JetBrains IDE"), "{all}");
         let q = JetBrainsQuota { used: 1.0, maximum: 10.0, ..Default::default() };
@@ -718,7 +738,7 @@ mod tests {
         let all = strip(&tab(&one, 100, 30, &Config::default(), &palette()).join(" "));
         let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("one of 1 IDEs"), "{words}");
-        assert!(words.contains("not listed /cfg/JetBrains · Permission denied"), "{words}");
+        assert!(words.contains("not read /cfg/JetBrains · Permission denied"), "{words}");
     }
 
     #[test]
