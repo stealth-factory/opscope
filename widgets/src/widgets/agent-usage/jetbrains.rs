@@ -397,7 +397,9 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
 fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = vec![("ide".into(), d.ide.clone())];
     if d.ides > 1 {
-        let which = if d.undated {
+        // Neither another file's missing time nor this one's lets the file
+        // shown be ranked, so either way it is only one of them.
+        let which = if d.undated || !written_known(d) {
             "one"
         } else if d.skipped > 0 {
             "newest readable"
@@ -617,6 +619,13 @@ mod tests {
         let all = tab(&rival, 100, 30, &Config::default(), &palette()).join(" ");
         let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("one of 2 IDEs · another is undated"), "{words}");
+        // The file shown can be the undated one, after a dated file above it
+        // held nothing readable: it is not "newest readable" either.
+        let own = Data { written: 0.0, skipped: 1, undated: false, ..rival };
+        let all = tab(&own, 100, 30, &Config::default(), &palette()).join(" ");
+        let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("one of 2 IDEs"), "{words}");
+        assert!(!words.contains("newest"), "{words}");
     }
 
     #[test]
