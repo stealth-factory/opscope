@@ -274,13 +274,16 @@ impl JetBrainsQuota {
 /// into the attribute. Only that one component is read, so this looks for
 /// it by name rather than parsing the whole document - which also keeps an
 /// XML crate out of the binary. Numbers arrive as strings (`"7478.3"`) and
-/// are accepted either way. None when there is no `quotaInfo` to read: a
-/// file with no quota in it says nothing, and a zero would say something.
+/// are accepted either way. None when there is no `quotaInfo` to read, or no
+/// `current` in it: a file with no quota in it says nothing, and a zero
+/// would say something.
 pub fn parse_jetbrains_quota(xml: &str) -> Option<JetBrainsQuota> {
     let component = jetbrains_component(xml)?;
     let info: serde_json::Value =
         serde_json::from_str(&decode_entities(&option_value(component, "quotaInfo")?)).ok()?;
-    let used = loose_num(&info["current"]).unwrap_or(0.0);
+    // An unreadable spend is no reading at all; a zero here would claim the
+    // whole allowance is left.
+    let used = loose_num(&info["current"])?;
     let maximum = loose_num(&info["maximum"]).unwrap_or(0.0);
     let available = loose_num(&info["tariffQuota"]["available"])
         .unwrap_or_else(|| (maximum - used).max(0.0));
@@ -709,6 +712,12 @@ mod tests {
         let other = "<application><component name=\"Other\">\
                      <option name=\"quotaInfo\" value=\"{}\"/></component></application>";
         assert_eq!(parse_jetbrains_quota(other), None);
+        // Nor is a quota whose spend could not be read, which would
+        // otherwise claim the whole allowance is left.
+        let xml = jetbrains_file(r#"{"maximum": "1000"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
+        let xml = jetbrains_file(r#"{"current": "lots", "maximum": "1000"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
         // A zero maximum has no percentage to rank.
         let xml = jetbrains_file(r#"{"current": "0", "maximum": "0"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), None);

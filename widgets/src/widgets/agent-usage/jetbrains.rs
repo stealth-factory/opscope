@@ -24,6 +24,7 @@
 //! not this machine's spend, and it is only as current as the IDE's last
 //! look, which the tab says.
 
+use chrono::TimeZone;
 use opscope_core as tc;
 
 use crate::parse::{parse_jetbrains_quota, JetBrainsQuota};
@@ -126,35 +127,72 @@ pub struct Data {
     /// How many IDEs have a quota file, so a reader with two knows the
     /// newest one is the one shown.
     ides: usize,
+    /// Newer files were passed over because they held no readable quota.
+    skipped: usize,
     why: String,
 }
 
-/// The newest file wins: every IDE on one account records the same quota,
-/// and the one written last has the latest look at it.
+/// The newest readable file wins: every IDE on one account records the same
+/// quota, and the one written last has the latest look at it. A newer file
+/// that holds nothing readable is passed over rather than hiding an older
+/// one that does; when none can be read, the newest one's reason is shown.
 pub fn read(_caches: &mut Caches, _cfg: &Config) -> Data {
-    let mut files = quota_files();
-    files.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let mut d = Data {
-        ides: files.len(),
-        ..Data::default()
-    };
-    let Some((ide, path, written)) = files.into_iter().next() else {
-        return d;
-    };
-    d.ide = ide;
-    d.written = written;
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => match parse_jetbrains_quota(&raw) {
-            Some(q) => d.quota = Some(q),
-            None => d.why = format!("no quota in {}'s AIAssistantQuotaManager2.xml", d.ide),
-        },
-        Err(e) => d.why = format!("could not read {}: {}", path, e),
-    }
-    d
+    pick(quota_files())
 }
 
+fn pick(mut files: Vec<(String, String, f64)>) -> Data {
+    files.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let found = files.len();
+    let mut first: Option<Data> = None;
+    for (skipped, (ide, path, written)) in files.into_iter().enumerate() {
+        let mut d = Data {
+            ide,
+            written,
+            ides: found,
+            skipped,
+            ..Data::default()
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => match parse_jetbrains_quota(&raw) {
+                Some(q) => {
+                    d.quota = Some(q);
+                    return d;
+                }
+                None => d.why = format!("no quota in {}'s AIAssistantQuotaManager2.xml", d.ide),
+            },
+            Err(e) => d.why = format!("could not read {}: {}", path, e),
+        }
+        first.get_or_insert(Data { skipped: 0, ..d });
+    }
+    first.unwrap_or(Data {
+        ides: found,
+        ..Data::default()
+    })
+}
+
+// Old either way: the IDE has not written for a while, or it wrote before a
+// refill that has since come due, so the figure belongs to a closed period.
 fn stale(d: &Data) -> bool {
-    d.written > 0.0 && now() - d.written > FRESH_SECS
+    let written_long_ago = d.written > 0.0 && now() - d.written > FRESH_SECS;
+    let refill_passed = d
+        .quota
+        .as_ref()
+        .and_then(|q| q.refill)
+        .is_some_and(|at| at <= now());
+    written_long_ago || refill_passed
+}
+
+/// A refill period as a reader would say it: days when it is a day or more,
+/// otherwise hours or minutes, so a twelve-hour period is not "0 days".
+fn period_label(secs: f64) -> String {
+    let plural = |n: i64, unit: &str| format!("{} {}{}", n, unit, if n == 1 { "" } else { "s" });
+    if secs >= 86400.0 {
+        plural((secs / 86400.0).round() as i64, "day")
+    } else if secs >= 3600.0 {
+        plural((secs / 3600.0).round() as i64, "hour")
+    } else {
+        plural((secs / 60.0).round().max(1.0) as i64, "minute")
+    }
 }
 
 pub fn why_no_lane(d: &Data) -> String {
@@ -215,7 +253,7 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
             "refill due · the IDE has not looked since".into()
         };
     }
-    let period = q.refill_secs.map(|s| format!("{} days", (s / 86400.0).round() as i64));
+    let period = q.refill_secs.map(period_label);
     if period.is_some() || !when.is_empty() {
         rows.push(tc::seg(
             &[
@@ -268,10 +306,13 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
 fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = vec![("ide".into(), d.ide.clone())];
     if d.ides > 1 {
-        pairs.push(("read from".into(), format!("newest of {} IDEs", d.ides)));
+        let which = if d.skipped > 0 { "newest readable" } else { "newest" };
+        pairs.push(("read from".into(), format!("{} of {} IDEs", which, d.ides)));
     }
     if let Some(until) = q.until {
-        let day = chrono::DateTime::from_timestamp(until as i64, 0)
+        let day = chrono::Local
+            .timestamp_opt(until as i64, 0)
+            .single()
             .map(|t| t.format("%-d %b %Y").to_string())
             .unwrap_or_default();
         if !day.is_empty() {
@@ -281,7 +322,7 @@ fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
     if let (Some(amount), Some(secs)) = (q.refill_amount, q.refill_secs) {
         pairs.push((
             "refill".into(),
-            format!("{} every {} days", big_num(amount), (secs / 86400.0).round() as i64),
+            format!("{} every {}", big_num(amount), period_label(secs)),
         ));
     }
     plan_rows(&q.kind, &pairs, w, "", None, "", p)
@@ -348,6 +389,60 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_taken_before_a_refill_that_has_passed_is_marked_as_cached() {
+        // Written a minute ago, but the refill came due since: the percentage
+        // belongs to the period that closed.
+        let d = Data {
+            quota: Some(JetBrainsQuota {
+                used: 9.0,
+                maximum: 10.0,
+                refill: Some(now() - 30.0),
+                ..Default::default()
+            }),
+            written: now() - 60.0,
+            ..Data::default()
+        };
+        assert!(lanes(&d)[0].stale);
+    }
+
+    #[test]
+    fn a_newer_file_with_nothing_readable_does_not_hide_an_older_one() {
+        let dir = std::env::temp_dir().join(format!("opscope-jb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("new.xml");
+        let good = dir.join("old.xml");
+        std::fs::write(&empty, "<application/>").unwrap();
+        std::fs::write(
+            &good,
+            "<application><component name=\"AIAssistantQuotaManager2\">\
+             <option name=\"quotaInfo\" value=\"{&quot;current&quot;:&quot;5&quot;,\
+             &quot;maximum&quot;:&quot;10&quot;}\" /></component></application>",
+        )
+        .unwrap();
+        let path = |p: &std::path::Path| p.to_string_lossy().to_string();
+        let d = pick(vec![
+            ("RustRover 2026.2".into(), path(&good), 100.0),
+            ("PyCharm 2026.2".into(), path(&empty), 200.0),
+        ]);
+        assert_eq!(d.ide, "RustRover 2026.2");
+        assert_eq!(d.quota.as_ref().and_then(|q| q.used_pct()), Some(50.0));
+        assert_eq!((d.ides, d.skipped), (2, 1));
+        // With nothing readable anywhere, the newest file's reason is shown.
+        let d = pick(vec![("PyCharm 2026.2".into(), path(&empty), 200.0)]);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(d.quota.is_none());
+        assert!(d.why.contains("PyCharm"), "{}", d.why);
+    }
+
+    #[test]
+    fn a_period_under_a_day_is_not_zero_days() {
+        assert_eq!(period_label(30.0 * 86400.0), "30 days");
+        assert_eq!(period_label(86400.0), "1 day");
+        assert_eq!(period_label(12.0 * 3600.0), "12 hours");
+        assert_eq!(period_label(1800.0), "30 minutes");
+    }
+
+    #[test]
     fn no_file_says_so_rather_than_drawing_nothing() {
         let d = Data::default();
         assert!(lanes(&d).is_empty());
@@ -388,6 +483,7 @@ mod tests {
             ide: "RustRover 2026.2".into(),
             written: now() - 300.0,
             ides: 2,
+            skipped: 1,
             why: String::new(),
         };
         for w in [40usize, 60, 100] {
@@ -404,7 +500,9 @@ mod tests {
             let all = rows.join("\n");
             assert!(all.contains("credits"), "{all}");
             assert!(all.contains("7.5k of 1.0M used"), "{all}");
-            assert!(all.contains("newest of 2 IDEs"), "{all}");
+            // A narrow pane wraps this value across rows, so it is read as words.
+            let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("newest readable of 2 IDEs"), "{all}");
         }
     }
 }
