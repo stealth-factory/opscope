@@ -285,11 +285,12 @@ pub fn parse_jetbrains_quota(xml: &str) -> Option<JetBrainsQuota> {
     // whole allowance is left.
     let used = loose_num(&info["current"])?;
     // An absent maximum is 0, which has no percentage to rank; one that is
-    // there and unreadable makes the file unreadable, so `pick` goes on to
-    // an older file that can be read rather than stopping at this one.
-    let maximum = match &info["maximum"] {
-        serde_json::Value::Null => 0.0,
-        v => loose_num(v)?,
+    // there and unreadable, `null` included, makes the file unreadable, so
+    // `pick` goes on to an older file that can be read rather than stopping
+    // at this one.
+    let maximum = match info.get("maximum") {
+        None => 0.0,
+        Some(v) => loose_num(v)?,
     };
     let available = loose_num(&info["tariffQuota"]["available"])
         .unwrap_or_else(|| (maximum - used).max(0.0));
@@ -735,8 +736,9 @@ mod tests {
             let info = format!(r#"{{"current": "{bad}", "maximum": "1000"}}"#);
             assert_eq!(parse_jetbrains_quota(&jetbrains_file(&info, "")), None, "{bad}");
         }
-        let info = r#"{"current": "5", "maximum": "NaN"}"#;
-        assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")), None);
+        for info in [r#"{"current": "5", "maximum": "NaN"}"#, r#"{"current": "5", "maximum": null}"#] {
+            assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")), None, "{info}");
+        }
         // An absent maximum is still read, as a quota with no percentage.
         let info = r#"{"current": "5"}"#;
         assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")).unwrap().used_pct(), None);
