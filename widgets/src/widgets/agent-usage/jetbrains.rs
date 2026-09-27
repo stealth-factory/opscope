@@ -40,6 +40,9 @@ const FRESH_SECS: f64 = 3600.0;
 
 /// Directory prefix to product name. The directory is the product plus its
 /// version, `IntelliJIdea2026.2`, and the version is what follows.
+///
+/// Fleet is not here: it kept its settings in `~/.fleet`, outside this
+/// tree and without this file, and was discontinued in December 2025.
 const IDES: &[(&str, &str)] = &[
     ("IntelliJIdea", "IntelliJ IDEA"),
     ("IdeaIC", "IntelliJ IDEA CE"),
@@ -55,7 +58,6 @@ const IDES: &[(&str, &str)] = &[
     ("PhpStorm", "PhpStorm"),
     ("RustRover", "RustRover"),
     ("AndroidStudio", "Android Studio"),
-    ("Fleet", "Fleet"),
     ("Aqua", "Aqua"),
     ("DataSpell", "DataSpell"),
 ];
