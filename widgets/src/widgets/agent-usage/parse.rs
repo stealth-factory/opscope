@@ -440,10 +440,13 @@ pub fn parse_notion_spaces(text: &str) -> Option<(String, Vec<NotionSpace>)> {
         _ => return None,
     };
     let held = &root[user];
-    let email = record(&held["notion_user"][user.as_str()])["email"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    // Everything drawn from this answer reaches the terminal, so none of it
+    // may carry a sequence the terminal would act on.
+    let email = strip_controls(
+        record(&held["notion_user"][user.as_str()])["email"]
+            .as_str()
+            .unwrap_or_default(),
+    );
     let mut spaces: Vec<NotionSpace> = held["space"]
         .as_object()
         .into_iter()
@@ -451,9 +454,9 @@ pub fn parse_notion_spaces(text: &str) -> Option<(String, Vec<NotionSpace>)> {
         .map(|(key, v)| {
             let r = record(v);
             NotionSpace {
-                id: r["id"].as_str().unwrap_or(key).to_string(),
-                name: r["name"].as_str().unwrap_or_default().to_string(),
-                tier: r["subscription_tier"].as_str().unwrap_or_default().to_string(),
+                id: strip_controls(r["id"].as_str().unwrap_or(key)),
+                name: strip_controls(r["name"].as_str().unwrap_or_default()),
+                tier: strip_controls(r["subscription_tier"].as_str().unwrap_or_default()),
             }
         })
         .collect();
@@ -823,6 +826,19 @@ mod tests {
         assert!(parse_notion_spaces(two).is_none());
         // One key naming nobody is how older answers looked.
         assert_eq!(parse_notion_spaces(r#"{"u1":{"space":{}}}"#).unwrap().1.len(), 0);
+    }
+
+    #[test]
+    fn a_notion_workspace_name_cannot_drive_the_terminal() {
+        // The name is drawn on the tab, and a JSON escape can carry an OSC or
+        // a newline straight to the terminal.
+        let raw = r#"{"u1":{"notion_user":{"u1":{"value":{"id":"u1","email":"a\u001b[2J@b.c"}}},
+            "space":{"s1":{"value":{"id":"s1","name":"Ac\u001b]0;pwned\u0007me\nCo",
+            "subscription_tier":"busi\u009bness"}}}}}"#;
+        let (email, spaces) = parse_notion_spaces(raw).unwrap();
+        assert_eq!(email, "a@b.c");
+        assert_eq!(spaces[0].name, "Acme Co");
+        assert!(!spaces[0].tier.chars().any(char::is_control), "{:?}", spaces[0].tier);
     }
 
     #[test]
