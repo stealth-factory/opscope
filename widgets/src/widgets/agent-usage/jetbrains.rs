@@ -154,6 +154,9 @@ pub struct Data {
     ides: usize,
     /// Newer files were passed over because they held no readable quota.
     skipped: usize,
+    /// Another IDE's file has no readable time, so it cannot be ranked and
+    /// the one shown cannot claim to be the newest look at the quota.
+    undated: bool,
     why: String,
 }
 
@@ -168,6 +171,7 @@ pub fn read(_caches: &mut Caches, _cfg: &Config) -> Data {
 fn pick(mut files: Vec<(String, String, f64)>) -> Data {
     files.sort_by(|a, b| b.2.total_cmp(&a.2));
     let found = files.len();
+    let undated = files.iter().filter(|f| f.2 <= 0.0).count();
     let mut first: Option<Data> = None;
     for (skipped, (ide, path, written)) in files.into_iter().enumerate() {
         let mut d = Data {
@@ -175,6 +179,8 @@ fn pick(mut files: Vec<(String, String, f64)>) -> Data {
             written,
             ides: found,
             skipped,
+            // Another file, not this one, that cannot be ranked.
+            undated: undated > usize::from(written <= 0.0),
             ..Data::default()
         };
         match std::fs::read_to_string(&path) {
@@ -196,7 +202,8 @@ fn pick(mut files: Vec<(String, String, f64)>) -> Data {
 }
 
 // Old either way: the IDE has not written for a while, or it wrote before a
-// refill that has since come due, so the figure belongs to a closed period.
+// refill or the licence's end that has since come due, so the figure belongs
+// to a closed period; or another file could be newer and cannot be ranked.
 fn stale(d: &Data) -> bool {
     // A file whose time could not be read cannot vouch for being recent.
     let written_long_ago = !written_known(d) || now() - d.written > FRESH_SECS;
@@ -205,7 +212,13 @@ fn stale(d: &Data) -> bool {
         .as_ref()
         .and_then(|q| q.refill)
         .is_some_and(|at| at <= now());
-    written_long_ago || refill_passed
+    // An entitlement that has ended leaves a percentage of nothing current.
+    let licence_ended = d
+        .quota
+        .as_ref()
+        .and_then(|q| q.until)
+        .is_some_and(|at| at <= now());
+    written_long_ago || refill_passed || licence_ended || d.undated
 }
 
 /// Whether the file's time can be trusted as an age: unread (0) and ahead
@@ -217,25 +230,46 @@ fn written_known(d: &Data) -> bool {
 
 /// A refill period as a reader would say it: in the largest unit it is a
 /// whole number of, so a twelve-hour period is not "0 days". A period that
-/// is none of those, such as `P1DT12H30M`, is given exactly in parts rather
-/// than rounded to a cadence the pace bar is not using.
+/// is none of those, such as `P1DT12H30M` or `PT90S`, is given exactly in
+/// parts rather than rounded to a cadence the pace bar is not using.
 fn period_label(secs: f64) -> String {
     let plural = |n: i64, unit: &str| format!("{} {}{}", n, unit, if n == 1 { "" } else { "s" });
-    let mins = (secs / 60.0).round().max(1.0) as i64;
-    if mins % 1440 == 0 {
-        plural(mins / 1440, "day")
-    } else if mins % 60 == 0 {
-        plural(mins / 60, "hour")
-    } else if mins < 60 {
-        plural(mins, "minute")
+    // Milliseconds, so the fractional seconds the parser accepts survive.
+    let ms = (secs * 1000.0).round().max(1.0) as i64;
+    // A smaller unit is named alone only below the next one up, so 36.5
+    // hours is not "2190 minutes".
+    let whole = [
+        (86_400_000, "day", i64::MAX),
+        (3_600_000, "hour", i64::MAX),
+        (60_000, "minute", 3_600_000),
+        (1000, "second", 60_000),
+    ];
+    for (size, unit, below) in whole {
+        if ms % size == 0 && ms < below {
+            return plural(ms / size, unit);
+        }
+    }
+    let (d, h, m) = (ms / 86_400_000, ms % 86_400_000 / 3_600_000, ms % 3_600_000 / 60_000);
+    let mut parts: Vec<String> = [(d, "d"), (h, "h"), (m, "m")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, u)| format!("{n}{u}"))
+        .collect();
+    let rest = ms % 60_000;
+    if rest > 0 {
+        parts.push(format!("{}s", rest as f64 / 1000.0));
+    }
+    parts.join(" ")
+}
+
+/// A credit count: JetBrains counts in fractions, so below a thousand the
+/// value is shown as it is rather than cut to a whole number that disagrees
+/// with the percentage beside it.
+fn credits(n: f64) -> String {
+    if n.abs() < 1000.0 {
+        format!("{}", (n * 100.0).round() / 100.0)
     } else {
-        let (d, h, m) = (mins / 1440, mins % 1440 / 60, mins % 60);
-        [(d, "d"), (h, "h"), (m, "m")]
-            .iter()
-            .filter(|(n, _)| *n > 0)
-            .map(|(n, u)| format!("{n}{u}"))
-            .collect::<Vec<_>>()
-            .join(" ")
+        big_num(n)
     }
 }
 
@@ -341,9 +375,9 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
             p.dim.as_str(),
             format!(
                 "  {} of {} used · {} left",
-                big_num(q.used),
-                big_num(q.maximum),
-                big_num(q.available)
+                credits(q.used),
+                credits(q.maximum),
+                credits(q.available)
             ),
         )],
         w - 1,
@@ -354,8 +388,15 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
 fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = vec![("ide".into(), d.ide.clone())];
     if d.ides > 1 {
-        let which = if d.skipped > 0 { "newest readable" } else { "newest" };
-        pairs.push(("read from".into(), format!("{} of {} IDEs", which, d.ides)));
+        let which = if d.undated {
+            "one"
+        } else if d.skipped > 0 {
+            "newest readable"
+        } else {
+            "newest"
+        };
+        let rest = if d.undated { " · another is undated" } else { "" };
+        pairs.push(("read from".into(), format!("{} of {} IDEs{}", which, d.ides, rest)));
     }
     if let Some(until) = q.until {
         let day = chrono::Local
@@ -370,7 +411,7 @@ fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
     if let (Some(amount), Some(secs)) = (q.refill_amount, q.refill_secs) {
         pairs.push((
             "refill".into(),
-            format!("{} every {}", big_num(amount), period_label(secs)),
+            format!("{} every {}", credits(amount), period_label(secs)),
         ));
     }
     plan_rows(&q.kind, &pairs, w, "", None, "", p)
@@ -526,6 +567,38 @@ mod tests {
         assert_eq!(period_label(131_400.0), "1d 12h 30m");
         assert_eq!(period_label(36.0 * 3600.0), "36 hours");
         assert_eq!(period_label(5400.0), "1h 30m");
+        // Seconds, whole and fractional, which the duration parser accepts.
+        assert_eq!(period_label(90.0), "1m 30s");
+        assert_eq!(period_label(45.0), "45 seconds");
+        assert_eq!(period_label(1.5), "1.5s");
+    }
+
+    #[test]
+    fn fractional_credits_are_not_cut_to_whole_numbers() {
+        assert_eq!(credits(0.9), "0.9");
+        assert_eq!(credits(99.1), "99.1");
+        assert_eq!(credits(100.0), "100");
+        assert_eq!(credits(992_521.7), "992.5k");
+    }
+
+    #[test]
+    fn an_ended_licence_or_an_undated_rival_is_not_fresh() {
+        let q = JetBrainsQuota { used: 1.0, maximum: 10.0, ..Default::default() };
+        let ended = Data {
+            quota: Some(JetBrainsQuota { until: Some(now() - 60.0), ..q.clone() }),
+            written: now() - 120.0,
+            ..Default::default()
+        };
+        assert!(stale(&ended));
+        let fresh = Data { quota: Some(q), written: now() - 120.0, ..Default::default() };
+        assert!(!stale(&fresh));
+        // An undated file among several cannot be ranked, so the one shown
+        // cannot say it is the newest.
+        let rival = Data { undated: true, ides: 2, ..fresh };
+        assert!(stale(&rival));
+        let all = tab(&rival, 100, 30, &Config::default(), &palette()).join(" ");
+        let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("one of 2 IDEs · another is undated"), "{words}");
     }
 
     #[test]
@@ -584,6 +657,7 @@ mod tests {
             written: now() - 300.0,
             ides: 2,
             skipped: 1,
+            undated: false,
             why: String::new(),
         };
         for w in [40usize, 60, 100] {
