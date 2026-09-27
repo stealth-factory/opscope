@@ -282,6 +282,23 @@ fn steady_24h(live: Option<i64>, held: &mut Option<i64>, counting: bool) -> Opti
     }
 }
 
+/// Whether a pass's aggregates ended without every account's pair.
+///
+/// A failed request and an answer missing the alias both leave a `None`
+/// behind, and either one means the figures held on screen are no longer
+/// the latest reading. Said by the poller rather than inferred from a
+/// frame: the render loop only learns a pass ended by drawing a frame after
+/// it, and while the settings screen is open it draws none - so the end of
+/// a failed pass could slip by unseen and the next pass hold the figures
+/// from before the failure.
+fn pass_left_a_hole(accounts: &[String], by_acc: &HashMap<String, Account>) -> bool {
+    accounts.iter().any(|a| {
+        by_acc
+            .get(a)
+            .is_none_or(|r| r.opened_24h.is_none() || r.merged_24h.is_none())
+    })
+}
+
 /// `tc::seg` over segments that own their colours.
 fn seg_owned(parts: &[(String, String)], w: usize) -> String {
     let borrowed: Vec<(&str, String)> =
@@ -2185,6 +2202,10 @@ struct State {
     /// screen holds the figures it already has for that stretch rather than
     /// drawing it as a first load: see [`steady_24h`].
     counting_24h: bool,
+    /// Bumped at the end of every pass whose aggregates left a hole, so the
+    /// screen drops the figures it holds even if it drew no frame between
+    /// that pass ending and the next one starting.
+    void_24h: u64,
 }
 
 /// Streaks and totals behind the contribution calendar.
@@ -2572,8 +2593,12 @@ fn one_pass(
         );
         publish(state, &accounts, &by_acc, rate);
     }
+    let hole = pass_left_a_hole(&accounts, &by_acc);
     if let Ok(mut g) = state.lock() {
         g.counting_24h = false;
+        if hole {
+            g.void_24h = g.void_24h.wrapping_add(1);
+        }
     }
 
     // Then the per-day counts. A past day cannot change - a PR merged on the
@@ -2841,6 +2866,7 @@ fn main() {
     // account's own screen, drawn while a refresh is still reading them.
     let mut held_board: (Option<i64>, Option<i64>) = (None, None);
     let mut held_acc: HashMap<String, (Option<i64>, Option<i64>)> = HashMap::new();
+    let mut seen_void = 0u64;
 
     loop {
         tick += 1;
@@ -2974,7 +3000,7 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (mut stats, rate, err, fetched, calendar, want, watched, overlay, counting) =
+        let (mut stats, rate, err, fetched, calendar, want, watched, overlay, counting, void) =
             match state.lock() {
                 Ok(g) => (
                     g.stats.clone(),
@@ -2986,9 +3012,17 @@ fn main() {
                     g.accounts.len(),
                     g.timing_overlay.clone(),
                     g.counting_24h,
+                    g.void_24h,
                 ),
                 Err(_) => return,
             };
+        // A pass that failed to read the figures, whether or not a frame
+        // was drawn while it ended, takes the held ones with it.
+        if void != seen_void {
+            seen_void = void;
+            held_board = (None, None);
+            held_acc.clear();
+        }
         // The board's pair is summed from the rows as they are, before any
         // row is given back its held figure: a sum across two passes is two
         // cutoffs wearing one label, so the board holds its own last whole
@@ -4093,6 +4127,29 @@ mod tests {
         // back on the next pass either.
         assert_eq!(steady_24h(None, &mut held, false), None);
         assert_eq!(steady_24h(None, &mut held, true), None);
+    }
+
+    #[test]
+    fn a_pass_that_left_a_figure_unread_says_so() {
+        // The screen cannot be relied on to see a failed pass end: with
+        // the settings screen open it draws no frame, and the next pass
+        // would hold the figures from before the failure. So the poller
+        // says it, and this is what it says it from.
+        let accounts = vec!["a".to_string(), "b".to_string()];
+        let row = |o: Option<i64>, m: Option<i64>| Account {
+            opened_24h: o,
+            merged_24h: m,
+            ..Default::default()
+        };
+        let mut by_acc = HashMap::new();
+        by_acc.insert("a".to_string(), row(Some(3), Some(1)));
+        by_acc.insert("b".to_string(), row(Some(2), Some(0)));
+        assert!(!pass_left_a_hole(&accounts, &by_acc));
+        by_acc.insert("b".to_string(), row(Some(2), None));
+        assert!(pass_left_a_hole(&accounts, &by_acc));
+        // An account that never landed at all is a hole too.
+        by_acc.remove("b");
+        assert!(pass_left_a_hole(&accounts, &by_acc));
     }
 
     #[test]
