@@ -114,6 +114,15 @@ through `send-text` fine.
 there is no equivalent for an arbitrary pane. For a non-agent pane, focus its
 tab — a tab tiles its panes, so the pane comes into view.
 
+**On Herdr 0.9.0, `agent focus` does not move the window.** 0.9.0 gave each
+attached client its own view, and `agent focus` changed the server's focus
+while every client stayed put - exit 0, a well-formed answer, nothing on
+screen. 0.9.1 fixed it (herdr #3760), but updating the client leaves a
+running server on its old version, so the fix has not arrived until the
+server is restarted. `tab focus` moves clients on every release: send it
+first with the agent's `tab_id`, then `agent focus` to pick the pane inside
+the tab.
+
 ## Detecting what a pane is doing
 
 **`pane process-info` costs about 5ms**, so polling every pane is cheap: 25

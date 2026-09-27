@@ -55,6 +55,23 @@ fn herdr_action(args: &[&str]) -> bool {
     tc::run(&argv, RUN_TIMEOUT).is_ok()
 }
 
+/// Bring an agent's pane to the front of the attached Herdr window.
+///
+/// `agent focus` alone is not enough. Herdr 0.9.0 gave each attached client
+/// its own view, and on that release `agent focus` moved the server's focus
+/// without moving any client: the command succeeded, the pane said
+/// "focused", and the window stayed where it was. 0.9.1 fixed it upstream,
+/// but a client update leaves the running server alone, so a 0.9.0 server
+/// can outlive the upgrade by days. `tab focus` does move clients on every
+/// release, so it goes first to bring the tab into view, and `agent focus`
+/// follows to pick the agent's pane inside it and mark it seen.
+fn focus_agent(tab_id: &str, pane_id: &str) -> bool {
+    // An agent list without a tab id is not one this was written against;
+    // fall through to the plain command rather than refusing.
+    let tab = tab_id.is_empty() || herdr_action(&["tab", "focus", tab_id]);
+    tab && herdr_action(&["agent", "focus", pane_id])
+}
+
 /// The `result` object out of one herdr answer, or why there is none.
 ///
 /// Split from the running of the command, because the running is not where
@@ -163,6 +180,7 @@ fn clock_ticks() -> f64 {
 struct Agent {
     name: String,
     pane_id: String,
+    tab_id: String,
     workspace_id: String,
     state: String,
     title: String,
@@ -453,6 +471,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
         agents.push(Agent {
             name: text_at(entry, "agent"),
             workspace_id: text_at(entry, "workspace_id"),
+            tab_id: text_at(entry, "tab_id"),
             title: text_at(entry, "terminal_title_stripped"),
             cwd: text_at(entry, "cwd"),
             state: state_name,
@@ -840,7 +859,7 @@ fn main() {
                     {
                         let (ok, what, pane) = match row {
                             Row::Agent(a) => (
-                                herdr_action(&["agent", "focus", &a.pane_id]),
+                                focus_agent(&a.tab_id, &a.pane_id),
                                 a.name.clone(),
                                 a.pane_id.clone(),
                             ),
