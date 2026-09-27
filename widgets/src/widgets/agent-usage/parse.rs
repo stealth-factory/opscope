@@ -400,8 +400,14 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
+/// A number, or a number written as a string. Rust's float parser also
+/// takes `NaN`, `inf` and overflow, none of which is a count, so only a
+/// finite value counts as read.
 fn loose_num(value: &serde_json::Value) -> Option<f64> {
-    value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|n: &f64| n.is_finite())
 }
 
 #[cfg(test)]
@@ -718,6 +724,13 @@ mod tests {
         assert_eq!(parse_jetbrains_quota(&xml), None);
         let xml = jetbrains_file(r#"{"current": "lots", "maximum": "1000"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml), None);
+        // Nor one the float parser takes but is not a count at all.
+        for bad in ["NaN", "inf", "-Infinity", "1e999"] {
+            let info = format!(r#"{{"current": "{bad}", "maximum": "1000"}}"#);
+            assert_eq!(parse_jetbrains_quota(&jetbrains_file(&info, "")), None, "{bad}");
+        }
+        let info = r#"{"current": "5", "maximum": "NaN"}"#;
+        assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")).unwrap().maximum, 0.0);
         // A zero maximum has no percentage to rank.
         let xml = jetbrains_file(r#"{"current": "0", "maximum": "0"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), None);
