@@ -169,6 +169,15 @@ pub fn read(_caches: &mut Caches, _cfg: &Config) -> Data {
 }
 
 fn pick(mut files: Vec<(String, String, f64)>) -> Data {
+    // A time ahead of this clock cannot be ranked any more than a missing
+    // one can, so it is treated as undated before sorting rather than
+    // winning the sort and hiding a file whose time is good.
+    let at = now();
+    for f in &mut files {
+        if f.2 > at {
+            f.2 = 0.0;
+        }
+    }
     files.sort_by(|a, b| b.2.total_cmp(&a.2));
     let found = files.len();
     let undated = files.iter().filter(|f| f.2 <= 0.0).count();
@@ -525,6 +534,15 @@ mod tests {
         assert_eq!(d.ide, "RustRover 2026.2");
         assert_eq!(d.quota.as_ref().and_then(|q| q.used_pct()), Some(50.0));
         assert_eq!((d.ides, d.skipped), (2, 1));
+        // A readable file dated in the future does not outrank one whose
+        // time is good: it cannot be ranked, so the good one is shown and
+        // no longer claims to be the newest.
+        let d = pick(vec![
+            ("RustRover 2026.2".into(), path(&good), now() - 60.0),
+            ("PyCharm 2026.2".into(), path(&good), now() + 3600.0),
+        ]);
+        assert_eq!(d.ide, "RustRover 2026.2");
+        assert!(d.undated && stale(&d));
         // With nothing readable anywhere, the newest file's reason is shown.
         let d = pick(vec![("PyCharm 2026.2".into(), path(&empty), 200.0)]);
         std::fs::remove_dir_all(&dir).ok();

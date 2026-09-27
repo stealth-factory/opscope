@@ -263,8 +263,11 @@ pub struct JetBrainsQuota {
 }
 
 impl JetBrainsQuota {
+    /// Share of the maximum spent. Not capped at 100: an overage is shown as
+    /// one, so the percentage agrees with the "120 of 100 used" beside it,
+    /// and the bars clamp their own fill.
     pub fn used_pct(&self) -> Option<f64> {
-        (self.maximum > 0.0).then(|| (self.used / self.maximum * 100.0).clamp(0.0, 100.0))
+        (self.maximum > 0.0).then(|| self.used / self.maximum * 100.0)
     }
 }
 
@@ -746,6 +749,9 @@ mod tests {
         // An absent maximum is still read, as a quota with no percentage.
         let info = r#"{"current": "5"}"#;
         assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")).unwrap().used_pct(), None);
+        // An overage is kept, so it agrees with the count beside it.
+        let xml = jetbrains_file(r#"{"current": "120", "maximum": "100"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), Some(120.0));
         // A zero maximum has no percentage to rank.
         let xml = jetbrains_file(r#"{"current": "0", "maximum": "0"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), None);
