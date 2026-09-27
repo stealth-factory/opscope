@@ -238,9 +238,12 @@ pub fn read(_caches: &mut Caches, _cfg: &Config) -> Data {
 /// the one shown is not called the newest; with nothing read at all, the
 /// refusal is the reason given rather than "no IDE recorded a quota".
 fn with_unlisted(mut d: Data, unlisted: Vec<Unlisted>) -> Data {
-    if d.quota.is_none() && d.why.is_empty() {
+    if d.quota.is_none() {
         if let Some((root, e)) = unlisted.first() {
-            d.why = format!("could not read {}: {}", root, e);
+            // A file that would not parse is not the whole story when
+            // another could not be read: that one may hold the quota.
+            let refused = format!("could not read {}: {}", root, e);
+            d.why = if d.why.is_empty() { refused } else { format!("{} · {}", d.why, refused) };
         }
     }
     d.unlisted = unlisted;
@@ -777,6 +780,11 @@ mod tests {
         assert!(d.why.contains("could not read /cfg/JetBrains: Permission denied"), "{}", d.why);
         let all = tab(&d, 100, 30, &Config::default(), &palette()).join(" ");
         assert!(!all.contains("No JetBrains IDE"), "{all}");
+        // A malformed file beside it does not hide the refusal.
+        let bad = Data { why: "no quota in RustRover 2026.2's file".into(), ..Default::default() };
+        let d = with_unlisted(bad, refused.clone());
+        assert!(d.why.contains("no quota in RustRover"), "{}", d.why);
+        assert!(d.why.contains("could not read /cfg/JetBrains: Permission denied"), "{}", d.why);
         let q = JetBrainsQuota { used: 1.0, maximum: 10.0, ..Default::default() };
         let one = Data {
             quota: Some(q),
