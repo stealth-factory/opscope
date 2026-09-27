@@ -1157,8 +1157,10 @@ nothing else: no credential is touched and nothing leaves the machine.
 
 - **Where it looks**: `~/Library/Application Support/JetBrains` and
   `…/Google` (Android Studio) on macOS, `~/.config/JetBrains`,
-  `~/.local/share/JetBrains` and `~/.config/Google` on Linux. Each directory
-  under them is an IDE and its version, `RustRover2026.2`.
+  `~/.local/share/JetBrains` and `~/.config/Google` on Linux, where a set
+  `XDG_CONFIG_HOME` is read first and the defaults only when it holds no
+  quota. Each directory under them is an IDE and its version,
+  `RustRover2026.2`.
 - **Which file**: the newest. Every IDE on one account records the same
   quota, and the one written last had the latest look at it. The tab names
   the IDE, and says so when there was more than one to pick from.

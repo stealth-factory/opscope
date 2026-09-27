@@ -410,7 +410,8 @@ pub fn parse_iso_hours(s: &str) -> Option<f64> {
             return None;
         }
     }
-    (any && total > 0.0).then_some(total)
+    // Enough digits parse as infinity, which is greater than zero.
+    (any && total.is_finite() && total > 0.0).then_some(total)
 }
 
 fn jetbrains_component(xml: &str) -> Option<&str> {
@@ -861,5 +862,7 @@ mod tests {
         assert_eq!(parse_iso_hours("monthly"), None);
         assert_eq!(parse_iso_hours("PT"), None);
         assert_eq!(parse_iso_hours("PT12"), None);
+        // A magnitude too large for f64 is not a period of infinite length.
+        assert_eq!(parse_iso_hours(&format!("PT{}H", "9".repeat(400))), None);
     }
 }

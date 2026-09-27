@@ -67,31 +67,35 @@ const IDES: &[(&str, &str)] = &[
 ///
 /// Only this platform's roots, so a home carried over from a Mac cannot
 /// offer a newer copied file than the quota the running IDE writes.
-fn roots() -> Vec<String> {
+///
+/// In tiers, read in order: a tier is read only when every one before it
+/// found no quota. The pick among files goes by when each was written, so
+/// a moved `XDG_CONFIG_HOME` read beside `~/.config` would lose to a newer
+/// copy left in the old tree, which the IDEs no longer write.
+fn roots() -> Vec<Vec<String>> {
     let xdg = std::env::var("XDG_CONFIG_HOME").ok();
     roots_under(xdg.as_deref(), cfg!(target_os = "macos"))
 }
 
-fn roots_under(xdg: Option<&str>, mac: bool) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn roots_under(xdg: Option<&str>, mac: bool) -> Vec<Vec<String>> {
     if mac {
-        for r in ["Library/Application Support/JetBrains", "Library/Application Support/Google"] {
-            out.push(under_home(r));
-        }
-        return out;
+        let roots = ["Library/Application Support/JetBrains", "Library/Application Support/Google"];
+        return vec![roots.iter().map(|r| under_home(r)).collect()];
     }
+    let mut tiers: Vec<Vec<String>> = Vec::new();
     // An XDG_CONFIG_HOME that is relative is invalid by the spec and ignored.
     if let Some(x) = xdg.map(|x| x.trim_end_matches('/')).filter(|x| x.starts_with('/')) {
-        out.push(format!("{}/JetBrains", x));
-        out.push(format!("{}/Google", x));
+        tiers.push(vec![format!("{}/JetBrains", x), format!("{}/Google", x)]);
     }
-    for r in [".config/JetBrains", ".local/share/JetBrains", ".config/Google"] {
-        out.push(under_home(r));
-    }
+    let defaults = [".config/JetBrains", ".local/share/JetBrains", ".config/Google"];
+    tiers.push(defaults.iter().map(|r| under_home(r)).collect());
     // An XDG root that is ~/.config would otherwise count each IDE twice.
     let mut seen = std::collections::HashSet::new();
-    out.retain(|r| seen.insert(r.clone()));
-    out
+    for tier in &mut tiers {
+        tier.retain(|r| seen.insert(r.clone()));
+    }
+    tiers.retain(|tier| !tier.is_empty());
+    tiers
 }
 
 /// Product name and version for a config directory, or None when it is
@@ -132,46 +136,52 @@ type Unlisted = (String, String);
 fn scan() -> (Vec<Found>, Vec<Unlisted>) {
     let mut out = Vec::new();
     let mut unlisted = Vec::new();
-    for root in roots() {
-        let entries = match std::fs::read_dir(&root) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                unlisted.push((root, e.to_string()));
-                continue;
-            }
-        };
-        for entry in entries {
-            // An entry that failed to come back could be the IDE with the
-            // newest quota, so the scan is said to be incomplete.
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    unlisted.push((root.clone(), e.to_string()));
-                    continue;
-                }
-            };
-            let dirname = entry.file_name().to_string_lossy().to_string();
-            let Some(ide) = ide_of(&dirname) else {
-                continue;
-            };
-            let path = format!("{}/{}/{}", root, dirname, QUOTA_FILE);
-            // An IDE that has not recorded a quota has no file; one whose
-            // file cannot be looked at is said, like a root that cannot.
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
+    // A tier is read only when the ones before it found no quota.
+    for tier in roots() {
+        if !out.is_empty() {
+            break;
+        }
+        for root in tier {
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    unlisted.push((path, e.to_string()));
+                    unlisted.push((root, e.to_string()));
                     continue;
                 }
             };
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0.0, |d| d.as_secs_f64());
-            out.push((ide, path, modified));
+            for entry in entries {
+                // An entry that failed to come back could be the IDE with the
+                // newest quota, so the scan is said to be incomplete.
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        unlisted.push((root.clone(), e.to_string()));
+                        continue;
+                    }
+                };
+                let dirname = entry.file_name().to_string_lossy().to_string();
+                let Some(ide) = ide_of(&dirname) else {
+                    continue;
+                };
+                let path = format!("{}/{}/{}", root, dirname, QUOTA_FILE);
+                // An IDE that has not recorded a quota has no file; one whose
+                // file cannot be looked at is said, like a root that cannot.
+                let meta = match std::fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        unlisted.push((path, e.to_string()));
+                        continue;
+                    }
+                };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0.0, |d| d.as_secs_f64());
+                out.push((ide, path, modified));
+            }
         }
     }
     (out, unlisted)
@@ -489,7 +499,14 @@ fn plan(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String> {
             "newest"
         };
         let rest = if d.undated { " · another is undated" } else { "" };
-        pairs.push(("read from".into(), format!("{} of {} IDEs{}", which, d.ides, rest)));
+        // What could not be read may be more IDEs, so the count is only of
+        // those that could, and says so.
+        let of = match (d.unlisted.is_empty(), d.ides) {
+            (true, n) => format!("{} of {} IDEs", which, n),
+            (false, 1) => "the only readable IDE".to_string(),
+            (false, n) => format!("{} of {} readable IDEs", which, n),
+        };
+        pairs.push(("read from".into(), format!("{}{}", of, rest)));
     }
     for (root, e) in &d.unlisted {
         pairs.push(("not read".into(), format!("{} · {}", root, e)));
@@ -673,11 +690,14 @@ mod tests {
     #[test]
     fn xdg_config_home_is_searched_first_and_never_twice() {
         let moved = roots_under(Some("/srv/cfg/"), false);
-        assert_eq!(&moved[..2], ["/srv/cfg/JetBrains", "/srv/cfg/Google"]);
-        assert!(moved.contains(&under_home(".config/JetBrains")));
+        // A tier of its own, so a newer file left in ~/.config cannot
+        // outrank the one the IDEs now write.
+        assert_eq!(moved[0], ["/srv/cfg/JetBrains", "/srv/cfg/Google"]);
+        assert!(moved[1].contains(&under_home(".config/JetBrains")));
         // Pointing it at the default adds nothing to read twice.
         let default = under_home(".config");
-        assert_eq!(roots_under(Some(&default), false).len(), roots_under(None, false).len());
+        let flat = |xdg: Option<&str>| roots_under(xdg, false).concat().len();
+        assert_eq!(flat(Some(&default)), flat(None));
         // A relative value is not a valid XDG_CONFIG_HOME.
         assert_eq!(roots_under(Some("cfg"), false), roots_under(None, false));
     }
@@ -686,9 +706,9 @@ mod tests {
     fn only_the_running_platforms_config_is_read() {
         // A home carried over from one platform to the other keeps the old
         // tree, and a copied file there could outrank the live one.
-        let mac = roots_under(Some("/srv/cfg"), true);
+        let mac = roots_under(Some("/srv/cfg"), true).concat();
         assert!(mac.iter().all(|r| r.contains("Library/Application Support")), "{mac:?}");
-        let other = roots_under(None, false);
+        let other = roots_under(None, false).concat();
         assert!(other.iter().all(|r| !r.contains("Library/Application Support")), "{other:?}");
     }
 
@@ -770,7 +790,13 @@ mod tests {
         assert!(stale(&one));
         let all = strip(&tab(&one, 100, 30, &Config::default(), &palette()).join(" "));
         let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("one of 1 IDEs"), "{words}");
+        // What was not read may be more IDEs, so the count is not a total.
+        assert!(words.contains("the only readable IDE"), "{words}");
+        assert!(!words.contains("of 1 IDEs"), "{words}");
+        let two = Data { ides: 2, ..one.clone() };
+        let all = strip(&tab(&two, 100, 30, &Config::default(), &palette()).join(" "));
+        let words = all.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("one of 2 readable IDEs"), "{words}");
         assert!(words.contains("not read /cfg/JetBrains · Permission denied"), "{words}");
     }
 
