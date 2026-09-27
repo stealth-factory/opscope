@@ -65,11 +65,44 @@ fn herdr_action(args: &[&str]) -> bool {
 /// can outlive the upgrade by days. `tab focus` does move clients on every
 /// release, so it goes first to bring the tab into view, and `agent focus`
 /// follows to pick the agent's pane inside it and mark it seen.
-fn focus_agent(tab_id: &str, pane_id: &str) -> bool {
+///
+/// `cached_tab` is the tab on the row, from the last poll. An agent can
+/// move in that interval. Focusing the tab it left, on 0.9.0, leaves the
+/// client there while both commands succeed. The tab is read again from a
+/// fresh `agent list`; the row's id is only the fallback when that read
+/// fails or no longer names this pane.
+fn focus_agent(cached_tab: &str, pane_id: &str) -> bool {
+    let tab_id = tab_for_focus(herdr(&["agent", "list"]).as_ref(), pane_id, cached_tab);
     // An agent list without a tab id is not one this was written against;
     // fall through to the plain command rather than refusing.
-    let tab = tab_id.is_empty() || herdr_action(&["tab", "focus", tab_id]);
+    let tab = tab_id.is_empty() || herdr_action(&["tab", "focus", &tab_id]);
     tab && herdr_action(&["agent", "focus", pane_id])
+}
+
+/// Which tab to focus for `pane_id`.
+///
+/// A list that names the agent wins, including a blank tab: that is the
+/// list saying there is nothing to focus, and a cached id would send the
+/// client somewhere the agent is not. `None` — the list failed, or it does
+/// not name this pane — keeps `cached`, which is the last place the poll
+/// saw it.
+fn tab_for_focus(listed: Option<&serde_json::Value>, pane_id: &str, cached: &str) -> String {
+    listed
+        .and_then(|list| tab_holding(list, pane_id))
+        .unwrap_or_else(|| cached.to_string())
+}
+
+/// The tab `pane_id` is on, in an `agent list` result.
+///
+/// `Some("")` means the list names the agent and gives it no tab. `None`
+/// means the list does not name it.
+fn tab_holding(listed: &serde_json::Value, pane_id: &str) -> Option<String> {
+    listed
+        .get("agents")?
+        .as_array()?
+        .iter()
+        .find(|entry| text_at(entry, "pane_id") == pane_id)
+        .map(|entry| text_at(entry, "tab_id"))
 }
 
 /// The `result` object out of one herdr answer, or why there is none.
@@ -1667,6 +1700,31 @@ mod tests {
         assert_eq!(rss, 4096 * 4096, "rss is in pages, reported in bytes");
         // A truncated line has no fields to find and must not be guessed at.
         assert_eq!(parse_proc_stat("42 (short) S 1 2 3"), None);
+    }
+
+    #[test]
+    fn the_tab_focused_is_the_one_the_agent_is_on_now() {
+        let listed = serde_json::json!({
+            "agents": [
+                {"pane_id": "w1:p1", "tab_id": "w1:t1"},
+                {"pane_id": "w1:p2", "tab_id": "w1:t9"}
+            ]
+        });
+        // The row still says the tab from the last poll. The list says the
+        // agent has moved, and that is the tab the client has to follow.
+        assert_eq!(tab_for_focus(Some(&listed), "w1:p2", "w1:t2"), "w1:t9");
+        // A list that fails, or that no longer names the pane, has nothing
+        // newer to offer. The poll's tab is what is left.
+        assert_eq!(tab_for_focus(None, "w1:p2", "w1:t2"), "w1:t2");
+        assert_eq!(tab_for_focus(Some(&listed), "w1:p9", "w1:t2"), "w1:t2");
+        assert_eq!(
+            tab_for_focus(Some(&serde_json::json!({})), "w1:p2", "w1:t2"),
+            "w1:t2"
+        );
+        // Named, with no tab: that is an answer. Falling back to the cached
+        // id would focus a tab the list says the agent is not on.
+        let bare = serde_json::json!({"agents": [{"pane_id": "w1:p2"}]});
+        assert_eq!(tab_for_focus(Some(&bare), "w1:p2", "w1:t2"), "");
     }
 
     #[test]

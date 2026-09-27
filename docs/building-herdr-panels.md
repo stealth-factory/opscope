@@ -121,7 +121,10 @@ screen. 0.9.1 fixed it (herdr #3760), but updating the client leaves a
 running server on its old version, so the fix has not arrived until the
 server is restarted. `tab focus` moves clients on every release: send it
 first with the agent's `tab_id`, then `agent focus` to pick the pane inside
-the tab.
+the tab. Read that id from a fresh `agent list` at the moment of focus.
+The copy on a polled row is up to a refresh interval old, and an agent that
+has moved is no longer on it — which on 0.9.0 is where the client stays,
+because `agent focus` does not move it and both commands still succeed.
 
 ## Detecting what a pane is doing
 
