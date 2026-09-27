@@ -358,6 +358,11 @@ pub fn parse_jetbrains_quota(xml: &str) -> Option<JetBrainsQuota> {
         None => 0.0,
         Some(v) => loose_num(v)?,
     };
+    // Two finite counts can still divide to infinity, `1` over `5e-324`,
+    // which would be drawn as `inf%`.
+    if maximum > 0.0 && !(used / maximum * 100.0).is_finite() {
+        return None;
+    }
     let available = loose_num(&info["tariffQuota"]["available"])
         .unwrap_or_else(|| (maximum - used).max(0.0));
     let mut out = JetBrainsQuota {
@@ -410,9 +415,14 @@ pub fn parse_iso_hours(s: &str) -> Option<f64> {
             return None;
         }
     }
-    // Enough digits parse as infinity, which is greater than zero.
-    (any && total.is_finite() && total > 0.0).then_some(total)
+    // Enough digits parse as infinity, which is greater than zero, and a
+    // finite one of 300 digits would saturate the label's milliseconds. No
+    // refill period is a century long.
+    (any && total > 0.0 && total <= MAX_PERIOD_SECS).then_some(total)
 }
+
+/// A hundred years of seconds: past this a duration is not a refill period.
+const MAX_PERIOD_SECS: f64 = 100.0 * 365.25 * 86400.0;
 
 fn jetbrains_component(xml: &str) -> Option<&str> {
     let mut from = 0;
@@ -850,6 +860,9 @@ mod tests {
         // A zero maximum has no percentage to rank.
         let xml = jetbrains_file(r#"{"current": "0", "maximum": "0"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), None);
+        // Two finite counts whose share is not, which would read `inf%`.
+        let xml = jetbrains_file(r#"{"current": "1", "maximum": "5e-324"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
     }
 
     #[test]
@@ -864,5 +877,8 @@ mod tests {
         assert_eq!(parse_iso_hours("PT12"), None);
         // A magnitude too large for f64 is not a period of infinite length.
         assert_eq!(parse_iso_hours(&format!("PT{}H", "9".repeat(400))), None);
+        // Nor one finite but far past anything the label can say.
+        assert_eq!(parse_iso_hours(&format!("PT{}H", "9".repeat(300))), None);
+        assert_eq!(parse_iso_hours("P36500D"), Some(36500.0 * 86400.0));
     }
 }
