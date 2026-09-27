@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.29.1] - 2026-09-27
+
+### Bug Fixes
+
+- **herdr-panes**: Bring an agent's tab into view before focusing it (#276)
+
 ## [0.29.0] - 2026-09-25
 
 ### Features
