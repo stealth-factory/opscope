@@ -20,6 +20,14 @@ own title and expiry as a date and time in this machine's local zone.
 That is separate from the usage-window countdown. Nothing here is inferred
 from a number that was not published.
 
+Notion AI is the one remote reading that uses a credential no agent here
+holds: Notion publishes no usage API, so its tab asks the endpoints Notion's
+web app uses, signed in with a token_v2 cookie you paste into
+agent_usage.notion_token or the NOTION_TOKEN_V2 environment variable. It is
+sent only to app.notion.com, only while Notion is one of the agents shown,
+and never read out of a browser. It is a full sign-in to your Notion
+account, so keep config.json chmod 600; the tab warns when it is not.
+
 Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
 the page, home/end to either edge, comma opens settings, r refreshes now,
 q quits.

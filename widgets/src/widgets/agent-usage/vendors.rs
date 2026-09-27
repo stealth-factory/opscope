@@ -36,6 +36,7 @@ pub struct State {
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
+    pub notion: crate::notion::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
@@ -50,9 +51,17 @@ fn coderabbit_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool
     chosen_agents(installed, cfg).iter().any(|t| t == "coderabbit")
 }
 
+/// Whether Notion may be asked, on the same terms: it sends the reader's
+/// own session to Notion, so a tab the fallback brought back does not
+/// count as a choice.
+fn notion_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "notion")
+}
+
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
     let installed = detect_agents(cfg);
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
+    let notion_shown = notion_asked(&installed, cfg);
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -61,6 +70,7 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
+        notion: crate::notion::read(caches, cfg, notion_shown),
         installed,
         fetched: 0.0,
         err: String::new(),
@@ -93,6 +103,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
+        "notion" => crate::notion::lanes(&s.notion),
         _ => Vec::new(),
     }
 }
@@ -155,6 +166,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
+        "notion" => crate::notion::why_no_lane(&s.notion),
         _ => String::new(),
     };
     let warn = quiet_is_actionable(&note);
@@ -477,6 +489,24 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         if group_agent(name) == "codex" {
             push_reset_summary(&mut rows, s, w, p);
         }
+        // Notion's endpoint is unsupported and can answer with less than a
+        // whole reading; the lanes above are then a subset, said here so
+        // they are not read as all of it.
+        if group_agent(name) == "notion" {
+            if let Some(gaps) = crate::notion::partial(&s.notion) {
+                let said = format!("partial · {} · its tab says what that costs", gaps);
+                rows.extend(
+                    tc::wrap_words(&said, w.saturating_sub(6).max(1))
+                        .into_iter()
+                        .map(|line| {
+                            tc::seg(
+                                &[(p.warn.as_str(), format!("     {line}"))],
+                                w.saturating_sub(1).max(1),
+                            )
+                        }),
+                );
+            }
+        }
     }
     if any_stale {
         rows.push(String::new());
@@ -538,6 +568,7 @@ pub fn tab_body(
         "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
         "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
+        "notion" => crate::notion::tab(&s.notion, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
 }
@@ -849,6 +880,56 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn a_partial_notion_reading_is_marked_on_the_summary() {
+        // The summary draws the lanes it is given, so one surviving window
+        // looked like the whole Notion reading there; only the tab said it
+        // was not.
+        let p = palette();
+        let part = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "billingPeriodWindow":{"used":18,"limit":100}}"#,
+            ),
+            ..State::default()
+        };
+        for w in [30usize, 60, 120] {
+            let rows = plain(&summary_for(&part, w, &p, &["notion"]));
+            for r in &rows {
+                assert!(tc::display_width(r) <= w - 1, "width {w}: {r:?}");
+            }
+            let words = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("partial · no rolling window"), "{words}");
+            assert!(words.contains("no billing-period end"), "{words}");
+        }
+        let whole = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "window":{"window":"6h","used":42,"limit":100},"resetsInSeconds":600,
+                    "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1788000000000}}"#,
+            ),
+            ..State::default()
+        };
+        let rows = plain(&summary_for(&whole, 120, &p, &["notion"]));
+        assert!(rows.iter().any(|r| r.contains("NOTION")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("partial")), "{rows:?}");
+        // An end date past any month we can measure is a length we do not have.
+        let unread = State {
+            notion: crate::notion::Data::answered(
+                r#"{"status":"within_limit",
+                    "window":{"window":"6h","used":42,"limit":100},"resetsInSeconds":600,
+                    "billingPeriodWindow":{"used":18,"limit":100,"periodEndMs":1e20}}"#,
+            ),
+            ..State::default()
+        };
+        let words = plain(&summary_for(&unread, 120, &p, &["notion"]))
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(words.contains("no billing-period length"), "{words}");
     }
 
     #[test]

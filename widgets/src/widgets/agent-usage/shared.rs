@@ -317,7 +317,9 @@ pub fn refusal(said: &str) -> String {
         None if said.contains("Could not resolve") || said.contains("Failed to connect") => {
             "could not reach it".into()
         }
-        None => said.trim_start_matches("curl: ").to_string(),
+        // The rest is whatever the server put in its body, which is text
+        // the widget did not write and is about to draw.
+        None => crate::parse::strip_controls(said.trim_start_matches("curl: ")),
     }
 }
 
@@ -411,6 +413,17 @@ mod tests {
         let odd = "curl: (35) SSL connect error";
         assert_eq!(refusal(odd), "(35) SSL connect error");
         assert!(!refusal(odd).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_body_cannot_drive_the_terminal() {
+        // An unrecognised refusal is drawn as the server said it, and what
+        // the server said is its own body - a 500 page from a proxy, or
+        // anything else on the path, with whatever bytes it chose to send.
+        let said = "HTTP 500 \u{1b}]0;owned\u{7}bad \u{1b}[31mgateway\u{1b}[0m\nretry";
+        let shown = refusal(said);
+        assert!(!shown.chars().any(char::is_control), "{:?}", shown);
+        assert!(shown.contains("bad gateway retry"), "{:?}", shown);
     }
 
     /// The sequence, and why it is not a flat hold: the one it replaced
