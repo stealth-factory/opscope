@@ -257,7 +257,11 @@ fn forget_24h(row: &mut Account) {
     row.merged_24h = None;
 }
 
-/// A rolling-day figure to draw this frame, holding the last good one
+/// An opened and merged rolling-day pair, either of which may not have
+/// arrived.
+type Pair24h = (Option<i64>, Option<i64>);
+
+/// The rolling-day pair to draw this frame, holding the last good one
 /// through a refresh.
 ///
 /// Every pass forgets the figures before any account lands, which is right
@@ -268,16 +272,20 @@ fn forget_24h(row: &mut Account) {
 /// new one replaces it in place when it is whole. Outside a pass `None`
 /// means what it always has - nothing read yet, or a pass that failed - so
 /// the held figure goes with it rather than outliving the failure.
-fn steady_24h(live: Option<i64>, held: &mut Option<i64>, counting: bool) -> Option<i64> {
+///
+/// The pair moves together. Held one figure at a time, an answer carrying
+/// the opened alias and not the merged one put this pass's opened beside
+/// last pass's merged - two cutoffs under one `24h`.
+fn steady_24h(live: Pair24h, held: &mut Pair24h, counting: bool) -> Pair24h {
     match live {
-        Some(v) => {
-            *held = Some(v);
-            Some(v)
+        (Some(_), Some(_)) => {
+            *held = live;
+            live
         }
-        None if counting => *held,
-        None => {
-            *held = None;
-            None
+        _ if counting => *held,
+        _ => {
+            *held = (None, None);
+            live
         }
     }
 }
@@ -3028,21 +3036,14 @@ fn main() {
         // cutoffs wearing one label, so the board holds its own last whole
         // sum instead of adding up held and fresh rows.
         let board_figs = (
-            steady_24h(
-                board_24h(&stats, watched, |s| s.opened_24h),
-                &mut held_board.0,
-                counting,
-            ),
-            steady_24h(
-                board_24h(&stats, watched, |s| s.merged_24h),
-                &mut held_board.1,
-                counting,
-            ),
+            board_24h(&stats, watched, |s| s.opened_24h),
+            board_24h(&stats, watched, |s| s.merged_24h),
         );
+        let board_figs = steady_24h(board_figs, &mut held_board, counting);
         for s in stats.iter_mut() {
             let held = held_acc.entry(s.key.clone()).or_default();
-            s.opened_24h = steady_24h(s.opened_24h, &mut held.0, counting);
-            s.merged_24h = steady_24h(s.merged_24h, &mut held.1, counting);
+            (s.opened_24h, s.merged_24h) =
+                steady_24h((s.opened_24h, s.merged_24h), held, counting);
         }
         // Busiest first: open PRs decide it, and merged-in-window breaks ties
         // so an idle backlog ranks below an account of the same size that is
@@ -4114,19 +4115,21 @@ mod tests {
         // screen drew that as a first load: both figures back to the
         // shimmer and in again, once a minute, over numbers that had not
         // changed. The first load still shimmers - nothing is held yet.
-        let mut held = None;
-        assert_eq!(steady_24h(None, &mut held, true), None);
-        assert_eq!(steady_24h(Some(7), &mut held, false), Some(7));
-        // A pass starts and forgets: the old figure stays up.
-        assert_eq!(steady_24h(None, &mut held, true), Some(7));
-        // The new one lands and replaces it in place.
-        assert_eq!(steady_24h(Some(9), &mut held, true), Some(9));
-        assert_eq!(steady_24h(Some(9), &mut held, false), Some(9));
+        let mut held = (None, None);
+        assert_eq!(steady_24h((None, None), &mut held, true), (None, None));
+        assert_eq!(steady_24h((Some(7), Some(2)), &mut held, false), (Some(7), Some(2)));
+        // A pass starts and forgets: the old pair stays up.
+        assert_eq!(steady_24h((None, None), &mut held, true), (Some(7), Some(2)));
+        // Half a pair is not a reading to swap in: this pass's opened
+        // beside last pass's merged would be two cutoffs under one label.
+        assert_eq!(steady_24h((Some(9), None), &mut held, true), (Some(7), Some(2)));
+        // The whole new pair lands and replaces it in place.
+        assert_eq!(steady_24h((Some(9), Some(3)), &mut held, true), (Some(9), Some(3)));
         // A pass that ended without it is not a pass in flight: the held
-        // figure goes rather than outliving the failure, and does not come
+        // pair goes rather than outliving the failure, and does not come
         // back on the next pass either.
-        assert_eq!(steady_24h(None, &mut held, false), None);
-        assert_eq!(steady_24h(None, &mut held, true), None);
+        assert_eq!(steady_24h((Some(9), None), &mut held, false), (Some(9), None));
+        assert_eq!(steady_24h((None, None), &mut held, true), (None, None));
     }
 
     #[test]
