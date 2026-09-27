@@ -11,7 +11,8 @@
           "grok",
           "copilot",
           "antigravity",
-          "coderabbit"
+          "coderabbit",
+          "jetbrains"
         ]
       },
       "inactive_when": {
@@ -29,7 +30,8 @@
           "grok",
           "copilot",
           "antigravity",
-          "coderabbit"
+          "coderabbit",
+          "jetbrains"
         ]
       }
     },

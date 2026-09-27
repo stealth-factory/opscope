@@ -301,6 +301,199 @@ pub fn coderabbit_signed_out(text: &str) -> bool {
     .any(|s| lower.contains(s))
 }
 
+/// What a JetBrains IDE last recorded about the AI Assistant quota.
+///
+/// The IDE writes this itself, into `options/AIAssistantQuotaManager2.xml`
+/// under its config directory, each time it asks JetBrains. So it is the
+/// account's figure as of the IDE's last look, not this machine's spend.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JetBrainsQuota {
+    /// `quotaInfo.type`, e.g. `Available`.
+    pub kind: String,
+    pub used: f64,
+    pub maximum: f64,
+    /// `tariffQuota.available` where the file carries it, otherwise what
+    /// `maximum - used` leaves.
+    pub available: f64,
+    /// `quotaInfo.until`: when the licence the quota belongs to runs out.
+    pub until: Option<f64>,
+    /// `nextRefill.next`: when the credits come back.
+    pub refill: Option<f64>,
+    /// How much a refill restores, where stated.
+    pub refill_amount: Option<f64>,
+    /// The refill period in seconds, where it is an ISO duration.
+    pub refill_secs: Option<f64>,
+}
+
+impl JetBrainsQuota {
+    /// Share of the maximum spent. Not capped at 100: an overage is shown as
+    /// one, so the percentage agrees with the "120 of 100 used" beside it,
+    /// and the bars clamp their own fill.
+    pub fn used_pct(&self) -> Option<f64> {
+        (self.maximum > 0.0).then(|| self.used / self.maximum * 100.0)
+    }
+}
+
+/// `AIAssistantQuotaManager2.xml`, as a JetBrains IDE writes it.
+///
+/// Two `<option>` elements whose `value` attributes are JSON, entity-encoded
+/// into the attribute. Only that one component is read, so this looks for
+/// it by name rather than parsing the whole document - which also keeps an
+/// XML crate out of the binary. Numbers arrive as strings (`"7478.3"`) and
+/// are accepted either way. None when there is no `quotaInfo` to read, or no
+/// `current` in it: a file with no quota in it says nothing, and a zero
+/// would say something.
+pub fn parse_jetbrains_quota(xml: &str) -> Option<JetBrainsQuota> {
+    let component = jetbrains_component(xml)?;
+    let info: serde_json::Value =
+        serde_json::from_str(&decode_entities(&option_value(component, "quotaInfo")?)).ok()?;
+    // An unreadable spend is no reading at all; a zero here would claim the
+    // whole allowance is left.
+    let used = loose_num(&info["current"])?;
+    // An absent maximum is 0, which has no percentage to rank; one that is
+    // there and unreadable, `null` included, makes the file unreadable, so
+    // `pick` goes on to an older file that can be read rather than stopping
+    // at this one.
+    let maximum = match info.get("maximum") {
+        None => 0.0,
+        Some(v) => loose_num(v)?,
+    };
+    // Two finite counts can still divide to infinity, `1` over `5e-324`,
+    // which would be drawn as `inf%`.
+    if maximum > 0.0 && !(used / maximum * 100.0).is_finite() {
+        return None;
+    }
+    let available = loose_num(&info["tariffQuota"]["available"])
+        .unwrap_or_else(|| (maximum - used).max(0.0));
+    let mut out = JetBrainsQuota {
+        kind: info["type"].as_str().unwrap_or("").to_string(),
+        used,
+        maximum,
+        available,
+        until: info["until"].as_str().and_then(iso_epoch),
+        ..Default::default()
+    };
+    let refill: Option<serde_json::Value> = option_value(component, "nextRefill")
+        .and_then(|raw| serde_json::from_str(&decode_entities(&raw)).ok());
+    if let Some(r) = refill {
+        out.refill = r["next"].as_str().and_then(iso_epoch);
+        out.refill_amount = loose_num(&r["amount"]).or_else(|| loose_num(&r["tariff"]["amount"]));
+        out.refill_secs = r["duration"]
+            .as_str()
+            .or_else(|| r["tariff"]["duration"].as_str())
+            .and_then(parse_iso_hours);
+    }
+    Some(out)
+}
+
+/// An ISO-8601 duration of the shape JetBrains uses, `PT720H`, in seconds.
+///
+/// Only day, hour, minute and second parts. A month or year part has no
+/// fixed length, so it is refused rather than guessed at, and the pace mark
+/// that would have rested on it is not drawn.
+pub fn parse_iso_hours(s: &str) -> Option<f64> {
+    let rest = s.strip_prefix('P')?;
+    let (days, time) = match rest.split_once('T') {
+        Some((d, t)) => (d, t),
+        None => (rest, ""),
+    };
+    let mut total = 0.0;
+    let mut any = false;
+    for (part, units) in [(days, &[('D', 86400.0)][..]), (time, &[('H', 3600.0), ('M', 60.0), ('S', 1.0)][..])] {
+        let mut num = String::new();
+        for ch in part.chars() {
+            if ch.is_ascii_digit() || ch == '.' {
+                num.push(ch);
+                continue;
+            }
+            let scale = units.iter().find(|(u, _)| *u == ch)?.1;
+            total += num.parse::<f64>().ok()? * scale;
+            num.clear();
+            any = true;
+        }
+        if !num.is_empty() {
+            return None;
+        }
+    }
+    // Enough digits parse as infinity, which is greater than zero, and a
+    // finite one of 300 digits would saturate the label's milliseconds. No
+    // refill period is a century long.
+    (any && total > 0.0 && total <= MAX_PERIOD_SECS).then_some(total)
+}
+
+/// A hundred years of seconds: past this a duration is not a refill period.
+const MAX_PERIOD_SECS: f64 = 100.0 * 365.25 * 86400.0;
+
+fn jetbrains_component(xml: &str) -> Option<&str> {
+    let mut from = 0;
+    while let Some(at) = xml[from..].find("<component") {
+        let start = from + at;
+        let open_end = start + xml[start..].find('>')?;
+        let tag = &xml[start..open_end];
+        if attr(tag, "name").as_deref() == Some("AIAssistantQuotaManager2") {
+            let close = xml[open_end..].find("</component>").map_or(xml.len(), |i| open_end + i);
+            return Some(&xml[open_end..close]);
+        }
+        from = open_end;
+    }
+    None
+}
+
+fn option_value(component: &str, name: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = component[from..].find("<option") {
+        let start = from + at;
+        let end = start + component[start..].find('>')?;
+        let tag = &component[start..end];
+        if attr(tag, "name").as_deref() == Some(name) {
+            return attr(tag, "value");
+        }
+        from = end;
+    }
+    None
+}
+
+/// One attribute out of a start tag, either quote style, any whitespace
+/// around the `=` - the IDE puts each attribute on a line of its own.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    while let Some(at) = rest.find(name) {
+        let before_ok = rest[..at].ends_with(|c: char| c.is_whitespace());
+        let after = rest[at + name.len()..].trim_start();
+        if before_ok {
+            if let Some(after_eq) = after.strip_prefix('=') {
+                let after_eq = after_eq.trim_start();
+                let quote = after_eq.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+                let body = &after_eq[1..];
+                return Some(body[..body.find(quote)?].to_string());
+            }
+        }
+        rest = &rest[at + name.len()..];
+    }
+    None
+}
+
+/// The XML entities an attribute value can carry. `&amp;` goes last, so an
+/// encoded `&amp;quot;` comes out as the literal text `&quot;`.
+fn decode_entities(s: &str) -> String {
+    let mut out = s.to_string();
+    for (from, to) in [("&#10;", "\n"), ("&#13;", "\r"), ("&#9;", "\t"), ("&quot;", "\""),
+                       ("&apos;", "'"), ("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&")] {
+        out = out.replace(from, to);
+    }
+    out
+}
+
+/// A count of credits, as a number or a number written as a string. Rust's
+/// float parser also takes `NaN`, `inf` and overflow, and a count below
+/// zero is no count either, so only a finite value of zero or more is read.
+fn loose_num(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|n: &f64| n.is_finite() && *n >= 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +765,120 @@ mod tests {
         assert!(!coderabbit_signed_out("Your reviews : 3"));
         // A count that is not a number does not make a report on its own.
         assert_eq!(parse_coderabbit_usage("Your reviews : lots"), None);
+    }
+
+    fn jetbrains_file(info: &str, refill: &str) -> String {
+        let enc = |s: &str| s.replace('"', "&quot;").replace('\n', "&#10;");
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<application>\n  \
+             <component name=\"AIAssistantQuotaManager2\">\n    <option\n      \
+             name=\"quotaInfo\"\n      value=\"{}\" />\n    <option\n      \
+             name=\"nextRefill\"\n      value=\"{}\" />\n  </component>\n</application>\n",
+            enc(info),
+            enc(refill)
+        )
+    }
+
+    #[test]
+    fn a_jetbrains_quota_file_gives_used_available_and_the_refill() {
+        // The shape an IDE writes: numbers as strings, one attribute a line.
+        let xml = jetbrains_file(
+            r#"{
+  "type": "Available",
+  "current": "7478.3",
+  "maximum": "1000000",
+  "until": "2026-11-09T21:00:00Z",
+  "tariffQuota": {"current": "7478.3", "maximum": "1000000", "available": "992521.7"}
+}"#,
+            r#"{
+  "type": "Known",
+  "next": "2026-10-16T14:00:54.939Z",
+  "tariff": {"amount": "1000000", "duration": "PT720H"}
+}"#,
+        );
+        let q = parse_jetbrains_quota(&xml).expect("parsed");
+        assert_eq!(q.kind, "Available");
+        assert_eq!(q.used, 7478.3);
+        assert_eq!(q.maximum, 1_000_000.0);
+        assert_eq!(q.available, 992_521.7);
+        assert_eq!(q.until, Some(at("2026-11-09T21:00:00Z")));
+        assert_eq!(q.refill, Some(at("2026-10-16T14:00:54.939Z")));
+        assert_eq!(q.refill_amount, Some(1_000_000.0));
+        assert_eq!(q.refill_secs, Some(30.0 * 86400.0));
+        let pct = q.used_pct().unwrap();
+        assert!((pct - 0.74783).abs() < 1e-9, "{pct}");
+    }
+
+    #[test]
+    fn without_a_tariff_quota_what_is_left_is_worked_out() {
+        // Older files carry no tariffQuota, and a refill period that is not
+        // a duration at all.
+        let xml = jetbrains_file(
+            r#"{"type": "paid", "current": "50000", "maximum": "100000"}"#,
+            r#"{"type": "monthly", "next": "2026-11-01T00:00:00Z",
+                "tariff": {"amount": "100000", "duration": "monthly"}}"#,
+        );
+        let q = parse_jetbrains_quota(&xml).expect("parsed");
+        assert_eq!(q.available, 50_000.0);
+        assert_eq!(q.used_pct(), Some(50.0));
+        // No length claimed for a period that did not state one.
+        assert_eq!(q.refill_secs, None);
+        assert_eq!(q.refill, Some(at("2026-11-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn a_file_with_no_quota_component_is_not_a_zero() {
+        // Nothing to read is None, so the tab says so instead of drawing 0%.
+        assert_eq!(parse_jetbrains_quota("<application/>"), None);
+        let other = "<application><component name=\"Other\">\
+                     <option name=\"quotaInfo\" value=\"{}\"/></component></application>";
+        assert_eq!(parse_jetbrains_quota(other), None);
+        // Nor is a quota whose spend could not be read, which would
+        // otherwise claim the whole allowance is left.
+        let xml = jetbrains_file(r#"{"maximum": "1000"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
+        let xml = jetbrains_file(r#"{"current": "lots", "maximum": "1000"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
+        // Nor one the float parser takes but is not a count at all.
+        for bad in ["NaN", "inf", "-Infinity", "1e999", "-5"] {
+            let info = format!(r#"{{"current": "{bad}", "maximum": "1000"}}"#);
+            assert_eq!(parse_jetbrains_quota(&jetbrains_file(&info, "")), None, "{bad}");
+        }
+        for info in [
+            r#"{"current": "5", "maximum": "NaN"}"#,
+            r#"{"current": "5", "maximum": null}"#,
+            r#"{"current": "5", "maximum": "-1000"}"#,
+        ] {
+            assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")), None, "{info}");
+        }
+        // An absent maximum is still read, as a quota with no percentage.
+        let info = r#"{"current": "5"}"#;
+        assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")).unwrap().used_pct(), None);
+        // An overage is kept, so it agrees with the count beside it.
+        let xml = jetbrains_file(r#"{"current": "120", "maximum": "100"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), Some(120.0));
+        // A zero maximum has no percentage to rank.
+        let xml = jetbrains_file(r#"{"current": "0", "maximum": "0"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml).unwrap().used_pct(), None);
+        // Two finite counts whose share is not, which would read `inf%`.
+        let xml = jetbrains_file(r#"{"current": "1", "maximum": "5e-324"}"#, "");
+        assert_eq!(parse_jetbrains_quota(&xml), None);
+    }
+
+    #[test]
+    fn iso_durations_with_a_fixed_length_are_read_and_others_refused() {
+        assert_eq!(parse_iso_hours("PT720H"), Some(2_592_000.0));
+        assert_eq!(parse_iso_hours("P7D"), Some(604_800.0));
+        assert_eq!(parse_iso_hours("P1DT12H30M"), Some(131_400.0));
+        // Months have no fixed length, and the rest are not durations.
+        assert_eq!(parse_iso_hours("P1M"), None);
+        assert_eq!(parse_iso_hours("monthly"), None);
+        assert_eq!(parse_iso_hours("PT"), None);
+        assert_eq!(parse_iso_hours("PT12"), None);
+        // A magnitude too large for f64 is not a period of infinite length.
+        assert_eq!(parse_iso_hours(&format!("PT{}H", "9".repeat(400))), None);
+        // Nor one finite but far past anything the label can say.
+        assert_eq!(parse_iso_hours(&format!("PT{}H", "9".repeat(300))), None);
+        assert_eq!(parse_iso_hours("P36500D"), Some(36500.0 * 86400.0));
     }
 }

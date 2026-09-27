@@ -36,6 +36,7 @@ pub struct State {
     pub copilot: crate::copilot::Data,
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
+    pub jetbrains: crate::jetbrains::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
@@ -61,6 +62,7 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
+        jetbrains: crate::jetbrains::read(caches, cfg),
         installed,
         fetched: 0.0,
         err: String::new(),
@@ -93,6 +95,7 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "copilot" => crate::copilot::lanes(&s.copilot),
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
+        "jetbrains" => crate::jetbrains::lanes(&s.jetbrains),
         _ => Vec::new(),
     }
 }
@@ -155,6 +158,7 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "copilot" => crate::copilot::why_no_lane(&s.copilot),
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
+        "jetbrains" => crate::jetbrains::why_no_lane(&s.jetbrains),
         _ => String::new(),
     };
     let warn = quiet_is_actionable(&note);
@@ -538,6 +542,7 @@ pub fn tab_body(
         "copilot" => crate::copilot::tab(&s.copilot, w, h, cfg, p),
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
         "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
+        "jetbrains" => crate::jetbrains::tab(&s.jetbrains, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
 }

@@ -4,7 +4,8 @@
 
 How much the coding agents on this machine have actually been used — one tab
 per agent, from each agent's own local state, plus a live quota reading for
-the four that publish one and a subscription for the five that do.
+the four that publish one, JetBrains AI's quota as its IDE last recorded it,
+and a subscription for the five that do.
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -1145,6 +1146,33 @@ than drawn as an empty bar.
   this machine's zone.
 
 This is the same command CodexBar runs for its CodeRabbit provider.
+
+### JetBrains AI is read from the IDE's own file
+
+JetBrains publishes no endpoint and no CLI for the AI Assistant quota. Every
+JetBrains IDE with AI Assistant signed in keeps one instead, in
+`options/AIAssistantQuotaManager2.xml` under its config directory, and
+rewrites it whenever it checks. The `jetbrains` tab reads that file and
+nothing else: no credential is touched and nothing leaves the machine.
+
+- **Where it looks**: `~/Library/Application Support/JetBrains` and
+  `…/Google` (Android Studio) on macOS, `~/.config/JetBrains`,
+  `~/.local/share/JetBrains` and `~/.config/Google` on Linux, where a set
+  `XDG_CONFIG_HOME` is read first and the defaults only when it holds no
+  quota. Each directory under them is an IDE and its version,
+  `RustRover2026.2`.
+- **Which file**: the newest. Every IDE on one account records the same
+  quota, and the one written last had the latest look at it. The tab names
+  the IDE, and says so when there was more than one to pick from.
+- **What it shows**: credits used against the maximum, with the refill date
+  and period from `nextRefill` — so the pace mark is drawn against the real
+  cycle, and not drawn when the period is not a fixed length.
+- **How old it is**: the header says when the IDE wrote it. Past an hour the
+  lane is marked cached on `[+]`, because credits spent from another machine
+  would not show until an IDE here looks again.
+
+The tab appears when a quota file exists. It is the same source CodexBar
+reads for its JetBrains AI provider.
 
 ### Grok Bot (Cursor's weekly allowance)
 

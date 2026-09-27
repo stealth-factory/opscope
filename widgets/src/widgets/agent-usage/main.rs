@@ -380,6 +380,7 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "copilot" => (186, 166, 255),
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
+        "jetbrains" => (250, 204, 90),
         _ => return None,
     })
 }
@@ -405,7 +406,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
-    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit",
+    "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "jetbrains",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1819,6 +1820,15 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
             vec![under_home(".gemini/antigravity-cli")],
         ),
         "coderabbit" => ("CodeRabbit", vec!["coderabbit"], vec![]),
+        // No binary either: an IDE is not on PATH under a name worth
+        // guessing, and only one that has recorded a quota has anything to
+        // show, so the quota file is the proof - or a config folder that
+        // would not be listed, so the tab can say so.
+        "jetbrains" => (
+            "JetBrains AI",
+            vec![],
+            crate::jetbrains::detection_paths(),
+        ),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
@@ -2425,6 +2435,7 @@ mod codex;
 mod copilot;
 mod cursor;
 mod grok;
+mod jetbrains;
 mod vendors;
 
 #[cfg(test)]
