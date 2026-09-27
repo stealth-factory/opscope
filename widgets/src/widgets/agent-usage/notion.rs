@@ -284,6 +284,27 @@ fn allowance_rows(d: &Data, a: &NotionAllowance, w: usize, p: &Palette) -> Vec<S
         let text = format!("Notion's answer had no {}, so it is not shown.", what);
         rows.extend(note(&text, &p.warn, w));
     }
+    // A window that came back without its clock still has a true share
+    // used, but no pace or reset can be drawn for it, and that is said.
+    let mut gaps: Vec<&str> = Vec::new();
+    if let Some(r) = &a.rolling {
+        if notion_span_secs(&r.span).is_none() {
+            gaps.push("length for the rolling window");
+        }
+        if a.resets_in.is_none() {
+            gaps.push("reset time for the rolling window");
+        }
+    }
+    if a.period.as_ref().is_some_and(|b| b.ends.is_none()) {
+        gaps.push("end date for the billing period");
+    }
+    if !gaps.is_empty() {
+        let text = format!(
+            "Notion's answer had no {}, so no pace or reset is drawn for it.",
+            gaps.join(" and no ")
+        );
+        rows.extend(note(&text, &p.warn, w));
+    }
     if a.enforcement.eq_ignore_ascii_case("preview") {
         let text = "Notion reports this allowance as a preview, not yet enforced.";
         rows.extend(note(text, &p.dim, w));
@@ -470,6 +491,25 @@ mod tests {
         // curl would turn it into a second header line.
         assert!(cookie_header("abc\r\nX-Other: 1").is_err());
         assert!(cookie_header("token_v2=abc\n").is_err());
+    }
+
+    #[test]
+    fn a_window_without_its_clock_says_what_is_missing() {
+        // Its share used is real; the pace and reset it would need are not.
+        let mut d = reading();
+        d.allowance = parse_notion_allowance(
+            r#"{"status":"within_limit","window":{"used":42,"limit":100},
+                "billingPeriodWindow":{"used":18,"limit":100}}"#,
+        );
+        assert_eq!(lanes(&d).len(), 2);
+        let rows = plain(&tab(&d, 100, 30, &Config::default(), &palette()));
+        let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("no length for the rolling window"), "{rows}");
+        assert!(words.contains("no reset time for the rolling window"), "{rows}");
+        assert!(words.contains("no end date for the billing period"), "{rows}");
+        // A whole answer carries none of it.
+        let rows = plain(&tab(&reading(), 100, 30, &Config::default(), &palette()));
+        assert!(!rows.contains("no pace or reset"), "{rows}");
     }
 
     #[test]
