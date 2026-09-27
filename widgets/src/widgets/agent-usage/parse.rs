@@ -407,14 +407,14 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
-/// A number, or a number written as a string. Rust's float parser also
-/// takes `NaN`, `inf` and overflow, none of which is a count, so only a
-/// finite value counts as read.
+/// A count of credits, as a number or a number written as a string. Rust's
+/// float parser also takes `NaN`, `inf` and overflow, and a count below
+/// zero is no count either, so only a finite value of zero or more is read.
 fn loose_num(value: &serde_json::Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())
-        .filter(|n: &f64| n.is_finite())
+        .filter(|n: &f64| n.is_finite() && *n >= 0.0)
 }
 
 #[cfg(test)]
@@ -732,11 +732,15 @@ mod tests {
         let xml = jetbrains_file(r#"{"current": "lots", "maximum": "1000"}"#, "");
         assert_eq!(parse_jetbrains_quota(&xml), None);
         // Nor one the float parser takes but is not a count at all.
-        for bad in ["NaN", "inf", "-Infinity", "1e999"] {
+        for bad in ["NaN", "inf", "-Infinity", "1e999", "-5"] {
             let info = format!(r#"{{"current": "{bad}", "maximum": "1000"}}"#);
             assert_eq!(parse_jetbrains_quota(&jetbrains_file(&info, "")), None, "{bad}");
         }
-        for info in [r#"{"current": "5", "maximum": "NaN"}"#, r#"{"current": "5", "maximum": null}"#] {
+        for info in [
+            r#"{"current": "5", "maximum": "NaN"}"#,
+            r#"{"current": "5", "maximum": null}"#,
+            r#"{"current": "5", "maximum": "-1000"}"#,
+        ] {
             assert_eq!(parse_jetbrains_quota(&jetbrains_file(info, "")), None, "{info}");
         }
         // An absent maximum is still read, as a quota with no percentage.
