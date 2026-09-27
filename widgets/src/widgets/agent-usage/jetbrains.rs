@@ -62,18 +62,33 @@ const IDES: &[(&str, &str)] = &[
 
 /// Where JetBrains IDEs keep their config, checked at run time rather than
 /// by build target: only the ones that exist are read, and Android Studio
-/// lives under Google rather than JetBrains.
+/// lives under Google rather than JetBrains. On Linux the IDEs follow
+/// `XDG_CONFIG_HOME` when it is set, with `~/.config` as its default.
 fn roots() -> Vec<String> {
-    [
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    roots_under(xdg.as_deref())
+}
+
+fn roots_under(xdg: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // An XDG_CONFIG_HOME that is relative is invalid by the spec and ignored.
+    if let Some(x) = xdg.map(|x| x.trim_end_matches('/')).filter(|x| x.starts_with('/')) {
+        out.push(format!("{}/JetBrains", x));
+        out.push(format!("{}/Google", x));
+    }
+    for r in [
         "Library/Application Support/JetBrains",
         "Library/Application Support/Google",
         ".config/JetBrains",
         ".local/share/JetBrains",
         ".config/Google",
-    ]
-    .iter()
-    .map(|r| under_home(r))
-    .collect()
+    ] {
+        out.push(under_home(r));
+    }
+    // An XDG root that is ~/.config would otherwise count each IDE twice.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|r| seen.insert(r.clone()));
+    out
 }
 
 /// Product name and version for a config directory, or None when it is
@@ -183,7 +198,8 @@ fn pick(mut files: Vec<(String, String, f64)>) -> Data {
 // Old either way: the IDE has not written for a while, or it wrote before a
 // refill that has since come due, so the figure belongs to a closed period.
 fn stale(d: &Data) -> bool {
-    let written_long_ago = d.written > 0.0 && now() - d.written > FRESH_SECS;
+    // A file whose time could not be read cannot vouch for being recent.
+    let written_long_ago = d.written <= 0.0 || now() - d.written > FRESH_SECS;
     let refill_passed = d
         .quota
         .as_ref()
@@ -241,7 +257,11 @@ fn quota_rows(d: &Data, q: &JetBrainsQuota, w: usize, p: &Palette) -> Vec<String
     // The IDE is named under SUBSCRIPTION, so the header keeps only what
     // decides how far to trust the figure, and adds the scope when it fits
     // rather than clipping the age off a narrow pane.
-    let age = format!("recorded {} ago", ago(d.written));
+    let age = if d.written > 0.0 {
+        format!("recorded {} ago", ago(d.written))
+    } else {
+        "age unknown".to_string()
+    };
     let scope = " · account-wide";
     let fits = 13 + age.chars().count() + scope.chars().count() <= w - 1;
     let mut rows = vec![tc::seg(
@@ -451,6 +471,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(d.quota.is_none());
         assert!(d.why.contains("PyCharm"), "{}", d.why);
+    }
+
+    #[test]
+    fn a_file_whose_time_is_unknown_is_cached_and_says_so() {
+        // Otherwise it reads as fresh and the header says "recorded never ago".
+        let d = Data {
+            quota: Some(JetBrainsQuota { used: 1.0, maximum: 10.0, ..Default::default() }),
+            written: 0.0,
+            ..Data::default()
+        };
+        assert!(lanes(&d)[0].stale);
+        let rows = tab(&d, 60, 20, &Config::default(), &palette()).join("\n");
+        assert!(rows.contains("age unknown"), "{rows}");
+    }
+
+    #[test]
+    fn xdg_config_home_is_searched_first_and_never_twice() {
+        let moved = roots_under(Some("/srv/cfg/"));
+        assert_eq!(&moved[..2], ["/srv/cfg/JetBrains", "/srv/cfg/Google"]);
+        assert!(moved.contains(&under_home(".config/JetBrains")));
+        // Pointing it at the default adds nothing to read twice.
+        let default = under_home(".config");
+        assert_eq!(roots_under(Some(&default)).len(), roots_under(None).len());
+        // A relative value is not a valid XDG_CONFIG_HOME.
+        assert_eq!(roots_under(Some("cfg")), roots_under(None));
     }
 
     #[test]
