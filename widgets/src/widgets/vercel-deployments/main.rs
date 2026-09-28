@@ -138,6 +138,52 @@ fn vercel_refusal(said: &str) -> String {
     said.to_string()
 }
 
+/// The team a SAML-locked refusal is about, when that is what this is.
+///
+/// A team that enforces SAML SSO turns away any token that was not made
+/// from a SAML sign-in, with `saml: true` in the body. The team list still
+/// names that team, so without this the whole board wore one team's 403,
+/// with advice to replace a token that was working for everything else.
+/// The name is the slug Vercel quotes in its message, or `None` inside the
+/// `Some` when the message does not quote one.
+fn saml_locked(said: &str) -> Option<Option<String>> {
+    let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
+    if !flat.contains("\"saml\":true") {
+        return None;
+    }
+    let body: serde_json::Value = said
+        .find('{')
+        .and_then(|at| serde_json::from_str(&said[at..]).ok())
+        .unwrap_or_default();
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    let slug = message
+        .split_once("scope \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(slug, _)| slug.to_string())
+        .filter(|slug| !slug.is_empty());
+    Some(slug)
+}
+
+/// What to say about the teams SAML kept out, or nothing when none did.
+fn saml_note(locked: &[String]) -> Option<String> {
+    if locked.is_empty() {
+        return None;
+    }
+    let (which, it_needs) = if locked.len() == 1 {
+        ("team", "it requires")
+    } else {
+        ("teams", "they require")
+    };
+    Some(format!(
+        "skipped {} {} ({}) - {} SAML SSO: sign in with SAML and make a new \
+         token, or leave it out of vercel_deployments.teams",
+        locked.len(),
+        which,
+        locked.join(", "),
+        it_needs
+    ))
+}
+
 /// The team ids in one page of `/v2/teams`, and the cursor for the next.
 ///
 /// Vercel pages every list endpoint the same way: `pagination.next` is the
@@ -1068,6 +1114,11 @@ fn main() {
     let poll_token = tok.clone();
     let poll_env = env_name.clone();
     let poll_scope = scope_note.clone();
+    // Teams that turned the token away for want of a SAML session, by id,
+    // and the names to show for them. A token does not gain a SAML session
+    // by being asked again, so they are not asked again.
+    let mut saml_skipped: HashSet<String> = HashSet::new();
+    let mut saml_names: Vec<String> = Vec::new();
     std::thread::spawn(move || loop {
         if poll_token.is_empty() {
             if let Ok(mut guard) = poller.lock() {
@@ -1089,6 +1140,9 @@ fn main() {
             // there is no empty case to guard here - a fallback that cannot
             // run reads as a case that can.
             for team in &poll_teams {
+                if saml_skipped.contains(team) {
+                    continue;
+                }
                 let mut path = format!("/v6/deployments?limit={}", limit);
                 if !team.is_empty() {
                     path += &format!("&teamId={}", team);
@@ -1101,6 +1155,11 @@ fn main() {
                             d["_team"] = serde_json::Value::String(team.clone());
                             out.push(d);
                         }
+                    }
+                    Err(said) if saml_locked(&said).is_some() => {
+                        let name = saml_locked(&said).flatten().unwrap_or_else(|| team.clone());
+                        saml_skipped.insert(team.clone());
+                        saml_names.push(name);
                     }
                     Err(said) => {
                         err = if said.contains("401") || said.contains("403") {
@@ -1132,7 +1191,13 @@ fn main() {
                 // A scope that was never complete is a caveat about which
                 // teams are being asked at all, so it goes in front of
                 // whatever this round has to say rather than under it.
-                guard.err = match (&poll_scope, err.is_empty()) {
+                // Teams SAML kept out are a standing caveat too, not a
+                // failed round: the rest of the board is current.
+                let standing = match (&poll_scope, saml_note(&saml_names)) {
+                    (Some(a), Some(b)) => Some(format!("{} · {}", a, b)),
+                    (a, b) => a.clone().or(b),
+                };
+                guard.err = match (&standing, err.is_empty()) {
                     (None, _) => err,
                     (Some(said), true) => said.clone(),
                     // One fact, said once. A refused token makes the scope
@@ -1850,6 +1915,35 @@ mod tests {
         // Whitespace in the JSON must not hide the flag.
         let spaced = r#"HTTP 403: { "error": { "invalidToken": true } }"#;
         assert!(vercel_refusal(spaced).starts_with("the Vercel token is not valid"));
+    }
+
+    #[test]
+    fn a_saml_locked_team_is_named_rather_than_blamed_on_the_token() {
+        // The body Vercel returns for a team that enforces SAML SSO, asked
+        // with a token made outside a SAML session.
+        let said = concat!(
+            r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized: "#,
+            r#"Trying to access resource under scope \"vercel\". You must "#,
+            r#"re-authenticate to this scope or use a token with access to this "#,
+            r#"scope.","saml":true}}"#
+        );
+        assert_eq!(saml_locked(said), Some(Some("vercel".to_string())));
+        // A plain permission refusal is not SAML's doing.
+        let limited = r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized"}}"#;
+        assert_eq!(saml_locked(limited), None);
+        // Flagged but unquoted still counts; the caller names it by id.
+        assert_eq!(saml_locked(r#"HTTP 403: { "error": { "saml": true } }"#), Some(None));
+    }
+
+    #[test]
+    fn the_saml_note_names_every_skipped_team_once() {
+        assert_eq!(saml_note(&[]), None);
+        let one = saml_note(&["vercel".to_string()]).unwrap();
+        assert!(one.starts_with("skipped 1 team (vercel) - it requires SAML SSO"), "{one}");
+        // Not the token's fault, so not the token-expired advice either.
+        assert!(!one.contains("expired"), "{one}");
+        let two = saml_note(&["a".to_string(), "b".to_string()]).unwrap();
+        assert!(two.starts_with("skipped 2 teams (a, b) - they require"), "{two}");
     }
 
     /// While the token itself is refused, nothing about teams is worth
