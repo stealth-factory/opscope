@@ -172,11 +172,11 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
 }
 
 /// The header's word on teams SAML kept out of its totals, or nothing.
-fn skipped_tag(skipped: usize) -> String {
-    match skipped {
+fn skipped_tag(skipped: &[String]) -> String {
+    match skipped.len() {
         0 => String::new(),
-        1 => " 1 team skipped ·".to_string(),
-        n => format!(" {} teams skipped ·", n),
+        1 => format!(" skipped scope: {} ·", skipped[0]),
+        _ => format!(" skipped scopes: {} ·", skipped.join(", ")),
     }
 }
 
@@ -388,7 +388,7 @@ struct State {
     fetched: f64,
     /// Teams left out for want of a SAML session. Kept apart from `err` so
     /// the header can qualify its totals without an error row.
-    skipped: usize,
+    skipped: Vec<String>,
 }
 
 fn text(value: &serde_json::Value, key: &str) -> String {
@@ -1227,7 +1227,7 @@ fn main() {
                 // whatever this round has to say rather than under it.
                 // Teams SAML kept out are a standing caveat too, not a
                 // failed round: the rest of the board is current.
-                guard.skipped = saml_skipped.len();
+                guard.skipped = saml_names.clone();
                 let standing = match (&poll_scope, saml_note(&saml_names, any_loaded)) {
                     (Some(a), Some(b)) => Some(format!("{} · {}", a, b)),
                     (a, b) => a.clone().or(b),
@@ -1455,7 +1455,7 @@ fn main() {
 
         let (w, h) = tc::size();
         let (deps, err, fetched, skipped) = match state.lock() {
-            Ok(g) => (g.deployments.clone(), g.err.clone(), g.fetched, g.skipped),
+            Ok(g) => (g.deployments.clone(), g.err.clone(), g.fetched, g.skipped.clone()),
             Err(_) => return,
         };
         if !note.0.is_empty() && tc::now() > note.1 {
@@ -1600,7 +1600,7 @@ fn main() {
             // The totals leave the SAML-locked teams out, and a partial
             // count must not read as the whole account. First, because the
             // header clips from the right and this must outlast the totals.
-            (p.dim.as_str(), skipped_tag(skipped)),
+            (p.dim.as_str(), skipped_tag(&skipped)),
             (p.dim.as_str(), format!(" {} deploys", deps.len())),
             (p.dim.as_str(), format!(" · {} proj", seen_projects.len())),
             (
@@ -1990,9 +1990,12 @@ mod tests {
         // locked team is not worth a line on it.
         assert_eq!(saml_note(&["vercel".to_string()], true), None);
         // The header still says its totals leave the team out.
-        assert_eq!(skipped_tag(0), "");
-        assert_eq!(skipped_tag(1), " 1 team skipped ·");
-        assert_eq!(skipped_tag(2), " 2 teams skipped ·");
+        assert_eq!(skipped_tag(&[]), "");
+        assert_eq!(skipped_tag(&["vercel".to_string()]), " skipped scope: vercel ·");
+        assert_eq!(
+            skipped_tag(&["a".to_string(), "b".to_string(), "c".to_string()]),
+            " skipped scopes: a, b, c ·"
+        );
     }
 
     #[test]
