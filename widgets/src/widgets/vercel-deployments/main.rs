@@ -171,6 +171,15 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
     Some(slug)
 }
 
+/// The header's word on teams SAML kept out of its totals, or nothing.
+fn skipped_tag(skipped: usize) -> String {
+    match skipped {
+        0 => String::new(),
+        1 => " · 1 team skipped".to_string(),
+        n => format!(" · {} teams skipped", n),
+    }
+}
+
 /// What to say about the teams SAML kept out, or nothing when none did.
 ///
 /// Said only while no scope at all is answering. With any team or the
@@ -377,6 +386,9 @@ struct State {
     deployments: Vec<serde_json::Value>,
     err: String,
     fetched: f64,
+    /// Teams left out for want of a SAML session. Kept apart from `err` so
+    /// the header can qualify its totals without an error row.
+    skipped: usize,
 }
 
 fn text(value: &serde_json::Value, key: &str) -> String {
@@ -1215,6 +1227,7 @@ fn main() {
                 // whatever this round has to say rather than under it.
                 // Teams SAML kept out are a standing caveat too, not a
                 // failed round: the rest of the board is current.
+                guard.skipped = saml_skipped.len();
                 let standing = match (&poll_scope, saml_note(&saml_names, any_loaded)) {
                     (Some(a), Some(b)) => Some(format!("{} · {}", a, b)),
                     (a, b) => a.clone().or(b),
@@ -1441,8 +1454,8 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (deps, err, fetched) = match state.lock() {
-            Ok(g) => (g.deployments.clone(), g.err.clone(), g.fetched),
+        let (deps, err, fetched, skipped) = match state.lock() {
+            Ok(g) => (g.deployments.clone(), g.err.clone(), g.fetched, g.skipped),
             Err(_) => return,
         };
         if !note.0.is_empty() && tc::now() > note.1 {
@@ -1586,6 +1599,9 @@ fn main() {
         let mut head = vec![
             (p.dim.as_str(), format!(" {} deploys", deps.len())),
             (p.dim.as_str(), format!(" · {} proj", seen_projects.len())),
+            // The totals leave the SAML-locked teams out, and a partial
+            // count must not read as the whole account.
+            (p.dim.as_str(), skipped_tag(skipped)),
             (
                 p.ready.as_str(),
                 format!("  {} ready", states.get("READY").copied().unwrap_or(0)),
@@ -1972,6 +1988,10 @@ mod tests {
         // One working team or the personal account is a useful board, and a
         // locked team is not worth a line on it.
         assert_eq!(saml_note(&["vercel".to_string()], true), None);
+        // The header still says its totals leave the team out.
+        assert_eq!(skipped_tag(0), "");
+        assert_eq!(skipped_tag(1), " · 1 team skipped");
+        assert_eq!(skipped_tag(2), " · 2 teams skipped");
     }
 
     #[test]
