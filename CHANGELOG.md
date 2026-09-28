@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.30.2] - 2026-09-28
+
+### Bug Fixes
+
+- **vercel-deployments**: Skip teams that require SAML SSO instead of erroring (#284)
+
 ## [0.30.1] - 2026-09-28
 
 ### Bug Fixes
