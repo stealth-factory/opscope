@@ -172,8 +172,13 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
 }
 
 /// What to say about the teams SAML kept out, or nothing when none did.
-fn saml_note(locked: &[String]) -> Option<String> {
-    if locked.is_empty() {
+///
+/// Said only while no scope at all is answering. With any team or the
+/// personal account loading, the board is useful and a locked team the
+/// reader cannot open anyway is not worth a line on it; with none, this is
+/// the reason the board is empty and has to be said.
+fn saml_note(locked: &[String], any_loaded: bool) -> Option<String> {
+    if locked.is_empty() || any_loaded {
         return None;
     }
     let (which, it_needs) = if locked.len() == 1 {
@@ -1136,6 +1141,8 @@ fn main() {
             }
         } else {
             let mut out: Vec<serde_json::Value> = Vec::new();
+            // Whether any scope answered this round, deployments or not.
+            let mut any_loaded = false;
             // A file others can read is worth saying out loud, since this
             // is the widget that put a token in it.
             let mut err = if source == "config" {
@@ -1156,6 +1163,7 @@ fn main() {
                 }
                 match api(&path, &poll_token) {
                     Ok(res) => {
+                        any_loaded = true;
                         for d in res["deployments"].as_array().into_iter().flatten() {
                             let mut d = d.clone();
                             // Carried so the detail request knows its scope.
@@ -1207,7 +1215,7 @@ fn main() {
                 // whatever this round has to say rather than under it.
                 // Teams SAML kept out are a standing caveat too, not a
                 // failed round: the rest of the board is current.
-                let standing = match (&poll_scope, saml_note(&saml_names)) {
+                let standing = match (&poll_scope, saml_note(&saml_names, any_loaded)) {
                     (Some(a), Some(b)) => Some(format!("{} · {}", a, b)),
                     (a, b) => a.clone().or(b),
                 };
@@ -1960,16 +1968,23 @@ mod tests {
     }
 
     #[test]
+    fn the_saml_note_stays_quiet_while_any_scope_loads() {
+        // One working team or the personal account is a useful board, and a
+        // locked team is not worth a line on it.
+        assert_eq!(saml_note(&["vercel".to_string()], true), None);
+    }
+
+    #[test]
     fn the_saml_note_names_every_skipped_team_once() {
-        assert_eq!(saml_note(&[]), None);
-        let one = saml_note(&["vercel".to_string()]).unwrap();
+        assert_eq!(saml_note(&[], false), None);
+        let one = saml_note(&["vercel".to_string()], false).unwrap();
         assert!(one.starts_with("skipped 1 team (vercel) - it requires SAML SSO"), "{one}");
         // Not the token's fault, so not the token-expired advice either.
         assert!(!one.contains("expired"), "{one}");
         // Found by discovery, it is in no list to be left out of, so the
         // way out is naming the teams that are wanted.
         assert!(one.contains("name only the teams you want"), "{one}");
-        let two = saml_note(&["a".to_string(), "b".to_string()]).unwrap();
+        let two = saml_note(&["a".to_string(), "b".to_string()], false).unwrap();
         assert!(two.starts_with("skipped 2 teams (a, b) - they require"), "{two}");
     }
 
