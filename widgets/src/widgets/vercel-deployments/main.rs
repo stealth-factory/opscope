@@ -175,8 +175,8 @@ fn saml_locked(body: &str) -> Option<Option<String>> {
 fn skipped_tag(skipped: usize) -> String {
     match skipped {
         0 => String::new(),
-        1 => " · 1 team skipped".to_string(),
-        n => format!(" · {} teams skipped", n),
+        1 => " 1 team skipped ·".to_string(),
+        n => format!(" {} teams skipped ·", n),
     }
 }
 
@@ -1597,11 +1597,12 @@ fn main() {
 
         let mut rows = vec![tc::title("vercel deployments", w, &p.prod)];
         let mut head = vec![
+            // The totals leave the SAML-locked teams out, and a partial
+            // count must not read as the whole account. First, because the
+            // header clips from the right and this must outlast the totals.
+            (p.dim.as_str(), skipped_tag(skipped)),
             (p.dim.as_str(), format!(" {} deploys", deps.len())),
             (p.dim.as_str(), format!(" · {} proj", seen_projects.len())),
-            // The totals leave the SAML-locked teams out, and a partial
-            // count must not read as the whole account.
-            (p.dim.as_str(), skipped_tag(skipped)),
             (
                 p.ready.as_str(),
                 format!("  {} ready", states.get("READY").copied().unwrap_or(0)),
@@ -1990,8 +1991,8 @@ mod tests {
         assert_eq!(saml_note(&["vercel".to_string()], true), None);
         // The header still says its totals leave the team out.
         assert_eq!(skipped_tag(0), "");
-        assert_eq!(skipped_tag(1), " · 1 team skipped");
-        assert_eq!(skipped_tag(2), " · 2 teams skipped");
+        assert_eq!(skipped_tag(1), " 1 team skipped ·");
+        assert_eq!(skipped_tag(2), " 2 teams skipped ·");
     }
 
     #[test]
