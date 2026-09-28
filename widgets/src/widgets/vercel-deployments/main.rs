@@ -183,7 +183,7 @@ fn saml_note(locked: &[String]) -> Option<String> {
     };
     Some(format!(
         "skipped {} {} ({}) - {} SAML SSO: sign in with SAML and make a new \
-         token, or leave it out of vercel_deployments.teams",
+         token, or name only the teams you want under vercel_deployments.teams",
         locked.len(),
         which,
         locked.join(", "),
@@ -1960,6 +1960,9 @@ mod tests {
         assert!(one.starts_with("skipped 1 team (vercel) - it requires SAML SSO"), "{one}");
         // Not the token's fault, so not the token-expired advice either.
         assert!(!one.contains("expired"), "{one}");
+        // Found by discovery, it is in no list to be left out of, so the
+        // way out is naming the teams that are wanted.
+        assert!(one.contains("name only the teams you want"), "{one}");
         let two = saml_note(&["a".to_string(), "b".to_string()]).unwrap();
         assert!(two.starts_with("skipped 2 teams (a, b) - they require"), "{two}");
     }
