@@ -1355,6 +1355,24 @@ pub fn get_with_headers(
     headers: &[(&str, &str)],
     seconds: u64,
 ) -> Result<(String, Vec<(String, String)>), String> {
+    let (status, body, found) = get_answer(url, headers, seconds)?;
+    if !(200..300).contains(&status) {
+        return Err(refused(status, &body));
+    }
+    Ok((body, found))
+}
+
+/// One HTTPS GET that hands back every answer, refusals included, whole.
+///
+/// `get_with_headers` squeezes a refusal onto one capped line, which is
+/// right for showing it and wrong for reading it: Vercel puts the flag
+/// that says which kind of 403 this is after a long message, past the cap.
+/// Only a failure to reach the server at all is an `Err` here.
+pub fn get_answer(
+    url: &str,
+    headers: &[(&str, &str)],
+    seconds: u64,
+) -> Result<(u16, String, Vec<(String, String)>), String> {
     use std::io::Write;
     let mut config = format!(
         "--silent\n--show-error\n--request GET\n--location\n--dump-header -\n\
@@ -1401,10 +1419,7 @@ pub fn get_with_headers(
         .filter_map(|line| line.split_once(':'))
         .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
         .collect();
-    if !(200..300).contains(&status) {
-        return Err(refused(status, &body));
-    }
-    Ok((body, found))
+    Ok((status, body, found))
 }
 
 /// One HTTPS POST of a JSON body, returning the body and its headers.
@@ -1486,7 +1501,7 @@ pub fn post_json(
 ///
 /// Squeezed onto one line and capped the way every other subprocess
 /// complaint here is, so an HTML error page cannot take the whole pane.
-fn refused(status: u16, body: &str) -> String {
+pub fn refused(status: u16, body: &str) -> String {
     let said: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let said: String = said.chars().take(200).collect();
     if said.is_empty() {

@@ -107,15 +107,15 @@ fn token(cfg: &serde_json::Value) -> (String, &'static str) {
 
 fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
     let url = format!("{}{}", API, path);
-    // get_with_headers rather than get: `get` runs curl with --fail, which
-    // throws the body away, and the body is the only place Vercel says
-    // *which* kind of 403 this is.
-    let (body, _) = tc::get_with_headers(
-        &url,
-        &[("Authorization", &format!("Bearer {}", tok))],
-        25,
-    )
-    .map_err(|said| vercel_refusal(&said))?;
+    // get_answer rather than get: `get` runs curl with --fail, which throws
+    // the body away, and the body is the only place Vercel says *which*
+    // kind of 403 this is. Not get_with_headers either: it caps a refusal
+    // at 200 characters, and `saml: true` comes after a longer message.
+    let (status, body, _) =
+        tc::get_answer(&url, &[("Authorization", &format!("Bearer {}", tok))], 25)?;
+    if !(200..300).contains(&status) {
+        return Err(vercel_refusal(status, &body));
+    }
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
@@ -127,16 +127,26 @@ fn api(path: &str, tok: &str) -> Result<serde_json::Value, String> {
 /// thing comes back without it. Saying "personal scope only" to somebody
 /// whose token is simply wrong sends them to read about scopes, which is
 /// the wrong page, and this cost an afternoon once.
-fn vercel_refusal(said: &str) -> String {
-    let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
+///
+/// Read from the whole body, before it is capped for the screen: the flags
+/// sit after the message, and a long message pushes them past the cap.
+fn vercel_refusal(status: u16, body: &str) -> String {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
     if flat.contains("\"invalidToken\":true") {
         return tc::missing_config(
             "the Vercel token is not valid - it may be revoked, or pasted \
              short. Set vercel_deployments.token",
         );
     }
-    said.to_string()
+    if let Some(slug) = saml_locked(body) {
+        return format!("{}{}", SAML_LOCKED, slug.unwrap_or_default());
+    }
+    tc::refused(status, body)
 }
+
+/// How a SAML-locked refusal reads on its way back from `api`, followed by
+/// the team's slug when Vercel named it.
+const SAML_LOCKED: &str = "SAML SSO required by team ";
 
 /// The team a SAML-locked refusal is about, when that is what this is.
 ///
@@ -146,15 +156,12 @@ fn vercel_refusal(said: &str) -> String {
 /// with advice to replace a token that was working for everything else.
 /// The name is the slug Vercel quotes in its message, or `None` inside the
 /// `Some` when the message does not quote one.
-fn saml_locked(said: &str) -> Option<Option<String>> {
-    let flat: String = said.chars().filter(|c| !c.is_whitespace()).collect();
+fn saml_locked(body: &str) -> Option<Option<String>> {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
     if !flat.contains("\"saml\":true") {
         return None;
     }
-    let body: serde_json::Value = said
-        .find('{')
-        .and_then(|at| serde_json::from_str(&said[at..]).ok())
-        .unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let message = body["error"]["message"].as_str().unwrap_or("");
     let slug = message
         .split_once("scope \"")
@@ -1156,8 +1163,9 @@ fn main() {
                             out.push(d);
                         }
                     }
-                    Err(said) if saml_locked(&said).is_some() => {
-                        let name = saml_locked(&said).flatten().unwrap_or_else(|| team.clone());
+                    Err(said) if said.starts_with(SAML_LOCKED) => {
+                        let slug = &said[SAML_LOCKED.len()..];
+                        let name = if slug.is_empty() { team.clone() } else { slug.to_string() };
                         saml_skipped.insert(team.clone());
                         saml_names.push(name);
                     }
@@ -1899,40 +1907,50 @@ mod tests {
     #[test]
     fn an_invalid_token_is_told_apart_from_a_limited_one() {
         let refused_token = concat!(
-            r#"HTTP 403: {"error":{"code":"forbidden","#,
+            r#"{"error":{"code":"forbidden","#,
             r#""message":"Not authorized","invalidToken":true}}"#
         );
-        let said = vercel_refusal(refused_token);
+        let said = vercel_refusal(403, refused_token);
         assert!(said.starts_with("the Vercel token is not valid"), "{said}");
         assert!(!said.contains("scope"), "it is not a scope problem: {said}");
         assert!(said.contains(tc::SET_IN_SETTINGS), "{said}");
 
         // The same status without that flag is a permission, and keeps
         // whatever Vercel said about it.
-        let limited = r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized"}}"#;
-        assert_eq!(vercel_refusal(limited), limited);
+        let limited = r#"{"error":{"code":"forbidden","message":"Not authorized"}}"#;
+        assert_eq!(vercel_refusal(403, limited), format!("HTTP 403: {}", limited));
 
         // Whitespace in the JSON must not hide the flag.
-        let spaced = r#"HTTP 403: { "error": { "invalidToken": true } }"#;
-        assert!(vercel_refusal(spaced).starts_with("the Vercel token is not valid"));
+        let spaced = r#"{ "error": { "invalidToken": true } }"#;
+        assert!(vercel_refusal(403, spaced).starts_with("the Vercel token is not valid"));
     }
 
     #[test]
     fn a_saml_locked_team_is_named_rather_than_blamed_on_the_token() {
         // The body Vercel returns for a team that enforces SAML SSO, asked
         // with a token made outside a SAML session.
-        let said = concat!(
-            r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized: "#,
+        let body = concat!(
+            r#"{"error":{"code":"forbidden","message":"Not authorized: "#,
             r#"Trying to access resource under scope \"vercel\". You must "#,
             r#"re-authenticate to this scope or use a token with access to this "#,
             r#"scope.","saml":true}}"#
         );
-        assert_eq!(saml_locked(said), Some(Some("vercel".to_string())));
+        assert_eq!(saml_locked(body), Some(Some("vercel".to_string())));
+        assert_eq!(vercel_refusal(403, body), format!("{}vercel", SAML_LOCKED));
+        // A longer slug pushes the flag past the 200 characters a refusal
+        // is capped to for the screen, so it has to be read from the whole
+        // body.
+        let long = body.replace("vercel", "a-much-longer-team-slug-than-that");
+        assert!(!tc::refused(403, &long).contains("\"saml\":true"));
+        assert_eq!(
+            vercel_refusal(403, &long),
+            format!("{}a-much-longer-team-slug-than-that", SAML_LOCKED)
+        );
         // A plain permission refusal is not SAML's doing.
-        let limited = r#"HTTP 403: {"error":{"code":"forbidden","message":"Not authorized"}}"#;
+        let limited = r#"{"error":{"code":"forbidden","message":"Not authorized"}}"#;
         assert_eq!(saml_locked(limited), None);
         // Flagged but unquoted still counts; the caller names it by id.
-        assert_eq!(saml_locked(r#"HTTP 403: { "error": { "saml": true } }"#), Some(None));
+        assert_eq!(vercel_refusal(403, r#"{ "error": { "saml": true } }"#), SAML_LOCKED);
     }
 
     #[test]
@@ -1951,9 +1969,7 @@ mod tests {
     #[test]
     fn a_refused_token_does_not_also_complain_about_teams() {
         let (ids, stopped) = walk_teams(|_| {
-            Err(vercel_refusal(
-                r#"HTTP 403: {"error":{"invalidToken":true}}"#,
-            ))
+            Err(vercel_refusal(403, r#"{"error":{"invalidToken":true}}"#))
         });
         assert!(ids.is_empty());
         let stopped = stopped.expect("a walk that gave up has to say so");
