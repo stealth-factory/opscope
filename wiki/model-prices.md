@@ -48,6 +48,7 @@ record which was taken, so both are carried.
 | `claude-opus-4-5` | 5 | 25 | 0.50 | 6.25 | 10 |
 | `claude-opus-4-1` | 15 | 75 | 1.50 | 18.75 | 30 |
 | `claude-opus-4` | 15 | 75 | 1.50 | 18.75 | 30 |
+| `claude-sonnet-5-5` | 2 | 10 | 0.20 | 2.50 | 4 |
 | `claude-sonnet-5` | 2 | 10 | 0.20 | 2.50 | 4 |
 | `claude-sonnet-4-6` | 3 | 15 | 0.30 | 3.75 | 6 |
 | `claude-sonnet-4-5` | 3 | 15 | 0.30 | 3.75 | 6 |
@@ -63,6 +64,10 @@ record which was taken, so both are carried.
 - **Opus 5.5 reads cache at 0.05× input**, $0.20. The pricing page footnotes
   it. `claude-opus-5` is a prefix of `claude-opus-5-5`, so the 5.5 row has to
   exist or 5.5 inherits Opus 5 — $5/$25 and cache reads at $0.50.
+- **Sonnet 5.5 publishes the same five as Sonnet 5**, 2 / 10 / 0.20 / 2.50 / 4.
+  Cache reads are the standard 0.1×, not Opus 5.5's 0.05×. `claude-sonnet-5`
+  is a prefix of `claude-sonnet-5-5`, so the 5.5 row has to exist or a later
+  move of one model reprices the other. Fast mode is not offered.
 - `claude-sonnet-5`'s introductory $2/$10 is now standard; the rise to $3/$15
   scheduled for 1 Sep 2026 was cancelled.
 - Fast mode, where offered, is a different rate — `claude-opus-5-5` is
@@ -222,6 +227,22 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 28 Sep 2026
+
+**Added `claude-sonnet-5-5`.** The published five match `claude-sonnet-5`:
+2 / 10 / 0.20 / 2.50 / 4 (input, output, cache read, 5m cache write, 1h
+cache write). Confirmed 28 Sep 2026 on the
+[model page](https://platform.claude.com/docs/en/models/sonnet-5-5/overview)
+and the
+[pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
+The API id is `claude-sonnet-5-5`. `claude-sonnet-5` is a prefix of that
+id, so without this row 5.5 inherits Sonnet 5. The numbers agree today,
+which is why the row is easy to skip and is not: a later move of one model
+must not reprice the other. Cache reads are the standard 0.1×; the 0.05×
+footnote is Opus 5.5 only. Fast mode is not offered. Claude 4.6 and later,
+including this model, bill the full 1M window at the standard per-token
+rate, so there is no long-context column to leave out.
 
 ### 22 Sep 2026
 

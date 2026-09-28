@@ -693,6 +693,10 @@ nothing. `gpt-6-sol` and `gpt-6-luna` are the same shape of gap against the
 0.10 / 0.50 / 0.01 / 0.125 — and `claude-opus-5` is a prefix of
 `claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
 would inherit Opus 5, cache reads at $0.50 against the published $0.20.
+`claude-sonnet-5` is a prefix of `claude-sonnet-5-5`. The published five
+match Sonnet 5 — 2 / 10 / 0.20 / 2.50 / 4 — so inheriting would bill the
+same today, and the row is still its own so a later move of one model does
+not reprice the other.
 
 Fifteen models have **no published price at all** — `gpt-5.3-codex-spark`,
 which is not on the API; `codex-auto-review`; `gemini-3.8-flash-lite`, never
