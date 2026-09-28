@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.30.1] - 2026-09-28
+
+### Bug Fixes
+
+- **github**: Keep the PR FLOW figures up through a refresh (#281)
+
 ## [0.30.0] - 2026-09-27
 
 ### Features
