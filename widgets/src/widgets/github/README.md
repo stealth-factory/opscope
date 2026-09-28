@@ -135,6 +135,11 @@ Three things about those figures:
   the sum across accounts and appear only once every account has reported
   one, because a sum missing a member is a smaller number wearing the same
   label.
+- **A refresh does not blank them.** Only the first load shimmers. On every
+  pass after that the figures already on screen stay up while the new ones
+  are counted, and are swapped in place once they are whole. A pass that
+  fails to read them drops them back to the shimmer rather than leaving the
+  last reading up as if it were this one.
 
 The column is reserved out of the chart's width *before* the days are spread,
 so the bars narrow to make room rather than being drawn over. Where the chart
