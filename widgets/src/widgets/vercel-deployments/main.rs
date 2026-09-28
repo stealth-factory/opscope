@@ -1195,6 +1195,12 @@ fn main() {
                 if !out.is_empty() || err.is_empty() {
                     guard.deployments = out;
                     guard.fetched = tc::now();
+                } else {
+                    // The kept rows must not outlive a team the note now
+                    // says was skipped: that would be a row from nowhere.
+                    guard
+                        .deployments
+                        .retain(|d| !saml_skipped.contains(&text(d, "_team")));
                 }
                 // A scope that was never complete is a caveat about which
                 // teams are being asked at all, so it goes in front of
