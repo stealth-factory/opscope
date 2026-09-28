@@ -266,6 +266,16 @@ const LIST_RATES: tc::Catalogue = &[
         &[("input", 15.0), ("output", 75.0), ("cache_write", 18.75), ("cache_read", 1.50), ("cache_write_1h", 30.0)],
     ),
     (
+        // claude-sonnet-5 is a prefix of this id. The published five match
+        // Sonnet 5 today, so inheriting would bill the same number, and the
+        // row is still its own: a later move of one model must not reprice
+        // the other. Fast mode is not offered. The full 1M window bills at
+        // these rates; there is no long-context column.
+        "claude-sonnet-5-5",
+        "Anthropic",
+        &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
+    ),
+    (
         "claude-sonnet-5",
         "Anthropic",
         &[("input", 2.0), ("output", 10.0), ("cache_write", 2.50), ("cache_read", 0.20), ("cache_write_1h", 4.0)],
@@ -3228,6 +3238,61 @@ mod tests {
         assert_eq!(opus5.get("input"), Some(&5.0));
         assert_eq!(opus5.get("output"), Some(&25.0));
         assert_eq!(opus5.get("cache_read"), Some(&0.50));
+    }
+
+    /// Published rates from Anthropic's pricing page on 28 Sep 2026.
+    ///
+    /// `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`, and the five
+    /// numbers match, so a missing row would still bill the same today.
+    /// Membership is what the test pins: deleting the line must fail here
+    /// even while the bill would not move.
+    #[test]
+    fn sonnet_5_5_is_priced_on_its_own_row() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        assert_eq!(
+            LIST_RATES.iter().filter(|(k, _, _)| *k == "claude-sonnet-5-5").count(),
+            1,
+            "claude-sonnet-5-5 needs its own row; the Sonnet 5 prefix would otherwise own it"
+        );
+
+        let (rate, origin) = rate_for("claude-sonnet-5-5", &none);
+        let rate = rate.expect("claude-sonnet-5-5 must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        assert_eq!(rate.get("cache_write"), Some(&2.50));
+        assert_eq!(rate.get("cache_write_1h"), Some(&4.0));
+
+        // The five match Sonnet 5, so the rate alone cannot tell the rows
+        // apart. Longest substring is what `rate_for` uses, and that is what
+        // has to land on 5.5 for a 5.5 id and on Sonnet 5 for a Sonnet 5 id.
+        let longest = |model: &str| {
+            LIST_RATES
+                .iter()
+                .filter(|(k, _, _)| model.contains(k))
+                .max_by_key(|(k, _, _)| k.chars().count())
+                .map(|(k, _, _)| *k)
+        };
+        assert_eq!(longest("claude-sonnet-5-5"), Some("claude-sonnet-5-5"));
+        assert_eq!(longest("claude-sonnet-5-5-20260928"), Some("claude-sonnet-5-5"));
+        assert_eq!(longest("claude-sonnet-5"), Some("claude-sonnet-5"));
+        assert_eq!(longest("claude-sonnet-5-20260101"), Some("claude-sonnet-5"));
+
+        let (dated, dated_origin) = rate_for("claude-sonnet-5-5-20260928", &none);
+        assert_eq!(dated_origin, "list");
+        assert_eq!(dated.unwrap().get("input"), Some(&2.0));
+
+        let (older, _) = rate_for("claude-sonnet-5", &none);
+        let older = older.expect("claude-sonnet-5 was already priced");
+        assert_eq!(older.get("input"), Some(&2.0));
+        assert_eq!(older.get("output"), Some(&10.0));
+        assert_eq!(older.get("cache_read"), Some(&0.20));
+        assert_eq!(older.get("cache_write"), Some(&2.50));
+        assert_eq!(older.get("cache_write_1h"), Some(&4.0));
+        let (dated_five, _) = rate_for("claude-sonnet-5-20260101", &none);
+        assert_eq!(dated_five.unwrap().get("input"), Some(&2.0));
     }
 
     #[test]
