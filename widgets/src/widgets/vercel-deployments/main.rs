@@ -1596,12 +1596,22 @@ fn main() {
             .sum();
 
         let mut rows = vec![tc::title("vercel deployments", w, &p.prod)];
+        // The totals leave the SAML-locked teams out, and a partial count
+        // must not read as the whole account. It leads the header, because
+        // the header clips from the right and this must outlast the totals;
+        // a list of names too long to sit beside the count gets rows of its
+        // own instead, wrapped, so no name is clipped away.
+        let deploys = format!(" {} deploys", deps.len());
+        let tag = skipped_tag(&skipped);
+        let (tag, tag_rows) =
+            if tag.chars().count() + deploys.chars().count() < w.saturating_sub(1) {
+                (tag, Vec::new())
+            } else {
+                (String::new(), wrap_words(tag.trim_end_matches(" ·"), w.saturating_sub(2)))
+            };
         let mut head = vec![
-            // The totals leave the SAML-locked teams out, and a partial
-            // count must not read as the whole account. First, because the
-            // header clips from the right and this must outlast the totals.
-            (p.dim.as_str(), skipped_tag(&skipped)),
-            (p.dim.as_str(), format!(" {} deploys", deps.len())),
+            (p.dim.as_str(), tag),
+            (p.dim.as_str(), deploys),
             (p.dim.as_str(), format!(" · {} proj", seen_projects.len())),
             (
                 p.ready.as_str(),
@@ -1629,6 +1639,9 @@ fn main() {
             ),
         ));
         rows.push(tc::seg(&head, w - 1));
+        for line in tag_rows {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w - 1));
+        }
         if !err.is_empty() {
             // Wrapped, not clipped: an error that explains what to do is
             // exactly the one long enough for `seg` to cut the explanation
