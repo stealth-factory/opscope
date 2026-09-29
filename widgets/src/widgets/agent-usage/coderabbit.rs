@@ -19,9 +19,10 @@
 //! `coderabbit usage` is the only source. It answers with a review count,
 //! whether usage billing is on, and when the period resets. From CLI 0.8 it
 //! also gives the included reviews left in the rolling window, the window,
-//! and when capacity returns - and that is the one lane drawn. An older CLI
-//! gives no limit, so on `[+]` CodeRabbit is named as publishing no quota
-//! rather than drawn as an empty one. The plan's documented hourly rates are
+//! and when capacity returns, which the tab draws. `[+]` does not: the
+//! report does not say which of CodeRabbit's allowances it is (see
+//! `lanes`), so CodeRabbit is named there as publishing no quota rather
+//! than drawn as a limit it may not be. The plan's documented hourly rates are
 //! never drawn in its place: a limit the CLI did not give is not a reading.
 //! The CLI owns the login; nothing here reads or touches its credentials.
 
@@ -144,10 +145,20 @@ fn window_label(secs: Option<f64>) -> String {
     }
 }
 
-/// One lane, for the included reviews used of the rolling window, when the
-/// CLI gave both what is left and out of how many. A count with no limit
-/// has nothing to be a share of, and draws nothing.
-pub fn lanes(d: &Data) -> Vec<Lane> {
+/// None on `[+]`. The allowance `coderabbit usage` reports is real, but it
+/// does not say which of CodeRabbit's separate PR, CLI and IDE allowances
+/// it is, and it read `10 of 10` while pull request reviews were held to 4
+/// an hour. On the summary it would sit beside every other agent's limit
+/// and read as the one that stops reviews, empty while that one is spent.
+/// The tab draws it, where there is room to say what it covers.
+pub fn lanes(_d: &Data) -> Vec<Lane> {
+    Vec::new()
+}
+
+/// The included reviews used of the rolling window, when the CLI gave both
+/// what is left and out of how many. A count with no limit has nothing to
+/// be a share of, and draws nothing.
+fn allowance(d: &Data) -> Vec<Lane> {
     let Some(u) = &d.usage else {
         return Vec::new();
     };
@@ -183,14 +194,18 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// "answered, and published no" wording that keeps it out of the warning
 /// colour. A failed ask is, and says what failed.
 pub fn why_no_lane(d: &Data) -> String {
-    if !lanes(d).is_empty() {
-        return String::new();
-    }
     if let Some(u) = &d.usage {
         let count = u
             .reviews()
             .map(|n| format!(" · {} reviews this period", n))
             .unwrap_or_default();
+        if !allowance(d).is_empty() {
+            return format!(
+                "no quota · CodeRabbit answered, and published no limit it says covers pull \
+                 request reviews · its tab has the rolling allowance{}.",
+                count
+            );
+        }
         if let Some(why) = u.unavailable_why() {
             return format!(
                 "no quota · CodeRabbit could not check the included reviews: {}{} · set \
@@ -224,11 +239,11 @@ fn days_until(date: &str, today: NaiveDate) -> Option<i64> {
     Some((day - today).num_days())
 }
 
-/// The rolling allowance, drawn as the `[+]` lane is: a bar of the share
+/// The rolling allowance, drawn as another agent's `[+]` lane is: a bar of the share
 /// used, with how many are left in words, since a share of five reviews
 /// reads better as a count.
 fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
-    let lanes = lanes(d);
+    let lanes = allowance(d);
     let Some(lane) = lanes.first() else {
         return Vec::new();
     };
@@ -269,6 +284,15 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
         ],
         w - 1,
     ));
+    // The report does not say which allowance this is, and pull request
+    // reviews have been held to fewer while it read full; see `lanes`.
+    let caveat = "CodeRabbit keeps pull request, CLI and IDE reviews on separate allowances, \
+                  and does not say which this is; pull request reviews may be limited sooner.";
+    let indent = " ".repeat(label_w + 3);
+    let room = w.saturating_sub(indent.len() + 1).max(8);
+    for line in tc::wrap_words(caveat, room) {
+        rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", indent, line))], w - 1));
+    }
     rows
 }
 
@@ -290,7 +314,7 @@ fn report_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<Stri
             (p.txt.as_str(), count),
             (
                 p.dim.as_str(),
-                if lanes(d).is_empty() { "   no limit published" } else { "" }.into(),
+                if allowance(d).is_empty() { "   no limit published" } else { "" }.into(),
             ),
         ],
         w - 1,
@@ -372,7 +396,7 @@ mod tests {
     #[test]
     fn a_report_is_named_as_publishing_no_quota_without_a_warning() {
         let d = Data { usage: Some(report()), read_at: now(), why: String::new() };
-        assert!(lanes(&d).is_empty());
+        assert!(allowance(&d).is_empty());
         let note = why_no_lane(&d);
         assert!(note.contains("25 reviews this period"), "{note}");
         // The wording `[+]` reads to decide this is not the reader's to fix.
@@ -398,7 +422,7 @@ mod tests {
              reviews.\nYour reviews : 94\nPeriod resets : 2026-10-06\n",
         );
         let d = Data { usage, read_at: now(), ..Data::default() };
-        assert!(lanes(&d).is_empty());
+        assert!(allowance(&d).is_empty());
         let note = why_no_lane(&d);
         assert!(note.contains("Run from a git repository"), "{}", note);
         assert!(note.contains("94 reviews this period"), "{}", note);
@@ -437,13 +461,17 @@ mod tests {
         )
         .unwrap();
         let d = Data { usage: Some(u), read_at: now(), why: String::new() };
-        let lanes = lanes(&d);
+        let lanes = allowance(&d);
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].label, "hour");
         assert!((lanes[0].pct - 60.0).abs() < 1e-9);
         // No window on the lane: a rolling window has no pace to draw.
         assert_eq!(lanes[0].window_secs, None);
-        assert!(why_no_lane(&d).is_empty());
+        // Kept off `[+]`, which says where it is instead.
+        assert!(super::lanes(&d).is_empty());
+        let note = why_no_lane(&d);
+        assert!(note.contains("answered, and published no"), "{note}");
+        assert!(note.contains("its tab has the rolling allowance"), "{note}");
     }
 
     #[test]
@@ -455,7 +483,7 @@ mod tests {
         )
         .unwrap();
         let d = Data { usage: Some(u), read_at, why: String::new() };
-        let lane = lanes(&d).remove(0);
+        let lane = allowance(&d).remove(0);
         assert!((lane.pct - 100.0).abs() < 1e-9);
         assert_eq!(lane.reset, Some(read_at + 1200.0));
         assert!(!lane.stale);
@@ -467,7 +495,7 @@ mod tests {
     fn a_count_left_with_no_limit_draws_no_bar_and_says_why() {
         // Four left of an unstated limit is not a share of anything.
         let d = Data { usage: Some(with_allowance("4")), read_at: now(), why: String::new() };
-        assert!(lanes(&d).is_empty());
+        assert!(allowance(&d).is_empty());
         let note = why_no_lane(&d);
         assert!(note.contains("no limit for the 4 reviews left"), "{note}");
         assert!(note.contains("answered, and published no"), "{note}");
@@ -480,9 +508,9 @@ mod tests {
     fn a_reading_held_past_its_cycle_is_marked_stale() {
         // Older than the ten-minute hold, it is flagged however far off the return is.
         let fresh = Data { usage: Some(with_allowance("3 of 5")), read_at: now(), why: String::new() };
-        assert!(!lanes(&fresh)[0].stale);
+        assert!(!allowance(&fresh)[0].stale);
         let old = Data { read_at: now() - REPORT_TTL - 60.0, ..fresh };
-        assert!(lanes(&old)[0].stale);
+        assert!(allowance(&old)[0].stale);
     }
 
     #[test]

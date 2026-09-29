@@ -1147,10 +1147,14 @@ Four settings, all on by default except the interval:
 CodeRabbit limits reviews per developer over a rolling window, not per month.
 From CLI 0.8, `coderabbit usage` reports the included reviews left in that
 window, how long the window is, and when capacity returns once none are left.
-That is the one lane drawn: on `[+]` and at the top of the `coderabbit` tab, a
-bar of the share used, with `2 of 5 left` under it on the tab and, when the
-allowance is spent, when the next review comes back. The lane has no pace
-marker, because a rolling window has no start to measure elapsed time from.
+It is drawn at the top of the `coderabbit` tab, a bar of the share used with
+`2 of 5 left` under it and, when the allowance is spent, when the next review
+comes back. It is not drawn on `[+]`: the report does not say which of
+CodeRabbit's allowances it is, and a bar there would read as the limit on
+pull request reviews, which has been lower while this one read full. `[+]`
+names CodeRabbit as publishing no limit for pull request reviews and points
+at the tab. The bar has no pace marker, because a rolling window has no
+start to measure elapsed time from.
 
 Under the allowance the tab shows your reviews this billing period, the reset
 with the days left, then the organisation, the login and any other line the
