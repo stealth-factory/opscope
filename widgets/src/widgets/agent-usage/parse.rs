@@ -424,6 +424,55 @@ pub fn parse_coderabbit_usage(text: &str) -> Option<CodeRabbitUsage> {
     known.then_some(out)
 }
 
+/// The plan `coderabbit auth status` names on its `Plan :` line, `Team`.
+pub fn parse_coderabbit_plan(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let line = strip_controls(line);
+        let (label, value) = line.split_once(':')?;
+        let value = value.trim();
+        (label.trim().eq_ignore_ascii_case("plan") && !value.is_empty())
+            .then(|| value.to_string())
+    })
+}
+
+/// Where CodeRabbit's fair-use policy puts a developer, from the pull
+/// request reviews they had in the last seven days.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FairUse {
+    /// Reviews an hour. One on the last tier, which is one at a time.
+    pub rate: u32,
+    pub one_at_a_time: bool,
+    /// The seven-day count at which the rate next drops, and what to.
+    pub next: Option<(u64, u32)>,
+}
+
+/// CodeRabbit's published fair-use tiers for a plan, as (the seven-day
+/// count a tier starts at, reviews an hour), from
+/// docs.coderabbit.ai/management/rate-limits as read on 2026-09-29. The
+/// last tier on each is one review at a time. None for a plan the page
+/// does not list, which then gets a count and no rate.
+pub fn coderabbit_fair_use_tiers(plan: &str) -> Option<&'static [(u64, u32)]> {
+    let first = plan.split_whitespace().next().unwrap_or("").to_lowercase();
+    match first.as_str() {
+        "essentials" => Some(&[(0, 5), (30, 4), (40, 3), (50, 2), (60, 1)]),
+        "team" => Some(&[(0, 8), (40, 6), (50, 4), (60, 2), (70, 1)]),
+        "advanced" => Some(&[(0, 10), (50, 8), (60, 4), (70, 2), (80, 1)]),
+        "enterprise" => Some(&[(0, 12), (60, 10), (70, 5), (80, 3), (90, 1)]),
+        _ => None,
+    }
+}
+
+/// The tier `week` pull request reviews in seven days lands on.
+pub fn coderabbit_fair_use(plan: &str, week: u64) -> Option<FairUse> {
+    let tiers = coderabbit_fair_use_tiers(plan)?;
+    let at = tiers.iter().rposition(|(from, _)| week >= *from)?;
+    Some(FairUse {
+        rate: tiers[at].1,
+        one_at_a_time: at + 1 == tiers.len(),
+        next: tiers.get(at + 1).copied(),
+    })
+}
+
 /// Whether the CLI's own words say it is not logged in.
 pub fn coderabbit_signed_out(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -1497,6 +1546,33 @@ Review cap    : $40.00 per billing month (shared subscription)
 Period resets : 2026-10-06
 ────────────────────────────────────────
 ";
+
+    #[test]
+    fn the_plan_is_read_from_auth_status() {
+        // Other lines carry colons too; only `Plan` is the plan.
+        let text = "Status       : signed in\nAccount      : someone@example.com\n\
+                    Plan         : Team\nOrganization : example-org\n";
+        assert_eq!(parse_coderabbit_plan(text).as_deref(), Some("Team"));
+        assert_eq!(parse_coderabbit_plan("Status : signed in\n"), None);
+    }
+
+    #[test]
+    fn a_week_of_pull_request_reviews_lands_on_the_published_tier() {
+        // Team: 0-39 eight an hour, 40-49 six, 50-59 four, 60-69 two, 70 on one at a time.
+        let team = |n| coderabbit_fair_use("Team", n).unwrap();
+        assert_eq!(team(0), FairUse { rate: 8, one_at_a_time: false, next: Some((40, 6)) });
+        assert_eq!(team(39).rate, 8);
+        assert_eq!(team(55), FairUse { rate: 4, one_at_a_time: false, next: Some((60, 2)) });
+        assert_eq!(team(70), FairUse { rate: 1, one_at_a_time: true, next: None });
+        assert_eq!(team(400).rate, 1);
+        // The other three plans the page lists, at each one's first drop.
+        assert_eq!(coderabbit_fair_use("essentials", 30).unwrap().rate, 4);
+        assert_eq!(coderabbit_fair_use("Advanced", 50).unwrap().rate, 8);
+        assert_eq!(coderabbit_fair_use("Enterprise", 59).unwrap().rate, 12);
+        // A plan the page does not list has no rate at all.
+        assert_eq!(coderabbit_fair_use("Free", 10), None);
+        assert_eq!(coderabbit_fair_use("", 10), None);
+    }
 
     #[test]
     fn a_captured_coderabbit_report_inside_a_repository_gives_the_allowance() {
