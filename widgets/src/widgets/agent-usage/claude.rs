@@ -459,6 +459,7 @@ fn claude_try(url: &str, tok: &str) -> Result<serde_json::Value, String> {
         url,
         &[
             ("Authorization", &format!("Bearer {}", tok)),
+            ("anthropic-beta", "oauth-2025-04-20"),
             ("User-Agent", "opscope"),
         ],
         20,
