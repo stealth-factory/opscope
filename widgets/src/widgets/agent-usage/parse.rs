@@ -276,7 +276,9 @@ impl CodeRabbitUsage {
         let of = nums.get(1).copied().or_else(|| {
             leading_numbers(self.quota_field(QuotaField::Limit)?).first().copied()
         });
-        Some((left, of.filter(|n| *n > 0)))
+        // A limit below what is left is not a limit this count is a share
+        // of, and would draw an empty bar beside `7 of 5`.
+        Some((left, of.filter(|n| *n > 0 && left <= *n)))
     }
 
     /// How long the rolling window is, in seconds.
@@ -1433,6 +1435,8 @@ mod tests {
         let apart = parse_coderabbit_usage("Available reviews : 4\nReview limit : 5 per hour\n")
             .expect("parsed");
         assert_eq!(apart.available(), Some((4, Some(5))));
+        let over = parse_coderabbit_usage("Available reviews : 7 of 5\n").expect("parsed");
+        assert_eq!(over.available(), Some((7, None)));
         let bare = parse_coderabbit_usage("Available reviews : 4\n").expect("parsed");
         assert_eq!(bare.available(), Some((4, None)));
         // The 0.7 report has no quota at all.
