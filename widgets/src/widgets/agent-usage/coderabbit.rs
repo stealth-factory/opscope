@@ -70,6 +70,8 @@ pub struct Data {
     samples: Vec<(f64, u64)>,
     /// The plan `coderabbit auth status` named, or empty when it named none.
     plan: String,
+    /// The reading could not be written, so a restarted pane starts over.
+    unsaved: bool,
 }
 
 /// One `coderabbit usage`, as the report or as why there was none.
@@ -93,11 +95,14 @@ fn ask(repo: &str) -> Result<serde_json::Value, String> {
         let at = now();
         // Kept on disk because a week is longer than any pane stays open,
         // and held with the report so a frame does not read the file.
-        let samples = u
+        let period = u.get("period resets").unwrap_or("");
+        let (samples, saved) = u
             .reviews()
-            .map(|n| record_sample(&samples_path(), &sample_key(&u), at, n))
-            .unwrap_or_default();
-        return Ok(serde_json::json!({"text": text, "at": at, "samples": samples}));
+            .map(|n| record_sample(&samples_path(), &sample_key(&u), period, at, n))
+            .unwrap_or((Vec::new(), true));
+        return Ok(serde_json::json!({
+            "text": text, "at": at, "samples": samples, "unsaved": !saved,
+        }));
     }
     Err(if coderabbit_signed_out(&text) {
         "not signed in · run coderabbit auth login".to_string()
@@ -132,13 +137,19 @@ fn sample_key(u: &CodeRabbitUsage) -> String {
     format!("{}@{}", u.get("user").unwrap_or(""), u.get("organization").unwrap_or(""))
 }
 
-/// Add a reading to the file at `path` and return this login's samples.
+/// Add a reading to the file at `path`, and return this login's samples
+/// and whether the file took them.
 ///
 /// A run of the same count keeps only its first and last reading: the
 /// first says when the count got there, the last how long it held, and
 /// everything between says nothing more. Samples older than a week go,
-/// except the newest of them, which is where the week's count starts.
-fn record_sample(path: &str, key: &str, at: f64, count: u64) -> Vec<(f64, u64)> {
+/// except the newest of them, which is where the week's count starts, and
+/// a login with nothing newer than a week goes altogether.
+///
+/// `period` is the report's `Period resets` date. When it moves, the count
+/// restarted between the last reading and this one, which a count that
+/// rose anyway would hide, so a zero is kept just before this reading.
+fn record_sample(path: &str, key: &str, period: &str, at: f64, count: u64) -> (Vec<(f64, u64)>, bool) {
     if let Some(dir) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -154,16 +165,10 @@ fn record_sample(path: &str, key: &str, at: f64, count: u64) -> Vec<(f64, u64)> 
         .ok()
         .filter(|f| f.lock().is_ok());
     let mut all = read_json(path).filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
-    let mut samples: Vec<(f64, u64)> = all[key]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| Some((s.get(0)?.as_f64()?, s.get(1)?.as_u64()?)))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut samples = stored_samples(&all[key]);
     samples.sort_by(|a, b| a.0.total_cmp(&b.0));
     let newest = samples.last().map_or(at, |(t, _)| t.max(at));
+    let was = text(&all[key], "period");
     let n = samples.len();
     if newest > at || samples.last().is_some_and(|(t, _)| *t == at) {
         // Older than a reading already kept: a clock stepped back, or a
@@ -172,21 +177,45 @@ fn record_sample(path: &str, key: &str, at: f64, count: u64) -> Vec<(f64, u64)> 
         samples.retain(|(t, _)| *t != at);
         let i = samples.partition_point(|(t, _)| *t < at);
         samples.insert(i, (at, count));
-    } else if n >= 2 && samples[n - 1].1 == count && samples[n - 2].1 == count {
-        samples[n - 1].0 = at;
     } else {
+        if n > 0 && !was.is_empty() && !period.is_empty() && was != period {
+            samples.push((at - 0.001, 0));
+        } else if n >= 2 && samples[n - 1].1 == count && samples[n - 2].1 == count {
+            samples.pop();
+        }
         samples.push((at, count));
     }
     if let Some(start) = samples.iter().rposition(|(t, _)| *t <= newest - WEEK) {
         samples.drain(..start);
     }
-    all[key] = serde_json::json!(samples.iter().map(|(t, c)| serde_json::json!([t, c])).collect::<Vec<_>>());
+    // The period of the newest reading, which is what the next one compares.
+    let period = if newest > at { was } else { period.to_string() };
+    all[key] = serde_json::json!({
+        "period": period,
+        "samples": samples.iter().map(|(t, c)| serde_json::json!([t, c])).collect::<Vec<_>>(),
+    });
+    if let Some(map) = all.as_object_mut() {
+        map.retain(|_, v| stored_samples(v).iter().any(|(t, _)| *t > newest - WEEK));
+    }
     // Renamed into place, so a pane reading it never sees half a file.
     let tmp = format!("{}.{}.tmp", path, std::process::id());
-    if std::fs::write(&tmp, all.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    let saved = std::fs::write(&tmp, all.to_string()).is_ok() && std::fs::rename(&tmp, path).is_ok();
+    if !saved {
+        let _ = std::fs::remove_file(&tmp);
     }
-    samples
+    (samples, saved)
+}
+
+/// One login's readings as the file holds them, as (when, count).
+fn stored_samples(entry: &serde_json::Value) -> Vec<(f64, u64)> {
+    entry["samples"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| Some((s.get(0)?.as_f64()?, s.get(1)?.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Reviews added over a span, from readings of a count that restarts each
@@ -274,6 +303,7 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
     d.why = text(&got, "why");
     if let Some(usage) = parse_coderabbit_usage(&text(&got, "text")) {
         d.read_at = num(&got, "at");
+        d.unsaved = got["unsaved"].as_bool().unwrap_or(false);
         d.samples = got["samples"]
             .as_array()
             .map(|a| {
@@ -502,6 +532,13 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let indent_w = if w > label_w + 3 + 16 { label_w + 3 } else { 1 };
     let indent = " ".repeat(indent_w);
     let room = w.saturating_sub(indent_w + 1).max(1);
+    // Said first, since it is why a count may start over after a restart.
+    if d.unsaved {
+        let said = format!("readings could not be saved to {}, so a restarted pane starts over", samples_path());
+        for line in tc::wrap_words(&said, room) {
+            rows.push(tc::seg(&[(p.warn.as_str(), format!("{}{}", indent, line))], w - 1));
+        }
+    }
     // One reading is where a count starts, not a count: a bar or a rate
     // from it would draw a zero nobody measured.
     if d.samples.len() < 2 {
@@ -896,24 +933,62 @@ mod tests {
             .to_string();
         let _ = std::fs::remove_file(&path);
         let t = 1_000_000.0;
-        record_sample(&path, "a@org", t, 10);
-        record_sample(&path, "a@org", t + 600.0, 10);
-        record_sample(&path, "a@org", t + 1200.0, 10);
-        let got = record_sample(&path, "a@org", t + 1800.0, 12);
+        let record = |key: &str, at: f64, n: u64| {
+            let (samples, saved) = record_sample(&path, key, "2026-10-06", at, n);
+            assert!(saved);
+            samples
+        };
+        record("a@org", t, 10);
+        record("a@org", t + 600.0, 10);
+        record("a@org", t + 1200.0, 10);
+        let got = record("a@org", t + 1800.0, 12);
         // The middle 10 said nothing the first and last did not.
         assert_eq!(got, vec![(t, 10), (t + 1200.0, 10), (t + 1800.0, 12)]);
         // Another login's readings are its own.
-        assert_eq!(record_sample(&path, "b@org", t + 60.0, 3), vec![(t + 60.0, 3)]);
+        assert_eq!(record("b@org", t + 60.0, 3), vec![(t + 60.0, 3)]);
         // Past a week, only the newest reading before the week is kept.
         let later = t + WEEK + 1500.0;
-        let kept = record_sample(&path, "a@org", later, 20);
+        let kept = record("a@org", later, 20);
         assert_eq!(kept, vec![(t + 1200.0, 10), (t + 1800.0, 12), (later, 20)]);
+        // And the other login, with nothing newer than a week, is gone.
+        let file = read_json(&path).unwrap();
+        assert!(file.get("b@org").is_none(), "{file}");
         // A reading from before the newest, as after a clock steps back, is
         // put in its place and erases nothing after it.
-        let back = record_sample(&path, "a@org", later - 60.0, 19);
+        let back = record("a@org", later - 60.0, 19);
         assert_eq!(back, vec![(t + 1200.0, 10), (t + 1800.0, 12), (later - 60.0, 19), (later, 20)]);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}.lock", path));
+    }
+
+    #[test]
+    fn a_new_billing_period_restarts_the_count_even_when_it_rose() {
+        // Nine before the reset and forty after is forty new, not thirty-one.
+        let path = std::env::temp_dir()
+            .join(format!("opscope-coderabbit-period-{}.json", std::process::id()))
+            .display()
+            .to_string();
+        let _ = std::fs::remove_file(&path);
+        let t = 2_000_000.0;
+        record_sample(&path, "a@org", "2026-10-06", t, 9);
+        let (samples, _) = record_sample(&path, "a@org", "2026-11-06", t + 3600.0, 40);
+        assert_eq!(reviews_across(&samples, t + 3600.0, WEEK).unwrap().reviews, 40);
+        // The same period carries on as a rise.
+        let (samples, _) = record_sample(&path, "a@org", "2026-11-06", t + 7200.0, 45);
+        assert_eq!(reviews_across(&samples, t + 7200.0, WEEK).unwrap().reviews, 45);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path));
+    }
+
+    #[test]
+    fn a_reading_that_could_not_be_saved_says_so() {
+        // Otherwise a restarted pane's shorter count looks like fewer reviews.
+        let (_, saved) = record_sample("/proc/opscope-no-such/x.json", "a@org", "", now(), 3);
+        assert!(!saved);
+        let at = now();
+        let d = Data { unsaved: true, ..week_of(vec![(at - 3600.0, 90), (at, 95)], "Team") };
+        let all = tab(&d, 100, 40, &Config::default(), &palette()).join("\n");
+        assert!(all.contains("could not be saved"), "{all}");
     }
 
     fn week_of(samples: Vec<(f64, u64)>, plan: &str) -> Data {

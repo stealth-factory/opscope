@@ -1187,8 +1187,10 @@ reports that count, so the tab works it out: every `coderabbit usage` that
 answers adds its `Your reviews` count to
 `$XDG_STATE_HOME/opscope/coderabbit-reviews.json` (`~/.local/state` when that
 is unset), kept per login and pruned to the last week. The reviews added
-across the week are the count, and a count that fell is a new billing
-period, all of it new. The FAIR USE section draws it as a bar toward the
+across the week are the count, and a reading whose `Period resets` date
+moved, or whose count fell, starts a new billing period, all of it new. A
+reading the file could not take is said in the section, since a restarted
+pane then starts the count over. The FAIR USE section draws it as a bar toward the
 count where reviews go one at a time, then looks the rate up on the plan
 `coderabbit auth status` names, which is asked every six hours.
 
