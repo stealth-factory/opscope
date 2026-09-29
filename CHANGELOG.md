@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.33.0] - 2026-09-29
+
+### Bug Fixes
+
+- **agent-usage**: Hide tabs until auto-detect finishes (#298)
+- **agent-usage**: Leave a blank line above the Codex reset summary (#297)
+
+### Features
+
+- **agent-usage**: Draw CodeRabbit's rolling allowance from CLI 0.8 (#299)
+
 ## [0.32.1] - 2026-09-29
 
 ### Bug Fixes
