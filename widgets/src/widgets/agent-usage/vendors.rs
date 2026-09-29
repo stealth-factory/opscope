@@ -216,15 +216,18 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
 /// count is greater than zero.
 ///
 /// Indented under the Codex rows, the same inset a collapsed provider uses
-/// for a note under its summary. Zero and an unread inventory add nothing.
-/// The count and `available` stay. When the parenthetical does not fit
-/// beside them it moves to the next lines, broken between the datetime's
-/// parts. A word or a part wider than the pane is broken by display width,
-/// so it is not skipped and a clock is not shortened into a different time.
+/// for a note under its summary, with one empty row above it so the count
+/// is not read as another quota line. Zero and an unread inventory add
+/// nothing, including that empty row. The count and `available` stay. When
+/// the parenthetical does not fit beside them it moves to the next lines,
+/// broken between the datetime's parts. A word or a part wider than the
+/// pane is broken by display width, so it is not skipped and a clock is
+/// not shortened into a different time.
 fn push_reset_summary(rows: &mut Vec<String>, s: &State, w: usize, p: &Palette) {
     let Some(line) = s.codex.reset_summary_line() else {
         return;
     };
+    rows.push(String::new());
     crate::codex::append_reset_summary(&mut *rows, &line, w.saturating_sub(1), p.txt.as_str());
 }
 
@@ -983,11 +986,11 @@ mod tests {
             .expect("the reset line");
         assert_eq!(rows[at], format!("     {line}"));
         assert!(
-            !rows[at - 1].is_empty(),
-            "a blank line still separates the reset from Codex: {rows:#?}"
+            rows[at - 1].is_empty(),
+            "the reset line lost the blank line above it: {rows:#?}"
         );
         assert!(
-            rows[at - 1].contains('%'),
+            rows[at - 2].contains('%'),
             "the reset line does not follow a Codex summary row: {rows:#?}"
         );
         assert!(at > rows.iter().position(|r| r.contains("CODEX")).unwrap());
@@ -1037,6 +1040,10 @@ mod tests {
             !zero.iter().any(|r| r.contains("reset available")),
             "a zero bank drew a reset line:\n{zero:#?}"
         );
+        assert_eq!(
+            zero, unread,
+            "a zero bank changed the summary an unread inventory draws:\n{zero:#?}\n{unread:#?}"
+        );
 
         // No quota lanes, so Codex is the quiet heading. The title stays
         // the name, and the reset line follows it.
@@ -1056,12 +1063,34 @@ mod tests {
             .expect("the reset line");
         assert_eq!(quiet[at], format!("     {line}"));
         assert!(
-            !quiet[at - 1].is_empty(),
-            "a blank line still separates the quiet reset from Codex: {quiet:#?}"
+            quiet[at - 1].is_empty(),
+            "the quiet reset lost the blank line above it: {quiet:#?}"
         );
         assert!(
-            quiet[at - 1].contains("no quota"),
+            quiet[at - 2].contains("no quota"),
             "the quiet reset does not follow the Codex note: {quiet:#?}"
+        );
+        let quiet_zero = plain(&summary_for(
+            &State {
+                codex: crate::codex::Data::with_window_and_bank(None, Some(0)),
+                ..State::default()
+            },
+            120,
+            &p,
+            &["codex"],
+        ));
+        let quiet_unread = plain(&summary_for(
+            &State {
+                codex: crate::codex::Data::with_reset(None, None),
+                ..State::default()
+            },
+            120,
+            &p,
+            &["codex"],
+        ));
+        assert_eq!(
+            quiet_zero, quiet_unread,
+            "a quiet zero bank added a blank the unread inventory does not:\n{quiet_zero:#?}\n{quiet_unread:#?}"
         );
 
         // Narrower than the datetime: the count and `available` stay, the

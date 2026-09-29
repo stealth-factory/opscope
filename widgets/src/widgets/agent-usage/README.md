@@ -1073,7 +1073,7 @@ The usage payload is not a source for the count or the dates. On the `[+]`
 summary the Codex title stays `CODEX`. When the inventory was read and the
 count is greater than zero, `N reset available` is indented under that
 group, at the same inset a collapsed provider uses for a note under its
-rows. The soonest expiry is added in parentheses only
+rows, with a blank line above it. The soonest expiry is added in parentheses only
 when every listed credit has a readable expiry. Zero and an unread
 inventory add nothing. Claude publishes no such count.
 
