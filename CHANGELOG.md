@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.34.0] - 2026-09-29
+
+### Bug Fixes
+
+- **agent-usage**: Send anthropic-beta oauth header on Claude OAuth requests (#301)
+
+### Features
+
+- **agent-usage**: Estimate CodeRabbit's fair-use rate from the week's reviews (#303)
+
 ## [0.33.0] - 2026-09-29
 
 ### Bug Fixes
