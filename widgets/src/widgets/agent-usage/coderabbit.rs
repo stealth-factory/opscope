@@ -263,7 +263,7 @@ fn reviews_across(samples: &[(f64, u64)], at: f64, span: f64) -> Option<Counted>
         .map(|p| if p[1].1 >= p[0].1 { p[1].1 - p[0].1 } else { p[1].1 })
         .sum();
     let gapped = pairs.clone().any(|p| p[1].1 < p[0].1 && p[1].0 - p[0].0 > RESET_GAP);
-    Some(Counted { reviews, since: start.0, whole: first.is_some(), readings: samples.len(), gapped })
+    Some(Counted { reviews, since: start.0, whole: first.is_some(), readings: samples.len() - from, gapped })
 }
 
 /// Where to run `coderabbit usage`: `coderabbit_repo` with a leading `~`
@@ -949,7 +949,7 @@ mod tests {
         let whole = [(at - 9.0 * day, 1), (at - 8.0 * day, 30), (at - 2.0 * day, 70), (at, 85)];
         assert_eq!(
             reviews_across(&whole, at, WEEK),
-            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true, readings: 4, gapped: false })
+            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true, readings: 3, gapped: false })
         );
         // A count that fell is a new billing period; all of it is new.
         let reset = [(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)];
@@ -960,6 +960,9 @@ mod tests {
         // A reset read within the hour is taken as read.
         let close = [(at - 8.0 * day, 90), (at - 600.0, 96), (at - 0.001, 0), (at, 4)];
         assert!(!reviews_across(&close, at, WEEK).unwrap().gapped);
+        // Only a starting reading, however old, is not a count.
+        let stale = [(at - 9.0 * day, 1), (at - 8.0 * day, 30)];
+        assert_eq!(reviews_across(&stale, at, WEEK).unwrap().readings, 1);
         // A reading after `at`, left by a clock stepped back, is not counted.
         let ahead = [(at - 8.0 * day, 10), (at, 20), (at + 3600.0, 5)];
         assert_eq!(reviews_across(&ahead, at, WEEK).unwrap().reviews, 10);
