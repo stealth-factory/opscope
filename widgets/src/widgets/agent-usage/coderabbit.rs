@@ -302,8 +302,11 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
     // CodeRabbit names the repository it read the allowance in, which is
     // the one coderabbit_repo points at; saying so shows where it came from.
     let repo = u.get("repository").map(|r| format!(" · in {}", r)).unwrap_or_default();
-    let indent = " ".repeat(label_w + 3);
-    let room = w.saturating_sub(indent.len() + 1).max(8);
+    // Under the bar where there is room for it, flush left where there is
+    // not: a fixed indent on a pane this narrow leaves nothing to wrap into.
+    let indent_w = if w > label_w + 3 + 16 { label_w + 3 } else { 1 };
+    let indent = " ".repeat(indent_w);
+    let room = w.saturating_sub(indent_w + 1).max(1);
     // Wrapped rather than cut: the return and the repository together run
     // past a narrow pane. The count keeps its own colour on the first line.
     let count = format!("{} of {}", left, of);
@@ -618,6 +621,39 @@ mod tests {
         assert_eq!(days_until("2026-09-30", today), Some(4));
         assert_eq!(days_until("2026-09-26", today), Some(0));
         assert_eq!(days_until("soon", today), None);
+    }
+
+    #[test]
+    fn the_allowance_text_is_wrapped_whole_on_the_narrowest_pane() {
+        // Down to the eight columns a pane may be, every word under the bar
+        // is somewhere on screen: wrapped, never clipped by `seg`.
+        let usage = parse_coderabbit_usage(
+            "Repository : example-org/example-repo\nRemaining : 0 of 5\nWindow : rolling 1 hour\n\
+             Capacity returns : in 20m\n",
+        );
+        let d = Data { usage, read_at: now(), ..Data::default() };
+        let squeeze = |t: &str| {
+            let mut out = String::new();
+            let mut chars = t.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else if !c.is_whitespace() {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        for w in [8usize, 12, 18, 24, 40] {
+            let all = squeeze(&tab(&d, w, 40, &Config::default(), &palette()).join(""));
+            for said in ["example-org/example-repo", "pullrequestreviewsmaybelimitedsooner."] {
+                assert!(all.contains(said), "width {w}: {said} missing from {all}");
+            }
+        }
     }
 
     #[test]
