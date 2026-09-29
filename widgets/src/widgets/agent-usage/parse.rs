@@ -772,20 +772,22 @@ fn factory_window(v: &serde_json::Value) -> Option<FactoryWindow> {
 }
 
 /// Core is drawn only when some window has a percent above zero, a
-/// `windowEnd`, or a `secondsRemaining`. Three explicit zeros and no dates
-/// are an empty pool, not three bars.
+/// `windowEnd`, or a `secondsRemaining`. A window that fails that test is
+/// left out even when a neighbour qualifies. A 0% that passes it is kept.
+/// Three explicit zeros and no dates are an empty pool, not three bars.
 fn factory_core(v: &serde_json::Value) -> Option<FactoryPool> {
     let obj = v.as_object()?;
-    let pool = FactoryPool {
-        five_hour: obj.get("fiveHour").and_then(factory_window),
-        weekly: obj.get("weekly").and_then(factory_window),
-        monthly: obj.get("monthly").and_then(factory_window),
+    let keep = |key: &str| {
+        obj.get(key)
+            .filter(|window| core_window_has_data(window))
+            .and_then(factory_window)
     };
-    let data = ["fiveHour", "weekly", "monthly"]
-        .iter()
-        .any(|key| obj.get(*key).is_some_and(core_window_has_data));
-    (data && (pool.five_hour.is_some() || pool.weekly.is_some() || pool.monthly.is_some()))
-        .then_some(pool)
+    let pool = FactoryPool {
+        five_hour: keep("fiveHour"),
+        weekly: keep("weekly"),
+        monthly: keep("monthly"),
+    };
+    (pool.five_hour.is_some() || pool.weekly.is_some() || pool.monthly.is_some()).then_some(pool)
 }
 
 fn core_window_has_data(v: &serde_json::Value) -> bool {
@@ -1504,6 +1506,28 @@ mod tests {
             .unwrap();
         assert!(core.five_hour.is_none() && core.monthly.is_none());
         assert_eq!(core.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        // A bare 0% has none of the fields the empty-pool rule treats as
+        // data, so a neighbouring window does not turn it into a bar.
+        let bare_zero = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}},
+            "core":{"fiveHour":{"usedPercent":0},"weekly":{"usedPercent":4,"secondsRemaining":50}}}}"#;
+        let beside = parse_factory_billing_limits(bare_zero)
+            .unwrap()
+            .core
+            .unwrap();
+        assert!(beside.five_hour.is_none());
+        assert_eq!(beside.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        // A 0% sent with a windowEnd is a real reading. The date is what
+        // makes the window data, and the percent stays 0.
+        let dated_zero = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}},
+            "core":{"fiveHour":{"usedPercent":0,"windowEnd":4102444800000},"weekly":{"usedPercent":4}}}}"#;
+        let dated = parse_factory_billing_limits(dated_zero)
+            .unwrap()
+            .core
+            .unwrap();
+        assert_eq!(dated.five_hour.as_ref().map(|w| w.pct), Some(0.0));
+        assert_eq!(dated.weekly.as_ref().map(|w| w.pct), Some(4.0));
         let partial = parse_factory_billing_limits(
             r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":2}}}}"#,
         )

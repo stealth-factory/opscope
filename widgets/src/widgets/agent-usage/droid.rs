@@ -408,9 +408,10 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
     let what = if data.source.is_empty() && data.why.is_empty() {
         tc::missing_config(&format!(
             "No Factory API key. Set agent_usage.factory_api_key, export {API_KEY_ENV}, or \
-             put FACTORY_API_KEY in ~/.factory/.env. It is sent only to api.factory.ai, and \
-             only while Droid is one of the agents shown. Nothing is read from a browser. \
-             Keep config.json chmod 600."
+             put FACTORY_API_KEY in ~/.factory/.env. It is sent only to api.factory.ai, with \
+             app.factory.ai tried once when the API host fails for a reason other than a \
+             rejected key, and only while Droid is one of the agents shown. Nothing is read \
+             from a browser. Keep config.json chmod 600."
         ))
     } else {
         why_no_lane(data)
