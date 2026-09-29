@@ -276,7 +276,9 @@ pub fn why_no_lane(data: &Data) -> String {
         return format!("no quota · {}", data.why);
     }
     if data.source.is_empty() {
-        return format!("no quota · no token · set devin_token, {TOKEN_ENV}, or {TOKEN_ALIAS}.");
+        return tc::missing_config(&format!(
+            "no quota · no token · set agent_usage.devin_token, {TOKEN_ENV}, or {TOKEN_ALIAS}."
+        ));
     }
     "no quota · no reading from Devin yet.".into()
 }
@@ -407,12 +409,12 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
         }
         None => {
             let what = if data.source.is_empty() && data.why.is_empty() {
-                format!(
-                    "No Devin token. Set devin_token and devin_org in config.json, or export \
-                     {TOKEN_ENV}. {TOKEN_ALIAS} is read when that variable is empty. Both are \
-                     sent only to app.devin.ai, and only while Devin is one of the agents shown. \
-                     Nothing is read from a browser. Keep config.json chmod 600."
-                )
+                tc::missing_config(&format!(
+                    "No Devin token. Set agent_usage.devin_token and agent_usage.devin_org, or \
+                     export {TOKEN_ENV}. {TOKEN_ALIAS} is read when that variable is empty. \
+                     Both are sent only to app.devin.ai, and only while Devin is one of the \
+                     agents shown. Nothing is read from a browser. Keep config.json chmod 600."
+                ))
             } else {
                 why_no_lane(data)
                     .trim_start_matches("no quota · ")

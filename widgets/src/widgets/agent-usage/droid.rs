@@ -342,9 +342,10 @@ pub fn why_no_lane(data: &Data) -> String {
         return format!("no quota · {}", data.why);
     }
     if data.source.is_empty() {
-        return format!(
-            "no quota · no Factory API key · set factory_api_key, {API_KEY_ENV}, or ~/.factory/.env."
-        );
+        return tc::missing_config(&format!(
+            "no quota · no Factory API key · set agent_usage.factory_api_key, {API_KEY_ENV}, \
+             or ~/.factory/.env."
+        ));
     }
     "no quota · no reading from Factory yet.".into()
 }
@@ -371,12 +372,12 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
         return add_section(rows, account_rows(data, None, w, p));
     }
     let what = if data.source.is_empty() && data.why.is_empty() {
-        format!(
-            "No Factory API key. Set factory_api_key in config.json, export {API_KEY_ENV}, or \
-             put FACTORY_API_KEY in ~/.factory/.env. It is sent only to api.factory.ai, and only \
-             while Droid is one of the agents shown. Nothing is read from a browser. Keep \
-             config.json chmod 600."
-        )
+        tc::missing_config(&format!(
+            "No Factory API key. Set agent_usage.factory_api_key, export {API_KEY_ENV}, or \
+             put FACTORY_API_KEY in ~/.factory/.env. It is sent only to api.factory.ai, and \
+             only while Droid is one of the agents shown. Nothing is read from a browser. \
+             Keep config.json chmod 600."
+        ))
     } else {
         why_no_lane(data)
             .trim_start_matches("no quota · ")
