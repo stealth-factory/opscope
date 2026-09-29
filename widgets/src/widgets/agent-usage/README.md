@@ -1160,8 +1160,13 @@ CodeRabbit gives the allowance only when `coderabbit usage` runs inside a
 git repository. Anywhere else it answers `Availability : unavailable` with a
 note saying so, and the billing period alone. The pane runs it wherever the
 widget was started, so set `coderabbit_repo` to any repository on this
-machine that CodeRabbit reviews; until then `[+]` passes CodeRabbit's note
-on and names the setting.
+machine that CodeRabbit reviews. Until then, `[+]` passes CodeRabbit's note
+on and names the setting. The tab names the repository the reading came from.
+
+CodeRabbit gives PR, CLI and IDE reviews separate allowances, and the report
+does not say which one this is. Two repositories both read `10 of 10` at a
+time when CodeRabbit's own PR reviews said the PR allowance was 4 an hour, so
+it is most likely the CLI one - an inference, not something the report says.
 
 An older CLI reports the count and no limit. Then there is no bar, and `[+]`
 names CodeRabbit as publishing no quota, with the count beside it and a note
@@ -1175,9 +1180,8 @@ grandfathered, and the fair-use policy lowers the rate as the week gets busy.
   its label says available (or availability), remaining or left; as the
   window when it says
   window; and as the return time when it says returns or again. `3 of 5`,
-  `3/5`, and a limit on a line of its own are all read. The report taken
-  outside a repository is in the tests as captured; the one from inside is
-  not yet.
+  `3/5`, and a limit on a line of its own are all read. Both reports, from
+  inside a repository and outside one, are in the tests as captured.
 - **It runs a program.** Every other agent here reads a file or an endpoint;
   this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
   runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is

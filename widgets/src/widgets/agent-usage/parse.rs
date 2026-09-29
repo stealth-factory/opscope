@@ -1477,6 +1477,40 @@ Period resets : 2026-10-06
 ────────────────────────────────────────
 ";
 
+    // The same, captured inside a repository.
+    const CODERABBIT_08_IN_A_REPO: &str = "\
+────────────────────────────────────────
+CodeRabbit Usage
+
+Included reviews
+Repository : example-org/example-repo
+Remaining  : 10 of 10
+Window     : rolling 1 hour
+
+Billing period
+Organization  : example-org
+Usage billing : active
+User          : example-user
+Your reviews  : 95
+Your spend    : $5.25
+Review cap    : $40.00 per billing month (shared subscription)
+Period resets : 2026-10-06
+────────────────────────────────────────
+";
+
+    #[test]
+    fn a_captured_coderabbit_report_inside_a_repository_gives_the_allowance() {
+        // `Remaining` is the count and its limit, `Window` the rolling hour;
+        // nothing is spent, so CodeRabbit names no return time.
+        let u = parse_coderabbit_usage(CODERABBIT_08_IN_A_REPO).expect("parsed");
+        assert_eq!(u.available(), Some((10, Some(10))));
+        assert_eq!(u.window_secs(), Some(3600.0));
+        assert_eq!(u.returns_at(1000.0), None);
+        assert_eq!(u.unavailable_why(), None);
+        assert_eq!(u.reviews(), Some(95));
+        assert_eq!(u.get("repository"), Some("example-org/example-repo"));
+    }
+
     #[test]
     fn a_captured_coderabbit_report_outside_a_repository_keeps_its_billing_period() {
         // Availability is a quota line, and `unavailable` is CodeRabbit's

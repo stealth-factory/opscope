@@ -258,11 +258,14 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
         Some(_) => " · returning".into(),
         None => String::new(),
     };
+    // CodeRabbit names the repository it read the allowance in, which is
+    // the one coderabbit_repo points at; saying so shows where it came from.
+    let repo = u.get("repository").map(|r| format!(" · in {}", r)).unwrap_or_default();
     rows.push(tc::seg(
         &[
             (p.dim.as_str(), format!(" {}  ", " ".repeat(label_w))),
             (p.txt.as_str(), format!("{} of {}", left, of)),
-            (p.dim.as_str(), format!(" left{}", when)),
+            (p.dim.as_str(), format!(" left{}{}", when, repo)),
         ],
         w - 1,
     ));
@@ -321,7 +324,8 @@ fn plan(u: &CodeRabbitUsage, drawn: bool, w: usize, p: &Palette) -> Vec<String> 
         }
     }
     for (k, v) in &u.fields {
-        if !PLACED.contains(&k.as_str()) && !(drawn && coderabbit_quota_field(k).is_some()) {
+        let beside_the_bar = coderabbit_quota_field(k).is_some() || k == "repository";
+        if !PLACED.contains(&k.as_str()) && !(drawn && beside_the_bar) {
             pairs.push((k.clone(), v.clone()));
         }
     }
@@ -399,6 +403,21 @@ mod tests {
         assert!(note.contains("Run from a git repository"), "{}", note);
         assert!(note.contains("94 reviews this period"), "{}", note);
         assert!(note.contains("coderabbit_repo"), "{}", note);
+    }
+
+    #[test]
+    fn the_allowance_names_the_repository_it_was_read_in() {
+        // Beside the count, and not listed again among the plan fields.
+        let usage = parse_coderabbit_usage(
+            "Repository : example-org/example-repo\nRemaining : 10 of 10\nWindow : rolling 1 hour\n\
+             Your reviews : 95\n",
+        );
+        let d = Data { usage, read_at: now(), ..Data::default() };
+        let rows = tab(&d, 100, 40, &Config::default(), &palette());
+        let found: Vec<&String> = rows.iter().filter(|r| r.contains("example-org/example-repo")).collect();
+        assert_eq!(found.len(), 1, "{:#?}", rows);
+        assert!(found[0].contains("10 of 10"), "{}", found[0]);
+        assert!(found[0].contains(" left · in example-org/example-repo"), "{}", found[0]);
     }
 
     #[test]
