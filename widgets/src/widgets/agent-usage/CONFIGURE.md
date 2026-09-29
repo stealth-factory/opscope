@@ -10,7 +10,7 @@ Local state left by installed coding agents, plus only the optional remote quota
 
 The owned section is `agent_usage`. A legacy `usage` section is used only when `agent_usage` is absent.
 
-Declared fields: `auto_detect_agent`, `agents`, `exclude_agents`, `refresh`, `rates`, `plan_cost`, `antigravity_remote`, `antigravity_start`, `grok_ping`, `grok_ping_minutes`, `claude_config_dirs`, `notion_token`, `notion_token_env`, `notion_workspace`, `devin_token`, `devin_token_env`, `devin_org`, `factory_api_key`, `factory_api_key_env`
+Declared fields: `auto_detect_agent`, `agents`, `exclude_agents`, `refresh`, `rates`, `plan_cost`, `antigravity_remote`, `antigravity_start`, `coderabbit_repo`, `grok_ping`, `grok_ping_minutes`, `claude_config_dirs`, `notion_token`, `notion_token_env`, `notion_workspace`, `devin_token`, `devin_token_env`, `devin_org`, `factory_api_key`, `factory_api_key_env`
 
 The field types, defaults, order, and inline help come from `settings.json` in this folder. Use the widget's settings screen (press `,`) instead of constructing JSON by hand.
 

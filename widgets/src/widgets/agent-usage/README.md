@@ -1142,16 +1142,50 @@ Four settings, all on by default except the interval:
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
 
-### CodeRabbit has a count and no quota
+### CodeRabbit has a rolling allowance, from CLI 0.8
 
-CodeRabbit publishes no limit to measure against. Its CLI's `coderabbit usage`
-reports your reviews this billing period, whether usage billing is on, and the
-date the period resets, and that is what the `coderabbit` tab shows: the count
-as a number with no bar under it, the reset with the days left, then the
-organisation, the login and any other line the report carried. On `[+]`
-CodeRabbit is named as publishing no quota, with the count beside it, rather
-than drawn as an empty bar.
+CodeRabbit limits reviews per developer over a rolling window, not per month.
+From CLI 0.8, `coderabbit usage` reports the included reviews left in that
+window, how long the window is, and when capacity returns once none are left.
+It is drawn at the top of the `coderabbit` tab, a bar of the share used with
+`2 of 5 left` under it and, when the allowance is spent, when the next review
+comes back. It is not drawn on `[+]`: the report does not say which of
+CodeRabbit's allowances it is, and a bar there would read as the limit on
+pull request reviews, which has been lower while this one read full. `[+]`
+names CodeRabbit as publishing no limit for pull request reviews and points
+at the tab. The bar has no pace marker, because a rolling window has no
+start to measure elapsed time from.
 
+Under the allowance the tab shows your reviews this billing period, the reset
+with the days left, then the organisation, the login and any other line the
+report carried, such as spend.
+
+CodeRabbit gives the allowance only when `coderabbit usage` runs inside a
+git repository. Anywhere else it answers `Availability : unavailable` with a
+note saying so, and the billing period alone. The pane runs it wherever the
+widget was started, so set `coderabbit_repo` to any repository on this
+machine that CodeRabbit reviews. Until then, `[+]` passes CodeRabbit's note
+on and names the setting. The tab names the repository the reading came from.
+
+CodeRabbit gives PR, CLI and IDE reviews separate allowances, and the report
+does not say which one this is. Two repositories both read `10 of 10` at a
+time when CodeRabbit's own PR reviews said the PR allowance was 4 an hour, so
+it is most likely the CLI one - an inference, not something the report says.
+
+An older CLI reports the count and no limit. Then there is no bar, and `[+]`
+names CodeRabbit as publishing no quota, with the count beside it and a note
+that CLI 0.8 reports the allowance. A count left with no limit beside it
+draws no bar either. CodeRabbit documents each plan's hourly rate, but a
+limit the CLI did not give is never drawn in its place: the plan may be
+grandfathered, and the fair-use policy lowers the rate as the week gets busy.
+
+- **The 0.8 wording is read by its words.** CodeRabbit documents what the
+  report holds but not its labels, so a line is taken as the allowance when
+  its label says available (or availability), remaining or left; as the
+  window when it says
+  window; and as the return time when it says returns or again. `3 of 5`,
+  `3/5`, and a limit on a line of its own are all read. Both reports, from
+  inside a repository and outside one, are in the tests as captured.
 - **It runs a program.** Every other agent here reads a file or an endpoint;
   this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
   runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is

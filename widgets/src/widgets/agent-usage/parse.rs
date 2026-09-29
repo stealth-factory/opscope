@@ -259,6 +259,143 @@ impl CodeRabbitUsage {
     pub fn reviews(&self) -> Option<u64> {
         self.get("your reviews")?.replace(',', "").parse().ok()
     }
+
+    /// The first field whose label says it is `kind` of the rolling quota.
+    fn quota_field(&self, kind: QuotaField) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(k, _)| coderabbit_quota_field(k) == Some(kind))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Included reviews left in the rolling window, and out of how many
+    /// when the report says. CLI 0.8 added this; 0.7 printed a count only.
+    pub fn available(&self) -> Option<(u64, Option<u64>)> {
+        let nums = leading_numbers(self.quota_field(QuotaField::Available)?);
+        let left = *nums.first()?;
+        let of = nums.get(1).copied().or_else(|| {
+            leading_numbers(self.quota_field(QuotaField::Limit)?).first().copied()
+        });
+        // A limit below what is left is not a limit this count is a share
+        // of, and would draw an empty bar beside `7 of 5`.
+        Some((left, of.filter(|n| *n > 0 && left <= *n)))
+    }
+
+    /// CodeRabbit's own reason, when it says the included reviews could not
+    /// be checked - `Availability : unavailable` beside a `Note`. The
+    /// billing period still arrives with it, so the report is not a failure.
+    pub fn unavailable_why(&self) -> Option<String> {
+        let said = self.quota_field(QuotaField::Available)?;
+        if !said.to_lowercase().starts_with("unavailable") {
+            return None;
+        }
+        Some(self.get("note").unwrap_or(said).trim_end_matches('.').to_string())
+    }
+
+    /// How long the rolling window is, in seconds.
+    pub fn window_secs(&self) -> Option<f64> {
+        coderabbit_span_secs(self.quota_field(QuotaField::Window)?)
+    }
+
+    /// When capacity comes back, as epoch seconds: a stamp as given, or a
+    /// span counted from `read_at`, the moment the report was taken.
+    pub fn returns_at(&self, read_at: f64) -> Option<f64> {
+        let v = self.quota_field(QuotaField::Returns)?;
+        let v = v.trim().trim_start_matches("in ").trim();
+        iso_epoch(v).or_else(|| coderabbit_span_secs(v).map(|s| read_at + s))
+    }
+}
+
+/// Which part of the rolling quota a report line is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum QuotaField {
+    Available,
+    Limit,
+    Window,
+    Returns,
+}
+
+/// What a `coderabbit usage` label says it is, if it is part of the
+/// rolling quota. Read from words, not exact labels: CLI 0.8's wording is
+/// documented only as "available included reviews, the rolling quota
+/// window, and when capacity returns", so the label's words are matched
+/// rather than a spelling this widget has not seen. The order matters -
+/// "capacity returns" and "available again" are a time, not a count.
+pub fn coderabbit_quota_field(label: &str) -> Option<QuotaField> {
+    let l = label.to_lowercase();
+    if l.contains("return") || l.contains("again") || l.contains("refill") || l.contains("next") {
+        Some(QuotaField::Returns)
+    } else if l.contains("window") {
+        Some(QuotaField::Window)
+    } else if l.contains("availab") || l.contains("remaining") || l.contains("left") {
+        Some(QuotaField::Available)
+    } else if l.contains("limit") || l.contains("quota") || l.contains("allowance") {
+        Some(QuotaField::Limit)
+    } else {
+        None
+    }
+}
+
+/// The whole numbers at the front of a value, as in `3 of 5`, `3/5` or
+/// `5 per hour`. Stops at the first word that is not a number or a joiner,
+/// so a count is never taken from a sentence that follows it.
+fn leading_numbers(value: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for word in value.replace('/', " / ").replace(',', "").split_whitespace() {
+        match word.trim_matches(|c: char| c == '(' || c == ')') {
+            "of" | "/" | "out" => continue,
+            w => match w.parse() {
+                Ok(n) => out.push(n),
+                Err(_) => break,
+            },
+        }
+    }
+    out
+}
+
+/// A span in words or short units - `1 hour`, `60 minutes`, `1h 5m`,
+/// `rolling 1 hour` - in seconds. None when there is no number with a unit.
+pub fn coderabbit_span_secs(value: &str) -> Option<f64> {
+    let v = value.to_lowercase();
+    let mut total = 0.0;
+    let mut found = false;
+    let mut num: Option<f64> = None;
+    // Split `1h5m` into `1 h 5 m` so numbers and units are words of their own.
+    let mut spaced = String::new();
+    let mut prev_digit = None;
+    for c in v.chars() {
+        let digit = c.is_ascii_digit() || c == '.';
+        if prev_digit.is_some_and(|p| p != digit) && !c.is_whitespace() {
+            spaced.push(' ');
+        }
+        spaced.push(c);
+        prev_digit = if c.is_whitespace() { None } else { Some(digit) };
+    }
+    for word in spaced.split_whitespace() {
+        if let Ok(n) = word.parse::<f64>() {
+            num = Some(n);
+            continue;
+        }
+        let unit = match word.trim_end_matches([',', '.']) {
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
+            "d" | "day" | "days" => 86400.0,
+            _ => {
+                num = None;
+                continue;
+            }
+        };
+        if let Some(n) = num.take() {
+            total += n * unit;
+            found = true;
+        } else if word.starts_with("hour") && !found {
+            // `rolling hour`: one of the unit, with no number said.
+            total += unit;
+            found = true;
+        }
+    }
+    (found && total > 0.0).then_some(total)
 }
 
 /// `coderabbit usage`, stdout and stderr together.
@@ -282,7 +419,8 @@ pub fn parse_coderabbit_usage(text: &str) -> Option<CodeRabbitUsage> {
     }
     let known = out.reviews().is_some()
         || out.get("usage billing").is_some()
-        || out.get("period resets").is_some();
+        || out.get("period resets").is_some()
+        || out.available().is_some();
     known.then_some(out)
 }
 
@@ -1277,6 +1415,133 @@ mod tests {
         // A field this does not name is kept, not dropped.
         assert_eq!(u.get("spend"), Some("$4.20"));
         assert_eq!(u.fields[0].0, "organization");
+    }
+
+    #[test]
+    fn a_coderabbit_report_with_a_rolling_quota_gives_what_is_left_of_it() {
+        // The 0.8 report adds the rolling allowance; its exact wording is
+        // unseen, so two plausible spellings are read the same way.
+        let text = "Your reviews           : 42\n\
+                    Available reviews      : 3 of 5\n\
+                    Rolling window         : 1 hour\n\
+                    Capacity returns       : in 23m\n\
+                    Period resets          : 2026-09-30\n";
+        let u = parse_coderabbit_usage(text).expect("parsed");
+        assert_eq!(u.available(), Some((3, Some(5))));
+        assert_eq!(u.window_secs(), Some(3600.0));
+        assert_eq!(u.returns_at(1000.0), Some(1000.0 + 23.0 * 60.0));
+        let split = parse_coderabbit_usage(
+            "Included reviews left : 0/8\nQuota window : 60 minutes\n\
+             Available again : 2026-09-29T13:05:00Z\n",
+        )
+        .expect("parsed");
+        assert_eq!(split.available(), Some((0, Some(8))));
+        assert_eq!(split.window_secs(), Some(3600.0));
+        assert_eq!(split.returns_at(0.0), iso_epoch("2026-09-29T13:05:00Z"));
+    }
+
+    #[test]
+    fn a_coderabbit_count_with_no_limit_is_not_given_one() {
+        // A limit on a line of its own is taken; a bare count stays bare.
+        let apart = parse_coderabbit_usage("Available reviews : 4\nReview limit : 5 per hour\n")
+            .expect("parsed");
+        assert_eq!(apart.available(), Some((4, Some(5))));
+        let over = parse_coderabbit_usage("Available reviews : 7 of 5\n").expect("parsed");
+        assert_eq!(over.available(), Some((7, None)));
+        let bare = parse_coderabbit_usage("Available reviews : 4\n").expect("parsed");
+        assert_eq!(bare.available(), Some((4, None)));
+        // The 0.7 report has no quota at all.
+        let old = parse_coderabbit_usage("Your reviews : 25\nPeriod resets : 2026-09-30\n").unwrap();
+        assert_eq!(old.available(), None);
+        assert_eq!(old.window_secs(), None);
+    }
+
+    // `coderabbit usage` from CLI 0.8, captured outside a repository, with
+    // the organisation and user replaced.
+    const CODERABBIT_08_OUTSIDE_A_REPO: &str = "\
+────────────────────────────────────────
+CodeRabbit Usage
+
+Included reviews
+Availability : unavailable
+Note         : Run from a git repository to check included reviews.
+
+Billing period
+Organization  : example-org
+Usage billing : active
+User          : example-user
+Your reviews  : 94
+Your spend    : $5.25
+Review cap    : $40.00 per billing month (shared subscription)
+Period resets : 2026-10-06
+────────────────────────────────────────
+";
+
+    // The same, captured inside a repository.
+    const CODERABBIT_08_IN_A_REPO: &str = "\
+────────────────────────────────────────
+CodeRabbit Usage
+
+Included reviews
+Repository : example-org/example-repo
+Remaining  : 10 of 10
+Window     : rolling 1 hour
+
+Billing period
+Organization  : example-org
+Usage billing : active
+User          : example-user
+Your reviews  : 95
+Your spend    : $5.25
+Review cap    : $40.00 per billing month (shared subscription)
+Period resets : 2026-10-06
+────────────────────────────────────────
+";
+
+    #[test]
+    fn a_captured_coderabbit_report_inside_a_repository_gives_the_allowance() {
+        // `Remaining` is the count and its limit, `Window` the rolling hour;
+        // nothing is spent, so CodeRabbit names no return time.
+        let u = parse_coderabbit_usage(CODERABBIT_08_IN_A_REPO).expect("parsed");
+        assert_eq!(u.available(), Some((10, Some(10))));
+        assert_eq!(u.window_secs(), Some(3600.0));
+        assert_eq!(u.returns_at(1000.0), None);
+        assert_eq!(u.unavailable_why(), None);
+        assert_eq!(u.reviews(), Some(95));
+        assert_eq!(u.get("repository"), Some("example-org/example-repo"));
+    }
+
+    #[test]
+    fn a_captured_coderabbit_report_outside_a_repository_keeps_its_billing_period() {
+        // Availability is a quota line, and `unavailable` is CodeRabbit's
+        // answer rather than a count, so nothing is read as reviews left.
+        let u = parse_coderabbit_usage(CODERABBIT_08_OUTSIDE_A_REPO).expect("parsed");
+        assert_eq!(u.reviews(), Some(94));
+        assert_eq!(u.get("period resets"), Some("2026-10-06"));
+        assert_eq!(u.get("your spend"), Some("$5.25"));
+        assert_eq!(u.available(), None);
+        assert_eq!(u.window_secs(), None);
+        assert_eq!(
+            u.unavailable_why().as_deref(),
+            Some("Run from a git repository to check included reviews")
+        );
+        assert_eq!(coderabbit_quota_field("availability"), Some(QuotaField::Available));
+        // Inside a repository the same line carries the count.
+        let inside = parse_coderabbit_usage("Availability : 3 of 8\n").expect("parsed");
+        assert_eq!(inside.available(), Some((3, Some(8))));
+        assert_eq!(inside.unavailable_why(), None);
+    }
+
+    #[test]
+    fn coderabbit_spans_read_words_and_short_units() {
+        // Words, short units run together, and a window named without a number.
+        assert_eq!(coderabbit_span_secs("1 hour"), Some(3600.0));
+        assert_eq!(coderabbit_span_secs("1h5m"), Some(3900.0));
+        assert_eq!(coderabbit_span_secs("rolling hour"), Some(3600.0));
+        assert_eq!(coderabbit_span_secs("soon"), None);
+        assert_eq!(coderabbit_quota_field("capacity returns"), Some(QuotaField::Returns));
+        assert_eq!(coderabbit_quota_field("your reviews"), None);
+        assert_eq!(coderabbit_quota_field("period resets"), None);
     }
 
     #[test]
