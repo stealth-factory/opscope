@@ -232,7 +232,15 @@ struct Counted {
     since: f64,
     /// Whether the readings reach back a whole week.
     whole: bool,
+    /// Whether a billing reset fell in a gap between readings too long to
+    /// trust, where the reviews before the reset were never read.
+    gapped: bool,
 }
+
+/// The longest gap across a billing reset that is still taken as read: a
+/// few of this widget's own ten-minute cycles. The reviews between the
+/// last reading and the reset are lost, and past this many could be.
+const RESET_GAP: f64 = 3600.0;
 
 /// The reviews added in the `span` up to `at`.
 ///
@@ -240,16 +248,20 @@ struct Counted {
 /// reviews between it and the next reading are counted even where some of
 /// them fell just before the start: the count can run over, never under,
 /// which puts the estimated rate on the cautious side. A count that fell
-/// is a new billing period, and everything in it is new.
+/// is a new billing period, and everything in it is new. Readings after
+/// `at`, which a clock stepped back leaves, have not happened yet here.
 fn reviews_across(samples: &[(f64, u64)], at: f64, span: f64) -> Option<Counted> {
+    let samples: Vec<(f64, u64)> = samples.iter().copied().filter(|(t, _)| *t <= at).collect();
     let first = samples.iter().rposition(|(t, _)| *t <= at - span);
     let from = first.unwrap_or(0);
     let start = samples.get(from)?;
-    let reviews = samples[from..]
-        .windows(2)
+    let pairs = samples[from..].windows(2);
+    let reviews = pairs
+        .clone()
         .map(|p| if p[1].1 >= p[0].1 { p[1].1 - p[0].1 } else { p[1].1 })
         .sum();
-    Some(Counted { reviews, since: start.0, whole: first.is_some() })
+    let gapped = pairs.clone().any(|p| p[1].1 < p[0].1 && p[1].0 - p[0].0 > RESET_GAP);
+    Some(Counted { reviews, since: start.0, whole: first.is_some(), gapped })
 }
 
 /// Where to run `coderabbit usage`: `coderabbit_repo` with a leading `~`
@@ -568,8 +580,16 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    let count = if week.whole {
+    // A reset in a long gap lost what came before it, so the count is a
+    // floor however far back the readings go.
+    let exact = week.whole && !week.gapped;
+    let count = if exact {
         format!("~{} reviews in the last 7 days", week.reviews)
+    } else if week.whole {
+        format!(
+            "at least {} reviews in the last 7 days; the billing period reset while no pane was reading",
+            week.reviews
+        )
     } else {
         format!(
             "at least {} reviews in the {} since readings began",
@@ -592,7 +612,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 Some((from, rate)) => format!(" · {} an hour from {}", rate, from),
                 None => String::new(),
             };
-            let so_far = if week.whole { "about" } else { "at most" };
+            let so_far = if exact { "about" } else { "at most" };
             format!(" · {} {} on {}{}", so_far, now_at, plan, then)
         }
         None if plan.is_empty() => " · the plan is not known, so no rate".into(),
@@ -914,17 +934,26 @@ mod tests {
         let partial = [(at - 3.0 * day, 40), (at - day, 47), (at, 52)];
         assert_eq!(
             reviews_across(&partial, at, WEEK),
-            Some(Counted { reviews: 12, since: at - 3.0 * day, whole: false })
+            Some(Counted { reviews: 12, since: at - 3.0 * day, whole: false, gapped: false })
         );
         // A reading from before the week starts the count there, and makes it whole.
         let whole = [(at - 9.0 * day, 1), (at - 8.0 * day, 30), (at - 2.0 * day, 70), (at, 85)];
         assert_eq!(
             reviews_across(&whole, at, WEEK),
-            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true })
+            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true, gapped: false })
         );
         // A count that fell is a new billing period; all of it is new.
         let reset = [(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)];
-        assert_eq!(reviews_across(&reset, at, WEEK).unwrap().reviews, 15);
+        let across = reviews_across(&reset, at, WEEK).unwrap();
+        assert_eq!(across.reviews, 15);
+        // Two days unread across that reset: the count is only a floor.
+        assert!(across.gapped);
+        // A reset read within the hour is taken as read.
+        let close = [(at - 8.0 * day, 90), (at - 600.0, 96), (at - 0.001, 0), (at, 4)];
+        assert!(!reviews_across(&close, at, WEEK).unwrap().gapped);
+        // A reading after `at`, left by a clock stepped back, is not counted.
+        let ahead = [(at - 8.0 * day, 10), (at, 20), (at + 3600.0, 5)];
+        assert_eq!(reviews_across(&ahead, at, WEEK).unwrap().reviews, 10);
         assert_eq!(reviews_across(&[], at, WEEK), None);
     }
 
@@ -1011,6 +1040,12 @@ mod tests {
         assert!(all.contains("about 4 reviews an hour on Team"), "{all}");
         assert!(all.contains("2 an hour from 60"), "{all}");
         assert!(all.contains(" of 70"), "{all}");
+        // A reset in a long unread gap makes even a whole week a floor.
+        let day = 86400.0;
+        let gapped = week_of(vec![(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)], "Team");
+        let text = tab(&gapped, 100, 40, &Config::default(), &palette()).join("\n");
+        assert!(text.contains("at least 15 reviews in the last 7 days"), "{text}");
+        assert!(text.contains("at most 8 reviews an hour"), "{text}");
         // And the plan it was looked up on heads the subscription.
         assert!(all.lines().any(|r| r.contains("SUBSCRIPTION") && r.contains("Team")), "{all}");
     }

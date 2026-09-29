@@ -1201,6 +1201,9 @@ count where reviews go one at a time, then looks the rate up on the plan
 - **A part week is a floor.** Until the readings reach back seven days, the
   tab says `at least` for the count and `at most` for the rate, and the date
   a whole week will be in.
+- **A reset in a long gap is a floor too.** When the billing period reset
+  while no pane read for over an hour, the reviews before the reset were
+  never counted, so the week says `at least` however far back it reaches.
 - **It may overcount.** Only pull request reviews count toward fair use, and
   `Your reviews` may also count CLI and IDE ones, so the real rate may be
   higher than the estimate. The tab says so under it.
