@@ -139,7 +139,20 @@ fn sample_key(u: &CodeRabbitUsage) -> String {
 /// everything between says nothing more. Samples older than a week go,
 /// except the newest of them, which is where the week's count starts.
 fn record_sample(path: &str, key: &str, at: f64, count: u64) -> Vec<(f64, u64)> {
-    // Read just before writing, since two panes may share the file.
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Two panes may share the file, so the whole read, change and rename is
+    // held under a lock beside it; otherwise the second rename drops the
+    // first pane's reading. Released when `_lock` closes. With no lock to
+    // be had the reading is still recorded, as it was before there was one.
+    let _lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{}.lock", path))
+        .ok()
+        .filter(|f| f.lock().is_ok());
     let mut all = read_json(path).filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
     let mut samples: Vec<(f64, u64)> = all[key]
         .as_array()
@@ -149,20 +162,25 @@ fn record_sample(path: &str, key: &str, at: f64, count: u64) -> Vec<(f64, u64)> 
                 .collect()
         })
         .unwrap_or_default();
-    samples.retain(|(t, _)| *t < at);
+    samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let newest = samples.last().map_or(at, |(t, _)| t.max(at));
     let n = samples.len();
-    if n >= 2 && samples[n - 1].1 == count && samples[n - 2].1 == count {
+    if newest > at || samples.last().is_some_and(|(t, _)| *t == at) {
+        // Older than a reading already kept: a clock stepped back, or a
+        // pane that wrote late. Put in its place rather than erasing what
+        // came after, replacing one taken at the same moment.
+        samples.retain(|(t, _)| *t != at);
+        let i = samples.partition_point(|(t, _)| *t < at);
+        samples.insert(i, (at, count));
+    } else if n >= 2 && samples[n - 1].1 == count && samples[n - 2].1 == count {
         samples[n - 1].0 = at;
     } else {
         samples.push((at, count));
     }
-    if let Some(start) = samples.iter().rposition(|(t, _)| *t <= at - WEEK) {
+    if let Some(start) = samples.iter().rposition(|(t, _)| *t <= newest - WEEK) {
         samples.drain(..start);
     }
     all[key] = serde_json::json!(samples.iter().map(|(t, c)| serde_json::json!([t, c])).collect::<Vec<_>>());
-    if let Some(dir) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     // Renamed into place, so a pane reading it never sees half a file.
     let tmp = format!("{}.{}.tmp", path, std::process::id());
     if std::fs::write(&tmp, all.to_string()).is_ok() {
@@ -880,7 +898,12 @@ mod tests {
         let later = t + WEEK + 1500.0;
         let kept = record_sample(&path, "a@org", later, 20);
         assert_eq!(kept, vec![(t + 1200.0, 10), (t + 1800.0, 12), (later, 20)]);
+        // A reading from before the newest, as after a clock steps back, is
+        // put in its place and erases nothing after it.
+        let back = record_sample(&path, "a@org", later - 60.0, 19);
+        assert_eq!(back, vec![(t + 1200.0, 10), (t + 1800.0, 12), (later - 60.0, 19), (later, 20)]);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path));
     }
 
     fn week_of(samples: Vec<(f64, u64)>, plan: &str) -> Data {
