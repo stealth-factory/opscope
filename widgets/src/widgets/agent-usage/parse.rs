@@ -484,6 +484,531 @@ pub fn pick_notion_space<'a>(spaces: &'a [NotionSpace], wanted: &str) -> Option<
     spaces.iter().find(|s| s.has_allowance()).or_else(|| spaces.first())
 }
 
+/// One Devin quota window. `pct` is the number the body sent, on a 0–100
+/// scale. `reset` is an absolute instant, when one was sent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DevinWindow {
+    pub pct: f64,
+    pub reset: Option<f64>,
+}
+
+/// Devin `GET /api/<org>/billing/quota/usage`.
+///
+/// `daily` is absent both when the body had no daily window and when
+/// `hide_daily_quota` is boolean true. Those two are told apart by
+/// `daily_hidden`: a hidden window is not a 0%.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DevinQuota {
+    pub daily: Option<DevinWindow>,
+    pub weekly: Option<DevinWindow>,
+    pub daily_hidden: bool,
+    /// Present only when `overage_balance` or `overage_balance_cents` was in
+    /// the body. A missing key is not a balance of zero.
+    pub balance: Option<f64>,
+    pub plan: Option<String>,
+}
+
+/// The flat quota object, or `quota_usage.daily_quota` / `weekly_quota`
+/// when the matching top-level percentage is absent.
+///
+/// None when both windows are missing, including when daily is hidden and
+/// weekly was not sent. Percentages are kept as sent: a value below 1 is
+/// not multiplied by 100, because 0.4% and 40% are different readings.
+pub fn parse_devin_quota(text: &str) -> Option<DevinQuota> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = body.as_object()?;
+    let daily_hidden = obj.get("hide_daily_quota").and_then(|v| v.as_bool()) == Some(true);
+    let nested = obj.get("quota_usage");
+    let mut daily = devin_window(
+        obj,
+        nested,
+        "daily_percentage",
+        "daily_reset_at",
+        "daily_quota",
+    );
+    let weekly = devin_window(
+        obj,
+        nested,
+        "weekly_percentage",
+        "weekly_reset_at",
+        "weekly_quota",
+    );
+    if daily_hidden {
+        daily = None;
+    }
+    if daily.is_none() && weekly.is_none() {
+        return None;
+    }
+    Some(DevinQuota {
+        daily,
+        weekly,
+        daily_hidden,
+        balance: devin_balance(obj),
+        plan: devin_plan(obj),
+    })
+}
+
+fn devin_window(
+    body: &serde_json::Map<String, serde_json::Value>,
+    nested: Option<&serde_json::Value>,
+    pct_key: &str,
+    reset_key: &str,
+    nested_key: &str,
+) -> Option<DevinWindow> {
+    let top = match body.get(pct_key) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => v.as_f64().filter(|n| n.is_finite() && *n >= 0.0),
+    };
+    let nested_window = nested
+        .and_then(|v| v.get(nested_key))
+        .and_then(devin_nested_window);
+    let pct = top.or_else(|| nested_window.as_ref().map(|w| w.pct))?;
+    let reset = body
+        .get(reset_key)
+        .and_then(|v| epoch_from(v, 10_000_000_000.0))
+        .or_else(|| nested_window.and_then(|w| w.reset));
+    Some(DevinWindow { pct, reset })
+}
+
+/// Percent, then an inverted remaining percent, then used-over-limit, then
+/// remaining-against-limit. Only the keys named here, and only on this
+/// object: a walk that matches "day" inside some other key binds the wrong
+/// window.
+fn devin_nested_window(v: &serde_json::Value) -> Option<DevinWindow> {
+    if let Some(n) = v.as_f64().filter(|n| n.is_finite() && *n >= 0.0) {
+        return Some(DevinWindow {
+            pct: n,
+            reset: None,
+        });
+    }
+    let obj = v.as_object()?;
+    let pct = named_percent(obj, DEVIN_PERCENT_KEYS)
+        .or_else(|| {
+            named_percent(obj, DEVIN_REMAINING_PERCENT_KEYS)
+                .filter(|n| (0.0..=100.0).contains(n))
+                .map(|n| 100.0 - n)
+        })
+        .or_else(|| ratio_percent(obj, DEVIN_USED_KEYS, DEVIN_LIMIT_KEYS))
+        .or_else(|| remaining_percent(obj))?;
+    let reset = obj.iter().find_map(|(key, value)| {
+        key.to_ascii_lowercase()
+            .contains("reset")
+            .then(|| epoch_from(value, 10_000_000_000.0))
+            .flatten()
+    });
+    Some(DevinWindow { pct, reset })
+}
+
+const DEVIN_PERCENT_KEYS: &[&str] = &[
+    "used_percent",
+    "usedPercent",
+    "usage_percent",
+    "usagePercent",
+    "percent_used",
+    "percentUsed",
+    "percent",
+];
+const DEVIN_REMAINING_PERCENT_KEYS: &[&str] = &[
+    "remaining_percent",
+    "remainingPercent",
+    "percent_remaining",
+    "percentRemaining",
+];
+const DEVIN_USED_KEYS: &[&str] = &["used", "usage", "used_count", "usedCount", "consumed"];
+const DEVIN_LIMIT_KEYS: &[&str] = &["limit", "quota", "total", "max", "available"];
+const DEVIN_LEFT_KEYS: &[&str] = &["remaining", "left", "available"];
+const DEVIN_PLAN_KEYS: &[&str] = &[
+    "plan_name",
+    "planName",
+    "plan",
+    "tier",
+    "subscription_tier",
+    "subscriptionTier",
+];
+
+fn named_percent(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        obj.get(*key)
+            .and_then(|v| v.as_f64())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    })
+}
+
+/// Two counts on this object. The keys have to differ: `available` is on
+/// both lists, and one number read as both sides is a 0% nobody sent.
+fn ratio_percent(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    used_keys: &[&str],
+    limit_keys: &[&str],
+) -> Option<f64> {
+    let (used_key, used) = first_keyed(obj, used_keys)?;
+    let (limit_key, limit) = first_keyed(obj, limit_keys)?;
+    (used_key != limit_key && limit > 0.0 && used >= 0.0).then_some(used / limit * 100.0)
+}
+
+fn remaining_percent(obj: &serde_json::Map<String, serde_json::Value>) -> Option<f64> {
+    let (left_key, left) = first_keyed(obj, DEVIN_LEFT_KEYS)?;
+    let (limit_key, limit) = first_keyed(obj, DEVIN_LIMIT_KEYS)?;
+    (left_key != limit_key && limit > 0.0 && left >= 0.0 && left <= limit)
+        .then_some((limit - left) / limit * 100.0)
+}
+
+fn first_keyed<'a>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    keys: &'a [&'a str],
+) -> Option<(&'a str, f64)> {
+    keys.iter().find_map(|key| {
+        let n = obj.get(*key)?.as_f64().filter(|n| n.is_finite())?;
+        Some((*key, n))
+    })
+}
+
+/// `overage_balance` when that key was sent, otherwise cents divided by 100.
+/// Either key missing is not filled in with zero.
+fn devin_balance(obj: &serde_json::Map<String, serde_json::Value>) -> Option<f64> {
+    if let Some(value) = obj.get("overage_balance") {
+        return value.as_f64().filter(|n| n.is_finite() && *n >= 0.0);
+    }
+    obj.get("overage_balance_cents")
+        .and_then(|v| v.as_f64())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|cents| cents / 100.0)
+}
+
+/// A plan string from the top level only. A nested copy, and the unread
+/// flags beside the quota, are not a plan.
+fn devin_plan(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    DEVIN_PLAN_KEYS
+        .iter()
+        .find_map(|key| non_empty(obj.get(*key)?))
+}
+
+/// One Factory rate-limit window. `seconds_remaining` is set only when the
+/// body sent a positive count. `window_end` is the instant even when it is
+/// already past: a closed window and the percent that was sent are different
+/// facts, and the percent is not replaced with 0 here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryWindow {
+    pub pct: f64,
+    pub seconds_remaining: Option<f64>,
+    pub window_end: Option<f64>,
+}
+
+/// Standard is the three named windows. Core is the same shape, and each of
+/// its windows can be absent without the others becoming 0%.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryPool {
+    pub five_hour: Option<FactoryWindow>,
+    pub weekly: Option<FactoryWindow>,
+    pub monthly: Option<FactoryWindow>,
+}
+
+/// Factory `GET /api/billing/limits` when the account is on token rate limits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryBilling {
+    pub standard: FactoryPool,
+    pub core: Option<FactoryPool>,
+    /// `extraUsageBalanceCents / 100`, and only when that key was sent.
+    pub balance: Option<f64>,
+    pub overage_preference: Option<String>,
+}
+
+/// None unless `usesTokenRateLimitsBilling` is boolean true and
+/// `limits.standard` has `fiveHour`, `weekly`, and `monthly`, each with
+/// `usedPercent`. A window the server left out is not a 0% bar, and it is
+/// not this body.
+pub fn parse_factory_billing_limits(text: &str) -> Option<FactoryBilling> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    if body
+        .get("usesTokenRateLimitsBilling")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        return None;
+    }
+    let standard_obj = body.get("limits")?.get("standard")?.as_object()?;
+    let standard = FactoryPool {
+        five_hour: Some(factory_window(standard_obj.get("fiveHour")?)?),
+        weekly: Some(factory_window(standard_obj.get("weekly")?)?),
+        monthly: Some(factory_window(standard_obj.get("monthly")?)?),
+    };
+    let core = body
+        .get("limits")
+        .and_then(|v| v.get("core"))
+        .and_then(factory_core);
+    let balance = match body.get("extraUsageBalanceCents") {
+        Some(v) => v
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .map(|cents| cents / 100.0),
+        None => None,
+    };
+    Some(FactoryBilling {
+        standard,
+        core,
+        balance,
+        overage_preference: body.get("overagePreference").and_then(non_empty),
+    })
+}
+
+fn factory_window(v: &serde_json::Value) -> Option<FactoryWindow> {
+    let obj = v.as_object()?;
+    let pct = obj
+        .get("usedPercent")?
+        .as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.0)?;
+    let seconds_remaining = obj
+        .get("secondsRemaining")
+        .and_then(|v| v.as_f64())
+        .filter(|n| n.is_finite() && *n > 0.0);
+    Some(FactoryWindow {
+        pct,
+        seconds_remaining,
+        window_end: obj.get("windowEnd").and_then(|v| epoch_from(v, 1e12)),
+    })
+}
+
+/// Core is drawn only when some window has a percent above zero, a
+/// `windowEnd`, or a `secondsRemaining`. Three explicit zeros and no dates
+/// are an empty pool, not three bars.
+fn factory_core(v: &serde_json::Value) -> Option<FactoryPool> {
+    let obj = v.as_object()?;
+    let pool = FactoryPool {
+        five_hour: obj.get("fiveHour").and_then(factory_window),
+        weekly: obj.get("weekly").and_then(factory_window),
+        monthly: obj.get("monthly").and_then(factory_window),
+    };
+    let data = ["fiveHour", "weekly", "monthly"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(core_window_has_data));
+    (data && (pool.five_hour.is_some() || pool.weekly.is_some() || pool.monthly.is_some()))
+        .then_some(pool)
+}
+
+fn core_window_has_data(v: &serde_json::Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    if obj
+        .get("usedPercent")
+        .and_then(|v| v.as_f64())
+        .is_some_and(|n| n.is_finite() && n > 0.0)
+    {
+        return true;
+    }
+    if obj
+        .get("windowEnd")
+        .is_some_and(|v| !v.is_null() && epoch_from(v, 1e12).is_some())
+    {
+        return true;
+    }
+    obj.get("secondsRemaining")
+        .and_then(|v| v.as_f64())
+        .is_some_and(|n| n.is_finite())
+}
+
+/// One legacy Standard or Premium pool. `pct` is absent when the body had
+/// no `usedRatio` on a 0–1 scale and no positive allowance to divide by.
+/// `unlimited` is an allowance above one trillion: there is no denominator,
+/// and no bar is filled in for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryTokens {
+    pub pct: Option<f64>,
+    pub unlimited: bool,
+    /// `orgTotalTokensUsed`, only when that key was sent. It is a different
+    /// population from the user percent and is not added into it.
+    pub org_tokens: Option<f64>,
+}
+
+/// Factory `GET /api/organization/subscription/usage`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryUsage {
+    /// `usage.endDate`, as epoch seconds. Shared by standard and premium.
+    pub end: Option<f64>,
+    pub standard: FactoryTokens,
+    pub premium: FactoryTokens,
+}
+
+/// None when the body has no `usage` object. A pool with no ratio and no
+/// positive allowance keeps `pct: None` rather than becoming 0%.
+pub fn parse_factory_usage(text: &str) -> Option<FactoryUsage> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let usage = body.get("usage")?.as_object()?;
+    Some(FactoryUsage {
+        end: usage.get("endDate").and_then(|v| epoch_from(v, 1e12)),
+        standard: factory_tokens(usage.get("standard")),
+        premium: factory_tokens(usage.get("premium")),
+    })
+}
+
+fn factory_tokens(v: Option<&serde_json::Value>) -> FactoryTokens {
+    let Some(obj) = v.and_then(|v| v.as_object()) else {
+        return FactoryTokens {
+            pct: None,
+            unlimited: false,
+            org_tokens: None,
+        };
+    };
+    let allowance = obj
+        .get("totalAllowance")
+        .and_then(|v| v.as_f64())
+        .filter(|n| n.is_finite());
+    let tokens = obj
+        .get("userTokens")
+        .and_then(|v| v.as_f64())
+        .filter(|n| n.is_finite());
+    let ratio = obj
+        .get("usedRatio")
+        .and_then(|v| v.as_f64())
+        .filter(|n| n.is_finite());
+    let org_tokens = match obj.get("orgTotalTokensUsed") {
+        Some(v) => v.as_f64().filter(|n| n.is_finite() && *n >= 0.0),
+        None => None,
+    };
+    // Above one trillion the allowance is not a ceiling anyone can draw a
+    // bar against. A stand-in denominator would be a percent the body did
+    // not have.
+    if allowance.is_some_and(|n| n > 1e12) {
+        return FactoryTokens {
+            pct: None,
+            unlimited: true,
+            org_tokens,
+        };
+    }
+    let pct = match ratio {
+        Some(r) if (0.0..=1.0).contains(&r) => {
+            let zero_but_spent =
+                r == 0.0 && tokens.is_some_and(|n| n > 0.0) && allowance.is_some_and(|n| n >= 1.0);
+            if zero_but_spent {
+                Some(tokens.unwrap_or(0.0) / allowance.unwrap_or(1.0) * 100.0)
+            } else {
+                Some(r * 100.0)
+            }
+        }
+        // A ratio outside 0–1 is not treated as an already-percent. That
+        // second scale is unconfirmed, and a guess would draw a different
+        // number from the one that was sent.
+        _ => match (tokens, allowance) {
+            (Some(t), Some(a)) if t >= 0.0 && a > 0.0 => Some(t / a * 100.0),
+            _ => None,
+        },
+    };
+    FactoryTokens {
+        pct,
+        unlimited: false,
+        org_tokens,
+    }
+}
+
+/// What `GET /api/app/auth/me` contributes to the subscription line.
+///
+/// `user_id` is `userProfile.id` and is used only to build the legacy usage
+/// query. Email, organization id, status, and feature flags are not taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryAuth {
+    pub org: Option<String>,
+    pub tier: Option<String>,
+    pub plan: Option<String>,
+    pub user_id: Option<String>,
+}
+
+pub fn parse_factory_auth(text: &str) -> Option<FactoryAuth> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let org_obj = &body["organization"];
+    let auth = FactoryAuth {
+        org: non_empty(&org_obj["name"]),
+        tier: non_empty(&org_obj["subscription"]["factoryTier"]),
+        plan: non_empty(&org_obj["subscription"]["orbSubscription"]["plan"]["name"]),
+        user_id: non_empty(&body["userProfile"]["id"]),
+    };
+    (auth.org.is_some() || auth.tier.is_some() || auth.plan.is_some() || auth.user_id.is_some())
+        .then_some(auth)
+}
+
+/// The `FACTORY_API_KEY` line in `~/.factory/.env`.
+///
+/// Blank lines and `#` comments are skipped. `export` is optional. The
+/// first key line wins; an empty value is not a key.
+pub fn parse_factory_dotenv(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some(value) = line.strip_prefix("FACTORY_API_KEY=") else {
+            continue;
+        };
+        let value = value.trim();
+        let value = value
+            .split_once(" #")
+            .map(|(head, _)| head.trim())
+            .unwrap_or(value);
+        let value = quoted(value).unwrap_or(value);
+        let value = value.trim();
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    None
+}
+
+fn quoted(value: &str) -> Option<&str> {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[0] == bytes[bytes.len() - 1]
+    {
+        Some(&value[1..value.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn non_empty(v: &serde_json::Value) -> Option<String> {
+    let text = strip_controls(v.as_str()?.trim());
+    (!text.is_empty()).then_some(text)
+}
+
+/// An ISO-8601 string, a numeric string, or a number. Above `millis_above`
+/// the number is milliseconds.
+fn epoch_from(v: &serde_json::Value, millis_above: f64) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().and_then(|n| epoch_number(n, millis_above)),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            if let Ok(n) = s.parse::<f64>() {
+                epoch_number(n, millis_above)
+            } else {
+                iso_epoch(s)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn epoch_number(n: f64, millis_above: f64) -> Option<f64> {
+    if !n.is_finite() || n <= 0.0 {
+        return None;
+    }
+    Some(if n > millis_above { n / 1000.0 } else { n })
+}
+
+/// A balance drawn as digits. No currency symbol: the body does not name one.
+pub fn format_balance(n: f64) -> String {
+    if !n.is_finite() {
+        return String::new();
+    }
+    let cents = (n * 100.0).round() / 100.0;
+    if (cents - cents.trunc()).abs() < 1e-9 {
+        format!("{}", cents as i64)
+    } else {
+        let text = format!("{cents:.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,5 +1395,194 @@ mod tests {
         // A name the account cannot see falls back to the automatic choice.
         assert_eq!(pick_notion_space(&spaces, "nope").unwrap().name, "Acme");
         assert!(pick_notion_space(&[], "").is_none());
+    }
+    #[test]
+    fn a_devin_quota_keeps_the_percents_it_was_sent() {
+        let q = parse_devin_quota(
+            r#"{"daily_percentage":0.4,"weekly_percentage":42,"daily_reset_at":"2026-09-30T00:00:00Z",
+                "weekly_reset_at":1700000000000,"hide_daily_quota":false,"overage_balance":12.5,
+                "is_quota_plan":true,"plan":"pro_plus"}"#,
+        )
+        .unwrap();
+        // 0.4 stays 0.4. Multiplying a sub-one percent by 100 would draw 40%.
+        assert_eq!(q.daily.as_ref().map(|w| w.pct), Some(0.4));
+        assert_eq!(q.weekly.as_ref().map(|w| w.pct), Some(42.0));
+        assert!(q.daily.as_ref().unwrap().reset.is_some());
+        // Above 10_000_000_000 the reset is milliseconds.
+        assert_eq!(q.weekly.as_ref().unwrap().reset, Some(1_700_000_000.0));
+        assert!(!q.daily_hidden);
+        assert_eq!(q.balance, Some(12.5));
+        assert_eq!(q.plan.as_deref(), Some("pro_plus"));
+    }
+
+    #[test]
+    fn a_hidden_devin_daily_is_omitted_and_a_missing_balance_is_not_zero() {
+        let hidden = parse_devin_quota(
+            r#"{"daily_percentage":40,"weekly_percentage":0,"hide_daily_quota":true}"#,
+        )
+        .unwrap();
+        assert!(hidden.daily.is_none());
+        assert!(hidden.daily_hidden);
+        // The zero was sent. It is not the stand-in for a window that was left out.
+        assert_eq!(hidden.weekly.as_ref().map(|w| w.pct), Some(0.0));
+        assert_eq!(hidden.balance, None);
+        // Only a JSON boolean true hides the daily window.
+        let kept = parse_devin_quota(
+            r#"{"daily_percentage":40,"weekly_percentage":1,"hide_daily_quota":"true"}"#,
+        )
+        .unwrap();
+        assert_eq!(kept.daily.as_ref().map(|w| w.pct), Some(40.0));
+        let cents =
+            parse_devin_quota(r#"{"weekly_percentage":1,"overage_balance_cents":250}"#).unwrap();
+        assert!(cents.daily.is_none() && !cents.daily_hidden);
+        assert_eq!(cents.balance, Some(2.5));
+        assert!(parse_devin_quota(r#"{"hide_daily_quota":true,"daily_percentage":40}"#).is_none());
+    }
+
+    #[test]
+    fn a_devin_nested_window_is_used_only_when_the_top_level_percent_is_absent() {
+        let q = parse_devin_quota(
+            r#"{"quota_usage":{"daily_quota":{"used":3,"limit":10,"daily_reset_at":1700000000},
+                "weekly_quota":{"remaining_percent":25},"plan_name":"nested"}}"#,
+        )
+        .unwrap();
+        assert_eq!(q.daily.as_ref().map(|w| w.pct), Some(30.0));
+        assert_eq!(q.daily.as_ref().unwrap().reset, Some(1_700_000_000.0));
+        assert_eq!(q.weekly.as_ref().map(|w| w.pct), Some(75.0));
+        // The plan key has to be at the top. A nested one is a different object.
+        assert!(q.plan.is_none());
+        let top = parse_devin_quota(
+            r#"{"daily_percentage":8,"quota_usage":{"daily_quota":{"used_percent":90}}}"#,
+        )
+        .unwrap();
+        assert_eq!(top.daily.as_ref().map(|w| w.pct), Some(8.0));
+        assert!(top.weekly.is_none());
+    }
+
+    #[test]
+    fn factory_rate_limits_need_three_standard_windows_and_skip_an_empty_core() {
+        let body = r#"{"usesTokenRateLimitsBilling":true,"extraUsageBalanceCents":0,
+            "overagePreference":"on_demand",
+            "limits":{"standard":{
+                "fiveHour":{"usedPercent":10,"secondsRemaining":1000},
+                "weekly":{"usedPercent":20,"windowEnd":1700000000000},
+                "monthly":{"usedPercent":0,"windowEnd":1600000000}}}}"#;
+        let b = parse_factory_billing_limits(body).unwrap();
+        assert_eq!(b.standard.five_hour.as_ref().map(|w| w.pct), Some(10.0));
+        assert_eq!(
+            b.standard.five_hour.as_ref().unwrap().seconds_remaining,
+            Some(1000.0)
+        );
+        assert_eq!(
+            b.standard.weekly.as_ref().unwrap().window_end,
+            Some(1_700_000_000.0)
+        );
+        // A past windowEnd is kept. The percent sent beside it stays 0, which was sent.
+        assert_eq!(
+            b.standard.monthly.as_ref().map(|w| (w.pct, w.window_end)),
+            Some((0.0, Some(1_600_000_000.0)))
+        );
+        assert!(b.core.is_none());
+        assert_eq!(b.balance, Some(0.0));
+        assert_eq!(b.overage_preference.as_deref(), Some("on_demand"));
+        let empty_core = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}},
+            "core":{"fiveHour":{"usedPercent":0},"weekly":{"usedPercent":0},"monthly":{"usedPercent":0}}}}"#;
+        assert!(parse_factory_billing_limits(empty_core)
+            .unwrap()
+            .core
+            .is_none());
+        let partial_core = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}},
+            "core":{"weekly":{"usedPercent":4,"secondsRemaining":50}}}}"#;
+        let core = parse_factory_billing_limits(partial_core)
+            .unwrap()
+            .core
+            .unwrap();
+        assert!(core.five_hour.is_none() && core.monthly.is_none());
+        assert_eq!(core.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        assert!(parse_factory_billing_limits(
+            r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1}}}}"#
+        )
+        .is_none());
+        assert!(parse_factory_billing_limits(
+            r#"{"usesTokenRateLimitsBilling":false,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}}}}"#
+        )
+        .is_none());
+        let no_cents = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}}}}"#;
+        assert_eq!(
+            parse_factory_billing_limits(no_cents).unwrap().balance,
+            None
+        );
+    }
+
+    #[test]
+    fn a_legacy_factory_percent_comes_from_the_ratio_or_not_at_all() {
+        let usage = parse_factory_usage(
+            r#"{"usage":{"endDate":1700000000000,
+                "standard":{"userTokens":10,"totalAllowance":100,"usedRatio":0.10,"orgTotalTokensUsed":40},
+                "premium":{"userTokens":5,"totalAllowance":100,"usedRatio":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.end, Some(1_700_000_000.0));
+        assert_eq!(usage.standard.pct, Some(10.0));
+        assert_eq!(usage.standard.org_tokens, Some(40.0));
+        // A zero ratio with tokens already spent falls through to the counts.
+        let spent = parse_factory_usage(
+            r#"{"usage":{"standard":{"userTokens":25,"totalAllowance":100,"usedRatio":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spent.standard.pct, Some(25.0));
+        assert!(spent.premium.pct.is_none());
+        assert_eq!(spent.premium.org_tokens, None);
+        let missing = parse_factory_usage(r#"{"usage":{"standard":{"userTokens":25}}}"#).unwrap();
+        assert!(missing.standard.pct.is_none());
+        assert!(!missing.standard.unlimited);
+        let huge = parse_factory_usage(
+            r#"{"usage":{"standard":{"userTokens":10,"totalAllowance":1000000000001,"usedRatio":0.5}}}"#,
+        )
+        .unwrap();
+        assert!(huge.standard.pct.is_none() && huge.standard.unlimited);
+        // Outside 0–1 the ratio is not read as an already-percent.
+        let odd = parse_factory_usage(r#"{"usage":{"premium":{"usedRatio":40}}}"#).unwrap();
+        assert!(odd.premium.pct.is_none());
+        assert!(parse_factory_usage(r#"{"limits":{}}"#).is_none());
+    }
+
+    #[test]
+    fn factory_auth_keeps_the_labels_and_the_user_id_and_drops_the_rest() {
+        let auth = parse_factory_auth(
+            r#"{"organization":{"id":"org_1","name":"Acme","subscription":{"factoryTier":"pro",
+                "orbSubscription":{"status":"active","plan":{"id":"plan_1","name":"Factory Pro"}}}},
+                "userProfile":{"id":"user-1","email":"a@b.c"},"featureFlags":{"x":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(auth.org.as_deref(), Some("Acme"));
+        assert_eq!(auth.tier.as_deref(), Some("pro"));
+        assert_eq!(auth.plan.as_deref(), Some("Factory Pro"));
+        assert_eq!(auth.user_id.as_deref(), Some("user-1"));
+        assert!(parse_factory_auth(r#"{"featureFlags":{}}"#).is_none());
+    }
+
+    #[test]
+    fn a_factory_dotenv_line_is_the_key_and_nothing_else_in_the_file() {
+        assert_eq!(
+            parse_factory_dotenv("# comment\n\nexport FACTORY_API_KEY=\"abc\"\nOTHER=1\n")
+                .as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            parse_factory_dotenv("FACTORY_API_KEY='xyz' # trailing\n").as_deref(),
+            Some("xyz")
+        );
+        assert_eq!(parse_factory_dotenv("FACTORY_API_KEY=\n").as_deref(), None);
+        assert_eq!(
+            parse_factory_dotenv("# FACTORY_API_KEY=nope\n").as_deref(),
+            None
+        );
+        assert_eq!(format_balance(2.5), "2.5");
+        assert_eq!(format_balance(0.0), "0");
+        assert!(!format_balance(12.5).contains('$'));
     }
 }

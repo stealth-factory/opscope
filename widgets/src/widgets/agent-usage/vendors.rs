@@ -37,6 +37,8 @@ pub struct State {
     pub antigravity: crate::antigravity::Data,
     pub coderabbit: crate::coderabbit::Data,
     pub notion: crate::notion::Data,
+    pub devin: crate::devin::Data,
+    pub droid: crate::droid::Data,
     pub installed: HashMap<String, Presence>,
     pub fetched: f64,
     pub err: String,
@@ -58,10 +60,24 @@ fn notion_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
     chosen_agents(installed, cfg).iter().any(|t| t == "notion")
 }
 
+/// Whether Devin may be asked. It sends the reader's token to Devin, so a
+/// tab the fallback brought back does not count as a choice.
+fn devin_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "devin")
+}
+
+/// Whether Droid may be asked, on the same terms: the Factory API key leaves
+/// this machine only when the reader actually picked Droid.
+fn droid_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
+    chosen_agents(installed, cfg).iter().any(|t| t == "droid")
+}
+
 pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
     let installed = detect_agents(cfg);
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
     let notion_shown = notion_asked(&installed, cfg);
+    let devin_shown = devin_asked(&installed, cfg);
+    let droid_shown = droid_asked(&installed, cfg);
     State {
         claude: crate::claude::read(caches, cfg),
         codex: crate::codex::read(caches, cfg),
@@ -71,6 +87,8 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         antigravity: crate::antigravity::read(caches, cfg),
         coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
         notion: crate::notion::read(caches, cfg, notion_shown),
+        devin: crate::devin::read(caches, cfg, devin_shown),
+        droid: crate::droid::read(caches, cfg, droid_shown),
         installed,
         fetched: 0.0,
         err: String::new(),
@@ -104,6 +122,8 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "antigravity" => crate::antigravity::lanes(&s.antigravity),
         "coderabbit" => crate::coderabbit::lanes(&s.coderabbit),
         "notion" => crate::notion::lanes(&s.notion),
+        "devin" => crate::devin::lanes(&s.devin),
+        "droid" => crate::droid::lanes(&s.droid),
         _ => Vec::new(),
     }
 }
@@ -167,6 +187,8 @@ fn quiet_of(name: &str, s: &State) -> (String, bool) {
         "antigravity" => crate::antigravity::why_no_lane(&s.antigravity),
         "coderabbit" => crate::coderabbit::why_no_lane(&s.coderabbit),
         "notion" => crate::notion::why_no_lane(&s.notion),
+        "devin" => crate::devin::why_no_lane(&s.devin),
+        "droid" => crate::droid::why_no_lane(&s.droid),
         _ => String::new(),
     };
     let warn = quiet_is_actionable(&note);
@@ -365,7 +387,13 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         // ago. It also made this screen disagree with the agent's own tab
         // about the order of the very same bars.
         let mut inner = lanes.clone();
-        if !matches!(group_agent(name).as_str(), "claude" | "cursor") {
+        // Devin's daily sits inside its weekly, and Droid's five-hour window
+        // sits inside weekly inside monthly. Percentage order would reshuffle
+        // that on every refresh and disagree with the agent's own tab.
+        if !matches!(
+            group_agent(name).as_str(),
+            "claude" | "cursor" | "devin" | "droid"
+        ) {
             inner.sort_by(|a, b| b.pct.total_cmp(&a.pct));
         }
         for lane in &inner {
@@ -569,6 +597,8 @@ pub fn tab_body(
         "antigravity" => crate::antigravity::tab(&s.antigravity, w, h, cfg, p),
         "coderabbit" => crate::coderabbit::tab(&s.coderabbit, w, h, cfg, p),
         "notion" => crate::notion::tab(&s.notion, w, h, cfg, p),
+        "devin" => crate::devin::tab(&s.devin, w, h, cfg, p),
+        "droid" => crate::droid::tab(&s.droid, w, h, cfg, p),
         other => unknown(other, &s.installed, w, p),
     }
 }

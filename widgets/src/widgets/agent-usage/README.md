@@ -3,8 +3,21 @@
 [← all widgets](../../../../docs/README.md)
 
 How much the coding agents on this machine have actually been used — one tab
-per agent, from each agent's own local state, plus a live quota reading for
-the four that publish one and a subscription for the five that do.
+per agent, from each agent's own local state where it has any, plus a live
+quota where that agent publishes one.
+
+The agents this widget reads:
+
+- Claude Code
+- Codex
+- Cursor
+- Grok
+- Copilot
+- Antigravity
+- CodeRabbit
+- Notion
+- Devin
+- Droid (Factory)
 
 ```
 ╺━ AGENT USAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸
@@ -1187,6 +1200,63 @@ ends, since Notion gives the end and not the start.
 | `notion_workspace` | `""` | the workspace to report, by id; empty picks one that has an allowance |
 
 These are the same two requests CodexBar makes for its Notion AI provider.
+
+### Devin asks app.devin.ai with a bearer token and an organization
+
+Devin publishes a daily percent, a weekly percent, the reset instant for each,
+and an extra-usage balance. `[+]` draws the two percents. Neither row has a
+pace mark: the body has a reset and no window length, and a 24-hour or 7-day
+length would be one this widget made up. The balance is a number with no bar
+and no currency symbol, because the body names neither a cap nor a currency.
+It is not a lane on `[+]`.
+
+- **Daily disappears when `hide_daily_quota` is boolean true.** The percent
+  may still be in the body. It is not drawn as 0%. A missing weekly field is
+  the same: no bar, and the tab says the window was not in the answer. A 0
+  that was sent is a real 0.
+- **The percent is kept as sent.** A value below 1 is not multiplied by 100.
+- **The credential is pasted.** `devin_token` or `DEVIN_BEARER_TOKEN`
+  (`DEVIN_AUTHORIZATION` is another name for that variable), and `devin_org`.
+  An internal id (`org-` or `org_`) is the path and the `x-cog-org-id` header.
+  A slug is requested as `org/<slug>`. Nothing is read from a browser. Devin
+  is here when both the token and the organization are set. The request goes
+  only to `app.devin.ai`, and only while Devin is one of the agents shown.
+  Keep `config.json` chmod 600; the tab warns when it is not.
+
+A plan string is shown only when the body carried one at the top level.
+
+### Droid asks Factory with an API key
+
+Droid is Factory. Current accounts answer `GET /api/billing/limits` on
+`api.factory.ai`: standard 5-hour, weekly, and monthly percents from
+`usedPercent`, and the same three for Core when that pool has usage data.
+The reset is `secondsRemaining` counted from the reading, or a `windowEnd`
+that was still in the future. Pace is drawn on the 5-hour rows only — that
+length is the key's name. Weekly and monthly have a reset and no pace. A
+window the server left out is not a 0% bar. A percent that was sent is kept
+even when `windowEnd` is already past; the countdown is what gets omitted.
+
+Older accounts answer the subscription usage body instead. The heading says
+**standard and premium tokens**, so those percents are not read as the
+rate-limit windows. The percent comes from `usedRatio` when that ratio is
+between 0 and 1, or from `userTokens / totalAllowance` when the allowance is
+a positive number at or under one trillion. No ratio and no allowance is an
+absent percent, not 0%. An allowance above one trillion is unlimited: no
+bar, because there is no denominator. Org token totals, when the body sent
+them, are a labeled count and are not added into the user percent.
+
+Extra usage on a rate-limit account is `extraUsageBalanceCents / 100`, a
+number with no bar. The line is omitted when the key was not in the body. A
+legacy body has no such line. The subscription footer is the tier, the plan,
+and the organization name from the auth body, when those fields were sent.
+
+- **The key is a Factory API key.** `factory_api_key`, or `FACTORY_API_KEY`,
+  or the `FACTORY_API_KEY` line in `~/.factory/.env` — the same file CodexBar
+  reads. It is sent only to `api.factory.ai`, with `app.factory.ai` tried
+  once when the API host fails for a reason other than a rejected key. A 401
+  from the API host stays a bad key. Nothing is read from a browser, and the
+  key is not decoded to invent a user id. Droid is here when a key resolves.
+  The request runs only while Droid is one of the agents shown.
 
 ### Grok Bot (Cursor's weekly allowance)
 
