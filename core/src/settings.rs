@@ -158,9 +158,10 @@ impl Field {
 }
 
 fn is_secret(key: &str) -> bool {
-    // token_env is the *name* of a variable, not a secret. The tokens
-    // themselves are the keys called `token`.
-    key == "token" || key.ends_with("_token")
+    // `token_env` and `factory_api_key_env` name a variable, not a secret.
+    // The values are the keys called `token`, `*_token`, `api_key`, or
+    // `*_api_key`.
+    key == "token" || key.ends_with("_token") || key == "api_key" || key.ends_with("_api_key")
 }
 
 fn kind_name(v: &Value) -> &'static str {
@@ -1104,6 +1105,15 @@ fn load(spec: SettingsSpec) -> App {
 }
 
 fn edit_seed(field: &Field, current: Option<&Value>) -> String {
+    // An existing secret is not copied into the box. The row already says
+    // it is set, and the box would put the credential on screen.
+    if field.secret()
+        && current
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    {
+        return String::new();
+    }
     let src = current.unwrap_or(&field.default);
     match src {
         Value::String(s) => s.clone(),
@@ -3269,6 +3279,27 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
             app.status = Some("Nothing written.".into());
         }
         "enter" => {
+            let keep_secret = {
+                let field = match app.fields.get(*index) {
+                    Some(f) => f,
+                    None => {
+                        app.mode = Mode::List;
+                        return false;
+                    }
+                };
+                // An empty box on a secret that is already set must not
+                // write "" over it. The box was opened blank on purpose.
+                field.secret()
+                    && buffer.trim().is_empty()
+                    && current_of(&app.live, field, app.legacy_section)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty())
+            };
+            if keep_secret {
+                leave_edit(app);
+                app.status = Some("Nothing written.".into());
+                return false;
+            }
             let field = match app.fields.get(*index) {
                 Some(f) => f,
                 None => {
@@ -5848,6 +5879,66 @@ mod tests {
         assert_eq!(summary(&Value::String(String::new()), true), "(empty)");
         assert!(!is_secret("token_env"));
         assert!(is_secret("token"));
+        assert!(is_secret("devin_token"));
+        assert!(is_secret("api_key"));
+        assert!(is_secret("factory_api_key"));
+        assert!(!is_secret("factory_api_key_env"));
+        assert!(!is_secret("devin_org"));
+        assert!(!is_secret("notion_workspace"));
+        let secret_field = Field {
+            section: "agent_usage".into(),
+            key: "factory_api_key".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: Value::String(String::new()),
+        };
+        let stored = Value::String("fk-not-a-real-key".into());
+        assert_eq!(summary(&stored, secret_field.secret()), "••••••••");
+        assert_eq!(edit_seed(&secret_field, Some(&stored)), "");
+        let org = Field {
+            key: "devin_org".into(),
+            ..secret_field
+        };
+        let named = Value::String("acme".into());
+        assert_eq!(edit_seed(&org, Some(&named)), "acme");
+    }
+
+    #[test]
+    fn enter_on_an_empty_secret_leaves_the_stored_value() {
+        let mut app = catalogue_app(serde_json::json!({
+            "w": { "factory_api_key": "fk-not-a-real-key" }
+        }));
+        app.fields = vec![Field {
+            section: "w".into(),
+            key: "factory_api_key".into(),
+            parents: Vec::new(),
+            help: String::new(),
+            default: Value::String(String::new()),
+        }];
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.status.as_deref(), Some("Nothing written."));
+        assert_eq!(app.live["w"]["factory_api_key"], "fk-not-a-real-key");
+
+        app.fields[0].key = "devin_org".into();
+        app.live["w"]["devin_org"] = Value::String("acme".into());
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        assert!(
+            matches!(app.mode, Mode::Edit { .. }),
+            "an empty non-secret still tries to write"
+        );
     }
 
     #[test]

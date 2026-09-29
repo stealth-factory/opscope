@@ -28,6 +28,19 @@ sent only to app.notion.com, only while Notion is one of the agents shown,
 and never read out of a browser. It is a full sign-in to your Notion
 account, so keep config.json chmod 600; the tab warns when it is not.
 
+Devin is the same kind of reading. Its daily and weekly quota, the resets
+that came with them, and the extra-usage balance come from app.devin.ai.
+The bearer token goes in agent_usage.devin_token or DEVIN_BEARER_TOKEN
+(DEVIN_AUTHORIZATION is another name for that variable). The organization
+goes in agent_usage.devin_org. Nothing is read from a browser.
+
+Droid (Factory) reads token rate limits, or the older standard and premium
+token pools, with a Factory API key. The key goes in
+agent_usage.factory_api_key, or FACTORY_API_KEY, or the FACTORY_API_KEY
+line in ~/.factory/.env. It is sent only to api.factory.ai, with
+app.factory.ai tried once when the API host fails for a reason other than
+a rejected key. Nothing is read from a browser.
+
 Keys: left/right or tab switch agent, up/down scroll it, pgup/pgdn by
 the page, home/end to either edge, comma opens settings, r refreshes now,
 q quits.

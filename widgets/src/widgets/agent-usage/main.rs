@@ -391,6 +391,8 @@ fn agent_hue(name: &str) -> Option<(u8, u8, u8)> {
         "antigravity" => (232, 158, 200),
         "coderabbit" => (255, 112, 72),
         "notion" => (232, 226, 212),
+        "devin" => (148, 214, 255),
+        "droid" => (196, 214, 140),
         _ => return None,
     })
 }
@@ -417,6 +419,7 @@ fn agent_steps(name: &str) -> [(u8, u8, u8); 4] {
 const SUMMARY_TAB: &str = "+";
 const ORDER: &[&str] = &[
     "claude", "codex", "cursor", "grok", "copilot", "antigravity", "coderabbit", "notion",
+    "devin", "droid",
 ];
 const MONTHS: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1690,6 +1693,19 @@ struct Config {
     /// The workspace to report, by id. Empty picks the first on a plan
     /// that has an allowance.
     notion_workspace: String,
+    /// Devin's bearer token. Empty reads `devin_token_env`.
+    devin_token: String,
+    /// The environment variable holding that token when `devin_token` is
+    /// empty. Empty means `DEVIN_BEARER_TOKEN`.
+    devin_token_env: String,
+    /// The Devin organization: an internal id, or a slug.
+    devin_org: String,
+    /// Factory's API key for Droid. Empty reads `factory_api_key_env`, then
+    /// `~/.factory/.env`.
+    factory_api_key: String,
+    /// The environment variable holding that key when `factory_api_key` is
+    /// empty. Empty means `FACTORY_API_KEY`.
+    factory_api_key_env: String,
     /// Set when the settings came from a leftover `usage` section rather
     /// than `agent_usage`. The pane says so, because a silent fallback is
     /// how a rename looks like nothing changed.
@@ -1744,6 +1760,11 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
         notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
+        devin_token: tc::cfg_str(&raw, "devin_token", ""),
+        devin_token_env: tc::cfg_str(&raw, "devin_token_env", crate::devin::TOKEN_ENV),
+        devin_org: tc::cfg_str(&raw, "devin_org", ""),
+        factory_api_key: tc::cfg_str(&raw, "factory_api_key", ""),
+        factory_api_key_env: tc::cfg_str(&raw, "factory_api_key_env", crate::droid::API_KEY_ENV),
         antigravity_remote: raw
             .get("antigravity_remote")
             .and_then(|v| v.as_bool())
@@ -1844,6 +1865,9 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
+        // Same shape: a pasted credential, not a binary and not a browser.
+        "devin" => ("Devin", vec![], vec![]),
+        "droid" => ("Droid", vec![], vec![]),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
     }
 }
@@ -1910,6 +1934,19 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
         "notion".into(),
         Presence {
             present: !crate::notion::token(cfg).0.is_empty(),
+        },
+    );
+    let (devin_token, _) = crate::devin::token(cfg);
+    found.insert(
+        "devin".into(),
+        Presence {
+            present: !devin_token.is_empty() && !cfg.devin_org.trim().is_empty(),
+        },
+    );
+    found.insert(
+        "droid".into(),
+        Presence {
+            present: !crate::droid::api_key(cfg).0.is_empty(),
         },
     );
     found
@@ -2454,6 +2491,8 @@ mod antigravity;
 mod claude;
 mod coderabbit;
 mod notion;
+mod devin;
+mod droid;
 mod codex;
 mod copilot;
 mod cursor;
