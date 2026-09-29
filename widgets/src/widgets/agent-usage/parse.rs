@@ -772,9 +772,10 @@ fn factory_window(v: &serde_json::Value) -> Option<FactoryWindow> {
 }
 
 /// Core is drawn only when some window has a percent above zero, a
-/// `windowEnd`, or a `secondsRemaining`. A window that fails that test is
-/// left out even when a neighbour qualifies. A 0% that passes it is kept.
-/// Three explicit zeros and no dates are an empty pool, not three bars.
+/// `windowEnd`, or a `secondsRemaining` above zero. A window that fails
+/// that test is left out even when a neighbour qualifies. A 0% that passes
+/// it is kept. Three explicit zeros and no dates are an empty pool, not
+/// three bars.
 fn factory_core(v: &serde_json::Value) -> Option<FactoryPool> {
     let obj = v.as_object()?;
     let keep = |key: &str| {
@@ -807,9 +808,11 @@ fn core_window_has_data(v: &serde_json::Value) -> bool {
     {
         return true;
     }
+    // Zero and negative are not a countdown. `factory_window` drops them,
+    // and a 0% kept only by that field would be a bar with no reset.
     obj.get("secondsRemaining")
         .and_then(|v| v.as_f64())
-        .is_some_and(|n| n.is_finite())
+        .is_some_and(|n| n.is_finite() && n > 0.0)
 }
 
 /// One legacy Standard or Premium pool. `pct` is absent when the body had
@@ -1528,6 +1531,31 @@ mod tests {
             .unwrap();
         assert_eq!(dated.five_hour.as_ref().map(|w| w.pct), Some(0.0));
         assert_eq!(dated.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        // A 0% whose only extra field is a non-positive secondsRemaining
+        // has no reset once that field is dropped, so it is not a bar.
+        for seconds in ["0", "-5"] {
+            let dead = format!(
+                r#"{{"usesTokenRateLimitsBilling":true,"limits":{{"standard":{{
+                "fiveHour":{{"usedPercent":1}},"weekly":{{"usedPercent":1}},"monthly":{{"usedPercent":1}}}},
+                "core":{{"fiveHour":{{"usedPercent":0,"secondsRemaining":{seconds}}},"weekly":{{"usedPercent":4}}}}}}}}"#
+            );
+            let core = parse_factory_billing_limits(&dead).unwrap().core.unwrap();
+            assert!(core.five_hour.is_none(), "secondsRemaining {seconds}");
+            assert_eq!(core.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        }
+        let counting = r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{
+            "fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1},"monthly":{"usedPercent":1}},
+            "core":{"fiveHour":{"usedPercent":0,"secondsRemaining":50}}}}"#;
+        let live = parse_factory_billing_limits(counting)
+            .unwrap()
+            .core
+            .unwrap();
+        assert_eq!(
+            live.five_hour
+                .as_ref()
+                .map(|w| (w.pct, w.seconds_remaining)),
+            Some((0.0, Some(50.0)))
+        );
         let partial = parse_factory_billing_limits(
             r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":2}}}}"#,
         )
