@@ -7,7 +7,9 @@ does not exist, so each tab shows that agent's own shape - and an agent that
 exposes nothing says so rather than showing a plausible zero. Extra Claude
 Max profiles from agent_usage.claude_config_dirs get their own tab, titled
 with the label the entry names or, failing that, with the directory's own
-name.
+name. With discovery on, which is the default, an agent's tab appears only
+once that agent has been found on this machine. Naming agents and turning
+discovery off keeps those tabs up while the first read is still running.
 
     agent-usage [-n SECONDS]
 

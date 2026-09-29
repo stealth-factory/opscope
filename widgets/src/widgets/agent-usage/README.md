@@ -1703,11 +1703,18 @@ yet"* — if you listed it, you want it. That is the same
 empty-means-discover idiom as `github.accounts` and `linear.exclude_teams`, so
 it needs learning once.
 
+While discovery is on, those tabs stay hidden until that check has run, and
+then only the agents it found are shown. An agent it did not find does not
+get a tab. One it found still has its tab when the read after that comes
+back empty or failed — the body says so, the tab does not go away. Turn
+discovery off and name the agents, and those tabs are drawn from the first
+frame, including while a read is in flight.
+
 The header says how many detected agents the config is hiding, so discovery
 stays visible rather than magic, and a name that matches no known agent is
 called out — `unknown agent in config: nonsence (known: claude, codex, …)` —
-rather than silently ignored. If the settings would leave no tabs at all it
-shows everything instead, because an empty widget teaches nothing and the
+rather than silently ignored. If an explicit list would leave no tabs at all
+it shows everything instead, because an empty widget teaches nothing and the
 likeliest cause is a typo.
 
 The section used to be called `usage`, matching the old binary name. A

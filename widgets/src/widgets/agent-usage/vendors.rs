@@ -582,8 +582,11 @@ pub fn tab_body(
                         .any(|t| t == *n || t.starts_with(&format!("{n}:")))
                 })
                 .collect();
-            let names: &[&str] = if shown.is_empty() { ORDER } else { &shown };
-            summary_for(s, w, p, names)
+            // No agent tab means discovery has not found one, or the reader
+            // excluded every one it found. Walking ORDER here would name
+            // agents that have no tab, which is the same claim a tab would
+            // have made.
+            summary_for(s, w, p, &shown)
         }
         name if agent_family(name) == "claude" => {
             let fallback = crate::claude::Data::default();
@@ -670,6 +673,34 @@ mod tests {
         let installed = HashMap::new();
         assert!(visible_agents(&installed, &cfg).iter().any(|t| t == "coderabbit"));
         assert!(!coderabbit_asked(&installed, &cfg));
+    }
+
+    /// The summary follows the tabs. With only `[+]` up — discovery has
+    /// not found an agent yet — naming every provider would claim they
+    /// are here.
+    #[test]
+    fn the_summary_does_not_name_agents_with_no_tab() {
+        let p = palette();
+        let rows = plain(&tab_body(
+            "+",
+            &State::default(),
+            90,
+            40,
+            &Config::default(),
+            &p,
+            &["+".into()],
+        ));
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("No agent is publishing a quota"),
+            "{joined}"
+        );
+        for name in ["CLAUDE", "CODEX", "CURSOR", "GROK", "COPILOT", "NOTION", "DROID"] {
+            assert!(
+                !joined.contains(name),
+                "{name} was named with no tab:\n{joined}"
+            );
+        }
     }
 
     /// Rendered rows with the colour escapes stripped, so a test can read

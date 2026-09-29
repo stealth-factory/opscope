@@ -1952,19 +1952,35 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
     found
 }
 
+/// Whether the pane is choosing agents by what this machine has.
+///
+/// The key decides when it is set. When it is not, the rule that shipped
+/// before it decides, so a config written against the old behaviour keeps
+/// the behaviour it was written for: a named list wins, an empty one
+/// discovers.
+fn discovers(cfg: &Config) -> bool {
+    cfg.auto_detect_agent
+        .unwrap_or_else(|| !cfg.agents.iter().any(|n| ORDER.contains(&n.as_str())))
+}
+
 /// The tabs to draw.
 ///
 /// Empty `agents` discovers every agent this machine actually has. Naming
 /// them instead fixes both the set and the order, whether or not they are
-/// installed - if you listed it, you want the tab. Falls back to everything
-/// known if the result would be empty, because a widget with no tabs
-/// teaches nothing and the likeliest cause is a typo.
+/// installed - if you listed it, you want the tab. An explicit list that
+/// filters down to nothing falls back to everything known, because a widget
+/// with no tabs teaches nothing and the likeliest cause is a typo.
+///
+/// Discovery does not take that fallback. An empty result there means
+/// detection has not said yes yet, or it has said no. A tab is how an
+/// installed agent looks, so an agent that was not detected does not get
+/// one. The summary stays either way: it is not an agent.
 fn visible_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String> {
     let shown = chosen_agents(found, cfg);
     // The summary leads and is never discovered or excluded: it is not an
     // agent, it is the view across whichever agents there turn out to be.
     let mut out = vec![SUMMARY_TAB.to_string()];
-    let chosen = if shown.is_empty() {
+    let chosen = if shown.is_empty() && !discovers(cfg) {
         ORDER.iter().map(|n| n.to_string()).collect()
     } else {
         shown
@@ -1989,11 +2005,7 @@ fn chosen_agents(found: &HashMap<String, Presence>, cfg: &Config) -> Vec<String>
         .filter(|n| known.contains(&n.as_str()))
         .cloned()
         .collect();
-    // The key decides when it is set. When it is not, the rule that shipped
-    // before it decides, so a config written against the old behaviour keeps
-    // the behaviour it was written for.
-    let detect = cfg.auto_detect_agent.unwrap_or_else(|| named.is_empty());
-    let chosen: Vec<String> = if detect {
+    let chosen: Vec<String> = if discovers(cfg) {
         ORDER
             .iter()
             .filter(|n| found.get(**n).is_some_and(|x| x.present))
@@ -2214,7 +2226,22 @@ fn main() {
         loop {
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
+            //
+            // Presence is cheap — a binary on PATH, a file, a token — and
+            // the reads after it are not. Publish it before those reads on
+            // the first pass, so auto-detect can open a tab the moment it
+            // knows the agent is here, while the body is still the loading
+            // rows. A later pass leaves the map alone until the read lands:
+            // swapping it in early would open a tab onto the previous
+            // snapshot, which has no reading for an agent that was not
+            // there last time.
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let installed = detect_agents(&poller_cfg);
+                if let Ok(mut g) = poller.lock() {
+                    if g.fetched <= 0.0 {
+                        g.installed = installed;
+                    }
+                }
                 vendors::read_all(&mut caches, &poller_cfg)
             }));
             match read {
@@ -3825,6 +3852,54 @@ mod tests {
         assert_eq!(tab_title("claude:main"), "MAIN");
         assert_eq!(tab_title("claude:overflow"), "OVERFLOW");
         assert!(!tabs.iter().any(|t| t == "claude"), "{tabs:?}");
+    }
+
+    /// Discovery draws a tab from presence alone. Before the scan, and
+    /// after a scan that found nothing, the summary is the only tab: a
+    /// tab that appears first reads as an agent that is installed. A yes
+    /// is enough on its own — the read that follows can still be loading,
+    /// empty or failed, and the tab stays. Naming agents and turning
+    /// discovery off keeps those tabs up with no presence map at all,
+    /// which is the pane while the first read is in flight.
+    #[test]
+    fn auto_detect_hides_tabs_until_an_agent_is_present() {
+        let discovering = Config::default();
+        assert!(discovers(&discovering));
+        assert_eq!(visible_agents(&HashMap::new(), &discovering), vec!["+"]);
+
+        let absent: HashMap<String, Presence> = ORDER
+            .iter()
+            .map(|n| ((*n).to_string(), Presence { present: false }))
+            .collect();
+        assert_eq!(
+            visible_agents(&absent, &discovering),
+            vec!["+"],
+            "an undetected agent took a tab"
+        );
+
+        let mut found = absent;
+        found.insert("codex".into(), Presence { present: true });
+        assert_eq!(visible_agents(&found, &discovering), vec!["+", "codex"]);
+
+        // The named list is ignored while discovery is on, including for
+        // an agent the list names and the scan has not found.
+        let forced = Config {
+            agents: vec!["claude".into(), "cursor".into()],
+            auto_detect_agent: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(visible_agents(&HashMap::new(), &forced), vec!["+"]);
+        assert_eq!(visible_agents(&found, &forced), vec!["+", "codex"]);
+
+        let listed = Config {
+            agents: vec!["claude".into(), "cursor".into()],
+            auto_detect_agent: Some(false),
+            ..Config::default()
+        };
+        assert_eq!(
+            visible_agents(&HashMap::new(), &listed),
+            vec!["+", "claude", "cursor"]
+        );
     }
 
     #[test]
