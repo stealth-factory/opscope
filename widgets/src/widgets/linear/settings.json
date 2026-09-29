@@ -1,6 +1,7 @@
 {
   "_comment": "Personal API key: Linear Settings -> Security & access -> Personal API keys. Nothing needs selecting; exclude_teams is for dropping a noisy automated intake. Keep this file chmod 600.",
   "_schema": {
+    "token": { "secret": true },
     "exclude_teams": {
       "items": "string"
     },
