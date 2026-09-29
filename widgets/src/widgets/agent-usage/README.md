@@ -1156,6 +1156,13 @@ Under the allowance the tab shows your reviews this billing period, the reset
 with the days left, then the organisation, the login and any other line the
 report carried, such as spend.
 
+CodeRabbit gives the allowance only when `coderabbit usage` runs inside a
+git repository. Anywhere else it answers `Availability : unavailable` with a
+note saying so, and the billing period alone. The pane runs it wherever the
+widget was started, so set `coderabbit_repo` to any repository on this
+machine that CodeRabbit reviews; until then `[+]` passes CodeRabbit's note
+on and names the setting.
+
 An older CLI reports the count and no limit. Then there is no bar, and `[+]`
 names CodeRabbit as publishing no quota, with the count beside it and a note
 that CLI 0.8 reports the allowance. A count left with no limit beside it
@@ -1165,9 +1172,12 @@ grandfathered, and the fair-use policy lowers the rate as the week gets busy.
 
 - **The 0.8 wording is read by its words.** CodeRabbit documents what the
   report holds but not its labels, so a line is taken as the allowance when
-  its label says available, remaining or left; as the window when it says
+  its label says available (or availability), remaining or left; as the
+  window when it says
   window; and as the return time when it says returns or again. `3 of 5`,
-  `3/5`, and a limit on a line of its own are all read.
+  `3/5`, and a limit on a line of its own are all read. The report taken
+  outside a repository is in the tests as captured; the one from inside is
+  not yet.
 - **It runs a program.** Every other agent here reads a file or an endpoint;
   this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
   runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is

@@ -1673,6 +1673,9 @@ struct Config {
     /// one down. Turn it off and the quota lasts an hour past the last time
     /// Antigravity ran, which is the token's life.
     antigravity_start: bool,
+    /// The directory `coderabbit usage` runs in. Empty is this widget's
+    /// own; CodeRabbit reports included reviews only inside a repository.
+    coderabbit_repo: String,
     /// Minutes between those requests. Fifteen, and the ceiling is
     /// `GROK_PING_MAX` rather than taste. The window it reports moves
     /// over days, but the spend inside it moves while they work, and an
@@ -1773,6 +1776,7 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .get("antigravity_start")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        coderabbit_repo: tc::cfg_str(&raw, "coderabbit_repo", ""),
         legacy_section,
         // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
         // labelled entry is an object, and dropping it in silence would

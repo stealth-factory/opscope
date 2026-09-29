@@ -281,6 +281,17 @@ impl CodeRabbitUsage {
         Some((left, of.filter(|n| *n > 0 && left <= *n)))
     }
 
+    /// CodeRabbit's own reason, when it says the included reviews could not
+    /// be checked - `Availability : unavailable` beside a `Note`. The
+    /// billing period still arrives with it, so the report is not a failure.
+    pub fn unavailable_why(&self) -> Option<String> {
+        let said = self.quota_field(QuotaField::Available)?;
+        if !said.to_lowercase().starts_with("unavailable") {
+            return None;
+        }
+        Some(self.get("note").unwrap_or(said).trim_end_matches('.').to_string())
+    }
+
     /// How long the rolling window is, in seconds.
     pub fn window_secs(&self) -> Option<f64> {
         coderabbit_span_secs(self.quota_field(QuotaField::Window)?)
@@ -316,7 +327,7 @@ pub fn coderabbit_quota_field(label: &str) -> Option<QuotaField> {
         Some(QuotaField::Returns)
     } else if l.contains("window") {
         Some(QuotaField::Window)
-    } else if l.contains("available") || l.contains("remaining") || l.contains("left") {
+    } else if l.contains("availab") || l.contains("remaining") || l.contains("left") {
         Some(QuotaField::Available)
     } else if l.contains("limit") || l.contains("quota") || l.contains("allowance") {
         Some(QuotaField::Limit)
@@ -1443,6 +1454,48 @@ mod tests {
         let old = parse_coderabbit_usage("Your reviews : 25\nPeriod resets : 2026-09-30\n").unwrap();
         assert_eq!(old.available(), None);
         assert_eq!(old.window_secs(), None);
+    }
+
+    // `coderabbit usage` from CLI 0.8, captured outside a repository, with
+    // the organisation and user replaced.
+    const CODERABBIT_08_OUTSIDE_A_REPO: &str = "\
+────────────────────────────────────────
+CodeRabbit Usage
+
+Included reviews
+Availability : unavailable
+Note         : Run from a git repository to check included reviews.
+
+Billing period
+Organization  : example-org
+Usage billing : active
+User          : example-user
+Your reviews  : 94
+Your spend    : $5.25
+Review cap    : $40.00 per billing month (shared subscription)
+Period resets : 2026-10-06
+────────────────────────────────────────
+";
+
+    #[test]
+    fn a_captured_coderabbit_report_outside_a_repository_keeps_its_billing_period() {
+        // Availability is a quota line, and `unavailable` is CodeRabbit's
+        // answer rather than a count, so nothing is read as reviews left.
+        let u = parse_coderabbit_usage(CODERABBIT_08_OUTSIDE_A_REPO).expect("parsed");
+        assert_eq!(u.reviews(), Some(94));
+        assert_eq!(u.get("period resets"), Some("2026-10-06"));
+        assert_eq!(u.get("your spend"), Some("$5.25"));
+        assert_eq!(u.available(), None);
+        assert_eq!(u.window_secs(), None);
+        assert_eq!(
+            u.unavailable_why().as_deref(),
+            Some("Run from a git repository to check included reviews")
+        );
+        assert_eq!(coderabbit_quota_field("availability"), Some(QuotaField::Available));
+        // Inside a repository the same line carries the count.
+        let inside = parse_coderabbit_usage("Availability : 3 of 8\n").expect("parsed");
+        assert_eq!(inside.available(), Some((3, Some(8))));
+        assert_eq!(inside.unavailable_why(), None);
     }
 
     #[test]

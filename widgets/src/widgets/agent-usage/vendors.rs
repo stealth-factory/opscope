@@ -85,7 +85,7 @@ pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
         grok: crate::grok::read(caches, cfg),
         copilot: crate::copilot::read(caches, cfg),
         antigravity: crate::antigravity::read(caches, cfg),
-        coderabbit: crate::coderabbit::read(caches, coderabbit_shown),
+        coderabbit: crate::coderabbit::read(caches, coderabbit_shown, &cfg.coderabbit_repo),
         notion: crate::notion::read(caches, cfg, notion_shown),
         devin: crate::devin::read(caches, cfg, devin_shown),
         droid: crate::droid::read(caches, cfg, droid_shown),

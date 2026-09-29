@@ -3127,12 +3127,26 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
 /// every other permission, login and bad-argument message arrived as an
 /// exit status or as the word "refused".
 pub fn run_full(args: &[&str], seconds: u64) -> Result<std::process::Output, String> {
+    run_full_in(args, seconds, None)
+}
+
+/// [`run_full`], started in `dir` rather than in this process's own
+/// directory - for a command that answers differently inside a repository.
+pub fn run_full_in(
+    args: &[&str],
+    seconds: u64,
+    dir: Option<&std::path::Path>,
+) -> Result<std::process::Output, String> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     let Some((program, rest)) = args.split_first() else {
         return Err("no command given".into());
     };
-    let child = Command::new(program)
+    let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let child = command
         .args(rest)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

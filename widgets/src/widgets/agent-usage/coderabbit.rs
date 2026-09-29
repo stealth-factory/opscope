@@ -53,8 +53,9 @@ pub struct Data {
 }
 
 /// One `coderabbit usage`, as the report or as why there was none.
-fn ask() -> Result<serde_json::Value, String> {
-    let out = tc::run_full(&[CLI, "usage"], 15)?;
+fn ask(repo: &str) -> Result<serde_json::Value, String> {
+    let dir = repo_dir(repo);
+    let out = tc::run_full_in(&[CLI, "usage"], 15, dir.as_deref())?;
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&out.stdout),
@@ -74,6 +75,21 @@ fn ask() -> Result<serde_json::Value, String> {
     })
 }
 
+/// Where to run `coderabbit usage`: `coderabbit_repo` with a leading `~`
+/// read as home, or nowhere in particular when it is empty.
+fn repo_dir(repo: &str) -> Option<std::path::PathBuf> {
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    Some(match repo.strip_prefix("~/") {
+        Some(rest) => std::path::Path::new(&home).join(rest),
+        None if repo == "~" => home.into(),
+        None => repo.into(),
+    })
+}
+
 /// `shown` is whether CodeRabbit has a tab under the reader's settings.
 ///
 /// Asked only where it could matter: the CLI is installed and the reader
@@ -81,7 +97,7 @@ fn ask() -> Result<serde_json::Value, String> {
 /// this one starts a program that spends a request on the reader's login,
 /// so a fixed `agents` list without it, or `exclude_agents` with it, means
 /// it is never run.
-pub fn read(caches: &mut Caches, shown: bool) -> Data {
+pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
     let mut d = Data::default();
     if !shown {
         // Can still be drawn: excluding every chosen agent brings all the
@@ -95,7 +111,7 @@ pub fn read(caches: &mut Caches, shown: bool) -> Data {
     // A failure is held as a refusal, so it is retried on the backoff
     // rather than trusted for the full ten minutes a report is.
     let mut refused = String::new();
-    let got = cached(caches, "coderabbit", REPORT_TTL, || match ask() {
+    let got = cached(caches, "coderabbit", REPORT_TTL, || match ask(repo) {
         Ok(v) => Some(v),
         Err(why) => {
             refused = why;
@@ -175,6 +191,13 @@ pub fn why_no_lane(d: &Data) -> String {
             .reviews()
             .map(|n| format!(" · {} reviews this period", n))
             .unwrap_or_default();
+        if let Some(why) = u.unavailable_why() {
+            return format!(
+                "no quota · CodeRabbit could not check the included reviews: {}{} · set \
+                 coderabbit_repo to a git repository.",
+                why, count
+            );
+        }
         if let Some((left, None)) = u.available() {
             return format!(
                 "no quota · CodeRabbit answered, and published no limit for the {} \
@@ -363,6 +386,31 @@ mod tests {
     }
 
     #[test]
+    fn a_report_from_outside_a_repository_says_how_to_get_the_allowance() {
+        // CLI 0.8 run anywhere but a repository gives the billing period and
+        // CodeRabbit's own note; the pane passes both on and names the setting.
+        let usage = parse_coderabbit_usage(
+            "Availability : unavailable\nNote : Run from a git repository to check included \
+             reviews.\nYour reviews : 94\nPeriod resets : 2026-10-06\n",
+        );
+        let d = Data { usage, read_at: now(), ..Data::default() };
+        assert!(lanes(&d).is_empty());
+        let note = why_no_lane(&d);
+        assert!(note.contains("Run from a git repository"), "{}", note);
+        assert!(note.contains("94 reviews this period"), "{}", note);
+        assert!(note.contains("coderabbit_repo"), "{}", note);
+    }
+
+    #[test]
+    fn a_repository_path_reads_a_leading_tilde_as_home() {
+        // Empty runs where the widget runs; `~/x` is under home, as typed.
+        assert_eq!(repo_dir("  "), None);
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(repo_dir("~/src/x"), Some(std::path::Path::new(&home).join("src/x")));
+        assert_eq!(repo_dir("/srv/x"), Some("/srv/x".into()));
+    }
+
+    #[test]
     fn a_rolling_allowance_is_drawn_as_the_share_used() {
         // Two of five left is sixty per cent used, over the hour the CLI named.
         let u = parse_coderabbit_usage(
@@ -439,7 +487,7 @@ mod tests {
     fn a_coderabbit_without_a_tab_is_never_asked() {
         // Nothing is run and nothing is cached: no tab, no request.
         let mut caches = Caches::default();
-        let d = read(&mut caches, false);
+        let d = read(&mut caches, false, "");
         assert!(d.usage.is_none());
         assert!(!caches.live.contains_key("coderabbit"));
         // And if its tab is drawn anyway, it says why rather than calling
