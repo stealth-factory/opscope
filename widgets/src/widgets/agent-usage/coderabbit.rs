@@ -273,7 +273,6 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
     };
     d.why = text(&got, "why");
     if let Some(usage) = parse_coderabbit_usage(&text(&got, "text")) {
-        d.usage = Some(usage);
         d.read_at = num(&got, "at");
         d.samples = got["samples"]
             .as_array()
@@ -284,9 +283,13 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
             })
             .unwrap_or_default();
         // Only once a report has come back: a signed-out CLI has no plan.
-        d.plan = cached(caches, "coderabbit-plan", PLAN_TTL, ask_plan)
+        // Held per login, so switching accounts is never judged on the
+        // last account's table for the six hours a plan is held.
+        let key = format!("coderabbit-plan:{}", sample_key(&usage));
+        d.plan = cached(caches, &key, PLAN_TTL, ask_plan)
             .map(|v| text(&v, "plan"))
             .unwrap_or_default();
+        d.usage = Some(usage);
     }
     d
 }
@@ -499,6 +502,15 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     let indent_w = if w > label_w + 3 + 16 { label_w + 3 } else { 1 };
     let indent = " ".repeat(indent_w);
     let room = w.saturating_sub(indent_w + 1).max(1);
+    // One reading is where a count starts, not a count: a bar or a rate
+    // from it would draw a zero nobody measured.
+    if d.samples.len() < 2 {
+        let said = format!("readings began {} ago; a count needs a later one", ago(week.since));
+        for line in tc::wrap_words(&said, room) {
+            rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", indent, line))], w - 1));
+        }
+        return rows;
+    }
     let plan = d.plan.trim();
     let tiers = coderabbit_fair_use_tiers(plan);
     // Filled toward the count where reviews go one at a time, which is the
@@ -515,9 +527,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    let count = if d.samples.len() < 2 {
-        format!("readings began {} ago; the count needs a later one", ago(week.since))
-    } else if week.whole {
+    let count = if week.whole {
         format!("~{} reviews in the last 7 days", week.reviews)
     } else {
         format!(
@@ -948,7 +958,9 @@ mod tests {
         assert!(all.contains("no fair-use table for Free"), "{all}");
         let first = week_of(vec![(at, 95)], "Team");
         let all = tab(&first, 100, 40, &Config::default(), &palette()).join("\n");
-        assert!(all.contains("the count needs a later one"), "{all}");
+        assert!(all.contains("a count needs a later one"), "{all}");
+        // And no bar or rate from the zero one reading gives.
+        assert!(!all.contains(" of 70") && !all.contains("an hour"), "{all}");
         // No readings at all, and the section is not drawn.
         let none = week_of(Vec::new(), "Team");
         assert!(!tab(&none, 100, 40, &Config::default(), &palette()).join("\n").contains("FAIR USE"));
