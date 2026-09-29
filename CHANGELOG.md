@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.32.1] - 2026-09-29
+
+### Bug Fixes
+
+- **core**: Stop the terminal erasing the last column of every row (#294)
+
 ## [0.32.0] - 2026-09-29
 
 ### Bug Fixes
