@@ -3,6 +3,21 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.32.0] - 2026-09-29
+
+### Bug Fixes
+
+- **agent-usage**: Indent Codex banked resets in the summary (#290)
+
+### Features
+
+- **agent-usage**: Add Devin and Droid quotas (#288)
+- **core**: Show the running version on every pane's top row (#291)
+
+### Refactor
+
+- **settings**: Read secret fields from the widget schema (#292)
+
 ## [0.31.0] - 2026-09-28
 
 ### Features
