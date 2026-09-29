@@ -155,9 +155,10 @@ fn record_sample(path: &str, key: &str, period: &str, at: f64, count: u64) -> (V
     }
     // Two panes may share the file, so the whole read, change and rename is
     // held under a lock beside it; otherwise the second rename drops the
-    // first pane's reading. Released when `_lock` closes. With no lock to
-    // be had the reading is still recorded, as it was before there was one.
-    let _lock = std::fs::OpenOptions::new()
+    // first pane's reading. Released when `lock` closes. With no lock to be
+    // had nothing is written, so a pane cannot overwrite another's reading,
+    // and the reading is reported unsaved, which the tab says.
+    let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
@@ -198,6 +199,9 @@ fn record_sample(path: &str, key: &str, period: &str, at: f64, count: u64) -> (V
         map.retain(|_, v| stored_samples(v).iter().any(|(t, _)| *t > newest - WEEK));
     }
     // Renamed into place, so a pane reading it never sees half a file.
+    if lock.is_none() {
+        return (samples, false);
+    }
     let tmp = format!("{}.{}.tmp", path, std::process::id());
     let saved = std::fs::write(&tmp, all.to_string()).is_ok() && std::fs::rename(&tmp, path).is_ok();
     if !saved {
