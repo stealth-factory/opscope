@@ -1071,10 +1071,11 @@ can be read, is still ahead. An inventory that answers `0` shows that none
 are in the account. A request that does not answer leaves the section out.
 The usage payload is not a source for the count or the dates. On the `[+]`
 summary the Codex title stays `CODEX`. When the inventory was read and the
-count is greater than zero, a blank line and then `N reset available`
-sit under that group. The soonest expiry is added in parentheses only
+count is greater than zero, `N reset available` is indented under that
+group, at the same inset a collapsed provider uses for a note under its
+rows. The soonest expiry is added in parentheses only
 when every listed credit has a readable expiry. Zero and an unread
-inventory add neither. Claude publishes no such count.
+inventory add nothing. Claude publishes no such count.
 
 The route to all this came from reading how
 [CodexBar](https://github.com/steipete/CodexBar) does it — a menu-bar app that
