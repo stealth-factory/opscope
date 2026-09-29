@@ -202,31 +202,6 @@ fn scrolled(at: usize, cursor: Option<usize>, chase: bool, body: usize, room: us
     at.min(body.saturating_sub(room))
 }
 
-/// The pinned top row: the name, and the version that is actually running.
-///
-/// The version sits after the rule as its own segment rather than inside
-/// the title text, because `tc::title` upper-cases what it is given and
-/// `V0.17.0` is not a version anybody writes. As a segment it takes the
-/// dim colour while the name keeps the accent, and the title is built to
-/// the width the version leaves so the row still measures exactly `w`.
-///
-/// Below that, the version goes rather than being cut: half of `v0.17.0`
-/// is worse than no version at all, and a build number that might be
-/// missing a digit is a build number nobody can act on.
-fn title_row(w: usize, p: &Palette) -> String {
-    let tag = format!(" v{}", tc::version_number());
-    let cells = tc::display_width(&tag);
-    // `╺━ OPSCOPE ╸` is twelve cells, and two of rule either side of the
-    // name is the least that still reads as a title bar.
-    if w >= 14 + cells {
-        let mut row = tc::title("opscope", w - cells, &p.accent);
-        row.push_str(&tc::seg(&[(p.dim.as_str(), tag)], cells));
-        row
-    } else {
-        tc::title("opscope", w, &p.accent)
-    }
-}
-
 /// The list row the cursor is on, counting from the top of the body.
 ///
 /// The count line and the blank under it come first.
@@ -582,7 +557,9 @@ fn main() -> std::process::ExitCode {
         moved = false;
         (list_top, list_first, list_rows) = list_on_frame(scroll, room_below);
 
-        let mut frame = vec![title_row(w, &p)];
+        // The version that is actually running goes on the end of this row in
+        // `tc::draw`, as it does for every widget.
+        let mut frame = vec![tc::title("opscope", w, &p.accent)];
         frame.extend(body.iter().skip(scroll).take(room_below).cloned());
         while frame.len() < room {
             frame.push(String::new());
@@ -622,46 +599,6 @@ mod tests {
             }
         }
         out
-    }
-
-    #[test]
-    fn the_title_row_carries_the_running_version_and_still_measures_the_pane() {
-        // The version is what a stale npx cache cannot lie about, so it has
-        // to be the stamp rather than a number typed here - and `tc::title`
-        // fills to width, so hanging a segment off it without taking those
-        // cells out of the title is a row wider than the pane, which wraps
-        // and scrolls the pinned title off the top.
-        let p = palette();
-        let tag = format!("v{}", tc::version_number());
-        assert!(
-            tc::version().contains(&tc::version_number().to_string()),
-            "the title would disagree with --version"
-        );
-        let mut stood_down = 0;
-        for w in 20usize..=160 {
-            let row = plain(&title_row(w, &p));
-            assert_eq!(tc::display_width(&row), w, "the title row is not {w} wide");
-            assert!(row.contains("OPSCOPE"), "the title lost its name at {w}");
-            if row.contains(&tag[..2]) {
-                // Present in full or not at all: `v0.1` is a version that
-                // was never released.
-                assert!(row.contains(&tag), "the version was cut at {w}: {row:?}");
-            } else {
-                stood_down += 1;
-            }
-        }
-        assert!(stood_down > 0, "the version never stood down on a narrow pane");
-        // Where it stands down, rather than merely that it does: the title
-        // itself wants twelve cells and two of rule, and the version takes
-        // the rest.
-        let edge = 14 + tc::display_width(&format!(" {tag}"));
-        assert!(plain(&title_row(edge, &p)).contains(&tag), "no version at {edge}");
-        assert!(
-            !plain(&title_row(edge - 1, &p)).contains(&tag[..2]),
-            "a version at {} , which cannot hold it",
-            edge - 1
-        );
-        assert!(plain(&title_row(80, &p)).contains(&tag), "no version on a wide pane");
     }
 
     #[test]

@@ -3707,3 +3707,111 @@ fn inventory_count_tokens_include_digits_and_do_not_match_a_suffix() {
     assert!(tokens.iter().any(|(w, n)| w == "twenty-one" && *n == 21));
     assert!(tokens.iter().any(|(w, n)| w == "twenty one" && *n == 21));
 }
+
+/// Every place in `src` that moves the cursor or clears the screen by
+/// itself: `tc::HOME` or `tc::CLEAR` named, or a string literal holding an
+/// escape that is not colour. Written the ways this tree writes an escape,
+/// `\x1b`, `\x1B` and `\u{1b}`, plus the one-byte CSI `\u{9b}`.
+fn cursor_moves(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in without_line_comments(src).lines() {
+        let trimmed = line.trim();
+        for name in ["tc::HOME", "tc::CLEAR", "opscope_core::HOME", "opscope_core::CLEAR"] {
+            if trimmed.contains(name) {
+                found.push(trimmed.to_string());
+            }
+        }
+        for lead in ["\\x1b", "\\x1B", "\\u{1b}", "\\u{1B}", "\\u{9b}", "\\u{9B}"] {
+            for (at, _) in line.match_indices(lead) {
+                let rest = &line[at + lead.len()..];
+                let rest = if lead.contains("9") { rest } else {
+                    match rest.chars().next() {
+                        // A bare escape that is not CSI: ESC 7, ESC 8,
+                        // ESC M, ESC c. A quote straight after is the
+                        // `'\x1b'` of a parser looking for escapes, not
+                        // one being written.
+                        Some(c) if c != '[' => {
+                            if c.is_ascii_alphanumeric() {
+                                found.push(trimmed.to_string());
+                            }
+                            continue;
+                        }
+                        Some(_) => &rest[1..],
+                        None => continue,
+                    }
+                };
+                // `{}` is a colour or a count filled in by `format!`; only a
+                // final letter says what the sequence does.
+                let last = rest
+                    .chars()
+                    .find(|c| !(c.is_ascii_digit() || matches!(c, ';' | ':' | '?' | '{' | '}')));
+                if matches!(last, Some(c) if c.is_ascii_alphabetic() && c != 'm') {
+                    found.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn cursor_move_matcher_sees_a_move_and_passes_colour() {
+    // Seen matching before it is trusted with a zero: a grep that finds
+    // nothing is as often a wrong pattern as an absent thing.
+    for moving in [
+        r#"tc::out("\x1b[1;70H");"#,
+        r#"tc::out(&format!("\x1b[{};{}H", y, x));"#,
+        r#"print!("\u{1b}[A");"#,
+        r#"let up = "\x1B[2J";"#,
+        r#"tc::out("\x1b7");"#,
+        r#"tc::out("\u{9b}1;1H");"#,
+        r#"tc::out(tc::HOME);"#,
+    ] {
+        assert_eq!(cursor_moves(moving).len(), 1, "missed {moving}");
+    }
+    for still in [
+        r#"let red = "\x1b[31m";"#,
+        r#"format!("\x1b[38;2;{};{};{}m", r, g, b)"#,
+        r#"if c == '\x1b' {"#,
+        r#"if c == '\u{1b}' {"#,
+        r#"tc::out(&format!("\x1b]9;{}\x07", text));"#,
+        r#"// tc::out("\x1b[H") in a comment"#,
+    ] {
+        assert!(cursor_moves(still).is_empty(), "flagged {still}");
+    }
+}
+
+#[test]
+fn no_widget_moves_the_cursor_itself() {
+    // Every pane's top row ends in the version that is running, and core
+    // puts it there in `draw`, which also strips anything that is not
+    // colour out of the rows it is handed. What that cannot stop is a
+    // widget writing to the terminal around `draw`: a cursor sent to the
+    // top-right corner after the frame lands paints over the version, and
+    // the next frame puts it back a moment later - long enough to read as
+    // a pane with no version at all. So the only thing that positions the
+    // cursor is core.
+    //
+    // It reads string literals, which is how every escape in this tree is
+    // written. An escape assembled a character at a time would get past
+    // it; `draw` is the half that does not depend on reading source.
+    let mut wrong = Vec::new();
+    let mut sources = widgets();
+    sources.insert(
+        "launcher".into(),
+        without_tests(
+            &std::fs::read_to_string(root().join("widgets/src/launcher/main.rs"))
+                .expect("the launcher"),
+        ),
+    );
+    for (name, src) in sources {
+        for line in cursor_moves(&src) {
+            wrong.push(format!("{name}: {line}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "widgets that move the cursor themselves - hand the rows to tc::draw instead:\n  {}",
+        wrong.join("\n  ")
+    );
+}
