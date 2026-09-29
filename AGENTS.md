@@ -113,6 +113,16 @@ than faked. `matrix` is the sole exception and computes nothing on purpose.
   whatever the pane had left, which hid `latency`'s event log, `link`'s chart
   and four of `github`'s sections, and left the body exactly one pane tall so
   there was nothing for the wheel to reach.
+- **Every pane says which build it is, and no widget decides that.** The
+  top row of every frame ends in the running version, dim, after the
+  title's `╸`. `tc::draw()` puts it there, not the widget: it cuts the top
+  row short and appends the version after a reset, and it strips every
+  escape that is not colour out of every row, so nothing a widget hands it
+  can cover, move or restyle the version. `tc::title()` already stops
+  short by that width. A widget that writes to the terminal around `draw`
+  is the one way left, and `no_widget_moves_the_cursor_itself` in
+  `check.rs` fails on it. A pane on an old build looked exactly like one
+  on the new, and the only way to tell was `--version` somewhere else.
 - **Never truncate a key hint.** `pack_hints()` wraps footers across lines
   without splitting a hint, because `[±]25` teaches a key that does not exist.
 - **A hint names the state the next press moves to; the body says what is in

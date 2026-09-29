@@ -241,7 +241,12 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
 }
 
 /// The rule across the top of every widget.
+///
+/// Built short of `w` by whatever the running version takes, because
+/// `draw` puts the version on the end of every frame's top row and a rule
+/// filled to the edge would lose its `╸` under it.
 pub fn title(text: &str, w: usize, colour: &str) -> String {
+    let w = w - version_room(w);
     let left = "╺━";
     let chrome = display_width(left) + 1;
     if w <= chrome {
@@ -294,20 +299,187 @@ pub fn flush() {
 ///
 /// Every row is followed by a reset and an erase-to-end, so a short row
 /// cannot leave the tail of the previous frame behind it.
-pub fn draw(rows: &[String], _w: usize, h: usize) {
+///
+/// The top row always ends in the version that is running, whatever the
+/// widget put there. See `frame`.
+pub fn draw(rows: &[String], w: usize, h: usize) {
+    out(&frame(rows, w, h));
+    flush();
+}
+
+/// The grey the version is drawn in: the launcher's dim, which is where
+/// the version was first shown.
+const VERSION_INK: (u8, u8, u8) = (127, 147, 172);
+
+/// What a title keeps for itself before the version gives way to it:
+/// `╺━`, a space, a name of eight cells, a space, `╸`, and two cells of
+/// rule. `╺━ OPSCOPE ╸` plus two is where the launcher stood it down.
+const TITLE_KEEPS: usize = 14;
+
+/// The version as it sits on the top row, leading space included.
+fn version_tag() -> String {
+    format!(" v{}", version_number())
+}
+
+/// The cells the version takes on the top row of a pane `w` wide.
+///
+/// All of it or none of it: half of `v0.31.0` is worse than no version at
+/// all, and a build number that might be missing a digit is one nobody
+/// can act on.
+fn version_room(w: usize) -> usize {
+    let cells = display_width(&version_tag());
+    if w >= TITLE_KEEPS + cells {
+        cells
+    } else {
+        0
+    }
+}
+
+/// The bytes one call to `draw` writes.
+///
+/// This is where the version goes on, and it goes on here rather than in
+/// any widget so that no widget can leave it off, move it or restyle it.
+/// A pane on an old build looks exactly like a pane on the new one, and
+/// the only way to tell them apart used to be `--version` in another
+/// terminal - which is no way at all when a dozen are open at once.
+///
+/// Two things make that hold against a widget trying:
+///
+/// - The top row is cut to what the version leaves and the version is
+///   appended after a reset, so neither the widget's text nor its colours
+///   reach those cells.
+/// - Every row is made inert first. Colour escapes pass; anything else
+///   that can move the cursor or rewrite the screen - a CSI that is not
+///   colour, a bare ESC sequence, an OSC, a carriage return, a backspace -
+///   is dropped. Without that, a later row could carry `ESC[1;70H` and
+///   write over the version from underneath.
+///
+/// What this cannot stop is a widget writing to the terminal without
+/// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
+/// the half that watches for that.
+fn frame(rows: &[String], w: usize, h: usize) -> String {
     let mut buf = String::from(HOME);
     for i in 0..h {
-        let empty = String::new();
-        let line = rows.get(i).unwrap_or(&empty);
-        buf.push_str(line);
+        let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+        if i == 0 {
+            buf.push_str(&stamped(&line, w));
+        } else {
+            buf.push_str(&line);
+        }
         buf.push_str(RST);
         buf.push_str(EL);
         if i + 1 != h {
             buf.push_str("\r\n");
         }
     }
-    out(&buf);
-    flush();
+    buf
+}
+
+/// `row`, with every escape that is not a colour and every control
+/// character taken out.
+///
+/// Colour is `ESC [` then digits, `;` and `:`, then `m`. A tab becomes a
+/// space rather than vanishing, since it was meant as a gap; everything
+/// else - C0, DEL, and C1, which includes the one-byte CSI `\u{9b}` - goes.
+fn inert(row: &str) -> String {
+    let chars: Vec<char> = row.chars().collect();
+    let mut out = String::with_capacity(row.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\x1b' {
+            match chars.get(i + 1) {
+                Some('[') => {
+                    // CSI: parameter and intermediate bytes, then one final
+                    // byte in `@`..`~`. Unterminated runs to the end.
+                    let mut j = i + 2;
+                    while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
+                        j += 1;
+                    }
+                    let colour = chars.get(j) == Some(&'m')
+                        && chars[i + 2..j]
+                            .iter()
+                            .all(|c| c.is_ascii_digit() || *c == ';' || *c == ':');
+                    if colour {
+                        out.extend(&chars[i..=j]);
+                    }
+                    i = j + 1;
+                }
+                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                    // A string: runs to BEL or to ST (`ESC \\`).
+                    let mut j = i + 2;
+                    while j < chars.len() {
+                        if chars[j] == '\x07' {
+                            j += 1;
+                            break;
+                        }
+                        if chars[j] == '\x1b' && chars.get(j + 1) == Some(&'\\') {
+                            j += 2;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                }
+                // `ESC 7`, `ESC 8`, `ESC M`, `ESC c` and the rest: two
+                // characters, or three when the second is an intermediate.
+                Some(n) if ('\x20'..='\x2f').contains(n) => i += 3,
+                Some(_) => i += 2,
+                None => i += 1,
+            }
+            continue;
+        }
+        if c == '\t' {
+            out.push(' ');
+        } else if !c.is_control() {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// An inert row cut to what the version leaves of `w`, padded out to
+/// exactly that, then the version.
+fn stamped(row: &str, w: usize) -> String {
+    let room = version_room(w);
+    if room == 0 {
+        return row.to_string();
+    }
+    let keep = w - room;
+    // Colour escapes cost nothing on screen; only the text is measured,
+    // and measured as a whole prefix, as `clip_width` does, because some
+    // glyphs are narrower together than apart.
+    let mut cut = String::new();
+    let mut text = String::new();
+    let mut used = 0;
+    let mut chars = row.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            cut.push(c);
+            for n in chars.by_ref() {
+                cut.push(n);
+                if n == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        text.push(c);
+        let width = display_width(&text);
+        if width > keep {
+            break;
+        }
+        cut.push(c);
+        used = width;
+    }
+    let (r, g, b) = VERSION_INK;
+    format!(
+        "{cut}{RST}{}{}{}",
+        " ".repeat(keep - used),
+        rgb(r, g, b),
+        version_tag()
+    )
 }
 
 /// Hide the cursor and clear, and put it all back on the way out.
@@ -3190,6 +3362,186 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A frame's rows as they land on screen: the leading home dropped,
+    /// split where `frame` puts its line breaks.
+    fn frame_rows(bytes: &str) -> Vec<String> {
+        bytes
+            .strip_prefix(super::HOME)
+            .expect("a frame starts at home")
+            .split("\r\n")
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// What a row shows, with colour and erase-to-end taken out.
+    fn shown(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Every escape a frame row carries, as `(parameters, final byte)`.
+    /// A row with anything but colour and erase-to-end in it can move the
+    /// cursor, and so can reach the version from somewhere else.
+    fn escapes(row: &str) -> Vec<(String, char)> {
+        let mut found = Vec::new();
+        let mut chars = row.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                assert_eq!(chars.next(), Some('['), "a bare escape reached the screen: {row:?}");
+                let mut params = String::new();
+                for n in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&n) {
+                        found.push((params.clone(), n));
+                        break;
+                    }
+                    params.push(n);
+                }
+            } else {
+                assert!(!c.is_control(), "a control character reached the screen: {row:?}");
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_top_row_carries_the_running_version_and_still_measures_the_pane() {
+        // The version is what tells a pane on an old build from one on the
+        // new, so it has to be the stamp rather than a number typed here,
+        // and it has to agree with `--version`. `title` fills to width, so
+        // a version hung off it without taking those cells out of the rule
+        // is a row wider than the pane, which wraps and scrolls the pinned
+        // title off the top.
+        let tag = format!("v{}", super::version_number());
+        assert!(super::version().contains(super::version_number()));
+        let mut stood_down = 0;
+        for w in 1usize..=160 {
+            let bytes = super::frame(&[super::title("clocks", w, "")], w, 1);
+            let top = shown(&frame_rows(&bytes)[0]);
+            if w >= 16 {
+                assert_eq!(super::display_width(&top), w, "the top row is not {w} wide");
+                assert!(top.contains("CLOCKS"), "the title lost its name at {w}");
+            }
+            if top.contains(&tag[..2]) {
+                // Present in full or not at all: `v0.1` is a version that
+                // was never released.
+                assert!(top.ends_with(&tag), "the version was cut at {w}: {top:?}");
+                assert!(top.contains("╸ v"), "the rule lost its end under the version at {w}");
+            } else {
+                stood_down += 1;
+            }
+        }
+        assert!(stood_down > 0, "the version never stood down on a narrow pane");
+        // Where it stands down, rather than merely that it does.
+        let edge = super::TITLE_KEEPS + super::display_width(&format!(" {tag}"));
+        let at = |w: usize| shown(&frame_rows(&super::frame(&[super::title("x", w, "")], w, 1))[0]);
+        assert!(at(edge).ends_with(&tag), "no version at {edge}");
+        assert!(!at(edge - 1).contains(&tag[..2]), "a version at {}", edge - 1);
+    }
+
+    #[test]
+    fn a_widget_cannot_keep_the_version_off_its_pane() {
+        // Everything here is something a widget could hand `draw`, and none
+        // of it may cost the version its place, its whole text, or its
+        // colour. The version lives in `frame` precisely so that no widget
+        // has a say in it.
+        let tag = format!("v{}", super::version_number());
+        let w = 60;
+        let full = "#".repeat(w);
+        let attempts: Vec<(&str, Vec<String>)> = vec![
+            ("nothing at all", vec![]),
+            ("a top row filled to the edge", vec![full.clone()]),
+            ("a top row wider than the pane", vec!["#".repeat(w * 3)]),
+            (
+                "a top row painting its own background to the edge",
+                vec![format!("{}{}", super::bg(200, 0, 0), full)],
+            ),
+            (
+                "its own version in the same place",
+                vec![format!("{}v9.9.9", " ".repeat(w - 6))],
+            ),
+            (
+                "a carriage return back over the top row",
+                vec![format!("title\r{}", full)],
+            ),
+            (
+                "a backspace run over the end of the top row",
+                vec![format!("{}{}", full, "\x08".repeat(10))],
+            ),
+            (
+                "a later row moving the cursor up to the top",
+                vec!["title".into(), format!("\x1b[1;{}H{}", w - 8, "#".repeat(9))],
+            ),
+            (
+                "a later row stepping up a line",
+                vec!["title".into(), format!("\x1b[A\x1b[{}C#########", w - 9)],
+            ),
+            (
+                "a saved and restored cursor",
+                vec![format!("\x1b7title\x1b8{}", full), "\x1b[2J".into()],
+            ),
+            (
+                "the one-byte CSI",
+                vec!["title".into(), format!("\u{9b}1;{}H#########", w - 8)],
+            ),
+            (
+                "an OSC and a DCS",
+                vec![format!("\x1b]0;x\x07\x1bPq#\x1b\\{}", full)],
+            ),
+            (
+                "an escape cut off at the end of the row",
+                vec![format!("{}\x1b[", full), "\x1b".into()],
+            ),
+        ];
+        for (what, rows) in attempts {
+            let bytes = super::frame(&rows, w, 3);
+            let on_screen = frame_rows(&bytes);
+            assert_eq!(on_screen.len(), 3, "{what}: the frame is not three rows");
+            let top = shown(&on_screen[0]);
+            assert_eq!(super::display_width(&top), w, "{what}: the top row is not {w} wide");
+            assert!(top.ends_with(&format!(" {tag}")), "{what}: {top:?}");
+            // Drawn in core's grey after a reset, so no colour the widget
+            // set carries into it.
+            let (r, g, b) = super::VERSION_INK;
+            let ink = format!("{} {tag}", super::rgb(r, g, b));
+            let at = on_screen[0].rfind(&ink).expect("the version in core's own colour");
+            let before = &on_screen[0][..at];
+            let reset = before.rfind(super::RST).expect("a reset ahead of the version");
+            assert!(
+                before[reset + super::RST.len()..].chars().all(|c| c == ' '),
+                "{what}: something of the widget's sits between the reset and the version"
+            );
+            for row in &on_screen {
+                for (params, last) in escapes(row) {
+                    let colour = last == 'm'
+                        && params.chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+                    let erase = last == 'K' && params.is_empty();
+                    assert!(colour || erase, "{what}: `ESC[{params}{last}` reached the screen");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn making_a_row_inert_keeps_its_colours_and_its_text() {
+        // The cost of the version being out of reach must not be the
+        // colours every widget draws in.
+        let row = format!("{}ok{} {}warn{}", super::rgb(1, 2, 3), super::RST, super::bg(4, 5, 6), super::NOBG);
+        assert_eq!(super::inert(&row), row);
+        assert_eq!(super::inert("a\tb"), "a b");
+    }
+
     #[test]
     fn an_unfiltered_pane_says_nothing_about_filters() {
         // A pane that always announces "no filters" is noise, and the
@@ -3875,13 +4227,15 @@ mod tests {
     }
 
     #[test]
-    fn title_fills_the_width() {
+    fn title_fills_the_width_the_version_leaves() {
+        // `draw` puts the version on the end of the top row, so the rule
+        // stops short by exactly that much and the two meet at the edge.
         let plain = strip(&title("clocks", 40, &rgb(0, 255, 170)));
-        assert_eq!(display_width(&plain), 40);
+        assert_eq!(display_width(&plain) + version_room(40), 40);
         assert!(plain.contains(" CLOCKS "));
         assert_eq!(
-            display_width(&strip(&title("月", 20, &rgb(0, 255, 170)))),
-            20
+            display_width(&strip(&title("月", 30, &rgb(0, 255, 170)))) + version_room(30),
+            30
         );
         for w in 0..=12 {
             assert!(
