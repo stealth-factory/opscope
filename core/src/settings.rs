@@ -81,6 +81,9 @@ struct Field {
     parents: Vec<String>,
     help: String,
     default: Value,
+    /// The widget's schema said `"secret": true`. The name pattern is
+    /// checked as well, so a token stays masked when a file forgets the flag.
+    marked_secret: bool,
 }
 
 impl Field {
@@ -142,7 +145,7 @@ impl Field {
     }
 
     fn secret(&self) -> bool {
-        is_secret(&self.key)
+        self.marked_secret || name_is_secret(&self.key)
     }
 
     fn kind(&self) -> &'static str {
@@ -157,11 +160,17 @@ impl Field {
     }
 }
 
-fn is_secret(key: &str) -> bool {
-    // `token_env` and `factory_api_key_env` name a variable, not a secret.
-    // The values are the keys called `token`, `*_token`, `api_key`, or
-    // `*_api_key`.
+/// A credential named the way every widget already names one.
+///
+/// A key ending in `_env` is the name of a variable, so it matches none of
+/// these. Anything else, a cookie or a session, is secret only when that
+/// widget's schema says so.
+fn name_is_secret(key: &str) -> bool {
     key == "token" || key.ends_with("_token") || key == "api_key" || key.ends_with("_api_key")
+}
+
+fn rule_is_secret(rule: Option<&serde_json::Map<String, Value>>) -> bool {
+    rule.and_then(|r| r.get("secret")).and_then(Value::as_bool) == Some(true)
 }
 
 fn kind_name(v: &Value) -> &'static str {
@@ -364,6 +373,7 @@ fn fields_from_example(text: &str) -> Result<Vec<Field>, String> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let schema = body.get("_schema").and_then(Value::as_object);
         for key in object_keys(text, section_open)? {
             if key.starts_with('_') {
                 continue;
@@ -375,12 +385,15 @@ fn fields_from_example(text: &str) -> Result<Vec<Field>, String> {
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| section_help.clone());
+            let marked_secret =
+                rule_is_secret(schema.and_then(|s| s.get(&key)).and_then(Value::as_object));
             fields.push(Field {
                 section: section.clone(),
                 key,
                 parents: Vec::new(),
                 help,
                 default: default.clone(),
+                marked_secret,
             });
         }
     }
@@ -1105,13 +1118,11 @@ fn load(spec: SettingsSpec) -> App {
 }
 
 fn edit_seed(field: &Field, current: Option<&Value>) -> String {
-    // An existing secret is not copied into the box. The row already says
-    // it is set, and the box would put the credential on screen.
-    if field.secret()
-        && current
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-    {
+    // An existing secret is not copied into the box, whatever JSON type it
+    // has. The list masks every stored value, and `compact` would put a
+    // number or an object on screen. A missing value still shows the
+    // declared default, which ships in the repo and is not a secret.
+    if field.secret() && current.is_some() {
         return String::new();
     }
     let src = current.unwrap_or(&field.default);
@@ -1636,6 +1647,7 @@ fn nested_fields(app: &App, index: usize) -> Option<Vec<Field>> {
                     parents: vec![field.key.clone()],
                     help,
                     default,
+                    marked_secret: rule_is_secret(rule),
                 }
             })
             .collect(),
@@ -1690,6 +1702,7 @@ fn model_fields(app: &App, field: &Field, model: &str) -> Vec<Field> {
                 .and_then(serde_json::Number::from_f64)
                 .map(Value::Number)
                 .unwrap_or(Value::Null),
+            marked_secret: false,
         })
         .collect()
 }
@@ -2583,6 +2596,7 @@ fn row_fields(app: &App, parent: &Field, at: usize) -> Vec<Field> {
         // field falls back to when nothing is written, and every one of
         // these is the reader's own.
         default: Value::String(String::new()),
+        marked_secret: false,
     };
     let mut out = vec![named(
         "path",
@@ -2770,6 +2784,7 @@ fn map_entry_field(parent: &Field, named: &str) -> Field {
         parents: vec![parent.key.clone()],
         help: parent.help.clone(),
         default: shipped,
+        marked_secret: false,
     }
 }
 
@@ -3288,12 +3303,15 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
                     }
                 };
                 // An empty box on a secret that is already set must not
-                // write "" over it. The box was opened blank on purpose.
+                // write "" over it. The box was opened blank on purpose,
+                // including when the stored value is not a string.
                 field.secret()
                     && buffer.trim().is_empty()
-                    && current_of(&app.live, field, app.legacy_section)
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| !s.is_empty())
+                    && match current_of(&app.live, field, app.legacy_section) {
+                        Some(Value::String(s)) => !s.is_empty(),
+                        Some(_) => true,
+                        None => false,
+                    }
             };
             if keep_secret {
                 leave_edit(app);
@@ -4432,6 +4450,7 @@ mod tests {
                 parents: Vec::new(),
                 help: String::new(),
                 default: Value::Object(serde_json::Map::new()),
+                marked_secret: false,
             }],
             live,
             raw: String::new(),
@@ -4595,6 +4614,7 @@ mod tests {
                 parents: Vec::new(),
                 help: String::new(),
                 default: serde_json::json!(1.0),
+                marked_secret: false,
             })
             .collect();
         let (frame, click) = draw_list(&mut app, 80, 40, &palette());
@@ -4633,6 +4653,7 @@ mod tests {
             parents: Vec::new(),
             help: String::new(),
             default,
+            marked_secret: false,
         }];
         if let Some(rule) = rule {
             app.constraints.insert(key.to_string(), rule);
@@ -4812,6 +4833,7 @@ mod tests {
             parents: Vec::new(),
             help: String::new(),
             default: serde_json::json!([]),
+            marked_secret: false,
         }];
         app.constraints
             .insert("hosts".into(), serde_json::json!({"items": "string"}));
@@ -4897,6 +4919,7 @@ mod tests {
             parents: Vec::new(),
             help: String::new(),
             default: shipped,
+            marked_secret: false,
         };
         app.constraints
             .insert("sources".into(), serde_json::json!({"values": "string"}));
@@ -4945,6 +4968,7 @@ mod tests {
             parents: Vec::new(),
             help: String::new(),
             default: shipped,
+            marked_secret: false,
         }];
         app.constraints
             .insert("sources".into(), serde_json::json!({"values": "string"}));
@@ -5024,6 +5048,7 @@ mod tests {
             parents: Vec::new(),
             help: String::new(),
             default: serde_json::json!({}),
+            marked_secret: false,
         }];
         app.constraints
             .insert("sources".into(), serde_json::json!({"values": "string"}));
@@ -5868,6 +5893,19 @@ mod tests {
         );
     }
 
+    /// A widget's own schema, with generic keys.
+    fn secret_fixture() -> Vec<Field> {
+        let schema = r#"{
+            "_schema": { "session": { "secret": true } },
+            "service_token": "",
+            "service_api_key": "",
+            "service_api_key_env": "SERVICE_API_KEY",
+            "org_slug": "",
+            "session": ""
+        }"#;
+        fields_from_example(&format!(r#"{{"w":{schema}}}"#)).unwrap()
+    }
+
     #[test]
     fn a_token_is_redacted_with_no_way_to_unredact_it() {
         // There was a key to reveal one. Nothing on this screen needed it -
@@ -5877,44 +5915,53 @@ mod tests {
         let secret = Value::String("ghp_not-a-real-token".into());
         assert_eq!(summary(&secret, true), "••••••••");
         assert_eq!(summary(&Value::String(String::new()), true), "(empty)");
-        assert!(!is_secret("token_env"));
-        assert!(is_secret("token"));
-        assert!(is_secret("devin_token"));
-        assert!(is_secret("api_key"));
-        assert!(is_secret("factory_api_key"));
-        assert!(!is_secret("factory_api_key_env"));
-        assert!(!is_secret("devin_org"));
-        assert!(!is_secret("notion_workspace"));
-        let secret_field = Field {
-            section: "agent_usage".into(),
-            key: "factory_api_key".into(),
-            parents: Vec::new(),
-            help: String::new(),
-            default: Value::String(String::new()),
-        };
-        let stored = Value::String("fk-not-a-real-key".into());
-        assert_eq!(summary(&stored, secret_field.secret()), "••••••••");
-        assert_eq!(edit_seed(&secret_field, Some(&stored)), "");
-        let org = Field {
-            key: "devin_org".into(),
-            ..secret_field
-        };
+        let fields = secret_fixture();
+        let of = |key: &str| fields.iter().find(|f| f.key == key).unwrap();
+        // The name pattern, with no flag in the schema.
+        assert!(of("service_token").secret());
+        assert!(of("service_api_key").secret());
+        assert!(!of("service_api_key_env").secret());
+        assert!(!of("org_slug").secret());
+        // A cookie or a session is secret because the schema says so.
+        assert!(of("session").secret());
+        assert!(of("session").marked_secret);
+        assert!(!of("service_api_key").marked_secret);
+        let stored = Value::String("not-a-real-key".into());
+        assert_eq!(summary(&stored, of("service_api_key").secret()), "••••••••");
+        assert_eq!(edit_seed(of("service_api_key"), Some(&stored)), "");
+        assert_eq!(edit_seed(of("session"), Some(&stored)), "");
         let named = Value::String("acme".into());
-        assert_eq!(edit_seed(&org, Some(&named)), "acme");
+        assert_eq!(edit_seed(of("org_slug"), Some(&named)), "acme");
+        assert_eq!(
+            edit_seed(
+                of("service_api_key_env"),
+                Some(&Value::String("SERVICE_API_KEY".into()))
+            ),
+            "SERVICE_API_KEY"
+        );
     }
 
     #[test]
-    fn enter_on_an_empty_secret_leaves_the_stored_value() {
+    fn a_non_string_secret_opens_blank() {
+        // The list masks every stored secret. A hand-edited number or object
+        // is still one, and the editor must not print it.
+        let fields = secret_fixture();
+        let session = fields.iter().find(|f| f.key == "session").unwrap();
+        let object = serde_json::json!({"k": "not-a-real-cookie"});
+        assert_eq!(summary(&object, session.secret()), "••••••••");
+        assert_eq!(summary(&Value::from(7), session.secret()), "••••••••");
+        assert_eq!(edit_seed(session, Some(&object)), "");
+        assert_eq!(edit_seed(session, Some(&Value::from(7))), "");
+        let mut with_default = session.clone();
+        with_default.default = Value::String("shipped".into());
+        assert_eq!(edit_seed(&with_default, None), "shipped");
+        let visible = fields.iter().find(|f| f.key == "org_slug").unwrap();
+        assert_eq!(edit_seed(visible, Some(&Value::from(7))), "7");
+
         let mut app = catalogue_app(serde_json::json!({
-            "w": { "factory_api_key": "fk-not-a-real-key" }
+            "w": { "session": { "k": "not-a-real-cookie" } }
         }));
-        app.fields = vec![Field {
-            section: "w".into(),
-            key: "factory_api_key".into(),
-            parents: Vec::new(),
-            help: String::new(),
-            default: Value::String(String::new()),
-        }];
+        app.fields = vec![session.clone()];
         app.mode = Mode::Edit {
             index: 0,
             buffer: String::new(),
@@ -5924,10 +5971,50 @@ mod tests {
         handle_edit_key(&mut app, "enter");
         assert!(matches!(app.mode, Mode::List));
         assert_eq!(app.status.as_deref(), Some("Nothing written."));
-        assert_eq!(app.live["w"]["factory_api_key"], "fk-not-a-real-key");
+        assert_eq!(
+            app.live["w"]["session"],
+            serde_json::json!({"k": "not-a-real-cookie"})
+        );
+    }
 
-        app.fields[0].key = "devin_org".into();
-        app.live["w"]["devin_org"] = Value::String("acme".into());
+    #[test]
+    fn enter_on_an_empty_secret_leaves_the_stored_value() {
+        let fields = secret_fixture();
+        let mut app = catalogue_app(serde_json::json!({
+            "w": {
+                "service_api_key": "not-a-real-key",
+                "session": "not-a-real-cookie"
+            }
+        }));
+        app.fields = vec![fields
+            .iter()
+            .find(|f| f.key == "service_api_key")
+            .unwrap()
+            .clone()];
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.status.as_deref(), Some("Nothing written."));
+        assert_eq!(app.live["w"]["service_api_key"], "not-a-real-key");
+
+        app.fields = vec![fields.iter().find(|f| f.key == "session").unwrap().clone()];
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        assert_eq!(app.status.as_deref(), Some("Nothing written."));
+        assert_eq!(app.live["w"]["session"], "not-a-real-cookie");
+
+        app.fields = vec![fields.iter().find(|f| f.key == "org_slug").unwrap().clone()];
+        app.live["w"]["org_slug"] = Value::String("acme".into());
         app.mode = Mode::Edit {
             index: 0,
             buffer: String::new(),
@@ -6018,6 +6105,7 @@ mod tests {
             key: "refresh".into(),
             help: String::new(),
             default: Value::from(4),
+            marked_secret: false,
         };
         assert_eq!(field.widget(), "herdr-panes");
         assert_eq!(field.path(), "herdr_panes.refresh");
@@ -6027,6 +6115,7 @@ mod tests {
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),
+            marked_secret: false,
         };
         assert_eq!(actions.widget(), "github-actions");
         let prs = Field {
@@ -6035,6 +6124,7 @@ mod tests {
             key: "sources".into(),
             help: String::new(),
             default: serde_json::json!({}),
+            marked_secret: false,
         };
         assert_eq!(prs.widget(), "github-prs");
         let usage = Field {
@@ -6043,6 +6133,7 @@ mod tests {
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
+            marked_secret: false,
         };
         assert_eq!(usage.widget(), "agent-usage");
     }
@@ -6085,6 +6176,7 @@ mod tests {
             key: "grok_ping".into(),
             help: String::new(),
             default: Value::Bool(false),
+            marked_secret: false,
         };
         assert_eq!(
             live_section(&leftover, "agent_usage", Some("usage")),
@@ -6114,6 +6206,7 @@ mod tests {
             key: "limit".into(),
             help: String::new(),
             default: Value::from(50),
+            marked_secret: false,
         };
         let old_pr = serde_json::json!({"pr": {"limit": 10}});
         assert_eq!(
@@ -6131,6 +6224,7 @@ mod tests {
             key: "max_repos".into(),
             help: String::new(),
             default: Value::from(16),
+            marked_secret: false,
         };
         let old_gha = serde_json::json!({"gha": {"max_repos": 8}});
         assert_eq!(

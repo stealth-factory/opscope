@@ -536,7 +536,8 @@ fn read_ordered(path: &std::path::Path) -> Ordered {
 /// A section as the public example carries it: everything but the rules.
 ///
 /// `_schema` is the widget telling the settings screen what a value may be -
-/// a minimum, what an array holds, which choices a field offers. None of it
+/// a minimum, what an array holds, which choices a field offers, whether it
+/// is a secret. None of it
 /// is a setting, so none of it belongs in a file people copy to
 /// `config.json`. Dropped at the top of a section only, which is where it
 /// lives; a `_schema` nested inside a value would be somebody's own key.

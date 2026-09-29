@@ -1,6 +1,7 @@
 {
   "_comment": "Uses this widget's own token, then the variable token_env names, which defaults to $GITHUB_TOKEN. It does not read any other widget's section: a token here and a different one under `github` is an ordinary thing to want, and borrowing would run this widget on a credential its own settings screen never showed. Empty accounts discovers the viewer login and every org they belong to. Empty repos means recently-pushed repos that have workflow files, capped at max_repos per owner so one busy org cannot hide personal — never every repo the token can see. The screen names the cap.",
   "_schema": {
+    "token": { "secret": true },
     "accounts": {
       "items": "string"
     },

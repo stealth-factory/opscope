@@ -1,6 +1,9 @@
 {
   "_comment": "Reads local agent state, plus remaining quota from each agent's own host with that agent's own credential. Grok's quota call is on by default and may start the Grok CLI to refresh its token; turn grok_ping off to keep those off. Empty agents discovers whatever this machine has; naming them instead fixes the set and the order and turns discovery off. exclude_agents drops one either way. A leftover section still named usage is read as this one, and the pane says so.",
   "_schema": {
+    "notion_token": { "secret": true },
+    "devin_token": { "secret": true },
+    "factory_api_key": { "secret": true },
     "agents": {
       "items": "string",
       "picker": {

@@ -327,6 +327,12 @@ ships a non-empty default. The settings screen can infer a list editor from
 that default, but `every_array_declares_what_it_holds` still requires the
 declaration so emptying that default later cannot steal the editor. `_schema`
 never appears in `config.example.json`.
+
+`"secret": true` on a field marks a credential. `token`, a name ending in
+`_token`, `api_key`, and a name ending in `_api_key` are secret either way.
+A key ending in `_env` names a variable and stays visible. A cookie or a
+session is marked in this file; core does not keep a list of field names.
+
 Repository checks also require every declared field to be read, every read
 field to be declared, code fallbacks to match the declared defaults, token
 environment names to match, and dynamic catalogues to name real fields.
@@ -759,7 +765,9 @@ nothing needed it: the value is in the file for anyone who has to read it,
 while a settings screen that can put a live credential on a shared terminal
 is a screen with a footgun on it. A declared *default* is never masked — it
 ships in the repo, and hiding it would make an unset token read as though a
-value were already there.
+value were already there. A field is secret when its `_schema` entry says
+`"secret": true`, or when its name is `token`, ends in `_token`, is
+`api_key`, or ends in `_api_key`. A key ending in `_env` stays visible.
 
 **In settings mode the footer shows only settings keys** — the widget's own
 keys are not offered there, because a key that does nothing in this mode
@@ -775,9 +783,9 @@ fresh-checkout command and the reason it has no Python dependency are in
 [step 7 above](#7-generate-configuration-and-run-the-gates).
 
 An optional `_schema` object beside the defaults carries UI-only constraints —
-choices, element types, numeric bounds, nesting, units. The generator omits it
-from `config.example.json`; it exists to stop the settings screen accepting a
-value the widget would silently ignore.
+choices, element types, numeric bounds, nesting, units, and `"secret": true`
+for a credential. The generator omits it from `config.example.json`; it exists
+to stop the settings screen accepting a value the widget would silently ignore.
 
 ### A field with a set of answers offers them
 
