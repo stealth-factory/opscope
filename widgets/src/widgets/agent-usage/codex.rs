@@ -998,11 +998,21 @@ pub(crate) fn local_expiry(at: f64) -> Option<String> {
 /// is passed as its own parts (`4`, `Oct`, `2026`, `04:03`, `(+00:00)`),
 /// which stay whole unless one part is still wider than the pane. That
 /// part is broken by hand. A clock is not shortened into a different time.
+///
+/// The two-space inset is the one the `BANK RESET` rows use.
 pub(crate) fn push_visible(rows: &mut Vec<String>, text: &str, room: usize, colour: &str) {
+    push_wrapped(rows, text, room, colour, 2);
+}
+
+/// Five spaces: the inset of a note nested under a collapsed provider's
+/// summary rows. Grok's `not live` line and Notion's `partial` line use it.
+const NESTED_UNDER_SUMMARY: usize = 5;
+
+fn push_wrapped(rows: &mut Vec<String>, text: &str, room: usize, colour: &str, indent: usize) {
     if room == 0 || text.is_empty() {
         return;
     }
-    let indent = if room > 2 { 2 } else { 0 };
+    let indent = if room > indent { indent } else { 0 };
     let budget = room - indent;
     for piece in tc::wrap_words(text, budget) {
         if piece.is_empty() {
@@ -1017,19 +1027,26 @@ pub(crate) fn push_visible(rows: &mut Vec<String>, text: &str, room: usize, colo
 /// and so a parenthetical moves to the following lines when it does not
 /// fit beside them.
 ///
-/// One line when the whole sentence fits. Otherwise the count phrase is
-/// drawn first, and the parenthetical follows, broken between the
-/// datetime's parts. A part wider than the pane is broken by hand.
+/// Indented under the Codex rows, the same inset a collapsed provider
+/// uses for a note under its summary. One line when the whole sentence
+/// fits. Otherwise the count phrase is drawn first, and the parenthetical
+/// follows, broken between the datetime's parts. A part wider than the
+/// pane is broken by hand.
 pub(crate) fn append_reset_summary(rows: &mut Vec<String>, line: &str, room: usize, colour: &str) {
-    let whole = format!("  {line}");
+    let indent = if room > NESTED_UNDER_SUMMARY {
+        NESTED_UNDER_SUMMARY
+    } else {
+        0
+    };
+    let whole = format!("{}{line}", " ".repeat(indent));
     if room > 0 && tc::display_width(&whole) <= room {
         rows.push(tc::seg(&[(colour, whole)], room));
         return;
     }
     let (head, stamp) = split_summary(line);
-    push_visible(rows, &head, room, colour);
+    push_wrapped(rows, &head, room, colour, indent);
     if let Some(stamp) = stamp {
-        push_visible(rows, &format!("({stamp})"), room, colour);
+        push_wrapped(rows, &format!("({stamp})"), room, colour, indent);
     }
 }
 

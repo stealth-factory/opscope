@@ -215,17 +215,16 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
 /// The reset line under Codex on `[+]`, when the inventory was read and the
 /// count is greater than zero.
 ///
-/// A blank line comes first, and only then. Zero and an unread inventory
-/// add neither the line nor that blank. The count and `available` stay.
-/// When the parenthetical does not fit beside them it moves to the next
-/// lines, broken between the datetime's parts. A word or a part wider than
-/// the pane is broken by display width, so it is not skipped and a clock
-/// is not shortened into a different time.
+/// Indented under the Codex rows, the same inset a collapsed provider uses
+/// for a note under its summary. Zero and an unread inventory add nothing.
+/// The count and `available` stay. When the parenthetical does not fit
+/// beside them it moves to the next lines, broken between the datetime's
+/// parts. A word or a part wider than the pane is broken by display width,
+/// so it is not skipped and a clock is not shortened into a different time.
 fn push_reset_summary(rows: &mut Vec<String>, s: &State, w: usize, p: &Palette) {
     let Some(line) = s.codex.reset_summary_line() else {
         return;
     };
-    rows.push(String::new());
     crate::codex::append_reset_summary(&mut *rows, &line, w.saturating_sub(1), p.txt.as_str());
 }
 
@@ -982,10 +981,14 @@ mod tests {
             .iter()
             .position(|r| r.contains(&line))
             .expect("the reset line");
-        assert_eq!(rows[at], format!("  {line}"));
+        assert_eq!(rows[at], format!("     {line}"));
         assert!(
-            rows[at - 1].is_empty(),
-            "the reset line was not set off by a blank line: {rows:#?}"
+            !rows[at - 1].is_empty(),
+            "a blank line still separates the reset from Codex: {rows:#?}"
+        );
+        assert!(
+            rows[at - 1].contains('%'),
+            "the reset line does not follow a Codex summary row: {rows:#?}"
         );
         assert!(at > rows.iter().position(|r| r.contains("CODEX")).unwrap());
 
@@ -1000,7 +1003,7 @@ mod tests {
         assert!(
             plain(&summary_for(&one, 120, &p, &["codex"]))
                 .iter()
-                .any(|r| r == &format!("  {one_line}")),
+                .any(|r| r == &format!("     {one_line}")),
             "one credit was not worded the same way"
         );
 
@@ -1051,13 +1054,20 @@ mod tests {
             .iter()
             .position(|r| r.contains(&line))
             .expect("the reset line");
+        assert_eq!(quiet[at], format!("     {line}"));
         assert!(
-            quiet[at - 1].is_empty(),
-            "quiet reset line had no blank before it"
+            !quiet[at - 1].is_empty(),
+            "a blank line still separates the quiet reset from Codex: {quiet:#?}"
+        );
+        assert!(
+            quiet[at - 1].contains("no quota"),
+            "the quiet reset does not follow the Codex note: {quiet:#?}"
         );
 
         // Narrower than the datetime: the count and `available` stay, the
         // parenthetical moves down, and the clock token stays whole.
+        // Width 23 leaves room for the five-space inset plus
+        // `2 reset available`, and not for the datetime beside them.
         let clock = stamp
             .split_whitespace()
             .find(|word| word.contains(':'))
@@ -1066,9 +1076,9 @@ mod tests {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let tight = plain(&summary_for(&with, 20, &p, &["codex"]));
+        let tight = plain(&summary_for(&with, 23, &p, &["codex"]));
         assert!(
-            tight.iter().any(|row| row == "  2 reset available"),
+            tight.iter().any(|row| row == "     2 reset available"),
             "the count and available were split while they fit: {tight:#?}"
         );
         assert!(
@@ -1078,8 +1088,10 @@ mod tests {
             "the parenthetical stayed on the count line: {tight:#?}"
         );
         assert!(
-            tight.iter().any(|row| row.contains(clock)),
-            "the clock was shortened: {tight:#?}"
+            tight
+                .iter()
+                .any(|row| row.starts_with("     ") && row.contains(clock)),
+            "the clock left the Codex inset: {tight:#?}"
         );
         let flat: String = tight
             .iter()
@@ -1091,7 +1103,9 @@ mod tests {
             "a token was skipped\n{wanted}\n{flat}"
         );
 
-        let squeezed = plain(&summary_for(&with, 8, &p, &["codex"]));
+        // Width 11 leaves five columns beside the inset, which is the
+        // clock and nothing wider.
+        let squeezed = plain(&summary_for(&with, 11, &p, &["codex"]));
         let flat: String = squeezed
             .iter()
             .flat_map(|row| row.trim().chars())
@@ -1102,8 +1116,10 @@ mod tests {
             "a narrow pane dropped the label or the zone\n{wanted}\n{flat}\n{squeezed:#?}"
         );
         assert!(
-            squeezed.iter().any(|row| row.contains(clock)),
-            "the clock was shortened: {squeezed:#?}"
+            squeezed
+                .iter()
+                .any(|row| row.starts_with("     ") && row.contains(clock)),
+            "the clock left the Codex inset: {squeezed:#?}"
         );
     }
 
