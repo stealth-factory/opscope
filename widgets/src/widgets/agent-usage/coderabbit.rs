@@ -232,6 +232,8 @@ struct Counted {
     since: f64,
     /// Whether the readings reach back a whole week.
     whole: bool,
+    /// How many readings up to the report time the count rests on.
+    readings: usize,
     /// Whether a billing reset fell in a gap between readings too long to
     /// trust, where the reviews before the reset were never read.
     gapped: bool,
@@ -261,7 +263,7 @@ fn reviews_across(samples: &[(f64, u64)], at: f64, span: f64) -> Option<Counted>
         .map(|p| if p[1].1 >= p[0].1 { p[1].1 - p[0].1 } else { p[1].1 })
         .sum();
     let gapped = pairs.clone().any(|p| p[1].1 < p[0].1 && p[1].0 - p[0].0 > RESET_GAP);
-    Some(Counted { reviews, since: start.0, whole: first.is_some(), gapped })
+    Some(Counted { reviews, since: start.0, whole: first.is_some(), readings: samples.len(), gapped })
 }
 
 /// Where to run `coderabbit usage`: `coderabbit_repo` with a leading `~`
@@ -557,7 +559,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     }
     // One reading is where a count starts, not a count: a bar or a rate
     // from it would draw a zero nobody measured.
-    if d.samples.len() < 2 {
+    if week.readings < 2 {
         let said = format!("readings began {} ago; a count needs a later one", ago(week.since));
         for line in tc::wrap_words(&said, room) {
             rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", indent, line))], w - 1));
@@ -934,13 +936,13 @@ mod tests {
         let partial = [(at - 3.0 * day, 40), (at - day, 47), (at, 52)];
         assert_eq!(
             reviews_across(&partial, at, WEEK),
-            Some(Counted { reviews: 12, since: at - 3.0 * day, whole: false, gapped: false })
+            Some(Counted { reviews: 12, since: at - 3.0 * day, whole: false, readings: 3, gapped: false })
         );
         // A reading from before the week starts the count there, and makes it whole.
         let whole = [(at - 9.0 * day, 1), (at - 8.0 * day, 30), (at - 2.0 * day, 70), (at, 85)];
         assert_eq!(
             reviews_across(&whole, at, WEEK),
-            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true, gapped: false })
+            Some(Counted { reviews: 55, since: at - 8.0 * day, whole: true, readings: 4, gapped: false })
         );
         // A count that fell is a new billing period; all of it is new.
         let reset = [(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)];
@@ -1075,6 +1077,11 @@ mod tests {
         assert!(all.contains("a count needs a later one"), "{all}");
         // And no bar or rate from the zero one reading gives.
         assert!(!all.contains(" of 70") && !all.contains("an hour"), "{all}");
+        // A reading ahead of the report, left by a clock stepped back, is not
+        // a second reading either.
+        let ahead = week_of(vec![(at, 95), (at + 3600.0, 99)], "Team");
+        let all = tab(&ahead, 100, 40, &Config::default(), &palette()).join("\n");
+        assert!(all.contains("a count needs a later one") && !all.contains(" of 70"), "{all}");
         // No readings at all, and the section is not drawn.
         let none = week_of(Vec::new(), "Team");
         assert!(!tab(&none, 100, 40, &Config::default(), &palette()).join("\n").contains("FAIR USE"));
