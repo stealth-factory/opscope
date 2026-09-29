@@ -333,10 +333,17 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
         // Only once a report has come back: a signed-out CLI has no plan.
         // Held per login, so switching accounts is never judged on the
         // last account's table for the six hours a plan is held.
-        let key = format!("coderabbit-plan:{}", sample_key(&usage));
-        d.plan = cached(caches, &key, PLAN_TTL, ask_plan)
-            .map(|v| text(&v, "plan"))
-            .unwrap_or_default();
+        // A plan the report names itself wins, so the heading and the rate
+        // are never read from two different plans.
+        d.plan = match usage.get("plan") {
+            Some(plan) => plan.to_string(),
+            None => {
+                let key = format!("coderabbit-plan:{}", sample_key(&usage));
+                cached(caches, &key, PLAN_TTL, ask_plan)
+                    .map(|v| text(&v, "plan"))
+                    .unwrap_or_default()
+            }
+        };
         d.usage = Some(usage);
     }
     d
