@@ -17,15 +17,20 @@
 //! CodeRabbit: reviews this billing period, from its own CLI.
 //!
 //! `coderabbit usage` is the only source. It answers with a review count,
-//! whether usage billing is on, and when the period resets - and no limit.
-//! So this tab has a count and no bar, and on `[+]` CodeRabbit is named as
-//! publishing no quota rather than drawn as an empty one. The CLI owns the
-//! login; nothing here reads or touches its credentials.
+//! whether usage billing is on, and when the period resets. From CLI 0.8 it
+//! also gives the included reviews left in the rolling window, the window,
+//! and when capacity returns - and that is the one lane drawn. An older CLI
+//! gives no limit, so on `[+]` CodeRabbit is named as publishing no quota
+//! rather than drawn as an empty one. The plan's documented hourly rates are
+//! never drawn in its place: a limit the CLI did not give is not a reading.
+//! The CLI owns the login; nothing here reads or touches its credentials.
 
 use chrono::{Local, NaiveDate};
 use opscope_core as tc;
 
-use crate::parse::{coderabbit_signed_out, parse_coderabbit_usage, CodeRabbitUsage};
+use crate::parse::{
+    coderabbit_quota_field, coderabbit_signed_out, parse_coderabbit_usage, CodeRabbitUsage,
+};
 use crate::shared::*;
 use crate::*;
 
@@ -113,9 +118,44 @@ pub fn read(caches: &mut Caches, shown: bool) -> Data {
     d
 }
 
-/// CodeRabbit never has a lane: it publishes a count, not a limit.
-pub fn lanes(_d: &Data) -> Vec<Lane> {
-    Vec::new()
+/// The rolling window's name on a lane: `hour` for the documented one.
+fn window_label(secs: Option<f64>) -> String {
+    match secs {
+        Some(s) if (s - 3600.0).abs() < 1.0 => "hour".into(),
+        Some(s) if s >= 3600.0 && s % 3600.0 == 0.0 => format!("{}h", s / 3600.0),
+        Some(s) if s >= 60.0 => format!("{}m", (s / 60.0).round()),
+        _ => "rolling".into(),
+    }
+}
+
+/// One lane, for the included reviews used of the rolling window, when the
+/// CLI gave both what is left and out of how many. A count with no limit
+/// has nothing to be a share of, and draws nothing.
+pub fn lanes(d: &Data) -> Vec<Lane> {
+    let Some(u) = &d.usage else {
+        return Vec::new();
+    };
+    let Some((left, Some(of))) = u.available() else {
+        return Vec::new();
+    };
+    let used = of.saturating_sub(left) as f64;
+    let window = u.window_secs();
+    // Capacity returns review by review as old ones age out, so there is a
+    // reset only when the CLI names one - which it does when none are left.
+    let reset = u.returns_at(d.read_at);
+    vec![Lane {
+        label: window_label(window),
+        pct: used / of as f64 * 100.0,
+        // Left out on purpose. A rolling window has no start, so the pace
+        // marker, which reads elapsed time back from the reset, would put
+        // a start where there is none and draw a pace that is not real.
+        window_secs: None,
+        reset,
+        // A return time since the reading means the count has moved on.
+        stale: reset.is_some_and(|r| r <= now()),
+        projected: false,
+        apart: false,
+    }]
 }
 
 /// Why `[+]` has no bar for CodeRabbit.
@@ -124,12 +164,26 @@ pub fn lanes(_d: &Data) -> Vec<Lane> {
 /// "answered, and published no" wording that keeps it out of the warning
 /// colour. A failed ask is, and says what failed.
 pub fn why_no_lane(d: &Data) -> String {
+    if !lanes(d).is_empty() {
+        return String::new();
+    }
     if let Some(u) = &d.usage {
         let count = u
             .reviews()
             .map(|n| format!(" · {} reviews this period", n))
             .unwrap_or_default();
-        return format!("no quota · CodeRabbit answered, and published no limit{}.", count);
+        if let Some((left, None)) = u.available() {
+            return format!(
+                "no quota · CodeRabbit answered, and published no limit for the {} \
+                 reviews left{}.",
+                left, count
+            );
+        }
+        return format!(
+            "no quota · CodeRabbit answered, and published no limit{} · coderabbit CLI \
+             0.8 or later reports the rolling allowance.",
+            count
+        );
     }
     if !d.why.is_empty() {
         return format!("no quota · {}", d.why);
@@ -142,6 +196,51 @@ pub fn why_no_lane(d: &Data) -> String {
 fn days_until(date: &str, today: NaiveDate) -> Option<i64> {
     let day = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
     Some((day - today).num_days())
+}
+
+/// The rolling allowance, drawn as the `[+]` lane is: a bar of the share
+/// used, with how many are left in words, since a share of five reviews
+/// reads better as a count.
+fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
+    let lanes = lanes(d);
+    let Some(lane) = lanes.first() else {
+        return Vec::new();
+    };
+    let Some((left, Some(of))) = u.available() else {
+        return Vec::new();
+    };
+    let mut rows = vec![tc::seg(
+        &[
+            (p.lbl.as_str(), " ── ALLOWANCE ── ".into()),
+            (p.dim.as_str(), format!("included reviews · per developer · read {} ago", ago(d.read_at))),
+        ],
+        w - 1,
+    )];
+    let hue = agent_hue("coderabbit");
+    let label_w = 7;
+    let used = (lane.pct / 100.0).clamp(0.0, 1.0);
+    let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
+    let mut line: Vec<(String, String)> =
+        vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
+    line.extend(paced_bar(used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
+    line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
+    line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
+    let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+    rows.push(tc::seg(&refs, w - 1));
+    let when = match lane.reset.map(|r| r - now()) {
+        Some(left) if left > 0.0 => format!(" · back in {}", left_span(left)),
+        Some(_) => " · returning".into(),
+        None => String::new(),
+    };
+    rows.push(tc::seg(
+        &[
+            (p.dim.as_str(), format!(" {}  ", " ".repeat(label_w))),
+            (p.txt.as_str(), format!("{} of {}", left, of)),
+            (p.dim.as_str(), format!(" left{}", when)),
+        ],
+        w - 1,
+    ));
+    rows
 }
 
 fn report_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
@@ -160,7 +259,10 @@ fn report_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<Stri
         &[
             (p.dim.as_str(), "  your reviews  ".into()),
             (p.txt.as_str(), count),
-            (p.dim.as_str(), "   no limit published".into()),
+            (
+                p.dim.as_str(),
+                if lanes(d).is_empty() { "   no limit published" } else { "" }.into(),
+            ),
         ],
         w - 1,
     ));
@@ -191,7 +293,7 @@ fn plan(u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
         }
     }
     for (k, v) in &u.fields {
-        if !PLACED.contains(&k.as_str()) {
+        if !PLACED.contains(&k.as_str()) && coderabbit_quota_field(k).is_none() {
             pairs.push((k.clone(), v.clone()));
         }
     }
@@ -211,7 +313,12 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
         let run = if d.why.starts_with("not signed in") { run_hint("coderabbit") } else { "" };
         return no_local(&what, run, w, p);
     };
-    add_section(report_rows(d, u, w, p), plan(u, w, p))
+    let mut rows = allowance_rows(d, u, w, p);
+    if !rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows.extend(report_rows(d, u, w, p));
+    add_section(rows, plan(u, w, p))
 }
 
 #[cfg(test)]
@@ -237,6 +344,69 @@ mod tests {
         assert!(note.contains("25 reviews this period"), "{note}");
         // The wording `[+]` reads to decide this is not the reader's to fix.
         assert!(note.contains("answered, and published no"), "{note}");
+    }
+
+    fn with_allowance(extra: &str) -> CodeRabbitUsage {
+        parse_coderabbit_usage(&format!(
+            "Your reviews      : 25\n\
+             Available reviews : {}\n\
+             Period resets     : 2026-09-30\n",
+            extra
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_rolling_allowance_is_drawn_as_the_share_used() {
+        // Two of five left is sixty per cent used, over the hour the CLI named.
+        let u = parse_coderabbit_usage(
+            "Your reviews : 25\nAvailable reviews : 2 of 5\nRolling window : 1 hour\n",
+        )
+        .unwrap();
+        let d = Data { usage: Some(u), read_at: now(), why: String::new() };
+        let lanes = lanes(&d);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].label, "hour");
+        assert!((lanes[0].pct - 60.0).abs() < 1e-9);
+        // No window on the lane: a rolling window has no pace to draw.
+        assert_eq!(lanes[0].window_secs, None);
+        assert!(why_no_lane(&d).is_empty());
+    }
+
+    #[test]
+    fn an_exhausted_allowance_says_when_capacity_returns() {
+        // The return time is counted from when the report was taken.
+        let read_at = now() - 60.0;
+        let u = parse_coderabbit_usage(
+            "Available reviews : 0 of 5\nRolling window : 1 hour\nCapacity returns : in 20m\n",
+        )
+        .unwrap();
+        let d = Data { usage: Some(u), read_at, why: String::new() };
+        let lane = lanes(&d).remove(0);
+        assert!((lane.pct - 100.0).abs() < 1e-9);
+        assert_eq!(lane.reset, Some(read_at + 1200.0));
+        assert!(!lane.stale);
+        let all = tab(&d, 80, 20, &Config::default(), &palette()).join("\n");
+        assert!(all.contains("back in"), "{all}");
+    }
+
+    #[test]
+    fn a_count_left_with_no_limit_draws_no_bar_and_says_why() {
+        // Four left of an unstated limit is not a share of anything.
+        let d = Data { usage: Some(with_allowance("4")), read_at: now(), why: String::new() };
+        assert!(lanes(&d).is_empty());
+        let note = why_no_lane(&d);
+        assert!(note.contains("no limit for the 4 reviews left"), "{note}");
+        assert!(note.contains("answered, and published no"), "{note}");
+    }
+
+    #[test]
+    fn quota_lines_are_not_listed_again_among_the_plan_fields() {
+        // The allowance has its own section; the plan list skips its lines.
+        let d = Data { usage: Some(with_allowance("3 of 5")), read_at: now(), why: String::new() };
+        let all = tab(&d, 80, 30, &Config::default(), &palette()).join("\n");
+        assert_eq!(all.matches("available reviews").count(), 0, "{all}");
+        assert!(all.contains("ALLOWANCE"), "{all}");
     }
 
     #[test]
@@ -298,6 +468,12 @@ mod tests {
             out
         };
         let d = Data { usage: Some(report()), read_at: now() - 120.0, why: String::new() };
+        let quota = Data { usage: Some(with_allowance("0 of 5")), ..d.clone() };
+        for w in [24usize, 40, 60, 100] {
+            for r in tab(&quota, w, 30, &Config::default(), &palette()) {
+                assert!(tc::display_width(&strip(&r)) <= w - 1, "width {w}: {r:?}");
+            }
+        }
         for w in [40usize, 60, 100] {
             let rows: Vec<String> =
                 tab(&d, w, 30, &Config::default(), &palette()).iter().map(|r| strip(r)).collect();

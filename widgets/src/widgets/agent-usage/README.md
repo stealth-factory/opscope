@@ -1142,16 +1142,32 @@ Four settings, all on by default except the interval:
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
 
-### CodeRabbit has a count and no quota
+### CodeRabbit has a rolling allowance, from CLI 0.8
 
-CodeRabbit publishes no limit to measure against. Its CLI's `coderabbit usage`
-reports your reviews this billing period, whether usage billing is on, and the
-date the period resets, and that is what the `coderabbit` tab shows: the count
-as a number with no bar under it, the reset with the days left, then the
-organisation, the login and any other line the report carried. On `[+]`
-CodeRabbit is named as publishing no quota, with the count beside it, rather
-than drawn as an empty bar.
+CodeRabbit limits reviews per developer over a rolling window, not per month.
+From CLI 0.8, `coderabbit usage` reports the included reviews left in that
+window, how long the window is, and when capacity returns once none are left.
+That is the one lane drawn: on `[+]` and at the top of the `coderabbit` tab, a
+bar of the share used, with `2 of 5 left` under it on the tab and, when the
+allowance is spent, when the next review comes back. The lane has no pace
+marker, because a rolling window has no start to measure elapsed time from.
 
+Under the allowance the tab shows your reviews this billing period, the reset
+with the days left, then the organisation, the login and any other line the
+report carried, such as spend.
+
+An older CLI reports the count and no limit. Then there is no bar, and `[+]`
+names CodeRabbit as publishing no quota, with the count beside it and a note
+that CLI 0.8 reports the allowance. A count left with no limit beside it
+draws no bar either. CodeRabbit documents each plan's hourly rate, but a
+limit the CLI did not give is never drawn in its place: the plan may be
+grandfathered, and the fair-use policy lowers the rate as the week gets busy.
+
+- **The 0.8 wording is read by its words.** CodeRabbit documents what the
+  report holds but not its labels, so a line is taken as the allowance when
+  its label says available, remaining or left; as the window when it says
+  window; and as the return time when it says returns or again. `3 of 5`,
+  `3/5`, and a limit on a line of its own are all read.
 - **It runs a program.** Every other agent here reads a file or an endpoint;
   this one starts `coderabbit usage`, which asks CodeRabbit on your login. It
   runs only when `coderabbit` is on `PATH` and not in `exclude_agents`, is
