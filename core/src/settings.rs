@@ -1118,13 +1118,11 @@ fn load(spec: SettingsSpec) -> App {
 }
 
 fn edit_seed(field: &Field, current: Option<&Value>) -> String {
-    // An existing secret is not copied into the box. The row already says
-    // it is set, and the box would put the credential on screen.
-    if field.secret()
-        && current
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-    {
+    // An existing secret is not copied into the box, whatever JSON type it
+    // has. The list masks every stored value, and `compact` would put a
+    // number or an object on screen. A missing value still shows the
+    // declared default, which ships in the repo and is not a secret.
+    if field.secret() && current.is_some() {
         return String::new();
     }
     let src = current.unwrap_or(&field.default);
@@ -3305,12 +3303,15 @@ fn handle_edit_key(app: &mut App, key: &str) -> bool {
                     }
                 };
                 // An empty box on a secret that is already set must not
-                // write "" over it. The box was opened blank on purpose.
+                // write "" over it. The box was opened blank on purpose,
+                // including when the stored value is not a string.
                 field.secret()
                     && buffer.trim().is_empty()
-                    && current_of(&app.live, field, app.legacy_section)
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| !s.is_empty())
+                    && match current_of(&app.live, field, app.legacy_section) {
+                        Some(Value::String(s)) => !s.is_empty(),
+                        Some(_) => true,
+                        None => false,
+                    }
             };
             if keep_secret {
                 leave_edit(app);
@@ -5937,6 +5938,42 @@ mod tests {
                 Some(&Value::String("SERVICE_API_KEY".into()))
             ),
             "SERVICE_API_KEY"
+        );
+    }
+
+    #[test]
+    fn a_non_string_secret_opens_blank() {
+        // The list masks every stored secret. A hand-edited number or object
+        // is still one, and the editor must not print it.
+        let fields = secret_fixture();
+        let session = fields.iter().find(|f| f.key == "session").unwrap();
+        let object = serde_json::json!({"k": "not-a-real-cookie"});
+        assert_eq!(summary(&object, session.secret()), "••••••••");
+        assert_eq!(summary(&Value::from(7), session.secret()), "••••••••");
+        assert_eq!(edit_seed(session, Some(&object)), "");
+        assert_eq!(edit_seed(session, Some(&Value::from(7))), "");
+        let mut with_default = session.clone();
+        with_default.default = Value::String("shipped".into());
+        assert_eq!(edit_seed(&with_default, None), "shipped");
+        let visible = fields.iter().find(|f| f.key == "org_slug").unwrap();
+        assert_eq!(edit_seed(visible, Some(&Value::from(7))), "7");
+
+        let mut app = catalogue_app(serde_json::json!({
+            "w": { "session": { "k": "not-a-real-cookie" } }
+        }));
+        app.fields = vec![session.clone()];
+        app.mode = Mode::Edit {
+            index: 0,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        };
+        handle_edit_key(&mut app, "enter");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.status.as_deref(), Some("Nothing written."));
+        assert_eq!(
+            app.live["w"]["session"],
+            serde_json::json!({"k": "not-a-real-cookie"})
         );
     }
 
