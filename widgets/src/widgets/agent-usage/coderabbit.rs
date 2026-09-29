@@ -424,16 +424,17 @@ fn fair_use_lane(d: &Data) -> Option<Lane> {
 }
 
 /// The line under the `[+]` bar: how many more pull request reviews before
-/// the published rate next drops, and the rate now. A part week or a reset
-/// in a long gap makes the count a floor, so what is left is the most it
-/// can be; the tab says the rest.
+/// the published rate next drops, and the rate now. A part week makes the
+/// count a floor, so what is left is the most it can be. A reset in a long
+/// gap loses the reviews before it while the week's start can still run
+/// over, so that count is off by an amount nobody knows in either
+/// direction, and says so. The tab says the rest.
 pub fn headroom(d: &Data) -> Option<String> {
     fair_use_lane(d)?;
     let week = reviews_across(&d.samples, d.read_at, WEEK)?;
     let plan = d.plan.trim();
     let f = coderabbit_fair_use(plan, week.reviews)?;
-    let exact = week.whole && !week.gapped;
-    let (about, most) = if exact { ("~", "about") } else { ("at most ", "at most") };
+    let (about, most) = if week.whole { ("~", "about") } else { ("at most ", "at most") };
     let said = match f.next {
         Some((from, rate)) => {
             let then = if rate == 1 { "one at a time".to_string() } else { format!("{} an hour", rate) };
@@ -449,8 +450,14 @@ pub fn headroom(d: &Data) -> Option<String> {
         }
         None => format!("one review at a time on {} · it eases as reviews age out of the 7 days", plan),
     };
-    let floor = if exact { "" } else { " · the count is a floor so far" };
-    Some(format!("{}{} · estimate, its tab says how", said, floor))
+    let caveat = if !week.whole {
+        " · the count is a floor so far"
+    } else if week.gapped {
+        " · a billing reset went unread, so it may be off either way"
+    } else {
+        ""
+    };
+    Some(format!("{}{} · estimate, its tab says how", said, caveat))
 }
 
 /// The included reviews used of the rolling window, when the CLI gave both
@@ -655,14 +662,14 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    // A reset in a long gap lost what came before it, so the count is a
-    // floor however far back the readings go.
-    let exact = week.whole && !week.gapped;
-    let count = if exact {
+    // A reset in a long gap lost what came before it, while the start of
+    // the week can still run over, so that count is off either way.
+    let count = if week.whole && !week.gapped {
         format!("~{} reviews in the last 7 days", week.reviews)
     } else if week.whole {
         format!(
-            "at least {} reviews in the last 7 days; the billing period reset while no pane was reading",
+            "~{} reviews in the last 7 days; the billing period reset while no pane was reading, \
+             so it may be off either way",
             week.reviews
         )
     } else {
@@ -687,7 +694,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 Some((from, rate)) => format!(" · {} an hour from {}", rate, from),
                 None => String::new(),
             };
-            let so_far = if exact { "about" } else { "at most" };
+            let so_far = if week.whole { "about" } else { "at most" };
             format!(" · {} {} on {}{}", so_far, now_at, plan, then)
         }
         None if plan.is_empty() => " · the plan is not known, so no rate".into(),
@@ -1159,8 +1166,15 @@ mod tests {
         let day = 86400.0;
         let gapped = week_of(vec![(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)], "Team");
         let text = tab(&gapped, 100, 40, &Config::default(), &palette()).join("\n");
-        assert!(text.contains("at least 15 reviews in the last 7 days"), "{text}");
-        assert!(text.contains("at most 8 reviews an hour"), "{text}");
+        // Reviews before the unread reset are lost and the week's start can
+        // run over, so neither a floor nor a ceiling: off either way.
+        assert!(text.contains("~15 reviews in the last 7 days"), "{text}");
+        assert!(text.contains("off either way"), "{text}");
+        assert!(text.contains("about 8 reviews an hour"), "{text}");
+        let said = headroom(&gapped).unwrap();
+        assert!(said.starts_with("~25 more reviews before 6 an hour"), "{said}");
+        assert!(said.contains("off either way"), "{said}");
+        assert!(!said.contains("at most"), "{said}");
         // And the plan it was looked up on heads the subscription.
         assert!(all.lines().any(|r| r.contains("SUBSCRIPTION") && r.contains("Team")), "{all}");
     }
