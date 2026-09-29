@@ -72,8 +72,14 @@ fn droid_asked(installed: &HashMap<String, Presence>, cfg: &Config) -> bool {
     chosen_agents(installed, cfg).iter().any(|t| t == "droid")
 }
 
-pub fn read_all(caches: &mut Caches, cfg: &Config) -> State {
-    let installed = detect_agents(cfg);
+pub fn read_all(
+    caches: &mut Caches,
+    cfg: &Config,
+    installed: HashMap<String, Presence>,
+) -> State {
+    // The poller already checked presence for this pass. Checking again
+    // would repeat the binary, file, and credential lookups, and a second
+    // answer could disagree with the map the tabs were drawn from.
     let coderabbit_shown = coderabbit_asked(&installed, cfg);
     let notion_shown = notion_asked(&installed, cfg);
     let devin_shown = devin_asked(&installed, cfg);

@@ -2227,22 +2227,22 @@ fn main() {
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
             //
-            // Presence is cheap — a binary on PATH, a file, a token — and
-            // the reads after it are not. Publish it before those reads on
-            // the first pass, so auto-detect can open a tab the moment it
-            // knows the agent is here, while the body is still the loading
-            // rows. A later pass leaves the map alone until the read lands:
-            // swapping it in early would open a tab onto the previous
-            // snapshot, which has no reading for an agent that was not
-            // there last time.
+            // One presence check per poll, and the read uses that same map.
+            // It is published before the reads only on the first pass, so
+            // auto-detect can open a tab while the body is still the loading
+            // rows. A later poll still checks — an agent that appears while
+            // the widget is running has to gain a tab — but the map waits
+            // for the read to land. Swapping it in early would open that tab
+            // onto the previous snapshot, which has no reading for an agent
+            // that was not there last time.
             let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let installed = detect_agents(&poller_cfg);
                 if let Ok(mut g) = poller.lock() {
                     if g.fetched <= 0.0 {
-                        g.installed = installed;
+                        g.installed = installed.clone();
                     }
                 }
-                vendors::read_all(&mut caches, &poller_cfg)
+                vendors::read_all(&mut caches, &poller_cfg, installed)
             }));
             match read {
                 Ok(found) => {
