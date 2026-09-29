@@ -56,6 +56,12 @@ pub struct Data {
 /// One `coderabbit usage`, as the report or as why there was none.
 fn ask(repo: &str) -> Result<serde_json::Value, String> {
     let dir = repo_dir(repo);
+    // Checked here rather than left to the spawn, which reports a missing
+    // directory as `coderabbit: No such file or directory` - the CLI's name
+    // on the setting's fault, pointing at a reinstall that would not help.
+    if let Some(dir) = dir.as_deref().filter(|d| !d.is_dir()) {
+        return Err(format!("coderabbit_repo {} is not a directory", dir.display()));
+    }
     let out = tc::run_full_in(&[CLI, "usage"], 15, dir.as_deref())?;
     let text = format!(
         "{}\n{}",
@@ -109,6 +115,7 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
     if !tc::missing(&[CLI]).is_empty() {
         return d;
     }
+    forget_once_returned(caches);
     // A failure is held as a refusal, so it is retried on the backoff
     // rather than trusted for the full ten minutes a report is.
     let mut refused = String::new();
@@ -133,6 +140,24 @@ pub fn read(caches: &mut Caches, shown: bool, repo: &str) -> Data {
         d.read_at = num(&got, "at");
     }
     d
+}
+
+/// Drop a held report once the return time it named has passed, so the
+/// next frame asks again rather than drawing `0 of 5 left` for the rest of
+/// the ten minutes after capacity came back.
+fn forget_once_returned(caches: &mut Caches) {
+    let returned = caches
+        .live
+        .get("coderabbit")
+        .and_then(|(_, v, _)| v.as_ref())
+        .and_then(|v| {
+            let u = parse_coderabbit_usage(&text(v, "text"))?;
+            u.returns_at(num(v, "at"))
+        })
+        .is_some_and(|r| r <= now());
+    if returned {
+        caches.live.remove("coderabbit");
+    }
 }
 
 /// The rolling window's name on a lane: `hour` for the documented one.
@@ -270,26 +295,35 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
     rows.push(tc::seg(&refs, w - 1));
     let when = match lane.reset.map(|r| r - now()) {
         Some(left) if left > 0.0 => format!(" · back in {}", left_span(left)),
-        Some(_) => " · returning".into(),
+        // Only between the return and the next ask, which is due now.
+        Some(_) => " · returned since this reading, asking again".into(),
         None => String::new(),
     };
     // CodeRabbit names the repository it read the allowance in, which is
     // the one coderabbit_repo points at; saying so shows where it came from.
     let repo = u.get("repository").map(|r| format!(" · in {}", r)).unwrap_or_default();
-    rows.push(tc::seg(
-        &[
-            (p.dim.as_str(), format!(" {}  ", " ".repeat(label_w))),
-            (p.txt.as_str(), format!("{} of {}", left, of)),
-            (p.dim.as_str(), format!(" left{}{}", when, repo)),
-        ],
-        w - 1,
-    ));
+    let indent = " ".repeat(label_w + 3);
+    let room = w.saturating_sub(indent.len() + 1).max(8);
+    // Wrapped rather than cut: the return and the repository together run
+    // past a narrow pane. The count keeps its own colour on the first line.
+    let count = format!("{} of {}", left, of);
+    let said = format!("{} left{}{}", count, when, repo);
+    for (i, line) in tc::wrap_words(&said, room).into_iter().enumerate() {
+        let rest = line.strip_prefix(&count).filter(|_| i == 0);
+        let parts = match rest {
+            Some(rest) => vec![
+                (p.dim.as_str(), indent.clone()),
+                (p.txt.as_str(), count.clone()),
+                (p.dim.as_str(), rest.to_string()),
+            ],
+            None => vec![(p.dim.as_str(), format!("{}{}", indent, line))],
+        };
+        rows.push(tc::seg(&parts, w - 1));
+    }
     // The report does not say which allowance this is, and pull request
     // reviews have been held to fewer while it read full; see `lanes`.
     let caveat = "CodeRabbit keeps pull request, CLI and IDE reviews on separate allowances, \
                   and does not say which this is; pull request reviews may be limited sooner.";
-    let indent = " ".repeat(label_w + 3);
-    let room = w.saturating_sub(indent.len() + 1).max(8);
     for line in tc::wrap_words(caveat, room) {
         rows.push(tc::seg(&[(p.dim.as_str(), format!("{}{}", indent, line))], w - 1));
     }
@@ -442,6 +476,30 @@ mod tests {
         assert_eq!(found.len(), 1, "{:#?}", rows);
         assert!(found[0].contains("10 of 10"), "{}", found[0]);
         assert!(found[0].contains(" left · in example-org/example-repo"), "{}", found[0]);
+    }
+
+    #[test]
+    fn a_held_report_is_dropped_once_its_return_time_passes() {
+        // A return still ahead keeps the reading; one gone by forgets it.
+        let held = |at: f64| {
+            let v = serde_json::json!({
+                "text": "Available reviews : 0 of 5\nCapacity returns : in 2m\n",
+                "at": at,
+            });
+            let mut caches = Caches::default();
+            caches.live.insert("coderabbit".into(), (at, Some(v), REPORT_TTL));
+            forget_once_returned(&mut caches);
+            caches.live.contains_key("coderabbit")
+        };
+        assert!(held(now() - 60.0));
+        assert!(!held(now() - 180.0));
+    }
+
+    #[test]
+    fn a_repository_that_is_not_a_directory_names_the_setting() {
+        // Refused before the CLI is started, so the fault is not put on it.
+        let why = ask("/no/such/directory/for/opscope").unwrap_err();
+        assert!(why.starts_with("coderabbit_repo /no/such/directory"), "{why}");
     }
 
     #[test]
