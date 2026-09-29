@@ -75,10 +75,18 @@ pub fn token(cfg: &Config) -> (String, &'static str) {
 /// A pasted `Authorization:` line or a `Bearer` prefix is the same token.
 fn strip_bearer(raw: &str) -> String {
     let mut text = raw.trim();
-    if text.len() >= 14 && text[..14].eq_ignore_ascii_case("authorization:") {
+    // `get` stops on a char boundary. A byte slice of a multibyte token
+    // panics, and this runs before every other agent's poll.
+    if text
+        .get(..14)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("authorization:"))
+    {
         text = text[14..].trim();
     }
-    if text.len() >= 7 && text[..7].eq_ignore_ascii_case("bearer ") {
+    if text
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
         text = text[7..].trim();
     }
     text.to_string()
@@ -227,14 +235,19 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
 }
 
 fn reset_passed(got: &serde_json::Value) -> bool {
+    let at = num(got, "at");
     let data = Data {
         quota: parse_devin_quota(&text(got, "body")),
-        read_at: num(got, "at"),
+        read_at: at,
         ..Data::default()
     };
+    // A reset already behind `at` was past when the body was read. Dropping
+    // the cache for it fetches again on every frame and still shows the
+    // same instant. A reset that was ahead of the reading and has now
+    // passed is a window that rolled.
     lanes(&data)
         .iter()
-        .any(|lane| lane.reset.is_some_and(|reset| reset <= now()))
+        .any(|lane| lane.reset.is_some_and(|reset| reset > at && reset <= now()))
 }
 
 /// Daily and weekly, each with the reset that was sent and no window
@@ -481,6 +494,32 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(token(&cfg), ("abc".to_string(), "config"));
+    }
+
+    #[test]
+    fn a_multibyte_token_is_left_whole() {
+        let cfg = Config {
+            devin_token: "éééééééé".into(),
+            ..Config::default()
+        };
+        assert_eq!(token(&cfg).0, "éééééééé");
+    }
+
+    #[test]
+    fn a_reset_already_past_at_the_reading_does_not_drop_the_cache() {
+        let at = now() - 120.0;
+        let already = serde_json::json!({
+            "daily_percentage": 10.0,
+            "daily_reset_at": at - 10.0,
+        });
+        let held = serde_json::json!({ "body": already.to_string(), "at": at });
+        assert!(!reset_passed(&held));
+        let rolled = serde_json::json!({
+            "weekly_percentage": 10.0,
+            "weekly_reset_at": at + 30.0,
+        });
+        let crossed = serde_json::json!({ "body": rolled.to_string(), "at": at });
+        assert!(reset_passed(&crossed));
     }
 
     #[test]

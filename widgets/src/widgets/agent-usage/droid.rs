@@ -60,6 +60,10 @@ pub struct Data {
 /// The API key, and where it came from. The setting wins, then the named
 /// variable, then the `FACTORY_API_KEY` line in `~/.factory/.env`.
 pub fn api_key(cfg: &Config) -> (String, &'static str) {
+    api_key_from(cfg, &home())
+}
+
+fn api_key_from(cfg: &Config, home_dir: &str) -> (String, &'static str) {
     if !cfg.factory_api_key.trim().is_empty() {
         return (strip_bearer(cfg.factory_api_key.trim()), "config");
     }
@@ -73,7 +77,7 @@ pub fn api_key(cfg: &Config) -> (String, &'static str) {
             return (strip_bearer(value.trim()), "env");
         }
     }
-    let path = format!("{}/.factory/.env", home());
+    let path = format!("{home_dir}/.factory/.env");
     if let Ok(text) = std::fs::read_to_string(path) {
         if let Some(value) = parse_factory_dotenv(&text) {
             return (strip_bearer(&value), "file");
@@ -84,7 +88,12 @@ pub fn api_key(cfg: &Config) -> (String, &'static str) {
 
 fn strip_bearer(raw: &str) -> String {
     let text = raw.trim();
-    if text.len() >= 7 && text[..7].eq_ignore_ascii_case("bearer ") {
+    // `get` stops on a char boundary. A byte slice of a multibyte key
+    // panics, and this runs before every other agent's poll.
+    if text
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
         text[7..].trim().to_string()
     } else {
         text.to_string()
@@ -123,17 +132,33 @@ fn rejected(said: &str) -> bool {
     status_of(said).is_some_and(|code| code == 401 || code == 403)
 }
 
-/// Auth on the API host, then the app host when the API host failed for a
-/// reason other than 401 or 403. An API-host 401 stays a bad key: trying the
-/// app host afterwards would hide it behind a later 404.
-fn fetch_auth(key: &str) -> Result<Option<String>, String> {
-    match factory_get(&format!("{API}/api/app/auth/me"), key) {
-        Ok(text) => Ok(Some(text)),
-        Err(said) if rejected(&said) => Err("Factory rejected the API key.".into()),
-        Err(_) => match factory_get(&format!("{APP}/api/app/auth/me"), key) {
-            Ok(text) => Ok(Some(text)),
-            Err(said) if rejected(&said) => Err("Factory rejected the API key.".into()),
-            Err(_) => Ok(None),
+/// What one host's profile answer means. A 401 or 403 is no profile: the
+/// key is still sent to billing. Any other failure is one try on the other
+/// host.
+enum ProfileRead {
+    Body(String),
+    None,
+    TryOtherHost,
+}
+
+fn profile_from_host(result: Result<String, String>) -> ProfileRead {
+    match result {
+        Ok(text) => ProfileRead::Body(text),
+        Err(said) if rejected(&said) => ProfileRead::None,
+        Err(_) => ProfileRead::TryOtherHost,
+    }
+}
+
+/// The profile is optional. An API-host 401 or 403 is not retried on the
+/// app host, and it does not stop the billing read. Any other API-host
+/// failure gets one try on the app host; a failure there is still no profile.
+fn fetch_auth(key: &str) -> Option<String> {
+    match profile_from_host(factory_get(&format!("{API}/api/app/auth/me"), key)) {
+        ProfileRead::Body(text) => Some(text),
+        ProfileRead::None => None,
+        ProfileRead::TryOtherHost => match factory_get(&format!("{APP}/api/app/auth/me"), key) {
+            Ok(text) => Some(text),
+            Err(_) => None,
         },
     }
 }
@@ -156,7 +181,7 @@ fn usage_url(host: &str, user_id: Option<&str>) -> String {
 }
 
 fn ask(key: &str) -> Result<serde_json::Value, String> {
-    let auth = fetch_auth(key)?;
+    let auth = fetch_auth(key);
     let user_id = auth
         .as_deref()
         .and_then(parse_factory_auth)
@@ -198,12 +223,16 @@ fn ask(key: &str) -> Result<serde_json::Value, String> {
 
 /// `shown` is whether Droid has a tab the reader chose.
 pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
+    read_with_home(caches, cfg, shown, &home())
+}
+
+fn read_with_home(caches: &mut Caches, cfg: &Config, shown: bool, home_dir: &str) -> Data {
     let mut data = Data::default();
     if !shown {
         data.why = "not asked · Droid is left out of this widget's agents".into();
         return data;
     }
-    let (key, source) = api_key(cfg);
+    let (key, source) = api_key_from(cfg, home_dir);
     data.source = source;
     if key.is_empty() {
         return data;
@@ -243,18 +272,23 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
 }
 
 fn reset_passed(got: &serde_json::Value) -> bool {
+    let at = num(got, "at");
     let mut data = Data {
         auth: parse_factory_auth(&text(got, "auth")),
         billing: parse_factory_billing_limits(&text(got, "limits")),
-        read_at: num(got, "at"),
+        read_at: at,
         ..Data::default()
     };
     if data.billing.is_none() {
         data.usage = parse_factory_usage(&text(got, "usage"));
     }
+    // A reset already behind `at` was past when the body was read. Dropping
+    // the cache for it fetches again on every frame and still shows the
+    // same instant. A reset that was ahead of the reading and has now
+    // passed is a window that rolled.
     lanes(&data)
         .iter()
-        .any(|lane| lane.reset.is_some_and(|reset| reset <= now()))
+        .any(|lane| lane.reset.is_some_and(|reset| reset > at && reset <= now()))
 }
 
 /// The windows that were sent. A 5h lane is the one length the key name
@@ -762,17 +796,98 @@ mod tests {
             factory_api_key_env: "OPSCOPE_TEST_NO_SUCH_VARIABLE".into(),
             ..Config::default()
         };
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-droid-empty-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let mut caches = Caches::default();
-        // Point the dotenv read at a home that has no Factory file by
-        // relying on the process home. The test only asserts that an empty
-        // setting and a missing variable do not open a cache slot when the
-        // file is also absent. When the file is present, a key is real and
-        // the assertion below is the wrong one — skip the cache check then.
-        let data = read(&mut caches, &cfg, true);
-        if data.source != "file" {
-            assert!(caches.live.keys().all(|key| !key.starts_with("droid")));
-            assert!(why_no_lane(&data).contains("factory_api_key"));
-        }
+        let data = read_with_home(&mut caches, &cfg, true, &dir.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(data.source.is_empty());
+        assert!(caches.live.keys().all(|key| !key.starts_with("droid")));
+        assert!(why_no_lane(&data).contains("factory_api_key"));
+    }
+
+    #[test]
+    fn a_dotenv_in_the_given_home_is_the_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-droid-dotenv-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".factory")).unwrap();
+        std::fs::write(dir.join(".factory/.env"), "FACTORY_API_KEY=from-file\n").unwrap();
+        let cfg = Config {
+            factory_api_key_env: "OPSCOPE_TEST_NO_SUCH_VARIABLE".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            api_key_from(&cfg, &dir.to_string_lossy()),
+            ("from-file".into(), "file")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_multibyte_key_is_left_whole() {
+        let cfg = Config {
+            factory_api_key: "éééé".into(),
+            ..Config::default()
+        };
+        assert_eq!(api_key(&cfg).0, "éééé");
+    }
+
+    #[test]
+    fn a_rejected_profile_does_not_reject_the_key() {
+        assert!(matches!(
+            profile_from_host(Err("error: 401".into())),
+            ProfileRead::None
+        ));
+        assert!(matches!(
+            profile_from_host(Err("error: 403".into())),
+            ProfileRead::None
+        ));
+        assert!(matches!(
+            profile_from_host(Err("error: 500".into())),
+            ProfileRead::TryOtherHost
+        ));
+        assert!(matches!(
+            profile_from_host(Ok("{\"ok\":true}".into())),
+            ProfileRead::Body(_)
+        ));
+    }
+
+    #[test]
+    fn a_reset_already_past_at_the_reading_does_not_drop_the_cache() {
+        let at = now() - 120.0;
+        let already = serde_json::json!({
+            "usage": { "endDate": at - 10.0, "standard": { "usedRatio": 0.1 } }
+        });
+        let held = serde_json::json!({
+            "limits": "",
+            "usage": already.to_string(),
+            "auth": "",
+            "at": at,
+        });
+        assert!(!reset_passed(&held));
+        let rolled = serde_json::json!({
+            "usage": { "endDate": at + 30.0, "standard": { "usedRatio": 0.1 } }
+        });
+        let crossed = serde_json::json!({
+            "limits": "",
+            "usage": rolled.to_string(),
+            "auth": "",
+            "at": at,
+        });
+        assert!(reset_passed(&crossed));
     }
 
     #[test]

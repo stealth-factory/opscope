@@ -713,10 +713,10 @@ pub struct FactoryBilling {
     pub overage_preference: Option<String>,
 }
 
-/// None unless `usesTokenRateLimitsBilling` is boolean true and
-/// `limits.standard` has `fiveHour`, `weekly`, and `monthly`, each with
-/// `usedPercent`. A window the server left out is not a 0% bar, and it is
-/// not this body.
+/// None unless `usesTokenRateLimitsBilling` is boolean true and at least
+/// one standard window has `usedPercent`. A window the server left out is
+/// not a 0% bar. When no standard window can be drawn, this is not the
+/// rate-limit body, and the older usage endpoint can still be read.
 pub fn parse_factory_billing_limits(text: &str) -> Option<FactoryBilling> {
     let body: serde_json::Value = serde_json::from_str(text).ok()?;
     if body
@@ -728,10 +728,13 @@ pub fn parse_factory_billing_limits(text: &str) -> Option<FactoryBilling> {
     }
     let standard_obj = body.get("limits")?.get("standard")?.as_object()?;
     let standard = FactoryPool {
-        five_hour: Some(factory_window(standard_obj.get("fiveHour")?)?),
-        weekly: Some(factory_window(standard_obj.get("weekly")?)?),
-        monthly: Some(factory_window(standard_obj.get("monthly")?)?),
+        five_hour: standard_obj.get("fiveHour").and_then(factory_window),
+        weekly: standard_obj.get("weekly").and_then(factory_window),
+        monthly: standard_obj.get("monthly").and_then(factory_window),
     };
+    if standard.five_hour.is_none() && standard.weekly.is_none() && standard.monthly.is_none() {
+        return None;
+    }
     let core = body
         .get("limits")
         .and_then(|v| v.get("core"))
@@ -1460,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_rate_limits_need_three_standard_windows_and_skip_an_empty_core() {
+    fn factory_rate_limits_keep_each_standard_window_and_skip_an_empty_core() {
         let body = r#"{"usesTokenRateLimitsBilling":true,"extraUsageBalanceCents":0,
             "overagePreference":"on_demand",
             "limits":{"standard":{
@@ -1501,8 +1504,18 @@ mod tests {
             .unwrap();
         assert!(core.five_hour.is_none() && core.monthly.is_none());
         assert_eq!(core.weekly.as_ref().map(|w| w.pct), Some(4.0));
+        let partial = parse_factory_billing_limits(
+            r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":2}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.standard.five_hour.as_ref().map(|w| w.pct),
+            Some(1.0)
+        );
+        assert_eq!(partial.standard.weekly.as_ref().map(|w| w.pct), Some(2.0));
+        assert!(partial.standard.monthly.is_none());
         assert!(parse_factory_billing_limits(
-            r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{"usedPercent":1},"weekly":{"usedPercent":1}}}}"#
+            r#"{"usesTokenRateLimitsBilling":true,"limits":{"standard":{"fiveHour":{},"weekly":{"secondsRemaining":1}}}}"#
         )
         .is_none());
         assert!(parse_factory_billing_limits(
