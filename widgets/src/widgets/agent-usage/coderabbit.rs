@@ -151,8 +151,11 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
         // a start where there is none and draw a pace that is not real.
         window_secs: None,
         reset,
-        // A return time since the reading means the count has moved on.
-        stale: reset.is_some_and(|r| r <= now()),
+        // A return time since the reading means the count has moved on, and
+        // so does a reading older than this widget's own ten-minute cycle.
+        // Inside the cycle it is this widget's reading, which the other
+        // agents do not flag either, and the tab says how old it is.
+        stale: reset.is_some_and(|r| r <= now()) || now() - d.read_at > REPORT_TTL,
         projected: false,
         apart: false,
     }]
@@ -285,7 +288,9 @@ fn report_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<Stri
     rows
 }
 
-fn plan(u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
+/// `drawn` is whether the ALLOWANCE section showed the quota lines; when it
+/// did not, a count left with no limit is still listed here as it came.
+fn plan(u: &CodeRabbitUsage, drawn: bool, w: usize, p: &Palette) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for key in ["organization", "user"] {
         if let Some(v) = u.get(key) {
@@ -293,7 +298,7 @@ fn plan(u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
         }
     }
     for (k, v) in &u.fields {
-        if !PLACED.contains(&k.as_str()) && coderabbit_quota_field(k).is_none() {
+        if !PLACED.contains(&k.as_str()) && !(drawn && coderabbit_quota_field(k).is_some()) {
             pairs.push((k.clone(), v.clone()));
         }
     }
@@ -314,11 +319,12 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
         return no_local(&what, run, w, p);
     };
     let mut rows = allowance_rows(d, u, w, p);
-    if !rows.is_empty() {
+    let drawn = !rows.is_empty();
+    if drawn {
         rows.push(String::new());
     }
     rows.extend(report_rows(d, u, w, p));
-    add_section(rows, plan(u, w, p))
+    add_section(rows, plan(u, drawn, w, p))
 }
 
 #[cfg(test)]
@@ -398,6 +404,18 @@ mod tests {
         let note = why_no_lane(&d);
         assert!(note.contains("no limit for the 4 reviews left"), "{note}");
         assert!(note.contains("answered, and published no"), "{note}");
+        // With no ALLOWANCE section, the tab still lists the line as it came.
+        let all = tab(&d, 80, 30, &Config::default(), &palette()).join("\n");
+        assert!(all.contains("available reviews"), "{all}");
+    }
+
+    #[test]
+    fn a_reading_held_past_its_cycle_is_marked_stale() {
+        // Older than the ten-minute hold, it is flagged however far off the return is.
+        let fresh = Data { usage: Some(with_allowance("3 of 5")), read_at: now(), why: String::new() };
+        assert!(!lanes(&fresh)[0].stale);
+        let old = Data { read_at: now() - REPORT_TTL - 60.0, ..fresh };
+        assert!(lanes(&old)[0].stale);
     }
 
     #[test]
