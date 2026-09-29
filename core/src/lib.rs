@@ -297,8 +297,8 @@ pub fn flush() {
 
 /// Paint `rows` from the top-left, one full frame.
 ///
-/// Every row is followed by a reset and an erase-to-end, so a short row
-/// cannot leave the tail of the previous frame behind it.
+/// Every row is erased before it is written, so a short row cannot leave
+/// the tail of the previous frame behind it.
 ///
 /// The top row always ends in the version that is running, whatever the
 /// widget put there. See `frame`.
@@ -361,13 +361,20 @@ fn frame(rows: &[String], w: usize, h: usize) -> String {
     let mut buf = String::from(HOME);
     for i in 0..h {
         let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+        // Erase first, then write. A row that fills the pane leaves the
+        // cursor on its last column waiting to wrap, and an erase-to-end
+        // sent from there erases that column too: the version lost its
+        // last digit that way, `v0.32.` for `v0.32.0`, and every rule lost
+        // its `╸` without anyone noticing. Erasing from column 0 before the
+        // row is written cannot reach anything the row puts down.
+        buf.push_str(RST);
+        buf.push_str(EL);
         if i == 0 {
             buf.push_str(&stamped(&line, w));
         } else {
             buf.push_str(&line);
         }
         buf.push_str(RST);
-        buf.push_str(EL);
         if i + 1 != h {
             buf.push_str("\r\n");
         }
@@ -3530,6 +3537,23 @@ mod tests {
                     assert!(colour || erase, "{what}: `ESC[{params}{last}` reached the screen");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn nothing_is_erased_after_a_row_is_written() {
+        // A row as wide as the pane leaves the cursor on the last column,
+        // and an erase-to-end from there takes that column with it. That is
+        // how `v0.32.0` reached the screen as `v0.32.`: the frame was right
+        // and the terminal did what it was told. So the erase comes first,
+        // while the cursor is still at column 0, and nothing follows the
+        // text but a reset.
+        let w = 40;
+        let rows = vec![super::title("clocks", w, ""), "#".repeat(w), "short".into()];
+        for (i, row) in frame_rows(&super::frame(&rows, w, 3)).iter().enumerate() {
+            let erase = row.find(super::EL).unwrap_or_else(|| panic!("row {i} is never erased"));
+            assert!(shown(&row[..erase]).is_empty(), "row {i} is erased after its text: {row:?}");
+            assert!(!row[erase + super::EL.len()..].contains(super::EL), "row {i} is erased twice");
         }
     }
 
