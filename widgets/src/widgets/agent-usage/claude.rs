@@ -531,7 +531,7 @@ fn reading_is_old(taken_at: f64) -> bool {
 /// being maintained. CodexBar does the same and for the same reason: its
 /// Claude sources are the API and the CLI, never that file, with its own
 /// snapshot shown by capture age when they all fail.
-fn snapshot_state_home() -> String {
+pub(crate) fn snapshot_state_home() -> String {
     std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
         format!("{}/.local/state", std::env::var("HOME").unwrap_or_default())
     })

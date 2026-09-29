@@ -1179,6 +1179,42 @@ draws no bar either. CodeRabbit documents each plan's hourly rate, but a
 limit the CLI did not give is never drawn in its place: the plan may be
 grandfathered, and the fair-use policy lowers the rate as the week gets busy.
 
+### CodeRabbit's fair-use rate is estimated, and says so
+
+CodeRabbit lowers a developer's hourly rate as their pull request reviews
+over the last seven days climb, on a published table per plan. No command
+reports that count, so the tab works it out: every `coderabbit usage` that
+answers adds its `Your reviews` count to
+`$XDG_STATE_HOME/opscope/coderabbit-reviews.json` (`~/.local/state` when that
+is unset), kept per login and pruned to the last week. The reviews added
+across the week are the count, and a reading whose `Period resets` date
+moved, or whose count fell, starts a new billing period, all of it new. A
+reading the file could not take is said in the section, since a restarted
+pane then starts the count over. The FAIR USE section draws it as a bar toward the
+count where reviews go one at a time, then looks the rate up on the plan
+`coderabbit auth status` names, which is asked every six hours.
+
+- **Every figure is marked.** A whole week is `~55 reviews in the last 7
+  days · about 4 reviews an hour on Team`. The readings between two asks
+  may straddle the week's start, and they are counted in, so the count can
+  run over and the rate errs low.
+- **A part week is a floor.** Until the readings reach back seven days, the
+  tab says `at least` for the count and `at most` for the rate, and the date
+  a whole week will be in.
+- **A reset in a long gap is a floor too.** When the billing period reset
+  while no pane read for over an hour, reviews added between the last reading
+  and the reset were never counted, so the week says `at least` however far
+  back it reaches.
+- **It may overcount.** Only pull request reviews count toward fair use, and
+  `Your reviews` may also count CLI and IDE ones, so the real rate may be
+  higher than the estimate. The tab says so under it.
+- **Only the four plans the page lists get a rate** - Essentials, Team,
+  Advanced and Enterprise, as read on 2026-09-29. Any other plan, or none,
+  gets the count and says why there is no rate.
+- **Gaps are the widget's.** Reviews made while no pane was running are
+  counted at the next reading, so a count is only as good as the readings
+  behind it.
+
 - **The 0.8 wording is read by its words.** CodeRabbit documents what the
   report holds but not its labels, so a line is taken as the allowance when
   its label says available (or availability), remaining or left; as the
