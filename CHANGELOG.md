@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.31.0] - 2026-09-28
+
+### Features
+
+- **agent-usage**: Price claude-sonnet-5-5 on its own row (#286)
+
 ## [0.30.2] - 2026-09-28
 
 ### Bug Fixes
