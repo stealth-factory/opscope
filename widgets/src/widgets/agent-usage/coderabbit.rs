@@ -24,8 +24,8 @@
 //! `lanes`), so it is not drawn there as a limit it may not be. The plan's
 //! documented hourly rates are never drawn in its place either: a limit the
 //! CLI did not give is not a reading. `[+]` draws the fair-use estimate
-//! below instead, marked as one, with how many more reviews before the
-//! rate next drops.
+//! below instead, as a compact bar marked as an estimate. Only the tab
+//! explains how many more reviews remain before the rate next drops.
 //!
 //! The tab does draw one estimate, and says it is one: the fair-use rate
 //! CodeRabbit's published table gives for the seven-day review count, which
