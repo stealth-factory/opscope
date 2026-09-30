@@ -2227,7 +2227,11 @@ fn main() {
     std::thread::spawn(move || {
         tc::record_panics();
         let mut caches = shared::Caches::default();
+        let mut asked = false;
         loop {
+            if asked {
+                caches.asked_at = now();
+            }
             // A poller that dies takes its explanation with it, and an empty
             // board looks exactly like a machine with no agents on it.
             //
@@ -2267,17 +2271,19 @@ fn main() {
                 }
             }
             let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
+            let mut pressed = match lock.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
+            if !*pressed {
+                pressed = match cond.wait_timeout(pressed, Duration::from_secs_f64(refresh)) {
                     Ok((g, _)) => g,
                     Err(_) => return,
                 };
             }
-            *asked = false;
+            // `r` rather than the clock: this pass asks the endpoints too.
+            asked = *pressed;
+            *pressed = false;
         }
     });
 

@@ -36,9 +36,21 @@ pub struct Caches {
     /// key -> refusals in a row, which is what the backoff doubles on.
     /// Cleared the moment one gets through.
     pub fails: HashMap<String, u32>,
+    /// When the reader last pressed `r`. A good reading taken before this
+    /// is asked again rather than served out of its hold; see `cached`.
+    pub asked_at: f64,
 }
 
 pub const LIVE_TTL: f64 = 120.0;
+/// How old a good reading must be before `r` asks for it again.
+///
+/// Without this a press held every quota for its full interval - two
+/// minutes to an hour - so the local counts moved and the numbers the
+/// reader was actually waiting on did not. The floor keeps a key held
+/// down from turning into a request per frame against endpoints whose
+/// limits are shared with the agent itself (Claude's answers 429 to three
+/// copies on a two-minute hold).
+pub const ASKED_FLOOR: f64 = 30.0;
 /// Where a refusal starts waiting, and where it stops.
 ///
 /// Two minutes for the first, because one failure is usually nothing - a
@@ -76,7 +88,11 @@ where
 {
     let at = now();
     if let Some((when, value, held)) = caches.live.get(key) {
-        if at - when < *held {
+        // A refusal keeps its backoff even when asked: pressing `r` at an
+        // endpoint that is rate-limiting us is how the limit is sustained.
+        let good = value.as_ref().is_some_and(|v| v.get("why").is_none());
+        let asked = good && *when < caches.asked_at && at - when >= ASKED_FLOOR;
+        if at - when < *held && !asked {
             return value.clone();
         }
     }
@@ -512,6 +528,41 @@ mod tests {
         });
         assert_eq!(text(&again.unwrap(), "why"), "the endpoint did not answer");
         assert_eq!(caches.fails.get("probe"), Some(&1));
+    }
+
+    #[test]
+    fn a_refresh_asks_again_for_a_good_reading_past_the_floor() {
+        // The bug: `r` woke the poller, but every quota was still inside
+        // its hold, so the press re-read local files and nothing else.
+        let mut caches = Caches::default();
+        let at = now() - ASKED_FLOOR - 1.0;
+        caches.live.insert("probe".into(), (at, Some(serde_json::json!(1)), 300.0));
+        caches.asked_at = now();
+        let got = cached(&mut caches, "probe", 300.0, || Some(serde_json::json!(2)));
+        assert_eq!(got, Some(serde_json::json!(2)));
+        // Asked once per press, not on every pass after it.
+        let again = cached(&mut caches, "probe", 300.0, || {
+            panic!("asked twice for one press")
+        });
+        assert_eq!(again, Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn a_refresh_leaves_a_fresh_reading_and_a_refusal_alone() {
+        let mut caches = Caches::default();
+        // Taken a moment ago: a held-down key must not become a request
+        // per frame.
+        let fresh = now() - 1.0;
+        caches.live.insert("fresh".into(), (fresh, Some(serde_json::json!(1)), 300.0));
+        // Refused, and still inside its backoff, with or without a reason.
+        let old = now() - ASKED_FLOOR - 1.0;
+        let why = Some(serde_json::json!({"why": "429"}));
+        caches.live.insert("refused".into(), (old, None, 300.0));
+        caches.live.insert("why".into(), (old, why, 300.0));
+        caches.asked_at = now();
+        for key in ["fresh", "refused", "why"] {
+            cached(&mut caches, key, 300.0, || panic!("{} was asked again", key));
+        }
     }
 
     #[test]
