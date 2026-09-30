@@ -87,6 +87,30 @@ pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<s
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    held_for(caches, key, ttl, true, fetch)
+}
+
+/// `cached` for a reading keyed on the file it came from, which `r` leaves
+/// alone. A key carrying the file's own (mtime, size) cannot hold anything
+/// the file does not still say, so asking again only re-parses every
+/// session on disk to learn the same numbers.
+pub fn cached_file<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<serde_json::Value>
+where
+    F: FnOnce() -> Option<serde_json::Value>,
+{
+    held_for(caches, key, ttl, false, fetch)
+}
+
+fn held_for<F>(
+    caches: &mut Caches,
+    key: &str,
+    ttl: f64,
+    askable: bool,
+    fetch: F,
+) -> Option<serde_json::Value>
+where
+    F: FnOnce() -> Option<serde_json::Value>,
+{
     let at = now();
     if let Some((when, value, held)) = caches.live.get(key) {
         // A refusal keeps its backoff even when asked: pressing `r` at an
@@ -97,7 +121,10 @@ where
             .is_some_and(|v| v.get("why").is_none() && v.get("opscope_refusal").is_none());
         // Aged at the press, not now: a reading kept for being under the
         // floor must not be asked later by a pass nobody pressed for.
-        let asked = good && *when < caches.asked_at && caches.asked_at - when >= ASKED_FLOOR;
+        let asked = askable
+            && good
+            && *when < caches.asked_at
+            && caches.asked_at - when >= ASKED_FLOOR;
         if at - when < *held && !asked {
             return value.clone();
         }
@@ -582,6 +609,17 @@ mod tests {
         let taken = now() - 30.0;
         caches.live.insert("probe".into(), (taken, Some(serde_json::json!(1)), 300.0));
         cached(&mut caches, "probe", 300.0, || panic!("asked without a press"));
+    }
+
+    #[test]
+    fn a_refresh_does_not_reparse_a_file_keyed_reading() {
+        // Keyed on the file's (mtime, size), so asking again reads the same
+        // bytes back.
+        let mut caches = Caches::default();
+        let old = now() - ASKED_FLOOR - 1.0;
+        caches.live.insert("file".into(), (old, Some(serde_json::json!(1)), 3600.0));
+        caches.asked_at = now();
+        cached_file(&mut caches, "file", 3600.0, || panic!("re-parsed an unchanged file"));
     }
 
     #[test]
