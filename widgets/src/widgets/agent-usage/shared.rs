@@ -36,8 +36,9 @@ pub struct Caches {
     /// key -> refusals in a row, which is what the backoff doubles on.
     /// Cleared the moment one gets through.
     pub fails: HashMap<String, u32>,
-    /// When the reader last pressed `r`. A good reading taken before this
-    /// is asked again rather than served out of its hold; see `cached`.
+    /// When the reader pressed `r`, for the one pass that press asked for.
+    /// A good reading taken before this is asked again rather than served
+    /// out of its hold; see `cached`. Zero on every other pass.
     pub asked_at: f64,
 }
 
@@ -90,8 +91,13 @@ where
     if let Some((when, value, held)) = caches.live.get(key) {
         // A refusal keeps its backoff even when asked: pressing `r` at an
         // endpoint that is rate-limiting us is how the limit is sustained.
-        let good = value.as_ref().is_some_and(|v| v.get("why").is_none());
-        let asked = good && *when < caches.asked_at && at - when >= ASKED_FLOOR;
+        // Antigravity holds its refusal under a name of its own.
+        let good = value
+            .as_ref()
+            .is_some_and(|v| v.get("why").is_none() && v.get("opscope_refusal").is_none());
+        // Aged at the press, not now: a reading kept for being under the
+        // floor must not be asked later by a pass nobody pressed for.
+        let asked = good && *when < caches.asked_at && caches.asked_at - when >= ASKED_FLOOR;
         if at - when < *held && !asked {
             return value.clone();
         }
@@ -557,12 +563,25 @@ mod tests {
         // Refused, and still inside its backoff, with or without a reason.
         let old = now() - ASKED_FLOOR - 1.0;
         let why = Some(serde_json::json!({"why": "429"}));
+        let agy = Some(serde_json::json!({"opscope_refusal": "refused"}));
         caches.live.insert("refused".into(), (old, None, 300.0));
         caches.live.insert("why".into(), (old, why, 300.0));
+        caches.live.insert("agy".into(), (old, agy, 300.0));
         caches.asked_at = now();
-        for key in ["fresh", "refused", "why"] {
+        for key in ["fresh", "refused", "why", "agy"] {
             cached(&mut caches, key, 300.0, || panic!("{} was asked again", key));
         }
+    }
+
+    #[test]
+    fn a_reading_kept_under_the_floor_is_not_asked_once_it_crosses_it() {
+        // Ten seconds old at the press, thirty now: the press kept it, and
+        // nothing since asked for it.
+        let mut caches = Caches::default();
+        caches.asked_at = now() - 20.0;
+        let taken = now() - 30.0;
+        caches.live.insert("probe".into(), (taken, Some(serde_json::json!(1)), 300.0));
+        cached(&mut caches, "probe", 300.0, || panic!("asked without a press"));
     }
 
     #[test]

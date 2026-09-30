@@ -2252,6 +2252,10 @@ fn main() {
                 }
                 vendors::read_all(&mut caches, &poller_cfg, installed)
             }));
+            // The press is spent on the pass it asked for. Left standing, a
+            // reading kept for being under the floor would be asked again
+            // by a later timed pass the moment it crossed it.
+            caches.asked_at = 0.0;
             match read {
                 Ok(found) => {
                     if let Ok(mut g) = poller.lock() {
