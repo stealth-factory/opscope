@@ -3,6 +3,13 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.35.1] - 2026-09-30
+
+### Bug Fixes
+
+- **agent-usage**: Keep the CodeRabbit summary compact (#310)
+- **agent-usage**: Make r ask the quota endpoints again (#307)
+
 ## [0.35.0] - 2026-09-30
 
 ### Features
