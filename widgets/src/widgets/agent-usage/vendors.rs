@@ -525,22 +525,6 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
         if group_agent(name) == "codex" {
             push_reset_summary(&mut rows, s, w, p);
         }
-        // The bar alone is a share of the count where reviews go one at a
-        // time; how many more before the rate drops is what a reader acts on.
-        if group_agent(name) == "coderabbit" {
-            if let Some(said) = crate::coderabbit::headroom(&s.coderabbit) {
-                rows.extend(
-                    tc::wrap_words(&said, w.saturating_sub(6).max(1))
-                        .into_iter()
-                        .map(|line| {
-                            tc::seg(
-                                &[(p.dim.as_str(), format!("     {line}"))],
-                                w.saturating_sub(1).max(1),
-                            )
-                        }),
-                );
-            }
-        }
         // Notion's endpoint is unsupported and can answer with less than a
         // whole reading; the lanes above are then a subset, said here so
         // they are not read as all of it.
@@ -922,35 +906,41 @@ mod tests {
     }
 
     #[test]
-    fn coderabbit_is_on_the_summary_with_the_reviews_left_before_fair_use_drops() {
-        // A whole week of 55 on Team draws a bar and the five left before 2 an hour.
+    fn coderabbit_summary_is_compact_and_its_tab_keeps_the_explanation() {
         let p = palette();
         let at = now();
-        let s = State {
-            coderabbit: crate::coderabbit::Data::with_readings(
-                vec![(at - 8.0 * 86400.0, 40), (at, 95)],
-                "Team",
-            ),
-            ..State::default()
-        };
-        let joined = plain(&summary_for(&s, 90, &p, &["coderabbit"])).join("\n");
-        assert!(joined.contains("CODERABBIT"), "{joined}");
-        assert!(joined.contains("~fair use"), "{joined}");
-        assert!(joined.contains("~5 more reviews before 2 an hour"), "{joined}");
-        assert!(!joined.contains("no quota"), "{joined}");
-        // Every row fits, and no word is lost, down to a narrow pane.
-        for w in 12..=100 {
-            let rows = plain(&summary_for(&s, w, &p, &["coderabbit"]));
-            for r in &rows {
-                assert!(r.chars().count() < w, "{w}: {r:?}");
+        let day = 86400.0;
+        for samples in [
+            vec![(at - 8.0 * day, 40), (at, 95)],
+            vec![(at - 2.0 * day, 83), (at, 95)],
+            vec![(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)],
+        ] {
+            let s = State {
+                coderabbit: crate::coderabbit::Data::with_readings(samples, "Team"),
+                ..State::default()
+            };
+            for w in 12..=100 {
+                let rows = plain(&summary_for(&s, w, &p, &["coderabbit"]));
+                for r in &rows {
+                    assert!(tc::display_width(r) < w, "{w}: {r:?}");
+                }
+                let joined = rows.join("\n");
+                assert!(!joined.contains("more reviews") && !joined.contains("an hour"), "{joined}");
+                assert!(!joined.contains("no quota"), "{joined}");
+                // The group is just its heading and lane, even at narrow widths.
+                let heading = rows.iter().position(|r| r.starts_with("  CODER")).unwrap();
+                assert_eq!(rows[heading..].iter().filter(|r| !r.is_empty()).count(), 2, "{joined}");
+                if w >= 40 {
+                    assert!(joined.contains("~fair use"), "{joined}");
+                }
+                // Exercise the actual tab dispatch, and verify wrapped text survives.
+                let detail = plain(&tab_body("coderabbit", &s, w, 40, &Config::default(), &p, &[]));
+                let words: String = detail.concat().split_whitespace().collect();
+                for said in ["more reviews before", "an hour now on Team", "Only pull request reviews count toward fair use"] {
+                    let said: String = said.split_whitespace().collect();
+                    assert!(words.contains(&said), "{w}: {said} missing from {words}");
+                }
             }
-            // Broken across lines where a word outruns the pane, never cut.
-            let said: String = crate::coderabbit::headroom(&s.coderabbit)
-                .unwrap()
-                .split_whitespace()
-                .collect();
-            let drawn: String = rows.concat().split_whitespace().collect();
-            assert!(drawn.contains(&said), "{w}: words lost\n{}", rows.join("\n"));
         }
     }
 

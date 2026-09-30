@@ -1205,21 +1205,24 @@ count where reviews go one at a time, then looks the rate up on the plan
 - **A reset in a long gap can be off either way.** When the billing period
   reset while no pane read for over an hour, reviews added between the last
   reading and the reset were never counted, while the week's start can still
-  run over. So the count is neither a floor nor a ceiling, and the tab and
-  `[+]` both say it may be off either way.
+  run over. So the count is neither a floor nor a ceiling, and only the
+  CodeRabbit tab says it may be off either way.
 - **It may overcount.** Only pull request reviews count toward fair use, and
   `Your reviews` may also count CLI and IDE ones, so the real rate may be
   higher than the estimate. The tab says so under it.
 - **Only the four plans the page lists get a rate** - Essentials, Team,
   Advanced and Enterprise, as read on 2026-09-29. Any other plan, or none,
   gets the count and says why there is no rate.
-- **`[+]` gets the same estimate, as a bar and what is left.** Once the tab
+- **`[+]` gets the same estimate, as a compact bar.** Once the tab
   can draw its bar, `[+]` draws it too, labelled `~fair use` and filled
-  toward the count where reviews go one at a time, with the reviews left
-  before the rate next drops under it: `~5 more reviews before 2 an hour ·
-  about 4 an hour now on Team · estimate, its tab says how`. Short of a
-  whole week that is `at most`, since the count is a floor. With one reading,
+  toward the count where reviews go one at a time. The `~` marks it as an
+  estimate; cached readings keep their status marker. With one reading,
   no plan, or a plan the table does not list, `[+]` keeps the no-quota note.
+- **The tab explains the headroom.** Headroom, the current rate, plan context
+  and data-quality caveats appear only in the CodeRabbit tab. For example,
+  it says `~5 more reviews before 2 an hour · about 4 an hour now on Team ·
+  estimate`. Short of a whole week, headroom is `at most`, since the count
+  is a floor.
 - **Gaps are the widget's.** Reviews made while no pane was running are
   counted at the next reading, so a count is only as good as the readings
   behind it.
