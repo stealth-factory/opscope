@@ -1152,8 +1152,9 @@ It is drawn at the top of the `coderabbit` tab, a bar of the share used with
 comes back. It is not drawn on `[+]`: the report does not say which of
 CodeRabbit's allowances it is, and a bar there would read as the limit on
 pull request reviews, which has been lower while this one read full. `[+]`
-names CodeRabbit as publishing no limit for pull request reviews and points
-at the tab. The bar has no pace marker, because a rolling window has no
+draws the fair-use estimate below instead, or, until there is one, names
+CodeRabbit as publishing no limit for pull request reviews and points at the
+tab. The bar has no pace marker, because a rolling window has no
 start to measure elapsed time from.
 
 Under the allowance the tab shows your reviews this billing period, the reset
@@ -1201,16 +1202,24 @@ count where reviews go one at a time, then looks the rate up on the plan
 - **A part week is a floor.** Until the readings reach back seven days, the
   tab says `at least` for the count and `at most` for the rate, and the date
   a whole week will be in.
-- **A reset in a long gap is a floor too.** When the billing period reset
-  while no pane read for over an hour, reviews added between the last reading
-  and the reset were never counted, so the week says `at least` however far
-  back it reaches.
+- **A reset in a long gap can be off either way.** When the billing period
+  reset while no pane read for over an hour, reviews added between the last
+  reading and the reset were never counted, while the week's start can still
+  run over. So the count is neither a floor nor a ceiling, and the tab and
+  `[+]` both say it may be off either way.
 - **It may overcount.** Only pull request reviews count toward fair use, and
   `Your reviews` may also count CLI and IDE ones, so the real rate may be
   higher than the estimate. The tab says so under it.
 - **Only the four plans the page lists get a rate** - Essentials, Team,
   Advanced and Enterprise, as read on 2026-09-29. Any other plan, or none,
   gets the count and says why there is no rate.
+- **`[+]` gets the same estimate, as a bar and what is left.** Once the tab
+  can draw its bar, `[+]` draws it too, labelled `~fair use` and filled
+  toward the count where reviews go one at a time, with the reviews left
+  before the rate next drops under it: `~5 more reviews before 2 an hour ·
+  about 4 an hour now on Team · estimate, its tab says how`. Short of a
+  whole week that is `at most`, since the count is a floor. With one reading,
+  no plan, or a plan the table does not list, `[+]` keeps the no-quota note.
 - **Gaps are the widget's.** Reviews made while no pane was running are
   counted at the next reading, so a count is only as good as the readings
   behind it.

@@ -21,9 +21,11 @@
 //! also gives the included reviews left in the rolling window, the window,
 //! and when capacity returns, which the tab draws. `[+]` does not: the
 //! report does not say which of CodeRabbit's allowances it is (see
-//! `lanes`), so CodeRabbit is named there as publishing no quota rather
-//! than drawn as a limit it may not be. The plan's documented hourly rates are
-//! never drawn in its place: a limit the CLI did not give is not a reading.
+//! `lanes`), so it is not drawn there as a limit it may not be. The plan's
+//! documented hourly rates are never drawn in its place either: a limit the
+//! CLI did not give is not a reading. `[+]` draws the fair-use estimate
+//! below instead, marked as one, with how many more reviews before the
+//! rate next drops.
 //!
 //! The tab does draw one estimate, and says it is one: the fair-use rate
 //! CodeRabbit's published table gives for the seven-day review count, which
@@ -72,6 +74,14 @@ pub struct Data {
     plan: String,
     /// The reading could not be written, so a restarted pane starts over.
     unsaved: bool,
+}
+
+impl Data {
+    /// A week of readings on a plan, for the summary's own tests.
+    #[allow(dead_code)]
+    pub(crate) fn with_readings(samples: Vec<(f64, u64)>, plan: &str) -> Self {
+        Data { read_at: now(), samples, plan: plan.into(), ..Data::default() }
+    }
 }
 
 /// One `coderabbit usage`, as the report or as why there was none.
@@ -377,14 +387,77 @@ fn window_label(secs: Option<f64>) -> String {
     }
 }
 
-/// None on `[+]`. The allowance `coderabbit usage` reports is real, but it
-/// does not say which of CodeRabbit's separate PR, CLI and IDE allowances
-/// it is, and it read `10 of 10` while pull request reviews were held to 4
-/// an hour. On the summary it would sit beside every other agent's limit
-/// and read as the one that stops reviews, empty while that one is spent.
-/// The tab draws it, where there is room to say what it covers.
-pub fn lanes(_d: &Data) -> Vec<Lane> {
-    Vec::new()
+/// The fair-use estimate on `[+]`, when there is one to draw.
+///
+/// The allowance `coderabbit usage` reports is real, but it does not say
+/// which of CodeRabbit's separate PR, CLI and IDE allowances it is, and it
+/// read `10 of 10` while pull request reviews were held to 4 an hour. On
+/// the summary it would sit beside every other agent's limit and read as
+/// the one that stops reviews, empty while that one is spent. So it stays
+/// on the tab, where there is room to say what it covers.
+///
+/// What goes on `[+]` instead is the seven-day count the tab estimates,
+/// filled toward the count where reviews go one at a time, labelled with a
+/// `~` and followed by `headroom` saying how many more before the rate next
+/// drops. It is drawn only where the tab would draw its bar: two readings
+/// or more, on a plan the published table lists.
+pub fn lanes(d: &Data) -> Vec<Lane> {
+    fair_use_lane(d).into_iter().collect()
+}
+
+fn fair_use_lane(d: &Data) -> Option<Lane> {
+    let week = reviews_across(&d.samples, d.read_at, WEEK)?;
+    if week.readings < 2 {
+        return None;
+    }
+    let last = coderabbit_fair_use_tiers(d.plan.trim())?.last()?.0.max(1);
+    Some(Lane {
+        label: "~fair use".into(),
+        pct: (week.reviews as f64 / last as f64 * 100.0).min(100.0),
+        // Seven days that roll have no start and no reset, so no pace.
+        window_secs: None,
+        reset: None,
+        stale: now() - d.read_at > REPORT_TTL,
+        projected: false,
+        apart: false,
+    })
+}
+
+/// The line under the `[+]` bar: how many more pull request reviews before
+/// the published rate next drops, and the rate now. A part week makes the
+/// count a floor, so what is left is the most it can be. A reset in a long
+/// gap loses the reviews before it while the week's start can still run
+/// over, so that count is off by an amount nobody knows in either
+/// direction, and says so. The tab says the rest.
+pub fn headroom(d: &Data) -> Option<String> {
+    fair_use_lane(d)?;
+    let week = reviews_across(&d.samples, d.read_at, WEEK)?;
+    let plan = d.plan.trim();
+    let f = coderabbit_fair_use(plan, week.reviews)?;
+    let (about, most) = if week.whole { ("~", "about") } else { ("at most ", "at most") };
+    let said = match f.next {
+        Some((from, rate)) => {
+            let then = if rate == 1 { "one at a time".to_string() } else { format!("{} an hour", rate) };
+            format!(
+                "{}{} more reviews before {} · {} {} an hour now on {}",
+                about,
+                from - week.reviews,
+                then,
+                most,
+                f.rate,
+                plan
+            )
+        }
+        None => format!("one review at a time on {} · it eases as reviews age out of the 7 days", plan),
+    };
+    let caveat = if !week.whole {
+        " · the count is a floor so far"
+    } else if week.gapped {
+        " · a billing reset went unread, so it may be off either way"
+    } else {
+        ""
+    };
+    Some(format!("{}{} · estimate, its tab says how", said, caveat))
 }
 
 /// The included reviews used of the rolling window, when the CLI gave both
@@ -589,14 +662,14 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
     }
-    // A reset in a long gap lost what came before it, so the count is a
-    // floor however far back the readings go.
-    let exact = week.whole && !week.gapped;
-    let count = if exact {
+    // A reset in a long gap lost what came before it, while the start of
+    // the week can still run over, so that count is off either way.
+    let count = if week.whole && !week.gapped {
         format!("~{} reviews in the last 7 days", week.reviews)
     } else if week.whole {
         format!(
-            "at least {} reviews in the last 7 days; the billing period reset while no pane was reading",
+            "~{} reviews in the last 7 days; the billing period reset while no pane was reading, \
+             so it may be off either way",
             week.reviews
         )
     } else {
@@ -621,7 +694,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                 Some((from, rate)) => format!(" · {} an hour from {}", rate, from),
                 None => String::new(),
             };
-            let so_far = if exact { "about" } else { "at most" };
+            let so_far = if week.whole { "about" } else { "at most" };
             format!(" · {} {} on {}{}", so_far, now_at, plan, then)
         }
         None if plan.is_empty() => " · the plan is not known, so no rate".into(),
@@ -848,7 +921,8 @@ mod tests {
         assert!((lanes[0].pct - 60.0).abs() < 1e-9);
         // No window on the lane: a rolling window has no pace to draw.
         assert_eq!(lanes[0].window_secs, None);
-        // Kept off `[+]`, which says where it is instead.
+        // Kept off `[+]`, which says where it is instead; with no
+        // readings kept there is no fair-use estimate to draw either.
         assert!(super::lanes(&d).is_empty());
         let note = why_no_lane(&d);
         assert!(note.contains("answered, and published no"), "{note}");
@@ -1042,6 +1116,42 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_gets_the_week_as_a_bar_and_the_reviews_left_before_the_rate_drops() {
+        // Fifty-five on Team: 55 of 70 to one at a time, five more before 2 an hour.
+        let at = now();
+        let day = 86400.0;
+        let d = week_of(vec![(at - 8.0 * day, 40), (at, 95)], "Team");
+        let lane = lanes(&d).remove(0);
+        assert_eq!(lane.label, "~fair use");
+        assert!((lane.pct - 55.0 / 70.0 * 100.0).abs() < 1e-9);
+        assert!(!lane.stale);
+        let said = headroom(&d).unwrap();
+        assert!(said.starts_with("~5 more reviews before 2 an hour"), "{said}");
+        assert!(said.contains("about 4 an hour now on Team"), "{said}");
+        assert!(said.contains("estimate"), "{said}");
+        // Short of a week the count is a floor, so what is left is a ceiling.
+        let part = week_of(vec![(at - 2.0 * day, 40), (at, 75)], "Team");
+        let said = headroom(&part).unwrap();
+        assert!(said.starts_with("at most 5 more reviews before 6 an hour"), "{said}");
+        assert!(said.contains("a floor"), "{said}");
+        // The next drop to one is said as one at a time.
+        let near = week_of(vec![(at - 8.0 * day, 0), (at, 65)], "Team");
+        assert!(headroom(&near).unwrap().starts_with("~5 more reviews before one at a time"));
+        // Past the last tier the bar is full and there is no next drop.
+        let spent = week_of(vec![(at - 8.0 * day, 0), (at, 90)], "Team");
+        assert!((lanes(&spent)[0].pct - 100.0).abs() < 1e-9);
+        assert!(headroom(&spent).unwrap().starts_with("one review at a time on Team"));
+        // No plan, an unlisted plan, or one reading: nothing to draw there.
+        assert!(lanes(&week_of(vec![(at - 8.0 * day, 40), (at, 95)], "")).is_empty());
+        assert!(lanes(&week_of(vec![(at - 8.0 * day, 40), (at, 95)], "Pro")).is_empty());
+        assert!(lanes(&week_of(vec![(at, 95)], "Team")).is_empty());
+        assert!(headroom(&week_of(vec![(at, 95)], "Team")).is_none());
+        // A reading past the widget's own cycle is marked, as any other lane.
+        let old = Data { read_at: at - REPORT_TTL - 60.0, ..week_of(vec![(at - 9.0 * day, 40), (at - 700.0, 95)], "Team") };
+        assert!(lanes(&old)[0].stale);
+    }
+
+    #[test]
     fn a_whole_week_gives_the_estimated_rate_on_the_plan() {
         // Fifty-five on Team is the 50-59 row: four an hour, two from sixty.
         let at = now();
@@ -1056,8 +1166,15 @@ mod tests {
         let day = 86400.0;
         let gapped = week_of(vec![(at - 8.0 * day, 90), (at - 3.0 * day, 96), (at - day, 4), (at, 9)], "Team");
         let text = tab(&gapped, 100, 40, &Config::default(), &palette()).join("\n");
-        assert!(text.contains("at least 15 reviews in the last 7 days"), "{text}");
-        assert!(text.contains("at most 8 reviews an hour"), "{text}");
+        // Reviews before the unread reset are lost and the week's start can
+        // run over, so neither a floor nor a ceiling: off either way.
+        assert!(text.contains("~15 reviews in the last 7 days"), "{text}");
+        assert!(text.contains("off either way"), "{text}");
+        assert!(text.contains("about 8 reviews an hour"), "{text}");
+        let said = headroom(&gapped).unwrap();
+        assert!(said.starts_with("~25 more reviews before 6 an hour"), "{said}");
+        assert!(said.contains("off either way"), "{said}");
+        assert!(!said.contains("at most"), "{said}");
         // And the plan it was looked up on heads the subscription.
         assert!(all.lines().any(|r| r.contains("SUBSCRIPTION") && r.contains("Team")), "{all}");
     }
