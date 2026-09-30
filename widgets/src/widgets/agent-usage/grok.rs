@@ -568,7 +568,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // every session on every refresh to learn that is the whole cost
         // of this tab.
         let key = format!("{}{}:{}:{}", CACHE, path, meta.mtime(), meta.size());
-        let got = cached(caches, &key, PLAN_TTL, || {
+        let got = cached_file(caches, &key, PLAN_TTL, || {
             let (total, days) = session_days(&std::fs::read_to_string(path).ok()?);
             Some(serde_json::json!({"total": total, "daily": days}))
         });

@@ -36,9 +36,22 @@ pub struct Caches {
     /// key -> refusals in a row, which is what the backoff doubles on.
     /// Cleared the moment one gets through.
     pub fails: HashMap<String, u32>,
+    /// When the reader pressed `r`, for the one pass that press asked for.
+    /// A good reading taken before this is asked again rather than served
+    /// out of its hold; see `cached`. Zero on every other pass.
+    pub asked_at: f64,
 }
 
 pub const LIVE_TTL: f64 = 120.0;
+/// How old a good reading must be before `r` asks for it again.
+///
+/// Without this a press held every quota for its full interval - two
+/// minutes to an hour - so the local counts moved and the numbers the
+/// reader was actually waiting on did not. The floor keeps a key held
+/// down from turning into a request per frame against endpoints whose
+/// limits are shared with the agent itself (Claude's answers 429 to three
+/// copies on a two-minute hold).
+pub const ASKED_FLOOR: f64 = 30.0;
 /// Where a refusal starts waiting, and where it stops.
 ///
 /// Two minutes for the first, because one failure is usually nothing - a
@@ -74,9 +87,45 @@ pub fn cached<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<s
 where
     F: FnOnce() -> Option<serde_json::Value>,
 {
+    held_for(caches, key, ttl, true, fetch)
+}
+
+/// `cached` for a reading keyed on the file it came from, which `r` leaves
+/// alone. A key carrying the file's own (mtime, size) cannot hold anything
+/// the file does not still say, so asking again only re-parses every
+/// session on disk to learn the same numbers.
+pub fn cached_file<F>(caches: &mut Caches, key: &str, ttl: f64, fetch: F) -> Option<serde_json::Value>
+where
+    F: FnOnce() -> Option<serde_json::Value>,
+{
+    held_for(caches, key, ttl, false, fetch)
+}
+
+fn held_for<F>(
+    caches: &mut Caches,
+    key: &str,
+    ttl: f64,
+    askable: bool,
+    fetch: F,
+) -> Option<serde_json::Value>
+where
+    F: FnOnce() -> Option<serde_json::Value>,
+{
     let at = now();
     if let Some((when, value, held)) = caches.live.get(key) {
-        if at - when < *held {
+        // A refusal keeps its backoff even when asked: pressing `r` at an
+        // endpoint that is rate-limiting us is how the limit is sustained.
+        // Antigravity holds its refusal under a name of its own.
+        let good = value
+            .as_ref()
+            .is_some_and(|v| v.get("why").is_none() && v.get("opscope_refusal").is_none());
+        // Aged at the press, not now: a reading kept for being under the
+        // floor must not be asked later by a pass nobody pressed for.
+        let asked = askable
+            && good
+            && *when < caches.asked_at
+            && caches.asked_at - when >= ASKED_FLOOR;
+        if at - when < *held && !asked {
             return value.clone();
         }
     }
@@ -512,6 +561,65 @@ mod tests {
         });
         assert_eq!(text(&again.unwrap(), "why"), "the endpoint did not answer");
         assert_eq!(caches.fails.get("probe"), Some(&1));
+    }
+
+    #[test]
+    fn a_refresh_asks_again_for_a_good_reading_past_the_floor() {
+        // The bug: `r` woke the poller, but every quota was still inside
+        // its hold, so the press re-read local files and nothing else.
+        let mut caches = Caches::default();
+        let at = now() - ASKED_FLOOR - 1.0;
+        caches.live.insert("probe".into(), (at, Some(serde_json::json!(1)), 300.0));
+        caches.asked_at = now();
+        let got = cached(&mut caches, "probe", 300.0, || Some(serde_json::json!(2)));
+        assert_eq!(got, Some(serde_json::json!(2)));
+        // Asked once per press, not on every pass after it.
+        let again = cached(&mut caches, "probe", 300.0, || {
+            panic!("asked twice for one press")
+        });
+        assert_eq!(again, Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn a_refresh_leaves_a_fresh_reading_and_a_refusal_alone() {
+        let mut caches = Caches::default();
+        // Taken a moment ago: a held-down key must not become a request
+        // per frame.
+        let fresh = now() - 1.0;
+        caches.live.insert("fresh".into(), (fresh, Some(serde_json::json!(1)), 300.0));
+        // Refused, and still inside its backoff, with or without a reason.
+        let old = now() - ASKED_FLOOR - 1.0;
+        let why = Some(serde_json::json!({"why": "429"}));
+        let agy = Some(serde_json::json!({"opscope_refusal": "refused"}));
+        caches.live.insert("refused".into(), (old, None, 300.0));
+        caches.live.insert("why".into(), (old, why, 300.0));
+        caches.live.insert("agy".into(), (old, agy, 300.0));
+        caches.asked_at = now();
+        for key in ["fresh", "refused", "why", "agy"] {
+            cached(&mut caches, key, 300.0, || panic!("{} was asked again", key));
+        }
+    }
+
+    #[test]
+    fn a_reading_kept_under_the_floor_is_not_asked_once_it_crosses_it() {
+        // Ten seconds old at the press, thirty now: the press kept it, and
+        // nothing since asked for it.
+        let mut caches = Caches::default();
+        caches.asked_at = now() - 20.0;
+        let taken = now() - 30.0;
+        caches.live.insert("probe".into(), (taken, Some(serde_json::json!(1)), 300.0));
+        cached(&mut caches, "probe", 300.0, || panic!("asked without a press"));
+    }
+
+    #[test]
+    fn a_refresh_does_not_reparse_a_file_keyed_reading() {
+        // Keyed on the file's (mtime, size), so asking again reads the same
+        // bytes back.
+        let mut caches = Caches::default();
+        let old = now() - ASKED_FLOOR - 1.0;
+        caches.live.insert("file".into(), (old, Some(serde_json::json!(1)), 3600.0));
+        caches.asked_at = now();
+        cached_file(&mut caches, "file", 3600.0, || panic!("re-parsed an unchanged file"));
     }
 
     #[test]
