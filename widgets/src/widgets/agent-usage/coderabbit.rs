@@ -80,7 +80,10 @@ impl Data {
     /// A week of readings on a plan, for the summary's own tests.
     #[allow(dead_code)]
     pub(crate) fn with_readings(samples: Vec<(f64, u64)>, plan: &str) -> Self {
-        Data { read_at: now(), samples, plan: plan.into(), ..Data::default() }
+        let usage = samples.last().and_then(|(_, count)| {
+            parse_coderabbit_usage(&format!("Your reviews : {}\n", count))
+        });
+        Data { usage, read_at: now(), samples, plan: plan.into(), ..Data::default() }
     }
 }
 
@@ -398,8 +401,8 @@ fn window_label(secs: Option<f64>) -> String {
 ///
 /// What goes on `[+]` instead is the seven-day count the tab estimates,
 /// filled toward the count where reviews go one at a time, labelled with a
-/// `~` and followed by `headroom` saying how many more before the rate next
-/// drops. It is drawn only where the tab would draw its bar: two readings
+/// `~`. The tab explains the headroom and rate. It is drawn only where
+/// the tab would draw its bar: two readings
 /// or more, on a plan the published table lists.
 pub fn lanes(d: &Data) -> Vec<Lane> {
     fair_use_lane(d).into_iter().collect()
@@ -423,13 +426,13 @@ fn fair_use_lane(d: &Data) -> Option<Lane> {
     })
 }
 
-/// The line under the `[+]` bar: how many more pull request reviews before
+/// The detailed tab's headroom: how many more pull request reviews before
 /// the published rate next drops, and the rate now. A part week makes the
 /// count a floor, so what is left is the most it can be. A reset in a long
 /// gap loses the reviews before it while the week's start can still run
 /// over, so that count is off by an amount nobody knows in either
-/// direction, and says so. The tab says the rest.
-pub fn headroom(d: &Data) -> Option<String> {
+/// direction, and says so.
+fn headroom(d: &Data) -> Option<String> {
     fair_use_lane(d)?;
     let week = reviews_across(&d.samples, d.read_at, WEEK)?;
     let plan = d.plan.trim();
@@ -457,7 +460,7 @@ pub fn headroom(d: &Data) -> Option<String> {
     } else {
         ""
     };
-    Some(format!("{}{} · estimate, its tab says how", said, caveat))
+    Some(format!("{}{} · estimate", said, caveat))
 }
 
 /// The included reviews used of the rolling window, when the CLI gave both
@@ -710,6 +713,11 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
     };
     for line in tc::wrap_words(&format!("{}{}{}", count, rate, full), room) {
         rows.push(tc::seg(&[(p.txt.as_str(), format!("{}{}", indent, line))], w - 1));
+    }
+    if let Some(said) = headroom(d) {
+        for line in tc::wrap_words(&said, room) {
+            rows.push(tc::seg(&[(p.txt.as_str(), format!("{}{}", indent, line))], w - 1));
+        }
     }
     let caveat = "Only pull request reviews count toward fair use, and your reviews may also \
                   count CLI and IDE ones, so the real rate may be higher than this.";
@@ -1116,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_gets_the_week_as_a_bar_and_the_reviews_left_before_the_rate_drops() {
+    fn the_summary_gets_the_bar_and_the_tab_gets_headroom() {
         // Fifty-five on Team: 55 of 70 to one at a time, five more before 2 an hour.
         let at = now();
         let day = 86400.0;
