@@ -295,16 +295,86 @@ pub fn flush() {
     let _ = std::io::stdout().flush();
 }
 
-/// Paint `rows` from the top-left, one full frame.
+/// Paint `rows` from the top-left.
 ///
 /// Every row is erased before it is written, so a short row cannot leave
 /// the tail of the previous frame behind it.
 ///
+/// Only the rows that differ from the last frame are written. Most frames
+/// change a row or two - a clock ticking, one bar moving - and repainting
+/// every row on every frame is most of the bytes a pane sends, which is
+/// what shows as flicker over SSH or with a dozen panes open. The whole
+/// frame is still painted on the first draw, when the pane changes size,
+/// and after anything else has had the screen. See `paint`.
+///
 /// The top row always ends in the version that is running, whatever the
-/// widget put there. See `frame`.
+/// widget put there. See `lines`.
 pub fn draw(rows: &[String], w: usize, h: usize) {
-    out(&frame(rows, w, h));
+    let resized = RESIZED.swap(false, Ordering::AcqRel);
+    let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    out(&paint(&mut shown, rows, w, h, resized));
     flush();
+}
+
+/// What `draw` last left on screen: each row exactly as it was written,
+/// after `inert` and the version stamp, and the size it was written for.
+///
+/// Whole rows rather than cells. Comparing cells would mean taking every
+/// row's colour codes apart into a grid first, which is a much larger
+/// change for a small extra saving: a row that changed at all is rewritten
+/// whole.
+struct Shown {
+    w: usize,
+    h: usize,
+    lines: Vec<String>,
+}
+
+/// `None` until the first frame, and again whenever something other than
+/// `draw` has written to the screen - `claim_screen`, `restore_screen`,
+/// and a launcher taking the terminal back from a child. A stored frame
+/// that no longer matches the screen would leave a stale row there for
+/// good, since a row that has not changed is never sent again.
+static SHOWN: std::sync::Mutex<Option<Shown>> = std::sync::Mutex::new(None);
+
+/// Set by `SIGWINCH`. The size `draw` is handed catches most resizes, but
+/// not one that comes back to the size it started from between two
+/// frames, as a pane zoomed and unzoomed does, and the terminal may have
+/// reflowed or cut what was on screen on the way.
+static RESIZED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_resize(_: libc::c_int) {
+    RESIZED.store(true, Ordering::Release);
+}
+
+/// Make the next `draw` paint the whole frame.
+fn forget_frame() {
+    *SHOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The bytes one call to `draw` writes, given what the last one left.
+///
+/// The whole frame when there is nothing to compare against, the size has
+/// changed, or `resized` says the terminal did something to it; otherwise
+/// each row that differs, reached with a cursor move of core's own and
+/// erased from column 0 before it is written, exactly as `painted` does it.
+/// A frame identical to the last writes nothing at all.
+fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, resized: bool) -> String {
+    let lines = lines(rows, w, h);
+    let buf = match shown {
+        Some(last) if !resized && last.w == w && last.h == h => {
+            let mut buf = String::new();
+            for (i, line) in lines.iter().enumerate() {
+                if last.lines.get(i) != Some(line) {
+                    buf.push_str(&format!("\x1b[{}H", i + 1));
+                    put_line(&mut buf, line);
+                }
+            }
+            buf
+        }
+        _ => painted(&lines),
+    };
+    *shown = Some(Shown { w, h, lines });
+    buf
 }
 
 /// The grey the version is drawn in: the launcher's dim, which is where
@@ -335,7 +405,10 @@ fn version_room(w: usize) -> usize {
     }
 }
 
-/// The bytes one call to `draw` writes.
+/// The `h` rows `draw` puts on screen: each made inert, and the top one
+/// stamped with the version. These are what it compares from one frame to
+/// the next, so a row is only the same as last time if it would look the
+/// same.
 ///
 /// This is where the version goes on, and it goes on here rather than in
 /// any widget so that no widget can leave it off, move it or restyle it.
@@ -357,29 +430,49 @@ fn version_room(w: usize) -> usize {
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
 /// the half that watches for that.
+fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
+    (0..h)
+        .map(|i| {
+            let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
+            if i == 0 {
+                stamped(&line, w)
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// The bytes of a whole frame, as `draw` paints it the first time.
+#[cfg(test)]
 fn frame(rows: &[String], w: usize, h: usize) -> String {
+    painted(&lines(rows, w, h))
+}
+
+/// Every one of `lines`, from home.
+fn painted(lines: &[String]) -> String {
     let mut buf = String::from(HOME);
-    for i in 0..h {
-        let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
-        // Erase first, then write. A row that fills the pane leaves the
-        // cursor on its last column waiting to wrap, and an erase-to-end
-        // sent from there erases that column too: the version lost its
-        // last digit that way, `v0.32.` for `v0.32.0`, and every rule lost
-        // its `╸` without anyone noticing. Erasing from column 0 before the
-        // row is written cannot reach anything the row puts down.
-        buf.push_str(RST);
-        buf.push_str(EL);
-        if i == 0 {
-            buf.push_str(&stamped(&line, w));
-        } else {
-            buf.push_str(&line);
-        }
-        buf.push_str(RST);
-        if i + 1 != h {
+    for (i, line) in lines.iter().enumerate() {
+        put_line(&mut buf, line);
+        if i + 1 != lines.len() {
             buf.push_str("\r\n");
         }
     }
     buf
+}
+
+/// One row, written where the cursor is, which is column 0.
+fn put_line(buf: &mut String, line: &str) {
+    // Erase first, then write. A row that fills the pane leaves the
+    // cursor on its last column waiting to wrap, and an erase-to-end
+    // sent from there erases that column too: the version lost its
+    // last digit that way, `v0.32.` for `v0.32.0`, and every rule lost
+    // its `╸` without anyone noticing. Erasing from column 0 before the
+    // row is written cannot reach anything the row puts down.
+    buf.push_str(RST);
+    buf.push_str(EL);
+    buf.push_str(line);
+    buf.push_str(RST);
 }
 
 /// `row`, with every escape that is not a colour and every control
@@ -503,6 +596,8 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+        let resize = handle_resize as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGWINCH, resize);
     }
     claim_screen();
 }
@@ -519,6 +614,7 @@ pub fn setup() {
 /// turns them off, because a terminal left reporting outlives the process
 /// that asked for it.
 pub fn claim_screen() {
+    forget_frame();
     out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
@@ -588,6 +684,7 @@ extern "C" fn handle_signal(sig: libc::c_int) {
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
+    forget_frame();
     out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
@@ -2755,6 +2852,7 @@ impl Keyboard {
         // child's, so no placement of ours describes it. Dropped for the
         // same reason the buffered input above is.
         self.hints.clear();
+        forget_frame();
     }
 
     /// Make this frame's footer clickable.
@@ -3568,6 +3666,134 @@ mod tests {
             let erase = row.find(super::EL).unwrap_or_else(|| panic!("row {i} is never erased"));
             assert!(shown(&row[..erase]).is_empty(), "row {i} is erased after its text: {row:?}");
             assert!(!row[erase + super::EL.len()..].contains(super::EL), "row {i} is erased twice");
+        }
+    }
+
+    /// The rows a repaint rewrites, numbered from 1 as the cursor moves
+    /// name them, with what each shows.
+    fn rewritten(bytes: &str) -> Vec<(usize, String)> {
+        let mut found: Vec<(usize, String)> = Vec::new();
+        for part in bytes.split("\x1b[").skip(1) {
+            let digits = part.find(|c: char| !c.is_ascii_digit()).unwrap_or(part.len());
+            if digits > 0 && part[digits..].starts_with('H') {
+                found.push((part[..digits].parse().unwrap(), part[digits + 1..].to_string()));
+            } else {
+                let last = found
+                    .last_mut()
+                    .expect("a repaint starts with a cursor move");
+                last.1.push_str("\x1b[");
+                last.1.push_str(part);
+            }
+        }
+        found.into_iter().map(|(row, bytes)| (row, shown(&bytes))).collect()
+    }
+
+    #[test]
+    fn a_frame_that_has_not_changed_writes_nothing() {
+        // Most frames are the last one again, and every byte of a repaint
+        // that changes nothing is one the terminal draws for no reason.
+        let w = 40;
+        let rows = vec![super::title("clocks", w, ""), "12:00:00".into(), "".into()];
+        let mut shown = None;
+        let first = super::paint(&mut shown, &rows, w, 3, false);
+        assert_eq!(
+            first,
+            super::frame(&rows, w, 3),
+            "the first frame is not painted whole"
+        );
+        assert_eq!(super::paint(&mut shown, &rows, w, 3, false), "");
+    }
+
+    #[test]
+    fn only_the_rows_that_changed_are_rewritten() {
+        // A clock ticking is one row of three, so one row is sent, and it
+        // is sent to that row: the cursor move is core's own, and the row
+        // is erased from column 0 before it is written, as `frame` does.
+        let w = 40;
+        let top = super::title("clocks", w, "");
+        let mut shown = None;
+        let before = [top.clone(), "12:00:00".into(), "steady".into()];
+        super::paint(&mut shown, &before, w, 3, false);
+        let after = [top.clone(), "12:00:01".into(), "steady".into()];
+        let bytes = super::paint(&mut shown, &after, w, 3, false);
+        assert_eq!(rewritten(&bytes), vec![(2, "12:00:01".to_string())]);
+        let erased = format!("\x1b[2H{}{}", super::RST, super::EL);
+        assert!(bytes.starts_with(&erased), "{bytes:?}");
+        // The top row changing still carries the version, since what is
+        // compared and written is the row after the stamp.
+        let tag = format!("v{}", super::version_number());
+        let retitled = [
+            super::title("clocks", w, "!"),
+            "12:00:01".into(),
+            "steady".into(),
+        ];
+        let again = rewritten(&super::paint(&mut shown, &retitled, w, 3, false));
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert_eq!(again[0].0, 1);
+        assert!(again[0].1.ends_with(&tag), "{:?}", again[0].1);
+    }
+
+    #[test]
+    fn a_row_that_empties_is_still_erased() {
+        // A row going blank is a change like any other, or the last thing
+        // drawn there stays on screen for good.
+        let w = 30;
+        let mut shown = None;
+        super::paint(&mut shown, &["t".into(), "loading".into()], w, 2, false);
+        let bytes = super::paint(&mut shown, &["t".into()], w, 2, false);
+        assert_eq!(
+            bytes,
+            format!("\x1b[2H{}{}{}", super::RST, super::EL, super::RST)
+        );
+    }
+
+    #[test]
+    fn a_resize_or_a_lost_screen_paints_the_whole_frame() {
+        // A new size reflows whatever the terminal was showing, and so
+        // does a resize that came back to the same size between frames,
+        // which only `SIGWINCH` sees. After either, nothing stored says
+        // what is on screen.
+        let rows = vec!["top".to_string(), "same".into(), "same".into()];
+        let mut shown = None;
+        super::paint(&mut shown, &rows, 40, 3, false);
+        assert_eq!(
+            super::paint(&mut shown, &rows, 41, 3, false),
+            super::frame(&rows, 41, 3)
+        );
+        assert_eq!(
+            super::paint(&mut shown, &rows, 41, 4, false),
+            super::frame(&rows, 41, 4)
+        );
+        assert_eq!(
+            super::paint(&mut shown, &rows, 41, 4, true),
+            super::frame(&rows, 41, 4)
+        );
+        let mut lost = None;
+        assert_eq!(
+            super::paint(&mut lost, &rows, 41, 4, false),
+            super::frame(&rows, 41, 4)
+        );
+    }
+
+    #[test]
+    fn everything_else_that_writes_the_screen_forgets_the_last_frame() {
+        // A row is only sent again when it changes, so anything that puts
+        // something else on screen has to make the next frame whole, or
+        // whatever it left stays under rows that never change.
+        let src = include_str!("lib.rs");
+        for start in [
+            "pub fn claim_screen() {",
+            "pub fn restore_screen() {",
+            "    pub fn reclaim(&mut self) {",
+        ] {
+            let at = src
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} moved or was renamed"));
+            let end = src[at..].find("\n}\n").expect("the body ends");
+            assert!(
+                src[at..at + end].contains("forget_frame();"),
+                "{start} keeps the last frame"
+            );
         }
     }
 
