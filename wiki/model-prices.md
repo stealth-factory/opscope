@@ -12,7 +12,7 @@ carries its own `LIST_RATES_AS_OF` date and is what the pane actually
 multiplies by. This page records what was published, so the two can be
 compared and the code updated deliberately rather than from memory.
 
-As of 4 Sep 2026 the two agree — see
+As of 1 Oct 2026 the two agree — see
 [what this collection changed](#what-this-collection-changed) for what moved.
 
 ## The two rules that shape every table here
@@ -85,6 +85,7 @@ record which was taken, so both are carried.
 | model | input | output | cache_read | cache_write |
 |---|--:|--:|--:|--:|
 | `gpt-6-astra` | 10 | 50 | 1 | 12.50 |
+| `gpt-6.1-sol` | 2 | 10 | 0.10 | 2.50 |
 | `gpt-6-sol` | 2 | 10 | 0.20 | 2.50 |
 | `gpt-6-luna` | 0.10 | 0.50 | 0.01 | 0.125 |
 | `gpt-5.6-sol` | 4 | 20 | 0.40 | 5 |
@@ -142,14 +143,25 @@ record which was taken, so both are carried.
   `gpt-6-astra` above the line: 20 / 75 / 2 / 25 — output is 1.5x rather
   than the usual 2x. The threshold is **272K** input tokens, named on the
   model page (`developers.openai.com/api/docs/models/gpt-6-astra`).
-  `gpt-6-sol` above the line: 4 / 15 / 0.40 / 5, and `gpt-6-luna`
-  0.20 / 0.75 / 0.02 / 0.25 — the same 272K boundary, output 1.5x, the
-  rest double. Both model pages name it.
+  `gpt-6-sol` above the line: 4 / 15 / 0.40 / 5, `gpt-6.1-sol`
+  4 / 15 / 0.20 / 5, and `gpt-6-luna` 0.20 / 0.75 / 0.02 / 0.25 — the
+  same 272K boundary, output 1.5x, the rest double. The model pages name it.
 - `gpt-5.6` and `gpt-daybreak-blue-latest` alias `gpt-5.6-sol`;
   `gpt-daybreak-red-latest` aliases `gpt-5.6-cyber`.
 - Reasoning tokens bill as output. Regional data-residency endpoints add 10%
-  for models released on or after 5 Mar 2026. Batch, Flex, Fast and
-  fine-tuned inference are separate tables, out of scope.
+  for models released on or after 5 Mar 2026. Batch, Flex and fine-tuned
+  inference are separate tables, out of scope.
+- **Fast and Ultrafast are multipliers, not rows.** Codex records the speed
+  beside the model, as `service_tier` on `thread_settings`. `fast`, and the
+  API's `priority` (the value a Fast response reports), bill at 2× the
+  standard short-context row and the pane names the row Fast.
+  `gpt-6.1-sol` Fast is therefore 4 / 20 / 0.20 / 5. `ultrafast` is 6× and
+  published for `gpt-6-astra` only: 60 / 300 / 6 / 75 short context, and the
+  row says Ultrafast. Any other model with `ultrafast` stays on its standard
+  row — the meter does not invent an Ultrafast rate. Missing, `default` and
+  `auto` stay on the standard row. These are published API list dollars.
+  Codex credit multipliers (included usage 2.5× Fast / 8× Ultrafast) are a
+  different bill and are not applied.
 
 ## xAI
 
@@ -227,6 +239,33 @@ Named so prefix matching cannot hand them a family rate.
 | embeddings, moderation, TTS, image, audio, video | Priced per item or per second, not per text token. |
 
 ## What this collection changed
+
+### 1 Oct 2026
+
+**Added `gpt-6.1-sol`.** Short-context standard rates only: 2 / 10 / 0.10 /
+2.50 (input, output, cache read, cache write). Confirmed on the
+[pricing page](https://developers.openai.com/api/docs/pricing) and the
+[model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
+
+`gpt-6-sol` is not a substring of `gpt-6.1-sol`, so without this row the
+model resolves to no price and its tokens cost zero. The cache-read rate is
+also different — $0.10 against `gpt-6-sol`'s $0.20 — so inheriting that row
+would be wrong even if the match worked. Prompts over 272K input tokens bill
+the whole request at 4 / 15 / 0.20 / 5 (output 1.5×, the rest double). That
+second tier stays off the card, the same limit `gpt-6-sol` already has.
+
+**Codex Fast and Ultrafast are read from `service_tier`, not from the model
+id.** Rollouts put it on `event_msg` `thread_settings`. `fast` and the API's
+`priority` multiply the standard short-context row by 2 and the row says
+Fast, so `gpt-6.1-sol` Fast is 4 / 20 / 0.20 / 5. `ultrafast` multiplies by
+6 and only when the model is `gpt-6-astra` (60 / 300 / 6 / 75); the row says
+Ultrafast so that total is not read as Standard. Ultrafast above 272K is
+120 / 450 / 12 / 150 and stays off the card with every other long-context
+column. `gpt-6.1-sol` with
+`ultrafast` stays on the standard row. Missing or `default` stays standard.
+Codex credit multipliers — included usage at 2.5× Fast and 8× Ultrafast —
+are a different bill. The pane meters published API list dollars, not
+credits. Batch, Flex and the regional 10% stay off.
 
 ### 28 Sep 2026
 
