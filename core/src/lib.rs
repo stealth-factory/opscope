@@ -313,8 +313,19 @@ pub fn flush() {
 pub fn draw(rows: &[String], w: usize, h: usize) {
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let lost = SCREEN_LOST.swap(false, Ordering::AcqRel) | due(&shown, Instant::now());
-    out(&paint(&mut shown, rows, w, h, lost));
-    flush();
+    let bytes = paint(&mut shown, rows, w, h, lost);
+    // `out` drops a failed write, which a full frame every time could
+    // afford: the next one put it right. Rows that never reached the
+    // terminal must not be remembered as on it, or they stay wrong until
+    // the next whole frame.
+    let mut stdout = std::io::stdout();
+    if stdout
+        .write_all(bytes.as_bytes())
+        .and_then(|_| stdout.flush())
+        .is_err()
+    {
+        *shown = None;
+    }
 }
 
 /// What `draw` last left on screen: each row exactly as it was written,
@@ -633,9 +644,16 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
-        let lost = handle_lost_screen as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGWINCH, lost);
-        libc::signal(libc::SIGCONT, lost);
+        // `sigaction` rather than `signal`, so that `SA_RESTART` is ours to
+        // ask for rather than the platform's to decide: `SIGWINCH` arrives
+        // in bursts during a resize, and a write it interrupts would be a
+        // row the terminal never got.
+        let mut lost: libc::sigaction = std::mem::zeroed();
+        lost.sa_sigaction = handle_lost_screen as *const () as libc::sighandler_t;
+        lost.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut lost.sa_mask);
+        libc::sigaction(libc::SIGWINCH, &lost, std::ptr::null_mut());
+        libc::sigaction(libc::SIGCONT, &lost, std::ptr::null_mut());
     }
     claim_screen();
 }
