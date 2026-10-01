@@ -230,10 +230,11 @@ fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank>
 /// per turn, and applies to the `token_count` events that follow it. So the
 /// lines are walked in order, carrying the model forward.
 ///
-/// The speed tier is not on the model either. Rollouts put `service_tier`
-/// on `event_msg` `thread_settings` (`thread_settings_applied`). It is
-/// carried the same way, and a later snapshot replaces it — including a
-/// snapshot that names no tier, which is Standard. `fast` and the API's
+/// The speed tier is not on the model either. A session that starts on
+/// Fast records it on `event_msg` `session_configured`; a later change
+/// records it on `thread_settings` (`thread_settings_applied`). Either
+/// snapshot replaces the tier carried so far — including one that names
+/// no tier, which is Standard. `fast` and the API's
 /// `priority` (what a Fast response reports) bill at 2× and the row says
 /// Fast. `ultrafast` bills at 6× and only for `gpt-6-astra`; any other
 /// model stays on its standard row rather than inventing an Ultrafast rate.
@@ -329,6 +330,8 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
 /// `thread_settings` is accepted beside `thread_settings_applied` because
 /// that is the object the tier lives on, and a payload that puts
 /// `service_tier` directly under that type still names it.
+/// `session_configured` carries the same field on the event itself: that
+/// is the tier a session started on, before any later settings snapshot.
 fn tier_from_event(payload: &serde_json::Value) -> Option<String> {
     let settings = match text(payload, "type").as_str() {
         "thread_settings_applied" | "thread_settings" => {
@@ -338,6 +341,7 @@ fn tier_from_event(payload: &serde_json::Value) -> Option<String> {
                 payload
             }
         }
+        "session_configured" => payload,
         _ => return None,
     };
     Some(text(settings, "service_tier"))
@@ -1516,6 +1520,43 @@ mod tests {
         let none = HashMap::new();
         let (rate, _) = crate::session_rate(&model, &none);
         assert_eq!(rate.unwrap().get("input"), Some(&0.20));
+    }
+
+    #[test]
+    fn a_session_that_starts_on_fast_is_billed_at_fast() {
+        // The tier a session opened on is session_configured, not a later
+        // thread_settings snapshot. Without this, an unchanged Fast session
+        // bills at Standard.
+        let body = [
+            r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"session_configured","model":"gpt-6.1-sol","service_tier":"fast"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"output_tokens":1}}}}"#,
+        ]
+        .join("\n");
+        let model = only_model(&body);
+        assert_eq!(model, format!("gpt-6.1-sol{}", crate::CODEX_TIER_FAST));
+        let none = HashMap::new();
+        let (rate, _) = crate::session_rate(&model, &none);
+        assert_eq!(rate.unwrap().get("output"), Some(&20.0));
+
+        // Ultrafast on the opening event is the same path, and still Astra only.
+        let ultra = [
+            r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"session_configured","model":"gpt-6-astra","service_tier":"ultrafast"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":1}}}}"#,
+        ]
+        .join("\n");
+        let model = only_model(&ultra);
+        assert!(model.ends_with(crate::CODEX_TIER_ULTRAFAST), "{model}");
+
+        // A session_configured that names no tier does not invent one.
+        let plain = [
+            r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"session_configured","model":"gpt-6.1-sol"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":1}}}}"#,
+        ]
+        .join("\n");
+        assert_eq!(only_model(&plain), "gpt-6.1-sol");
     }
 
     #[test]

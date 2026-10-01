@@ -607,7 +607,7 @@ with its money, its tokens, and the models underneath, and every model row
 carrying both: what it cost and what it ran.
 
 ```
- ── METERED ── this machine · at list prices · 4 Sep 2026
+ ── METERED ── this machine · at list prices · 1 Oct 2026
   Counted from transcripts, which are written where the agent ran. Claude used
   on another machine, or on claude.ai, is not in here.
   today    $172.64    74.3M tokens
@@ -642,7 +642,7 @@ off a list whose absence would read as *nothing here is unpriced*.
 And the window's money then says **at least**:
 
 ```
- ── METERED ── this machine · at list prices · 4 Sep 2026
+ ── METERED ── this machine · at list prices · 1 Oct 2026
   CLI rollouts only. Codex bills Cloud, Web, Desktop and the rest to the same
   account, and none of those leave anything on this disk to count.
   today    at least $9.79     27.3M tokens

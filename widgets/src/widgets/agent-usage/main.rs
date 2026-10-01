@@ -46,7 +46,7 @@ const RATE_KINDS: &[&str] = &[
     "cache_write_1h",
 ];
 
-const LIST_RATES_AS_OF: &str = "4 Sep 2026";
+const LIST_RATES_AS_OF: &str = "1 Oct 2026";
 /// Models known to have no published price: prefix matching would otherwise
 /// hand gpt-5.3-codex-spark its family's rate, and Spark is explicitly not
 /// on the API. Naming them makes them report as unpriced rather than as a
@@ -1029,27 +1029,41 @@ fn split_codex_tier(model: &str) -> (&str, f64) {
 
 /// The rate a session model bills at.
 ///
-/// A Codex speed suffix is stripped before the lookup, so
-/// `gpt-6-astra · Ultrafast` still finds the Astra row, and every kind is
-/// then scaled. An exact config key for the full id — suffix included — is
-/// the reader's own price for that row and is not scaled again. A model
-/// with no rate stays unpriced: scaling nothing would invent a number.
+/// The suffix is stripped before the lookup, so `gpt-6-astra · Ultrafast`
+/// still finds the Astra row — and still hits `NO_PUBLISHED_PRICE` for an
+/// id that has no published rate. The list (and any config on that bare id)
+/// is then scaled. A config entry keyed by the full suffixed id overlays
+/// only the kinds it names, unscaled: those are the reader's price for this
+/// tier, and the kinds they left out stay on the multiplied row. Looking
+/// the suffixed id up directly would fill those leftovers from the standard
+/// row and would also let a Fast suffix sneak a named-unpriced model past
+/// the exact-id guard.
 fn session_rate(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &'static str) {
-    if configured.get(model).is_some_and(|rate| !rate.is_empty()) {
-        return rate_for(model, configured);
-    }
     let (base, multiplier) = split_codex_tier(model);
-    let (rate, origin) = rate_for(base, configured);
-    let Some(rate) = rate else {
-        return (None, origin);
+    let (rate, mut origin) = rate_for(base, configured);
+    let mut rate = match rate {
+        Some(rate) if multiplier != 1.0 => {
+            let scaled: Rate = rate
+                .into_iter()
+                .map(|(kind, value)| (kind, value * multiplier))
+                .collect();
+            Some(scaled)
+        }
+        other => other,
     };
-    if multiplier == 1.0 {
-        return (Some(rate), origin);
+    // The bare id's own config was already merged above. Only a key for the
+    // suffixed row is an overlay, and only the kinds it actually names.
+    if model != base {
+        if let Some(mine) = configured.get(model).filter(|rate| !rate.is_empty()) {
+            let mut merged = rate.unwrap_or_default();
+            for (kind, value) in mine {
+                merged.insert(kind.clone(), *value);
+            }
+            rate = Some(merged);
+            origin = "config";
+        }
     }
-    (
-        Some(rate.into_iter().map(|(kind, value)| (kind, value * multiplier)).collect()),
-        origin,
-    )
+    (rate, origin)
 }
 
 /// Token counts by priced kind.
@@ -3487,6 +3501,44 @@ mod tests {
         assert!(row.contains("gpt-6-astra"), "{row:?}");
         assert!(row.contains("$60.00"), "{row:?}");
         assert!(!rows.iter().any(|r| r.contains("unpriced")), "{rows:#?}");
+    }
+
+    /// A config entry for the suffixed row names only the kinds the reader
+    /// set. The rest stay on the multiplied list. Looking the suffixed id up
+    /// as a model filled those leftovers from the standard row, so a Fast
+    /// total understated every kind that was not overridden.
+    #[test]
+    fn a_partial_fast_override_scales_the_kinds_it_does_not_name() {
+        let fast = format!("gpt-6.1-sol{CODEX_TIER_FAST}");
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(fast.clone(), [("input".to_string(), 3.0)].into_iter().collect());
+        let (rate, origin) = session_rate(&fast, &mine);
+        let rate = rate.expect("the unnamed kinds still have the Fast list rate");
+        assert_eq!(origin, "config");
+        // The named kind is the reader's number, not 2× of it.
+        assert_eq!(rate.get("input"), Some(&3.0));
+        // 2× of 10 / 0.10 / 2.50.
+        assert_eq!(rate.get("output"), Some(&20.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        assert_eq!(rate.get("cache_write"), Some(&5.0));
+    }
+
+    /// `gpt-5.3-codex-spark · Fast` is still Spark. The suffix must not make
+    /// `rate_for` miss the exact unpriced-id check and inherit `gpt-5.3-codex`.
+    #[test]
+    fn a_fast_suffix_does_not_publish_a_rate_for_an_unpriced_model() {
+        let fast = format!("gpt-5.3-codex-spark{CODEX_TIER_FAST}");
+        let none: HashMap<String, Rate> = HashMap::new();
+        assert!(session_rate(&fast, &none).0.is_none());
+
+        let mut mine: HashMap<String, Rate> = HashMap::new();
+        mine.insert(fast.clone(), [("input".to_string(), 1.0)].into_iter().collect());
+        let (rate, origin) = session_rate(&fast, &mine);
+        let rate = rate.expect("the named kind is the reader's");
+        assert_eq!(origin, "config");
+        assert_eq!(rate.get("input"), Some(&1.0));
+        assert_eq!(rate.len(), 1, "the family rate must not fill the unnamed kinds");
+        assert!(!rate.contains_key("output"));
     }
 
     /// Published rates from Anthropic's pricing page on 28 Sep 2026.
