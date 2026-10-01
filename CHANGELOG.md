@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.36.0] - 2026-10-01
+
+### Features
+
+- **agent-usage**: Price gpt-6.1-sol and bill Codex speed tiers (#317)
+
+### Miscellaneous
+
+- Retarget retired TOY team citations to OPS (#316)
+
 ## [0.35.1] - 2026-09-30
 
 ### Bug Fixes
