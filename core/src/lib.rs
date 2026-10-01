@@ -35,6 +35,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 pub const HIDE: &str = "\x1b[?25l";
@@ -310,8 +311,8 @@ pub fn flush() {
 /// The top row always ends in the version that is running, whatever the
 /// widget put there. See `lines`.
 pub fn draw(rows: &[String], w: usize, h: usize) {
-    let lost = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let lost = SCREEN_LOST.swap(false, Ordering::AcqRel) | due(&shown, Instant::now());
     out(&paint(&mut shown, rows, w, h, lost));
     flush();
 }
@@ -327,6 +328,27 @@ struct Shown {
     w: usize,
     h: usize,
     lines: Vec<String>,
+    /// When the whole frame was last painted. See `WHOLE_EVERY`.
+    whole_at: Instant,
+}
+
+/// How long a pane goes between whole frames even when nothing says it
+/// needs one.
+///
+/// The signals and the screen handoffs catch everything this process can
+/// see, but not another process writing to the same terminal - a
+/// background job printing a status line, `wall`. That scrolls or covers
+/// the pane with nothing to say so, and a row that does not change - the
+/// title and the version among them - would never be put back. Painting
+/// everything this often bounds how long that can last, at the cost of
+/// one whole frame in every few seconds of them.
+const WHOLE_EVERY: Duration = Duration::from_secs(5);
+
+/// Whether the last whole frame is `WHOLE_EVERY` old at `now`.
+fn due(shown: &Option<Shown>, now: Instant) -> bool {
+    shown
+        .as_ref()
+        .is_some_and(|s| now.saturating_duration_since(s.whole_at) >= WHOLE_EVERY)
 }
 
 /// `None` until the first frame, and again whenever something other than
@@ -363,13 +385,14 @@ fn forget_frame() {
 /// The bytes one call to `draw` writes, given what the last one left.
 ///
 /// The whole frame when there is nothing to compare against, the size has
-/// changed, or `lost` says the screen was disturbed some other way; otherwise
+/// changed, or `lost` says the screen was disturbed some other way or is
+/// due a whole frame anyway; otherwise
 /// each row that differs, reached with a cursor move of core's own and
 /// erased from column 0 before it is written, exactly as `painted` does it.
 /// A frame identical to the last writes nothing at all.
 fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: bool) -> String {
     let lines = lines(rows, w, h);
-    let buf = match shown {
+    let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
             for (i, line) in lines.iter().enumerate() {
@@ -378,11 +401,16 @@ fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: b
                     put_line(&mut buf, line);
                 }
             }
-            buf
+            (buf, last.whole_at)
         }
-        _ => painted(&lines),
+        _ => (painted(&lines), Instant::now()),
     };
-    *shown = Some(Shown { w, h, lines });
+    *shown = Some(Shown {
+        w,
+        h,
+        lines,
+        whole_at,
+    });
     buf
 }
 
@@ -3784,6 +3812,24 @@ mod tests {
             super::paint(&mut lost, &rows, 41, 4, false),
             super::frame(&rows, 41, 4)
         );
+    }
+
+    #[test]
+    fn a_whole_frame_is_painted_every_few_seconds_whatever_else_happens() {
+        // Another process writing to the same terminal sends no signal, so
+        // nothing else would ever put back a row it covered. Rewriting the
+        // changed rows does not reset the clock: only a whole frame does.
+        let rows = vec!["top".to_string(), "12:00:00".into()];
+        let mut shown = None;
+        assert!(!super::due(&shown, std::time::Instant::now()));
+        super::paint(&mut shown, &rows, 40, 2, false);
+        let whole_at = shown.as_ref().unwrap().whole_at;
+        let ticked = vec!["top".to_string(), "12:00:01".into()];
+        assert_ne!(super::paint(&mut shown, &ticked, 40, 2, false), "");
+        assert_eq!(shown.as_ref().unwrap().whole_at, whole_at);
+        let almost = whole_at + super::WHOLE_EVERY - std::time::Duration::from_millis(1);
+        assert!(!super::due(&shown, almost));
+        assert!(super::due(&shown, whole_at + super::WHOLE_EVERY));
     }
 
     #[test]
