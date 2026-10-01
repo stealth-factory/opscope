@@ -1077,7 +1077,7 @@ fn main() {
         .collect();
         // Every heading is drawn, always: AGENTS and its column head, a
         // blank and PROCESSES, and the same again for IDLE when there is an
-        // idle section at all. TOY-34's rule survives that way rather than
+        // idle section at all. OPS-34's rule survives that way rather than
         // by rationing - the heading and its count are never what gets cut.
         // Everything that is not an entry row: the pinned header already
         // pushed, each section's heading and column head, the note line and
@@ -1360,7 +1360,7 @@ fn main() {
         }
 
         // The idle section's heading is drawn whenever there is an idle
-        // section at all, and it is never what gets cut - that was TOY-34:
+        // section at all, and it is never what gets cut - that was OPS-34:
         // dropping it silently left the footer offering [i]dle with nothing
         // behind it. Rationing rows for it is no longer how that is kept.
         // The window bounds the entries above, so the heading always fits,
@@ -1597,7 +1597,7 @@ mod tests {
 
     #[test]
     fn the_idle_section_is_never_silently_absent() {
-        // TOY-34's rule, which this rewrite had to keep: dropping the idle
+        // OPS-34's rule, which this rewrite had to keep: dropping the idle
         // section silently left the footer offering [i]dle with nothing
         // behind it.
         //

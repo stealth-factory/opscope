@@ -3825,9 +3825,9 @@ mod tests {
         // Named teams win outright; otherwise the excluded ones are dropped
         // and everything else is in.
         let of = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
-        assert!(team_wanted(&of(&["TOY"]), &of(&["OPS"]), "TOY"));
-        assert!(!team_wanted(&of(&["TOY"]), &of(&[]), "OPS"));
-        assert!(team_wanted(&of(&[]), &of(&["OPS"]), "TOY"));
+        assert!(team_wanted(&of(&["ABC"]), &of(&["OPS"]), "ABC"));
+        assert!(!team_wanted(&of(&["ABC"]), &of(&[]), "OPS"));
+        assert!(team_wanted(&of(&[]), &of(&["OPS"]), "ABC"));
         assert!(!team_wanted(&of(&[]), &of(&["OPS"]), "OPS"));
         // A named team wins even when it is also excluded, which is the
         // branch the test-local copy could never have got wrong.

@@ -5,7 +5,7 @@
 For the length of the port every widget here existed twice, and the Rust was
 never a transliteration: some of it answers differently on purpose. Telling
 *on purpose* from *a defect the port introduced* was the whole point of the
-side-by-side review ([TOY-8](https://linear.app/stealth-company/issue/TOY-8)),
+side-by-side review ([OPS-8](https://linear.app/stealth-company/issue/OPS-8)),
 and this page is what that review produced.
 
 **The Python is gone.** This page outlives it, because most of what is here

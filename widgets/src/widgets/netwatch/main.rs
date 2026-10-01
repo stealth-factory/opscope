@@ -198,7 +198,7 @@ fn wire_label(names: &[String]) -> String {
 /// measured, so a label that grew by a character could wrap the hints onto
 /// another line and leave the body sized for a footer that is not there.
 ///
-/// link.rs carries the same function; TOY-7 tracks folding the pair into
+/// link.rs carries the same function; OPS-7 tracks folding the pair into
 /// opscope-core rather than fixing anything here twice.
 fn scroll_label(first: usize, last: usize, total: usize) -> String {
     format!("rows {:>3}-{:>3} of {:>3}", first, last, total)

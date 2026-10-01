@@ -62,7 +62,7 @@ jobs:
           # What it cannot do is run the result, so the x86_64 binaries are
           # built and packaged but their tests are not executed here. That
           # is stated rather than hidden: `cross: true` is what turns those
-          # steps off, and TOY-40 already owns "what actually works on a
+          # steps off, and OPS-40 already owns "what actually works on a
           # Mac" as a question.
           #
           # macos-15 rather than macos-14: 14 is deprecated, and this is a

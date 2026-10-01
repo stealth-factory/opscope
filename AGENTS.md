@@ -1,6 +1,6 @@
 # Working on opscope
 
-Linear team: <https://linear.app/stealth-company/team/TOY/overview>
+Linear team: <https://linear.app/stealth-company/team/OPS/overview>
 Linear project: <https://linear.app/stealth-company/project/opscope-e829b47d84b8/issues>
 
 **Everything is tracked there** — planned widgets, the per-widget port
