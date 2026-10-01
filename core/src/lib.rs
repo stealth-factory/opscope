@@ -310,9 +310,9 @@ pub fn flush() {
 /// The top row always ends in the version that is running, whatever the
 /// widget put there. See `lines`.
 pub fn draw(rows: &[String], w: usize, h: usize) {
-    let resized = RESIZED.swap(false, Ordering::AcqRel);
+    let lost = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
-    out(&paint(&mut shown, rows, w, h, resized));
+    out(&paint(&mut shown, rows, w, h, lost));
     flush();
 }
 
@@ -336,14 +336,23 @@ struct Shown {
 /// good, since a row that has not changed is never sent again.
 static SHOWN: std::sync::Mutex<Option<Shown>> = std::sync::Mutex::new(None);
 
-/// Set by `SIGWINCH`. The size `draw` is handed catches most resizes, but
-/// not one that comes back to the size it started from between two
-/// frames, as a pane zoomed and unzoomed does, and the terminal may have
-/// reflowed or cut what was on screen on the way.
-static RESIZED: AtomicBool = AtomicBool::new(false);
+/// Set by a signal that means the screen may no longer be what `draw`
+/// left there, without the size saying so.
+///
+/// `SIGWINCH`: the size `draw` is handed catches most resizes, but not one
+/// that comes back to the size it started from between two frames, as a
+/// pane zoomed and unzoomed does, and the terminal may have reflowed or
+/// cut what was on screen on the way.
+///
+/// `SIGCONT`: `Keyboard` leaves `ISIG` on, so Ctrl-Z stops a widget and
+/// the shell writes its job message and prompt over the pane. `fg` brings
+/// it back at the same size with no `SIGWINCH`, and without this the
+/// shell's text would sit under every row that does not change - the
+/// title and the version among them.
+static SCREEN_LOST: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn handle_resize(_: libc::c_int) {
-    RESIZED.store(true, Ordering::Release);
+extern "C" fn handle_lost_screen(_: libc::c_int) {
+    SCREEN_LOST.store(true, Ordering::Release);
 }
 
 /// Make the next `draw` paint the whole frame.
@@ -354,14 +363,14 @@ fn forget_frame() {
 /// The bytes one call to `draw` writes, given what the last one left.
 ///
 /// The whole frame when there is nothing to compare against, the size has
-/// changed, or `resized` says the terminal did something to it; otherwise
+/// changed, or `lost` says the screen was disturbed some other way; otherwise
 /// each row that differs, reached with a cursor move of core's own and
 /// erased from column 0 before it is written, exactly as `painted` does it.
 /// A frame identical to the last writes nothing at all.
-fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, resized: bool) -> String {
+fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: bool) -> String {
     let lines = lines(rows, w, h);
     let buf = match shown {
-        Some(last) if !resized && last.w == w && last.h == h => {
+        Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
             for (i, line) in lines.iter().enumerate() {
                 if last.lines.get(i) != Some(line) {
@@ -596,8 +605,9 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
-        let resize = handle_resize as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGWINCH, resize);
+        let lost = handle_lost_screen as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGWINCH, lost);
+        libc::signal(libc::SIGCONT, lost);
     }
     claim_screen();
 }
@@ -3749,10 +3759,11 @@ mod tests {
 
     #[test]
     fn a_resize_or_a_lost_screen_paints_the_whole_frame() {
-        // A new size reflows whatever the terminal was showing, and so
-        // does a resize that came back to the same size between frames,
-        // which only `SIGWINCH` sees. After either, nothing stored says
-        // what is on screen.
+        // A new size reflows whatever the terminal was showing. A resize
+        // that came back to the same size between frames, which only
+        // `SIGWINCH` sees, does too, and a shell prompt written over the
+        // pane while it was stopped is reported by `SIGCONT`. After any of
+        // them, nothing stored says what is on screen.
         let rows = vec!["top".to_string(), "same".into(), "same".into()];
         let mut shown = None;
         super::paint(&mut shown, &rows, 40, 3, false);
