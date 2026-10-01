@@ -287,7 +287,12 @@ pub fn size() -> (usize, usize) {
     }
 }
 
+/// Write `text` to the terminal around `draw` rather than through it.
+///
+/// Whatever it writes is something `draw` did not, so the next frame is
+/// painted whole rather than trusting rows that may now be covered.
 pub fn out(text: &str) {
+    forget_frame();
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(text.as_bytes());
 }
@@ -3857,6 +3862,7 @@ mod tests {
         // whatever it left stays under rows that never change.
         let src = include_str!("lib.rs");
         for start in [
+            "pub fn out(text: &str) {",
             "pub fn claim_screen() {",
             "pub fn restore_screen() {",
             "    pub fn reclaim(&mut self) {",
