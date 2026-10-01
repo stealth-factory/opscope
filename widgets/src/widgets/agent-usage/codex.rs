@@ -230,6 +230,15 @@ fn bank_of(inventory: Option<&str>, now: f64) -> Option<crate::parse::ResetBank>
 /// per turn, and applies to the `token_count` events that follow it. So the
 /// lines are walked in order, carrying the model forward.
 ///
+/// The speed tier is not on the model either. Rollouts put `service_tier`
+/// on `event_msg` `thread_settings` (`thread_settings_applied`). It is
+/// carried the same way, and a later snapshot replaces it — including a
+/// snapshot that names no tier, which is Standard. `fast` and the API's
+/// `priority` (what a Fast response reports) bill at 2× and the row says
+/// Fast. `ultrafast` bills at 6× and only for `gpt-6-astra`; any other
+/// model stays on its standard row rather than inventing an Ultrafast rate.
+/// Missing, `default`, `auto` and `flex` stay on the standard row.
+///
 /// `last_token_usage` is the per-turn delta - the running total is on every
 /// event, and summing those would count the session once per turn. Within
 /// input_tokens, cached_input_tokens is the cheaper subset, and within
@@ -245,10 +254,12 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
     let mut records: HashMap<String, (String, String, Tokens)> = HashMap::new();
     let mut session = fallback.to_string();
     let mut model = String::new();
+    let mut tier = String::new();
     for line in body.lines() {
         if !line.contains("\"model\"")
             && !line.contains("\"token_count\"")
             && !line.contains("\"session_meta\"")
+            && !line.contains("\"service_tier\"")
         {
             continue;
         }
@@ -270,6 +281,12 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
                     model = named;
                 }
                 continue;
+            }
+            "event_msg" => {
+                if let Some(next) = tier_from_event(payload) {
+                    tier = next;
+                    continue;
+                }
             }
             _ => {}
         }
@@ -298,10 +315,56 @@ fn rollout_records(body: &str, fallback: &str) -> HashMap<String, (String, Strin
             .unwrap_or_default();
         records.insert(
             format!("{}\u{0}{}", session, stamp),
-            (day, model.clone(), got),
+            (day, billed_model(&model, &tier), got),
         );
     }
     records
+}
+
+/// The tier a thread-settings snapshot carries forward.
+///
+/// `Some` only for the events that publish one. The string is empty when
+/// the snapshot names no tier, which clears a Fast or Ultrafast that was
+/// in force: the snapshot is the effective settings, not a delta.
+/// `thread_settings` is accepted beside `thread_settings_applied` because
+/// that is the object the tier lives on, and a payload that puts
+/// `service_tier` directly under that type still names it.
+fn tier_from_event(payload: &serde_json::Value) -> Option<String> {
+    let settings = match text(payload, "type").as_str() {
+        "thread_settings_applied" | "thread_settings" => {
+            if payload["thread_settings"].is_object() {
+                &payload["thread_settings"]
+            } else {
+                payload
+            }
+        }
+        _ => return None,
+    };
+    Some(text(settings, "service_tier"))
+}
+
+/// The model id the meter keys on, with the speed tier named when a
+/// published API multiplier applies.
+///
+/// Ultrafast is published for `gpt-6-astra` only, including a dated
+/// snapshot of that id. A different model that merely contains the
+/// substring is not Astra, and stays on its standard row.
+fn billed_model(model: &str, tier: &str) -> String {
+    match tier.trim().to_ascii_lowercase().as_str() {
+        "fast" | "priority" => format!("{model}{}", crate::CODEX_TIER_FAST),
+        "ultrafast" if astra_model(model) => format!("{model}{}", crate::CODEX_TIER_ULTRAFAST),
+        _ => model.to_string(),
+    }
+}
+
+fn astra_model(model: &str) -> bool {
+    if model == "gpt-6-astra" {
+        return true;
+    }
+    match model.strip_prefix("gpt-6-astra-") {
+        Some(rest) => rest.starts_with(|c: char| c.is_ascii_digit()),
+        None => false,
+    }
 }
 
 /// One rollout's records, parsed once.
@@ -1334,6 +1397,125 @@ mod tests {
         // leaving them out.
         let body = r#"{"type":"event_msg","timestamp":"2026-08-16T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":10}}}}"#;
         assert!(rollout_records(body, "fallback.jsonl").is_empty());
+    }
+
+    /// One turn: thread settings name the tier, turn_context names the model,
+    /// and the token_count that follows is billed as that pair.
+    fn tiered_turn(model: &str, tier: &str) -> String {
+        [
+            format!(
+                r#"{{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{{"type":"thread_settings_applied","thread_settings":{{"model":"{model}","service_tier":"{tier}"}}}}}}"#
+            ),
+            format!(r#"{{"type":"turn_context","payload":{{"model":"{model}"}}}}"#),
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":1}}}}"#.to_string(),
+        ]
+        .join("\n")
+    }
+
+    fn only_model(body: &str) -> String {
+        let got = rollout_records(body, "fallback.jsonl");
+        assert_eq!(got.len(), 1, "{got:?}");
+        got.into_values().next().unwrap().1
+    }
+
+    #[test]
+    fn ultrafast_astra_is_billed_at_six_times_and_the_row_says_ultrafast() {
+        let model = only_model(&tiered_turn("gpt-6-astra", "ultrafast"));
+        assert_eq!(model, format!("gpt-6-astra{}", crate::CODEX_TIER_ULTRAFAST));
+        let none = HashMap::new();
+        let (rate, origin) = crate::session_rate(&model, &none);
+        let rate = rate.expect("ultrafast astra is priced");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&60.0));
+        assert_eq!(rate.get("output"), Some(&300.0));
+        assert_eq!(rate.get("cache_read"), Some(&6.0));
+        assert_eq!(rate.get("cache_write"), Some(&75.0));
+
+        // A dated snapshot of Astra is still Astra.
+        let dated = only_model(&tiered_turn("gpt-6-astra-20260905", "ultrafast"));
+        assert!(dated.ends_with(crate::CODEX_TIER_ULTRAFAST), "{dated}");
+        // A different id that merely contains the substring is not.
+        let mini = only_model(&tiered_turn("gpt-6-astra-mini", "ultrafast"));
+        assert_eq!(mini, "gpt-6-astra-mini");
+    }
+
+    #[test]
+    fn fast_gpt_6_1_sol_is_billed_at_twice_the_standard_row() {
+        let model = only_model(&tiered_turn("gpt-6.1-sol", "fast"));
+        assert_eq!(model, format!("gpt-6.1-sol{}", crate::CODEX_TIER_FAST));
+        let none = HashMap::new();
+        let (rate, _) = crate::session_rate(&model, &none);
+        let rate = rate.expect("fast gpt-6.1-sol is priced");
+        assert_eq!(rate.get("input"), Some(&4.0));
+        assert_eq!(rate.get("output"), Some(&20.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        assert_eq!(rate.get("cache_write"), Some(&5.0));
+    }
+
+    #[test]
+    fn ultrafast_on_gpt_6_1_sol_does_not_invent_an_ultrafast_rate() {
+        // Ultrafast is published for Astra only. Naming it here would bill
+        // a rate nobody published.
+        let model = only_model(&tiered_turn("gpt-6.1-sol", "ultrafast"));
+        assert_eq!(model, "gpt-6.1-sol");
+        assert!(!model.contains("Ultrafast"));
+        let none = HashMap::new();
+        let (rate, _) = crate::session_rate(&model, &none);
+        let rate = rate.expect("the standard row still prices it");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
+        assert_eq!(rate.get("output"), Some(&10.0));
+    }
+
+    #[test]
+    fn a_missing_or_default_tier_stays_on_the_standard_row() {
+        let named_default = only_model(&tiered_turn("gpt-6.1-sol", "default"));
+        assert_eq!(named_default, "gpt-6.1-sol");
+        // auto follows the project default, which this pane cannot see, and
+        // flex is a different table. Neither invents a multiplier.
+        assert_eq!(only_model(&tiered_turn("gpt-6.1-sol", "auto")), "gpt-6.1-sol");
+        assert_eq!(only_model(&tiered_turn("gpt-6.1-sol", "flex")), "gpt-6.1-sol");
+
+        // A snapshot that omits service_tier is Standard, not a tier carried
+        // forward from nothing.
+        let body = [
+            r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra"}}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":10}}}}"#,
+        ]
+        .join("\n");
+        assert_eq!(only_model(&body), "gpt-6-astra");
+
+        // And a later snapshot that drops the tier clears one that was on.
+        let cleared = [
+            r#"{"type":"event_msg","timestamp":"2026-10-01T09:00:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","service_tier":"fast"}}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":10}}}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T11:00:00Z","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","service_tier":"default"}}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-10-01T11:01:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":20}}}}"#,
+        ]
+        .join("\n");
+        let got = rollout_records(&cleared, "fallback.jsonl");
+        let mut models: Vec<String> = got.into_values().map(|(_, m, _)| m).collect();
+        models.sort();
+        assert_eq!(
+            models,
+            vec![
+                "gpt-6-astra".to_string(),
+                format!("gpt-6-astra{}", crate::CODEX_TIER_FAST),
+            ]
+        );
+    }
+
+    #[test]
+    fn priority_is_the_fast_bill_the_api_reports() {
+        // A Fast response reports service_tier "priority". That is the same
+        // 2× published rate, and the row says Fast.
+        let model = only_model(&tiered_turn("gpt-6-luna", "priority"));
+        assert_eq!(model, format!("gpt-6-luna{}", crate::CODEX_TIER_FAST));
+        let none = HashMap::new();
+        let (rate, _) = crate::session_rate(&model, &none);
+        assert_eq!(rate.unwrap().get("input"), Some(&0.20));
     }
 
     #[test]

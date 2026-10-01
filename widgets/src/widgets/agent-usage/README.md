@@ -703,9 +703,14 @@ below-200k rates as `grok-4.6` — 2 / 6 / 0.50 — and still needs its own row:
 no existing key is a substring of `grok-4.7`, so without one the model costs
 nothing. `gpt-6-sol` and `gpt-6-luna` are the same shape of gap against the
 5.6 rows — the short-context rates are 2 / 10 / 0.20 / 2.50 and
-0.10 / 0.50 / 0.01 / 0.125 — and `claude-opus-5` is a prefix of
+0.10 / 0.50 / 0.01 / 0.125 — and `gpt-6.1-sol` is the same shape of gap
+against `gpt-6-sol`: that id is not a substring of `gpt-6.1-sol`, and cache
+reads are $0.10 rather than $0.20. `claude-opus-5` is a prefix of
 `claude-opus-5-5`, so without its own row (4 / 20 / 0.20 / 5 / 8) Opus 5.5
 would inherit Opus 5, cache reads at $0.50 against the published $0.20.
+Codex Fast and Ultrafast are not model ids. A rollout's `service_tier` of
+`fast` bills 2× the standard row and the row says Fast; `ultrafast` bills
+6× and only for `gpt-6-astra`, and the row says Ultrafast.
 `claude-sonnet-5` is a prefix of `claude-sonnet-5-5`. The published five
 match Sonnet 5 — 2 / 10 / 0.20 / 2.50 / 4 — so inheriting would bill the
 same today, and the row is still its own so a later move of one model does

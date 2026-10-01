@@ -121,6 +121,18 @@ const LIST_RATES: tc::Catalogue = &[
     ),
     (
         // Short-context standard rates. Above 272K the whole request is
+        // 4 / 15 / 0.20 / 5 — output 1.5x, the rest double — which this
+        // table cannot express; that column is in wiki/model-prices.md.
+        // gpt-6-sol is not a substring of this id, so that row cannot price
+        // it, and the cache-read rate is $0.10 against gpt-6-sol's $0.20,
+        // so inheriting would be wrong even if the match worked. A missing
+        // line costs the tokens zero.
+        "gpt-6.1-sol",
+        "OpenAI",
+        &[("input", 2.0), ("output", 10.0), ("cache_read", 0.10), ("cache_write", 2.50)],
+    ),
+    (
+        // Short-context standard rates. Above 272K the whole request is
         // 4 / 15 / 0.40 / 5 — output 1.5x, the rest double — which this
         // table cannot express; that column is in wiki/model-prices.md.
         // gpt-5.6-sol is not a substring of this id, so the 5.6 row cannot
@@ -989,6 +1001,57 @@ fn rate_for(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &
     }
 }
 
+/// Suffix Codex appends when a rollout's `service_tier` is Fast.
+///
+/// The row has to say so: a 2× total on the bare model id reads as Standard.
+pub(crate) const CODEX_TIER_FAST: &str = " · Fast";
+/// Suffix Codex appends when a rollout's `service_tier` is Ultrafast.
+///
+/// Published for `gpt-6-astra` only. A 6× Astra total on the bare id reads
+/// as Standard.
+pub(crate) const CODEX_TIER_ULTRAFAST: &str = " · Ultrafast";
+
+/// The model id without a Codex speed suffix, and the published API
+/// multiplier that suffix names.
+///
+/// Fast is 2× the standard short-context row. Ultrafast is 6×. The suffix
+/// is only present when that multiplier was applied, so stripping it and
+/// scaling is the whole bill. An id with neither suffix is the standard row.
+fn split_codex_tier(model: &str) -> (&str, f64) {
+    if let Some(base) = model.strip_suffix(CODEX_TIER_ULTRAFAST) {
+        (base, 6.0)
+    } else if let Some(base) = model.strip_suffix(CODEX_TIER_FAST) {
+        (base, 2.0)
+    } else {
+        (model, 1.0)
+    }
+}
+
+/// The rate a session model bills at.
+///
+/// A Codex speed suffix is stripped before the lookup, so
+/// `gpt-6-astra · Ultrafast` still finds the Astra row, and every kind is
+/// then scaled. An exact config key for the full id — suffix included — is
+/// the reader's own price for that row and is not scaled again. A model
+/// with no rate stays unpriced: scaling nothing would invent a number.
+fn session_rate(model: &str, configured: &HashMap<String, Rate>) -> (Option<Rate>, &'static str) {
+    if configured.get(model).is_some_and(|rate| !rate.is_empty()) {
+        return rate_for(model, configured);
+    }
+    let (base, multiplier) = split_codex_tier(model);
+    let (rate, origin) = rate_for(base, configured);
+    let Some(rate) = rate else {
+        return (None, origin);
+    };
+    if multiplier == 1.0 {
+        return (Some(rate), origin);
+    }
+    (
+        Some(rate.into_iter().map(|(kind, value)| (kind, value * multiplier)).collect()),
+        origin,
+    )
+}
+
 /// Token counts by priced kind.
 type Tokens = HashMap<String, f64>;
 
@@ -1294,7 +1357,7 @@ fn metered_rows(
             if ran <= 0.0 {
                 continue;
             }
-            let (rate, origin) = rate_for(model, &cfg.rates);
+            let (rate, origin) = session_rate(model, &cfg.rates);
             tokens += ran;
             let Some(rate) = rate else {
                 // The tokens were already counted into the window above, so
@@ -3318,6 +3381,112 @@ mod tests {
         assert_eq!(opus5.get("input"), Some(&5.0));
         assert_eq!(opus5.get("output"), Some(&25.0));
         assert_eq!(opus5.get("cache_read"), Some(&0.50));
+    }
+
+    /// Short-context standard rates from OpenAI's pricing page.
+    ///
+    /// `gpt-6-sol` is not a substring of `gpt-6.1-sol`, so a missing line
+    /// prices those tokens at zero. The cache-read rate is also different
+    /// ($0.10 against $0.20), so inheriting the 6.0 row would be wrong even
+    /// if the match worked.
+    #[test]
+    fn gpt_6_1_sol_is_priced_on_its_own_row_and_not_at_gpt_6_sol_cache_reads() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        assert_eq!(
+            LIST_RATES.iter().filter(|(k, _, _)| *k == "gpt-6.1-sol").count(),
+            1,
+            "gpt-6.1-sol needs its own row; gpt-6-sol is not a substring of it"
+        );
+
+        let (rate, origin) = rate_for("gpt-6.1-sol", &none);
+        let rate = rate.expect("gpt-6.1-sol must be priced, not free");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&2.0));
+        assert_eq!(rate.get("output"), Some(&10.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.10));
+        assert_eq!(rate.get("cache_write"), Some(&2.50));
+        assert_ne!(
+            rate.get("cache_read"),
+            Some(&0.20),
+            "cache reads are not the gpt-6-sol rate"
+        );
+
+        // A dated snapshot still reaches this row, not a neighbour's.
+        let (dated, dated_origin) = rate_for("gpt-6.1-sol-20261001", &none);
+        assert_eq!(dated_origin, "list");
+        let dated = dated.expect("a dated gpt-6.1-sol id is still this model");
+        assert_eq!(dated.get("input"), Some(&2.0));
+        assert_eq!(dated.get("cache_read"), Some(&0.10));
+
+        let longest = |model: &str| {
+            LIST_RATES
+                .iter()
+                .filter(|(k, _, _)| model.contains(k))
+                .max_by_key(|(k, _, _)| k.chars().count())
+                .map(|(k, _, _)| *k)
+        };
+        assert_eq!(longest("gpt-6.1-sol"), Some("gpt-6.1-sol"));
+        assert_eq!(longest("gpt-6.1-sol-20261001"), Some("gpt-6.1-sol"));
+        assert_eq!(longest("gpt-6-sol"), Some("gpt-6-sol"));
+
+        // The neighbour keeps the cache-read rate this row must not inherit.
+        let (older, _) = rate_for("gpt-6-sol", &none);
+        assert_eq!(older.unwrap().get("cache_read"), Some(&0.20));
+    }
+
+    /// Codex speed is a multiplier on the standard row, named on the id the
+    /// rollout parser emits. Fast is 2×. Ultrafast is 6× and the suffix is
+    /// only attached for gpt-6-astra, so a non-Astra ultrafast id never
+    /// reaches this scale.
+    #[test]
+    fn codex_fast_and_ultrafast_scale_the_published_row_and_name_the_tier() {
+        let none: HashMap<String, Rate> = HashMap::new();
+
+        let fast = format!("gpt-6.1-sol{CODEX_TIER_FAST}");
+        let (rate, origin) = session_rate(&fast, &none);
+        let rate = rate.expect("fast gpt-6.1-sol is the standard row, doubled");
+        assert_eq!(origin, "list");
+        assert_eq!(rate.get("input"), Some(&4.0));
+        assert_eq!(rate.get("output"), Some(&20.0));
+        assert_eq!(rate.get("cache_read"), Some(&0.20));
+        assert_eq!(rate.get("cache_write"), Some(&5.0));
+
+        let ultra = format!("gpt-6-astra{CODEX_TIER_ULTRAFAST}");
+        let (rate, origin) = session_rate(&ultra, &none);
+        let rate = rate.expect("ultrafast astra is the standard row, times six");
+        assert_eq!(origin, "list");
+        // 6× of 10 / 50 / 1 / 12.50.
+        assert_eq!(rate.get("input"), Some(&60.0));
+        assert_eq!(rate.get("output"), Some(&300.0));
+        assert_eq!(rate.get("cache_read"), Some(&6.0));
+        assert_eq!(rate.get("cache_write"), Some(&75.0));
+
+        // The bare ids stay on the standard row. A suffix is the only way
+        // a speed tier enters the bill.
+        let (standard, _) = session_rate("gpt-6.1-sol", &none);
+        assert_eq!(standard.unwrap().get("cache_read"), Some(&0.10));
+        let (astra, _) = session_rate("gpt-6-astra", &none);
+        assert_eq!(astra.unwrap().get("input"), Some(&10.0));
+
+        // The row the pane draws is the suffixed id, so a 6× total cannot
+        // be read as Standard.
+        let windows = vec![(
+            "30 days".to_string(),
+            vec![(ultra.clone(), counts(1_000_000.0))],
+        )];
+        let rows: Vec<String> =
+            metered_rows(&windows, 120, "", "codex", "", "", &Config::default(), &palette())
+                .iter()
+                .map(|r| plain(r))
+                .collect();
+        let row = rows
+            .iter()
+            .find(|r| r.contains("Ultrafast"))
+            .expect("the tier is on the row");
+        assert!(row.contains("gpt-6-astra"), "{row:?}");
+        assert!(row.contains("$60.00"), "{row:?}");
+        assert!(!rows.iter().any(|r| r.contains("unpriced")), "{rows:#?}");
     }
 
     /// Published rates from Anthropic's pricing page on 28 Sep 2026.
