@@ -668,20 +668,22 @@ fn progress_at(window: f64, reset: f64, at: f64, days: u8) -> Option<f64> {
         return Some(wall);
     }
     let start = reset - window;
-    match (work_secs(start, reset, days), work_secs(start, at, days)) {
+    match (work_days_between(start, reset, days), work_days_between(start, at, days)) {
         (Some(total), Some(done)) if total > 0.0 => Some(done / total),
         _ => Some(wall),
     }
 }
 
-/// Seconds between two instants that fall on work days, by this machine's
-/// own calendar. The first `days` days from Monday are the work days.
+/// Work days between two instants, by this machine's own calendar. The
+/// first `days` days from Monday are the work days.
 ///
-/// Midnight is asked of the local zone each day rather than stepped in
-/// fixed 86400s, so a daylight-saving change does not slide every later
-/// day boundary by an hour. `None` when a midnight cannot be named, and the
-/// caller falls back to the wall clock.
-fn work_secs(from: f64, to: f64, days: u8) -> Option<f64> {
+/// Counted in days, not seconds: every work day weighs one, and a day the
+/// window only partly covers counts the share of that day's own length it
+/// covers. Summing seconds gave the 23- and 25-hour days of a daylight-
+/// saving change a different weight from every other work day. Midnight is
+/// asked of the local zone each day for the same reason. `None` when a
+/// midnight cannot be named, and the caller falls back to the wall clock.
+fn work_days_between(from: f64, to: f64, days: u8) -> Option<f64> {
     if to <= from {
         return Some(0.0);
     }
@@ -702,7 +704,10 @@ fn work_secs(from: f64, to: f64, days: u8) -> Option<f64> {
         }
         let end = midnight(next)?;
         if day.weekday().num_days_from_monday() < days as u32 {
-            total += (end.min(to) - start.max(from)).max(0.0);
+            let length = end - start;
+            if length > 0.0 {
+                total += (end.min(to) - start.max(from)).max(0.0) / length;
+            }
         }
         day = next;
     }
@@ -3835,6 +3840,14 @@ mod tests {
         let reset = local_noon(2026, 11, 1) - 12.0 * 3600.0;
         let got = progress_at(reset - start, reset, local_noon(2026, 10, 15), 5).unwrap();
         assert!((got - 10.5 / 22.0).abs() < 1e-9, "got {}", got);
+    }
+
+    #[test]
+    fn a_daylight_saving_day_weighs_the_same_as_any_other() {
+        // Summing seconds gave a 23- or 25-hour day its own weight, and the
+        // monthly test above failed under a zone that changes clocks in it.
+        assert_eq!(work_days_between(local_noon(2026, 3, 2), local_noon(2026, 3, 30), 5), Some(20.0));
+        assert_eq!(work_days_between(local_noon(2026, 10, 5), local_noon(2026, 11, 2), 5), Some(20.0));
     }
 
     #[test]
