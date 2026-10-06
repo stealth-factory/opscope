@@ -690,10 +690,17 @@ fn work_days_between<Tz: TimeZone>(tz: &Tz, from: f64, to: f64, days: u8) -> Opt
     if to <= from {
         return Some(0.0);
     }
+    // Where a zone springs forward at midnight - Cairo did on 24 April
+    // 2026 - 00:00 never happens that day, and the day starts at the first
+    // minute that does. Refusing such a day dropped the whole window back
+    // onto the wall clock.
     let midnight = |d: NaiveDate| -> Option<f64> {
-        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-            .earliest()
-            .map(|t| t.timestamp() as f64)
+        let start = d.and_hms_opt(0, 0, 0)?;
+        (0..=180).find_map(|minute| {
+            tz.from_local_datetime(&(start + Days::minutes(minute)))
+                .earliest()
+                .map(|t| t.timestamp() as f64)
+        })
     };
     let mut day = tz.timestamp_opt(from as i64, 0).earliest()?.date_naive();
     let mut total = 0.0;
@@ -3869,6 +3876,10 @@ mod tests {
         // ending 29 October 2026. That week holds five work days, not 4.96.
         let cairo = &chrono_tz::Africa::Cairo;
         let got = work_days_between(cairo, noon(cairo, 10, 26), noon(cairo, 11, 2), 5);
+        assert_eq!(got, Some(5.0));
+        // And forward at midnight on Friday 24 April, so that day has no
+        // 00:00 at all. It starts at 01:00 and is still one work day.
+        let got = work_days_between(cairo, noon(cairo, 4, 20), noon(cairo, 4, 27), 5);
         assert_eq!(got, Some(5.0));
     }
 
