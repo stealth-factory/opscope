@@ -668,7 +668,10 @@ fn progress_at(window: f64, reset: f64, at: f64, days: u8) -> Option<f64> {
         return Some(wall);
     }
     let start = reset - window;
-    match (work_days_between(start, reset, days), work_days_between(start, at, days)) {
+    match (
+        work_days_between(&Local, start, reset, days),
+        work_days_between(&Local, start, at, days),
+    ) {
         (Some(total), Some(done)) if total > 0.0 => Some(done / total),
         _ => Some(wall),
     }
@@ -683,17 +686,16 @@ fn progress_at(window: f64, reset: f64, at: f64, days: u8) -> Option<f64> {
 /// saving change a different weight from every other work day. Midnight is
 /// asked of the local zone each day for the same reason. `None` when a
 /// midnight cannot be named, and the caller falls back to the wall clock.
-fn work_days_between(from: f64, to: f64, days: u8) -> Option<f64> {
+fn work_days_between<Tz: TimeZone>(tz: &Tz, from: f64, to: f64, days: u8) -> Option<f64> {
     if to <= from {
         return Some(0.0);
     }
     let midnight = |d: NaiveDate| -> Option<f64> {
-        Local
-            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
             .earliest()
             .map(|t| t.timestamp() as f64)
     };
-    let mut day = Local.timestamp_opt(from as i64, 0).earliest()?.date_naive();
+    let mut day = tz.timestamp_opt(from as i64, 0).earliest()?.date_naive();
     let mut total = 0.0;
     // A window is at most a billing cycle; the cap only stops a nonsense
     // reset from walking the calendar for ever.
@@ -3844,10 +3846,30 @@ mod tests {
 
     #[test]
     fn a_daylight_saving_day_weighs_the_same_as_any_other() {
-        // Summing seconds gave a 23- or 25-hour day its own weight, and the
-        // monthly test above failed under a zone that changes clocks in it.
-        assert_eq!(work_days_between(local_noon(2026, 3, 2), local_noon(2026, 3, 30), 5), Some(20.0));
-        assert_eq!(work_days_between(local_noon(2026, 10, 5), local_noon(2026, 11, 2), 5), Some(20.0));
+        // Summing seconds gave a 23- or 25-hour day its own weight. Named
+        // zones rather than Local, because CI runs in UTC and would never
+        // see a clock change at all.
+        use chrono_tz::{America::New_York, Europe::London};
+        let noon = |tz: &chrono_tz::Tz, m: u32, d: u32| {
+            tz.with_ymd_and_hms(2026, m, d, 12, 0, 0).unwrap().timestamp() as f64
+        };
+        // London goes forward on Sunday 29 March and back on 25 October;
+        // New York forward on 8 March and back on 1 November. Each span is
+        // four whole weeks from Monday noon. The changes all fall on a
+        // Sunday, so only a seven-day count has the short or long day in it;
+        // by seconds that came to 27.96 and 28.04 days rather than 28.
+        for tz in [&London, &New_York] {
+            for (from, to) in [((3, 2), (3, 30)), ((10, 5), (11, 2))] {
+                let (from, to) = (noon(tz, from.0, from.1), noon(tz, to.0, to.1));
+                assert_eq!(work_days_between(tz, from, to, 7), Some(28.0), "{tz}");
+                assert_eq!(work_days_between(tz, from, to, 5), Some(20.0), "{tz}");
+            }
+        }
+        // Cairo moves its clocks on a Thursday, a work day: back at midnight
+        // ending 29 October 2026. That week holds five work days, not 4.96.
+        let cairo = &chrono_tz::Africa::Cairo;
+        let got = work_days_between(cairo, noon(cairo, 10, 26), noon(cairo, 11, 2), 5);
+        assert_eq!(got, Some(5.0));
     }
 
     #[test]
