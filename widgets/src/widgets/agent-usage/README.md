@@ -611,10 +611,11 @@ where the clock would have shown two sevenths of headroom you will not use.
 There is no monthly equivalent and none is needed. Every window arrives with its
 own start and reset, so a monthly or billing-cycle window counts the work days
 actually inside that cycle off the calendar — October 2026 has 22 weekdays
-and February 2026 had 20. Windows shorter than a day, such as the five-hour session, stay on
-the clock: they are being used now, whatever day it is. A window with no work
-day in it at all also falls back to the clock rather than losing its pace. Days
-are this machine's local calendar.
+and February 2026 had 20. Windows of a day or less, such as the five-hour
+session or a daily quota, stay on the clock: they are being used now, whatever
+day it is, and have no weekend in them to skip. A window with no work day in it
+at all also falls back to the clock rather than losing its pace. Days are this
+machine's local calendar.
 
 ## METERED: today, and the last thirty days
 

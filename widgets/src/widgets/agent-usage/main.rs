@@ -653,8 +653,10 @@ fn work_days() -> u8 {
 /// The pace compares spend against this, so for someone who works five days
 /// a week a weekly window that has run Monday to Friday is all but gone,
 /// not five sevenths gone - the weekend ahead spends nothing. A window
-/// shorter than a day stays on the wall clock: it is being used now, on
-/// whatever day now is. So does a window with no work time in it at all,
+/// of a day or less stays on the wall clock: it is being used now, on
+/// whatever day now is, and has no weekend in it to skip. A rolling 24
+/// hours from Friday evening counted only Friday's last hours and read as
+/// spent all of Saturday. So does a window with no work time in it at all,
 /// rather than losing its pace. Monthly and billing-cycle windows need no
 /// setting of their own: their real start and reset are known, so the work
 /// days inside that cycle are counted off the calendar.
@@ -664,7 +666,7 @@ fn progress_at(window: f64, reset: f64, at: f64, days: u8) -> Option<f64> {
         return None;
     }
     let wall = gone / window;
-    if days >= 7 || window < 86400.0 {
+    if days >= 7 || window <= 86400.0 {
         return Some(wall);
     }
     let start = reset - window;
@@ -3894,11 +3896,22 @@ mod tests {
 
     #[test]
     fn a_window_with_no_work_day_in_it_keeps_its_pace() {
-        // A one-day window on a Sunday with a five-day week has no work time
-        // at all, and falls back to the clock rather than dividing by zero.
+        // A weekend-only window with a five-day week has no work time at
+        // all, and falls back to the clock rather than dividing by zero.
+        let midnight = |d: u32| local_noon(2026, 10, d) - 12.0 * 3600.0;
+        let (saturday, monday) = (midnight(10), midnight(12));
+        assert_eq!(progress_at(monday - saturday, monday, midnight(11), 5), Some(0.5));
+    }
+
+    #[test]
+    fn a_rolling_day_stays_on_the_wall_clock_too() {
+        // Friday 18:00 to Saturday 18:00 holds six work hours, so counting
+        // work days put it at fully spent from midnight on, all of Saturday.
         let day = 86400.0;
-        let sunday = local_noon(2026, 10, 11);
-        assert_eq!(progress_at(day, sunday + 6.0 * 3600.0, sunday, 5), Some(0.75));
+        let friday_six = local_noon(2026, 10, 9) + 6.0 * 3600.0;
+        let saturday_ten = friday_six + 16.0 * 3600.0;
+        let got = progress_at(day, friday_six + day, saturday_ten, 5).unwrap();
+        assert!((got - 16.0 / 24.0).abs() < 1e-9, "got {}", got);
     }
 
     #[test]
