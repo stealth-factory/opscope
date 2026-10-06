@@ -22,10 +22,11 @@
 //! exposes nothing says so rather than showing a plausible zero.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use chrono::{Datelike, Duration as Days, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, Duration as Days, Local, NaiveDate, TimeZone, Utc};
 use opscope_core as tc;
 
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
@@ -602,11 +603,7 @@ fn lead(pct_used: f64, window_secs: Option<f64>, reset_ts: Option<f64>) -> Optio
     if window <= 0.0 {
         return None;
     }
-    let gone = window - (reset - now());
-    if gone <= 0.0 || gone > window {
-        return None;
-    }
-    let elapsed = 100.0 * gone / window;
+    let elapsed = 100.0 * progress_at(window, reset, now(), work_days())?;
     if elapsed < PACE_FLOOR {
         return None;
     }
@@ -636,11 +633,80 @@ fn elapsed_of(secs: Option<f64>, reset: Option<f64>) -> Option<f64> {
     if secs <= 0.0 {
         return None;
     }
-    let left = reset - now();
-    if left <= 0.0 || left > secs {
+    progress_at(secs, reset, now(), work_days())
+}
+
+/// Days a week that count towards a window's progress, from Monday.
+///
+/// Set once from `work_days_per_week` before anything draws, and read by
+/// `lead` and `elapsed_of` rather than handed down to them: they are called
+/// from every agent's renderer, none of which holds the config. Seven is
+/// the wall clock, which is what the pace was before the setting existed.
+static WORK_DAYS: AtomicU8 = AtomicU8::new(7);
+
+fn work_days() -> u8 {
+    WORK_DAYS.load(Ordering::Relaxed)
+}
+
+/// How far through a window `at` is, from 0 to 1, counting only work days.
+///
+/// The pace compares spend against this, so for someone who works five days
+/// a week a weekly window that has run Monday to Friday is all but gone,
+/// not five sevenths gone - the weekend ahead spends nothing. A window
+/// shorter than a day stays on the wall clock: it is being used now, on
+/// whatever day now is. So does a window with no work time in it at all,
+/// rather than losing its pace. Monthly and billing-cycle windows need no
+/// setting of their own: their real start and reset are known, so the work
+/// days inside that cycle are counted off the calendar.
+fn progress_at(window: f64, reset: f64, at: f64, days: u8) -> Option<f64> {
+    let gone = window - (reset - at);
+    if window <= 0.0 || gone <= 0.0 || gone > window {
         return None;
     }
-    Some((secs - left) / secs)
+    let wall = gone / window;
+    if days >= 7 || window < 86400.0 {
+        return Some(wall);
+    }
+    let start = reset - window;
+    match (work_secs(start, reset, days), work_secs(start, at, days)) {
+        (Some(total), Some(done)) if total > 0.0 => Some(done / total),
+        _ => Some(wall),
+    }
+}
+
+/// Seconds between two instants that fall on work days, by this machine's
+/// own calendar. The first `days` days from Monday are the work days.
+///
+/// Midnight is asked of the local zone each day rather than stepped in
+/// fixed 86400s, so a daylight-saving change does not slide every later
+/// day boundary by an hour. `None` when a midnight cannot be named, and the
+/// caller falls back to the wall clock.
+fn work_secs(from: f64, to: f64, days: u8) -> Option<f64> {
+    if to <= from {
+        return Some(0.0);
+    }
+    let midnight = |d: NaiveDate| -> Option<f64> {
+        Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.timestamp() as f64)
+    };
+    let mut day = Local.timestamp_opt(from as i64, 0).earliest()?.date_naive();
+    let mut total = 0.0;
+    // A window is at most a billing cycle; the cap only stops a nonsense
+    // reset from walking the calendar for ever.
+    for _ in 0..400 {
+        let (start, next) = (midnight(day)?, day.succ_opt()?);
+        if start >= to {
+            break;
+        }
+        let end = midnight(next)?;
+        if day.weekday().num_days_from_monday() < days as u32 {
+            total += (end.min(to) - start.max(from)).max(0.0);
+        }
+        day = next;
+    }
+    Some(total)
 }
 
 /// The dark end of every agent ramp. The two stops above it are measured,
@@ -1753,6 +1819,10 @@ struct Config {
     /// The directory `coderabbit usage` runs in. Empty is this widget's
     /// own; CodeRabbit reports included reviews only inside a repository.
     coderabbit_repo: String,
+    /// Days a week that count towards a window's pace, from Monday: 5 is
+    /// Monday to Friday. Seven, the default, is the wall clock. Clamped to
+    /// 1..=7, because no week has more and a pace over no days is nothing.
+    work_days_per_week: u8,
     /// Minutes between those requests. Fifteen, and the ceiling is
     /// `GROK_PING_MAX` rather than taste. The window it reports moves
     /// over days, but the spend inside it moves while they work, and an
@@ -1854,6 +1924,7 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         coderabbit_repo: tc::cfg_str(&raw, "coderabbit_repo", ""),
+        work_days_per_week: tc::cfg_f64(&raw, "work_days_per_week", 7.0).round().clamp(1.0, 7.0) as u8,
         legacy_section,
         // Not `tc::cfg_strings`, which keeps only the `as_str` entries: a
         // labelled entry is an object, and dropping it in silence would
@@ -2289,6 +2360,7 @@ fn main() {
         return;
     }
     let cfg = read_config();
+    WORK_DAYS.store(cfg.work_days_per_week, Ordering::Relaxed);
     let mut refresh = cfg.refresh;
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() >= 2 && (args[0] == "-n" || args[0] == "--refresh") {
@@ -3714,6 +3786,85 @@ mod tests {
         // Nothing to say without both halves.
         assert_eq!(lead(50.0, None, half), None);
         assert_eq!(lead(50.0, window, None), None);
+    }
+
+    /// Local noon on a date, as the epoch seconds the pace works in.
+    fn local_noon(y: i32, m: u32, d: u32) -> f64 {
+        Local
+            .from_local_datetime(&NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp() as f64
+    }
+
+    #[test]
+    fn seven_work_days_is_the_wall_clock_it_always_was() {
+        // The default must not move a single existing pace figure.
+        let week = 7.0 * 86400.0;
+        let reset = local_noon(2026, 10, 12);
+        let at = reset - 2.5 * 86400.0;
+        assert_eq!(progress_at(week, reset, at, 7), Some(4.5 / 7.0));
+        assert_eq!(config_from(&serde_json::json!({}), false).work_days_per_week, 7);
+    }
+
+    #[test]
+    fn a_five_day_week_has_spent_its_week_by_friday_night() {
+        // Monday noon to the next Monday noon holds five work days. By
+        // Saturday noon four and a half have gone and only Monday morning is
+        // left; the clock's five sevenths would show headroom that is not
+        // there.
+        let week = 7.0 * 86400.0;
+        let reset = local_noon(2026, 10, 12);
+        let saturday = local_noon(2026, 10, 10);
+        let got = progress_at(week, reset, saturday, 5).unwrap();
+        assert!((got - 0.9).abs() < 1e-9, "got {}", got);
+        // And it does not move across the weekend.
+        let sunday = local_noon(2026, 10, 11);
+        assert_eq!(progress_at(week, reset, sunday, 5), Some(got));
+        // Wednesday noon is two of five work days in, not two of seven.
+        let wednesday = local_noon(2026, 10, 7);
+        let got = progress_at(week, reset, wednesday, 5).unwrap();
+        assert!((got - 0.4).abs() < 1e-9, "got {}", got);
+    }
+
+    #[test]
+    fn a_monthly_cycle_counts_the_work_days_actually_in_it() {
+        // No monthly setting: October 2026 has 22 weekdays, and by noon on the
+        // 15th ten and a half have gone (the 1st is a Thursday).
+        let start = local_noon(2026, 10, 1) - 12.0 * 3600.0;
+        let reset = local_noon(2026, 11, 1) - 12.0 * 3600.0;
+        let got = progress_at(reset - start, reset, local_noon(2026, 10, 15), 5).unwrap();
+        assert!((got - 10.5 / 22.0).abs() < 1e-9, "got {}", got);
+    }
+
+    #[test]
+    fn a_window_under_a_day_stays_on_the_wall_clock() {
+        // A five-hour session on a Saturday is being used now; a work-day
+        // count would call it not started.
+        let five_hours = 5.0 * 3600.0;
+        let saturday = local_noon(2026, 10, 10);
+        assert_eq!(progress_at(five_hours, saturday + 3600.0, saturday, 5), Some(0.8));
+    }
+
+    #[test]
+    fn a_window_with_no_work_day_in_it_keeps_its_pace() {
+        // A one-day window on a Sunday with a five-day week has no work time
+        // at all, and falls back to the clock rather than dividing by zero.
+        let day = 86400.0;
+        let sunday = local_noon(2026, 10, 11);
+        assert_eq!(progress_at(day, sunday + 6.0 * 3600.0, sunday, 5), Some(0.75));
+    }
+
+    #[test]
+    fn work_days_per_week_is_held_to_a_week() {
+        let read = |v: serde_json::Value| {
+            config_from(&serde_json::json!({ "work_days_per_week": v }), false).work_days_per_week
+        };
+        assert_eq!(read(serde_json::json!(5)), 5);
+        // The settings screen may write a number as a float.
+        assert_eq!(read(serde_json::json!(6.0)), 6);
+        assert_eq!(read(serde_json::json!(0)), 1);
+        assert_eq!(read(serde_json::json!(9)), 7);
     }
 
     #[test]
