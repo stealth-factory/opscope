@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.37.0] - 2026-10-06
+
+### Features
+
+- **agent-usage**: Count only work days in the pace (#322)
+
 ## [0.36.0] - 2026-10-01
 
 ### Features
