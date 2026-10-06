@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.37.1] - 2026-10-06
+
+### Performance
+
+- **core**: Rewrite only the rows that changed in tc::draw() (#319)
+
 ## [0.37.0] - 2026-10-06
 
 ### Features
