@@ -249,6 +249,40 @@ fn scopes_for(configured: Vec<String>, discovered: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// One row per deployment, however many scopes returned it.
+///
+/// The personal scope is a request with no `teamId`, and Vercel answers
+/// that for the account's default team. Every account has one now, and
+/// `/v2/teams` lists it too, so asking for "personal and every team" asks
+/// for that team twice and every deployment in it was listed twice.
+/// Dropping the personal scope would not do: an account whose default is
+/// not among the discovered teams would lose its own deployments again.
+/// So the rows are merged by `uid`, keeping the copy that names its team,
+/// since that is the scope its detail request should carry.
+fn dedupe_by_uid(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for d in rows {
+        let uid = text(&d, "uid");
+        if uid.is_empty() {
+            out.push(d);
+            continue;
+        }
+        match at.get(&uid) {
+            Some(&i) => {
+                if text(&out[i], "_team").is_empty() && !text(&d, "_team").is_empty() {
+                    out[i] = d;
+                }
+            }
+            None => {
+                at.insert(uid, out.len());
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 /// How many pages of teams to walk before giving up on the cursor.
 const TEAM_PAGES: usize = 20;
 
@@ -1198,6 +1232,7 @@ fn main() {
                     }
                 }
             }
+            let mut out = dedupe_by_uid(out);
             if !poll_projects.is_empty() {
                 out.retain(|d| poll_projects.contains(&text(d, "name")));
             }
@@ -2098,6 +2133,35 @@ mod tests {
     #[test]
     fn an_account_with_no_teams_still_polls_itself() {
         assert_eq!(scopes_for(Vec::new(), Vec::new()), vec![""]);
+    }
+
+    /// The personal scope and the default team are the same deployments.
+    ///
+    /// A request without a `teamId` is answered for the account's default
+    /// team, which discovery also finds, so every row arrived twice.
+    #[test]
+    fn a_deployment_seen_by_two_scopes_is_listed_once() {
+        let rows = vec![
+            serde_json::json!({"uid": "dpl_1", "_team": ""}),
+            serde_json::json!({"uid": "dpl_2", "_team": ""}),
+            serde_json::json!({"uid": "dpl_1", "_team": "team_a"}),
+            serde_json::json!({"uid": "dpl_2", "_team": "team_a"}),
+            serde_json::json!({"uid": "dpl_3", "_team": "team_b"}),
+        ];
+        let kept = dedupe_by_uid(rows);
+        let seen: Vec<(String, String)> = kept
+            .iter()
+            .map(|d| (text(d, "uid"), text(d, "_team")))
+            .collect();
+        // The copy that names its team wins, so its detail asks that team.
+        assert_eq!(
+            seen,
+            vec![
+                ("dpl_1".into(), "team_a".into()),
+                ("dpl_2".into(), "team_a".into()),
+                ("dpl_3".into(), "team_b".into()),
+            ]
+        );
     }
 
     /// The line that says why a build failed is the one worth finding, and
