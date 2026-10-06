@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.37.2] - 2026-10-06
+
+### Bug Fixes
+
+- **vercel**: List each deployment once when personal and team scopes overlap (#325)
+
 ## [0.37.1] - 2026-10-06
 
 ### Performance
