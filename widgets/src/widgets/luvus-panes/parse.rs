@@ -17,8 +17,8 @@
 //! Everything that turns a UHP answer into rows.
 //!
 //! Pure, so it compiles and is tested on every target: the only part of
-//! this widget that touches the machine is spawning `luvus`, and that is
-//! the same command on Linux and macOS. Nothing here is `cfg`-gated.
+//! this widget that touches the machine is spawning `luvus` and `ps`, using
+//! the same commands on Linux and macOS. Nothing here is `cfg`-gated.
 
 use serde_json::Value;
 
@@ -248,6 +248,8 @@ pub struct Pane {
     pub cwd: String,
     /// What luvus says is in the pane — `bash`, `npm`, an agent's name.
     pub command: String,
+    pub is_opscope: bool,
+    pub root_pid: Option<u32>,
     /// One of the protocol's four states, or empty when it reported none.
     pub status: String,
     pub authority: String,
@@ -277,6 +279,7 @@ pub struct Snapshot {
     pub sequence: u64,
     pub spaces: Vec<Workspace>,
     pub panes: Vec<Pane>,
+    pub process_error: String,
 }
 
 /// The session out of one `luvus uhp snapshot`.
@@ -310,6 +313,9 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
                     kind: text_at(pane, "kind"),
                     cwd: text_at(pane, "cwd"),
                     command: text_at(pane, "agent"),
+                    is_opscope: crate::process_filter::matches("", &text_at(pane, "agent")),
+                    root_pid: pane["root_process"]["pid"].as_u64()
+                        .and_then(|pid| u32::try_from(pid).ok()).filter(|&pid| pid > 0),
                     status: text_at(pane, "agent_status"),
                     authority: text_at(pane, "agent_authority"),
                     focused: pane["focused"].as_bool().unwrap_or(false),
@@ -323,7 +329,52 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
         sequence: result["event_sequence"].as_u64().unwrap_or(0),
         spaces,
         panes,
+        process_error: String::new(),
     })
+}
+
+/// Match local process names and full commands without retaining either.
+/// UHP snapshots expose a root PID, but intentionally omit argv. The bounded
+/// local `ps` read happens in main; this parser follows each matching process
+/// to its ancestors so a shell hosting a dashboard is recognised too.
+pub fn parse_process_flags(text: &str) -> Result<std::collections::HashSet<u32>, String> {
+    let mut parents = std::collections::HashMap::new();
+    let mut matches = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let pid = fields.next().and_then(|s| s.parse::<u32>().ok())
+            .filter(|&pid| pid > 0).ok_or("local process scan returned an invalid PID")?;
+        let parent = fields.next().and_then(|s| s.parse::<u32>().ok())
+            .ok_or("local process scan returned an invalid parent PID")?;
+        let name = fields.next().ok_or("local process scan returned no executable name")?;
+        let command = fields.collect::<Vec<_>>().join(" ");
+        parents.insert(pid, parent);
+        if crate::process_filter::matches(name, &command) {
+            matches.push(pid);
+        }
+    }
+    if parents.is_empty() {
+        return Err("local process scan returned no processes".into());
+    }
+    let mut marked = std::collections::HashSet::new();
+    for mut pid in matches {
+        while pid > 0 && marked.insert(pid) {
+            pid = parents.get(&pid).copied().unwrap_or(0);
+        }
+    }
+    Ok(marked)
+}
+
+pub fn mark_opscope_processes(snapshot: &mut Snapshot, processes: Result<&str, String>) {
+    match processes.and_then(parse_process_flags) {
+        Ok(marked) => {
+            for pane in &mut snapshot.panes {
+                pane.is_opscope |= pane.root_pid.is_some_and(|pid| marked.contains(&pid));
+            }
+        }
+        Err(why) => snapshot.process_error = format!(
+            "opscope command filtering unavailable: {}; using reported names only", why),
+    }
 }
 
 /// A claimable unit of work, from `luvus task list --json`.
@@ -696,6 +747,62 @@ pub fn parse_explanation(text: &str) -> Result<Explanation, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_snapshot_root_pids_join_local_names_and_commands() {
+        for (agent, name, command, expected) in [
+            ("bash", "opscope-widget", "monitor", true),
+            ("bash", "OpScOpE", "monitor", true),
+            ("node", "node", "/opt/OpScOpE/dashboard.js", true),
+            ("npm", "node", "server.js", false),
+            ("OpScOpE widget", "node", "server.js", true),
+        ] {
+            // The UHP wire exposes pid and start_marker, never name/argv.
+            let text = serde_json::json!({"result": {"workspaces": [{"tabs": [{"panes": [
+                {"pane_id": "1", "agent": agent, "root_process": {"pid": 100, "start_marker": "fixture"}, "agent_status": "working"}
+            ]}]}]}}).to_string();
+            let mut snapshot = parse_snapshot(&text).unwrap();
+            let table = format!("100 1 bash bash\n101 100 {} {}\n102 1 normal normal", name, command);
+            mark_opscope_processes(&mut snapshot, Ok(&table));
+            assert_eq!(snapshot.panes[0].is_opscope, expected);
+            assert!(snapshot.process_error.is_empty());
+            let mut filter = crate::process_filter::Filter::default();
+            let count = |filter: &crate::process_filter::Filter| snapshot.panes.iter().filter(|p| filter.visible(p.is_opscope)).count();
+            assert_eq!(count(&filter), usize::from(!expected));
+            let mut selected = 3;
+            for _ in 0..2 {
+                filter.toggle(&mut selected);
+                assert_eq!(count(&filter), 1);
+                assert_eq!(selected, 0);
+                filter.toggle(&mut selected);
+                assert_eq!(count(&filter), usize::from(!expected));
+            }
+        }
+    }
+
+    #[test]
+    fn process_scan_keeps_unrelated_roots_and_bounds_parent_cycles() {
+        let flags = parse_process_flags("100 1 bash bash\n101 100 node /opt/OpScOpE/dashboard.js\n200 1 node server.js\n300 301 opscope opscope\n301 300 bash bash").unwrap();
+        assert!(flags.contains(&100));
+        assert!(flags.contains(&101));
+        assert!(flags.contains(&300) && flags.contains(&301));
+        assert!(!flags.contains(&200));
+        assert!(parse_process_flags("broken").is_err());
+        assert!(parse_process_flags("").is_err());
+    }
+
+    #[test]
+    fn unavailable_process_scan_is_reported_and_keeps_name_fallback() {
+        let mut snapshot = parse_snapshot(SNAPSHOT).unwrap();
+        mark_opscope_processes(&mut snapshot, Err("ps unavailable".into()));
+        assert!(snapshot.process_error.contains("ps unavailable"));
+        assert!(snapshot.panes.iter().all(|p| !p.is_opscope));
+        let mut snapshot = parse_snapshot(SNAPSHOT).unwrap();
+        snapshot.panes[0].is_opscope = true;
+        mark_opscope_processes(&mut snapshot, Ok("malformed"));
+        assert!(snapshot.panes[0].is_opscope);
+        assert!(snapshot.process_error.contains("invalid PID"));
+    }
 
     /// Shaped from a live `luvus uhp snapshot`, with the paths replaced.
     /// A fixture naming a real directory is a fixture that leaks one.

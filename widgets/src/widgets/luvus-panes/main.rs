@@ -28,6 +28,9 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
+#[path = "../../process_filter.rs"]
+mod process_filter;
+
 #[path = "parse.rs"]
 mod parse;
 
@@ -62,6 +65,10 @@ fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
 /// so there is nothing for a second command to add.
 fn focus_pane(session: &str, pane: &str) -> bool {
     luvus_text(session, &["pane", "focus", pane]).is_ok()
+}
+
+fn local_processes() -> Result<String, String> {
+    tc::run(&["ps", "-axww", "-o", "pid=,ppid=,comm=,args="], RUN_TIMEOUT)
 }
 
 /// Everything one poll established, each source answering for itself.
@@ -132,7 +139,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
     // The snapshot answers first because it is also the liveness probe: if
     // there is no server, nothing else is worth asking and the reason is
     // the same for every reading.
-    let snapshot = match luvus_text(session, &["uhp", "snapshot"]) {
+    let mut snapshot = match luvus_text(session, &["uhp", "snapshot"]) {
         Ok(text) => parse::parse_snapshot(&text),
         Err(why) => {
             let absent = parse::parse_failure(&why);
@@ -156,6 +163,13 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
             return;
         }
     };
+
+    if let Ok(snapshot) = &mut snapshot {
+        // One bounded local scan per poll, not one subprocess per pane. UHP
+        // provides root PIDs; full command lines never travel over its wire.
+        let processes = local_processes();
+        parse::mark_opscope_processes(snapshot, processes.as_deref().map_err(String::from));
+    }
 
     let agents = luvus_text(session, &["agent", "list", "--json"])
         .and_then(|text| parse::parse_agents(&text));
@@ -480,6 +494,13 @@ fn plural(n: usize) -> &'static str {
     } else {
         "s"
     }
+}
+
+fn pane_summary(total: usize, hidden_opscope: usize, resting: usize, show_idle: bool) -> String {
+    let hidden_idle = if show_idle { 0 } else { resting };
+    let visible = total - hidden_opscope - hidden_idle;
+    format!(" · {} {}pane{}", visible,
+        if hidden_opscope + hidden_idle > 0 { "visible " } else { "" }, plural(visible))
 }
 
 /// The filter `[i]` applies, named, or nothing when it is holding nothing.
@@ -817,6 +838,7 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
+    let mut opscope_filter = process_filter::Filter::default();
     let (mut selected, mut tick) = (0usize, 0usize);
     // How far down the body, in drawn rows, the window has scrolled. Kept
     // across frames so the view holds still while the cursor moves inside
@@ -874,6 +896,12 @@ fn main() {
                     if let Ok(mut asked) = lock.lock() {
                         *asked = true;
                         cond.notify_all();
+                    }
+                }
+                "o" | "O" => {
+                    if detail.is_none() {
+                        opscope_filter.toggle(&mut selected);
+                        moved = true;
                     }
                 }
                 "i" | "I" => {
@@ -1076,6 +1104,9 @@ fn main() {
             .filter(|n| !claimed.contains(&n.pane_id))
             .cloned()
             .collect();
+        let total_others = others.len();
+        let hidden_opscope = others.iter().filter(|n| !opscope_filter.visible(n.is_opscope)).count();
+        others.retain(|n| opscope_filter.visible(n.is_opscope));
         // Unstated first, then busy, then the prompts: the row that wants
         // looking at is the one where luvus could not say.
         others.sort_by_key(|n| match n.status.as_str() {
@@ -1160,7 +1191,7 @@ fn main() {
         }
         summary.push((
             p.dim.as_str(),
-            format!(" · {} pane{}", panes.len(), plural(panes.len())),
+            pane_summary(panes.len(), hidden_opscope, resting.len(), show_idle),
         ));
         for state_name in ["blocked", "done", "working", "idle"] {
             if let Some(n) = counts.get(state_name) {
@@ -1261,13 +1292,22 @@ fn main() {
         // a short list looking like a quiet session. It goes in the pinned
         // header so it cannot scroll away from the list it qualifies, and
         // it is drawn only while it is holding something back.
-        let hidden_idle = idle_filter(show_idle, resting.len());
+        let mut hidden_idle = idle_filter(show_idle, resting.len());
+        hidden_idle.extend(opscope_filter.description(hidden_opscope));
+        if !opscope_filter.show {
+            if let Ok(s) = &snapshot {
+                if !s.process_error.is_empty() {
+                    hidden_idle.push(format!("! {}", s.process_error));
+                }
+            }
+        }
         // `others`, not `panes`: a pane holding a recognised agent is in
         // AGENTS rather than in this list, and counting it here would
         // report it as something the filter had hidden.
         // Held out of `head` until after the prune: that loop pops from
         // the bottom, and this row would be the first content it took.
-        let filter_line = tc::filter_row(busy.len(), others.len(), &hidden_idle).map(|said| {
+        let shown = busy.len() + if show_idle { resting.len() } else { 0 };
+        let filter_line = tc::filter_row(shown, total_others, &hidden_idle).map(|said| {
             tc::seg(
                 &[(p.dim.as_str(), format!(" {}", said))],
                 w.saturating_sub(1),
@@ -1279,6 +1319,9 @@ fn main() {
         // It wraps, so how many rows it takes depends on the width, and the
         // body cannot know its own budget until that is settled.
         let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![
+                (p.dim.as_str(), format!("[o]{} Opscope", if opscope_filter.show { "hide" } else { "show" })),
+            ],
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
@@ -1550,7 +1593,8 @@ fn main() {
                 && agents.as_ref().is_ok_and(|a| a.is_empty())
                 && tasks.as_ref().is_ok_and(|t| t.is_empty())
                 && leases.as_ref().is_ok_and(|l| l.is_empty())
-                && busy.is_empty();
+                && busy.is_empty()
+                && hidden_opscope == 0;
             if nothing_under_it {
                 let (said, next) = if panes.is_empty() {
                     (
@@ -2153,13 +2197,13 @@ fn main() {
                 // every pane is resting, and a session with no panes at
                 // all. Saying the first about the second would be a claim
                 // about panes that do not exist.
+                let empty = process_filter::empty_message(
+                    hidden_opscope, resting.len(),
+                    if panes.is_empty() { "no panes in this session" } else { "every other pane is idle at a prompt" },
+                );
                 let (said, bad) = empty_or_why(
                     &snapshot.clone().map(|s| s.panes),
-                    if panes.is_empty() {
-                        "no panes in this session"
-                    } else {
-                        "every other pane is idle at a prompt"
-                    },
+                    &empty,
                 );
                 body.push(tc::seg(
                     &[(
@@ -2333,6 +2377,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_process_scan_works_on_the_current_host() {
+        if !tc::missing(&["ps"]).is_empty() {
+            return; // Optional at runtime; fixture tests cover unavailable scans.
+        }
+        let table = local_processes().expect("ps should supply the local process table");
+        assert!(parse::parse_process_flags(&table).is_ok());
+    }
+
+    #[test]
+    fn pane_summary_counts_both_filters_without_double_counting() {
+        // Four panes: one Opscope, two idle, and one busy. `resting` is
+        // counted after removing Opscope panes, as it is in the live view.
+        assert_eq!(pane_summary(4, 1, 2, false), " · 1 visible pane");
+        assert_eq!(pane_summary(4, 1, 2, true), " · 3 visible panes");
+        assert_eq!(pane_summary(4, 0, 2, false), " · 2 visible panes");
+        assert_eq!(pane_summary(4, 0, 2, true), " · 4 panes");
+        assert_eq!(pane_summary(1, 1, 0, false), " · 0 visible panes");
+    }
 
     #[test]
     fn hiding_the_idle_panes_is_a_filter_the_pane_states() {

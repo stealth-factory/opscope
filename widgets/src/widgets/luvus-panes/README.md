@@ -183,8 +183,8 @@ this repository is public and screenshots of it are not.
 
 ## How it knows
 
-Everything comes from the session's own Universal Harness Protocol 1.0
-answers, through the `luvus` CLI, and nothing here writes:
+Session data comes from its own Universal Harness Protocol 1.0 answers,
+through the `luvus` CLI. Nothing here writes:
 
 - `luvus uhp snapshot` — the whole session in one call: workspaces (name, cwd,
   branch) → tabs → panes (id, cwd, focused, what is in it, its state and the
@@ -198,6 +198,12 @@ answers, through the `luvus` CLI, and nothing here writes:
   session.
 - `luvus git status` — the focused workspace's checkout.
 - `luvus worktree list` — every checkout of that repository.
+- A bounded local `ps` scan joins process names and full commands to the
+  snapshot's root PIDs, including descendants, to identify Opscope panes.
+  Argument text is used only for matching; it is not displayed or saved.
+  This requires the widget and Luvus session to run on the same machine.
+  If the scan fails, a warning says command filtering is unavailable and
+  only Luvus's reported command labels are matched.
 
 **`agent list` is what decides who is an agent.** A plain shell sitting at a
 prompt looks enough like an agent from the outside that taking the wider
@@ -231,6 +237,7 @@ readings of the same screen. The title and the counts never go.
 | `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
 | `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — focus the selected pane |
+| `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
 | `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |
 | `,` | open settings |

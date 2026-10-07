@@ -41,3 +41,6 @@ you jump straight to whatever needs you, l toggles workspace labels vs pane
 ids, i shows or hides the idle section,
 r refreshes now, comma opens settings, q quits.
 Requires HERDR_ENV; it shells out to the `herdr` CLI.
+
+Press o to show or hide Opscope processes (hidden by default). Matching is
+case-insensitive in process names and commands, including dashboard widgets.
