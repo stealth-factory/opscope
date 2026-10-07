@@ -1319,6 +1319,16 @@ fn main() {
                 ],
                 w - 1,
             ));
+            // The name grows with the pane rather than being cut at 16. The
+            // glyph, the time, the day with a UTC+5:30 offset and a day shift
+            // are the fixed cells, and one more keeps a full-length name off
+            // the time.
+            let longest = ordered
+                .iter()
+                .map(|c| tc::display_width(&c.name) + 1)
+                .max()
+                .unwrap_or(0);
+            let name_w = tc::fit_columns((w - 1).saturating_sub(3 + 5 + 16 + 7), &[(16, longest)])[0];
             for city in ordered.iter().skip(scroll).take(shown) {
                 let there = now.with_timezone(&city.zone);
                 // Sun or moon by the local hour, which is the fastest way
@@ -1328,7 +1338,7 @@ fn main() {
                 rows.push(tc::seg(
                     &[
                         (ink.as_str(), format!(" {} ", glyph)),
-                        (p.txt.as_str(), tc::pad(&city.name, 16)),
+                        (p.txt.as_str(), tc::pad(&city.name, name_w)),
                         (p.txt.as_str(), there.format("%H:%M").to_string()),
                         (
                             p.dim.as_str(),

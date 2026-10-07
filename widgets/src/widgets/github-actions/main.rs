@@ -686,6 +686,42 @@ fn columns(w: usize) -> Columns {
     }
 }
 
+/// How wide the BRANCH and EVENT columns are drawn this frame.
+///
+/// Fourteen and twelve were the widths whatever the pane, which cut
+/// `pull_request_target` and most branch names on a pane with a hundred
+/// columns to spare. Those stay the minimums; the room the fixed cells
+/// leave is shared with the repo after them, which is unpadded but takes
+/// its share so a long branch does not push it off the row.
+fn text_widths(
+    cols: &Columns,
+    w: usize,
+    runs: impl Iterator<Item = (String, String, String)>,
+) -> (usize, usize) {
+    if !cols.detail {
+        return (14, 12);
+    }
+    let (mut branch, mut event, mut repo) = (0, 0, 0);
+    for (b, e, r) in runs {
+        branch = branch.max(tc::display_width(&b));
+        event = event.max(tc::display_width(&e));
+        repo = repo.max(tc::display_width(&r));
+    }
+    // The mark and outcome, the duration, the age and the sha, then the
+    // spaces in front of the branch and the repo; the event's space and the
+    // queue time when they are on the row.
+    let fixed = 12 + 7 + 5 + 9 + 1 + 2
+        + if cols.event { 1 } else { 0 }
+        + if cols.queued { 7 } else { 0 };
+    let room = w.saturating_sub(1).saturating_sub(fixed);
+    if cols.event {
+        let fit = tc::fit_columns(room, &[(14, branch), (12, event), (0, repo)]);
+        (fit[0], fit[1])
+    } else {
+        (tc::fit_columns(room, &[(14, branch), (0, repo)])[0], 12)
+    }
+}
+
 struct Palette {
     ok: String,
     run: String,
@@ -2180,6 +2216,10 @@ fn main() {
             moved = false;
         }
 
+        let (branch_w, event_w) = text_widths(&cols, w, shown.iter().map(|r| {
+            (text(r, "branch"), text(r, "event"), text(r, "repo"))
+        }));
+
         // The span each run covers, taken from where its rows started
         // and ended: a run is one row, or two when its jobs are drawn.
         let mut rows_at: Vec<(usize, usize)> = Vec::new();
@@ -2239,11 +2279,11 @@ fn main() {
                 ));
                 line.push((
                     c(&p.branch),
-                    format!(" {}", tc::pad(&text(run, "branch"), 14)),
+                    format!(" {}", tc::pad(&text(run, "branch"), branch_w)),
                 ));
             }
             if cols.event {
-                line.push((c(&p.dim), format!(" {}", tc::pad(&text(run, "event"), 12))));
+                line.push((c(&p.dim), format!(" {}", tc::pad(&text(run, "event"), event_w))));
             }
             if cols.queued {
                 line.push((
@@ -2251,8 +2291,10 @@ fn main() {
                     format!(" q{}", dur_label(queue_secs(run, tc::now())).trim()),
                 ));
             }
-            // Everything above this point is a fixed width that its own
-            // values cannot exceed, so nothing above can be cut. The repo
+            // Everything above this point is either a fixed width its own
+            // values cannot exceed or, for the branch and the event, as
+            // wide as this frame's longest when the pane has the room
+            // (`text_widths`), so nothing above is cut on a wide pane. The repo
             // is the first field whose length is somebody else's decision,
             // which is why it goes last and takes whatever is left rather
             // than being padded into a budget - CLAUDE.md asks for columns
@@ -2805,10 +2847,27 @@ mod tests {
         assert!(columns(100).event);
         assert!(!columns(100).queued);
         assert!(columns(114).queued);
-        // No name has a width budget any more. Every remaining field on the
-        // first row is a fixed shape its own values cannot outgrow, so the
-        // only thing width decides is which optional columns appear - which
-        // is what the assertions above check.
+        // The branch and the event are the two names before the repo;
+        // `a_wide_pane_shows_the_whole_branch_and_event` covers how wide.
+    }
+
+    #[test]
+    fn a_wide_pane_shows_the_whole_branch_and_event() {
+        // Fourteen and twelve cut `pull_request_target` and most branches
+        // on any pane, with the room to show them left blank.
+        let run = || {
+            std::iter::once((
+                "feature/responsive-columns-for-agents".to_string(),
+                "pull_request_target".to_string(),
+                "stealth-factory/opscope".to_string(),
+            ))
+        };
+        assert_eq!(text_widths(&columns(200), 200, run()), (37, 19));
+        // Narrower, they share what is left with the repo and never drop
+        // below the old widths.
+        let (branch, event) = text_widths(&columns(100), 100, run());
+        assert!(branch >= 14 && event >= 12 && branch < 37);
+        assert_eq!(text_widths(&columns(60), 60, run()), (14, 12));
     }
 
     #[test]

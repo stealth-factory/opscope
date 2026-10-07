@@ -476,6 +476,31 @@ fn refilled_sources_note() -> Option<String> {
         .then(|| "config: `sources` is empty — using the three shipped searches".into())
 }
 
+/// How wide REPO is drawn, given the cells REPO and TITLE share.
+///
+/// Eighteen whatever the pane, which cut a long repo name on a pane with
+/// the room to show it. Eighteen and TITLE's sixteen stay the minimums,
+/// and the rest is shared between the two by what each still cuts; TITLE
+/// then takes everything REPO did not, so the columns after it stay
+/// pinned to the right edge. Each wants one cell more than its longest
+/// value, since both are clipped a cell short of the next column.
+fn repo_width(room: usize, prs: &[serde_json::Value]) -> usize {
+    let longest = |f: &dyn Fn(&serde_json::Value) -> usize| prs.iter().map(f).max().unwrap_or(0);
+    let repo = longest(&|pr| {
+        let full = text(&pr["repository"], "nameWithOwner");
+        tc::display_width(full.rsplit('/').next().unwrap_or("")) + 1
+    });
+    // The longest a title is drawn: the stack mark and the draft prefix
+    // are both part of it.
+    let title = longest(&|pr| {
+        tc::display_width(&text(pr, "title"))
+            + if pr["stackEntry"].is_null() { 0 } else { 2 }
+            + if pr["isDraft"].as_bool().unwrap_or(false) { 8 } else { 0 }
+            + 1
+    });
+    tc::fit_columns(room, &[(18, repo), (16, title)])[0]
+}
+
 fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
@@ -3308,10 +3333,10 @@ fn list_view(
     // and the title takes exactly what is left, so nothing runs off the
     // right edge or into its neighbour.
     let wide = w >= 96;
-    let repo_w = if wide { 18 } else { 0 };
     let size_w = if wide { 12 } else { 0 };
-    let fixed = 8 + repo_w + 13 + 8 + 6 + size_w;
-    let title_w = (w - 1).saturating_sub(fixed).max(16);
+    let fixed = 8 + 13 + 8 + 6 + size_w;
+    let repo_w = if wide { repo_width(w - 1 - fixed.min(w - 1), prs) } else { 0 };
+    let title_w = (w - 1).saturating_sub(fixed + repo_w).max(16);
     let mut head = format!(" {:<7}", "PR");
     if repo_w > 0 {
         head += &format!("{:<width$}", "REPO", width = repo_w);
@@ -3908,6 +3933,26 @@ fn detail_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_repo_name_is_cut_only_when_the_title_needs_the_room() {
+        // REPO was eighteen whatever the pane, so a long name was cut on a
+        // pane with cells to spare.
+        let pr = |repo: &str, title: &str| {
+            serde_json::json!({
+                "repository": {"nameWithOwner": format!("org/{}", repo)},
+                "title": title,
+                "stackEntry": null,
+            })
+        };
+        let prs = vec![pr("a-repository-with-a-long-name", "short title")];
+        assert_eq!(repo_width(150, &prs), 30);
+        // A long title shares the spare evenly, and REPO never drops below
+        // eighteen.
+        let prs = vec![pr("a-repository-with-a-long-name", &"t".repeat(200))];
+        assert_eq!(repo_width(40, &prs), 21);
+        assert_eq!(repo_width(20, &prs), 18);
+    }
 
     #[test]
     fn the_from_hint_names_the_source_the_next_press_goes_to() {

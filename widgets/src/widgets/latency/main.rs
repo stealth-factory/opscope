@@ -1485,6 +1485,15 @@ fn main() {
                 w - 1,
             ));
         }
+        // The host grows past 22 when the pane has room: the fixed cells
+        // are the time and the kind, and the detail after it takes its
+        // share so a long host does not push it off the row.
+        let host_w = {
+            let at_w = recent.iter().map(|e| tc::display_width(&e.at) + 2).max().unwrap_or(0);
+            let host = recent.iter().map(|e| tc::display_width(&e.host) + 1).max().unwrap_or(0);
+            let detail = recent.iter().map(|e| tc::display_width(&e.detail)).max().unwrap_or(0);
+            tc::fit_columns((w - 1).saturating_sub(at_w + 6), &[(22, host), (0, detail)])[0]
+        };
         for event in &recent {
             let kind_c = match event.kind {
                 "LOSS" | "DOWN" => &p.bad,
@@ -1495,7 +1504,7 @@ fn main() {
                 &[
                     (p.dim.as_str(), format!(" {} ", event.at)),
                     (kind_c.as_str(), format!("{:<6}", event.kind)),
-                    (event.hue.as_str(), tc::pad(&event.host, 22)),
+                    (event.hue.as_str(), tc::pad(&event.host, host_w)),
                     (p.dim.as_str(), event.detail.clone()),
                 ],
                 w - 1,

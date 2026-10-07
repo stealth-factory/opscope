@@ -2390,6 +2390,35 @@ fn main() {
                 w - 1,
             ));
         }
+        // The team and cycle name, which was cut at 18 whatever the pane.
+        let cycle_name = |c: &serde_json::Value| {
+            format!(
+                "{} {}",
+                match text(&c["team"], "key") {
+                    k if k.is_empty() => "?".to_string(),
+                    k => k,
+                },
+                match text(c, "name") {
+                    n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
+                    n => n,
+                }
+            )
+        };
+        // The meter grows to 28 and stops; past that the cells it leaves go
+        // to a name being cut. 54 is the row with an 18-cell name: the
+        // marker, the name, and 35 for the figures after the meter.
+        let meter_w = w.saturating_sub(54).clamp(8, 28);
+        let cycle_name_w = tc::fit_columns(
+            w.saturating_sub(54 - 18).saturating_sub(meter_w),
+            &[(
+                18,
+                ranked_cycles
+                    .iter()
+                    .map(|c| tc::display_width(&cycle_name(c)) + 1)
+                    .max()
+                    .unwrap_or(0),
+            )],
+        )[0];
         for (ci, c) in ranked_cycles.iter().enumerate() {
             let (from, slot) = (rows.len(), targets.len());
             targets.push((cycles_pane, ci));
@@ -2402,17 +2431,7 @@ fn main() {
             let left_days = parse(&text(c, "endsAt"))
                 .map(|ends| (ends - Utc::now().naive_utc()).num_days());
             let frac = if scope > 0.0 { done / scope } else { 0.0 };
-            let name = format!(
-                "{} {}",
-                match text(&c["team"], "key") {
-                    k if k.is_empty() => "?".to_string(),
-                    k => k,
-                },
-                match text(c, "name") {
-                    n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
-                    n => n,
-                }
-            );
+            let name = cycle_name(c);
             let on = focus == Some(cycles_pane) && ci == sel[cycles_pane];
             let tint = if on { tc::bg(38, 56, 76) } else { String::new() };
             let c_of = |colour: &str| {
@@ -2441,12 +2460,9 @@ fn main() {
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),
-                    format!("{}{}", if on { "▸" } else { " " }, tc::pad(&name, 18)),
+                    format!("{}{}", if on { "▸" } else { " " }, tc::pad(&name, cycle_name_w)),
                 ),
-                (
-                    c_of(&hot),
-                    tc::meter(frac, (w.saturating_sub(54)).clamp(8, 28)),
-                ),
+                (c_of(&hot), tc::meter(frac, meter_w)),
                 (
                     c_of(if scope > 0.0 { &hot } else { &p.dim }),
                     format!(
@@ -2660,12 +2676,25 @@ fn main() {
             ],
             w - 1,
         ));
+        // The key and name grow past 22 when the pane has room; the four
+        // counts and the marker are the fixed cells.
+        let team_w = tc::fit_columns(
+            w.saturating_sub(1 + 1 + 6 + 7 + 8 + 8),
+            &[(
+                22,
+                ranked
+                    .iter()
+                    .map(|(key, name)| tc::display_width(&format!("{}  {}", key, name)) + 1)
+                    .max()
+                    .unwrap_or(0),
+            )],
+        )[0];
         rows.push(tc::seg(
             &[(
                 p.dim.as_str(),
                 tc::pad(
                     &format!(
-                        " {:<22}{:>6}{:>7}{:>8}{:>8}",
+                        " {:<team_w$}{:>6}{:>7}{:>8}{:>8}",
                         "TEAM",
                         "OPEN",
                         "TRIAGE",
@@ -2710,7 +2739,7 @@ fn main() {
                     format!(
                         "{}{}",
                         if here { "▸" } else { " " },
-                        tc::pad(&format!("{}  {}", key, name), 22)
+                        tc::pad(&format!("{}  {}", key, name), team_w)
                     ),
                 ),
                 (c_of(&p.new), format!("{:>6}", count("open"))),

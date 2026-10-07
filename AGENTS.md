@@ -359,7 +359,8 @@ which the compiler now makes impossible. It went with the Python.
 24-bit `rgb()` and the green→amber→red `heat()` ramp — with `heat_on()`
 and `health_on()`, the same ramp with its hot end lifted for anything drawn
 on a tinted row — `seg()` for clipping
-coloured segments to a cell budget, `pack_hints()` and the `pack_hints_placed()`
+coloured segments to a cell budget, `fit_columns()` for text columns that
+grow with the pane instead of stopping at a fixed width, `pack_hints()` and the `pack_hints_placed()`
 that also says where each hint landed, `follow()` for a window
 that keeps a cursor in view with `item_at()` and `rows_clicked()` for undoing it, bar and chart helpers (`vbars`, `vbars_down`,
 `stacked_bar`, `meter`, `skeleton`), `get()` and `post_json()` over `curl`,

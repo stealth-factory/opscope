@@ -1159,20 +1159,46 @@ fn chart_head(len: usize, w: usize, label: &str, interval: f64, p: &Palette) -> 
 /// width lives in a function so the heading and the rows read it from the
 /// same place: a heading that has slipped a column is worse than no heading,
 /// because it labels the wrong number with confidence.
-fn endpoint_host_w(w: usize) -> usize {
+///
+/// Each list's first column fills the room its tail leaves up to a ceiling,
+/// and the ceiling is the longest name in the list when that is wider: a
+/// fixed 34 or 38 cut a long host or an IPv6 socket on a pane with the room
+/// to show it. Every name is clipped a cell short of the next column, hence
+/// the one added to the longest.
+fn endpoint_host_w(w: usize, longest: usize) -> usize {
     // 44, not 42: the fixed tail is 9 for ports, 10 for rx, 11 for tx and 11
     // for the rate, plus 3 for the selection mark. It was written as 42, so
     // between 59 and 77 columns the host name took two cells the rate needed
     // and seg() clipped "12.4 KB/s" down to "12.4 KB". A rate short of its
     // unit is not a smaller rate, it is a wrong one.
-    ((w - 1).saturating_sub(44)).clamp(14, 34)
+    ((w - 1).saturating_sub(44)).clamp(14, 34.max(longest + 1))
 }
 
-fn connection_host_w(w: usize) -> usize {
+fn connection_host_w(w: usize, longest: usize) -> usize {
     // 37 is the fixed tail exactly: 3 for the mark, 6 for our port, 7 for the
     // state, 10 for rx and 11 for tx. Counted, not estimated - the endpoint
     // list had this written as 42 when it was 44 and quietly clipped the rate.
-    ((w - 1).saturating_sub(37)).clamp(14, 38)
+    ((w - 1).saturating_sub(37)).clamp(14, 38.max(longest + 1))
+}
+
+/// The name an endpoint row shows: what the resolver found, else the address.
+fn endpoint_name(spot: &Spot, names: &Resolver) -> String {
+    let found = names.name(&spot.peer);
+    if found.is_empty() { spot.peer.clone() } else { found }
+}
+
+/// The widest name the endpoint list has, for its HOST column.
+fn endpoint_longest(spots: &[Spot], names: &Resolver) -> usize {
+    spots.iter().map(|s| tc::display_width(&endpoint_name(s, names))).max().unwrap_or(0)
+}
+
+/// The widest `peer:port` the connection list has, for its SOCKET column.
+fn connection_longest(conns: &[Conn]) -> usize {
+    conns
+        .iter()
+        .map(|c| tc::display_width(&format!("{}:{}", c.peer, c.port)))
+        .max()
+        .unwrap_or(0)
 }
 
 fn file_path_w(w: usize) -> usize {
@@ -1181,13 +1207,13 @@ fn file_path_w(w: usize) -> usize {
 
 /// The column names above `endpoint_rows`. The leading three cells are the
 /// selection mark's column, left blank here.
-fn endpoint_head(w: usize, p: &Palette) -> String {
+fn endpoint_head(w: usize, longest: usize, p: &Palette) -> String {
     tc::seg(
         &[(
             p.dim.as_str(),
             format!(
                 "   {}{:<9}{:>10}{:>11}{:>11}",
-                tc::pad("HOST", endpoint_host_w(w)),
+                tc::pad("HOST", endpoint_host_w(w, longest)),
                 "PORTS",
                 "RX",
                 "TX",
@@ -1199,13 +1225,13 @@ fn endpoint_head(w: usize, p: &Palette) -> String {
 }
 
 /// The column names above `connection_rows`.
-fn connection_head(w: usize, p: &Palette) -> String {
+fn connection_head(w: usize, longest: usize, p: &Palette) -> String {
     tc::seg(
         &[(
             p.dim.as_str(),
             format!(
                 "   {}{:<6}{:<7}{:>10}{:>11}",
-                tc::pad("SOCKET", connection_host_w(w)),
+                tc::pad("SOCKET", connection_host_w(w, longest)),
                 "LOCAL",
                 "STATE",
                 "RX",
@@ -1242,7 +1268,7 @@ fn endpoint_rows(
     names: &Resolver,
     p: &Palette,
 ) -> Vec<String> {
-    let host_w = endpoint_host_w(w);
+    let host_w = endpoint_host_w(w, endpoint_longest(spots, names));
     spots
         .iter()
         .take(room.max(1))
@@ -1250,10 +1276,7 @@ fn endpoint_rows(
         .map(|(i, spot)| {
             let here = focused && i == at;
             let tint = if here { tc::bg(28, 44, 62) } else { String::new() };
-            let name = {
-                let found = names.name(&spot.peer);
-                if found.is_empty() { spot.peer.clone() } else { found }
-            };
+            let name = endpoint_name(spot, names);
             let ports: Vec<String> = spot
                 .ports
                 .iter()
@@ -1302,7 +1325,7 @@ fn connection_rows(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    let host_w = connection_host_w(w);
+    let host_w = connection_host_w(w, connection_longest(conns));
     conns
         .iter()
         .take(room.max(1))
@@ -1539,7 +1562,7 @@ fn detail_rows(
             };
             out.push(tc::seg(&[(p.dim.as_str(), empty)], w - 1));
         } else if which == 0 {
-            out.push(endpoint_head(w, p));
+            out.push(endpoint_head(w, endpoint_longest(spots, names), p));
             let mut rows = endpoint_rows(spots, at[which], focused, room, w, names, p);
             // The chart belongs under the line it describes, not after the
             // list: with it at the bottom you had to hold which host was
@@ -1559,7 +1582,7 @@ fn detail_rows(
             }
             out.extend(rows);
         } else if which == 1 {
-            out.push(connection_head(w, p));
+            out.push(connection_head(w, connection_longest(conns), p));
             let mut rows = connection_rows(conns, at[which], focused, room, w, p);
             let pick_at = at[which].min(conns.len().saturating_sub(1));
             if focused {
@@ -2598,9 +2621,13 @@ fn table(
     let avail = (w - 1).saturating_sub(2 + 8 + 11);
     let wide = avail >= 10 + 11 + 22;
     let mid = avail >= 10 + 11;
+    // Up to 26, or past it to the longest name when the pane has the room:
+    // a fixed ceiling cut long process names beside blank cells. The name
+    // is clipped two short of its column.
+    let longest = rows.iter().map(|r| tc::display_width(&r.name) + 2).max().unwrap_or(0);
     let name_w = avail
         .saturating_sub(if wide { 33 } else if mid { 11 } else { 0 })
-        .clamp(8, 26);
+        .clamp(8, 26.max(longest));
 
     let mut head = vec![
         (p.dim.as_str(), format!("  {}", tc::pad("PROCESS", name_w))),
@@ -2961,7 +2988,7 @@ mod tests {
         };
         spot.ports.insert(9999);
         for w in [60usize, 84, 120, 200] {
-            let head = bare(&endpoint_head(w, &p));
+            let head = bare(&endpoint_head(w, endpoint_longest(&[spot.clone()], &names), &p));
             let row = bare(&endpoint_rows(&[spot.clone()], 0, false, 1, w, &names, &p)[0]);
             let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
             assert_eq!(head.chars().count(), wide, "heading width at w={}", w);
@@ -2986,7 +3013,7 @@ mod tests {
             ..Default::default()
         };
         for w in [66usize, 84, 120, 200] {
-            let head = bare(&connection_head(w, &p));
+            let head = bare(&connection_head(w, connection_longest(&[conn.clone()]), &p));
             let row = bare(&connection_rows(&[conn.clone()], 0, false, 1, w, &p)[0]);
             let (wide, down, up) = (row.chars().count(), col(&row, "↓"), col(&row, "↑"));
             assert_eq!(head.chars().count(), wide, "heading width at w={}", w);

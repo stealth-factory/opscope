@@ -1145,8 +1145,12 @@ fn main() {
 
         let wide = w >= 62;
         // Machine names are long; spend spare width on them, not padding.
+        // Up to 32, or past it to the longest name when the pane has the
+        // room: a fixed 32 cut a long name beside blank cells. A name is
+        // clipped a cell short of its column, hence the one.
+        let longest = listed.iter().map(|peer| tc::display_width(&peer_name(peer)) + 1).max().unwrap_or(0);
         let namew = if wide {
-            (w.saturating_sub(45)).clamp(16, 32)
+            (w.saturating_sub(45)).clamp(16, 32.max(longest))
         } else {
             w.saturating_sub(22).max(12)
         };
