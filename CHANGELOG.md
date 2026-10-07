@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.37.3] - 2026-10-07
+
+### Bug Fixes
+
+- Let widget text columns grow with the pane (#328)
+
 ## [0.37.2] - 2026-10-06
 
 ### Bug Fixes
