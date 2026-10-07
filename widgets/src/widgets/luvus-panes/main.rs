@@ -2380,6 +2380,9 @@ mod tests {
 
     #[test]
     fn local_process_scan_works_on_the_current_host() {
+        if !tc::missing(&["ps"]).is_empty() {
+            return; // Optional at runtime; fixture tests cover unavailable scans.
+        }
         let table = local_processes().expect("ps should supply the local process table");
         assert!(parse::parse_process_flags(&table).is_ok());
     }
