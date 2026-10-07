@@ -231,6 +231,7 @@ readings of the same screen. The title and the counts never go.
 | `Tab` | jump to the head of the next section, wrapping past the last — IDLE is one of those sections only while it is on screen |
 | `Ctrl-Y` `Ctrl-E` `PgUp` `PgDn` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — focus the selected pane |
+| `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
 | `i` | show/hide the idle section; hiding it also drops it from tab order |
 | `r` | refresh now |
 | `,` | open settings |

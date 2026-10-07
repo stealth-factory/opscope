@@ -67,3 +67,6 @@ the pane currently has on screen. The panel is read-only; it never answers
 the prompt it is showing you. esc closes it, as does a second e.
 
 Requires the `luvus` command; it reads a running session over UHP.
+
+Press o to show or hide Opscope processes (hidden by default). Matching is
+case-insensitive in process names and commands, including dashboard widgets.

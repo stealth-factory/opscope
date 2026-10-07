@@ -248,6 +248,7 @@ pub struct Pane {
     pub cwd: String,
     /// What luvus says is in the pane — `bash`, `npm`, an agent's name.
     pub command: String,
+    pub is_opscope: bool,
     /// One of the protocol's four states, or empty when it reported none.
     pub status: String,
     pub authority: String,
@@ -310,6 +311,19 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
                     kind: text_at(pane, "kind"),
                     cwd: text_at(pane, "cwd"),
                     command: text_at(pane, "agent"),
+                    is_opscope: crate::process_filter::matches(
+                        &text_at(&pane["root_process"], "name"),
+                        &format!(
+                            "{} {} {} {}",
+                            text_at(pane, "agent"),
+                            text_at(pane, "command"),
+                            text_at(&pane["root_process"], "command"),
+                            pane["root_process"]["argv"]
+                                .as_array()
+                                .map(|args| args.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
+                                .unwrap_or_default()
+                        ),
+                    ),
                     status: text_at(pane, "agent_status"),
                     authority: text_at(pane, "agent_authority"),
                     focused: pane["focused"].as_bool().unwrap_or(false),
@@ -697,6 +711,36 @@ pub fn parse_explanation(text: &str) -> Result<Explanation, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn opscope_snapshot_matches_names_and_commands_in_both_toggle_states() {
+        for (agent, root, command, expected) in [
+            ("bash", serde_json::json!({"name": "opscope-widget"}), "", true),
+            ("bash", serde_json::json!({"name": "OpScOpE"}), "", true),
+            ("bash", serde_json::json!({"name": "sh", "argv": ["sh", "-c", "OpScOpE dashboard"]}), "", true),
+            ("bash", serde_json::json!({"command": "/opt/opscope/bin/widget"}), "", true),
+            ("bash", serde_json::json!({}), "OPSCOPE dashboard", true),
+            ("OpScOpE widget", serde_json::json!({}), "", true),
+            ("npm", serde_json::json!({"name": "node", "argv": ["node", "server.js"]}), "npm start", false),
+            ("", serde_json::json!({}), "", false),
+        ] {
+            let text = serde_json::json!({"result": {"workspaces": [{"tabs": [{"panes": [
+                {"pane_id": "1", "agent": agent, "command": command, "root_process": root, "agent_status": "working"}
+            ]}]}]}}).to_string();
+            let snapshot = parse_snapshot(&text).unwrap();
+            assert_eq!(snapshot.panes[0].is_opscope, expected, "{text}");
+            let mut filter = crate::process_filter::Filter::default();
+            let count = |filter: &crate::process_filter::Filter| snapshot.panes.iter().filter(|p| filter.visible(p.is_opscope)).count();
+            assert_eq!(count(&filter), usize::from(!expected));
+            let mut selected = 3;
+            for _ in 0..2 {
+                filter.toggle(&mut selected);
+                assert_eq!(count(&filter), 1);
+                assert_eq!(selected, 0);
+                filter.toggle(&mut selected);
+                assert_eq!(count(&filter), usize::from(!expected));
+            }
+        }
+    }
     /// Shaped from a live `luvus uhp snapshot`, with the paths replaced.
     /// A fixture naming a real directory is a fixture that leaks one.
     const SNAPSHOT: &str = r#"{

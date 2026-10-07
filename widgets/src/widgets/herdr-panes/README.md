@@ -119,7 +119,8 @@ behind it.
 | `Tab` | jump to the head of the next section, wrapping past the last |
 | `Ctrl-Y` `Ctrl-E` `wheel` | scroll the window; the selection stays where it is |
 | `Enter` / `f` | **go there** — the agent's pane, or the tab holding that process |
-| `i` | show/hide the idle section — `o` in the Python, which is being retired |
+| `o` | show/hide Opscope processes (hidden by default; case-insensitive name and command matches) |
+| `i` | show/hide the idle section |
 | `l` | workspace labels vs pane ids |
 | `r` | refresh now |
 | `,` | open settings |

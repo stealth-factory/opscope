@@ -27,6 +27,9 @@ use std::time::Duration;
 
 use opscope_core as tc;
 
+#[path = "../../process_filter.rs"]
+mod process_filter;
+
 const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
     widget: "herdr-panes",
     section: "herdr_panes",
@@ -411,6 +414,7 @@ struct Panel {
     tab_id: String,
     workspace_id: String,
     command: String,
+    is_opscope: bool,
     cwd: String,
     doing: Doing,
     /// Why the probe failed, when it did. Carried rather than counted: a
@@ -512,6 +516,10 @@ fn classify(info: &serde_json::Value) -> Front {
     )
 }
 
+fn front_is_opscope(front: &Front) -> bool {
+    matches!(front, Front::Running(_, argv, name, _) if process_filter::matches(name, &argv.join(" ")))
+}
+
 /// The foreground process of a pane, the prompt, or the failed probe.
 fn foreground(pane_id: &str) -> Front {
     match herdr_result(&["pane", "process-info", "--pane", pane_id]) {
@@ -589,6 +597,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
             }
             let pane_id = text_at(pane, "pane_id");
             let front = foreground(&pane_id);
+            let is_opscope = front_is_opscope(&front);
             let (cpu, rss) = match &front {
                 Front::Running(pid, _, _, _) => cpu_of(seen, *pid, at, hz),
                 Front::Prompt | Front::Unknown(_) => (None, None),
@@ -620,6 +629,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, hz: f64) {
                 tab_id: text_at(pane, "tab_id"),
                 workspace_id: text_at(pane, "workspace_id"),
                 doing,
+                is_opscope,
                 why,
                 pane_id,
                 command,
@@ -855,6 +865,7 @@ fn main() {
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
+    let mut opscope_filter = process_filter::Filter::default();
     let (mut selected, mut tick) = (0usize, 0usize);
     // Where each pane's rows landed on the frame now on screen. The three
     // sections share one index - agents, then busy, then the rest - which
@@ -909,6 +920,10 @@ fn main() {
                     }
                 }
                 "l" | "L" => show_labels = !show_labels,
+                "o" | "O" => {
+                    opscope_filter.toggle(&mut selected);
+                    moved = true;
+                }
                 "i" | "I" => {
                     show_idle = !show_idle;
                     selected = 0;
@@ -995,6 +1010,11 @@ fn main() {
         // the whole point of the unread ones is that the claim cannot be
         // made. [i] hides only the panes we know are resting: hiding one we
         // could not read would be the old bug wearing the new type.
+        let total_panels = panels.len();
+        let hidden_opscope = panels.iter()
+            .filter(|n| !opscope_filter.visible(n.is_opscope)).count();
+        let panels: Vec<Panel> = panels.into_iter()
+            .filter(|n| opscope_filter.visible(n.is_opscope)).collect();
         let busy: Vec<&Panel> = panels.iter().filter(|n| n.doing != Doing::Prompt).collect();
         let resting: Vec<&Panel> = panels.iter().filter(|n| n.doing == Doing::Prompt).collect();
         let unread: Vec<&&Panel> = busy.iter().filter(|n| n.doing == Doing::Unknown).collect();
@@ -1070,8 +1090,10 @@ fn main() {
         // a short list looking like a quiet Herdr. Drawn only when it is
         // holding something back: with nothing hidden there is nothing to
         // say, and saying it anyway is a row that never comes off.
-        let hidden_idle = idle_filter(show_idle, resting.len());
-        if let Some(said) = tc::filter_row(busy.len(), panels.len(), &hidden_idle) {
+        let mut hidden_idle = idle_filter(show_idle, resting.len());
+        hidden_idle.extend(opscope_filter.description(hidden_opscope));
+        let shown = busy.len() + if show_idle { resting.len() } else { 0 };
+        if let Some(said) = tc::filter_row(shown, total_panels, &hidden_idle) {
             rows.push(tc::seg(&[(p.dim.as_str(), format!(" {}", said))], w - 1));
         }
         rows.push(String::new());
@@ -1084,6 +1106,9 @@ fn main() {
         // budget until that is settled. Each section budgeting for itself is
         // what drifted before, and left the footer written past the bottom.
         let hints: Vec<Vec<(&str, String)>> = vec![
+            vec![
+                (p.dim.as_str(), format!("[o]{} Opscope", if opscope_filter.show { "hide" } else { "show" })),
+            ],
             vec![(p.accent.as_str(), "↑↓".into()), (p.dim.as_str(), " select".into())],
             vec![
                 (p.accent.as_str(), "↵".into()),
@@ -1454,7 +1479,7 @@ fn main() {
         // pane the probe failed on is not a Herdr where everything rests.
         if busy.is_empty() {
             rows.push(tc::seg(
-                &[(p.dim.as_str(), "   every other pane is idle at a prompt".into())],
+                &[(p.dim.as_str(), format!("   {}", process_filter::empty_message(hidden_opscope, "every other pane is idle at a prompt")))],
                 w - 1,
             ));
         }
@@ -1581,6 +1606,32 @@ fn idle_filter(show_idle: bool, resting: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opscope_matches_name_or_full_command_without_hiding_other_processes() {
+        for (name, argv, expected) in [
+            ("opscope-widget", vec!["python", "monitor.py"], true),
+            ("python", vec!["python", "/opt/opscope/widgets/monitor.py"], true),
+            ("OpScOpE", vec![], true),
+            ("sh", vec!["sh", "-c", "OpScOpE dashboard"], true),
+            ("python", vec!["python", "monitor.py"], false),
+            ("", vec![], false),
+        ] {
+            let info = serde_json::json!({"process_info": {"shell_pid": 1,
+                "foreground_processes": [{"pid": 2, "name": name, "argv": argv}]}});
+            let front = classify(&info);
+            assert_eq!(front_is_opscope(&front), expected, "{name}");
+            let mut filter = process_filter::Filter::default();
+            assert_eq!(filter.visible(front_is_opscope(&front)), !expected);
+            let mut selected = 4;
+            filter.toggle(&mut selected);
+            assert!(filter.visible(front_is_opscope(&front)));
+            filter.toggle(&mut selected);
+            assert_eq!(filter.visible(front_is_opscope(&front)), !expected);
+        }
+        assert!(!front_is_opscope(&Front::Prompt));
+        assert!(!front_is_opscope(&Front::Unknown("unavailable".into())));
+    }
 
     #[test]
     fn hiding_the_idle_panes_is_a_filter_the_pane_states() {
@@ -1714,7 +1765,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn a_runner_gives_way_to_the_script_it_was_handed() {
