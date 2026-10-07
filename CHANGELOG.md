@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.38.0] - 2026-10-07
+
+### Features
+
+- **panes**: Hide opscope processes with a shared visibility toggle (#330)
+
 ## [0.37.3] - 2026-10-07
 
 ### Bug Fixes
