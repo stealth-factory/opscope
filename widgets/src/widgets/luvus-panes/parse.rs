@@ -395,14 +395,20 @@ pub fn rank_of(state: &str) -> usize {
 
 /// Keep the end of a path, marking the cut so it does not read as a name.
 pub fn tail_path(path: &str, n: usize) -> String {
-    let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= n || n < 2 {
+    // Cells, not characters: a directory named in CJK is two cells a
+    // character, and counting characters let it run past the column into
+    // whatever the row says after it.
+    if opscope_core::display_width(path) <= n || n < 2 {
         return path.to_string();
     }
-    format!(
-        "…{}",
-        chars[chars.len() - (n - 1)..].iter().collect::<String>()
-    )
+    let mut start = path.len();
+    for (at, _) in path.char_indices().rev() {
+        if opscope_core::display_width(&path[at..]) > n - 1 {
+            break;
+        }
+        start = at;
+    }
+    format!("…{}", &path[start..])
 }
 
 /// A duration as this widget says it.
@@ -937,6 +943,11 @@ mod tests {
         // Five cells asked for, five cells given: the mark costs one of them.
         assert_eq!(tail_path("abcdefghij", 5), "…ghij");
         assert_eq!(tail_path("abc", 1), "abc");
+        // Cells, not characters: each CJK character is two cells, so a
+        // ten-cell budget keeps nine cells of the end and the mark.
+        let cut = tail_path("~/專案/工作區", 10);
+        assert!(opscope_core::display_width(&cut) <= 10, "{}", cut);
+        assert_eq!(cut, "…案/工作區");
     }
 
     #[test]

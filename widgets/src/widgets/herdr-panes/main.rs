@@ -141,13 +141,73 @@ fn herdr(args: &[&str]) -> Option<serde_json::Value> {
     herdr_result(args).ok()
 }
 
+/// How wide each text column is drawn this frame.
+///
+/// The text columns grow with the pane. Their old fixed widths are the
+/// minimums, so nothing moves at the `wide` threshold, and whatever the
+/// numbers leave goes to the column still cutting something: a workspace
+/// label stayed cut at 18 cells on a 200-column pane with the rest blank.
+#[derive(Debug, PartialEq)]
+struct Columns {
+    name_w: usize,
+    agent_place_w: usize,
+    command_w: usize,
+    busy_place_w: usize,
+    dir_w: usize,
+    idle_place_w: usize,
+}
+
+impl Columns {
+    /// `want` is the widest value of each column this frame, in the order
+    /// the fields are declared.
+    fn fit(w: usize, wide: bool, want: [usize; 6]) -> Columns {
+        let row = w.saturating_sub(1);
+        // An agent row: `▸`, the mark and a space, the name, then STATE, FOR
+        // and CPU; MEM and the space before the place when wide.
+        let (name_w, agent_place_w) = if wide {
+            let fit = tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 5 + 6 + 1), &[(6, want[0]), (18, want[1])]);
+            (fit[0], fit[1])
+        } else {
+            (tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 5), &[(6, want[0])])[0], 0)
+        };
+        // A process row: `▸`, the mark and a space, the command, CPU; MEM
+        // and the space before the place when wide.
+        let (command_w, busy_place_w) = if wide {
+            let fit = tc::fit_columns(row.saturating_sub(3 + 5 + 6 + 1), &[(20, want[2]), (18, want[3])]);
+            (fit[0], fit[1])
+        } else {
+            (tc::fit_columns(row.saturating_sub(3 + 5), &[(20, want[2])])[0], 0)
+        };
+        // An idle row: `▸`, the mark and a space, the directory and a space,
+        // then the place.
+        let idle = tc::fit_columns(row.saturating_sub(3 + 1), &[(26, want[4]), (18, want[5])]);
+        Columns {
+            name_w,
+            agent_place_w,
+            command_w,
+            busy_place_w,
+            dir_w: idle[0],
+            idle_place_w: idle[1],
+        }
+    }
+}
+
 /// Keep the end of a path, marking the cut so it does not read as a name.
 fn tail_path(path: &str, n: usize) -> String {
-    let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= n || n < 2 {
+    // Cells, not characters: a directory named in CJK is two cells a
+    // character, and counting characters let it run past the column into
+    // whatever the row says after it.
+    if opscope_core::display_width(path) <= n || n < 2 {
         return path.to_string();
     }
-    format!("…{}", chars[chars.len() - (n - 1)..].iter().collect::<String>())
+    let mut start = path.len();
+    for (at, _) in path.char_indices().rev() {
+        if opscope_core::display_width(&path[at..]) > n - 1 {
+            break;
+        }
+        start = at;
+    }
+    format!("…{}", &path[start..])
 }
 
 fn base_name(path: &str) -> String {
@@ -1105,6 +1165,41 @@ fn main() {
         scroll = window.start;
         moved = false;
 
+        // Where a row points: the workspace's label when labels are shown
+        // and it has one, else the bare id.
+        let place_of = |workspace_id: &str, pane_id: &str| -> String {
+            if show_labels {
+                let label = labels.get(workspace_id).cloned().unwrap_or_default();
+                if label.is_empty() { workspace_id.to_string() } else { label }
+            } else {
+                pane_id.to_string()
+            }
+        };
+        let widest = |it: &mut dyn Iterator<Item = String>| -> usize {
+            it.map(|t| tc::display_width(&t)).max().unwrap_or(0)
+        };
+        let cols = Columns::fit(
+            w,
+            wide,
+            [
+                widest(&mut agents.iter().map(|a| a.name.clone())),
+                widest(&mut agents.iter().map(|a| place_of(&a.workspace_id, &a.pane_id))),
+                widest(&mut busy.iter().map(|n| n.command.clone()))
+                    .max(tc::display_width("could not be read")),
+                widest(&mut busy.iter().map(|n| place_of(&n.workspace_id, &n.pane_id))),
+                widest(&mut resting.iter().map(|n| homely(&n.cwd))),
+                widest(&mut resting.iter().map(|n| place_of(&n.workspace_id, &n.pane_id))),
+            ],
+        );
+        let Columns {
+            name_w,
+            agent_place_w,
+            command_w,
+            busy_place_w,
+            dir_w,
+            idle_place_w,
+        } = cols;
+
         rows.push(tc::seg(
             &[
                 (p.lbl.as_str(), " ── AGENTS ── ".into()),
@@ -1113,9 +1208,17 @@ fn main() {
             ],
             w - 1,
         ));
-        let mut head = format!(" {:<8} {:<8} {:<6} {:<5}", "AGENT", "STATE", "FOR", "CPU");
+        // AGENT sits over the mark as well as the name, hence the two.
+        let mut head = format!(
+            " {:<nw$} {:<8} {:<6} {:<5}",
+            "AGENT",
+            "STATE",
+            "FOR",
+            "CPU",
+            nw = name_w + 2
+        );
         if wide {
-            head += &format!(" {:<5} {:<18}", "MEM", "WORKSPACE");
+            head += &format!(" {:<5} {}", "MEM", "WORKSPACE");
         }
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
 
@@ -1160,7 +1263,7 @@ fn main() {
                 };
                 format!("{}{}", tint, colour)
             };
-            let name: String = a.name.chars().take(6).collect();
+            let name = tc::pad(&a.name, name_w);
             let state_cell = if loud {
                 a.state.to_uppercase()
             } else {
@@ -1178,7 +1281,7 @@ fn main() {
                 (
                     c(colour),
                     format!(
-                        "{}{} {:<6}",
+                        "{}{} {}",
                         if here { "▸" } else { " " },
                         mark_of(&a.state, tick),
                         name
@@ -1192,14 +1295,9 @@ fn main() {
                 (c(&heat), percent(a.cpu)),
             ];
             if wide {
-                let place = if show_labels {
-                    let label = labels.get(&a.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() { a.workspace_id.clone() } else { label }
-                } else {
-                    a.pane_id.clone()
-                };
+                let place = place_of(&a.workspace_id, &a.pane_id);
                 line.push((c(&p.dim), format!(" {}", mem(a.rss))));
-                line.push((c(&p.accent), format!(" {}", tc::pad(&place, 18))));
+                line.push((c(&p.accent), format!(" {}", tc::pad(&place, agent_place_w))));
             }
             if loud || here {
                 line.push((tint.clone(), " ".repeat(w)));
@@ -1248,7 +1346,14 @@ fn main() {
                 &[(
                     p.dim.as_str(),
                     tc::pad(
-                        &format!(" {:<20} {:<5} {:<5} {:<18}", "COMMAND", "CPU", "MEM", "WORKSPACE"),
+                        &format!(
+                            " {:<cw$} {:<5} {:<5} {}",
+                            "COMMAND",
+                            "CPU",
+                            "MEM",
+                            "WORKSPACE",
+                            cw = command_w + 1
+                        ),
                         w - 1,
                     ),
                 )],
@@ -1327,20 +1432,15 @@ fn main() {
                         } else {
                             &n.command
                         },
-                        20,
+                        command_w,
                     ),
                 ),
                 (c(&heat), percent(n.cpu)),
             ];
             if wide {
-                let place = if show_labels {
-                    let label = labels.get(&n.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() { n.workspace_id.clone() } else { label }
-                } else {
-                    n.pane_id.clone()
-                };
+                let place = place_of(&n.workspace_id, &n.pane_id);
                 line.push((c(&p.dim), format!(" {}", mem(n.rss))));
-                line.push((c(&p.accent), format!(" {}", tc::pad(&place, 18))));
+                line.push((c(&p.accent), format!(" {}", tc::pad(&place, busy_place_w))));
             }
             if here {
                 line.push((tint.clone(), " ".repeat(w)));
@@ -1410,16 +1510,11 @@ fn main() {
                 };
                 format!("{}{}", tint, colour)
             };
-                let place = if show_labels {
-                    let label = labels.get(&n.workspace_id).cloned().unwrap_or_default();
-                    if label.is_empty() { n.workspace_id.clone() } else { label }
-                } else {
-                    n.pane_id.clone()
-                };
+                let place = place_of(&n.workspace_id, &n.pane_id);
                 let mut line = vec![
                     (c(&p.idle_c), format!("{}▫ ", if here { "▸" } else { " " })),
-                    (c(&p.idle_c), tc::pad(&tail_path(&homely(&n.cwd), 26), 27)),
-                    (c(&p.accent), tc::pad(&place, 18)),
+                    (c(&p.idle_c), tc::pad(&tail_path(&homely(&n.cwd), dir_w), dir_w + 1)),
+                    (c(&p.accent), tc::pad(&place, idle_place_w)),
                 ];
                 if here {
                     line.push((tint.clone(), " ".repeat(w)));
@@ -1675,6 +1770,34 @@ mod tests {
         assert_eq!(mem(Some(512)), " 512B");
         assert_eq!(mem(Some(1024 * 1024 * 3)), "   3M");
         assert_eq!(mem(None), "   --");
+    }
+
+    #[test]
+    fn a_wide_pane_shows_the_whole_workspace_label() {
+        // The place was cut at 18 cells however wide the pane: a label of
+        // 40 on a 200-column pane lost half of itself beside blank space.
+        let cols = Columns::fit(200, true, [12, 40, 30, 40, 50, 40]);
+        assert_eq!((cols.name_w, cols.agent_place_w), (12, 40));
+        assert_eq!((cols.command_w, cols.busy_place_w), (30, 40));
+        assert_eq!((cols.dir_w, cols.idle_place_w), (50, 40));
+    }
+
+    #[test]
+    fn no_row_grows_past_the_pane_it_was_fitted_to() {
+        // Each row's fixed cells plus its text columns, against the width
+        // they were fitted for, from the threshold up. Below the minimums
+        // `seg` clips as it always did, so the check starts where they fit.
+        let long = [60, 80, 60, 80, 90, 80];
+        for w in 66..=240 {
+            let c = Columns::fit(w, true, long);
+            assert!(3 + c.name_w + 21 + 7 + c.agent_place_w <= w - 1, "agent row at {}", w);
+            assert!(3 + c.command_w + 5 + 7 + c.busy_place_w <= w - 1, "process row at {}", w);
+            assert!(3 + c.dir_w + 1 + c.idle_place_w <= w - 1, "idle row at {}", w);
+        }
+        // At the threshold the old widths still stand, so nothing jumps
+        // when the pane crosses it.
+        let at = Columns::fit(66, true, long);
+        assert!(at.name_w >= 6 && at.agent_place_w >= 18 && at.command_w >= 20);
     }
 
     #[test]

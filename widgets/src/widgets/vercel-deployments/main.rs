@@ -600,6 +600,31 @@ fn columns(w: usize) -> Columns {
     }
 }
 
+/// How wide the project and branch are drawn this frame.
+///
+/// `columns` gives the widths a pane of this size starts from, and they
+/// were also where the names stopped: a project cut at 20 and a branch at
+/// 34 on a 200-column pane, beside blank cells. Those stay the minimums;
+/// what the fixed cells leave goes to whichever name is still cut, shared
+/// with the commit subject when it is on the same row so a long branch does
+/// not push the subject off it. The wants are each column's longest value,
+/// plus the one cell that keeps a full-length project off the duration.
+fn fit_names(cols: &Columns, w: usize, project: usize, branch: usize, subject: usize) -> (usize, usize) {
+    // The mark and state, the duration, the age and PROD or prev; then the
+    // sha and the space before the branch, and the space before the subject.
+    let fixed = 12 + 6 + 5 + 6 + if cols.detail { 9 + 1 } else { 0 } + if cols.single { 1 } else { 0 };
+    let room = w.saturating_sub(1).saturating_sub(fixed);
+    if !cols.detail {
+        return (tc::fit_columns(room, &[(cols.project, project + 1)])[0], cols.branch);
+    }
+    let mut want = vec![(cols.project, project + 1), (cols.branch, branch)];
+    if cols.single {
+        want.push((0, subject));
+    }
+    let fit = tc::fit_columns(room, &want);
+    (fit[0], fit[1])
+}
+
 /// Pin the title and show one window onto the complete list body.
 ///
 /// The caller builds every section and every deployment first. Keeping the
@@ -1789,6 +1814,18 @@ fn main() {
             w - 1,
         ));
         let cols = columns(w);
+        let longest = |f: &dyn Fn(&serde_json::Value) -> String| {
+            shown.iter().map(|d| tc::display_width(&f(d))).max().unwrap_or(0)
+        };
+        let (project_w, branch_w) = fit_names(
+            &cols,
+            w,
+            longest(&|d| text(d, "name")),
+            longest(&|d| text(&d["meta"], "githubCommitRef")),
+            longest(&|d| {
+                text(&d["meta"], "githubCommitMessage").lines().next().unwrap_or("").to_string()
+            }),
+        );
         let per_item = if cols.single { 1 } else { 2 };
         let list_start = rows.len();
         let mut cursor = None;
@@ -1827,7 +1864,7 @@ fn main() {
                         titled(&state)
                     ),
                 ),
-                (c(&p.txt), tc::pad(&text(d, "name"), cols.project)),
+                (c(&p.txt), tc::pad(&text(d, "name"), project_w)),
                 (c(&p.dim), dur(build_seconds(d))),
                 (c(&p.dim), format!(" {:>4}", age(ms_at(d, "created")))),
             ];
@@ -1844,7 +1881,7 @@ fn main() {
                 ));
                 line.push((
                     c(&p.branch),
-                    format!(" {}", tc::pad(&text(meta, "githubCommitRef"), cols.branch)),
+                    format!(" {}", tc::pad(&text(meta, "githubCommitRef"), branch_w)),
                 ));
             }
             if cols.single {
@@ -2246,6 +2283,22 @@ mod tests {
         let odd: serde_json::Value =
             serde_json::from_str(r#"{"state": "READY", "ready": 46000}"#).unwrap();
         assert_eq!(build_seconds(&odd), None);
+    }
+
+    #[test]
+    fn a_wide_pane_shows_the_whole_project_and_branch() {
+        // The project stopped at 20 and the branch at 34 however wide the
+        // pane, beside blank cells.
+        assert_eq!(fit_names(&columns(200), 200, 30, 50, 0), (31, 50));
+        // Narrower, the old widths still stand as the floor.
+        let (project, branch) = fit_names(&columns(80), 80, 30, 50, 0);
+        assert!(project >= 16 && branch >= 16);
+        // No row grows past the pane it was fitted to.
+        for w in 66..=240 {
+            let cols = columns(w);
+            let (project, branch) = fit_names(&cols, w, 60, 80, 40);
+            assert!(12 + project + 6 + 5 + 6 + 10 + branch <= w - 1, "row at {}", w);
+        }
     }
 
     #[test]

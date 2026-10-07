@@ -1748,6 +1748,80 @@ fn churn(c: &serde_json::Value) -> (f64, i64) {
     (-moved, left)
 }
 
+/// A cycle's team key and name, as its row starts.
+fn cycle_name(c: &serde_json::Value) -> String {
+    format!(
+        "{} {}",
+        match text(&c["team"], "key") {
+            k if k.is_empty() => "?".to_string(),
+            k => k,
+        },
+        match text(c, "name") {
+            n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
+            n => n,
+        }
+    )
+}
+
+/// The meter's width and the name's, for the cycles on screen.
+///
+/// The meter grows to 28 and stops. The name was cut at 18 whatever the
+/// pane; past that it takes what the meter leaves, after the widest set of
+/// figures any cycle draws - measured, because "+100 added" and "14d left"
+/// are wider than a constant allowed for, and a name fitted to a guess cut
+/// them off the end of the row.
+fn cycle_widths(w: usize, cycles: &[serde_json::Value]) -> (usize, usize) {
+    let meter_w = w.saturating_sub(54).clamp(8, 28);
+    let tail_w = cycles
+        .iter()
+        .map(|c| cycle_tail(c).iter().map(|t| tc::display_width(t)).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let longest = cycles
+        .iter()
+        .map(|c| tc::display_width(&cycle_name(c)) + 1)
+        .max()
+        .unwrap_or(0);
+    // The marker in front of the name, and `seg`'s budget of `w - 1`.
+    let room = w.saturating_sub(1 + 1 + tail_w).saturating_sub(meter_w);
+    (meter_w, tc::fit_columns(room, &[(18, longest)])[0])
+}
+
+/// The figures a cycle row draws after its meter: the share done, the
+/// points, the days left and the scope added since it opened, each empty
+/// when the row does not draw it.
+///
+/// One function for drawing and for measuring, so the name's width is
+/// fitted to the figures the row actually carries.
+fn cycle_tail(c: &serde_json::Value) -> [String; 4] {
+    let scope = last_of(c, "scopeHistory");
+    let done = last_of(c, "completedScopeHistory");
+    let opened_at = first_of(c, "scopeHistory");
+    let left_days =
+        parse(&text(c, "endsAt")).map(|ends| (ends - Utc::now().naive_utc()).num_days());
+    [
+        format!(
+            " {:>3}",
+            if scope > 0.0 {
+                format!("{:.0}%", done / scope * 100.0)
+            } else {
+                "--".into()
+            }
+        ),
+        if scope > 0.0 {
+            format!("  {}/{} pts", tidy(done), tidy(scope))
+        } else {
+            "  nothing scoped".into()
+        },
+        left_days.map(|d| format!("  {}d left", d)).unwrap_or_default(),
+        if scope > opened_at {
+            format!("  +{} added", tidy(scope - opened_at))
+        } else {
+            String::new()
+        },
+    ]
+}
+
 fn last_of(c: &serde_json::Value, key: &str) -> f64 {
     c[key]
         .as_array()
@@ -2390,6 +2464,7 @@ fn main() {
                 w - 1,
             ));
         }
+        let (meter_w, cycle_name_w) = cycle_widths(w, &ranked_cycles);
         for (ci, c) in ranked_cycles.iter().enumerate() {
             let (from, slot) = (rows.len(), targets.len());
             targets.push((cycles_pane, ci));
@@ -2402,17 +2477,8 @@ fn main() {
             let left_days = parse(&text(c, "endsAt"))
                 .map(|ends| (ends - Utc::now().naive_utc()).num_days());
             let frac = if scope > 0.0 { done / scope } else { 0.0 };
-            let name = format!(
-                "{} {}",
-                match text(&c["team"], "key") {
-                    k if k.is_empty() => "?".to_string(),
-                    k => k,
-                },
-                match text(c, "name") {
-                    n if n.is_empty() => format!("Cycle {}", tidy(c["number"].as_f64().unwrap_or(0.0))),
-                    n => n,
-                }
-            );
+            let name = cycle_name(c);
+            let [pct, pts, left, added] = cycle_tail(c);
             let on = focus == Some(cycles_pane) && ci == sel[cycles_pane];
             let tint = if on { tc::bg(38, 56, 76) } else { String::new() };
             let c_of = |colour: &str| {
@@ -2441,42 +2507,19 @@ fn main() {
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),
-                    format!("{}{}", if on { "▸" } else { " " }, tc::pad(&name, 18)),
+                    format!("{}{}", if on { "▸" } else { " " }, tc::pad(&name, cycle_name_w)),
                 ),
-                (
-                    c_of(&hot),
-                    tc::meter(frac, (w.saturating_sub(54)).clamp(8, 28)),
-                ),
-                (
-                    c_of(if scope > 0.0 { &hot } else { &p.dim }),
-                    format!(
-                        " {:>3}",
-                        if scope > 0.0 {
-                            format!("{:.0}%", frac * 100.0)
-                        } else {
-                            "--".into()
-                        }
-                    ),
-                ),
-                (
-                    c_of(&p.dim),
-                    if scope > 0.0 {
-                        format!("  {}/{} pts", tidy(done), tidy(scope))
-                    } else {
-                        "  nothing scoped".into()
-                    },
-                ),
+                (c_of(&hot), tc::meter(frac, meter_w)),
+                (c_of(if scope > 0.0 { &hot } else { &p.dim }), pct),
+                (c_of(&p.dim), pts),
             ];
             if let Some(days_left) = left_days {
-                line.push((
-                    c_of(if days_left <= 2 { &p.warn } else { &p.dim }),
-                    format!("  {}d left", days_left),
-                ));
+                line.push((c_of(if days_left <= 2 { &p.warn } else { &p.dim }), left));
             }
             // Scope added after the cycle opened is the number that explains
             // a cycle working hard and still slipping.
             if scope > opened_at {
-                line.push((c_of(&p.bad), format!("  +{} added", tidy(scope - opened_at))));
+                line.push((c_of(&p.bad), added));
             }
             if on {
                 line.push((tint.clone(), " ".repeat(w)));
@@ -2660,12 +2703,25 @@ fn main() {
             ],
             w - 1,
         ));
+        // The key and name grow past 22 when the pane has room; the four
+        // counts and the marker are the fixed cells.
+        let team_w = tc::fit_columns(
+            w.saturating_sub(1 + 1 + 6 + 7 + 8 + 8),
+            &[(
+                22,
+                ranked
+                    .iter()
+                    .map(|(key, name)| tc::display_width(&format!("{}  {}", key, name)) + 1)
+                    .max()
+                    .unwrap_or(0),
+            )],
+        )[0];
         rows.push(tc::seg(
             &[(
                 p.dim.as_str(),
                 tc::pad(
                     &format!(
-                        " {:<22}{:>6}{:>7}{:>8}{:>8}",
+                        " {:<team_w$}{:>6}{:>7}{:>8}{:>8}",
                         "TEAM",
                         "OPEN",
                         "TRIAGE",
@@ -2710,7 +2766,7 @@ fn main() {
                     format!(
                         "{}{}",
                         if here { "▸" } else { " " },
-                        tc::pad(&format!("{}  {}", key, name), 22)
+                        tc::pad(&format!("{}  {}", key, name), team_w)
                     ),
                 ),
                 (c_of(&p.new), format!("{:>6}", count("open"))),
@@ -3790,6 +3846,36 @@ mod tests {
         // Anything shorter than a whole instant is not one.
         assert!(parse("2026-08-23").is_none());
         assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn a_long_cycle_name_leaves_room_for_every_figure() {
+        // Fitted to a constant, a long name on a 120-cell pane pushed
+        // "+100 added" off the end of the row.
+        let ends = (Utc::now() + chrono::Duration::days(14) + chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let cycle = serde_json::json!({
+            "team": {"key": "OPS"},
+            "name": "a cycle with a name far longer than any pane will show",
+            "scopeHistory": [100.0, 200.0],
+            "completedScopeHistory": [0.0, 100.0],
+            "endsAt": ends,
+        });
+        let tail: usize = cycle_tail(&cycle).iter().map(|t| tc::display_width(t)).sum();
+        assert!(tail > 35, "the case needs figures wider than the old guess");
+        for w in 60..=240 {
+            let (meter_w, name_w) = cycle_widths(w, &[cycle.clone()]);
+            assert!(name_w >= 18);
+            // Below the minimum the row was clipped before this change
+            // too; what the name grows into must never cost a figure.
+            if name_w > 18 {
+                assert!(1 + name_w + meter_w + tail <= w - 1, "row at {}", w);
+            }
+        }
+        // And a wide pane shows the whole name.
+        let (_, name_w) = cycle_widths(200, &[cycle.clone()]);
+        assert_eq!(name_w, tc::display_width(&cycle_name(&cycle)) + 1);
     }
 
     #[test]

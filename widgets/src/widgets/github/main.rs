@@ -959,9 +959,11 @@ fn fill_reviews(
     }
 }
 
+/// The ACCOUNT column at its narrowest.
+const ACCT_NAME: usize = 20;
 /// What a BY ACCOUNT row spends before any optional column: the cursor mark
 /// and twenty for the name, then OPEN, REVW, MRG*D and HELD.
-const ACCT_FIXED: usize = 1 + 20 + 5 + 5 + 7 + 6;
+const ACCT_FIXED: usize = 1 + ACCT_NAME + 5 + 5 + 7 + 6;
 /// R24, and T2D, one cell slot each.
 const ACCT_PCT: usize = 6;
 const ACCT_ISSUES: usize = 7;
@@ -1010,6 +1012,23 @@ fn by_account_bar_cols(w: usize) -> usize {
     w.saturating_sub(1)
         .saturating_sub(ACCT_FIXED + 2 * ACCT_PCT + ACCT_ISSUES + ACCT_SPARK_GAP)
         .max(ACCT_SPARK_MIN)
+}
+
+/// How wide the ACCOUNT column is drawn, given its longest name.
+///
+/// Twenty until every column is on the row and the spark has all of its
+/// days; what the spark cannot use after that goes to a name that was being
+/// cut, since a login can run to 39 characters and the cells beyond the
+/// spark's last day were blank. The spark keeps priority: it is the
+/// reading, and the name only takes cells the spark has no day for.
+fn by_account_name_w(w: usize, want: i64, longest: usize) -> usize {
+    let (_, _, wide) = by_account_cols(w);
+    if !wide {
+        return ACCT_NAME;
+    }
+    let bar_cols = by_account_bar_cols(w);
+    let idle = bar_cols.saturating_sub((want.max(0) as usize).min(bar_cols));
+    ACCT_NAME + idle.min(longest.saturating_sub(ACCT_NAME))
 }
 
 /// The board footer, given the `[i]` wording to put in it.
@@ -1208,15 +1227,18 @@ fn legend_block(open: bool, want: i64, w: usize) -> Vec<String> {
 /// since "MRG60D" is six characters and would sit flush against REVW in every
 /// window but the seven-day one. HELD keeps RATE's six-cell slot. R24 and T2D
 /// spend the padding that used to sit idle in front of ISSUES.
-fn by_account_head(w: usize, want: i64, bar_cols: usize) -> String {
+fn by_account_head(w: usize, want: i64, bar_cols: usize, name_w: usize) -> String {
     let (show_r24, show_t2d, wide) = by_account_cols(w);
+    // The name's cells beyond twenty came out of the spark's room.
+    let bar_cols = bar_cols.saturating_sub(name_w.saturating_sub(ACCT_NAME));
     let mut head = format!(
-        " {:<20}{:>5}{:>5}{:>7}{:>6}",
+        " {:<name_w$}{:>5}{:>5}{:>7}{:>6}",
         "ACCOUNT",
         "OPEN",
         "REVW",
         format!("MRG{}D", want),
-        "HELD"
+        "HELD",
+        name_w = name_w
     );
     if show_r24 {
         head += &format!("{:>6}", "R24");
@@ -1260,6 +1282,7 @@ fn by_account_row(
     w: usize,
     here: bool,
     spark_days: &[String],
+    name_w: usize,
     p: &Palette,
 ) -> Vec<(String, String)> {
     let (show_r24, show_t2d, wide) = by_account_cols(w);
@@ -1314,7 +1337,7 @@ fn by_account_row(
                 if here { "▸" } else { " " },
                 tc::pad(
                     &format!("{}{}", s.account, if s.is_me { " (you)" } else { "" }),
-                    20
+                    name_w
                 )
             ),
         ),
@@ -3463,7 +3486,13 @@ fn main() {
                 false => tc::seg(&[(p.dim.as_str(), line)], w - 1),
             });
         }
-        let head = by_account_head(w, want, bar_cols);
+        let longest = stats
+            .iter()
+            .map(|s| tc::display_width(&s.account) + if s.is_me { 6 } else { 0 })
+            .max()
+            .unwrap_or(0);
+        let name_w = by_account_name_w(w, want, longest);
+        let head = by_account_head(w, want, bar_cols, name_w);
         rows.push(tc::seg(&[(p.dim.as_str(), tc::pad(&head, w - 1))], w - 1));
         let mut cursor: Option<usize> = None;
         // The span each account covers, taken from where its rows started
@@ -3478,7 +3507,7 @@ fn main() {
             }
             let tint = if here { tc::bg(38, 56, 76) } else { String::new() };
             let land = land_of(s, &overlay, want);
-            let mut line = by_account_row(s, land.as_ref(), want, w, here, &spark_days, &p);
+            let mut line = by_account_row(s, land.as_ref(), want, w, here, &spark_days, name_w, &p);
             if here {
                 line.push((tint.clone(), " ".repeat(w)));
             }
@@ -4714,6 +4743,20 @@ mod tests {
     }
 
     #[test]
+    fn a_long_login_takes_the_cells_the_spark_has_no_day_for() {
+        // ACCOUNT was cut at twenty on any pane, with the cells past the
+        // spark's last day left blank.
+        assert_eq!(by_account_name_w(200, 7, 39), 39);
+        // The spark keeps its days: on a pane with only enough for them,
+        // the name stays at twenty.
+        assert_eq!(by_account_name_w(100, 60, 39), ACCT_NAME);
+        // Before every column is on the row nothing is spare.
+        assert_eq!(by_account_name_w(60, 7, 39), ACCT_NAME);
+        // A short name takes nothing it does not need.
+        assert_eq!(by_account_name_w(200, 7, 12), ACCT_NAME);
+    }
+
+    #[test]
     fn by_account_spends_padding_on_r24_then_t2d() {
         // One column later than the widths the columns cost, because the row
         // is clipped to `w - 1`: at 50 the fixed 44 plus R24's 6 is exactly
@@ -4815,7 +4858,10 @@ mod tests {
                 let spark_days: Vec<String> = (0..(want as usize).min(bar_cols))
                     .map(|n| format!("2026-09-{:02}", (n % 28) + 1))
                     .collect();
-                let head = by_account_head(w, want, bar_cols);
+                // A 39-character login, GitHub's longest, so the name takes
+                // every cell it is offered.
+                let name_w = by_account_name_w(w, want, 39);
+                let head = by_account_head(w, want, bar_cols, name_w);
                 assert!(
                     tc::display_width(&head) <= w - 1,
                     "width {} want {}: heading drew {} cells: {:?}",
@@ -4828,7 +4874,7 @@ mod tests {
                     for here in [false, true] {
                         let land = land_of(&s, &HashMap::new(), want);
                         let line =
-                            by_account_row(&s, land.as_ref(), want, w, here, &spark_days, &p);
+                            by_account_row(&s, land.as_ref(), want, w, here, &spark_days, name_w, &p);
                         let text: String = line.iter().map(|(_, t)| t.as_str()).collect();
                         assert!(
                             tc::display_width(&text) <= w - 1,
@@ -4879,7 +4925,8 @@ mod tests {
                 timing_window: Some(want),
                 ..Default::default()
             };
-            let line = by_account_row(&s, s.timing.as_ref(), want, w, false, &spark_days, &p);
+            let line =
+                by_account_row(&s, s.timing.as_ref(), want, w, false, &spark_days, ACCT_NAME, &p);
             let text: String = line.iter().map(|(_, t)| t.as_str()).collect();
             let (r24, t2d, _) = by_account_cols(w);
             let cells = 1 + usize::from(r24) + usize::from(t2d);

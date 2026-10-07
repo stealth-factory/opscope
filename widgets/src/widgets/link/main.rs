@@ -897,6 +897,24 @@ fn plotted_span(
     capped as f64 * refresh
 }
 
+/// What the PEER column says for a session.
+///
+/// One login, and only where there is room for it: the address is what
+/// identifies the session, the name is a courtesy.
+fn label_of(row: &Session, state: &State, wide: bool) -> String {
+    let who = state
+        .names
+        .get(&row.ip)
+        .and_then(|names| names.first())
+        .map(|(user, _tty)| user.clone())
+        .unwrap_or_default();
+    if who.is_empty() || !wide {
+        row.peer.clone()
+    } else {
+        format!("{} {}", row.peer, who)
+    }
+}
+
 fn table(
     rows: &[Session],
     state: &State,
@@ -920,7 +938,21 @@ fn table(
     // browser tabs against the same dev server share an address and a local
     // port and are told apart by nothing else. 21 fits the longest IPv4
     // address and port; the wider pane spends five more on the login.
-    let name_w = if wide { 26usize } else { 21usize };
+    //
+    // Those are the minimums. A wider pane spends what the numbers leave on
+    // the name, so an IPv6 address and its login are not cut beside blank
+    // cells: the chip and the marker, then PORT, NOW, FLOOR, JITTER and
+    // LOSS, and ACHIEVED and IDLE when wide, are the fixed cells.
+    let fixed = 2 + 6 + 7 + 8 + 8 + 7 + if wide { 10 + 7 } else { 0 };
+    let longest = rows
+        .iter()
+        .map(|r| tc::display_width(&label_of(r, state, wide)))
+        .max()
+        .unwrap_or(0);
+    let name_w = tc::fit_columns(
+        (w - 1).saturating_sub(fixed),
+        &[(if wide { 26usize } else { 21usize }, longest)],
+    )[0];
     let mut out = vec![tc::seg(
         &[
             (p.dim.as_str(), "  PEER".into()),
@@ -961,19 +993,7 @@ fn table(
         };
         let hue = &p.hues[i % p.hues.len()];
 
-        // One login, and only where there is room for it: the address is
-        // what identifies the session, the name is a courtesy.
-        let who = state
-            .names
-            .get(&row.ip)
-            .and_then(|names| names.first())
-            .map(|(user, _tty)| user.clone())
-            .unwrap_or_default();
-        let label = if who.is_empty() || !wide {
-            row.peer.clone()
-        } else {
-            format!("{} {}", row.peer, who)
-        };
+        let label = label_of(row, state, wide);
         let loss = row.recent_loss;
         let tone = format!("{}{}", tint, colour_for(quality(row), loss, p));
         let name_c = format!("{}{}", tint, hue);
@@ -1713,6 +1733,37 @@ mod tests {
         // Nothing selected, so no row carries the highlight.
         let drawn = table(&[row], &state, 86, None, &palette());
         assert_eq!(plain(&drawn[1]), want);
+    }
+
+    #[test]
+    fn a_wide_pane_shows_the_whole_ipv6_peer() {
+        // PEER was 26 cells however wide the pane, so an IPv6 address and
+        // its port were cut beside blank space.
+        let peer = "[2001:db8:85a3::8a2e:370:7334]:51000";
+        let row = Session {
+            peer: peer.into(),
+            ip: "2001:db8:85a3::8a2e:370:7334".into(),
+            port: 22,
+            ..Default::default()
+        };
+        let state = State {
+            rows: vec![row.clone()],
+            names: HashMap::new(),
+            history: HashMap::new(),
+            err: String::new(),
+        };
+        let drawn = table(&[row.clone()], &state, 140, None, &palette());
+        assert!(plain(&drawn[1]).contains(peer), "{}", plain(&drawn[1]));
+        // The numbers still line up under their heading: the port ends
+        // where PORT does.
+        let head = plain(&drawn[0]);
+        let line = plain(&drawn[1]);
+        let end = |s: &str, word: &str| s.find(word).map(|b| s[..b].chars().count() + word.len());
+        assert_eq!(end(&head, "PORT"), end(&line, " 22 ").map(|c| c - 1));
+        for w in 82..=200 {
+            let drawn = table(&[row.clone()], &state, w, None, &palette());
+            assert!(tc::display_width(&plain(&drawn[1])) <= w - 1, "row at {}", w);
+        }
     }
 
     #[test]
