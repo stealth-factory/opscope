@@ -1479,7 +1479,7 @@ fn main() {
         // pane the probe failed on is not a Herdr where everything rests.
         if busy.is_empty() {
             rows.push(tc::seg(
-                &[(p.dim.as_str(), format!("   {}", process_filter::empty_message(hidden_opscope, "every other pane is idle at a prompt")))],
+                &[(p.dim.as_str(), format!("   {}", process_filter::empty_message(hidden_opscope, resting.len(), "every other pane is idle at a prompt")))],
                 w - 1,
             ));
         }

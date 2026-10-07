@@ -23,12 +23,19 @@ impl Filter {
         if hidden == 0 {
             Vec::new()
         } else {
-            vec![format!("{} opscope processes hidden", hidden)]
+            vec![format!(
+                "{} opscope {} hidden",
+                hidden,
+                if hidden == 1 { "process" } else { "processes" }
+            )]
         }
     }
 }
 
-pub fn empty_message(hidden: usize, otherwise: &str) -> String {
+pub fn empty_message(hidden: usize, remaining: usize, otherwise: &str) -> String {
+    if remaining > 0 {
+        return otherwise.to_string();
+    }
     opscope_core::filtered_to_nothing(hidden, &["opscope processes hidden".into()])
         .unwrap_or_else(|| otherwise.to_string())
 }
@@ -55,8 +62,10 @@ mod tests {
             assert_eq!(selected, 0);
         }
         assert!(!filter.visible(true));
-        assert!(empty_message(2, "idle").contains("opscope processes hidden"));
-        assert_eq!(empty_message(0, "idle"), "idle");
+        assert!(empty_message(2, 0, "idle").contains("opscope processes hidden"));
+        assert_eq!(empty_message(0, 0, "idle"), "idle");
         assert!(filter.description(0).is_empty());
+        assert_eq!(filter.description(1), vec!["1 opscope process hidden"]);
+        assert_eq!(empty_message(1, 1, "idle"), "idle");
     }
 }

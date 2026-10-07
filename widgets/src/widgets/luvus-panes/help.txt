@@ -69,4 +69,7 @@ the prompt it is showing you. esc closes it, as does a second e.
 Requires the `luvus` command; it reads a running session over UHP.
 
 Press o to show or hide Opscope processes (hidden by default). Matching is
-case-insensitive in process names and commands, including dashboard widgets.
+case-insensitive in local process names and commands, including dashboard
+widgets. A local ps scan joins the snapshot's root PIDs to their process
+trees; run this widget on the same machine as the Luvus session. A failed
+scan warns that only Luvus's reported command labels can be filtered.
