@@ -2456,6 +2456,47 @@ pub fn spread(count: usize, room: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Widths for a row's text columns that grow with the pane.
+///
+/// Each column is `(min, want)`: `min` is the width it keeps however narrow
+/// the pane, so a table does not reflow on every resize below its threshold,
+/// and `want` is the widest thing it has to show this frame. `room` is what
+/// is left of the row once its fixed cells (marks, separators, numbers) are
+/// counted. Every column starts at its minimum and the rest of `room` goes
+/// to the columns still cutting something, evenly, each stopping once its
+/// widest value fits - so the space goes to whichever column is truncating
+/// and never to padding. What no column wants is left over rather than
+/// spread, and the caller draws it as the blank end of the row.
+///
+/// Fixed widths were what this replaced: a workspace capped at 18 cells
+/// stayed cut at 18 on a 200-column pane with a hundred columns blank.
+pub fn fit_columns(room: usize, columns: &[(usize, usize)]) -> Vec<usize> {
+    let mut widths: Vec<usize> = columns.iter().map(|&(min, _)| min).collect();
+    let mut spare = room.saturating_sub(widths.iter().sum());
+    loop {
+        let needy: Vec<usize> = (0..columns.len())
+            .filter(|&i| columns[i].1 > widths[i])
+            .collect();
+        if needy.is_empty() || spare == 0 {
+            return widths;
+        }
+        let share = spare / needy.len();
+        if share == 0 {
+            // Fewer cells than columns wanting one: leftmost first, the
+            // same rule `spread` uses for its remainder.
+            for &i in needy.iter().take(spare) {
+                widths[i] += 1;
+            }
+            return widths;
+        }
+        for &i in &needy {
+            let give = share.min(columns[i].1 - widths[i]);
+            widths[i] += give;
+            spare -= give;
+        }
+    }
+}
+
 /// Which of these required commands are not on PATH.
 pub fn missing(programs: &[&str]) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
@@ -4378,6 +4419,30 @@ mod tests {
         // what to drop - returning fewer widths would lose data silently.
         assert_eq!(spread(10, 4), vec![1; 10]);
         assert!(spread(0, 10).is_empty());
+    }
+
+    #[test]
+    fn a_wide_pane_spends_its_width_on_the_column_being_cut() {
+        // A workspace capped at 18 stayed cut at 18 on any pane: the room
+        // has to reach the column whose value does not fit.
+        assert_eq!(fit_columns(100, &[(6, 5), (18, 40)]), vec![6, 40]);
+        // Two columns cutting share the spare evenly, and each stops once
+        // it fits, handing what it did not need to the other.
+        assert_eq!(fit_columns(40, &[(6, 30), (18, 30)]), vec![14, 26]);
+        assert_eq!(fit_columns(60, &[(6, 10), (18, 60)]), vec![10, 50]);
+        // An odd cell goes left, as `spread` does it.
+        assert_eq!(fit_columns(25, &[(6, 30), (18, 30)]), vec![7, 18]);
+    }
+
+    #[test]
+    fn a_narrow_pane_keeps_every_column_at_its_minimum() {
+        // Below its minimum the row is clipped by `seg` as before; columns
+        // never shrink under it, so the table does not jump as it narrows.
+        assert_eq!(fit_columns(10, &[(6, 30), (18, 30)]), vec![6, 18]);
+        // Nothing wanting more leaves the rest of the row blank, not padded
+        // into the columns.
+        assert_eq!(fit_columns(200, &[(6, 4), (18, 12)]), vec![6, 18]);
+        assert!(fit_columns(50, &[]).is_empty());
     }
 
     #[test]
