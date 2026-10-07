@@ -194,11 +194,20 @@ impl Columns {
 
 /// Keep the end of a path, marking the cut so it does not read as a name.
 fn tail_path(path: &str, n: usize) -> String {
-    let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= n || n < 2 {
+    // Cells, not characters: a directory named in CJK is two cells a
+    // character, and counting characters let it run past the column into
+    // whatever the row says after it.
+    if opscope_core::display_width(path) <= n || n < 2 {
         return path.to_string();
     }
-    format!("…{}", chars[chars.len() - (n - 1)..].iter().collect::<String>())
+    let mut start = path.len();
+    for (at, _) in path.char_indices().rev() {
+        if opscope_core::display_width(&path[at..]) > n - 1 {
+            break;
+        }
+        start = at;
+    }
+    format!("…{}", &path[start..])
 }
 
 fn base_name(path: &str) -> String {
