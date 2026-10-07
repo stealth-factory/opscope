@@ -696,30 +696,40 @@ fn columns(w: usize) -> Columns {
 fn text_widths(
     cols: &Columns,
     w: usize,
-    runs: impl Iterator<Item = (String, String, String)>,
+    runs: impl Iterator<Item = (String, String, String, String)>,
 ) -> (usize, usize) {
     if !cols.detail {
         return (14, 12);
     }
-    let (mut branch, mut event, mut repo) = (0, 0, 0);
-    for (b, e, r) in runs {
+    let (mut branch, mut event, mut repo, mut title) = (0, 0, 0, 0);
+    for (b, e, r, t) in runs {
         branch = branch.max(tc::display_width(&b));
         event = event.max(tc::display_width(&e));
         repo = repo.max(tc::display_width(&r));
+        title = title.max(tc::display_width(&t));
     }
     // The mark and outcome, the duration, the age and the sha, then the
-    // spaces in front of the branch and the repo; the event's space and the
-    // queue time when they are on the row.
+    // spaces in front of the branch and the repo; the event's space, the
+    // queue time and the space before the workflow and subject when they
+    // are on the row.
     let fixed = 12 + 7 + 5 + 9 + 1 + 2
         + if cols.event { 1 } else { 0 }
-        + if cols.queued { 7 } else { 0 };
+        + if cols.queued { 7 } else { 0 }
+        + if cols.single { 2 } else { 0 };
     let room = w.saturating_sub(1).saturating_sub(fixed);
+    // The repo and, on a one-line row, the workflow and subject after it
+    // are unpadded, but they take their share so a long branch cannot push
+    // them off the row.
+    let mut want = vec![(14, branch)];
     if cols.event {
-        let fit = tc::fit_columns(room, &[(14, branch), (12, event), (0, repo)]);
-        (fit[0], fit[1])
-    } else {
-        (tc::fit_columns(room, &[(14, branch), (0, repo)])[0], 12)
+        want.push((12, event));
     }
+    want.push((0, repo));
+    if cols.single {
+        want.push((0, title));
+    }
+    let fit = tc::fit_columns(room, &want);
+    (fit[0], if cols.event { fit[1] } else { 12 })
 }
 
 struct Palette {
@@ -2217,7 +2227,16 @@ fn main() {
         }
 
         let (branch_w, event_w) = text_widths(&cols, w, shown.iter().map(|r| {
-            (text(r, "branch"), text(r, "event"), text(r, "repo"))
+            (
+                text(r, "branch"),
+                text(r, "event"),
+                text(r, "repo"),
+                format!(
+                    "{} · {}",
+                    text(r, "workflow"),
+                    text(r, "display_title").lines().next().unwrap_or("")
+                ),
+            )
         }));
 
         // The span each run covers, taken from where its rows started
@@ -2860,6 +2879,7 @@ mod tests {
                 "feature/responsive-columns-for-agents".to_string(),
                 "pull_request_target".to_string(),
                 "stealth-factory/opscope".to_string(),
+                "ci · let widget text columns grow".to_string(),
             ))
         };
         assert_eq!(text_widths(&columns(200), 200, run()), (37, 19));
@@ -2868,6 +2888,12 @@ mod tests {
         let (branch, event) = text_widths(&columns(100), 100, run());
         assert!(branch >= 14 && event >= 12 && branch < 37);
         assert_eq!(text_widths(&columns(60), 60, run()), (14, 12));
+        // On a one-line row the workflow and subject after the repo keep
+        // their share: at 110 the branch no longer takes all of it.
+        // Before, a long branch took all 68 cells it could reach.
+        let (branch, event) = text_widths(&columns(110), 110, run());
+        let left = (110 - 1) - (12 + 7 + 5 + 9 + 1 + 2 + 1 + 2) - branch - event;
+        assert!(branch < 37 && left >= 20, "branch {} event {} left {}", branch, event, left);
     }
 
     #[test]
