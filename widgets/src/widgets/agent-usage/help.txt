@@ -22,6 +22,11 @@ own title and expiry as a date and time in this machine's local zone.
 That is separate from the usage-window countdown. Nothing here is inferred
 from a number that was not published.
 
+On [+], Claude accounts also show available usage-limit resets and the
+soonest known expiry beneath their quota rows. Each profile keeps its own
+count; cached availability is labelled, and expired grants are excluded.
+This display reads availability only and never uses a reset.
+
 Notion AI is the one remote reading that uses a credential no agent here
 holds: Notion publishes no usage API, so its tab asks the endpoints Notion's
 web app uses, signed in with a token_v2 cookie you paste into

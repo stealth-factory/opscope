@@ -18,6 +18,52 @@
 
 use crate::iso_epoch;
 
+/// Claude's optional `cedar_ember` usage block. A grant can hold several
+/// resets; its expiry applies to all of them. No grant identifiers are kept.
+#[derive(Debug, PartialEq)]
+pub struct ClaudeResets {
+    pub left: u64,
+    pub soonest: Option<f64>,
+}
+
+/// Wire fields verified against Claude Code 2.1.296's grant schema.
+/// Unknown/ineligible blocks are absent, not a guessed empty inventory.
+/// Recheck dates at render time so cached offers cannot outlive their expiry.
+pub fn parse_claude_resets(text: &str, now: f64) -> Option<ClaudeResets> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let block = body.get("cedar_ember")?.as_object()?;
+    if !block.get("eligible")?.as_bool()? {
+        return None;
+    }
+    let grants = block.get("grants")?.as_array()?;
+    let mut left = 0u64;
+    let mut soonest: Option<f64> = None;
+    let mut undated = false;
+    for grant in grants {
+        let grant = grant.as_object()?;
+        if grant.get("usable_now").and_then(|v| v.as_bool()) != Some(true)
+            || grant.get("paused").and_then(|v| v.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let count = whole_count(grant.get("resets_left")?)?;
+        if count == 0 {
+            continue;
+        }
+        let expiry = grant.get("ends_at").and_then(|v| v.as_str()).and_then(iso_epoch);
+        let start = grant.get("starts_at").and_then(|v| v.as_str()).and_then(iso_epoch);
+        if expiry.is_some_and(|at| at <= now) || start.is_some_and(|at| at > now) {
+            continue;
+        }
+        left = left.checked_add(count)?;
+        match expiry {
+            Some(at) => soonest = Some(soonest.map_or(at, |old| old.min(at))),
+            None => undated = true,
+        }
+    }
+    Some(ClaudeResets { left, soonest: if undated { None } else { soonest } })
+}
+
 /// One reset credit still usable on a Codex account.
 ///
 /// `title` is the credit's own `title`. Absent, blank, or not a string is
@@ -1206,6 +1252,51 @@ pub fn format_balance(n: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_resets_count_usable_grants_and_expire_cached_offers() {
+        let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
+        let body = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+            {"resets_left": 2, "usable_now": true, "ends_at": "2026-10-12T00:00:00Z"},
+            {"resets_left": 1, "usable_now": true, "ends_at": "2026-10-11T00:00:00Z"},
+            {"resets_left": 9, "usable_now": true, "ends_at": "2026-10-10T00:00:00Z"},
+            {"resets_left": 9, "usable_now": true, "starts_at": "2026-10-13T00:00:00Z"},
+            {"resets_left": 9, "usable_now": true, "paused": true},
+            {"resets_left": 9, "usable_now": false},
+            {"resets_left": 9},
+            {"resets_left": 0, "usable_now": true}
+        ]}}).to_string();
+        assert_eq!(parse_claude_resets(&body, now), Some(ClaudeResets {
+            left: 3, soonest: iso_epoch("2026-10-11T00:00:00Z")
+        }));
+        assert_eq!(parse_claude_resets(&body, now + 86400.0), Some(ClaudeResets {
+            left: 2, soonest: iso_epoch("2026-10-12T00:00:00Z")
+        }));
+    }
+
+    #[test]
+    fn claude_resets_keep_unknown_separate_from_zero_and_dates_optional() {
+        let now = iso_epoch("2026-10-10T00:00:00Z").unwrap();
+        for body in ["not json", "{}", r#"{"cedar_ember":null}"#,
+            r#"{"cedar_ember":{"eligible":false}}"#,
+            r#"{"cedar_ember":{"eligible":true}}"#,
+            r#"{"cedar_ember":{"eligible":true,"grants":{}}}"#] {
+            assert_eq!(parse_claude_resets(body, now), None, "{body}");
+        }
+        let mut body = serde_json::json!({"cedar_ember":{"eligible":true,"grants":[]}});
+        assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:0, soonest:None}));
+        for count in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("2"), serde_json::Value::Null] {
+            body["cedar_ember"]["grants"] = serde_json::json!([{"resets_left":count,"usable_now":true}]);
+            assert_eq!(parse_claude_resets(&body.to_string(), now), None);
+        }
+        for date in [serde_json::Value::Null, serde_json::json!("bad date")] {
+            body["cedar_ember"]["grants"] = serde_json::json!([
+                {"resets_left":1,"usable_now":true,"ends_at":"2026-10-12T00:00:00Z"},
+                {"resets_left":2,"usable_now":true,"ends_at":date}
+            ]);
+            assert_eq!(parse_claude_resets(&body.to_string(), now), Some(ClaudeResets {left:3, soonest:None}));
+        }
+    }
+
     use super::*;
 
     fn at(iso: &str) -> f64 {
