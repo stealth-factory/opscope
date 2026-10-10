@@ -393,9 +393,12 @@ permission to make changes.
 ### Kitty and ordinary terminals
 
 Opscope detects terminal capabilities per session. Supporting terminals get
-synchronized frame updates; `latency`, `link` and `netwatch` can draw pixel charts
-through the Kitty graphics protocol. Other sessions use Braille charts with the
-same data and controls. Use `OPSCOPE_GRAPHICS=text` to keep text charts, or
+synchronized frame updates and pixel charts through the Kitty graphics protocol.
+`latency`, `link`, `netwatch` and `ports` render network history; `github`,
+`github-actions`, `vercel-deployments` and `linear` render activity charts;
+`github` and `agent-usage` render calendars; `linear` and `agent-usage` also
+render progress/quota meters. Other sessions use Braille and text graphics with
+the same data and controls. Use `OPSCOPE_GRAPHICS=text` to keep text charts, or
 `OPSCOPE_GRAPHICS=kitty` to request pixels with an on-screen fallback explanation.
 The default is `auto`. No Kitty helper or image library needs installing.
 

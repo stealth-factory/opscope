@@ -1712,7 +1712,12 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     )
 }
 
+#[cfg(test)]
 pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    claude_tab_with_plots(c, w, p, &mut Vec::new())
+}
+
+fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = claude_quota(c, w, p);
     if rows.is_empty() {
         // Two facts have to survive a quota block that drew nothing: why the
@@ -2031,6 +2036,9 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
             ],
             w - 1,
         ));
+        let mut plot = cal.plot.clone();
+        plot.y += rows.len();
+        plots.push(plot);
         for line in &cal.rows {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
@@ -2278,8 +2286,8 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
 
 /// The whole tab: the quota, what the machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
-pub fn tab(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    let body = add_section(claude_tab(c, w, p), claude_metered(c, w, cfg, p));
+pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let body = add_section(claude_tab_with_plots(c, w, p, plots), claude_metered(c, w, cfg, p));
     match c.profile.as_ref() {
         Some(prof) => add_section(body, claude_plan_rows(prof, w, p)),
         None => body,

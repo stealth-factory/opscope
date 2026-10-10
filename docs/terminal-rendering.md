@@ -19,6 +19,12 @@ It selects antialiased pixels for an acknowledged Kitty graphics session and
 Braille otherwise. Samples, gaps, scales, time windows and selection stay the
 same. Higher resolution does not imply more samples or faster polling.
 
+`ports` adds pixel traffic bars; `github`, `github-actions`,
+`vercel-deployments`, and `linear` add discrete pixel bar charts.
+`github` and `agent-usage` use separated calendar cells, and `linear` and
+`agent-usage` use fractional progress/quota meters. These fall back to ordinary
+block characters, squares, dots and reference marks in text sessions.
+
 ## Choosing a renderer
 
 ```sh
@@ -97,6 +103,30 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
+For discrete data, use the other `Plot` constructors with the same viewport and
+drawing path:
+
+```rust,ignore
+// One column per bucket; an explicit peak keeps paired charts on one scale.
+let upward = tc::Plot::bars(x, y, &columns, 3, peak, false);
+let downward = tc::Plot::bars(x, y + 4, &other_columns, 3, peak, true);
+// Each day is Some(truecolor) or None. A missing day is a dot in both modes.
+let calendar = tc::Plot::heatmap(x, y, &day_colours, &missing_colour);
+// Fractions, with an optional elapsed-window marker. Keep exact values in text.
+let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
+```
+
+Bars do not interpolate between buckets. Calendar cells have transparent gutters
+so adjacent days remain distinct; measured zeroes have an explicit colour and
+are not treated as missing data. Meters clamp the drawn fill to 0–100%, while
+the widget's numeric label can still report an overage. Reference marks do not
+change the measured fill. No primitive animates a value between API polls.
+
+Collect plots in the same coordinate system as the body, then call
+`in_viewport` after the scroll offset is clamped. Clip to the body room above
+the footer. If a guarded body fails, discard its pending plots together with
+its rows, so graphics cannot cover the error message.
+
 The widget owns its axis transform, sample aggregation, labels and colors.
 The chart owns right alignment, line interpolation between adjacent measurements,
 gap preservation, focused-trace priority and both rasterizers. `baseline` omits
@@ -129,17 +159,17 @@ a claim of shipped behavior.
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
 | `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
-| `github` | Elapsed-time loading shimmer and loading-chart motion | A future shared bar/heatmap API could improve activity charts; keep discrete day buckets |
-| `linear` | Elapsed-time loading-chart motion | Shared bar and meter primitives could improve throughput/cycle views; never smooth counts into invented measurements |
+| `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
+| `linear` | Pixel created/completed bars and board cycle/project meters; elapsed-time loading motion | Detail-screen meters and state breakdowns remain text; preserve scope and exact percentage labels |
 | `github-prs` | Elapsed-time spinners and loading shimmer | Keep review text and tables selectable; enhance shared figures only if it improves legibility |
-| `github-actions` | Elapsed-time running/loading indicators | Shared discrete activity bars and duration plots are candidates; retain status text and exact durations |
-| `vercel-deployments` | Elapsed-time build indicators | Same shared activity-bar opportunity as Actions; do not imply measured build progress from a spinner |
-| `agent-usage` | Elapsed-time loading indicators | Shared heatmap cells could improve daily usage calendars; preserve day boundaries, missing data and quota labels |
+| `github-actions` | Pixel activity and recent-duration bars; elapsed-time running/loading indicators | Retain outcome colours, exact durations and status text |
+| `vercel-deployments` | Pixel deployment activity and recent-build-duration bars; elapsed-time build indicators | Preserve scrolling and text logs; a spinner does not imply measured build progress |
+| `agent-usage` | Pixel quota meters on summary; Claude/Codex/Grok daily heatmaps; elapsed-time loading indicators | Individual vendor quota rows remain text; preserve missing days, freshness, overages and pace labels |
 | `herdr-panes` | Elapsed-time working indicators | Keep status, selection and navigation as text; decorative motion must not imply extra agent activity |
 | `luvus-panes` | Elapsed-time working indicators | Same principle for coordination/evidence tables; verify pane protocol support end to end |
 | `clocks` | Synchronized text presentation | Native scaled text needs its own capability and fallback; keep current block digits until that exists |
 | `months` | Synchronized text presentation | Date cells are discrete and benefit from stable text; no reason to animate static dates |
-| `ports` | Synchronized text presentation | A text table is the useful view; avoid animation that makes stable rows look active |
+| `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels | Keep the server table and unmeasured-history dots as text |
 | `tailnet` | Synchronized text presentation | Larger history plots could adopt `LineChart`; compact per-row sparklines remain efficient text |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
@@ -157,8 +187,11 @@ The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
 terminals, fragmented/late replies, image errors, cached frames, scrolling,
 resize, screen changes, suspend/resume, quit, panic and signal cleanup. Unit tests
-cover shared geometry, gap/idle semantics, cropping, compression/chunking and
-input isolation. These tests verify emitted bytes and state, not a terminal
+cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
+markers, quota references, cropping, compression/chunking and input isolation.
+The fixture's `g` key shows synthetic bars, a calendar and a quota meter; the
+PTY checks exercise both its pixel and text paths. These tests verify emitted
+bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.

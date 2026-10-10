@@ -1669,6 +1669,7 @@ fn add_section(mut rows: Vec<String>, block: Vec<String>) -> Vec<String> {
 /// months named across the top; solid blocks in four steps of a single hue,
 /// and a dim dot for a day the file has no entry for.
 struct Calendar {
+    plot: tc::Plot,
     rows: Vec<Vec<(String, String)>>,
     best: Option<NaiveDate>,
     active: usize,
@@ -1722,7 +1723,9 @@ fn day_calendar(
         p.dim.clone(),
         format!("     {}", strip.iter().collect::<String>()),
     )]];
+    let mut cells = Vec::new();
     for i in 0..7 {
+        let mut cell_row = Vec::new();
         let label = match i {
             0 => "Mon",
             2 => "Wed",
@@ -1732,12 +1735,14 @@ fn day_calendar(
         let mut line = vec![(p.dim.clone(), format!(" {:<4}", label))];
         for wk in &starts {
             let day = *wk + Days::days(i);
+            cell_row.push(totals.get(&day).map(|n| shade((n / peak).sqrt(), steps)));
             match totals.get(&day) {
                 None => line.push((p.empty_cell.clone(), "·".into())),
                 Some(n) => line.push((shade((n / peak).sqrt(), steps), "█".into())),
             }
         }
         rows.push(line);
+        cells.push(cell_row);
     }
 
     // Active out of days in the range, not out of days the file happens to
@@ -1759,6 +1764,7 @@ fn day_calendar(
         current += 1;
     }
     Some(Calendar {
+        plot: tc::Plot::heatmap(5, 1, &cells, &p.empty_cell),
         rows,
         best,
         active,
@@ -2575,6 +2581,7 @@ fn main() {
         rows.extend(strip);
         rows.push(String::new());
 
+        let mut plots = Vec::new();
         let body = if snapshot.fetched <= 0.0 {
             loading_rows(w, tick, &p)
         } else {
@@ -2586,7 +2593,10 @@ fn main() {
             // still steer - the other tabs still open, and `q` still
             // quits.
             tc::guard_rows(&name, w, || {
-                vendors::tab_body(&name, &snapshot, w, h, &cfg, &p, &tabs)
+                let mut pending = Vec::new();
+                let body = vendors::tab_body_with_plots(&name, &snapshot, w, h, &cfg, &p, &tabs, &mut pending);
+                plots = pending;
+                body
             })
         };
 
@@ -2669,6 +2679,11 @@ fn main() {
             footer.insert(0, String::new());
             blanks += 1;
         }
+        let top = rows.len();
+        let plots: Vec<_> = plots.into_iter().filter_map(|mut plot| {
+            plot.y += top;
+            plot.in_viewport(off, top, avail)
+        }).collect();
         rows.extend(view);
         while rows.len() < h.saturating_sub(footer.len()) {
             rows.push(String::new());
@@ -2680,7 +2695,7 @@ fn main() {
         let foot_top = rows.len() + blanks;
         rows.extend(footer);
         rows.truncate(h);
-        tc::draw(&rows, w, h);
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }

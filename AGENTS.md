@@ -382,6 +382,9 @@ another widget a second source.
 Line charts belong to core: `LineChart`, `Trace`, `Plot`, and `draw_plots`
 choose pixels or Braille from the same data. Widgets own axis transforms,
 gaps, time slots and labels, but never branch on Kitty or emit graphics escapes.
+Discrete graphics use `Plot::bars`, `Plot::heatmap`, and `Plot::meter`; core owns
+their block-character fallbacks too. Keep bucket/day boundaries and reference
+marks explicit, and leave exact values and controls in ordinary text.
 `Plot::in_viewport` keeps chart cropping aligned with body scrolling. See
 `docs/terminal-rendering.md` for the API, animation helpers and compatibility checks.
 
