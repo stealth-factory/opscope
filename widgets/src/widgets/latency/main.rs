@@ -712,15 +712,58 @@ fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
     }
 }
 
-/// Log-scale plot of every target's round trip.
-///
-/// Log because the targets on one screen can differ by two orders of
-/// magnitude, and a linear axis renders the near one as a flat line at the
-/// bottom.
+/// Aggregate observed runs while keeping explicit losses separate from
+/// empty time intervals. Return measured values and their horizontal positions.
 ///
 /// Columns are anchored to a fixed time grid rather than measured backwards
 /// from now, so a sample never migrates between columns: the plot steps left
 /// exactly once per bucket instead of shuffling as the clock slides.
+fn bucketed_trace(
+    samples: &[(f64, Option<f64>)],
+    bucket: f64,
+    newest: f64,
+    slots: usize,
+    how: &str,
+) -> (Vec<Option<f64>>, Vec<f64>) {
+    let mut columns: Vec<Vec<Option<f64>>> = vec![Vec::new(); slots];
+    for (at, value) in samples {
+        let age = newest - (at / bucket).floor();
+        if !age.is_finite() || age < 0.0 || age >= slots as f64 {
+            continue;
+        }
+        columns[slots - 1 - age as usize].push(*value);
+    }
+    let mut values = Vec::new();
+    let mut positions = Vec::new();
+    for (column, samples) in columns.into_iter().enumerate() {
+        let x = column as f64 / slots.saturating_sub(1).max(1) as f64;
+        let mut run = Vec::new();
+        // No observation in a time bucket is not a lost ping. Omit that
+        // position and connect the surrounding measured points. An explicit
+        // timeout splits runs even when it shares a bucket with a reply.
+        for value in samples.into_iter().chain(std::iter::once(None)) {
+            if let Some(value) = value.filter(|v| v.is_finite()) {
+                run.push(value);
+            } else {
+                if !run.is_empty() {
+                    values.push(Some(aggregate(&run, how)));
+                    positions.push(x);
+                    run.clear();
+                }
+                values.push(None);
+                positions.push(x);
+            }
+        }
+        // Remove only the sentinel used to flush the final run. Real loss
+        // markers (including a trailing timeout) remain in the model.
+        values.pop();
+        positions.pop();
+    }
+    (values, positions)
+}
+
+/// Log-scale plot of every target's round trip. The log axis keeps both
+/// nearby and distant targets readable across orders of magnitude.
 fn graph(
     targets: &[Target],
     w: usize,
@@ -738,36 +781,18 @@ fn graph(
     // did when each one had a whole character to itself.
     let slots = gw * 2;
     let newest = (tc::now() / bucket).floor();
-    let series: Vec<(usize, Vec<Option<f64>>)> = targets
+    let series: Vec<(usize, Vec<Option<f64>>, Vec<f64>)> = targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let mut columns: Vec<Vec<f64>> = vec![Vec::new(); slots];
-            for (at, rtt) in &t.samples {
-                let Some(rtt) = rtt else { continue };
-                let age = newest - (at / bucket).floor();
-                if age < 0.0 || age >= slots as f64 {
-                    continue;
-                }
-                columns[slots - 1 - age as usize].push(*rtt);
-            }
-            let values = columns
-                .into_iter()
-                .map(|c| {
-                    if c.is_empty() {
-                        None
-                    } else {
-                        Some(aggregate(&c, how))
-                    }
-                })
-                .collect();
-            (i, values)
+            let (values, positions) = bucketed_trace(&t.samples, bucket, newest, slots, how);
+            (i, values, positions)
         })
         .collect();
     let span = bucket * slots as f64;
     let seen: Vec<f64> = series
         .iter()
-        .flat_map(|(_, v)| v.iter().flatten())
+        .flat_map(|(_, v, _)| v.iter().flatten())
         .copied()
         .collect();
     if seen.is_empty() {
@@ -807,7 +832,8 @@ fn graph(
     let chart = tc::LineChart {
         slots,
         focus,
-        traces: series.iter().map(|(idx, values)| tc::Trace {
+        traces: series.iter().map(|(idx, values, positions)| tc::Trace {
+            positions: Some(positions.clone()),
             baseline: None,
             values: values.iter().map(|v| v.map(|v| (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect(),
             colour: if focus.is_some_and(|at| at != *idx) {
@@ -1086,7 +1112,7 @@ fn main() {
                 (
                     p.dim.as_str(),
                     if bucket <= interval {
-                        " · 1 ping/column".to_string()
+                        format!(" · {:.1}s buckets", bucket)
                     } else {
                         format!(" · {} of {}s blocks", how, bucket)
                     },
@@ -1755,6 +1781,28 @@ mod tests {
         // A value that is not one of the choices starts from the first.
         assert_eq!(cycle(INTERVAL_CHOICES, 3.3), 0.5);
         assert_eq!(cycle(COLUMN_CHOICES, 10.0), 0.0);
+    }
+
+    #[test]
+    fn reply_jitter_does_not_invent_lost_pings() {
+        // Every half-second probe replied. RTT variation alone moves two
+        // replies into one arrival bucket and leaves intervening bins empty.
+        let samples = [(100.45, Some(50.0)), (101.10, Some(200.0)),
+            (101.45, Some(50.0)), (102.10, Some(200.0)), (102.45, Some(50.0))];
+        let (values, positions) = bucketed_trace(&samples, 0.5, 204.0, 5, "median");
+        assert_eq!(values, vec![Some(50.0), Some(125.0), Some(125.0)]);
+        assert_eq!(positions, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn explicit_losses_survive_empty_and_mixed_buckets() {
+        let samples = [(100.45, Some(50.0)), (100.9, None),
+            (101.10, Some(200.0)), (101.2, None), (101.45, Some(50.0)), (102.0, None)];
+        let (values, positions) = bucketed_trace(&samples, 0.5, 204.0, 5, "median");
+        assert_eq!(values, vec![Some(50.0), None, Some(200.0), None, Some(50.0), None]);
+        assert_eq!(positions, vec![0.0, 0.25, 0.5, 0.5, 0.5, 1.0]);
+        let (values, positions) = bucketed_trace(&samples, 0.5, 206.0, 2, "median");
+        assert!(values.is_empty() && positions.is_empty());
     }
 
     #[test]

@@ -11,6 +11,10 @@ pub struct Trace {
     /// Bottom-to-top fractions, already transformed to the widget's axis.
     /// None is a missing measurement: never join a line across it.
     pub values: Vec<Option<f64>>,
+    /// Optional explicit horizontal fractions. Unobserved time positions
+    /// need not be inserted as fake missing samples; None values still break
+    /// the line. Both pixel and Braille renderers use these same positions.
+    pub positions: Option<Vec<f64>>,
     pub colour: String,
     /// Omit idle runs at this normalized value (e.g. zero network traffic).
     /// Edges into/out of activity still reach the baseline.
@@ -34,7 +38,14 @@ impl LineChart {
             .map(|t| {
                 (
                     t.colour.clone(),
-                    braille_with_baseline(&t.values, self.slots, cols, rows, t.baseline),
+                    braille_with_baseline(
+                        &t.values,
+                        self.slots,
+                        cols,
+                        rows,
+                        t.baseline,
+                        t.positions.as_deref(),
+                    ),
                 )
             })
             .collect();
@@ -294,7 +305,7 @@ impl Plot {
 
 /// Shared Braille rasterizer, also useful to widgets drawing small sparklines.
 pub fn braille(values: &[Option<f64>], slots: usize, cols: usize, rows: usize) -> Vec<Vec<u8>> {
-    braille_with_baseline(values, slots, cols, rows, None)
+    braille_with_baseline(values, slots, cols, rows, None, None)
 }
 
 fn braille_with_baseline(
@@ -303,15 +314,24 @@ fn braille_with_baseline(
     cols: usize,
     rows: usize,
     baseline: Option<f64>,
+    positions: Option<&[f64]>,
 ) -> Vec<Vec<u8>> {
     let mut grid = vec![vec![0; cols]; rows];
-    segments(values, slots, cols * 2, rows * 4, baseline, |a, b| {
-        raster(a, b, |x, y| {
-            if x < cols * 2 && y < rows * 4 {
-                grid[y / 4][x / 2] |= super::BRAILLE[y % 4][x % 2];
-            }
-        });
-    });
+    segments(
+        values,
+        slots,
+        cols * 2,
+        rows * 4,
+        baseline,
+        positions,
+        |a, b| {
+            raster(a, b, |x, y| {
+                if x < cols * 2 && y < rows * 4 {
+                    grid[y / 4][x / 2] |= super::BRAILLE[y % 4][x % 2];
+                }
+            });
+        },
+    );
     grid
 }
 
@@ -321,23 +341,35 @@ fn segments(
     w: usize,
     h: usize,
     baseline: Option<f64>,
+    positions: Option<&[f64]>,
     mut emit: impl FnMut((usize, usize), (usize, usize)),
 ) {
     if w == 0 || h == 0 || slots == 0 {
         return;
     }
-    let start = values.len().saturating_sub(slots);
+    let start = if positions.is_some() {
+        0
+    } else {
+        values.len().saturating_sub(slots)
+    };
     let values = &values[start..];
     let mut previous = None;
     for (i, value) in values.iter().enumerate() {
-        let point = value.filter(|v| v.is_finite()).map(|v| {
+        let point = value.filter(|v| v.is_finite()).and_then(|v| {
             let age = values.len() - 1 - i;
-            let x = w
-                - 1
-                - ((age as f64 * (w - 1) as f64) / slots.saturating_sub(1).max(1) as f64).round()
-                    as usize;
+            let x = if let Some(positions) = positions {
+                let x = *positions.get(start + i)?;
+                if !x.is_finite() || !(0.0..=1.0).contains(&x) {
+                    return None;
+                }
+                (x * (w - 1) as f64).round() as usize
+            } else {
+                w - 1
+                    - ((age as f64 * (w - 1) as f64) / slots.saturating_sub(1).max(1) as f64)
+                        .round() as usize
+            };
             let y = ((1.0 - v.clamp(0.0, 1.0)) * (h - 1) as f64).round() as usize;
-            (x, y)
+            Some((x, y))
         });
         let idle = baseline.is_some()
             && *value == baseline
@@ -608,6 +640,7 @@ fn pixels(plot: &Plot) -> Vec<u8> {
             w,
             h,
             trace.baseline,
+            trace.positions.as_deref(),
             |a, b| {
                 // Draw a one-pixel-wide stroke at 2x resolution, then downsample
                 // coverage. Smoothing never crosses a missing measurement.
@@ -696,12 +729,40 @@ mod tests {
         LineChart {
             slots: values.len(),
             traces: vec![Trace {
+                positions: None,
                 values,
                 colour: super::super::rgb(30, 220, 180),
                 baseline: None,
             }],
             focus: None,
         }
+    }
+
+    #[test]
+    fn sparse_time_positions_connect_in_both_renderers_but_losses_break() {
+        let mut c = chart(vec![Some(0.5), Some(0.5)]);
+        c.traces[0].positions = Some(vec![0.1, 0.9]);
+        let grid = c.cells(10, 4);
+        assert!(grid[1..3].iter().any(|row| row[5].1 != 0));
+        let bytes = pixels(&Plot::new(0, 1, 10, 4, c.clone()));
+        assert!((0..64).any(|y| bytes[(y * 80 + 40) * 4 + 3] != 0));
+        c.traces[0].values = vec![Some(0.5), None, Some(0.5)];
+        c.traces[0].positions = Some(vec![0.1, 0.5, 0.9]);
+        // Explicit positions are not truncated to the regular-slot count.
+        let grid = c.cells(10, 4);
+        assert!(grid.iter().all(|row| row[5].1 == 0));
+        assert!(grid.iter().any(|row| row[1].1 != 0));
+        let bytes = pixels(&Plot::new(0, 1, 10, 4, c));
+        assert!((0..64).all(|y| bytes[(y * 80 + 40) * 4 + 3] == 0));
+    }
+
+    #[test]
+    fn identical_time_positions_draw_vertical_segments_in_both_renderers() {
+        let mut c = chart(vec![Some(0.0), Some(1.0)]);
+        c.traces[0].positions = Some(vec![0.5, 0.5]);
+        assert!(c.cells(10, 8).iter().all(|row| row[5].1 != 0));
+        let bytes = pixels(&Plot::new(0, 1, 10, 8, c));
+        assert!((0..128).all(|y| bytes[(y * 80 + 40) * 4 + 3] != 0));
     }
 
     #[test]
@@ -890,6 +951,7 @@ mod tests {
         let mut seed = 7u32;
         c.traces = (0..12)
             .map(|i| Trace {
+                positions: None,
                 values: (0..120)
                     .map(|_| {
                         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);

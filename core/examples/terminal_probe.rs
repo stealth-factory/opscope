@@ -39,6 +39,7 @@ fn main() {
             slots: 12,
             focus: None,
             traces: vec![tc::Trace {
+                positions: Some((0..12).map(|i| i as f64 / 11.0).collect()),
                 values: vec![
                     Some(0.1),
                     Some(0.6),

@@ -1415,6 +1415,7 @@ fn graph(
         slots,
         focus: focus.and_then(|at| series.iter().position(|(idx, _)| *idx == at)),
         traces: series.iter().map(|(idx, values)| tc::Trace {
+            positions: None,
             baseline: None,
             values: values.iter().map(|v| Some((v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect(),
             colour: if focus.is_some_and(|at| at != *idx) {
