@@ -32,6 +32,30 @@ not bypass detection. Unsupported explicit requests show a notice in the title
 row and use text. An image transmission error also disables pixels for the
 session and shows why; re-entering the terminal session renegotiates support.
 
+### Force text rendering on Kitty-capable terminals
+
+Set `OPSCOPE_GRAPHICS=text` when starting Opscope to use Braille/text charts even
+when the terminal supports Kitty graphics:
+
+```sh
+OPSCOPE_GRAPHICS=text opscope latency  # one widget
+OPSCOPE_GRAPHICS=text opscope          # launcher and every widget it opens
+```
+
+If you start widgets through a local `preview` command, prefix that command too:
+
+```sh
+OPSCOPE_GRAPHICS=text preview
+```
+
+These prefixes apply only to that command and its children. To keep text mode
+for the current shell session, run `export OPSCOPE_GRAPHICS=text` before launching
+widgets. Run `unset OPSCOPE_GRAPHICS` and restart them to restore automatic
+renderer selection. Text mode retains the same data and controls, and still
+uses synchronized updates when supported.
+
+## Image transport and lifecycle
+
 No Kitty executable, image conversion command, shared file, shared memory or
 system graphics library is needed. Images are RGBA, zlib compressed in pure Rust,
 base64 encoded and sent in chunks of at most 4096 payload bytes. They can travel
@@ -46,7 +70,9 @@ does not depend on potentially unavailable cell-pixel-size reports. Up to 16
 visible plots, each at most 20,000 cells, use images; additional or larger plots
 use text to bound image memory/transport costs. It is a raster chart renderer,
 not a general replacement for terminal text, native scaled fonts or animation
-frames in the Kitty protocol.
+frames in the Kitty protocol. Pixel traces use a centered two-pixel stroke with
+antialiased edges so steep segments retain an opaque core in narrow plots.
+Missing measurements still break the trace; they are never interpolated away.
 
 ## Widget API
 
