@@ -134,9 +134,9 @@ both Kitty pixels and Braille. Equal positions can draw a vertical segment.
 
 Latency uses sparse bucket positions: reply-time jitter can leave an arrival
 bucket empty without losing a ping, so an empty bucket does not break the line.
-Explicit timeout/loss records still break it, including within an otherwise
-populated bucket. Aggregation never combines readings across such a loss.
-The bucket width and numeric statistics keep their existing meaning.
+Each populated bucket aggregates its successful replies, even if it also contains
+losses. A bucket containing only losses leaves a gap. Loss counts and events still
+include every recorded loss; the bucket width and numeric statistics are unchanged.
 
 All widget chart paths were reviewed for this distinction. `link` and `netwatch`
 use ordered sample traces; `ports` and `tailnet` use ordered traffic samples.

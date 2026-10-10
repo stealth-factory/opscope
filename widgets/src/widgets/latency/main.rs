@@ -712,8 +712,8 @@ fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
     }
 }
 
-/// Aggregate observed runs while keeping explicit losses separate from
-/// empty time intervals. Return measured values and their horizontal positions.
+/// Aggregate successful replies per bucket, leaving a gap only when a
+/// populated bucket has no valid reply. Return values and time positions.
 ///
 /// Columns are anchored to a fixed time grid rather than measured backwards
 /// from now, so a sample never migrates between columns: the plot steps left
@@ -737,27 +737,15 @@ fn bucketed_trace(
     let mut positions = Vec::new();
     for (column, samples) in columns.into_iter().enumerate() {
         let x = column as f64 / slots.saturating_sub(1).max(1) as f64;
-        let mut run = Vec::new();
-        // No observation in a time bucket is not a lost ping. Omit that
-        // position and connect the surrounding measured points. An explicit
-        // timeout splits runs even when it shares a bucket with a reply.
-        for value in samples.into_iter().chain(std::iter::once(None)) {
-            if let Some(value) = value.filter(|v| v.is_finite()) {
-                run.push(value);
-            } else {
-                if !run.is_empty() {
-                    values.push(Some(aggregate(&run, how)));
-                    positions.push(x);
-                    run.clear();
-                }
-                values.push(None);
-                positions.push(x);
-            }
+        // An empty arrival bucket is not evidence of loss. A mixed bucket
+        // still has a measured RTT; loss accounting stays in the raw samples.
+        if samples.is_empty() {
+            continue;
         }
-        // Remove only the sentinel used to flush the final run. Real loss
-        // markers (including a trailing timeout) remain in the model.
-        values.pop();
-        positions.pop();
+        let replies: Vec<f64> = samples.into_iter().flatten()
+            .filter(|v| v.is_finite()).collect();
+        values.push(if replies.is_empty() { None } else { Some(aggregate(&replies, how)) });
+        positions.push(x);
     }
     (values, positions)
 }
@@ -1795,14 +1783,29 @@ mod tests {
     }
 
     #[test]
-    fn explicit_losses_survive_empty_and_mixed_buckets() {
+    fn only_loss_only_buckets_break_the_trace() {
         let samples = [(100.45, Some(50.0)), (100.9, None),
             (101.10, Some(200.0)), (101.2, None), (101.45, Some(50.0)), (102.0, None)];
         let (values, positions) = bucketed_trace(&samples, 0.5, 204.0, 5, "median");
-        assert_eq!(values, vec![Some(50.0), None, Some(200.0), None, Some(50.0), None]);
-        assert_eq!(positions, vec![0.0, 0.25, 0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(values, vec![Some(50.0), None, Some(125.0), None]);
+        assert_eq!(positions, vec![0.0, 0.25, 0.5, 1.0]);
         let (values, positions) = bucketed_trace(&samples, 0.5, 206.0, 2, "median");
         assert!(values.is_empty() && positions.is_empty());
+    }
+
+    #[test]
+    fn mixed_buckets_plot_replies_regardless_of_loss_order() {
+        for samples in [
+            vec![(100.1, None), (100.2, Some(40.0)), (100.3, Some(80.0))],
+            vec![(100.1, Some(40.0)), (100.2, None), (100.3, Some(80.0))],
+            vec![(100.1, Some(40.0)), (100.2, Some(80.0)), (100.3, None)],
+        ] {
+            for (how, expected) in [("median", 60.0), ("mean", 60.0), ("max", 80.0)] {
+                let (values, positions) = bucketed_trace(&samples, 0.5, 200.0, 1, how);
+                assert_eq!(values, vec![Some(expected)]);
+                assert_eq!(positions, vec![0.0]);
+            }
+        }
     }
 
     #[test]
