@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.39.0] - 2026-10-10
+
+### Features
+
+- **agent-usage**: Show Claude account reset availability (#337)
+
 ## [0.38.1] - 2026-10-10
 
 ### Bug Fixes
