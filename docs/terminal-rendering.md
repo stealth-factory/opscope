@@ -115,10 +115,10 @@ let calendar = tc::Plot::heatmap_levels(x, y, &days, &missing_colour);
 let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
 ```
 
-Bars do not interpolate between buckets. Calendar cells have transparent gutters
-so adjacent days remain distinct. GitHub contributions and agent-usage's Claude,
-Codex and Grok calendars all use the same core heatmap renderer: solid 7×14 pixel tiles within each 8×16 cell (one pixel between columns and
-two between rows), and solid text blocks. Measured zeroes use a dark fill;
+Bars do not interpolate between buckets. GitHub contributions and agent-usage's
+Claude, Codex and Grok calendars all use the same gapless core heatmap renderer:
+solid tiles fill each entire 8×16 pixel cell, matching the solid text blocks.
+Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
