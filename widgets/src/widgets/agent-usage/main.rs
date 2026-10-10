@@ -1480,31 +1480,18 @@ fn metered_rows(
     }
     let unpriced_anywhere = built.iter().any(|x| x.3.iter().any(|m| m.1.is_none()));
     let priced_anywhere = built.iter().any(|x| window_is_priced(&x.3));
-    // Nothing priced and no rates set at all: the tab says how to set them.
-    // Where there are unpriced tokens the block is still drawn under that
-    // advice, because a tab saying only "no rates" is silent about what it
-    // would have been pricing - which is the whole of its spend.
+    // No positive token counts reached either list. That says nothing
+    // about prices: changing the rate card cannot create usage records.
     if !priced_anywhere && !unpriced_anywhere {
-        if cfg.rates.is_empty() {
-            let mut rows = vec![tc::seg(
-                &[
-                    (p.lbl.as_str(), " ── METERED ── ".into()),
-                    (p.dim.as_str(), "no published rates for these models".into()),
-                ],
-                w - 1,
-            )];
-            rows.extend(no_local(
-                &tc::missing_config(
-                    "Set agent_usage.rates - US$ per million tokens, keyed by model.",
-                ),
-                "",
-                w,
-                p,
-            ));
-            rows.push(String::new());
-            return rows;
+        let mut rows = vec![tc::seg(
+            &[(p.lbl.as_str(), " ── METERED ── ".into()), (p.dim.as_str(), scope.into())],
+            w - 1,
+        )];
+        rows.extend(no_local("No recorded token usage in these windows.", "", w, p));
+        if !caveat.is_empty() {
+            rows.extend(no_local(caveat, "", w, p));
         }
-        return Vec::new();
+        return rows;
     }
     // Where the prices came from belongs on screen: a list price is a dated
     // fact that goes stale in silence, and a configured one is the reader's
@@ -2936,6 +2923,30 @@ mod tests {
             .iter()
             .map(|r| plain(r))
             .collect()
+    }
+
+    #[test]
+    fn empty_metering_is_usage_absence_regardless_of_rate_overrides() {
+        for agent in ["claude", "codex"] {
+            for configured in [false, true] {
+                let mut cfg = Config::default();
+                if configured {
+                    cfg.rates.insert("*".into(), HashMap::from([("input".into(), 1.0)]));
+                }
+                for entries in [vec![], vec![("unknown-model".into(), empty_tokens())]] {
+                    let windows = vec![("today".into(), entries.clone()), ("30 days".into(), entries)];
+                    for width in [30, 60, 120] {
+                        let rows = metered_rows(&windows, width, "", agent, "this machine", "Local records only.", &cfg, &palette());
+                        let text = rows.iter().map(|r| plain(r)).collect::<Vec<_>>().join(" ");
+                        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        assert!(words.contains("No recorded token usage in these windows."), "{words}");
+                        assert!(words.contains("Local records only."), "{words}");
+                        assert!(!words.contains("rates") && !words.contains('$'), "{words}");
+                        assert!(rows.iter().all(|r| tc::display_width(&plain(r)) < width));
+                    }
+                }
+            }
+        }
     }
 
     /// One priced and one unpriced model in the same window. The priced row
