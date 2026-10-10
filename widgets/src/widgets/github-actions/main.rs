@@ -2055,7 +2055,7 @@ fn main() {
             // describe a frame that is no longer on screen.
             placed.clear();
             tc::draw(&out, w, h);
-            std::thread::sleep(Duration::from_millis(250));
+            keyboard.wait(Duration::from_millis(250));
             continue;
         }
 
@@ -2433,7 +2433,7 @@ fn main() {
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 

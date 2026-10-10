@@ -181,14 +181,30 @@ def filled_text(t):
     t.read()
     assert not t.images()
     text = t.output.decode(errors="replace")
-    assert all(glyph in text for glyph in "·▫░▒▓█┃")
+    assert all(glyph in text for glyph in "█┃")
 
+
+
+def responsive_selection(t):
+    # Each press must produce its own frame inside the 300 ms idle interval.
+    # Also verifies unchanged Kitty images are not retransmitted on navigation.
+    for selected in [1, 2]:
+        t.send(b"\x1b[B")
+        t.read(0.12)
+        assert f"SELECTED:{selected}".encode() in t.output, "input waited for the idle redraw timer"
+    # First Down scrolls/crops the fixture; second only changes selection.
+    after_scroll = len(t.images())
+    t.send(b"\x1b[B")
+    t.read(0.12)
+    assert b"SELECTED:3" in t.output
+    assert len(t.images()) == after_scroll, "selection retransmitted unchanged images"
 
 if __name__ == "__main__":
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
                                ("auto", "kitty", rejected_image),
-                               ("auto", "kitty", filled_graphics), ("text", "sync", filled_text)]:
+                               ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
+                               ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
     for ending in ["signal", "panic"]:

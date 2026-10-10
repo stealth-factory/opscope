@@ -3106,6 +3106,27 @@ impl Keyboard {
         key
     }
 
+    /// Wait between frames, waking immediately when terminal input arrives.
+    /// Does not consume input; poll() still owns decoding and protocol replies.
+    pub fn wait(&self, timeout: Duration) {
+        if self.saved.is_none() {
+            std::thread::sleep(timeout);
+            return;
+        }
+        // Resolve a held Escape promptly without spinning on incomplete input.
+        let timeout = if self.pending.is_empty() { timeout } else {
+            timeout.min(Duration::from_millis(20))
+        };
+        let mut fd = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
+        let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+        unsafe { libc::poll(&mut fd, 1, millis); }
+        // Signals interrupt the wait so resize/resume is handled next frame.
+        // A hung-up descriptor is always ready; avoid a busy loop on disconnect.
+        if fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            std::thread::sleep(timeout);
+        }
+    }
+
     /// Every key waiting, decoded. Empty when nothing has been pressed.
     pub fn poll(&mut self) -> Vec<String> {
         if self.saved.is_none() {

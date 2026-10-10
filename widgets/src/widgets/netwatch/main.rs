@@ -1981,7 +1981,7 @@ fn main() {
 
         let now = Instant::now();
         if !had_input && now < next_redraw {
-            std::thread::sleep(Duration::from_millis(10).min(next_redraw - now));
+            keyboard.wait(Duration::from_millis(10).min(next_redraw - now));
             continue;
         }
         next_redraw = now + Duration::from_millis(100);

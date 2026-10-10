@@ -2311,7 +2311,7 @@ fn main() {
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         }
 
@@ -3132,7 +3132,7 @@ fn main() {
                 out.extend(foot);
                 tc::draw(&out, w, h);
                 keyboard.footer_at(&packed, foot_top, 1);
-                std::thread::sleep(Duration::from_millis(300));
+                keyboard.wait(Duration::from_millis(300));
                 continue;
             }
         } else {
@@ -3212,7 +3212,7 @@ fn main() {
         let plots: Vec<_> = plots.drain(..).filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
         tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

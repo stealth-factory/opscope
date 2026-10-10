@@ -1444,7 +1444,7 @@ fn main() {
                 flash_started = None;
             }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        keyboard.wait(Duration::from_millis(200));
     }
 }
 
