@@ -171,38 +171,74 @@ impl Plot {
         cells: &[Vec<Option<String>>],
         missing_colour: &str,
     ) -> Self {
+        let levels: Vec<_> = cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.as_ref().map(|colour| (colour.clone(), 4)))
+                    .collect()
+            })
+            .collect();
+        Self::heatmap_levels(x, y, &levels, missing_colour)
+    }
+
+    /// Calendar activity levels: 0 is measured zero, 1..=4 increasing
+    /// density. None remains missing data. Colour and density reinforce
+    /// each other, so activity is readable without subtle colour differences.
+    pub fn heatmap_levels(
+        x: usize,
+        y: usize,
+        cells: &[Vec<Option<(String, u8)>>],
+        missing_colour: &str,
+    ) -> Self {
         let width = cells.iter().map(Vec::len).max().unwrap_or(0);
-        let mut rects = Vec::new();
-        let mut text = Vec::new();
+        let mut fill = Fill {
+            rects: Vec::new(),
+            text: Vec::new(),
+        };
         for (r, row) in cells.iter().enumerate() {
             let mut line = Vec::new();
             for c in 0..width {
-                match row.get(c).and_then(Option::as_ref) {
-                    Some(colour) => {
-                        line.push((colour.clone(), "■".into()));
-                        rects.push(Rect {
-                            x: c as f64 + 0.125,
-                            y: r as f64 + 0.125,
-                            width: 0.75,
-                            height: 0.75,
-                            colour: colour.clone(),
-                        });
-                    }
-                    None => {
-                        line.push((missing_colour.into(), "·".into()));
-                        rects.push(Rect {
-                            x: c as f64 + 0.375,
-                            y: r as f64 + 0.4375,
-                            width: 0.25,
-                            height: 0.125,
-                            colour: missing_colour.into(),
-                        });
+                let Some((colour, level)) = row.get(c).and_then(Option::as_ref) else {
+                    line.push((missing_colour.into(), "·".into()));
+                    fill.rects.push(Rect {
+                        x: c as f64 + 0.375,
+                        y: r as f64 + 0.4375,
+                        width: 0.25,
+                        height: 0.125,
+                        colour: missing_colour.into(),
+                    });
+                    continue;
+                };
+                line.push((
+                    colour.clone(),
+                    ["▫", "░", "▒", "▓", "█"][(*level).min(4) as usize].into(),
+                ));
+                // A centered 6x6 square with a fixed Bayer pattern: each
+                // step adds coverage while retaining transparent gutters.
+                const BAYER: [[u8; 2]; 2] = [[0, 2], [3, 1]];
+                for py in 0..6 {
+                    for px in 0..6 {
+                        let on = if *level == 0 {
+                            px == 0 || px == 5 || py == 0 || py == 5
+                        } else {
+                            BAYER[py % 2][px % 2] < (*level).min(4)
+                        };
+                        if on {
+                            fill.rects.push(Rect {
+                                x: c as f64 + (px + 1) as f64 / 8.0,
+                                y: r as f64 + (py + 5) as f64 / 16.0,
+                                width: 1.0 / 8.0,
+                                height: 1.0 / 16.0,
+                                colour: colour.clone(),
+                            });
+                        }
                     }
                 }
             }
-            text.push(line);
+            fill.text.push(line);
         }
-        Self::filled(x, y, width, cells.len(), rects, text)
+        Self::filled(x, y, width, cells.len(), fill.rects, fill.text)
     }
 
     /// A measured fraction plus an optional reference position (e.g. elapsed
@@ -805,12 +841,43 @@ mod tests {
                 .count()
         };
         assert_eq!(area(0), 4);
-        assert_eq!(area(1), 72);
+        assert_eq!(area(1), 36);
         let text = p.fill.as_ref().unwrap().row(0, 2);
-        assert!(text.contains('·') && text.contains('■'));
+        assert!(text.contains('·') && text.contains('█'));
         // Cell gutters remain transparent: adjacent days never merge.
         for y in 0..16 {
             assert_eq!(bytes[(y * 16 + 8) * 4 + 3], 0);
+        }
+    }
+
+    #[test]
+    fn calendar_levels_have_matching_density_and_distinct_zero_and_missing() {
+        let colour = super::super::rgb(90, 210, 140);
+        let row = std::iter::once(None)
+            .chain((0..=4).map(|level| Some((colour.clone(), level))))
+            .collect::<Vec<_>>();
+        let plot = Plot::heatmap_levels(0, 0, &[row], &colour);
+        let text = plot.fill.as_ref().unwrap().row(0, 6);
+        for glyph in ['·', '▫', '░', '▒', '▓', '█'] {
+            assert!(text.contains(glyph));
+        }
+        let bytes = pixels(&plot);
+        let areas: Vec<_> = (0..6)
+            .map(|col| {
+                (0..16)
+                    .flat_map(|y| (0..8).map(move |x| (y * 48 + col * 8 + x) * 4 + 3))
+                    .filter(|i| bytes[*i] == 255)
+                    .count()
+            })
+            .collect();
+        assert_eq!(areas, vec![4, 20, 9, 18, 27, 36]);
+        // All tiles retain horizontal and vertical gutters, including solid days.
+        for y in 0..16 {
+            for x in 0..48 {
+                if x % 8 == 0 || x % 8 == 7 || !(5..11).contains(&y) {
+                    assert_eq!(bytes[(y * 48 + x) * 4 + 3], 0);
+                }
+            }
         }
     }
 

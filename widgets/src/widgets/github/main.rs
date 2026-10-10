@@ -3394,10 +3394,10 @@ fn main() {
                     let n = day["contributionCount"].as_i64().unwrap_or(0);
                     let wd = (day["weekday"].as_u64().unwrap_or(0) as usize).min(6);
                     let level = if n == 0 { 0 } else { (1 + (n as f64 / peak.max(1) as f64 * 3.99) as usize).min(4) };
-                    cells[wd][x] = Some(shades[level].clone());
+                    cells[wd][x] = Some((shades[level].clone(), level as u8));
                 }
             }
-            plots.push(tc::Plot::heatmap(5, rows.len(), &cells, &p.dim));
+            plots.push(tc::Plot::heatmap_levels(5, rows.len(), &cells, &p.dim));
             for (r, line) in grid.iter().enumerate() {
                 // Rows are GitHub's own weekday index, where 0 is Sunday, so
                 // the labels come off the same constant rather than a

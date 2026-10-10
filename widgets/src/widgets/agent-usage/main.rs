@@ -1735,7 +1735,12 @@ fn day_calendar(
         let mut line = vec![(p.dim.clone(), format!(" {:<4}", label))];
         for wk in &starts {
             let day = *wk + Days::days(i);
-            cell_row.push(totals.get(&day).map(|n| shade((n / peak).sqrt(), steps)));
+            cell_row.push(totals.get(&day).map(|n| {
+                let fraction = (n / peak).sqrt();
+                let level = if *n <= 0.0 { 0 } else { 1 + ((fraction * 3.999) as u8).min(3) };
+                let colour = if level == 0 { p.empty_cell.clone() } else { shade(fraction, steps) };
+                (colour, level)
+            }));
             match totals.get(&day) {
                 None => line.push((p.empty_cell.clone(), "·".into())),
                 Some(n) => line.push((shade((n / peak).sqrt(), steps), "█".into())),
@@ -1764,7 +1769,7 @@ fn day_calendar(
         current += 1;
     }
     Some(Calendar {
-        plot: tc::Plot::heatmap(5, 1, &cells, &p.empty_cell),
+        plot: tc::Plot::heatmap_levels(5, 1, &cells, &p.empty_cell),
         rows,
         best,
         active,

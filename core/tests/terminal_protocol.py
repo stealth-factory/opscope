@@ -181,7 +181,7 @@ def filled_text(t):
     t.read()
     assert not t.images()
     text = t.output.decode(errors="replace")
-    assert "■" in text and "·" in text and "┃" in text
+    assert all(glyph in text for glyph in "·▫░▒▓█┃")
 
 
 if __name__ == "__main__":
