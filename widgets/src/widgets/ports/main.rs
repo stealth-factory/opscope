@@ -2551,7 +2551,7 @@ fn main() {
                 ),
             ];
             tc::draw(&rows, w, h);
-            std::thread::sleep(Duration::from_millis(100));
+            keyboard.wait(Duration::from_millis(100));
             continue;
         }
 
@@ -2649,7 +2649,7 @@ fn main() {
             rows.extend(foot);
             let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room_below)).collect();
             tc::draw_plots(&rows, w, h, &plots);
-            std::thread::sleep(Duration::from_millis(300));
+            keyboard.wait(Duration::from_millis(300));
             continue;
         }
 
@@ -2982,7 +2982,7 @@ fn main() {
         rows.extend(foot);
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, room.saturating_sub(1))).collect();
         tc::draw_plots(&rows, w, h, &plots);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

@@ -117,9 +117,9 @@ let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
 
 Bars do not interpolate between buckets. Calendar cells have transparent gutters
 so adjacent days remain distinct. GitHub contributions and agent-usage's Claude,
-Codex and Grok calendars all use the same core heatmap renderer: centered square
-pixel tiles and `░▒▓█` text density levels, with an outline for measured zero
-and a dot for missing data. Widgets own their colour ramps and activity scales;
+Codex and Grok calendars all use the same core heatmap renderer: solid 7×14 pixel tiles within each 8×16 cell (one pixel between columns and
+two between rows), and solid text blocks. Measured zeroes use a dark fill;
+missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
 Meters clamp the drawn fill to 0–100%, while
@@ -224,3 +224,12 @@ check; the managed test workspace has no attached graphical terminal.
 
 The independent Kitty keyboard and text-sizing protocols are not enabled by this
 graphics implementation. Legacy keyboard bindings remain the input contract.
+
+### Input responsiveness
+
+Interactive widget loops use `Keyboard::wait(timeout)` between frames. It waits
+on terminal input and wakes immediately without consuming keys or capability
+replies. The timeout retains the idle refresh cadence, but input no longer waits
+behind an unconditional 200–400 ms sleep. Settings uses the same helper; matrix
+retains its animation pacing. Buffered partial escapes use a short bounded wait.
+Unchanged Kitty plots remain cached when only the selected row changes.

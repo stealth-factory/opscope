@@ -1577,7 +1577,7 @@ fn main() {
         rows.extend(footer);
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 

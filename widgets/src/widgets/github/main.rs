@@ -3127,7 +3127,7 @@ fn main() {
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         }
 
@@ -3385,7 +3385,7 @@ fn main() {
                 p.lbl.as_str(),
                 p.dim.as_str(),
             ));
-            let shades = [tc::rgb(128, 148, 168), tc::rgb(110, 175, 145), tc::rgb(90, 195, 135), tc::rgb(80, 215, 130), p.ok.clone()];
+            let shades = [tc::rgb(58, 66, 80), tc::rgb(60, 130, 95), tc::rgb(65, 170, 110), tc::rgb(80, 215, 130), p.ok.clone()];
             let cols = grid.first().map_or(0, |r| r.chars().count());
             let mut cells = vec![vec![None; cols]; 7];
             let weeks: Vec<_> = cal["weeks"].as_array().into_iter().flatten().collect();
@@ -3696,7 +3696,7 @@ fn main() {
                 let plots: Vec<_> = detail_plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room_below)).collect();
                 tc::draw_plots(&out, w, h, &plots);
                 keyboard.footer_at(&packed, foot_top, 1);
-                std::thread::sleep(Duration::from_millis(300));
+                keyboard.wait(Duration::from_millis(300));
                 continue;
             }
             detail = false;
@@ -3731,7 +3731,7 @@ fn main() {
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

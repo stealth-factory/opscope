@@ -736,7 +736,7 @@ fn main() {
             let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
             tc::draw_plots(&shown_body, w, h, &plots);
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(200));
+            keyboard.wait(Duration::from_millis(200));
             continue;
         }
 
@@ -881,7 +881,7 @@ fn main() {
         let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(lscroll, 1, room_below)).collect();
         tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

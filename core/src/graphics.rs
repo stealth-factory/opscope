@@ -163,7 +163,7 @@ impl Plot {
         Self::filled(x, y, columns.len(), height, rects, text)
     }
 
-    /// A discrete calendar grid. `None` stays a missing-data dot, distinct
+    /// A discrete calendar grid. `None` stays a blank missing-data cell, distinct
     /// from a measured zero (which the caller supplies with its zero colour).
     pub fn heatmap(
         x: usize,
@@ -183,8 +183,8 @@ impl Plot {
     }
 
     /// Calendar activity levels: 0 is measured zero, 1..=4 increasing
-    /// density. None remains missing data. Colour and density reinforce
-    /// each other, so activity is readable without subtle colour differences.
+    /// activity. Callers supply the corresponding colour ramp. Solid tiles
+    /// avoid font-dependent shading and tiny stipple patterns; None is blank.
     pub fn heatmap_levels(
         x: usize,
         y: usize,
@@ -199,42 +199,21 @@ impl Plot {
         for (r, row) in cells.iter().enumerate() {
             let mut line = Vec::new();
             for c in 0..width {
-                let Some((colour, level)) = row.get(c).and_then(Option::as_ref) else {
-                    line.push((missing_colour.into(), "·".into()));
-                    fill.rects.push(Rect {
-                        x: c as f64 + 0.375,
-                        y: r as f64 + 0.4375,
-                        width: 0.25,
-                        height: 0.125,
-                        colour: missing_colour.into(),
-                    });
+                let Some((colour, _level)) = row.get(c).and_then(Option::as_ref) else {
+                    line.push((missing_colour.into(), " ".into()));
+
                     continue;
                 };
-                line.push((
-                    colour.clone(),
-                    ["▫", "░", "▒", "▓", "█"][(*level).min(4) as usize].into(),
-                ));
-                // A centered 6x6 square with a fixed Bayer pattern: each
-                // step adds coverage while retaining transparent gutters.
-                const BAYER: [[u8; 2]; 2] = [[0, 2], [3, 1]];
-                for py in 0..6 {
-                    for px in 0..6 {
-                        let on = if *level == 0 {
-                            px == 0 || px == 5 || py == 0 || py == 5
-                        } else {
-                            BAYER[py % 2][px % 2] < (*level).min(4)
-                        };
-                        if on {
-                            fill.rects.push(Rect {
-                                x: c as f64 + (px + 1) as f64 / 8.0,
-                                y: r as f64 + (py + 5) as f64 / 16.0,
-                                width: 1.0 / 8.0,
-                                height: 1.0 / 16.0,
-                                colour: colour.clone(),
-                            });
-                        }
-                    }
-                }
+                line.push((colour.clone(), "█".into()));
+                // Use most of each cell: 7x14 pixels, with a one-pixel
+                // column gutter and two pixels between weekday rows.
+                fill.rects.push(Rect {
+                    x: c as f64 + 0.125,
+                    y: r as f64 + 0.0625,
+                    width: 0.875,
+                    height: 0.875,
+                    colour: colour.clone(),
+                });
             }
             fill.text.push(line);
         }
@@ -840,10 +819,10 @@ mod tests {
                 .filter(|i| bytes[*i] == 255)
                 .count()
         };
-        assert_eq!(area(0), 4);
-        assert_eq!(area(1), 36);
+        assert_eq!(area(0), 0);
+        assert_eq!(area(1), 98);
         let text = p.fill.as_ref().unwrap().row(0, 2);
-        assert!(text.contains('·') && text.contains('█'));
+        assert!(text.contains(' ') && text.contains('█'));
         // Cell gutters remain transparent: adjacent days never merge.
         for y in 0..16 {
             assert_eq!(bytes[(y * 16 + 8) * 4 + 3], 0);
@@ -851,16 +830,15 @@ mod tests {
     }
 
     #[test]
-    fn calendar_levels_have_matching_density_and_distinct_zero_and_missing() {
+    fn calendar_tiles_are_solid_with_tight_gutters_and_blank_missing_days() {
         let colour = super::super::rgb(90, 210, 140);
         let row = std::iter::once(None)
             .chain((0..=4).map(|level| Some((colour.clone(), level))))
             .collect::<Vec<_>>();
         let plot = Plot::heatmap_levels(0, 0, &[row], &colour);
         let text = plot.fill.as_ref().unwrap().row(0, 6);
-        for glyph in ['·', '▫', '░', '▒', '▓', '█'] {
-            assert!(text.contains(glyph));
-        }
+        assert_eq!(text.matches('█').count(), 5);
+        assert!(text.contains(' '));
         let bytes = pixels(&plot);
         let areas: Vec<_> = (0..6)
             .map(|col| {
@@ -870,11 +848,11 @@ mod tests {
                     .count()
             })
             .collect();
-        assert_eq!(areas, vec![4, 20, 9, 18, 27, 36]);
+        assert_eq!(areas, vec![0, 98, 98, 98, 98, 98]);
         // All tiles retain horizontal and vertical gutters, including solid days.
         for y in 0..16 {
             for x in 0..48 {
-                if x % 8 == 0 || x % 8 == 7 || !(5..11).contains(&y) {
+                if x % 8 == 0 || !(1..15).contains(&y) {
                     assert_eq!(bytes[(y * 48 + x) * 4 + 3], 0);
                 }
             }

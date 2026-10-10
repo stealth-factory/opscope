@@ -10,6 +10,7 @@ fn main() {
     let mut hidden = false;
     let mut scroll = 0;
     let mut gallery = false;
+    let mut selected = 0;
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -20,14 +21,14 @@ fn main() {
                     return;
                 }
                 "c" => hidden = !hidden,
-                "down" => scroll = 2,
+                "down" => { scroll = 2; selected += 1; },
                 "g" => gallery = !gallery,
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
         }
         let (w, h) = tc::size();
-        let rows = vec![
+        let mut rows = vec![
             tc::title(
                 "protocol fixture (synthetic test data)",
                 w,
@@ -96,7 +97,9 @@ fn main() {
                 .filter_map(|p| p.in_viewport(scroll, 1, h.saturating_sub(2))),
             );
         }
+        rows.resize(h, String::new());
+        rows[h - 1] = format!("SELECTED:{selected}");
         tc::draw_plots(&rows, w, h, &plots);
-        std::thread::sleep(Duration::from_millis(25));
+        keyboard.wait(Duration::from_millis(300));
     }
 }

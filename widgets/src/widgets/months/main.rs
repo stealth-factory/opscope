@@ -799,7 +799,7 @@ fn main() {
         rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, indent);
-        std::thread::sleep(Wait::from_millis(200));
+        keyboard.wait(Wait::from_millis(200));
     }
 }
 
