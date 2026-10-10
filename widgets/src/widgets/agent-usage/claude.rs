@@ -977,13 +977,16 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         Some(stats) => {
             claude.ok = true;
             claude.stats = stats;
-            let (rates, sampled) = claude_rates_at(&projects_path(&dir.path));
-            claude.rates = rates;
-            claude.sampled = sampled;
-            claude.daily = claude_daily_at(caches, &projects_path(&dir.path));
         }
         None => claude.why = "no stats cache".into(),
     }
+    // Transcripts are written as Claude runs; the optional stats cache is
+    // rebuilt separately. A missing cache must not hide recorded usage.
+    let projects = projects_path(&dir.path);
+    let (rates, sampled) = claude_rates_at(&projects);
+    claude.rates = rates;
+    claude.sampled = sampled;
+    claude.daily = claude_daily_at(caches, &projects);
     claude
 }
 
@@ -3673,6 +3676,61 @@ mod tests {
         std::fs::write(&sibling, "{}").unwrap();
         assert_eq!(claude_json_for(&dir_s), sibling.to_string_lossy());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transcripts_are_metered_without_a_readable_stats_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-144-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let stamp = Local::now().date_naive().and_hms_opt(12, 0, 0).unwrap();
+        let record = serde_json::json!({
+            "type": "assistant", "uuid": "metered-turn",
+            "timestamp": Local.from_local_datetime(&stamp).single().unwrap().to_rfc3339(),
+            "message": { "model": "claude-fable-5-1", "usage": {
+                "input_tokens": 1_000_000, "output_tokens": 1_000_000
+            }}
+        });
+        std::fs::write(project.join("session.jsonl"), record.to_string()).unwrap();
+        let dir = ClaudeDir { path: root.to_string_lossy().into(), label: String::new() };
+        let mut caches = Caches::default();
+        for stats in [None, Some("not json"), Some("{}")] {
+            if let Some(body) = stats {
+                std::fs::write(root.join("stats-cache.json"), body).unwrap();
+            }
+            let data = read_one(&mut caches, &dir);
+            assert_eq!(data.ok, stats == Some("{}"));
+            assert_eq!(data.sampled, 1, "transcript sampling must not depend on stats");
+            for days in [1, 30] {
+                let models = window_models(&data.daily, days);
+                assert_eq!(models.len(), 1, "stats: {stats:?}, days: {days}");
+                assert_eq!(total_tokens(&models[0].1), 2_000_000.0);
+            }
+            let rendered = bare(&tab(&data, 120, 40, &Config::default(), &palette()).join("\n"));
+            for label in ["today", "30 days"] {
+                let row = rendered.lines().find(|l| l.contains(label)).unwrap();
+                assert!(row.contains("$60.00") && row.contains("2.0M tokens"), "{row}");
+            }
+            assert_eq!(rendered.contains("No stats cache"), !data.ok);
+            assert!(!rendered.contains("agent_usage.rates"), "{rendered}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_transcripts_do_not_claim_missing_prices() {
+        let day = (Local::now().date_naive() - Days::days(31)).to_string();
+        let mut tokens = empty_tokens();
+        tokens.insert("input".into(), 1_000_000.0);
+        let data = Data {
+            daily: HashMap::from([(day, HashMap::from([("claude-fable-5-1".into(), tokens)]))]),
+            ..Default::default()
+        };
+        let rows = bare(&claude_metered(&data, 120, &Config::default(), &palette()).join("\n"));
+        assert!(rows.contains("No recorded token usage in these windows."), "{rows}");
+        assert!(!rows.contains("agent_usage.rates") && !rows.contains('$'), "{rows}");
     }
 
     #[test]

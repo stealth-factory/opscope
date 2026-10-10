@@ -160,6 +160,11 @@ Measured here: the file sat untouched for three days across a version upgrade
 and five live sessions, then refreshed the moment that screen was opened.
 `/stats` and `/cost` are aliases for the same command.
 
+Metered usage reads the project transcripts independently of this cache, so
+a missing or unreadable cache does not hide recorded tokens or their cost.
+When no tokens are recorded in the displayed windows, METERED says so;
+missing prices are reported only for models with recorded usage.
+
 So those four sections can be days behind while everything else on the tab is
 current, and nothing this widget does can move them — the refresh is the
 reader's to trigger. The tab says so in as many words at its foot, and the two
