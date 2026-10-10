@@ -205,13 +205,12 @@ impl Plot {
                     continue;
                 };
                 line.push((colour.clone(), "█".into()));
-                // Use most of each cell: 7x14 pixels, with a one-pixel
-                // column gutter and two pixels between weekday rows.
+                // Fill the entire cell, matching the gapless text blocks.
                 fill.rects.push(Rect {
-                    x: c as f64 + 0.125,
-                    y: r as f64 + 0.0625,
-                    width: 0.875,
-                    height: 0.875,
+                    x: c as f64,
+                    y: r as f64,
+                    width: 1.0,
+                    height: 1.0,
                     colour: colour.clone(),
                 });
             }
@@ -820,22 +819,22 @@ mod tests {
                 .count()
         };
         assert_eq!(area(0), 0);
-        assert_eq!(area(1), 98);
+        assert_eq!(area(1), 128);
         let text = p.fill.as_ref().unwrap().row(0, 2);
         assert!(text.contains(' ') && text.contains('█'));
-        // Cell gutters remain transparent: adjacent days never merge.
+        // Measured cells include their edges; only missing days are blank.
         for y in 0..16 {
-            assert_eq!(bytes[(y * 16 + 8) * 4 + 3], 0);
+            assert_eq!(bytes[(y * 16 + 8) * 4 + 3], 255);
         }
     }
 
     #[test]
-    fn calendar_tiles_are_solid_with_tight_gutters_and_blank_missing_days() {
+    fn calendar_tiles_are_gapless_with_blank_missing_days() {
         let colour = super::super::rgb(90, 210, 140);
         let row = std::iter::once(None)
             .chain((0..=4).map(|level| Some((colour.clone(), level))))
             .collect::<Vec<_>>();
-        let plot = Plot::heatmap_levels(0, 0, &[row], &colour);
+        let plot = Plot::heatmap_levels(0, 0, &[row.clone(), row], &colour);
         let text = plot.fill.as_ref().unwrap().row(0, 6);
         assert_eq!(text.matches('█').count(), 5);
         assert!(text.contains(' '));
@@ -848,13 +847,11 @@ mod tests {
                     .count()
             })
             .collect();
-        assert_eq!(areas, vec![0, 98, 98, 98, 98, 98]);
-        // All tiles retain horizontal and vertical gutters, including solid days.
-        for y in 0..16 {
+        assert_eq!(areas, vec![0, 128, 128, 128, 128, 128]);
+        // Both row and column boundaries remain opaque between measured days.
+        for y in 0..32 {
             for x in 0..48 {
-                if x % 8 == 0 || !(1..15).contains(&y) {
-                    assert_eq!(bytes[(y * 48 + x) * 4 + 3], 0);
-                }
+                assert_eq!(bytes[(y * 48 + x) * 4 + 3], if x < 8 { 0 } else { 255 });
             }
         }
     }
