@@ -513,6 +513,7 @@ fn main() {
         // Read before the keys rather than after them, so a page key knows
         // how big a page is on this pane.
         let (w, h) = tc::size();
+        let mut plots = Vec::new();
         let page = h.saturating_sub(4).max(1);
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
@@ -708,7 +709,7 @@ fn main() {
             };
             let foot = pack(&detail_hints(scroll_label(0, 0, 0)));
             let room = h.saturating_sub(foot.lines.len() + 1).max(1);
-            let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p);
+            let body = detail_view(&shown[pick], &guard, w, room, pick, window, refresh, &p, &mut plots);
             drop(guard);
             // The body is as tall as it needs to be and the pane shows a
             // window onto it, rather than the body being cut to the pane
@@ -732,7 +733,8 @@ fn main() {
             )));
             let foot_top = shown_body.len();
             shown_body.extend(packed.lines.iter().cloned());
-            tc::draw(&shown_body, w, h);
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
+            tc::draw_plots(&shown_body, w, h, &plots);
             keyboard.footer_at(&packed, foot_top, 1);
             std::thread::sleep(Duration::from_millis(200));
             continue;
@@ -794,10 +796,12 @@ fn main() {
                 w,
                 room,
                 0,
+                rows.len(),
                 selected,
                 window,
                 refresh,
                 &p,
+                &mut plots,
             ));
             rows.push(tc::seg(
                 &[
@@ -874,7 +878,8 @@ fn main() {
         // screen when the next click arrives.
         let foot_top = frame.len();
         frame.extend(foot);
-        tc::draw(&frame, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(lscroll, 1, room_below)).collect();
+        tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -1098,6 +1103,7 @@ fn detail_view(
     window: f64,
     refresh: f64,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let empty = Vec::new();
     let users = state.names.get(&row.ip).unwrap_or(&empty);
@@ -1311,12 +1317,14 @@ fn detail_view(
             w,
             room,
             idx,
+            rows.len(),
             // One session on its own screen: there is nothing to push back,
             // so it is drawn at full strength like everything else.
             None,
             window,
             refresh,
             p,
+            plots,
         ));
         rows.push(tc::seg(
             &[
@@ -1344,82 +1352,6 @@ fn detail_view(
     rows
 }
 
-/// A braille cell is two dots wide and four tall, so one character holds
-/// eight addressable points. The bit for each is fixed by the encoding.
-
-/// Plot one session's round trips on a dot canvas finer than the cells.
-///
-/// Consecutive samples are joined rather than left as marks, which is the
-/// difference between a line that reads as a path moving and one that reads
-/// as specks a row apart. The masks come back per cell instead of as text so
-/// that several sessions can be laid over one another first.
-///
-/// `slots` is how many samples the axis holds, which is not how many this
-/// session has: newest sits against the right edge either way, and a session
-/// younger than the chart takes its own share of the width rather than being
-/// stretched over all of it. The longest session fills the axis by
-/// definition, and it is the one the "N ago" under the corner is measured
-/// from, so the label and the left edge cannot drift apart.
-fn braille_canvas(
-    values: &[f64],
-    llo: f64,
-    lhi: f64,
-    cols: usize,
-    rows: usize,
-    slots: usize,
-) -> Vec<Vec<u8>> {
-    let (px_w, px_h) = (cols * 2, rows * 4);
-    let mut grid = vec![vec![0u8; cols]; rows];
-    if values.is_empty() || px_w == 0 || px_h == 0 {
-        return grid;
-    }
-    let vals: Vec<f64> = values.iter().rev().take(px_w).rev().copied().collect();
-    let step = (px_w as f64 - 1.0) / (slots.max(2) as f64 - 1.0);
-    let decade = (lhi - llo).max(1e-9);
-    let point = |i: usize| -> (i64, i64) {
-        let frac = ((vals[i].max(1e-3).log10() - llo) / decade).clamp(0.0, 1.0);
-        let age = (vals.len() - 1 - i) as f64;
-        (
-            px_w as i64 - 1 - (age * step).round() as i64,
-            ((1.0 - frac) * (px_h as f64 - 1.0)).round() as i64,
-        )
-    };
-    let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
-        if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
-            grid[y as usize / 4][x as usize / 2] |= tc::BRAILLE[y as usize % 4][x as usize % 2];
-        }
-    };
-    // Every value here is a round trip the kernel measured, so unlike
-    // netwatch's idle zero there is no reading that means "nothing happened"
-    // and should be left blank. One sample is a measurement and gets its dot.
-    let (x, y) = point(0);
-    dot(x, y, &mut grid);
-    for i in 1..vals.len() {
-        let (mut x0, mut y0) = point(i - 1);
-        let (x1, y1) = point(i);
-        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        loop {
-            dot(x0, y0, &mut grid);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let twice = 2 * err;
-            if twice >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if twice <= dx {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-    grid
-}
-
 #[allow(clippy::too_many_arguments)]
 fn graph(
     rows: &[Session],
@@ -1430,10 +1362,12 @@ fn graph(
     // in the list: opening the ▲ row and finding a ● chart reads as a
     // different connection.
     start_at: usize,
+    top: usize,
     focus: Option<usize>,
     window: f64,
     refresh: f64,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let gw = w.saturating_sub(9).max(10);
     let gh = h.max(4);
@@ -1477,40 +1411,20 @@ fn graph(
     // the same number plotted_span turns into the "N ago" beneath the chart:
     // one quantity, so the label and the left edge state the same thing.
     let slots = series.iter().map(|(_, v)| v.len()).max().unwrap_or(1);
-    // One canvas per session rather than one shared grid: a braille cell can
-    // carry the dots of two traces but only one hue, so each series has to
-    // keep its own until the moment they are laid over one another.
-    // The selected session is laid down last and at full strength while the
-    // rest are mixed toward the backdrop, so the trace being looked at wins
-    // any cell it shares. With nothing selected every trace is equal, which
-    // is the chart this widget has always drawn.
-    let mut layers: Vec<(String, Vec<Vec<u8>>)> = Vec::with_capacity(series.len());
-    let mut front: Option<(String, Vec<Vec<u8>>)> = None;
-    for (idx, values) in &series {
-        let canvas = braille_canvas(values, llo, lhi, gw, gh, slots);
-        let hue = p.hues[idx % p.hues.len()].clone();
-        match focus {
-            None => layers.push((hue, canvas)),
-            Some(at) if at == *idx => front = Some((hue, canvas)),
-            Some(_) => layers.push((p.faded[idx % p.faded.len()].clone(), canvas)),
-        }
-    }
-    let mut cells = tc::overlay(&layers, gw, gh);
-    // The focused trace takes its cells outright rather than being merged
-    // into them: a sample drawn in a colour that is not its own is a number
-    // on screen that is not real.
-    if let Some((hue, canvas)) = front {
-        for (y, line) in canvas.iter().enumerate().take(gh) {
-            for (x, mask) in line.iter().enumerate().take(gw) {
-                if *mask != 0 {
-                    cells[y][x] = (hue.clone(), *mask);
-                }
-            }
-        }
-    }
-
+    let chart = tc::LineChart {
+        slots,
+        focus: focus.and_then(|at| series.iter().position(|(idx, _)| *idx == at)),
+        traces: series.iter().map(|(idx, values)| tc::Trace {
+            baseline: None,
+            values: values.iter().map(|v| Some((v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect(),
+            colour: if focus.is_some_and(|at| at != *idx) {
+                p.faded[idx % p.faded.len()].clone()
+            } else { p.hues[idx % p.hues.len()].clone() },
+        }).collect(),
+    };
+    plots.push(tc::Plot::new(8, top, gw, gh, chart));
     let mut out = Vec::new();
-    for (y, line) in cells.iter().enumerate() {
+    for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
         let value = 10f64.powf(llo + frac * (lhi - llo));
         let label = if y == 0 || y == gh / 2 || y == gh - 1 {
@@ -1520,17 +1434,7 @@ fn graph(
         };
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
-        for (colour, mask) in line {
-            parts.push(match mask {
-                0 => (p.grid.as_str(), " ".into()),
-                m => (
-                    colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32)
-                        .unwrap_or(' ')
-                        .to_string(),
-                ),
-            });
-        }
+        parts.push((p.grid.as_str(), " ".repeat(gw)));
         out.push(tc::seg(&parts, w - 1));
     }
     out
@@ -1569,6 +1473,11 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn braille_canvas(values: &[f64], llo: f64, lhi: f64, cols: usize, rows: usize, slots: usize) -> Vec<Vec<u8>> {
+        let values: Vec<_> = values.iter().rev().take(cols * 2).rev().map(|v| Some((v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect();
+        tc::braille(&values, slots, cols, rows)
+    }
 
     /// Naming ports pins the set. It used to add to it.
     ///
@@ -1810,7 +1719,7 @@ mod tests {
         };
         let list = plain(&table(&[row.clone()], &state, 100, None, &palette())[1]);
         assert!(list.contains("macOS n/a"), "{list}");
-        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette())
+        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
             .iter()
             .map(|line| plain(line))
             .collect::<Vec<_>>()
@@ -1845,7 +1754,7 @@ mod tests {
         let list = plain(&table(&[row.clone()], &state, 86, None, &palette())[1]);
         assert!(list.contains("n/a"), "{list}");
         assert!(!list.contains("0.00%"), "{list}");
-        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette())
+        let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
             .iter()
             .map(|line| plain(line))
             .collect::<Vec<_>>()

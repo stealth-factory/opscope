@@ -866,7 +866,7 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let mut opscope_filter = process_filter::Filter::default();
-    let (mut selected, mut tick) = (0usize, 0usize);
+    let mut selected = 0usize;
     // Where each pane's rows landed on the frame now on screen. The three
     // sections share one index - agents, then busy, then the rest - which
     // is what the arrows walk, so a click lands in the same space and
@@ -889,7 +889,7 @@ fn main() {
     let mut sections: Vec<usize> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
         // names for opening one. Rewritten before the match rather than

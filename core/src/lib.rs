@@ -23,6 +23,11 @@
 
 mod dependencies;
 mod settings;
+mod terminal;
+mod graphics;
+
+pub use terminal::{capabilities, graphics_notice, Capabilities};
+pub use graphics::{braille, LineChart, Plot, Trace};
 
 pub use dependencies::{
     Dependencies, Dependency, DependencyStatus, Host, LinuxFamily, Platform, Tool,
@@ -72,6 +77,34 @@ pub const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x
 
 /// A consistent animation for work that has not finished yet.
 pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Animation time is independent of data polling and the number of input events.
+/// Only use this for decoration/loading indicators, never to invent measurements.
+pub fn animation_tick() -> usize {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    (START.get_or_init(Instant::now).elapsed().as_millis() / 100) as usize
+}
+
+/// Pace an animation against a deadline so rendering time does not slow it down.
+/// A missed deadline starts a new interval rather than a burst of catch-up frames.
+pub struct FramePacer {
+    interval: Duration,
+    deadline: Instant,
+}
+
+impl FramePacer {
+    pub fn new(interval: Duration) -> Self {
+        Self { interval, deadline: Instant::now() + interval }
+    }
+
+    pub fn wait(&mut self) {
+        let now = Instant::now();
+        if self.deadline > now {
+            std::thread::sleep(self.deadline - now);
+        }
+        self.deadline = Instant::now() + self.interval;
+    }
+}
 
 /// Seconds since the Unix epoch, for elapsed-time and cache timestamps.
 pub fn now() -> f64 {
@@ -316,9 +349,20 @@ pub fn flush() {
 /// The top row always ends in the version that is running, whatever the
 /// widget put there. See `lines`.
 pub fn draw(rows: &[String], w: usize, h: usize) {
+    draw_plots(rows, w, h, &[]);
+}
+
+/// Draw text and structured chart regions in one transaction. The terminal
+/// backend is core's choice; widgets supply the same chart in every session.
+pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let lost = SCREEN_LOST.swap(false, Ordering::AcqRel) | due(&shown, Instant::now());
-    let bytes = paint(&mut shown, rows, w, h, lost);
+    let reset = lost || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
+    let caps = capabilities();
+    let (rows, before, after) = graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset);
+    let bytes = paint(&mut shown, &rows, w, h, lost);
+    let bytes = format!("{before}{bytes}{after}");
+    let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
     // `out` drops a failed write, which a full frame every time could
     // afford: the next one put it right. Rows that never reached the
     // terminal must not be remembered as on it, or they stay wrong until
@@ -388,9 +432,24 @@ static SHOWN: std::sync::Mutex<Option<Shown>> = std::sync::Mutex::new(None);
 /// shell's text would sit under every row that does not change - the
 /// title and the version among them.
 static SCREEN_LOST: AtomicBool = AtomicBool::new(false);
+static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn handle_lost_screen(_: libc::c_int) {
+extern "C" fn handle_lost_screen(sig: libc::c_int) {
     SCREEN_LOST.store(true, Ordering::Release);
+    if sig == libc::SIGCONT {
+        SESSION_CHANGED.store(true, Ordering::Release);
+        if HAS_TERMIOS.load(Ordering::Acquire) {
+            let mut raw = unsafe { SAVED_IOS };
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            raw.c_cc[libc::VMIN] = 0;
+            raw.c_cc[libc::VTIME] = 0;
+            unsafe {
+                libc::tcsetattr(TERM_FD.load(Ordering::Acquire), libc::TCSANOW, &raw);
+                libc::write(libc::STDOUT_FILENO, MOUSE_ON.as_ptr().cast(), MOUSE_ON.len());
+                libc::write(libc::STDOUT_FILENO, HIDE.as_ptr().cast(), HIDE.len());
+            }
+        }
+    }
 }
 
 /// Make the next `draw` paint the whole frame.
@@ -488,6 +547,9 @@ fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
         .map(|i| {
             let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
             if i == 0 {
+                let line = if let Some(notice) = graphics_notice() {
+                    format!("{notice} · {line}")
+                } else { line };
                 stamped(&line, w)
             } else {
                 line
@@ -649,6 +711,7 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGTSTP, handle_suspend as *const () as libc::sighandler_t);
         // `sigaction` rather than `signal`, so that `SA_RESTART` is ours to
         // ask for rather than the platform's to decide: `SIGWINCH` arrives
         // in bursts during a resize, and a write it interrupts would be a
@@ -676,6 +739,7 @@ pub fn setup() {
 /// that asked for it.
 pub fn claim_screen() {
     forget_frame();
+    graphics::cleanup();
     out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
@@ -723,7 +787,9 @@ fn forget_termios() {
 /// calls, then `_exit`. `process::exit` runs atexit handlers and can
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
-extern "C" fn handle_signal(sig: libc::c_int) {
+fn restore_terminal_signal() {
+    graphics::cleanup_signal();
+    terminal::cleanup_signal();
     if HAS_TERMIOS.load(Ordering::Acquire) {
         let fd = TERM_FD.load(Ordering::Acquire);
         if fd >= 0 {
@@ -739,13 +805,25 @@ extern "C" fn handle_signal(sig: libc::c_int) {
             SCREEN_RESTORE.as_ptr() as *const libc::c_void,
             SCREEN_RESTORE.len(),
         );
-        libc::_exit(128 + sig);
     }
+}
+
+extern "C" fn handle_signal(sig: libc::c_int) {
+    restore_terminal_signal();
+    unsafe { libc::_exit(128 + sig); }
+}
+
+extern "C" fn handle_suspend(_: libc::c_int) {
+    restore_terminal_signal();
+    // SIGSTOP needs no disposition changes and SIGCONT restores cbreak above.
+    unsafe { libc::kill(libc::getpid(), libc::SIGSTOP); }
 }
 
 /// Put the terminal back the way it was found.
 pub fn restore_screen() {
     forget_frame();
+    graphics::cleanup();
+    terminal::cleanup_signal();
     out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
 }
@@ -2894,6 +2972,9 @@ impl Keyboard {
         } else {
             None
         };
+        if saved.is_some() {
+            terminal::start();
+        }
         Keyboard {
             pending: String::new(),
             lone_esc: false,
@@ -2919,9 +3000,13 @@ impl Keyboard {
     /// unwinding has already released whatever `draw` was holding.
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
+            graphics::cleanup();
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
             out(MOUSE_OFF);
+            if capabilities().synchronized_updates {
+                out(terminal::SYNC_END);
+            }
             flush();
         }
     }
@@ -2950,11 +3035,14 @@ impl Keyboard {
         remember_termios(self.fd, saved);
         self.saved = Some(saved);
         self.buf.clear();
+        self.pending.clear();
+        self.lone_esc = false;
         // Whatever was on screen while the child had the terminal was the
         // child's, so no placement of ours describes it. Dropped for the
         // same reason the buffered input above is.
         self.hints.clear();
         forget_frame();
+        terminal::start();
     }
 
     /// Make this frame's footer clickable.
@@ -3023,6 +3111,11 @@ impl Keyboard {
         if self.saved.is_none() {
             return Vec::new();
         }
+        if SESSION_CHANGED.swap(false, Ordering::AcqRel) {
+            graphics::cleanup();
+            forget_frame();
+            terminal::start();
+        }
         let mut chunk = [0u8; 64];
         loop {
             let flags = unsafe { libc::fcntl(self.fd, libc::F_GETFL) };
@@ -3066,11 +3159,11 @@ fn escape_len(s: &[char]) -> Option<usize> {
     match s.get(1) {
         Some('[') => {
             let mut i = 2;
-            while matches!(s.get(i), Some(c) if c.is_ascii_digit() || *c == ';') {
+            while matches!(s.get(i), Some(c) if ('\x20'..='\x3f').contains(c)) {
                 i += 1;
             }
             match s.get(i) {
-                Some(c) if c.is_ascii_alphabetic() || *c == '~' => Some(i + 1),
+                Some(c) if ('\x40'..='\x7e').contains(c) => Some(i + 1),
                 _ => None,
             }
         }
@@ -3180,6 +3273,7 @@ fn still_arriving(s: &[char]) -> bool {
         [] => false,
         ['\x1b'] => true,
         ['\x1b', 'O'] => true,
+        ['\x1b', '_' | ']' | 'P' | '^' | 'X', ..] => true,
         // A mouse report that has not reached its M or m yet. Without this
         // arm the `<` fails the test below, the report is declared
         // malformed, and the ESC is dropped one character at a time -
@@ -3191,7 +3285,7 @@ fn still_arriving(s: &[char]) -> bool {
             .all(|c| c.is_ascii_digit() || *c == ';'),
         ['\x1b', '[', rest @ ..] => rest
             .iter()
-            .all(|c| c.is_ascii_digit() || *c == ';'),
+            .all(|c| ('\x20'..='\x3f').contains(c)),
         _ => false,
     }
 }
@@ -3230,6 +3324,11 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
     while at < chars.len() {
         if chars[at] == '\x1b' {
             let rest: String = chars[at..].iter().collect();
+            if let Some(len) = terminal::string_len(&chars[at..]) {
+                terminal::reply(&chars[at..at + len].iter().collect::<String>());
+                at += len;
+                continue;
+            }
             // Longest wins: ESC [ 1 ~ is Home, not ESC [ 1 followed by ~.
             let found = SEQUENCES
                 .iter()
@@ -3255,6 +3354,7 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
                 continue;
             }
             if let Some(len) = escape_len(&chars[at..]) {
+                terminal::reply(&chars[at..at + len].iter().collect::<String>());
                 at += len; // a sequence this program does not map; drop it
                 continue;
             }
@@ -3583,6 +3683,27 @@ fn binary_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_replies_never_become_keys_even_when_fragmented_or_late() {
+        for response in [
+            "\x1b_Gi=2147483646;OK\x1b\\",
+            "\x1b_Gi=2147483646;ENOTSUP: unavailable\x1b\\",
+            "\x1b[?2026;2$y",
+            "\x1b[?62;4;c",
+            "\x1b]10;rgb:ffff/0000/0000\x1b\\",
+        ] {
+            for split in 1..response.len() {
+                let mut pending = response[..split].to_string();
+                let mut escape = false;
+                assert!(super::decode(&mut pending, &mut escape).is_empty(), "{response:?} at {split}");
+                pending.push_str(&response[split..]);
+                pending.push_str("x\x1b[A");
+                assert_eq!(super::decode(&mut pending, &mut escape), ["x", "up"]);
+                assert!(pending.is_empty());
+            }
+        }
+    }
+
     /// A frame's rows as they land on screen: the leading home dropped,
     /// split where `frame` puts its line breaks.
     fn frame_rows(bytes: &str) -> Vec<String> {

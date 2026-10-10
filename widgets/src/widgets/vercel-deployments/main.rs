@@ -1325,7 +1325,7 @@ fn main() {
     let mut filter = 0usize;
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
-    let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    let (mut selected, mut scroll) = (0usize, 0usize);
     // Every row each deployment occupies on the frame now on screen, and
     // how many rows stay pinned above the window. A click is answered
     // against the frame the reader was looking at when they clicked, which
@@ -1345,7 +1345,7 @@ fn main() {
     let mut shown: Vec<serde_json::Value> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer

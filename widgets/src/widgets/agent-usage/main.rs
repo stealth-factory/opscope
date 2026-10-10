@@ -2461,7 +2461,7 @@ fn main() {
     // Signed, because the left key has to be able to go below zero and
     // wrap; rem_euclid then brings it back into range the way Python's
     // % does for a negative index.
-    let (mut active, mut tick) = (0i64, 0usize);
+    let mut active = 0i64;
     // The tab strip on the frame now on screen: which row it is on, and
     // which tab each of its columns belongs to.
     let (mut tab_row, mut tabs_at): (usize, Vec<(usize, usize, usize)>) = (0, Vec::new());
@@ -2478,7 +2478,7 @@ fn main() {
     let (mut carried, mut shown) = (0usize, String::new());
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         // Scrolling is applied after the frame is built, not here: a page is
         // however many body rows this pane turned out to have, and that is
         // not known until the tab has been rendered and the footer packed.
