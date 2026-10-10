@@ -34,6 +34,12 @@ use crate::*;
 const RATE_FILES: usize = 3;
 /// Seconds; below this the timestamps are not a turn.
 const MIN_GAP: f64 = 1.0;
+/// The official client's optional reset-grant block, alongside normal usage.
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
+/// Compatibility surface required by the usage endpoint's grant inventory.
+/// Verified against the published Claude Code 2.1.296 client. The server
+/// gates grants by client surface/version. No reset is redeemed by this GET.
+const USAGE_USER_AGENT: &str = "claude-cli/2.1.296 (external, cli)";
 
 /// One Claude Code config directory the widget should read.
 ///
@@ -77,6 +83,22 @@ pub struct Data {
 }
 
 impl Data {
+    pub(crate) fn reset_summary_line(&self) -> Option<String> {
+        let quota = self.quota.as_ref()?;
+        let bank = crate::parse::parse_claude_resets(&quota.to_string(), now())?;
+        if bank.left == 0 {
+            return None;
+        }
+        let mut line = match bank.soonest.and_then(crate::codex::local_expiry) {
+            Some(stamp) => format!("{} reset available ({stamp})", bank.left),
+            None => format!("{} reset available", bank.left),
+        };
+        if !self.quota_live {
+            line.push_str(&format!(" · cached {} ago", ago(self.quota_at)));
+        }
+        Some(line)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn with_session_quota(label: &str, pct: i64) -> Self {
         Self {
@@ -460,7 +482,7 @@ fn claude_try(url: &str, tok: &str) -> Result<serde_json::Value, String> {
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("anthropic-beta", "oauth-2025-04-20"),
-            ("User-Agent", "opscope"),
+            ("User-Agent", if url == USAGE_URL { USAGE_USER_AGENT } else { "opscope" }),
         ],
         20,
     )
@@ -914,7 +936,7 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
         };
-        match claude_try("https://api.anthropic.com/api/oauth/usage", &tok) {
+        match claude_try(USAGE_URL, &tok) {
             Ok(u) => Some(serde_json::json!({ "u": u, "at": now(), "plan": plan })),
             Err(why) => Some(serde_json::json!({ "why": why })),
         }
@@ -2292,6 +2314,19 @@ pub fn tab(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Data {
+        pub(crate) fn with_reset_grants(label: &str, pct: Option<i64>, grants: serde_json::Value, live: bool) -> Self {
+            let mut data = Self::with_session_quota(label, pct.unwrap_or(0));
+            let quota = data.quota.as_mut().unwrap();
+            if pct.is_none() {
+                quota["limits"] = serde_json::json!([]);
+            }
+            quota["cedar_ember"] = serde_json::json!({"eligible": true, "grants": grants});
+            data.quota_live = live;
+            data
+        }
+    }
 
     /// The rule the fossil taught: Claude Code's cache is worth reading only
     /// while Claude Code itself would read it.

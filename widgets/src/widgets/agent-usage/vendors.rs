@@ -218,10 +218,10 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
     quiet_block(&said, s, w, p)
 }
 
-/// The reset line under Codex on `[+]`, when the inventory was read and the
+/// The reset line under an account on `[+]`, when the inventory was read and the
 /// count is greater than zero.
 ///
-/// Indented under the Codex rows, the same inset a collapsed provider uses
+/// Indented under the account rows, the same inset a collapsed provider uses
 /// for a note under its summary, with one empty row above it so the count
 /// is not read as another quota line. Zero and an unread inventory add
 /// nothing, including that empty row. The count and `available` stay. When
@@ -229,8 +229,15 @@ fn quiet_from(quiet: &[(String, String)], s: &State, w: usize, p: &Palette) -> V
 /// broken between the datetime's parts. A word or a part wider than the
 /// pane is broken by display width, so it is not skipped and a clock is
 /// not shortened into a different time.
-fn push_reset_summary(rows: &mut Vec<String>, s: &State, w: usize, p: &Palette) {
-    let Some(line) = s.codex.reset_summary_line() else {
+fn push_reset_summary(rows: &mut Vec<String>, heading: &str, s: &State, w: usize, p: &Palette) {
+    let line = if heading == "CODEX" {
+        s.codex.reset_summary_line()
+    } else {
+        s.claude.iter()
+            .find(|profile| crate::claude::summary_heading(&profile.label, s.claude.len() > 1) == heading)
+            .and_then(crate::claude::Data::reset_summary_line)
+    };
+    let Some(line) = line else {
         return;
     };
     rows.push(String::new());
@@ -259,9 +266,7 @@ fn quiet_block(said: &[(String, String, bool)], s: &State, w: usize, p: &Palette
                 .into_iter()
                 .map(|l| tc::seg(&[(tone, format!("   {}", l))], w - 1)),
         );
-        if name == "CODEX" {
-            push_reset_summary(&mut rows, s, w, p);
-        }
+        push_reset_summary(&mut rows, name, s, w, p);
         rows.push(String::new());
     }
     if !unexplained.is_empty() {
@@ -522,9 +527,7 @@ fn summary_for(s: &State, w: usize, p: &Palette, names: &[&str]) -> Vec<String> 
                     }),
             );
         }
-        if group_agent(name) == "codex" {
-            push_reset_summary(&mut rows, s, w, p);
-        }
+        push_reset_summary(&mut rows, name, s, w, p);
         // Notion's endpoint is unsupported and can answer with less than a
         // whole reading; the lanes above are then a subset, said here so
         // they are not read as all of it.
@@ -1038,6 +1041,70 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(words.contains("no billing-period length"), "{words}");
+    }
+
+    #[test]
+    fn claude_reset_summaries_stay_with_their_accounts_with_or_without_lanes() {
+        let grants = |left| serde_json::json!([{
+            "resets_left":left,"usable_now":true,"ends_at":"2126-01-02T00:00:00Z"
+        }]);
+        for pct in [Some(25), None] {
+            let s = State {
+                claude: vec![
+                    crate::claude::Data::with_reset_grants("", pct, grants(2), true),
+                    crate::claude::Data::with_reset_grants("work", Some(80), grants(3), false),
+                ],
+                ..Default::default()
+            };
+            let rows = plain(&summary_for(&s, 120, &palette(), &["claude"]));
+            let mut heading = "";
+            let mut counts = 0;
+            for (i, row) in rows.iter().enumerate() {
+                if row.trim() == "CLAUDE" || row.trim() == "work - CLAUDE" {
+                    heading = row.trim();
+                }
+                if row.contains("reset available") {
+                    counts += 1;
+                    assert!(rows[i - 1].is_empty(), "{rows:?}");
+                    let (count, cached) = if heading == "CLAUDE" { (2, false) } else { (3, true) };
+                    assert!(row.starts_with(&format!("     {count} reset available (")), "{rows:?}");
+                    assert_eq!(row.contains("cached"), cached, "{rows:?}");
+                }
+            }
+            assert_eq!(counts, 2, "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn claude_reset_summaries_wrap_and_omit_empty_or_unread_banks() {
+        let s = State {
+            claude: vec![crate::claude::Data::with_reset_grants("work", Some(25), serde_json::json!([
+                {"resets_left":2,"usable_now":true,"ends_at":"2126-01-02T00:00:00Z"}
+            ]), true)],
+            ..Default::default()
+        };
+        let line = s.claude[0].reset_summary_line().unwrap();
+        for width in 20..=120 {
+            let mut rows = Vec::new();
+            push_reset_summary(&mut rows, "CLAUDE", &s, width, &palette());
+            let bare = plain(&rows);
+            let joined = bare.iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+            assert_eq!(joined.trim(), line, "width {width}");
+            assert!(bare.iter().all(|r| tc::display_width(r) < width), "{bare:?}");
+        }
+        for grants in [serde_json::json!([]), serde_json::Value::Null, serde_json::json!([
+            {"resets_left":3,"usable_now":true,"ends_at":"2000-01-01T00:00:00Z"}
+        ])] {
+            let s = State {
+                claude: vec![crate::claude::Data::with_reset_grants("", Some(25), grants, true)],
+                ..Default::default()
+            };
+            let mut rows = Vec::new();
+            push_reset_summary(&mut rows, "CLAUDE", &s, 120, &palette());
+            assert!(rows.is_empty(), "no empty separator either: {rows:?}");
+        }
+        let rows = plain(&summary_for(&s, 120, &palette(), &["codex"]));
+        assert!(!rows.iter().any(|r| r.contains("reset available")), "excluded Claude leaked: {rows:?}");
     }
 
     #[test]
