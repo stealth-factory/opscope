@@ -61,8 +61,35 @@ pub struct Plot {
     pub width: usize,
     pub height: usize,
     pub chart: LineChart,
+    fill: Option<Fill>,
     first_row: usize,
     visible_rows: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Rect {
+    // Coordinates in terminal cells, with fractional edges.
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    colour: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Fill {
+    rects: Vec<Rect>,
+    text: Vec<Vec<(String, String)>>,
+}
+
+impl Fill {
+    fn row(&self, row: usize, cols: usize) -> String {
+        let parts: Vec<_> = self.text[row]
+            .iter()
+            .map(|(c, t)| (c.as_str(), t.clone()))
+            .collect();
+        super::seg(&parts, cols)
+    }
 }
 
 impl Plot {
@@ -73,9 +100,180 @@ impl Plot {
             width,
             height,
             chart,
+            fill: None,
             first_row: 0,
             visible_rows: height,
         }
+    }
+
+    /// Discrete columns, one terminal cell per bucket. Both renderers share
+    /// the same scale; downward bars retain fractional heights in pixels.
+    pub fn bars(
+        x: usize,
+        y: usize,
+        columns: &[(f64, String)],
+        height: usize,
+        peak: f64,
+        down: bool,
+    ) -> Self {
+        let columns: Vec<_> = columns
+            .iter()
+            .map(|(v, c)| (if v.is_finite() { v.max(0.0) } else { 0.0 }, c.clone()))
+            .collect();
+        let peak = if peak.is_finite() && peak > 0.0 {
+            peak
+        } else {
+            columns
+                .iter()
+                .map(|(v, _)| *v)
+                .fold(0.0, f64::max)
+                .max(f64::MIN_POSITIVE)
+        };
+        let text = if down {
+            super::vbars_down(&columns, height, peak)
+        } else {
+            super::vbars(&columns, height, peak)
+        };
+        let rects = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, (v, _))| *v > 0.0)
+            .map(|(i, (v, colour))| {
+                let h = (v / peak).min(1.0) * height as f64;
+                Rect {
+                    x: i as f64,
+                    y: if down { 0.0 } else { height as f64 - h },
+                    width: 1.0,
+                    height: h,
+                    colour: colour.clone(),
+                }
+            })
+            .collect();
+        Self::filled(x, y, columns.len(), height, rects, text)
+    }
+
+    /// A discrete calendar grid. `None` stays a missing-data dot, distinct
+    /// from a measured zero (which the caller supplies with its zero colour).
+    pub fn heatmap(
+        x: usize,
+        y: usize,
+        cells: &[Vec<Option<String>>],
+        missing_colour: &str,
+    ) -> Self {
+        let width = cells.iter().map(Vec::len).max().unwrap_or(0);
+        let mut rects = Vec::new();
+        let mut text = Vec::new();
+        for (r, row) in cells.iter().enumerate() {
+            let mut line = Vec::new();
+            for c in 0..width {
+                match row.get(c).and_then(Option::as_ref) {
+                    Some(colour) => {
+                        line.push((colour.clone(), "■".into()));
+                        rects.push(Rect {
+                            x: c as f64 + 0.125,
+                            y: r as f64 + 0.125,
+                            width: 0.75,
+                            height: 0.75,
+                            colour: colour.clone(),
+                        });
+                    }
+                    None => {
+                        line.push((missing_colour.into(), "·".into()));
+                        rects.push(Rect {
+                            x: c as f64 + 0.375,
+                            y: r as f64 + 0.4375,
+                            width: 0.25,
+                            height: 0.125,
+                            colour: missing_colour.into(),
+                        });
+                    }
+                }
+            }
+            text.push(line);
+        }
+        Self::filled(x, y, width, cells.len(), rects, text)
+    }
+
+    /// A measured fraction plus an optional reference position (e.g. elapsed
+    /// quota window). Labels and percentages remain ordinary terminal text.
+    pub fn meter(
+        x: usize,
+        y: usize,
+        width: usize,
+        fraction: f64,
+        marker: Option<f64>,
+        colour: &str,
+        track: &str,
+        mark: &str,
+    ) -> Self {
+        let fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let marker = marker.filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
+        let mut rects = vec![
+            Rect {
+                x: 0.0,
+                y: 0.25,
+                width: width as f64,
+                height: 0.5,
+                colour: track.into(),
+            },
+            Rect {
+                x: 0.0,
+                y: 0.25,
+                width: width as f64 * fraction,
+                height: 0.5,
+                colour: colour.into(),
+            },
+        ];
+        if let Some(at) = marker {
+            rects.push(Rect {
+                x: (at * width as f64).min((width as f64 - 0.25).max(0.0)),
+                y: 0.0625,
+                width: 0.25,
+                height: 0.875,
+                colour: mark.into(),
+            });
+        }
+        let filled = (fraction * width as f64).round() as usize;
+        let at = marker.map(|v| ((v * width as f64).round() as usize).min(width.saturating_sub(1)));
+        let text = (0..width)
+            .map(|i| {
+                if Some(i) == at {
+                    (mark.into(), "┃".into())
+                } else if i < filled {
+                    (colour.into(), "█".into())
+                } else {
+                    (track.into(), "░".into())
+                }
+            })
+            .collect();
+        Self::filled(x, y, width, 1, rects, vec![text])
+    }
+
+    fn filled(
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        rects: Vec<Rect>,
+        text: Vec<Vec<(String, String)>>,
+    ) -> Self {
+        let mut plot = Self::new(
+            x,
+            y,
+            width,
+            height,
+            LineChart {
+                traces: Vec::new(),
+                slots: 0,
+                focus: None,
+            },
+        );
+        plot.fill = Some(Fill { rects, text });
+        plot
     }
 
     /// `top` is the pinned header height; `room` excludes the footer.
@@ -268,8 +466,12 @@ pub(crate) fn compose(
         let use_pixels = kitty
             && images.len() < MAX_PLOTS
             && plot.width.saturating_mul(plot.height) <= 20_000
+            && plot
+                .fill
+                .as_ref()
+                .is_none_or(|f| f.rects.iter().all(|r| rgb(&r.colour).is_some()))
             && plot.chart.traces.iter().all(|t| rgb(&t.colour).is_some());
-        let cells = if use_pixels {
+        let cells = if use_pixels || plot.fill.is_some() {
             Vec::new()
         } else {
             plot.chart.cells(plot.width, plot.height)
@@ -277,6 +479,8 @@ pub(crate) fn compose(
         for row in 0..plot.visible_rows {
             let content = if use_pixels {
                 " ".repeat(cols)
+            } else if let Some(fill) = &plot.fill {
+                fill.row(row + plot.first_row, cols)
             } else {
                 cells[row + plot.first_row]
                     .iter()
@@ -369,6 +573,28 @@ fn rgb(colour: &str) -> Option<[u8; 3]> {
 fn pixels(plot: &Plot) -> Vec<u8> {
     let (w, h) = (plot.width * CELL_W, plot.height * CELL_H);
     let mut pixels = vec![0u8; w * h * 4];
+    if let Some(fill) = &plot.fill {
+        for rect in &fill.rects {
+            let colour = rgb(&rect.colour).unwrap_or([180, 200, 220]);
+            let left = rect.x * CELL_W as f64;
+            let top = rect.y * CELL_H as f64;
+            let right = left + rect.width * CELL_W as f64;
+            let bottom = top + rect.height * CELL_H as f64;
+            for y in top.floor().max(0.0) as usize..(bottom.ceil() as usize).min(h) {
+                for x in left.floor().max(0.0) as usize..(right.ceil() as usize).min(w) {
+                    let area = (right.min(x as f64 + 1.0) - left.max(x as f64)).max(0.0)
+                        * (bottom.min(y as f64 + 1.0) - top.max(y as f64)).max(0.0);
+                    let at = (y * w + x) * 4;
+                    blend(
+                        &mut pixels[at..at + 4],
+                        colour,
+                        (area * 255.0).round() as u32,
+                    );
+                }
+            }
+        }
+        return pixels;
+    }
     let order = (0..plot.chart.traces.len())
         .filter(|i| Some(*i) != plot.chart.focus)
         .chain(plot.chart.focus.filter(|i| *i < plot.chart.traces.len()));
@@ -428,6 +654,18 @@ fn pixels(plot: &Plot) -> Vec<u8> {
     pixels
 }
 
+fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
+    if alpha == 0 {
+        return;
+    }
+    let old = pixel[3] as u32 * (255 - alpha) / 255;
+    let total = alpha + old;
+    for c in 0..3 {
+        pixel[c] = ((colour[c] as u32 * alpha + pixel[c] as u32 * old) / total) as u8;
+    }
+    pixel[3] = total as u8;
+}
+
 fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
     let source = pixels(plot);
     let cols = plot.width.min(pane_width - plot.x);
@@ -470,6 +708,89 @@ mod tests {
                 baseline: None,
             }],
             focus: None,
+        }
+    }
+
+    #[test]
+    fn discrete_bars_preserve_scale_direction_and_empty_buckets() {
+        let colour = super::super::rgb(30, 220, 180);
+        let cols = vec![
+            (0.0, colour.clone()),
+            (0.1, colour.clone()),
+            (1.0, colour.clone()),
+        ];
+        let up = Plot::bars(0, 1, &cols, 3, 1.0, false);
+        let down = Plot::bars(0, 1, &cols, 3, 1.0, true);
+        let a = pixels(&up);
+        let b = pixels(&down);
+        for y in 0..48 {
+            for x in 0..24 {
+                assert_eq!(a[(y * 24 + x) * 4 + 3], b[((47 - y) * 24 + x) * 4 + 3]);
+                if x < 8 {
+                    assert_eq!(a[(y * 24 + x) * 4 + 3], 0);
+                }
+            }
+        }
+        // A tenth-height bar reaches 4.8 pixels; it must not round up to
+        // the text backend's half-cell step or disappear below that step.
+        assert_eq!(b[(4 * 24 + 8) * 4 + 3], 204);
+        assert_eq!(b[(5 * 24 + 8) * 4 + 3], 0);
+        let subsecond = Plot::bars(0, 1, &[(0.2, colour)], 1, 0.0, false);
+        assert!(pixels(&subsecond).chunks_exact(4).all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn heatmaps_distinguish_missing_days_from_measured_zeroes() {
+        let zero = super::super::rgb(120, 145, 170);
+        let p = Plot::heatmap(5, 2, &[vec![None, Some(zero.clone())]], &zero);
+        let bytes = pixels(&p);
+        let area = |col: usize| {
+            (0..16)
+                .flat_map(|y| (col * 8..(col + 1) * 8).map(move |x| (y * 16 + x) * 4 + 3))
+                .filter(|i| bytes[*i] == 255)
+                .count()
+        };
+        assert_eq!(area(0), 4);
+        assert_eq!(area(1), 72);
+        let text = p.fill.as_ref().unwrap().row(0, 2);
+        assert!(text.contains('·') && text.contains('■'));
+        // Cell gutters remain transparent: adjacent days never merge.
+        for y in 0..16 {
+            assert_eq!(bytes[(y * 16 + 8) * 4 + 3], 0);
+        }
+    }
+
+    #[test]
+    fn meter_reference_does_not_change_measured_fill() {
+        let fill = super::super::rgb(30, 220, 180);
+        let track = super::super::rgb(80, 100, 120);
+        let mark = super::super::rgb(240, 245, 250);
+        let p = Plot::meter(2, 1, 10, 0.25, Some(0.75), &fill, &track, &mark);
+        let bytes = pixels(&p);
+        let at = |x: usize, y: usize| &bytes[(y * 80 + x) * 4..(y * 80 + x + 1) * 4];
+        assert_eq!(at(19, 8), &[30, 220, 180, 255]);
+        assert_eq!(at(20, 8), &[80, 100, 120, 255]);
+        assert_eq!(at(60, 8), &[240, 245, 250, 255]);
+        assert_eq!(at(20, 0)[3], 0);
+    }
+
+    #[test]
+    fn filled_plots_crop_without_changing_values_or_labels() {
+        let colour = super::super::rgb(80, 220, 170);
+        let p = Plot::bars(4, 3, &[(0.2, colour.clone()), (1.0, colour)], 4, 1.0, false);
+        let clipped = p.clone().in_viewport(4, 1, 2).unwrap();
+        assert_eq!(pixels(&p), pixels(&clipped));
+        assert_eq!(
+            (clipped.y, clipped.first_row, clipped.visible_rows),
+            (1, 2, 2)
+        );
+        let rows: Vec<String> = vec!["title".into(), "axis.. units".into(), "axis.. units".into()];
+        // Render text directly here to avoid sharing the image cache with
+        // lifecycle tests running in parallel.
+        let fill = clipped.fill.as_ref().unwrap();
+        for (i, row) in rows.iter().skip(1).enumerate() {
+            let text = replace_cells(row, 4, 2, &fill.row(i + clipped.first_row, 2));
+            assert!(text.starts_with("axis") && text.ends_with(" units"));
         }
     }
 

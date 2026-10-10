@@ -916,7 +916,7 @@ fn codex_rate_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// totals and the cost come from. A per-file sum would count a resumed
 /// session's replayed turns again and put a peak on the calendar that never
 /// happened.
-fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn codex_calendar_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut totals: HashMap<NaiveDate, f64> = HashMap::new();
     for (day, models) in &d.daily {
         let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
@@ -945,6 +945,9 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         ],
         w - 1,
     )];
+    let mut plot = cal.plot.clone();
+    plot.y += rows.len();
+    plots.push(plot);
     for line in &cal.rows {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
@@ -1298,7 +1301,12 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 
 /// The whole tab: the quota, what this machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
+#[cfg(test)]
 pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, cfg, p, &mut Vec::new())
+}
+
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = codex_quota(d, w, p);
     if rows.is_empty() {
         let note = why_no_lane(d);
@@ -1321,7 +1329,11 @@ pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     }
     rows.extend(codex_totals_rows(d, w, p));
     rows = add_section(rows, codex_rate_rows(d, w, p));
-    rows = add_section(rows, codex_calendar(d, w, p));
+    let mut calendar_plots = Vec::new();
+    let calendar = codex_calendar_with_plots(d, w, p, &mut calendar_plots);
+    let start = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1) + 1;
+    plots.extend(calendar_plots.into_iter().map(|mut p| { p.y += start; p }));
+    rows = add_section(rows, calendar);
     rows.push(String::new());
     for line in wrap_text(
         "Tokens and rate are measured here, from the rollouts. Quota is the \

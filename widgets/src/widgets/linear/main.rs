@@ -2259,6 +2259,7 @@ fn main() {
         let stale = s.window != want;
         let left = quota.lock().map(|g| g.requests).unwrap_or(None);
 
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("linear ops", w, &p.new)];
         // Where the focused section's cursor landed, so the board can be
         // scrolled to keep it on screen.
@@ -2503,6 +2504,7 @@ fn main() {
             // and the plain ramp's hot end measures 3.18 on it. A cycle that
             // has completed almost nothing is what lands there.
             let hot = tc::health_on(frac, on);
+            plots.push(tc::Plot::meter(1 + cycle_name_w, rows.len(), meter_w, frac, None, &hot, &p.grid, &p.txt));
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),
@@ -2633,6 +2635,10 @@ fn main() {
                 _ => (real_u, real_d, p.new.clone(), p.ok.clone()),
             }
         };
+        plots.extend([
+            tc::Plot::bars(1, rows.len(), &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0, false),
+            tc::Plot::bars(1, rows.len() + 4, &hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0, true),
+        ]);
         for line in tc::vbars(
             &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(),
             3,
@@ -2925,6 +2931,10 @@ fn main() {
                     (c_of(&p.txt), format!(" {:>3.0}%", 100.0 * q.progress)),
                     (c_of(&p.dim), aside),
                 ];
+                if bar_w > 0 {
+                    let x = line.iter().take(3).map(|(_, t)| tc::display_width(t)).sum::<usize>() + 2;
+                    plots.push(tc::Plot::meter(x, rows.len(), bar_w, q.progress, None, colour, &p.grid, &p.txt));
+                }
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
@@ -3199,7 +3209,8 @@ fn main() {
         }
         let foot_top = out.len();
         out.extend(footer);
-        tc::draw(&out, w, h);
+        let plots: Vec<_> = plots.drain(..).filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
+        tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
         std::thread::sleep(Duration::from_millis(300));
     }

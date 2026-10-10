@@ -155,10 +155,40 @@ def rejected_image(t):
     assert len(t.images()) == count
 
 
+def filled_graphics(t):
+    count = len(t.images())
+    t.send(b"g")
+    t.read()
+    added = t.images()[count:]
+    assert len(added) == 4, "bars, calendar and meter did not reach the compositor"
+    for n, (keys, payload) in enumerate(added):
+        assert keys[b"m"] == b"0", "small gallery fixture unexpectedly chunked"
+        decoded = zlib.decompress(base64.b64decode(payload))
+        assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
+        assert any(decoded[3::4]), "empty graphic"
+        Path(f"/tmp/opscope-gallery-{n}.rgba").write_bytes(decoded)
+        Path(f"/tmp/opscope-gallery-{n}.size").write_text(f"{int(keys[b's'])} {int(keys[b'v'])}")
+    count = len(t.images())
+    t.read()
+    assert len(t.images()) == count, "unchanged figures retransmitted"
+    t.send(b"c")
+    t.read()
+    assert t.commands()[-1][0].get(b"a") == b"d"
+
+
+def filled_text(t):
+    t.send(b"g")
+    t.read()
+    assert not t.images()
+    text = t.output.decode(errors="replace")
+    assert "■" in text and "·" in text and "┃" in text
+
+
 if __name__ == "__main__":
     for mode, reply, check in [("auto", "kitty", supported), ("auto", "reject", fallback),
                                ("text", "sync", fallback), ("kitty", "silent", timeout),
-                               ("auto", "kitty", rejected_image)]:
+                               ("auto", "kitty", rejected_image),
+                               ("auto", "kitty", filled_graphics), ("text", "sync", filled_text)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
     for ending in ["signal", "panic"]:
