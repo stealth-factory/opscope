@@ -76,9 +76,7 @@ does not depend on potentially unavailable cell-pixel-size reports. Up to 16
 visible plots, each at most 20,000 cells, use images; additional or larger plots
 use text to bound image memory/transport costs. It is a raster chart renderer,
 not a general replacement for terminal text, native scaled fonts or animation
-frames in the Kitty protocol. Pixel traces use a centered two-pixel stroke with
-antialiased edges so steep segments retain an opaque core in narrow plots.
-Missing measurements still break the trace; they are never interpolated away.
+frames in the Kitty protocol.
 
 ## Widget API
 

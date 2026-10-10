@@ -609,20 +609,13 @@ fn pixels(plot: &Plot) -> Vec<u8> {
             h,
             trace.baseline,
             |a, b| {
-                // A centered two-pixel stroke keeps an opaque core even on
-                // steep segments; a one-pixel stroke can split into faint
-                // columns when downsampled. Round edges at 2x resolution.
+                // Draw a one-pixel-wide stroke at 2x resolution, then downsample
+                // coverage. Smoothing never crosses a missing measurement.
                 raster((a.0 * 2, a.1 * 2), (b.0 * 2, b.1 * 2), |x, y| {
-                    for dy in -2isize..=2 {
-                        for dx in -2isize..=2 {
-                            if dx * dx + dy * dy > 4 {
-                                continue;
-                            }
-                            let px = x as isize + dx;
-                            let py = y as isize + dy;
-                            if px >= 0 && py >= 0 && px < (w * 2) as isize && py < (h * 2) as isize
-                            {
-                                coverage[py as usize * w * 2 + px as usize] = 1;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            if x + dx < w * 2 && y + dy < h * 2 {
+                                coverage[(y + dy) * w * 2 + x + dx] = 1;
                             }
                         }
                     }
@@ -791,22 +784,6 @@ mod tests {
         for (i, row) in rows.iter().skip(1).enumerate() {
             let text = replace_cells(row, 4, 2, &fill.row(i + clipped.first_row, 2));
             assert!(text.starts_with("axis") && text.ends_with(" units"));
-        }
-    }
-
-    #[test]
-    fn steep_strokes_keep_an_opaque_core_in_narrow_plots() {
-        for width in [1, 2, 4] {
-            for values in [vec![Some(0.0), Some(1.0)], vec![Some(1.0), Some(0.0)]] {
-                let p = Plot::new(0, 1, width, 8, chart(values));
-                let bytes = pixels(&p);
-                for (y, row) in bytes.chunks_exact(width * CELL_W * 4).enumerate() {
-                    assert!(
-                        row.chunks_exact(4).any(|pixel| pixel[3] == 255),
-                        "stroke fades at row {y} with width {width}"
-                    );
-                }
-            }
         }
     }
 
