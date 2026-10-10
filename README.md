@@ -390,6 +390,19 @@ permission to make changes.
 
 ## Requirements
 
+### Kitty and ordinary terminals
+
+Opscope detects terminal capabilities per session. Supporting terminals get
+synchronized frame updates; `latency`, `link` and `netwatch` can draw pixel charts
+through the Kitty graphics protocol. Other sessions use Braille charts with the
+same data and controls. Use `OPSCOPE_GRAPHICS=text` to keep text charts, or
+`OPSCOPE_GRAPHICS=kitty` to request pixels with an on-screen fallback explanation.
+The default is `auto`. No Kitty helper or image library needs installing.
+See [terminal rendering](docs/terminal-rendering.md) for the developer API,
+widget review, tests and multiplexer compatibility limits.
+
+### Platform and tools
+
 - **Nothing to install to run them** — the binaries carry what they link
   against, SQLite included. Node, if you use `npx`; a Rust toolchain only
   if you build rather than download or install

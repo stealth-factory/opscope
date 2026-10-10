@@ -379,10 +379,11 @@ folder that holds `help.txt`. Parsers always compiled (`mod parse`);
 is the worked example; drop the same three files beside `main.rs` to give
 another widget a second source.
 
-Braille line charts are not in there. `latency` and `link` each keep their
-own `braille_canvas`, and the two are not the same function: latency's series
-carries the gaps a ping can leave, link's is told how many slots the axis
-holds. Copy from whichever is closer rather than expecting core to have one.
+Line charts belong to core: `LineChart`, `Trace`, `Plot`, and `draw_plots`
+choose pixels or Braille from the same data. Widgets own axis transforms,
+gaps, time slots and labels, but never branch on Kitty or emit graphics escapes.
+`Plot::in_viewport` keeps chart cropping aligned with body scrolling. See
+`docs/terminal-rendering.md` for the API, animation helpers and compatibility checks.
 
 `docs/port-decisions.md` records what the port changed from the Python and
 why - the keys it consolidated, the three it renamed, the charts it draws

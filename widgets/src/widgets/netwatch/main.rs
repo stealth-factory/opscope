@@ -747,90 +747,6 @@ fn absorb_wire(state: &mut State, stamp: f64, counters: Option<(u64, u64, Vec<St
     state.wire_names = names;
 }
 
-/// Plot a series on a dot canvas eight times finer than the cells.
-///
-/// Two dots per column and four per row, which is the difference between a
-/// line that steps between character rows and one that reads as a curve.
-fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted: bool) -> Vec<Vec<u8>> {
-    let (px_w, px_h) = (cols * 2, rows * 4);
-    let mut grid = vec![vec![0u8; cols]; rows];
-    let vals: Vec<f64> = values.iter().rev().take(px_w).rev().copied().collect();
-    if vals.is_empty() {
-        return grid;
-    }
-    let point = |i: usize| -> (i64, i64) {
-        let x = if vals.len() == 1 {
-            px_w as i64 - 1
-        } else {
-            ((i as f64) * (px_w as f64 - 1.0) / (vals.len() as f64 - 1.0)).round() as i64
-        };
-        let scaled = if peak > 0.0 {
-            (vals[i] / peak).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let magnitude = (scaled * (px_h as f64 - 1.0)).round() as i64;
-        (x, if inverted { magnitude } else { px_h as i64 - 1 - magnitude })
-    };
-    let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
-        if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
-            grid[y as usize / 4][x as usize / 2] |= tc::BRAILLE[y as usize % 4][x as usize % 2];
-        }
-    };
-    if vals.len() == 1 {
-        if vals[0] > 0.0 {
-            let (x, y) = point(0);
-            dot(x, y, &mut grid);
-        }
-        return grid;
-    }
-    for i in 1..vals.len() {
-        // An idle stretch draws nothing at all rather than a flat line
-        // pinned to the axis, which would read as activity at zero.
-        if vals[i - 1] == 0.0 && vals[i] == 0.0 {
-            continue;
-        }
-        let (mut x0, mut y0) = point(i - 1);
-        let (x1, y1) = point(i);
-        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        loop {
-            dot(x0, y0, &mut grid);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let twice = 2 * err;
-            if twice >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if twice <= dx {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-    grid
-}
-
-fn braille_row(masks: &[u8], colour: &str) -> Vec<(String, String)> {
-    masks
-        .iter()
-        .map(|m| {
-            (
-                colour.to_string(),
-                if *m == 0 {
-                    " ".to_string()
-                } else {
-                    char::from_u32(0x2800 + *m as u32).unwrap_or(' ').to_string()
-                },
-            )
-        })
-        .collect()
-}
-
 // ── the second screen ────────────────────────────────────────────────
 //
 // The table answers "what is using the network"; this answers "with what,
@@ -1440,6 +1356,7 @@ fn detail_rows(
     interval: f64,
     names: &Resolver,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<(usize, usize)>) {
     // Where the cursor ended up in the body, and how many rows it owns - its
     // own row plus the chart drawn under it. The caller cannot work this out:
@@ -1516,7 +1433,7 @@ fn detail_rows(
     };
     if graph_h > 0 && !row.hist.is_empty() {
         out.push(chart_head(row.hist.len(), w, "THIS PROCESS", interval, p));
-        out.extend(chart(&row.hist, w, graph_h, p));
+        out.extend(chart(&row.hist, w, graph_h, p, plots, out.len()));
         out.push(String::new());
     }
 
@@ -1573,7 +1490,7 @@ fn detail_rows(
                 let pick = &spots[pick_at];
                 let mut tall = 1;
                 if !pick.hist.is_empty() && pick_at < rows.len() {
-                    let mut under = chart(&pick.hist, w, 4, p);
+                    let mut under = chart(&pick.hist, w, 4, p, plots, out.len() + pick_at + 1);
                     under.push(String::new());
                     tall += under.len();
                     rows.splice(pick_at + 1..pick_at + 1, under);
@@ -1589,7 +1506,7 @@ fn detail_rows(
                 let mut tall = 1;
                 if let Some(pick) = conns.get(pick_at) {
                     if !pick.hist.is_empty() && pick_at < rows.len() {
-                        let mut under = chart(&pick.hist, w, 4, p);
+                        let mut under = chart(&pick.hist, w, 4, p, plots, out.len() + pick_at + 1);
                         under.push(String::new());
                         tall += under.len();
                         rows.splice(pick_at + 1..pick_at + 1, under);
@@ -1640,7 +1557,7 @@ fn detail_rows(
         // answer. Hiding it would leave the reader unsure whether the
         // process is quiet or the chart is broken.
         if disk_h > 0 && !row.disk.is_empty() {
-            out.extend(chart(&row.disk, w, disk_h, p));
+            out.extend(chart(&row.disk, w, disk_h, p, plots, out.len()));
         }
     } else if !host::HAS_DISK_IO && h.saturating_sub(out.len()) >= 2 {
         out.push(tc::seg(
@@ -2070,6 +1987,7 @@ fn main() {
         next_redraw = now + Duration::from_millis(100);
 
         let (w, h) = tc::size();
+        let mut plots = Vec::new();
         if notice.as_ref().is_some_and(|n| tc::now() >= n.2) {
             notice = None;
         }
@@ -2195,6 +2113,7 @@ fn main() {
                 interval,
                 &names,
                 &p,
+                &mut plots,
             );
             // The title is pinned and everything below it is the window.
             // `cursor` addresses the whole body, so its row shifts by the
@@ -2260,7 +2179,8 @@ fn main() {
             placed.clear();
             let foot_top = shown.len();
             shown.extend(foot);
-            tc::draw(&shown, w, h);
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room)).collect();
+            tc::draw_plots(&shown, w, h, &plots);
             keyboard.footer_at(&packed, foot_top, 1);
             continue;
         }
@@ -2416,7 +2336,7 @@ fn main() {
                 ],
                 w - 1,
             ));
-            out.extend(chart(&series, w, graph_h, &p));
+            out.extend(chart(&series, w, graph_h, &p, &mut plots, out.len()));
             out.push(String::new());
         }
 
@@ -2518,7 +2438,8 @@ fn main() {
         // against.
         let foot_top = out.len();
         out.extend(foot);
-        tc::draw(&out, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+        tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
     }
 }
@@ -2527,7 +2448,7 @@ fn main() {
 ///
 /// That way round because of the arrows: ↑ means upload and ↓ means
 /// download, so upload has to be the half that goes up.
-fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> {
+fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec<tc::Plot>, top: usize) -> Vec<String> {
     let canvas = h.saturating_sub(3).max(2);
     let up_h = (canvas / 2).max(1);
     let down_h = canvas.saturating_sub(up_h).max(1);
@@ -2547,6 +2468,21 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
         .max(down_label.chars().count())
         .clamp(9, 16);
     let plot = w.saturating_sub(lab + 4).max(12);
+    for (values, peak, colour, height, y, inverted) in [
+        (&tx, tx_peak, &p.up, up_h, top + 1, false),
+        (&rx, rx_peak, &p.down, down_h, top + up_h + 2, true),
+    ] {
+        let values: Vec<_> = values.iter().rev().take(plot * 2).rev().map(|v| {
+            let fraction = (v / peak).clamp(0.0, 1.0);
+            Some(if inverted { 1.0 - fraction } else { fraction })
+        }).collect();
+        let slots = values.len();
+        plots.push(tc::Plot::new(lab + 2, y, plot, height, tc::LineChart {
+            traces: vec![tc::Trace { values, colour: colour.clone(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
+            slots,
+            focus: None,
+        }));
+    }
 
     let mut out = Vec::new();
     out.push(tc::seg(
@@ -2556,12 +2492,12 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
         ],
         w - 1,
     ));
-    for masks in braille_canvas(&tx, tx_peak, plot, up_h, false) {
+    for _ in 0..up_h {
         let mut line = vec![
             (p.dim.clone(), " ".repeat(lab + 1)),
             (p.grid.clone(), "│".into()),
         ];
-        line.extend(braille_row(&masks, &p.up));
+        line.push((p.grid.clone(), " ".repeat(plot)));
         line.push((p.grid.clone(), "│".into()));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         out.push(tc::seg(&refs, w - 1));
@@ -2573,12 +2509,12 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette) -> Vec<String> 
         ],
         w - 1,
     ));
-    for masks in braille_canvas(&rx, rx_peak, plot, down_h, true) {
+    for _ in 0..down_h {
         let mut line = vec![
             (p.dim.clone(), " ".repeat(lab + 1)),
             (p.grid.clone(), "│".into()),
         ];
-        line.extend(braille_row(&masks, &p.down));
+        line.push((p.grid.clone(), " ".repeat(plot)));
         line.push((p.grid.clone(), "│".into()));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         out.push(tc::seg(&refs, w - 1));
@@ -2722,6 +2658,18 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn braille_canvas(values: &[f64], peak: f64, cols: usize, rows: usize, inverted: bool) -> Vec<Vec<u8>> {
+        let values: Vec<_> = values.iter().rev().take(cols * 2).rev().map(|v| {
+            let fraction = if peak > 0.0 { (v / peak).clamp(0.0, 1.0) } else { 0.0 };
+            Some(if inverted { 1.0 - fraction } else { fraction })
+        }).collect();
+        tc::LineChart {
+            slots: values.len(),
+            traces: vec![tc::Trace { values, colour: String::new(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
+            focus: None,
+        }.cells(cols, rows).into_iter().map(|row| row.into_iter().map(|(_, mask)| mask).collect()).collect()
+    }
 
     #[test]
     fn acquisition_does_not_hold_the_ui_state_lock() {

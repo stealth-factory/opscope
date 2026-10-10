@@ -1999,12 +1999,11 @@ fn main() {
     let mut moved = false;
     // Which project the board's own list has under its cursor.
     let mut board_project: Option<String> = None;
-    let mut tick = 0usize;
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
         // names for opening one. Rewritten before the match rather than
