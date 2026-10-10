@@ -2478,7 +2478,7 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
         }).collect();
         let slots = values.len();
         plots.push(tc::Plot::new(lab + 2, y, plot, height, tc::LineChart {
-            traces: vec![tc::Trace { values, colour: colour.clone(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
+            traces: vec![tc::Trace { positions: None, values, colour: colour.clone(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
             slots,
             focus: None,
         }));
@@ -2666,7 +2666,7 @@ mod tests {
         }).collect();
         tc::LineChart {
             slots: values.len(),
-            traces: vec![tc::Trace { values, colour: String::new(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
+            traces: vec![tc::Trace { positions: None, values, colour: String::new(), baseline: Some(if inverted { 1.0 } else { 0.0 }) }],
             focus: None,
         }.cells(cols, rows).into_iter().map(|row| row.into_iter().map(|(_, mask)| mask).collect()).collect()
     }

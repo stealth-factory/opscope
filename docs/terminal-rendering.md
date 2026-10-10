@@ -90,6 +90,7 @@ let chart = tc::LineChart {
     traces: vec![tc::Trace {
         // Fractions measured from the bottom; None means a missing sample.
         values: samples.iter().map(|value| value.map(|v| v / axis_max)).collect(),
+        positions: None, // evenly spaced samples; see timed traces below
         colour: tc::rgb(50, 220, 170),
         baseline: None,
     }],
@@ -126,6 +127,23 @@ the footer. If a guarded body fails, discard its pending plots together with
 its rows, so graphics cannot cover the error message.
 
 The widget owns its axis transform, sample aggregation, labels and colors.
+For timed traces, set `Trace::positions` to horizontal fractions in `0..=1`,
+one per value. Positions with no observation are omitted; an explicit `None`
+value is a discontinuity. The shared geometry applies this distinction in
+both Kitty pixels and Braille. Equal positions can draw a vertical segment.
+
+Latency uses sparse bucket positions: reply-time jitter can leave an arrival
+bucket empty without losing a ping, so an empty bucket does not break the line.
+Explicit timeout/loss records still break it, including within an otherwise
+populated bucket. Aggregation never combines readings across such a loss.
+The bucket width and numeric statistics keep their existing meaning.
+
+All widget chart paths were reviewed for this distinction. `link` and `netwatch`
+use ordered sample traces; `ports` and `tailnet` use ordered traffic samples.
+GitHub, Actions, PRs, Linear and Vercel activity buckets represent event counts,
+where empty buckets are legitimate zeroes. Calendar missing-day markers remain
+explicit, and the other widgets do not bucket measured line traces. No global
+interpolation or fill-forward rule is applied to these different data types.
 The chart owns right alignment, line interpolation between adjacent measurements,
 gap preservation, focused-trace priority and both rasterizers. `baseline` omits
 idle runs, while preserving transitions to/from activity; netwatch uses this for
