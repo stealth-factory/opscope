@@ -74,12 +74,22 @@ fn main() {
                 .iter()
                 .map(|v| (*v, green.clone()))
                 .collect();
-            let cells = vec![vec![Some(green.clone()), None, Some(blue.clone())]; 3];
+            let cells = vec![
+                vec![
+                    None,
+                    Some((grey.clone(), 0)),
+                    Some((green.clone(), 1)),
+                    Some((green.clone(), 2)),
+                    Some((green.clone(), 3)),
+                    Some((green.clone(), 4))
+                ];
+                3
+            ];
             plots.extend(
                 [
                     tc::Plot::bars(3, 9, &columns, 3, 1.0, false),
                     tc::Plot::bars(13, 9, &columns, 3, 1.0, true),
-                    tc::Plot::heatmap(3, 14, &cells, &grey),
+                    tc::Plot::heatmap_levels(3, 14, &cells, &grey),
                     tc::Plot::meter(3, 18, 20, 0.375, Some(0.65), &green, &grey, &blue),
                 ]
                 .into_iter()

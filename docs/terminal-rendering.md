@@ -109,15 +109,20 @@ drawing path:
 // One column per bucket; an explicit peak keeps paired charts on one scale.
 let upward = tc::Plot::bars(x, y, &columns, 3, peak, false);
 let downward = tc::Plot::bars(x, y + 4, &other_columns, 3, peak, true);
-// Each day is Some(truecolor) or None. A missing day is a dot in both modes.
-let calendar = tc::Plot::heatmap(x, y, &day_colours, &missing_colour);
+// Each day is Some((truecolor, level)) or None. Levels: 0 zero, 1..=4 activity.
+let calendar = tc::Plot::heatmap_levels(x, y, &days, &missing_colour);
 // Fractions, with an optional elapsed-window marker. Keep exact values in text.
 let quota = tc::Plot::meter(x, y, width, used, elapsed, &fill, &track, &marker);
 ```
 
 Bars do not interpolate between buckets. Calendar cells have transparent gutters
-so adjacent days remain distinct; measured zeroes have an explicit colour and
-are not treated as missing data. Meters clamp the drawn fill to 0–100%, while
+so adjacent days remain distinct. GitHub contributions and agent-usage's Claude,
+Codex and Grok calendars all use the same core heatmap renderer: centered square
+pixel tiles and `░▒▓█` text density levels, with an outline for measured zero
+and a dot for missing data. Widgets own their colour ramps and activity scales;
+core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
+colour-only convenience wrapper using the same renderer with solid tiles.
+Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. No primitive animates a value between API polls.
 
