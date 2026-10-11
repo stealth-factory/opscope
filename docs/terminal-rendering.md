@@ -119,7 +119,9 @@ owned image IDs. Scrolling crops the chart instead of changing its axes.
 Geometry is worked out on the full chart, then only the visible rows and the
 columns that fit the pane are allocated and stroked, coverage buffers included.
 Core cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
-resume.
+resume. A one-sample tick still replaces the whole image. OPS-155 edits that
+image in place when the terminal accepts a frame operation, and keeps this
+full upload when it does not.
 
 Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
 on synthetic frames at the sizes the widgets use:
