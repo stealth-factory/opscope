@@ -1,10 +1,9 @@
 //! Shared chart geometry and optional inline Kitty images. Widgets never emit
 //! protocol bytes and the same normalized measurements drive both backends.
 use base64::Engine;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Mutex,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(not(test))]
+use std::sync::Mutex;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trace {
@@ -608,7 +607,14 @@ pub(crate) const MAX_PLOTS: usize = 32;
 const CELL_W: usize = 8;
 const CELL_H: usize = 16;
 static LIVE: AtomicU32 = AtomicU32::new(0);
+// Tests run in parallel in one process. A process-wide cache makes an
+// unchanged chart look new because another test cleared it.
+#[cfg(not(test))]
 static CACHE: Mutex<Vec<CachedPlot>> = Mutex::new(Vec::new());
+#[cfg(test)]
+std::thread_local! {
+    static CACHE: std::cell::RefCell<Vec<CachedPlot>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 // At most 8 MiB across all slots. Larger crops compare by re-rasterizing
 // the old plot rather than retaining another large pixel buffer.
 const MAX_CACHED_RGBA: usize = 256 * 1024;
@@ -631,6 +637,19 @@ impl CachedPlot {
             }
     }
 }
+
+fn with_cache<R>(f: impl FnOnce(&mut Vec<CachedPlot>) -> R) -> R {
+    #[cfg(test)]
+    {
+        CACHE.with(|cache| f(&mut cache.borrow_mut()))
+    }
+    #[cfg(not(test))]
+    {
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut cache)
+    }
+}
+
 static PLACEMENT_SEQ: AtomicU32 = AtomicU32::new(1);
 static PLACEMENTS: [AtomicU32; MAX_PLOTS] = [const { AtomicU32::new(1) }; MAX_PLOTS];
 /// Set once a passthrough query is answered. Signal cleanup has to wrap
@@ -725,7 +744,7 @@ fn wrap_graphics(raw: &[u8], out: &mut [u8]) -> usize {
 pub(crate) fn cleanup() {
     super::shm::release();
     cleanup_signal();
-    CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    with_cache(|cache| cache.clear());
 }
 
 /// Compose chart regions through core, preserving the sanitizer and header.
@@ -809,73 +828,75 @@ pub(crate) fn compose(
             images.push(plot);
         }
     }
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut before = String::new();
-    let mut after = String::new();
-    for slot in 0..cache.len().max(images.len()) {
-        let plot = images.get(slot);
-        let cols = plot.map_or(0, |p| p.width.min(w - p.x));
-        if !lost && cache.get(slot).is_some_and(|c| Some(&c.plot) == plot && c.cols == cols) {
-            // The periodic whole frame repairs text another process may
-            // have scrolled or covered. The terminal still holds the image,
-            // so only its placement is put back, not the pixels.
-            if let Some(plot) = images.get(slot).filter(|_| heal && !placeholders) {
-                after.push_str(&place(plot, slot, w));
+    let (before, after) = with_cache(|cache| {
+        let mut before = String::new();
+        let mut after = String::new();
+        for slot in 0..cache.len().max(images.len()) {
+            let plot = images.get(slot);
+            let cols = plot.map_or(0, |p| p.width.min(w - p.x));
+            if !lost && cache.get(slot).is_some_and(|c| Some(&c.plot) == plot && c.cols == cols) {
+                // The periodic whole frame repairs text another process may
+                // have scrolled or covered. The terminal still holds the image,
+                // so only its placement is put back, not the pixels.
+                if let Some(plot) = images.get(slot).filter(|_| heal && !placeholders) {
+                    after.push_str(&place(plot, slot, w));
+                }
+                continue;
             }
-            continue;
-        }
-        let rgba = plot.map(|p| raster_pixels(p, cols));
-        if !lost {
-            if let (Some(cached), Some(plot), Some(rgba)) =
-                (cache.get_mut(slot), plot, rgba.as_deref())
-            {
-                // Time-dependent values can change without changing a pixel.
-                // Upload acknowledgements must not start a redraw/upload loop.
-                if cached.same_pixels(plot, cols, rgba) {
-                    cached.plot = plot.clone();
-                    if heal && !placeholders {
-                        after.push_str(&place(plot, slot, w));
+            let rgba = plot.map(|p| raster_pixels(p, cols));
+            if !lost {
+                if let (Some(cached), Some(plot), Some(rgba)) =
+                    (cache.get_mut(slot), plot, rgba.as_deref())
+                {
+                    // Time-dependent values can change without changing a pixel.
+                    // Upload acknowledgements must not start a redraw/upload loop.
+                    if cached.same_pixels(plot, cols, rgba) {
+                        cached.plot = plot.clone();
+                        if heal && !placeholders {
+                            after.push_str(&place(plot, slot, w));
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
-        }
-        // Once placeholders have been negotiated, deletes stay wrapped even
-        // after a later rejection, or tmux swallows them and the outer
-        // terminal keeps the image.
-        let wrap = placeholders || passthrough_enabled();
-        if cache.get(slot).is_some() {
-            // a=T replaces this image ID itself. Deleting it first exposes a
-            // blank interval while the replacement pixels are transmitted.
-            if lost || plot.is_none() {
-                before.push_str(&emit_graphics(&delete(slot), wrap));
+            // Once placeholders have been negotiated, deletes stay wrapped even
+            // after a later rejection, or tmux swallows them and the outer
+            // terminal keeps the image.
+            let wrap = placeholders || passthrough_enabled();
+            if cache.get(slot).is_some() {
+                // a=T replaces this image ID itself. Deleting it first exposes a
+                // blank interval while the replacement pixels are transmitted.
+                if lost || plot.is_none() {
+                    before.push_str(&emit_graphics(&delete(slot), wrap));
+                }
+                super::shm::retire_id(image_id(slot));
             }
-            super::shm::retire_id(image_id(slot));
-        }
-        if let (Some(plot), Some(rgba)) = (plot, rgba) {
-            // Set before writing: a signal during transmission must clean it up.
-            LIVE.fetch_or(1 << slot, Ordering::Release);
-            let command = if placeholders {
-                placeholder_transmit(plot, slot, w, &rgba)
+            if let (Some(plot), Some(rgba)) = (plot, rgba) {
+                // Set before writing: a signal during transmission must clean it up.
+                LIVE.fetch_or(1 << slot, Ordering::Release);
+                let command = if placeholders {
+                    placeholder_transmit(plot, slot, w, &rgba)
+                } else {
+                    image_rgba(plot, slot, w, &rgba)
+                };
+                after.push_str(&emit_graphics(&command, wrap));
+                let cached = CachedPlot {
+                    plot: plot.clone(),
+                    cols,
+                    rgba: (rgba.len() <= MAX_CACHED_RGBA).then_some(rgba),
+                };
+                if let Some(previous) = cache.get_mut(slot) {
+                    *previous = cached;
+                } else {
+                    cache.push(cached);
+                }
             } else {
-                image_rgba(plot, slot, w, &rgba)
-            };
-            after.push_str(&emit_graphics(&command, wrap));
-            let cached = CachedPlot {
-                plot: plot.clone(),
-                cols,
-                rgba: (rgba.len() <= MAX_CACHED_RGBA).then_some(rgba),
-            };
-            if let Some(previous) = cache.get_mut(slot) {
-                *previous = cached;
-            } else {
-                cache.push(cached);
+                LIVE.fetch_and(!(1 << slot), Ordering::Release);
             }
-        } else {
-            LIVE.fetch_and(!(1 << slot), Ordering::Release);
         }
-    }
-    cache.truncate(images.len());
+        cache.truncate(images.len());
+        (before, after)
+    });
     (text, before, after)
 }
 
