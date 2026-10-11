@@ -112,7 +112,10 @@ If those are missing, zero, or not a character cell either, the raster is
 2×4 dots are compared with and what every in-process test measures. A
 reply that already matched this resize is left as reported. The terminal
 still places the image in the same cell box; only the raster is finer, so
-a HiDPI cell is not an 8×16 image scaled up after the stroke was drawn.
+a HiDPI cell is not an 8×16 image scaled up after the stroke was drawn. A
+reply answers the latest query only while it is the only one in flight.
+If none arrives for a second and a half, that count is dropped so a lost
+reply cannot reject the next one.
 
 A larger cell lowers the per-plot cell cap. At 8×16 a plot may be 20,000
 cells (10,240,000 uncompressed RGBA bytes). At 20×40 the cap is 3,200 cells
