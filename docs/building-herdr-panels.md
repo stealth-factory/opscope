@@ -172,12 +172,14 @@ typing at, across SSH, with no dependency on Herdr. Detect Herdr via
 `HERDR_ENV=1` and add its native toast on top — never require it.
 
 **Pixel charts inside tmux need passthrough. Herdr stays on the direct path.**
-Core detects tmux (`$TMUX` set and non-empty) and sends a Kitty placeholder
-probe through a DCS passthrough. Herdr (`HERDR_ENV=1`) is not treated as tmux:
-nothing in Herdr shows it understands that wrapper, so charts there stay on
-today's direct path. When the tmux probe is answered, charts are Unicode
-placeholders rather than cursor placements. A pane move is expected to keep
-the image; that was not checked by eye. tmux has to allow it:
+Core detects tmux (`$TMUX` set and non-empty) and sends XTVERSION through a
+DCS passthrough. Placeholders are used when that answer names Kitty 0.28.0
+or newer, Ghostty, or another allowlisted name. Herdr (`HERDR_ENV=1`) is not
+treated as tmux: nothing in Herdr shows it understands that wrapper, so
+charts there stay on today's direct path. When the answer names a terminal
+with placeholders, charts are Unicode placeholders rather than cursor
+placements. A pane move is expected to keep the image; that was not checked
+by eye. tmux has to allow it:
 
 ```
 set -g allow-passthrough on

@@ -70,10 +70,12 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if self.reply == "kitty" or self.reply == "keyboard":
+                if b"[>q" in self.output:
+                    # Inside tmux the probe is XTVERSION, not a graphics query.
+                    response += self._xtversion()
+                elif self.reply == "kitty" or self.reply == "keyboard":
                     response += self._graphics_reply(b"OK")
                 elif self.reply == "basic":
-                    # A plain graphics OK, even when the placeholder probe was sent.
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
                     response += self._graphics_reply(b"ENOTSUP")
@@ -129,10 +131,19 @@ class Terminal:
         os.close(self.master)
 
     def _graphics_reply(self, status):
-        # The placeholder probe uses its own id. Answering the plain query
-        # must not be treated as support for virtual placement.
-        ident = b"2147483645" if b"i=2147483645," in self.output else b"2147483646"
-        return b"\x1b_Gi=" + ident + b";" + status + b"\x1b\\"
+        # Direct path only. 2147483645 is the shared-memory probe on another
+        # branch and is not a query this one sends.
+        assert b"i=2147483645," not in self.output
+        return b"\x1b_Gi=2147483646;" + status + b"\x1b\\"
+
+    def _xtversion(self):
+        # Kitty gained placeholders in 0.28.0. An older Kitty answers
+        # XTVERSION and then draws the placeholder character as tofu.
+        if self.reply == "kitty":
+            return b"\x1bP>|kitty(0.40.0)\x1b\\"
+        if self.reply == "basic":
+            return b"\x1bP>|kitty(0.27.1)\x1b\\"
+        return b""
 
 
 def shm_names(commands):
@@ -425,12 +436,14 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
-# Header ESC, then the payload's leading ESC doubled. tmux's FAQ uses the
-# same shape. unwrap_tmux treats the header as ending at that first ESC.
+# ESC P tmux ; then the payload, with each ESC doubled. A payload that
+# starts with ESC therefore has two ESC bytes before its command, which
+# is the example in tmux's FAQ. unwrap_tmux treats the header as ending
+# at `tmux;`, with no extra ESC of its own.
 PROBE = (
-    b"\x1bPtmux;\x1b"
-    b"\x1b\x1b_Gi=2147483645,s=1,v=1,a=q,U=1,t=d,f=24;AAAA"
-    b"\x1b\x1b\\\x1b\\"
+    b"\x1bPtmux;"
+    b"\x1b\x1b[>q"
+    b"\x1b\\"
 )
 # Eight hex digits: U+10EEEE, not U+010EEE plus a trailing E.
 PLACEHOLDER = "\U0010EEEE".encode()
@@ -440,7 +453,7 @@ def unwrap_tmux(data):
     """Undo DCS passthrough so the graphics commands can be parsed."""
     out = bytearray()
     i = 0
-    header = b"\x1bPtmux;\x1b"
+    header = b"\x1bPtmux;"
     while i < len(data):
         if data.startswith(header, i):
             i += len(header)
@@ -468,12 +481,14 @@ def commands_of(data):
 
 
 def tmux_placeholders(t):
-    assert PROBE in t.output, "placeholder probe was not passed through"
+    assert PROBE in t.output, "XTVERSION was not passed through"
     assert b"i=2147483646," not in t.output, "tmux sent the plain graphics query"
+    assert b"2147483645" not in t.output, "tmux used the shared-memory probe id"
+    assert b"\x1bPtmux;\x1b\x1b\x1b" not in t.output, "passthrough header carried an extra ESC"
     images = [(keys, payload) for keys, payload in commands_of(unwrap_tmux(t.output)) if keys.get(b"a") == b"T"]
     assert images, "answered passthrough did not upload a chart"
     keys, _ = images[0]
-    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"1", keys
+    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"2", keys
     upload = t.output.find(b"a=T")
     cell = t.output.find(PLACEHOLDER)
     assert 0 <= upload < cell, "virtual placement was not uploaded before the cells"
@@ -486,14 +501,14 @@ def tmux_placeholders(t):
 
 
 def tmux_text(t):
-    assert PROBE in t.output, "placeholder probe was not passed through"
+    assert PROBE in t.output, "XTVERSION was not passed through"
     t.read(0.7)
     fallback(t)
     assert PLACEHOLDER not in t.output, "an unanswered query still drew placeholders"
 
 
 def tmux_basic_is_braille(t):
-    assert PROBE in t.output, "placeholder probe was not passed through"
+    assert PROBE in t.output, "XTVERSION was not passed through"
     t.read(0.2)
     fallback(t)
     assert PLACEHOLDER not in t.output, "a plain graphics OK enabled placeholders"

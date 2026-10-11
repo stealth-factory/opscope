@@ -10,11 +10,16 @@ pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
 const GRAPHICS_QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
-/// Virtual-placement probe. A different id from the plain query, so an OK
-/// for basic Kitty graphics cannot turn placeholders on.
-const PLACEHOLDER_QUERY: &str = "\x1b_Gi=2147483645,s=1,v=1,a=q,U=1,t=d,f=24;AAAA\x1b\\";
 const GRAPHICS_REPLY: &str = "\x1b_Gi=2147483646;";
-const PLACEHOLDER_REPLY: &str = "\x1b_Gi=2147483645;";
+/// XTVERSION. `a=q` does not report Unicode-placeholder support: Kitty treats
+/// it as try-to-load, and `U` has no meaning on that command.
+const XTVERSION_QUERY: &str = "\x1b[>q";
+/// Kitty added Unicode placeholders in 0.28.0.
+const KITTY_PLACEHOLDERS: [u32; 3] = [0, 28, 0];
+/// Names whose XTVERSION means placeholders, with no version floor. Kitty is
+/// not in this list: a build older than 0.28 answers XTVERSION and then
+/// draws the placeholder character as tofu.
+const PLACEHOLDER_ALLOWLIST: &[&str] = &["ghostty"];
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
@@ -26,7 +31,7 @@ static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     pub kitty_graphics: bool,
-    /// Unicode placeholders, only after the tmux placeholder probe is answered.
+    /// Unicode placeholders, only after XTVERSION names a terminal that has them.
     pub kitty_placeholders: bool,
     pub synchronized_updates: bool,
     /// Kitty `Smulx`: curly and dashed underlines.
@@ -63,7 +68,7 @@ struct Session {
     probe_settled: bool,
     /// Later images go out as `t=s`. A failure clears this and stays on `t=d`.
     use_shm: bool,
-    /// The placeholder probe was wrapped for tmux.
+    /// XTVERSION was wrapped for tmux.
     passthrough: bool,
 }
 
@@ -100,14 +105,12 @@ fn in_tmux() -> bool {
 
 /// Wrap an escape sequence so tmux forwards it. Every ESC inside is doubled.
 ///
-/// The header is `ESC P tmux ; ESC`. tmux consumes that ESC without storing
-/// it, then stores the next byte, so a payload that starts with ESC is
-/// written with that ESC doubled: three ESC bytes between `;` and the
-/// command. That is the form in tmux's FAQ. The header's ESC is the
-/// introducer; the payload's doubled ESC is the byte that is forwarded.
+/// The documented form is `ESC P tmux ;` and then the payload. A payload
+/// that starts with ESC therefore has two ESC bytes before its command,
+/// which is the example in tmux's FAQ (`ESC P tmux ; ESC ESC ] …`).
 pub(crate) fn tmux_passthrough(sequence: &str) -> String {
     let mut out = String::with_capacity(sequence.len() + 16);
-    out.push_str("\x1bPtmux;\x1b");
+    out.push_str("\x1bPtmux;");
     for c in sequence.chars() {
         if c == '\x1b' {
             out.push('\x1b');
@@ -159,17 +162,17 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    // Inside tmux the placeholder probe goes through DCS passthrough. A plain
-    // graphics OK does not enable placeholders. Herdr is not wrapped. The
-    // keyboard, underline, and shared-memory probe stay unwrapped.
-    let graphics = if mode == GraphicsMode::Text {
+    // Inside tmux, XTVERSION goes through DCS passthrough. A graphics OK does
+    // not enable placeholders. Herdr is not wrapped. The keyboard, underline,
+    // and shared-memory probe stay unwrapped.
+    let leading = if mode == GraphicsMode::Text {
         String::new()
     } else if passthrough {
-        tmux_passthrough(PLACEHOLDER_QUERY)
+        tmux_passthrough(XTVERSION_QUERY)
     } else {
         GRAPHICS_QUERY.to_string()
     };
-    let mut bytes = format!("{graphics}{TEXT_QUERY}{UNDERLINE_QUERY}");
+    let mut bytes = format!("{leading}{TEXT_QUERY}{UNDERLINE_QUERY}");
     if let Some(probe) = probe {
         bytes.push_str(&probe);
     }
@@ -278,11 +281,11 @@ impl Session {
             return false;
         }
         if self.passthrough {
-            if let Some(response) = sequence.strip_prefix(PLACEHOLDER_REPLY) {
-                // Both flags follow this probe. Basic graphics without the
-                // virtual placement stay on Braille inside tmux: a cursor
-                // placement does not survive it.
-                self.accept_graphics(response, true);
+            if let Some(payload) = xtversion_text(sequence) {
+                // Both flags follow the name in the answer. A cursor
+                // placement does not survive tmux, so basic graphics
+                // without placeholders stay on Braille.
+                self.accept_version(payload);
             }
         } else if let Some(response) = sequence.strip_prefix(GRAPHICS_REPLY) {
             self.accept_graphics(response, false);
@@ -326,8 +329,8 @@ impl Session {
             // It does not answer the keyboard query. Terminals send these
             // two replies in either order, and a flags reply still inside
             // the window is support.
-            // tmux answers DA itself, before the outer terminal can answer the
-            // wrapped query, so that reply must not close a passthrough probe.
+            // tmux answers DA itself, before the outer terminal can answer
+            // XTVERSION, so that reply must not close the passthrough probe.
             if !self.passthrough {
                 self.graphics_answered = true;
             }
@@ -346,6 +349,61 @@ impl Session {
         self.capabilities.kitty_placeholders = ok && placeholders;
         self.graphics_answered = true;
     }
+
+    fn accept_version(&mut self, payload: &str) {
+        if self.graphics_answered || self.mode == GraphicsMode::Text {
+            return;
+        }
+        let ok = supports_unicode_placeholders(payload);
+        self.capabilities.kitty_graphics = ok;
+        self.capabilities.kitty_placeholders = ok;
+        self.graphics_answered = true;
+    }
+}
+
+/// Kitty answers `\x1bP>|kitty(0.40.0)\x1b\\`. Ghostty answers
+/// `\x1bP>|ghostty 1.1.0\x1b\\`. The text between `>|` and ST is the payload.
+fn xtversion_text(sequence: &str) -> Option<&str> {
+    let rest = sequence.strip_prefix("\x1bP>|")?;
+    let end = rest.find("\x1b\\")?;
+    Some(&rest[..end])
+}
+
+fn supports_unicode_placeholders(payload: &str) -> bool {
+    let (name, version) = split_xtversion(payload.trim());
+    if PLACEHOLDER_ALLOWLIST
+        .iter()
+        .any(|allowed| name.eq_ignore_ascii_case(allowed))
+    {
+        return true;
+    }
+    name.eq_ignore_ascii_case("kitty")
+        && version.is_some_and(|version| version_at_least(version, KITTY_PLACEHOLDERS))
+}
+
+fn split_xtversion(payload: &str) -> (&str, Option<&str>) {
+    if let Some(name) = payload.strip_suffix(')') {
+        if let Some((name, version)) = name.split_once('(') {
+            return (name.trim(), Some(version.trim()));
+        }
+    }
+    if let Some((name, version)) = payload.split_once([' ', '\t']) {
+        return (name.trim(), Some(version.trim()));
+    }
+    (payload, None)
+}
+
+fn version_at_least(version: &str, want: [u32; 3]) -> bool {
+    let mut got = [0u32; 3];
+    for (i, part) in version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .take(3)
+        .enumerate()
+    {
+        got[i] = part.parse().unwrap_or(0);
+    }
+    got >= want
 }
 
 pub(crate) fn reply(sequence: &str) {
@@ -860,28 +918,25 @@ mod tests {
         let wrapped = tmux_passthrough(GRAPHICS_QUERY);
         assert_eq!(
             wrapped,
-            "\x1bPtmux;\x1b\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
+            "\x1bPtmux;\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
         );
-        let probe = tmux_passthrough(PLACEHOLDER_QUERY);
-        assert_eq!(
-            probe,
-            "\x1bPtmux;\x1b\x1b\x1b_Gi=2147483645,s=1,v=1,a=q,U=1,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
-        );
+        let probe = tmux_passthrough(XTVERSION_QUERY);
+        assert_eq!(probe, "\x1bPtmux;\x1b\x1b[>q\x1b\\");
+        // 2147483645 is the shared-memory probe id on another branch.
+        assert!(!probe.contains("2147483645"));
         assert!(tmux_session(Some("/tmp/tmux-0,1,0")));
         assert!(!tmux_session(Some("")));
         assert!(!tmux_session(None));
     }
 
     #[test]
-    fn placeholders_turn_on_only_when_the_probe_is_answered() {
+    fn placeholders_turn_on_only_when_xtversion_names_one() {
         let now = Instant::now();
         let mut direct = Session {
             deadline: Some(now + TIMEOUT),
             ..Session::default()
         };
-        // The placeholder probe is not sent on the direct path, and an OK
-        // for it must not be read as basic graphics support.
-        direct.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        direct.reply("\x1bP>|kitty(0.40.0)\x1b\\", now);
         assert!(!direct.graphics_answered);
         assert!(!direct.capabilities.kitty_graphics);
         direct.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
@@ -893,31 +948,49 @@ mod tests {
             deadline: Some(now + TIMEOUT),
             ..Session::default()
         };
-        // tmux answers DA before the outer terminal answers the wrapped probe.
+        // tmux answers DA before the outer terminal answers XTVERSION.
         waiting.reply("\x1b[?62;c", now);
         assert!(!waiting.graphics_answered);
-        // A plain graphics OK is not the placeholder probe.
+        // A graphics OK does not mean the terminal can draw placeholders.
         waiting.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         assert!(!waiting.graphics_answered);
-        assert!(!waiting.capabilities.kitty_graphics);
         assert!(!waiting.capabilities.kitty_placeholders);
         waiting.reply("\x1b[?2026;2$y", now);
         assert!(waiting.capabilities.synchronized_updates);
-        waiting.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
+        waiting.reply("\x1bP>|kitty(0.40.0)\x1b\\", now);
         assert!(waiting.capabilities.kitty_graphics);
         assert!(waiting.capabilities.kitty_placeholders);
 
-        let mut missed = Session {
+        for answer in [
+            "\x1bP>|kitty(0.27.1)\x1b\\",
+            "\x1bP>|WezTerm 20240203-110809-5046fc22\x1b\\",
+            "\x1bP>|XTerm(388)\x1b\\",
+            "\x1bP>|Konsole 24.08.0\x1b\\",
+        ] {
+            let mut missed = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            missed.reply(answer, now);
+            assert!(missed.graphics_answered, "{answer}");
+            assert!(!missed.capabilities.kitty_graphics, "{answer}");
+            assert!(!missed.capabilities.kitty_placeholders, "{answer}");
+        }
+
+        let mut ghostty = Session {
             passthrough: true,
             deadline: Some(now + TIMEOUT),
             ..Session::default()
         };
-        missed.reply("\x1b_Gi=2147483645;ENOTSUP\x1b\\", now);
-        assert!(missed.graphics_answered);
-        assert!(!missed.capabilities.kitty_graphics);
-        assert!(!missed.capabilities.kitty_placeholders);
-        missed.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
-        assert!(!missed.capabilities.kitty_graphics);
-        assert!(!missed.capabilities.kitty_placeholders);
+        ghostty.reply("\x1bP>|ghostty 1.1.0\x1b\\", now);
+        assert!(ghostty.capabilities.kitty_placeholders);
+        let mut floor = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        floor.reply("\x1bP>|kitty(0.28.0)\x1b\\", now);
+        assert!(floor.capabilities.kitty_placeholders);
     }
 }

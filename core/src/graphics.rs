@@ -723,9 +723,9 @@ pub(crate) fn cleanup_signal() {
 }
 
 /// Double every ESC and surround the sequence with tmux's DCS passthrough.
-/// Stack only: this runs from the signal handler.
+/// The header ends at `tmux;`. Stack only: this runs from the signal handler.
 fn wrap_graphics(raw: &[u8], out: &mut [u8]) -> usize {
-    let header = b"\x1bPtmux;\x1b";
+    let header = b"\x1bPtmux;";
     out[..header.len()].copy_from_slice(header);
     let mut pos = header.len();
     for &byte in raw {
@@ -842,20 +842,12 @@ pub(crate) fn compose(
                 // The periodic whole frame repairs text another process may
                 // have scrolled or covered. The terminal still holds the image,
                 // so only its placement is put back, not the pixels.
-                if let Some(plot) = images.get(slot).filter(|_| heal) {
-                    if placeholders {
-                        // The chart's real columns and rows. A 1×1 probe
-                        // would shrink the virtual placement. ENOENT takes
-                        // the existing screen-lost path, which uploads
-                        // again next frame. q=1 reports that and stays
-                        // quiet when the image is still there.
-                        before.push_str(&emit_graphics(
-                            &placeholder_probe(plot, slot, w),
-                            wrap,
-                        ));
-                    } else {
-                        after.push_str(&place(plot, slot, w));
-                    }
+                // Placeholder mode does not send that placement. Stock tmux
+                // does not forward an APC reply, and q=1 would let the key
+                // parser type the error into the focused pane. A dropped
+                // image is sent again when the chart changes.
+                if let Some(plot) = images.get(slot).filter(|_| heal && !placeholders) {
+                    after.push_str(&place(plot, slot, w));
                 }
                 continue;
             }
@@ -868,15 +860,11 @@ pub(crate) fn compose(
                     // Upload acknowledgements must not start a redraw/upload loop.
                     if cached.same_pixels(plot, cols, rgba) {
                         cached.plot = plot.clone();
-                        if heal {
-                            if placeholders {
-                                before.push_str(&emit_graphics(
-                                    &placeholder_probe(plot, slot, w),
-                                    wrap,
-                                ));
-                            } else {
-                                after.push_str(&place(plot, slot, w));
-                            }
+                        // Placeholder mode does not send that placement. Stock tmux
+                        // does not forward an APC reply, and q=1 would let the key
+                        // parser type the error into the focused pane.
+                        if heal && !placeholders {
+                            after.push_str(&place(plot, slot, w));
                         }
                         continue;
                     }
@@ -1169,17 +1157,6 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
     pixel[3] = total as u8;
 }
 
-/// Ask whether the virtual placement is still there, without moving the
-/// cursor and without changing its size.
-fn placeholder_probe(plot: &Plot, slot: usize, pane_width: usize) -> String {
-    let cols = plot.width.min(pane_width.saturating_sub(plot.x));
-    format!(
-        "\x1b_Ga=p,i={},U=1,p=1,c={cols},r={},C=1,q=1\x1b\\",
-        image_id(slot),
-        plot.visible_rows,
-    )
-}
-
 /// Re-place an image the terminal already holds, at the same cell and size.
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
@@ -1215,7 +1192,9 @@ fn is_frame_edit(bytes: &str) -> bool {
 fn emit_graphics(bytes: &str, wrap: bool) -> String {
     // A shared-memory transmission names a filesystem path. Wrapping it
     // would hand that path to the outer terminal. The direct path may
-    // still send `t=s` unwrapped; this branch does not invent that path.
+    // still send `t=s` unwrapped. The rewrite that emits `t=s` on the
+    // shared-memory branch runs after compose, so this guard does not see
+    // that command. Re-checking it on the rebase is still outstanding.
     let wrap = wrap || (is_frame_edit(bytes) && passthrough_enabled());
     if graphics_key(bytes, "t=s") {
         return if wrap { String::new() } else { bytes.to_string() };
@@ -1299,7 +1278,7 @@ fn placeholder_transmit(plot: &Plot, slot: usize, pane_width: usize, rgba: &[u8]
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,q=1,U=1,m={more};",
+                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,q=2,U=1,m={more};",
             ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
@@ -2091,7 +2070,7 @@ mod tests {
         compose(&rows, &[], 40, 6, true, true, true, false);
         let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
         assert!(text[1].contains('\u{10EEEE}'), "{:?}", text[1]);
-        assert!(before.contains("q=1,U=1"), "{before:?}");
+        assert!(before.contains("q=2,U=1"), "{before:?}");
         assert!(before.contains("a=T"), "{before:?}");
         assert!(before.contains("\x1bPtmux;"));
         assert!(!before.contains("a=p"), "{before:?}");
@@ -2101,14 +2080,14 @@ mod tests {
         );
         assert!(!after.contains("a=T"), "{after:?}");
         let frame = format!("{before}{}{after}", text.concat());
-        let upload = frame.find("q=1,U=1").expect("upload");
+        let upload = frame.find("q=2,U=1").expect("upload");
         let cell = frame.find('\u{10EEEE}').expect("placeholder");
         assert!(upload < cell, "the virtual placement must precede its cells");
         // A second transmission deletes the previous image before the new one.
         let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
         let frame = format!("{before}{}{after}", text.concat());
         let delete_at = frame.find("a=d").expect("delete");
-        let upload = frame.find("q=1,U=1").expect("upload");
+        let upload = frame.find("q=2,U=1").expect("upload");
         let cell = frame.find('\u{10EEEE}').expect("placeholder");
         assert!(delete_at < upload && upload < cell, "{frame:?}");
         let cell = crate::placeholder::placeholder_cell(42, 0, 0);
@@ -2120,14 +2099,13 @@ mod tests {
         assert!(z < tail, "{replaced:?}");
         assert!(!replaced.contains('\u{10EEEE}'), "{replaced:?}");
         assert_eq!(super::super::display_width(&replaced), 5);
-        // Unchanged chart: ask whether the placement is still there, at its
-        // real size, and do not send the pixels again.
+        // Unchanged chart: do not ask the terminal. A q=1 probe would be
+        // typed into the pane when tmux does not forward the APC reply.
         let (_, before, again) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, true);
-        assert!(again.is_empty(), "{again:?}");
-        assert!(before.contains("a=p") && before.contains("U=1"), "{before:?}");
-        assert!(before.contains("q=1") && before.contains("c=8") && before.contains("r=2"), "{before:?}");
-        assert!(!before.contains("a=T"), "{before:?}");
-        assert!(!before.contains("\x1b[2;3H"), "{before:?}");
+        assert!(
+            before.is_empty() && again.is_empty(),
+            "{before:?} {again:?}"
+        );
         let (direct, _, placed) = compose(&rows, &[plot], 40, 6, true, false, true, false);
         assert!(!direct.iter().any(|row| row.contains('\u{10EEEE}')));
         assert!(placed.contains("a=T"));
