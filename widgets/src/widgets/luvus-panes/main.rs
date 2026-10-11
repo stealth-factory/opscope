@@ -368,7 +368,7 @@ fn event_watcher(
             }
         };
 
-        let result = events::parse_wait_response(&response, cursor);
+        let result = parse::parse_wait_response(&response, cursor);
         let current = event_baseline(&state).unwrap_or((wait_epoch, cursor));
         if let Some((next_baseline, should_wake)) =
             events::reconcile_result(&result, wait_epoch, cursor, current)

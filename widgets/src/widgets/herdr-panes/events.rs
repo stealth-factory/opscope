@@ -129,14 +129,241 @@ fn sleep_or_stop(stop: &AtomicBool, duration: Duration) {
 }
 
 #[cfg(unix)]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(unix)]
+enum ConnectProgress {
+    Connected,
+    Retry,
+    Stopped,
+}
+
+#[cfg(unix)]
+fn wait_for_connect(
+    fd: std::os::fd::RawFd,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> Result<ConnectProgress, String> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(ConnectProgress::Stopped);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Herdr event socket connection timed out".into());
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, 100) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("Herdr event socket connection failed: {error}"));
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err("Herdr event socket connection failed: invalid descriptor".into());
+        }
+        if descriptor.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut option_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+        let checked = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(),
+                &mut option_len,
+            )
+        };
+        if checked < 0 {
+            return Err(format!(
+                "Herdr event socket connection failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if socket_error == libc::EAGAIN {
+            sleep_or_stop(stop, Duration::from_millis(10));
+            return Ok(if stop.load(Ordering::Relaxed) {
+                ConnectProgress::Stopped
+            } else {
+                ConnectProgress::Retry
+            });
+        }
+        if matches!(
+            socket_error,
+            libc::EINPROGRESS | libc::EALREADY | libc::EINTR
+        ) {
+            sleep_or_stop(stop, Duration::from_millis(10));
+            continue;
+        }
+        if socket_error != 0 {
+            return Err(format!(
+                "Herdr event socket connection failed: {}",
+                std::io::Error::from_raw_os_error(socket_error)
+            ));
+        }
+
+        let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
+        let checked = unsafe {
+            libc::getpeername(
+                fd,
+                (&mut peer as *mut libc::sockaddr_un).cast(),
+                &mut peer_len,
+            )
+        };
+        if checked == 0 {
+            return Ok(ConnectProgress::Connected);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTCONN) {
+            sleep_or_stop(stop, Duration::from_millis(10));
+            return Ok(if stop.load(Ordering::Relaxed) {
+                ConnectProgress::Stopped
+            } else {
+                ConnectProgress::Retry
+            });
+        }
+        return Err(format!("Herdr event socket connection failed: {error}"));
+    }
+}
+
+#[cfg(unix)]
+fn connect_unix(
+    path: &std::path::Path,
+    stop: &AtomicBool,
+) -> Result<Option<std::os::unix::net::UnixStream>, String> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::UnixStream;
+
+    if stop.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let path_bytes = path.as_os_str().as_bytes();
+    if path_bytes.contains(&0) {
+        return Err("Herdr event socket path contains a null byte".into());
+    }
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path_bytes.len() >= address.sun_path.len() {
+        return Err("Herdr event socket path is too long".into());
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path_bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path_bytes.len() + 1;
+    let address_len = libc::socklen_t::try_from(address_len)
+        .map_err(|_| "Herdr event socket address is too long".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = u8::try_from(address_len)
+            .map_err(|_| "Herdr event socket address is too long".to_string())?;
+    }
+
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err("Herdr event socket connection timed out".into());
+        }
+        let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if raw_fd < 0 {
+            return Err(format!(
+                "Herdr event socket creation failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `socket` returned a new descriptor and `OwnedFd` closes it
+        // on every return path until ownership is transferred to `UnixStream`.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let descriptor_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        if descriptor_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    fd.as_raw_fd(),
+                    libc::F_SETFD,
+                    descriptor_flags | libc::FD_CLOEXEC,
+                )
+            } < 0
+        {
+            return Err(format!(
+                "Herdr event socket setup failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let status_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if status_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    fd.as_raw_fd(),
+                    libc::F_SETFL,
+                    status_flags | libc::O_NONBLOCK,
+                )
+            } < 0
+        {
+            return Err(format!(
+                "Herdr event socket setup failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+
+        let connected = unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&address as *const libc::sockaddr_un).cast(),
+                address_len,
+            )
+        };
+        if connected < 0 {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EAGAIN) => {
+                    sleep_or_stop(stop, Duration::from_millis(10));
+                    continue;
+                }
+                Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR) => {
+                    match wait_for_connect(fd.as_raw_fd(), stop, deadline)? {
+                        ConnectProgress::Connected => {}
+                        ConnectProgress::Retry => continue,
+                        ConnectProgress::Stopped => return Ok(None),
+                    }
+                }
+                _ => return Err(format!("Herdr event socket connection failed: {error}")),
+            }
+        }
+
+        let stream = UnixStream::from(fd);
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| format!("could not restore blocking Herdr event socket: {error}"))?;
+        return Ok(Some(stream));
+    }
+}
+
+#[cfg(unix)]
 fn watch_unix(
     state: Arc<Mutex<State>>,
     wake: refresh_wake::Wake,
     refresh: f64,
     stop: Arc<AtomicBool>,
 ) {
-    use std::os::unix::net::UnixStream;
-
     let window = Duration::from_secs_f64(refresh.clamp(1.0, 30.0));
     let mut backoff = Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
@@ -144,8 +371,9 @@ fn watch_unix(
             let raw_status = super::herdr_text(&["status", "server", "--json"])?;
             let target = parse::parse_status(&raw_status)?;
             let (generation, pane_ids) = current_inventory(&state)?;
-            let mut stream = UnixStream::connect(&target.path)
-                .map_err(|error| format!("Herdr event socket connection failed: {error}"))?;
+            let Some(mut stream) = connect_unix(&target.path, &stop)? else {
+                return Ok(WindowResult::Stopped);
+            };
             let request = parse::subscription_request(&pane_ids)?;
             subscribe_window(
                 &mut stream,
@@ -195,6 +423,7 @@ pub fn watch(
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -311,5 +540,57 @@ mod tests {
         );
         server.join().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn full_listener_backlog_makes_connect_fail_within_the_bound() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opscope-herdr-full-{}-{suffix}",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        // SAFETY: `listener` owns a valid listening Unix-domain descriptor.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut queued = Vec::new();
+        let mut timed_out = false;
+        for _ in 0..256 {
+            let started = Instant::now();
+            match connect_unix(&path, &AtomicBool::new(false)) {
+                Ok(Some(stream)) => queued.push(stream),
+                Ok(None) => panic!("an unstopped connection attempt stopped"),
+                Err(error) => {
+                    assert!(started.elapsed() <= CONNECT_TIMEOUT + Duration::from_secs(1));
+                    assert!(error.contains("timed out"), "{error}");
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+        assert!(timed_out, "the listener never filled its backlog");
+
+        drop(queued);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stopped_and_missing_socket_connections_return_without_blocking() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opscope-herdr-missing-{}-{suffix}",
+            std::process::id()
+        ));
+
+        assert!(connect_unix(&path, &AtomicBool::new(true))
+            .unwrap()
+            .is_none());
+        let error = connect_unix(&path, &AtomicBool::new(false)).unwrap_err();
+        assert!(error.contains("connection failed"), "{error}");
     }
 }

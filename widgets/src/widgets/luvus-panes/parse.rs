@@ -106,6 +106,106 @@ pub fn parse_result(text: &str) -> Result<Value, String> {
     }
 }
 
+pub const EVENT_WAIT_ID: &str = "opscope-luvus-events-wait";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum WaitResult {
+    Matched { event_sequence: u64 },
+    TimedOut { sequence: Option<u64> },
+}
+
+fn is_resync_name(name: &str) -> bool {
+    matches!(
+        name,
+        "resync_required"
+            | "events.resync_required"
+            | "terminal.resync_required"
+            | "events_lost"
+            | "event.gap"
+    )
+}
+
+pub fn parse_wait_response(text: &str, after_sequence: u64) -> Result<WaitResult, String> {
+    let response: Value =
+        serde_json::from_str(text).map_err(|e| format!("unreadable event wait answer: {e}"))?;
+    if response["id"].as_str() != Some(EVENT_WAIT_ID) {
+        return Err("event wait answer has an unexpected request id".into());
+    }
+    if response["error"].is_object() {
+        let code = response["error"]["code"].as_str().unwrap_or("");
+        let message = response["error"]["message"].as_str().unwrap_or("").trim();
+        if code == "timeout" {
+            return Ok(WaitResult::TimedOut { sequence: None });
+        }
+        if is_resync_name(code)
+            || code.contains("resync_required")
+            || message.contains("resync_required")
+        {
+            let reason = if !code.is_empty() { code } else { message };
+            return Err(format!("event history requires a new snapshot: {reason}"));
+        }
+        return Err(if message.is_empty() {
+            format!("event wait failed: {}", response["error"])
+        } else {
+            message.to_string()
+        });
+    }
+    let result = response
+        .get("result")
+        .filter(|result| result.is_object())
+        .ok_or_else(|| "event wait answer has no result".to_string())?;
+    if result["terminal"]["resync_required"] == true {
+        return Err(
+            "terminal requested event resynchronization; a new snapshot is required".into(),
+        );
+    }
+    if result["events"]["resync_required"] == true
+        || result["resync_required"] == true
+        || result["gap"] == true
+        || result["lost"] == true
+        || result["events_lost"] == true
+    {
+        return Err("event history requires a new snapshot".into());
+    }
+    if let Some(result_type) = result["type"].as_str() {
+        if is_resync_name(result_type) {
+            return Err(format!(
+                "event history requires a new snapshot: {result_type}"
+            ));
+        }
+    }
+    if result["matched"].as_bool() == Some(false) {
+        let sequence = result["sequence"]
+            .as_u64()
+            .ok_or_else(|| "event wait timeout has no sequence".to_string())?;
+        if sequence < after_sequence {
+            return Err("event sequence moved backwards; a new snapshot is required".into());
+        }
+        return Ok(WaitResult::TimedOut {
+            sequence: Some(sequence),
+        });
+    }
+    if result["matched"].as_bool() != Some(true) {
+        return Err("event wait answer has no matched flag".into());
+    }
+    let event_name = result["event"]["event"].as_str();
+    if let Some(event_name) = event_name.filter(|name| is_resync_name(name)) {
+        return Err(format!(
+            "event history requires a new snapshot: {event_name}"
+        ));
+    }
+    if event_name != Some("pane.agent_status_changed") {
+        return Err("event wait returned an unexpected event".into());
+    }
+    let event_sequence = result["event"]["sequence"]
+        .as_u64()
+        .ok_or_else(|| "matched event has no sequence".to_string())?;
+    if event_sequence <= after_sequence {
+        return Err("matched event sequence did not advance; a new snapshot is required".into());
+    }
+    Ok(WaitResult::Matched { event_sequence })
+}
+
 fn text_at(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
@@ -762,6 +862,62 @@ pub fn parse_explanation(text: &str) -> Result<Explanation, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matched_events_use_the_event_sequence_not_the_registration_fence() {
+        let result = parse_wait_response(
+            r#"{"id":"opscope-luvus-events-wait","result":{"type":"event_wait","matched":true,"sequence":18,
+              "event":{"event":"pane.agent_status_changed","sequence":23,"data":{"pane":"7","status":"done"}}}}"#,
+            18,
+        )
+        .unwrap();
+        assert_eq!(result, WaitResult::Matched { event_sequence: 23 });
+    }
+
+    #[test]
+    fn unmatched_wait_advances_to_its_result_sequence() {
+        assert_eq!(
+            parse_wait_response(
+                r#"{"id":"opscope-luvus-events-wait","result":{"type":"event_wait","matched":false,"sequence":29}}"#,
+                23,
+            ),
+            Ok(WaitResult::TimedOut { sequence: Some(29) })
+        );
+    }
+
+    #[test]
+    fn filtered_sequence_jumps_are_not_mistaken_for_lost_events() {
+        assert_eq!(
+            parse_wait_response(
+                r#"{"id":"opscope-luvus-events-wait","result":{"matched":true,"sequence":21,
+                  "event":{"event":"pane.agent_status_changed","sequence":47,"data":{}}}}"#,
+                21,
+            ),
+            Ok(WaitResult::Matched { event_sequence: 47 })
+        );
+    }
+
+    #[test]
+    fn malformed_resync_and_backwards_answers_require_a_snapshot() {
+        for response in [
+            "not json",
+            r#"{"id":"unrelated","result":{"matched":false,"sequence":11}}"#,
+            r#"{"id":"opscope-luvus-events-wait","error":{"code":"events.resync_required","message":"resync"}}"#,
+            r#"{"id":"opscope-luvus-events-wait","result":{"resync_required":true}}"#,
+            r#"{"id":"opscope-luvus-events-wait","result":{"gap":true,"matched":false,"sequence":10}}"#,
+            r#"{"id":"opscope-luvus-events-wait","result":{"matched":true,"event":{"event":"events.resync_required","sequence":11}}}"#,
+            r#"{"id":"opscope-luvus-events-wait","result":{"matched":false,"sequence":9}}"#,
+            r#"{"id":"opscope-luvus-events-wait","result":{"matched":true,"event":{"event":"pane.agent_status_changed","sequence":10}}}"#,
+        ] {
+            assert!(parse_wait_response(response, 10).is_err(), "{response}");
+        }
+        let terminal = parse_wait_response(
+            r#"{"id":"opscope-luvus-events-wait","result":{"matched":true,"event":{"event":"terminal.resync_required","sequence":11}}}"#,
+            10,
+        )
+        .unwrap_err();
+        assert!(terminal.contains("terminal.resync_required"));
+    }
 
     #[test]
     fn real_snapshot_root_pids_join_local_names_and_commands() {
