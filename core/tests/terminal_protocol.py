@@ -421,7 +421,8 @@ WRAP = (
     b"\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA"
     b"\x1b\x1b\\\x1b\\"
 )
-PLACEHOLDER = "\U00010EEEE".encode()
+# Eight hex digits: U+10EEEE, not U+010EEE plus a trailing E.
+PLACEHOLDER = "\U0010EEEE".encode()
 
 
 def unwrap_tmux(data):
