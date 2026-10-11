@@ -858,10 +858,7 @@ fn paced_bar_with_plot(
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
     let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-    // The notch needs a lone foreground colour to be drawn as pixels;
-    // `pace_mark` carries a background for the text bar and would send the
-    // whole meter back to text.
-    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.txt));
+    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.pace_mark));
     paced_bar(used, elapsed, room, hue, p)
 }
 

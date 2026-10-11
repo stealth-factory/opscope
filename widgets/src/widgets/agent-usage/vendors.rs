@@ -470,7 +470,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             )];
             let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
             plots.push(tc::Plot::meter(4 + label_w, rows.len(), bar_room, used,
-                elapsed_of(lane.window_secs, lane.reset), &fill, &p.grid, &p.txt));
+                elapsed_of(lane.window_secs, lane.reset), &fill, &p.grid, &p.pace_mark));
             line.extend(paced_bar(
                 used,
                 elapsed_of(lane.window_secs, lane.reset),
@@ -986,6 +986,37 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("CLAUDE"), "{joined}");
         assert!(!joined.contains("main - CLAUDE"), "{joined}");
+    }
+
+    #[test]
+    fn overview_and_provider_plots_keep_the_pace_marker_background() {
+        let state = State {
+            notion: crate::notion::Data::answered(&serde_json::json!({
+                "status": "within_limit",
+                "billingPeriodWindow": { "used": 50, "limit": 100, "periodEndMs": (now() + 86400.0) * 1000.0 }
+            }).to_string()),
+            ..State::default()
+        };
+        for width in [30, 60, 120] {
+            let p = palette();
+            let mut without_background = palette();
+            without_background.pace_mark = tc::rgb(238, 244, 252);
+            for overview in [true, false] {
+                let render = |palette: &Palette| {
+                    let mut plots = Vec::new();
+                    if overview {
+                        summary_with_plots(&state, width, palette, &["notion"], &mut plots);
+                    } else {
+                        crate::notion::tab_with_plots(&state.notion, width, 40, &Config::default(), palette, &mut plots);
+                    }
+                    plots
+                };
+                let plots = render(&p);
+                let bare = render(&without_background);
+                assert!(!plots.is_empty());
+                assert_ne!(plots, bare, "marker background lost: width={width}, overview={overview}");
+            }
+        }
     }
 
     #[test]
