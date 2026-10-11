@@ -376,6 +376,44 @@ struct State {
     read_at: f64,
 }
 
+/// One successful look: the sessions found, and the logins named against them.
+struct Reading {
+    rows: Vec<Session>,
+    names: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Fold one poll into the state the pane draws.
+///
+/// A failed read records why and leaves the last successful rows, the names
+/// on them, their history, and their timestamp alone. Replacing the rows
+/// with an empty list would skip the table and close the detail view, so
+/// the stale underline would have nothing left to mark, and the pane would
+/// read as a machine with nothing listening. The timestamp moves only when
+/// a reading actually landed, which is what lets those kept numbers go stale.
+fn store_poll(state: &mut State, reading: Result<Reading, String>, history_len: usize, now: f64) {
+    let reading = match reading {
+        Err(why) => {
+            state.err = why;
+            return;
+        }
+        Ok(reading) => reading,
+    };
+    for row in &reading.rows {
+        if let Some(rtt) = row.rtt {
+            let series = state.history.entry(session_id(row)).or_default();
+            series.push(rtt);
+            if series.len() > history_len {
+                let drop = series.len() - history_len;
+                series.drain(..drop);
+            }
+        }
+    }
+    state.rows = reading.rows;
+    state.names = reading.names;
+    state.err.clear();
+    state.read_at = now;
+}
+
 fn main() {
     tc::maybe_widget_help(include_str!("help.txt"), include_str!("CONFIGURE.md"), true);
     if !tc::dependencies_available("link", include_str!("dependencies.json"), Some(SETTINGS)) {
@@ -436,47 +474,24 @@ fn main() {
         };
         let mut last: HashMap<String, (f64, f64)> = HashMap::new();
         loop {
-            let mut found = match sessions() {
-                Ok(rows) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = String::new();
-                    }
-                    rows
+            // Not fatal: ss can fail for a moment. Reported and retried
+            // rather than ending the thread. The last good rows stay, with
+            // the failure as a line above them, so a missed poll is not an
+            // empty table.
+            let reading = match sessions() {
+                Ok(mut rows) => {
+                    let names = who();
+                    apply_loss(&mut rows, &mut last);
+                    Ok(Reading { rows, names })
                 }
-                // Not fatal: ss can fail for a moment. Reported and retried
-                // rather than ending the thread, but never silently - an empty
-                // list and a failed read look identical on screen otherwise.
-                Err(why) => {
-                    if let Ok(mut guard) = poller.lock() {
-                        guard.err = why;
-                    }
-                    Vec::new()
-                }
+                Err(why) => Err(why),
             };
-            let names = who();
-            apply_loss(&mut found, &mut last);
             {
                 let mut guard = match poller.lock() {
                     Ok(g) => g,
                     Err(_) => return,
                 };
-                for row in &found {
-                    if let Some(rtt) = row.rtt {
-                        let series = guard.history.entry(session_id(row)).or_default();
-                        series.push(rtt);
-                        if series.len() > history_len {
-                            let drop = series.len() - history_len;
-                            series.drain(..drop);
-                        }
-                    }
-                }
-                guard.rows = found;
-                guard.names = names;
-                // A failed read keeps the previous stamp, so the numbers
-                // still on screen can go stale instead of looking new.
-                if guard.err.is_empty() {
-                    guard.read_at = tc::now();
-                }
+                store_poll(&mut guard, reading, history_len, tc::now());
             }
             let (lock, cond) = &*poller_wake;
             let mut asked = match lock.lock() {
@@ -1872,6 +1887,80 @@ mod tests {
         apply_loss(&mut rows, &mut last);
         assert!(rows[0].recent_loss.is_none());
         assert!(last.is_empty());
+    }
+
+    #[test]
+    fn a_failed_poll_keeps_the_last_rows_and_their_stamp() {
+        // A missed `ss` used to store an empty list and leave the old
+        // timestamp. The table then stood down and the detail view closed,
+        // so the stale underline had no reading left to mark.
+        let kept = Session {
+            peer: "203.0.113.9:51000".into(),
+            ip: "203.0.113.9".into(),
+            port: 22,
+            rtt: Some(12.0),
+            ..Default::default()
+        };
+        let id = session_id(&kept);
+        let mut state = State {
+            rows: vec![kept],
+            names: HashMap::from([(
+                "203.0.113.9".to_string(),
+                vec![("ada".to_string(), "pts/0".to_string())],
+            )]),
+            history: HashMap::from([(id.clone(), vec![12.0])]),
+            err: String::new(),
+            read_at: 100.0,
+        };
+        store_poll(&mut state, Err("ss did not answer in 5s".into()), 8, 110.0);
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].peer, "203.0.113.9:51000");
+        assert_eq!(state.read_at, 100.0);
+        assert_eq!(state.err, "ss did not answer in 5s");
+        assert_eq!(state.history.get(&id).map(Vec::as_slice), Some(&[12.0][..]));
+        assert_eq!(
+            state.names.get("203.0.113.9").map(|n| n[0].0.as_str()),
+            Some("ada")
+        );
+
+        // The next successful look replaces the rows and moves the stamp.
+        let next = Session {
+            peer: "203.0.113.10:51000".into(),
+            ip: "203.0.113.10".into(),
+            port: 22,
+            rtt: Some(20.0),
+            ..Default::default()
+        };
+        store_poll(
+            &mut state,
+            Ok(Reading {
+                rows: vec![next.clone()],
+                names: HashMap::new(),
+            }),
+            8,
+            120.0,
+        );
+        assert_eq!(state.rows[0].peer, "203.0.113.10:51000");
+        assert_eq!(state.read_at, 120.0);
+        assert!(state.err.is_empty());
+        assert_eq!(
+            state.history.get(&session_id(&next)).map(Vec::as_slice),
+            Some(&[20.0][..])
+        );
+
+        // An empty success is a real reading of nothing, so the rows do go.
+        store_poll(
+            &mut state,
+            Ok(Reading {
+                rows: Vec::new(),
+                names: HashMap::new(),
+            }),
+            8,
+            130.0,
+        );
+        assert!(state.rows.is_empty());
+        assert_eq!(state.read_at, 130.0);
+        assert!(state.err.is_empty());
     }
 
     #[test]
