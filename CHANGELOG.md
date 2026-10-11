@@ -3,6 +3,12 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.41.0] - 2026-10-11
+
+### Features
+
+- **core**: Add Kitty graphics with automatic text fallback (#332)
+
 ## [0.40.0] - 2026-10-11
 
 ### CI
