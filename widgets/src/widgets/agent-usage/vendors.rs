@@ -999,8 +999,6 @@ mod tests {
         };
         for width in [30, 60, 120] {
             let p = palette();
-            let mut without_background = palette();
-            without_background.pace_mark = tc::rgb(238, 244, 252);
             for overview in [true, false] {
                 let render = |palette: &Palette| {
                     let mut plots = Vec::new();
@@ -1012,9 +1010,12 @@ mod tests {
                     plots
                 };
                 let plots = render(&p);
-                let bare = render(&without_background);
                 assert!(!plots.is_empty());
-                assert_ne!(plots, bare, "marker background lost: width={width}, overview={overview}");
+                // Plot's cells are private to core. Inspect the recorded style,
+                // not whole-plot inequality: time advances between two renders
+                // and can move the reference even when its style is unchanged.
+                assert!(format!("{plots:?}").contains(&format!("{:?}", p.pace_mark)),
+                    "marker background lost: width={width}, overview={overview}");
             }
         }
     }
