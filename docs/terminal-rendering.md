@@ -69,7 +69,9 @@ No Kitty executable, image conversion command, shared file, shared memory or
 system graphics library is needed. Images are RGBA, zlib compressed in pure Rust,
 base64 encoded and sent in chunks of at most 4096 payload bytes. They can travel
 over SSH. Stable charts reuse terminal images; changed regions replace their
-owned image IDs. Scrolling crops the chart instead of changing its axes. Core
+owned image IDs. Scrolling crops the chart instead of changing its axes.
+OPS-148 crops that raster to the visible rows before it is allocated, and
+records the measured payload change on the pull request. Core
 cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
 resume. A process cannot catch SIGKILL.
 
