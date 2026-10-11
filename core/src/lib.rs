@@ -461,6 +461,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     if output_held() {
         return;
     }
+    // A font change is a SIGWINCH. Read the window's pixel fields before
+    // this frame is rasterised, unless a cell-size reply already won.
+    terminal::apply_pending_cell_size();
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
@@ -553,6 +556,9 @@ static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
     SCREEN_LOST.store(true, Ordering::Release);
+    if sig == libc::SIGWINCH {
+        terminal::note_resize();
+    }
     if sig == libc::SIGCONT {
         SESSION_CHANGED.store(true, Ordering::Release);
         if HAS_TERMIOS.load(Ordering::Acquire) {
@@ -4379,6 +4385,8 @@ mod tests {
             "\x1b[?2026;2$y",
             "\x1b[?62;4;c",
             "\x1b]10;rgb:ffff/0000/0000\x1b\\",
+            "\x1b[6;40;20t",
+            "\x1b[6;0;0t",
         ] {
             for split in 1..response.len() {
                 let mut pending = response[..split].to_string();

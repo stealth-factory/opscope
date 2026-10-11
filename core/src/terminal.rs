@@ -1,6 +1,6 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const SYNC_BEGIN: &str = "\x1b[?2026h";
@@ -9,14 +9,36 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
-const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c";
+/// Raster used when the terminal never reports a cell, or reports one that
+/// is not a character cell. Today's charts are this size.
+pub(crate) const FALLBACK_CELL_W: usize = 8;
+pub(crate) const FALLBACK_CELL_H: usize = 16;
+/// Cells in one plot at the fallback raster. A larger cell lowers the cap
+/// so the uncompressed RGBA bytes of a plot stay at or under this times
+/// 8×16×4.
+pub(crate) const MAX_PLOT_CELLS: usize = 20_000;
+const CELL_QUERY: &[u8] = b"\x1b[16t";
+/// `CSI ? u` stays immediately before `CSI c`. `CSI 16 t` follows `CSI c`.
+const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c\x1b[16t";
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
+/// Inclusive window for a reported cell. 20×40, a HiDPI Kitty cell, sits
+/// inside it. Wider or taller than this, or an aspect outside 5:4..=3:1,
+/// is not a cell we will rasterise.
+const MIN_CELL_W: usize = 4;
+const MAX_CELL_W: usize = 48;
+const MIN_CELL_H: usize = 8;
+const MAX_CELL_H: usize = 96;
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 /// True after flag 1 was pushed, so every cleanup path pops exactly once.
 static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+static QUERY_CELLS: AtomicBool = AtomicBool::new(false);
+static CELL_QUERY_GEN: AtomicU64 = AtomicU64::new(0);
+static CELL_REPORT_GEN: AtomicU64 = AtomicU64::new(u64::MAX);
+static CELL_STALE: AtomicBool = AtomicBool::new(false);
+static CELL: AtomicU32 = AtomicU32::new(((FALLBACK_CELL_H as u32) << 16) | FALLBACK_CELL_W as u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
@@ -92,11 +114,19 @@ pub(crate) fn start() {
     // A resumed or reclaimed session asks again. Pop first so a second push
     // does not leave flag 1 on the stack after the matching pop.
     pop_keyboard();
-    // Text mode still benefits from synchronized updates, but sends no image query.
+    // Text mode still benefits from synchronized updates, but sends no image query
+    // and does not ask for a cell size it will not rasterise.
     // The keyboard query is sent either way: it is independent of graphics.
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
+    let query_cells = mode != GraphicsMode::Text;
+    QUERY_CELLS.store(query_cells, Ordering::Release);
+    if query_cells {
+        CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+        let (w, h) = cell_from_winsize().unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
+        publish_cell(w, h);
+    }
     super::out(&format!(
         "{}{UNDERLINE_QUERY}",
         if mode == GraphicsMode::Text {
@@ -203,6 +233,18 @@ impl Session {
 }
 
 pub(crate) fn reply(sequence: &str) {
+    // Outside the 800 ms capability window on purpose: a font change asks
+    // again on SIGWINCH, long after startup, and the reply is still a cell size.
+    if let Some(report) = cell_report(sequence) {
+        let ioctl = if report.is_some() {
+            None
+        } else {
+            cell_from_winsize()
+        };
+        let (w, h) = resolve_cell(report, ioctl);
+        CELL_REPORT_GEN.store(CELL_QUERY_GEN.load(Ordering::Acquire), Ordering::Release);
+        publish_cell(w, h);
+    }
     let push = {
         let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
         let push = session.reply(sequence, Instant::now());
@@ -228,6 +270,122 @@ pub(crate) fn pop_keyboard() {
     if KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         super::out(KEYBOARD_POP);
         super::flush();
+    }
+}
+
+/// `CSI 16 t` answers `CSI 6 ; height ; width t`.
+///
+/// `None` means this sequence is not that reply. `Some(None)` means it is,
+/// and the numbers are zero, missing or not a character cell — the caller
+/// falls through to the window size, then to 8×16.
+pub(crate) fn cell_report(sequence: &str) -> Option<Option<(usize, usize)>> {
+    let rest = sequence.strip_prefix("\x1b[6;")?.strip_suffix('t')?;
+    let (height, width) = rest.split_once(';')?;
+    if height.is_empty()
+        || width.is_empty()
+        || height.len() > 6
+        || width.len() > 6
+        || !height.bytes().all(|b| b.is_ascii_digit())
+        || !width.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(None);
+    }
+    let width = width.parse::<usize>().unwrap_or(0);
+    let height = height.parse::<usize>().unwrap_or(0);
+    Some(sane_cell(width, height))
+}
+
+pub(crate) fn sane_cell(width: usize, height: usize) -> Option<(usize, usize)> {
+    if !(MIN_CELL_W..=MAX_CELL_W).contains(&width) || !(MIN_CELL_H..=MAX_CELL_H).contains(&height) {
+        return None;
+    }
+    // height/width from 5/4 through 3, inclusive. 8×16 and 20×40 are 2.
+    if height.saturating_mul(4) < width.saturating_mul(5) || height > width.saturating_mul(3) {
+        return None;
+    }
+    Some((width, height))
+}
+
+pub(crate) fn resolve_cell(
+    report: Option<(usize, usize)>,
+    ioctl: Option<(usize, usize)>,
+) -> (usize, usize) {
+    report.unwrap_or(ioctl.unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H)))
+}
+
+pub(crate) fn max_plot_cells_for(cell_w: usize, cell_h: usize) -> usize {
+    let area = cell_w.saturating_mul(cell_h).max(1);
+    MAX_PLOT_CELLS.saturating_mul(FALLBACK_CELL_W * FALLBACK_CELL_H) / area
+}
+
+pub(crate) fn max_plot_cells() -> usize {
+    let (w, h) = cell_size();
+    max_plot_cells_for(w, h)
+}
+
+pub(crate) fn cell_size() -> (usize, usize) {
+    let packed = CELL.load(Ordering::Acquire);
+    ((packed & 0xffff) as usize, (packed >> 16) as usize)
+}
+
+fn publish_cell(width: usize, height: usize) {
+    // Unit tests share one process, and several of them decode terminal
+    // replies. Publishing here would change the 8×16 raster those tests
+    // measure. The probe binary is not built as a test.
+    #[cfg(test)]
+    {
+        let _ = (width, height);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let packed = ((height as u32) << 16) | (width as u32);
+        if CELL.swap(packed, Ordering::AcqRel) != packed {
+            super::screen_lost();
+        }
+    }
+}
+
+fn cell_from_winsize() -> Option<(usize, usize)> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if ok != 0 || ws.ws_col == 0 || ws.ws_row == 0 || ws.ws_xpixel == 0 || ws.ws_ypixel == 0 {
+        return None;
+    }
+    sane_cell(
+        ws.ws_xpixel as usize / ws.ws_col as usize,
+        ws.ws_ypixel as usize / ws.ws_row as usize,
+    )
+}
+
+/// A font change in Kitty is a SIGWINCH with a new cell size. Ask again,
+/// and let the next frame read the window's pixel fields until the reply.
+/// Signal-safe: atomics and one write, no locks.
+pub(crate) fn note_resize() {
+    if !QUERY_CELLS.load(Ordering::Acquire) {
+        return;
+    }
+    CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
+    CELL_STALE.store(true, Ordering::Release);
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            CELL_QUERY.as_ptr().cast(),
+            CELL_QUERY.len(),
+        );
+    }
+}
+
+/// Use the window pixel size when a resize is still waiting on `CSI 16 t`.
+pub(crate) fn apply_pending_cell_size() {
+    if !CELL_STALE.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    if CELL_REPORT_GEN.load(Ordering::Acquire) == CELL_QUERY_GEN.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some((w, h)) = cell_from_winsize() {
+        publish_cell(w, h);
     }
 }
 
@@ -573,6 +731,53 @@ mod tests {
                 unsafe { libc::sigismember(&before, sig) },
                 "{sig}"
             );
+        }
+    }
+
+    #[test]
+    fn a_cell_report_is_height_then_width_and_junk_is_not_one() {
+        // CSI 16 t is answered `CSI 6 ; height ; width t`.
+        assert_eq!(cell_report("\x1b[6;40;20t"), Some(Some((20, 40))));
+        assert_eq!(cell_report("\x1b[6;16;8t"), Some(Some((8, 16))));
+        assert_eq!(cell_report("\x1b[6;22;10t"), Some(Some((10, 22))));
+        assert_eq!(cell_report("\x1b[?62;c"), None);
+        assert_eq!(cell_report("\x1b_Gi=2147483646;OK\x1b\\"), None);
+        assert_eq!(cell_report("\x1b[6;40;20;1t"), Some(None));
+    }
+
+    #[test]
+    fn zero_missing_and_absurd_cell_reports_fall_back_to_8x16() {
+        assert_eq!(cell_report("\x1b[6;0;0t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;0;20t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;;t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;2;500t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;8;8t"), Some(None));
+        assert_eq!(cell_report("\x1b[6;400;200t"), Some(None));
+        assert_eq!(sane_cell(0, 0), None);
+        assert_eq!(resolve_cell(None, None), (FALLBACK_CELL_W, FALLBACK_CELL_H));
+        assert_eq!(
+            resolve_cell(cell_report("\x1b[6;0;0t").unwrap(), None),
+            (8, 16)
+        );
+        assert_eq!(
+            resolve_cell(cell_report("\x1b[6;2;500t").unwrap(), None),
+            (8, 16)
+        );
+        // A usable window size is the step between a bad report and 8×16.
+        assert_eq!(resolve_cell(None, Some((10, 22))), (10, 22));
+        assert_eq!(resolve_cell(Some((20, 40)), Some((10, 22))), (20, 40));
+    }
+
+    #[test]
+    fn a_larger_cell_does_not_raise_the_worst_case_raster_bytes() {
+        let fallback_cells = max_plot_cells_for(FALLBACK_CELL_W, FALLBACK_CELL_H);
+        assert_eq!(fallback_cells, MAX_PLOT_CELLS);
+        let pixels = |w, h| max_plot_cells_for(w, h) * w * h;
+        let cap = pixels(FALLBACK_CELL_W, FALLBACK_CELL_H);
+        assert_eq!(pixels(20, 40), cap);
+        for (w, h) in [(10, 22), (48, 96), (7, 14), (4, 8), (9, 18)] {
+            assert!(sane_cell(w, h).is_some(), "{w}x{h} should be a cell");
+            assert!(pixels(w, h) <= cap, "{w}x{h} exceeds the 8x16 byte cap");
         }
     }
 }
