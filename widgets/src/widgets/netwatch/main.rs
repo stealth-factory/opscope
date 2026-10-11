@@ -2443,6 +2443,22 @@ fn main() {
     }
 }
 
+/// Terminal row of a rate inside a chart of `rows`.
+///
+/// Upload grows upward, so a full peak is row 0. Download is inverted and
+/// a full peak is the last row. The row is the cell the stroke's pixel
+/// falls in. Rounding against `rows - 1` puts a four-row upload at 20% of
+/// peak on row 2 while the endpoint is on row 3.
+fn chart_end_row(now: f64, peak: f64, rows: usize, inverted: bool) -> usize {
+    let fraction = if peak.is_finite() && peak > 0.0 {
+        (now / peak).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let value = if inverted { 1.0 - fraction } else { fraction };
+    tc::line_row(value, rows)
+}
+
 /// The current rate at the right edge of a chart row, or the gap alone
 /// when the rate is wider than the plot. Nothing is cut to fit.
 fn push_end(line: &mut Vec<(String, String)>, width: usize, here: bool, label: &str, ink: &str, gap: &str) {
@@ -2496,19 +2512,10 @@ fn chart(series: &[(f64, f64)], w: usize, h: usize, p: &Palette, plots: &mut Vec
     }
     let tx_now = *tx.last().unwrap_or(&0.0);
     let rx_now = *rx.last().unwrap_or(&0.0);
-    // Newest sample, on the row the line actually ends on. Omitted when it
-    // does not fit: cutting a rate would name a different number.
-    let end_row = |now: f64, peak: f64, rows: usize, inverted: bool| -> usize {
-        let fraction = (now / peak).clamp(0.0, 1.0);
-        let along = if inverted { fraction } else { 1.0 - fraction };
-        if rows <= 1 {
-            0
-        } else {
-            (along * (rows - 1) as f64).round() as usize
-        }
-    };
-    let tx_row = end_row(tx_now, tx_peak, up_h, false);
-    let rx_row = end_row(rx_now, rx_peak, down_h, true);
+    // Newest sample, on the row the stroke ends on. Omitted when it does
+    // not fit: cutting a rate would name a different number.
+    let tx_row = chart_end_row(tx_now, tx_peak, up_h, false);
+    let rx_row = chart_end_row(rx_now, rx_peak, down_h, true);
     let tx_label = rate(tx_now);
     let rx_label = rate(rx_now);
 
@@ -3028,6 +3035,23 @@ mod tests {
             );
             assert_eq!(col(&head, "GROWTH") + 6, wide, "growth column at w={}", w);
         }
+    }
+
+    #[test]
+    fn the_current_rate_sits_on_the_stroke_row() {
+        // Four rows each way. Both ends are 20% of their own peak.
+        // Cell rounding puts the upload on row 2 and the download on row 1.
+        // The strokes are on upload row 3 and download row 0.
+        let series = [(1000.0, 100.0), (200.0, 20.0)];
+        let mut plots = Vec::new();
+        let rows = chart(&series, 80, 11, &palette(), &mut plots, 1);
+        assert_eq!(chart_end_row(20.0, 100.0, 4, false), 3);
+        assert_eq!(chart_end_row(200.0, 1000.0, 4, true), 0);
+        assert_eq!(((1.0 - 0.2) * 3.0_f64).round() as usize, 2);
+        assert!(bare(&rows[4]).ends_with("20 B/s│"), "{}", bare(&rows[4]));
+        assert!(!bare(&rows[3]).contains("20 B/s"));
+        assert!(bare(&rows[6]).ends_with("200 B/s│"), "{}", bare(&rows[6]));
+        assert!(!bare(&rows[7]).contains("200 B/s"));
     }
 
     #[test]

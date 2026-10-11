@@ -202,8 +202,11 @@ tc::draw_plots(&text_rows, width, height, &plots);
 image is placed at `z=-1`: under the glyphs, and above cells that have a
 background colour. A lower z, below `-1073741824`, would also sit under that
 background, so an opaque selected-row tint would cover the stroke. The widget
-draws labels and the current value in the chart cells. Pixel mode leaves them
-there. Braille and text mode still replace those cells with the chart, so the
+draws labels and the current value in the chart cells. The row a label shares
+with the stroke is `line_row`: the pixel y the chart rounds against, then the
+cell that pixel falls in. Rounding against the cell count instead lands the
+label on a different row. Pixel mode leaves the labels there. Braille and text
+mode still replace those cells with the chart, so the
 fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
 meters or stacked bars: text over a solid fill does not stay readable, and it
 would fail the contrast rule.

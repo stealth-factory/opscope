@@ -713,10 +713,13 @@ fn trace_cells(
     if values.is_empty() {
         return String::new();
     }
-    let hi = peak.max(values.iter().copied().fold(0.0, f64::max));
-    if hi <= 0.0 {
+    // This direction's own samples, before the board's shared peak. That
+    // peak is the other direction as often as this one, and scaling a run
+    // of zeros by it draws a flat line where the row promised dots.
+    if values.iter().all(|v| *v <= 0.0) {
         return "·".repeat(values.len());
     }
+    let hi = peak.max(values.iter().copied().fold(0.0, f64::max));
     let samples: Vec<Option<f64>> = values.iter().map(|v| Some((v / hi).clamp(0.0, 1.0))).collect();
     plots.push(
         tc::Plot::new(
@@ -1933,6 +1936,58 @@ fn copy_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_moving_in_one_direction_keeps_the_other_dotted() {
+        let p = palette();
+        for (hist, dotted_down) in [
+            (vec![(200.0, 0.0), (400.0, 0.0)], false),
+            (vec![(0.0, 200.0), (0.0, 400.0)], true),
+        ] {
+            let rates = HashMap::from([("peer".into(), hist)]);
+            let (rows, plots) = activity_rows(&rates, 80, 4, &p, 2);
+            assert_eq!(plots.len(), 1, "a silent direction is not a chart");
+            let text = bare(&rows[0]);
+            let (down, up) = text.split_once('↑').unwrap();
+            let down = down.split('↓').nth(1).unwrap();
+            if dotted_down {
+                assert!(down.contains('·'), "download stays dotted: {text}");
+                assert!(up.starts_with(' '), "upload is the chart: {text}");
+            } else {
+                assert!(down.chars().all(|c| c == ' '), "download is the chart: {text}");
+                assert!(up.starts_with('·'), "upload stays dotted: {text}");
+            }
+            let values = &plots[0].chart.traces[0].values;
+            assert!(values.iter().any(|v| v.unwrap_or(0.0) > 0.0));
+        }
+        // Both directions move, and the quieter one keeps the shared scale
+        // rather than stretching to fill its own row.
+        let rates = HashMap::from([("peer".into(), vec![(1000.0, 100.0)])]);
+        let (rows, plots) = activity_rows(&rates, 80, 4, &p, 2);
+        assert_eq!(plots.len(), 2);
+        assert!(!bare(&rows[0]).contains('·'));
+        let down = plots[0].chart.traces[0].values[0].unwrap();
+        let up = plots[1].chart.traces[0].values[0].unwrap();
+        assert!((down - 1000.0 / 1100.0).abs() < 1e-9, "{down}");
+        assert!((up - 100.0 / 1100.0).abs() < 1e-9, "{up}");
+    }
+
+    fn bare(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
 
     #[test]
     fn detail_traffic_plots_follow_scrolling_and_absent_history_stays_blank() {

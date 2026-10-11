@@ -549,6 +549,26 @@ fn braille_with_baseline(
     grid
 }
 
+/// Pixel row of a bottom-to-top chart fraction inside a bitmap `height` pixels tall.
+///
+/// Both renderers round against this height minus one. A label that rounds
+/// against the cell count instead misses the stroke.
+fn pixel_y(value: f64, height: usize) -> usize {
+    ((1.0 - value.clamp(0.0, 1.0)) * (height - 1) as f64).round() as usize
+}
+
+/// Terminal row of a bottom-to-top chart fraction.
+///
+/// The stroke is placed in a bitmap `rows * 16` pixels tall and that pixel
+/// falls into a cell. A four-row chart at 20% of peak ends on row 3;
+/// rounding against `rows - 1` puts a label on row 2.
+pub fn line_row(value: f64, rows: usize) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    pixel_y(value, rows.saturating_mul(CELL_H)) / CELL_H
+}
+
 fn segments(
     values: &[Option<f64>],
     slots: usize,
@@ -582,7 +602,7 @@ fn segments(
                     - ((age as f64 * (w - 1) as f64) / slots.saturating_sub(1).max(1) as f64)
                         .round() as usize
             };
-            let y = ((1.0 - v.clamp(0.0, 1.0)) * (h - 1) as f64).round() as usize;
+            let y = pixel_y(v, h);
             Some((x, y))
         });
         let idle = baseline.is_some()
@@ -1922,6 +1942,36 @@ mod tests {
         assert_eq!(decoded, pixels(&gapped));
         let line = Plot::new(0, 0, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
         assert!(image(&line, 0, 80, CELL_W, CELL_H).contains("f=32,"));
+    }
+
+    #[test]
+    fn line_row_is_the_terminal_row_of_the_stroke() {
+        // 20% of a four-row chart. Cell rounding lands on row 2.
+        assert_eq!(((1.0 - 0.2) * 3.0_f64).round() as usize, 2);
+        assert_eq!(line_row(0.2, 4), 3);
+        assert_eq!(inked_rows(&chart(vec![Some(0.2); 4]), 4), vec![3]);
+        // Inverted 20% is the fraction 0.8, and cell rounding lands on row 1.
+        assert_eq!((0.2_f64 * 3.0).round() as usize, 1);
+        assert_eq!(line_row(0.8, 4), 0);
+        assert_eq!(inked_rows(&chart(vec![Some(0.8); 4]), 4), vec![0]);
+        assert_eq!(line_row(0.5, 1), 0);
+        assert_eq!(line_row(0.5, 0), 0);
+    }
+
+    fn inked_rows(chart: &LineChart, rows: usize) -> Vec<usize> {
+        let plot = Plot::new(0, 0, 4, rows, chart.clone());
+        let bytes = pixels(&plot);
+        let w = 4 * CELL_W;
+        let mut hit = Vec::new();
+        for row in 0..rows {
+            let ink = (0..CELL_H).any(|y| {
+                (0..w).any(|x| bytes[((row * CELL_H + y) * w + x) * 4 + 3] != 0)
+            });
+            if ink {
+                hit.push(row);
+            }
+        }
+        hit
     }
 
     #[test]
