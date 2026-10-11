@@ -91,6 +91,14 @@ Colour is judged against the socket's own floor rather than a fixed threshold:
 kernel already knows which this is. Amber past 1.6× the floor, red past 3× or
 above half a percent of loss.
 
+An underline sits under the same number, and does not replace that colour:
+
+- **Curly** on NOW — the last poll is older than the refresh interval.
+- **Dashed** on the chart's "ago" label — the history on screen is shorter than the window you asked for.
+- **Coloured** on NOW when the row is already amber or red, and on LOSS once recent loss is at or above half a percent.
+
+A terminal without underline styles draws a plain line under the same digits.
+
 ## The chart
 
 Log scale, newest on the right, one glyph and hue per session so the trace

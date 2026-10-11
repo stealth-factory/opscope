@@ -800,13 +800,37 @@ fn palette() -> Palette {
 /// the pace cell beside it is already amber for exactly that, and a number
 /// and its own explanation both turning yellow reads as two problems.
 fn pct_colour(pct: f64, hue: Option<(u8, u8, u8)>, p: &Palette) -> String {
-    if pct >= 90.0 {
-        return p.bad.clone();
-    }
-    match hue {
-        Some((r, g, b)) => tc::rgb(r, g, b),
-        None => tc::heat(pct / 100.0),
-    }
+    quota_mark(pct, hue, p, false, false)
+}
+
+/// The percentage's foreground, plus an underline when the reading is stale,
+/// the window is estimated, or the 90% line has been crossed.
+///
+/// The digits are the same either way. The underline is a second signal on
+/// top of the colour that was already there.
+fn quota_mark(
+    pct: f64,
+    hue: Option<(u8, u8, u8)>,
+    p: &Palette,
+    stale: bool,
+    partial: bool,
+) -> String {
+    let fg = if pct >= 90.0 {
+        p.bad.clone()
+    } else {
+        match hue {
+            Some((r, g, b)) => tc::rgb(r, g, b),
+            None => tc::heat(pct / 100.0),
+        }
+    };
+    tc::marked(
+        &fg,
+        tc::Marks {
+            stale,
+            partial,
+            threshold: pct >= 90.0,
+        },
+    )
 }
 
 /// The signed cushion, coloured by whether it is one.
@@ -827,16 +851,28 @@ fn pace_cell(value: Option<f64>, p: &Palette) -> (String, String) {
 fn pace_cell_of(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String) {
     match value {
         None => (p.dim.clone(), String::new()),
-        Some(v) => (
-            if guessed {
+        Some(v) => {
+            let fg = if guessed {
                 p.dim.clone()
             } else if v >= 0.0 {
                 p.ok.clone()
             } else {
                 p.warn.clone()
-            },
-            format!("  {}{:+.0}%", if guessed { "~" } else { "" }, v),
-        ),
+            };
+            (
+                // `~` is a window we rolled forward or a cached percentage.
+                // A live negative cushion is the pace falling behind the clock.
+                tc::marked(
+                    &fg,
+                    tc::Marks {
+                        partial: guessed,
+                        threshold: !guessed && v < 0.0,
+                        ..tc::Marks::default()
+                    },
+                ),
+                format!("  {}{:+.0}%", if guessed { "~" } else { "" }, v),
+            )
+        }
     }
 }
 

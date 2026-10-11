@@ -450,7 +450,7 @@ fn bar_row_with_plots(
         hue,
         p,
     ));
-    line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
+    line.push((quota_mark(lane.pct, hue, p, lane.stale, lane.projected), pct_text(lane.pct)));
     line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
     let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     let mut rows = vec![tc::seg(&refs, w - 1)];

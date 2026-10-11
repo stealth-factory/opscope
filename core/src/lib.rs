@@ -150,6 +150,68 @@ pub fn rgb(r: u8, g: u8, b: u8) -> String {
     format!("\x1b[38;2;{};{};{}m", r, g, b)
 }
 
+/// An underline colour, Kitty `Setulc`. Costs no columns.
+pub fn underline(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[58;2;{};{};{}m", r, g, b)
+}
+
+/// Why a value is underlined. Widgets pass the meaning; core chooses the SGR.
+///
+/// A cell can carry more than one. The style is curly when the poll is
+/// stale, dashed when the window is partial, and a plain underline when
+/// only a threshold was crossed. The threshold colour is added on top of
+/// whichever style is in force.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    /// The last poll is older than its interval.
+    pub stale: bool,
+    /// A window that has not completed, or a figure carried forward.
+    pub partial: bool,
+    /// A threshold this value has crossed.
+    pub threshold: bool,
+}
+
+const UNDERLINE_OFF: &str = "\x1b[24m\x1b[59m";
+
+fn opens_underline(colour: &str) -> bool {
+    colour.contains("\x1b[4m") || colour.contains("\x1b[4:") || colour.contains("\x1b[58;")
+}
+
+/// Foreground `colour` plus the underline for `marks`.
+///
+/// The result is a colour prefix for [`seg`]: it costs no columns. While
+/// the terminal has not answered the underline query, and the negotiation
+/// window is still open, this is `colour` unchanged. After a refusal or a
+/// missed window it is a plain underline. After `Smulx` it is curly for a
+/// stale poll and dashed for a partial window. The threshold colour is
+/// sent only once `Setulc` has been acknowledged.
+pub fn marked(colour: &str, marks: Marks) -> String {
+    apply_mark(colour, marks, terminal::underline_caps())
+}
+
+fn apply_mark(colour: &str, marks: Marks, caps: terminal::UnderlineCaps) -> String {
+    if !marks.stale && !marks.partial && !marks.threshold {
+        return colour.to_string();
+    }
+    if caps.support == terminal::UnderlineSupport::Unknown {
+        return colour.to_string();
+    }
+    let mut out = String::from(UNDERLINE_OFF);
+    out.push_str(colour);
+    match caps.support {
+        terminal::UnderlineSupport::Styled if marks.stale => out.push_str("\x1b[4:3m"),
+        terminal::UnderlineSupport::Styled if marks.partial => out.push_str("\x1b[4:5m"),
+        _ => out.push_str("\x1b[4m"),
+    }
+    if marks.threshold && caps.colour {
+        // (255, 214, 140) clears AA 4.5 on black and on the selected-row tints.
+        // A darker red at (80, 30, 30) measures about 1.55 on black and 1.13
+        // on bg(38, 56, 76), which is how the contrast check can fail.
+        out.push_str(&underline(255, 214, 140));
+    }
+    out
+}
+
 /// A background colour. Needs an explicit reset afterwards, or it bleeds
 /// along the rest of the row - the same trap as in the Python.
 pub fn bg(r: u8, g: u8, b: u8) -> String {
@@ -262,6 +324,12 @@ pub fn seg(parts: &[(&str, String)], width: usize) -> String {
         let (cut, used, clipped) = clip_width(text, room);
         out.push_str(colour);
         out.push_str(&cut);
+        // A mark must not run on into the next segment. The reset is
+        // zero-width and only follows a colour that turned an underline on,
+        // so a row with no mark is byte-for-byte what it was.
+        if opens_underline(colour) {
+            out.push_str(UNDERLINE_OFF);
+        }
         n += used;
         if clipped {
             // A double-width glyph cannot be drawn in one remaining column.
@@ -4935,6 +5003,62 @@ mod tests {
         // and the new one wins; set only the old one and it is still read.
         assert_eq!(LEGACY_ENV, "TERMINAL_TOYS_CONFIG");
         assert_eq!(LEGACY_DIR, "terminal-toys");
+    }
+
+    #[test]
+    fn a_mark_keeps_the_text_and_names_the_style() {
+        let ink = "\x1b[38;2;1;2;3m";
+        let caps = |support, colour| terminal::UnderlineCaps { support, colour };
+        let stale = apply_mark(
+            ink,
+            Marks { stale: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, false),
+        );
+        assert!(stale.contains("\x1b[4:3m"), "{stale:?}");
+        assert!(!stale.contains("\x1b[4:5m"), "{stale:?}");
+        let partial = apply_mark(
+            ink,
+            Marks { partial: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(partial.contains("\x1b[4:5m"), "{partial:?}");
+        assert!(!partial.contains("\x1b[58;"), "{partial:?}");
+        let over = apply_mark(
+            ink,
+            Marks { threshold: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(over.contains("\x1b[4m"), "{over:?}");
+        assert!(over.contains("\x1b[58;2;255;214;140m"), "{over:?}");
+        assert!(!over.contains("\x1b[4:3m") && !over.contains("\x1b[4:5m"), "{over:?}");
+        // Stale wins the style; the threshold colour still rides on it.
+        let both = apply_mark(
+            ink,
+            Marks { stale: true, threshold: true, partial: true },
+            caps(terminal::UnderlineSupport::Styled, true),
+        );
+        assert!(both.contains("\x1b[4:3m") && both.contains("\x1b[58;2;255;214;140m"));
+        assert!(!both.contains("\x1b[4:5m"));
+        let plain = apply_mark(
+            ink,
+            Marks { stale: true, partial: true, threshold: true },
+            caps(terminal::UnderlineSupport::Plain, false),
+        );
+        assert!(plain.contains("\x1b[4m"), "{plain:?}");
+        assert!(!plain.contains("\x1b[4:"), "{plain:?}");
+        assert!(!plain.contains("\x1b[58;"), "{plain:?}");
+        let held = apply_mark(
+            ink,
+            Marks { stale: true, ..Marks::default() },
+            caps(terminal::UnderlineSupport::Unknown, false),
+        );
+        assert_eq!(held, ink);
+        let line = seg(&[(plain.as_str(), "12".into())], 4);
+        assert!(line.contains("12"));
+        assert!(line.contains(UNDERLINE_OFF));
+        let bare = seg(&[(ink, "12".into())], 4);
+        assert!(!bare.contains(UNDERLINE_OFF));
+        assert!(bare.contains("12"));
     }
 
     #[test]

@@ -545,7 +545,7 @@ fn draw_lanes_with_plots(lanes: &[&Lane], hue: Option<(u8, u8, u8)>, w: usize, p
             hue,
             p,
         ));
-        line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
+        line.push((quota_mark(lane.pct, hue, p, lane.stale, lane.projected), pct_text(lane.pct)));
         line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));

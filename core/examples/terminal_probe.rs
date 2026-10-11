@@ -39,6 +39,40 @@ fn main() {
             ),
             "  axes and labels remain text".into(),
         ];
+        // Synthetic samples so the PTY test can see underline bytes. The
+        // words stay the same whether the terminal answers the query.
+        let ink = tc::rgb(225, 235, 245);
+        let stale = tc::marked(
+            &ink,
+            tc::Marks {
+                stale: true,
+                ..tc::Marks::default()
+            },
+        );
+        let partial = tc::marked(
+            &ink,
+            tc::Marks {
+                partial: true,
+                ..tc::Marks::default()
+            },
+        );
+        let over = tc::marked(
+            &ink,
+            tc::Marks {
+                threshold: true,
+                ..tc::Marks::default()
+            },
+        );
+        // Row 2 is the chart. These words sit on the first row under it,
+        // which the chart does not paint over.
+        let samples = tc::seg(
+            &[
+                (stale.as_str(), " stale".into()),
+                (partial.as_str(), " partial".into()),
+                (over.as_str(), " over".into()),
+            ],
+            w.saturating_sub(1),
+        );
         let chart = tc::LineChart {
             slots: 12,
             focus: None,
@@ -107,6 +141,9 @@ fn main() {
             );
         }
         rows.resize(h, String::new());
+        if h > 9 {
+            rows[8] = samples;
+        }
         rows[h - 1] = format!("SELECTED:{selected}");
         tc::draw_plots(&rows, w, h, &plots);
         keyboard.wait(Duration::from_millis(300));

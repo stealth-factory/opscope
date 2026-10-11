@@ -372,6 +372,8 @@ struct State {
     names: HashMap<String, Vec<(String, String)>>,
     history: HashMap<String, Vec<f64>>,
     err: String,
+    /// When the last poll stored a reading. Zero until the first one lands.
+    read_at: f64,
 }
 
 fn main() {
@@ -413,6 +415,7 @@ fn main() {
         names: HashMap::new(),
         history: HashMap::new(),
         err: String::new(),
+        read_at: 0.0,
     }));
     // [r] asks for a reading now rather than at the end of the interval, so
     // the poller sleeps on a condition it can be woken out of.
@@ -469,6 +472,11 @@ fn main() {
                 }
                 guard.rows = found;
                 guard.names = names;
+                // A failed read keeps the previous stamp, so the numbers
+                // still on screen can go stale instead of looking new.
+                if guard.err.is_empty() {
+                    guard.read_at = tc::now();
+                }
             }
             let (lock, cond) = &*poller_wake;
             let mut asked = match lock.lock() {
@@ -779,7 +787,8 @@ fn main() {
             // Recorded rather than recomputed at the click, because by then
             // the body has been windowed and the heading's row is gone.
             rows_at = (0..shown.len()).map(|at| (rows.len() + 1 + at, at)).collect();
-            rows.extend(table(&shown, &guard, w, selected, &p));
+            let poll_stale = guard.read_at > 0.0 && tc::now() - guard.read_at > refresh;
+            rows.extend(table(&shown, &guard, w, selected, &p, poll_stale));
             rows.push(String::new());
             // The chart takes MIN_CHART rows whatever the table has already
             // spent, and the screen scrolls to reach what will not fit -
@@ -814,10 +823,14 @@ fn main() {
                 w - 1,
             ));
             let covered = plotted_span(&shown, &guard.history, window, refresh, w);
+            let span_ink = tc::marked(
+                p.dim.as_str(),
+                tc::Marks { partial: covered < window, ..tc::Marks::default() },
+            );
             rows.push(tc::seg(
                 &[
                     (
-                        p.dim.as_str(),
+                        span_ink.as_str(),
                         format!("        {} ago", span(Some(covered * 1000.0))),
                     ),
                     (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
@@ -926,6 +939,7 @@ fn table(
     w: usize,
     selected: Option<usize>,
     p: &Palette,
+    poll_stale: bool,
 ) -> Vec<String> {
     // The Python's header, column for column: the two have to sit side by
     // side in a wall and read as the same widget.
@@ -1000,18 +1014,25 @@ fn table(
 
         let label = label_of(row, state, wide);
         let loss = row.recent_loss;
-        let tone = format!("{}{}", tint, colour_for(quality(row), loss, p));
+        let tone_fg = colour_for(quality(row), loss, p);
+        let tone = tc::marked(
+            &format!("{tint}{tone_fg}"),
+            tc::Marks {
+                stale: poll_stale,
+                threshold: tone_fg == p.bad.as_str() || tone_fg == p.warn.as_str(),
+                ..tc::Marks::default()
+            },
+        );
         let name_c = format!("{}{}", tint, hue);
         let label_c = format!("{}{}", tint, if here { &p.txt } else { &p.dim });
         let dim_c = format!("{}{}", tint, p.dim);
-        let loss_c = format!(
-            "{}{}",
-            tint,
-            if loss.unwrap_or(0.0) >= 0.5 {
-                &p.bad
-            } else {
-                &p.dim
-            }
+        let loss_fg = if loss.unwrap_or(0.0) >= 0.5 { &p.bad } else { &p.dim };
+        let loss_c = tc::marked(
+            &format!("{tint}{loss_fg}"),
+            tc::Marks {
+                threshold: loss.unwrap_or(0.0) >= 0.5,
+                ..tc::Marks::default()
+            },
         );
         let idle = [row.lastsnd, row.lastrcv]
             .into_iter()
@@ -1177,11 +1198,21 @@ fn detail_view(
     }
 
     let ratio = quality(row);
+    let poll_stale = state.read_at > 0.0 && tc::now() - state.read_at > refresh;
     let live = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| ms(Some(x)));
+    let rtt_fg = colour_for(ratio, row.recent_loss, p);
+    let rtt_ink = tc::marked(
+        rtt_fg,
+        tc::Marks {
+            stale: poll_stale,
+            threshold: rtt_fg == p.bad.as_str() || rtt_fg == p.warn.as_str(),
+            ..tc::Marks::default()
+        },
+    );
     field!(
         "round trip",
         live(row.rtt),
-        colour_for(ratio, row.recent_loss, p),
+        rtt_ink.as_str(),
         &ratio.map_or(String::new(), |r| format!("{:.1}x this path's best", r)),
     );
     field!(
@@ -1227,14 +1258,15 @@ fn detail_view(
             0.0
         };
         let loss = row.recent_loss;
+        let loss_over = loss.unwrap_or(0.0) >= 0.5;
+        let loss_ink = tc::marked(
+            if loss_over { &p.bad } else { &p.txt },
+            tc::Marks { threshold: loss_over, ..tc::Marks::default() },
+        );
         field!(
             "loss just now",
             loss.map(|v| format!("{:.2}%", v)),
-            if loss.unwrap_or(0.0) >= 0.5 {
-                &p.bad
-            } else {
-                &p.txt
-            },
+            loss_ink.as_str(),
             "resent since the last look",
         );
         field!(
@@ -1337,10 +1369,14 @@ fn detail_view(
             w - 1,
         ));
         let covered = plotted_span(&one, &state.history, window, refresh, w);
+        let span_ink = tc::marked(
+            p.dim.as_str(),
+            tc::Marks { partial: covered < window, ..tc::Marks::default() },
+        );
         rows.push(tc::seg(
             &[
                 (
-                    p.dim.as_str(),
+                    span_ink.as_str(),
                     format!("        {} ago", span(Some(covered * 1000.0))),
                 ),
                 (p.dim.as_str(), " ".repeat(w.saturating_sub(26).max(1))),
@@ -1639,9 +1675,10 @@ mod tests {
             )]),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
         // Nothing selected, so no row carries the highlight.
-        let drawn = table(&[row], &state, 86, None, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette(), false);
         assert_eq!(plain(&drawn[1]), want);
     }
 
@@ -1661,8 +1698,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = table(&[row.clone()], &state, 140, None, &palette());
+        let drawn = table(&[row.clone()], &state, 140, None, &palette(), false);
         assert!(plain(&drawn[1]).contains(peer), "{}", plain(&drawn[1]));
         // The numbers still line up under their heading: the port ends
         // where PORT does.
@@ -1671,7 +1709,7 @@ mod tests {
         let end = |s: &str, word: &str| s.find(word).map(|b| s[..b].chars().count() + word.len());
         assert_eq!(end(&head, "PORT"), end(&line, " 22 ").map(|c| c - 1));
         for w in 82..=200 {
-            let drawn = table(&[row.clone()], &state, w, None, &palette());
+            let drawn = table(&[row.clone()], &state, w, None, &palette(), false);
             assert!(tc::display_width(&plain(&drawn[1])) <= w - 1, "row at {}", w);
         }
     }
@@ -1692,8 +1730,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = table(&[row], &state, 86, None, &palette());
+        let drawn = table(&[row], &state, 86, None, &palette(), false);
         assert_eq!(
             plain(&drawn[1]),
             "▐ 203.0.113.9:22                22     --      --      --     --        --     --"
@@ -1717,8 +1756,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let list = plain(&table(&[row.clone()], &state, 100, None, &palette())[1]);
+        let list = plain(&table(&[row.clone()], &state, 100, None, &palette(), false)[1]);
         assert!(list.contains("macOS n/a"), "{list}");
         let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
             .iter()
@@ -1751,8 +1791,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let list = plain(&table(&[row.clone()], &state, 86, None, &palette())[1]);
+        let list = plain(&table(&[row.clone()], &state, 86, None, &palette(), false)[1]);
         assert!(list.contains("n/a"), "{list}");
         assert!(!list.contains("0.00%"), "{list}");
         let detail = detail_view(&row, &state, 100, 40, 0, 60.0, 2.0, &palette(), &mut Vec::new())
@@ -1851,8 +1892,9 @@ mod tests {
             names: HashMap::new(),
             history: HashMap::new(),
             err: String::new(),
+            read_at: 0.0,
         };
-        let drawn = plain(&table(&[row], &state, 86, None, &palette())[1]);
+        let drawn = plain(&table(&[row], &state, 86, None, &palette(), false)[1]);
         let (_, after) = drawn.split_once("54321").expect("the peer's own port");
         // By word rather than by column, so padding is free to change and
         // only the number has to be right.

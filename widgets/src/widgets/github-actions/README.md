@@ -48,6 +48,14 @@ repo count (how many were asked for runs, including a quiet window), then
 success / failed / running, the same placement as `deployments`' ready /
 error / building. A missing poll stamp is `--`, not a fake now.
 
+An underline is a second signal on figures that were already coloured or already named:
+
+- **Curly** on "updated … ago" — that poll is older than the refresh interval.
+- **Dashed** on the run count — at least one repo returned a page shorter than the runs it has in the window, so the count is a partial page. The note under the headline still says which repo and how many.
+- **Coloured** on the API budget once fewer than 1000 calls remain, which is when that figure turns amber.
+
+A terminal without underline styles draws a plain line under the same text.
+
 **Activity** — runs per hour over the last 48h (the default window; `w`
 cycles 12h / 24h / 48h / 7d), coloured by the worst outcome in each
 bucket. The axis says `48h ago` and names the peak, matching deployments.

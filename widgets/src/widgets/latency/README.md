@@ -81,6 +81,16 @@ Jitter here is the mean gap between consecutive samples, so **it is not
 comparable across different intervals**. Do not read a jitter change right after
 pressing `i` as the network changing.
 
+## Underlines
+
+The numbers do not change. An underline is a second signal beside the colour:
+
+- **Curly** on NOW — the newest sample is older than the ping interval.
+- **Dashed** on AVG — the retained window has not filled yet, so the average is over a shorter stretch than the one configured.
+- **Coloured** on NOW when the sample is a spike (the same test as the event log: more than `spike_factor` times the median, and only after ten replies), and on LOSS once any loss is showing.
+
+A terminal without underline styles draws a plain line under the same digits.
+
 ## Keys
 
 | Key | Action |

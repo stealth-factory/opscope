@@ -427,7 +427,7 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             // countdown there to keep, and no burn either: what has been
             // spent in the current window is exactly what nobody knows.
             let ahead = lane.reset.map(|r| r - now());
-            let (when, tone) = if !show_reset {
+            let (when, tone_fg) = if !show_reset {
                 (String::new(), p.dim.clone())
             } else {
                 match ahead {
@@ -447,6 +447,14 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                     None => (String::new(), p.dim.clone()),
                 }
             };
+            let tone = tc::marked(
+                &tone_fg,
+                tc::Marks {
+                    stale: lane.stale,
+                    partial: lane.projected,
+                    ..tc::Marks::default()
+                },
+            );
             // A projected window is one we rolled forward because the
             // agent's own reading had expired - so the percentage beside it
             // was measured in a window that has since closed and reset.
@@ -481,8 +489,13 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             if any_stale {
                 // Held for every lane, so the percentages stay in one
                 // column whether the row beside them is cached or not.
+                let star = if lane.stale {
+                    tc::marked(&p.warn, tc::Marks { stale: true, ..tc::Marks::default() })
+                } else {
+                    p.warn.clone()
+                };
                 line.push((
-                    p.warn.clone(),
+                    star,
                     if lane.stale {
                         " *".into()
                     } else {
@@ -490,7 +503,10 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                     },
                 ));
             }
-            line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
+            line.push((
+                quota_mark(lane.pct, hue, p, lane.stale, lane.projected),
+                pct_text(lane.pct),
+            ));
             line.push((pace_colour, pace_txt));
             line.push((tone, when));
             let refs: Vec<(&str, String)> =
@@ -541,8 +557,12 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
                     tc::wrap_words(&said, w.saturating_sub(6).max(1))
                         .into_iter()
                         .map(|line| {
+                            let ink = tc::marked(
+                                p.warn.as_str(),
+                                tc::Marks { partial: true, ..tc::Marks::default() },
+                            );
                             tc::seg(
-                                &[(p.warn.as_str(), format!("     {line}"))],
+                                &[(ink.as_str(), format!("     {line}"))],
                                 w.saturating_sub(1).max(1),
                             )
                         }),

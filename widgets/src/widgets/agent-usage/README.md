@@ -69,6 +69,16 @@ The agents this widget reads:
   billing          stripe subscription
 ```
 
+## Underlines
+
+The percentages, the pace and the reset stay the numbers they were. An underline is a second signal:
+
+- **Curly** — a cached reading (`*`), older than a fresh poll.
+- **Dashed** — a window that was rolled forward (`~` on the pace or the reset) or a Notion reading that did not come back whole (`partial`).
+- **Coloured** — usage at or past 90%, which is already red, or a live pace that has fallen behind the clock, which is already amber.
+
+A terminal without underline styles draws a plain line under the same digits.
+
 ## The `+` tab
 
 The first tab is not an agent. It is every quota all of them publish, on one

@@ -1952,6 +1952,69 @@ fn text_on_a_selection_tint_clears_aa() {
     assert!(wrong.is_empty(), "on the selected-row tint:\n{}", wrong.join("\n"));
 }
 
+/// Underline colours have to clear AA on the terminal background and on a
+/// selected-row tint. The text check above never sees them: `58;2` is not a
+/// palette field.
+///
+/// A dark red is under 4.5 on both, which is how this stays a check rather
+/// than a measurement that cannot fail. The colour that ships is the
+/// `underline(` call in core.
+#[test]
+fn underline_colours_clear_aa_on_the_background_and_a_tint() {
+    let background = (0.0, 0.0, 0.0);
+    let sample_tint = (38.0, 56.0, 76.0);
+    let bad = (80.0, 30.0, 30.0);
+    assert!(
+        contrast(bad, background) < 4.5 && contrast(bad, sample_tint) < 4.5,
+        "a deliberately bad underline colour has to fail or this check cannot"
+    );
+
+    let widgets = widgets();
+    let mut colours = underline_calls(&std::fs::read_to_string(root().join("core/src/lib.rs")).unwrap());
+    for src in widgets.values() {
+        colours.extend(underline_calls(src));
+    }
+    assert!(!colours.is_empty(), "no underline(r, g, b) call to measure");
+
+    let mut surfaces = vec![("background", background)];
+    for (name, src) in &widgets {
+        for (tint, inline) in tints_of(src) {
+            // Bound selection tints. An inline background that is not a
+            // selection — a pace chip, a flash — is not a row these marks
+            // are drawn on.
+            if inline.is_none() {
+                surfaces.push((name.as_str(), tint));
+            }
+        }
+    }
+    let mut wrong = Vec::new();
+    for c in colours {
+        for (name, surface) in &surfaces {
+            let r = contrast(c, *surface);
+            if r < 4.5 {
+                wrong.push(format!(
+                    "underline {c:?} on {name} {surface:?} measures {r:.2}, under AA 4.5"
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "underline colours:\n{}",
+        wrong.join("\n")
+    );
+}
+
+fn underline_calls(src: &str) -> Vec<(f64, f64, f64)> {
+    let mut found = Vec::new();
+    for line in src.lines() {
+        if let Some(c) = triple(line, "underline(") {
+            found.push(c);
+        }
+    }
+    found
+}
+
 /// A widget with a lighter grey has to actually reach for it.
 ///
 /// The check above measures the colour and cannot see the wiring: delete the

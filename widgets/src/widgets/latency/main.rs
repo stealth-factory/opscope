@@ -1077,8 +1077,8 @@ fn main() {
                 Some(at.min(snapshot.len() - 1))
             };
         }
-        let (interval, per_column, how) = match settings.lock() {
-            Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone()),
+        let (interval, per_column, how, spike_factor) = match settings.lock() {
+            Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone(), s.spike_factor),
             Err(_) => return,
         };
         // Zero means one bucket per ping, which is the finest motion the
@@ -1182,6 +1182,26 @@ fn main() {
             // foreground on the row, or the colour that follows it resets
             // the background and the highlight stops halfway across.
             let tinted = |colour: &str| format!("{}{}", tint, colour);
+            // The newest sample older than one interval is a poll that has
+            // not come back. A window that has not filled yet is partial.
+            // A spike is the same test the event log already uses.
+            let stale = t.samples.last().is_some_and(|(at, _)| tc::now() - *at > interval);
+            let partial = st.avg.is_some() && st.n < window;
+            let spiked = st.now.is_some_and(|now| {
+                st.med.is_some_and(|med| st.n > 10 && now > med * spike_factor)
+            });
+            let now_ink = tc::marked(
+                &tinted(if st.now.is_some() { &p.txt } else { &p.bad }),
+                tc::Marks { stale, threshold: spiked, ..tc::Marks::default() },
+            );
+            let avg_ink = tc::marked(
+                &tinted(&p.txt),
+                tc::Marks { partial, ..tc::Marks::default() },
+            );
+            let loss_ink = tc::marked(
+                &tinted(loss_c),
+                tc::Marks { threshold: st.loss > 0.0, ..tc::Marks::default() },
+            );
             // MIN and MAX are drawn in `dim`, which does not clear AA on the
             // tint. On the selected row they get the lighter one.
             let dim = if here { &p.dim_lit } else { &p.dim };
@@ -1244,11 +1264,8 @@ fn main() {
                 ),
                 // Red when there is no round trip to report, which is the
                 // whole of what the status dot used to say.
-                (
-                    tinted(if st.now.is_some() { &p.txt } else { &p.bad }),
-                    format!(" {}", fmt_ms(st.now)),
-                ),
-                (tinted(&p.txt), format!(" {}", fmt_ms(st.avg))),
+                (now_ink, format!(" {}", fmt_ms(st.now))),
+                (avg_ink, format!(" {}", fmt_ms(st.avg))),
                 (
                     tinted(&p.ok),
                     if show_med {
@@ -1260,7 +1277,7 @@ fn main() {
                 (tinted(dim), format!(" {}", fmt_ms(st.min))),
                 (tinted(dim), format!(" {}", fmt_ms(st.max))),
                 (tinted(&p.txt), format!(" {}", fmt_ms(st.jit))),
-                (tinted(loss_c), format!(" {:>5.1}%", st.loss)),
+                (loss_ink, format!(" {:>5.1}%", st.loss)),
                 // The reason, when there is one. It sits after the figures
                 // rather than replacing them: the numbers from before it
                 // broke are still true, and still the last thing this
