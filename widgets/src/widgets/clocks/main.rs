@@ -2010,6 +2010,7 @@ mod tests {
         for width in 8..80usize {
             let face = clock_face("12:34:56", width, 24, &p);
             assert_eq!(face.len(), 5, "width {width} left the block digits");
+            assert!(face.iter().all(|row| !row.contains("\x1b]66;")));
             for row in &face {
                 assert!(
                     tc::occupied_columns(row) <= width.saturating_sub(1),
@@ -2018,6 +2019,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_scaled_face_is_the_time_plus_the_blank_rows_under_it() {
+        let p = palette();
+        tc::with_text_sizing(true, || {
+            // 17 columns: the time's budget is 15, and 2× needs 16.
+            let narrow = clock_face("12:34:56", 17, 24, &p);
+            assert_eq!(narrow.len(), 5);
+            assert!(narrow.iter().all(|row| !row.contains("\x1b]66;")));
+            assert!(narrow[0].contains('█'));
+
+            let face = clock_face("12:34:56", 40, 24, &p);
+            let scale = tc::row_scale(&face[0]).expect("the face is sized");
+            assert_eq!(scale, 4);
+            assert!(face[0].contains("\x1b]66;s=4;12:34:56\x07"), "{:?}", face[0]);
+            assert_eq!(face.len(), scale as usize);
+            assert!(face[1..].iter().all(|row| row.is_empty()));
+            for row in &face {
+                assert!(tc::occupied_columns(row) <= 39);
+            }
+
+            // Three rows of room: the scale drops, the time stays whole.
+            let short = clock_face("12:34:56", 80, 3, &p);
+            assert_eq!(tc::row_scale(&short[0]), Some(3));
+            assert!(short[0].contains("12:34:56"));
+            assert_eq!(short.len(), 3);
+            assert!(short[1].is_empty() && short[2].is_empty());
+            assert!(tc::occupied_columns(&short[0]) <= 79);
+        });
+        // The override does not stay on for the next assertion.
+        let after = clock_face("12:34:56", 40, 24, &p);
+        assert_eq!(after.len(), 5);
+        assert!(after.iter().all(|row| !row.contains("\x1b]66;")));
     }
 
     #[test]

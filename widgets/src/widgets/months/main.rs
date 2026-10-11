@@ -649,6 +649,10 @@ fn footer(w: usize, neighbours: bool, p: &Palette) -> (tc::Footer, usize) {
 /// heading and the blank rows under it stay together: a window that would
 /// cut the glyph either backs up to its first row or, when the block is
 /// taller than the window, skips it and shows the rows after it.
+///
+/// The backup is only where the window starts. `settle_scroll` decides
+/// what the next key remembers, so a downward step is not stored as the
+/// row it had to retreat from.
 fn view_bounds(rest: &[String], scroll: usize, room: usize) -> (usize, usize) {
     if room == 0 || rest.is_empty() {
         return (0, 0);
@@ -690,6 +694,31 @@ fn view_bounds(rest: &[String], scroll: usize, room: usize) -> (usize, usize) {
     (start, end.max(start))
 }
 
+/// The scroll position to keep after a step.
+///
+/// A downward step that would land inside a scaled heading moves past the
+/// whole glyph, so the rows under it can be reached. The window may still
+/// back up when the step went upward: that shows the heading whole, and
+/// the asked position stays where the key put it. Either way the result
+/// is only a scroll index. Nothing here is a selection.
+fn settle_scroll(rows: &[String], asked: usize, room: usize, down: bool) -> usize {
+    if room == 0 || rows.is_empty() {
+        return 0;
+    }
+    let limit = rows.len().saturating_sub(room.min(rows.len()));
+    let asked = asked.min(limit);
+    if down {
+        let (shown, _) = view_bounds(rows, asked, room);
+        if shown < asked {
+            if let Some(origin) = span_origin(rows, asked) {
+                let scale = tc::row_scale(&rows[origin]).unwrap_or(1) as usize;
+                return (origin + scale).min(limit);
+            }
+        }
+    }
+    asked
+}
+
 fn span_origin(rows: &[String], index: usize) -> Option<usize> {
     if index == 0 || index > rows.len() {
         return None;
@@ -703,6 +732,35 @@ fn span_origin(rows: &[String], index: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// One band as frame rows. A scaled heading keeps the blank rows under it
+/// here, not inside `strip`, so a band measured without sizing stays
+/// `2 + GRID_ROWS` tall.
+fn place_strip(rows: &[Vec<(String, String)>], width: usize) -> Vec<String> {
+    let mut body = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let sized = i == 0 && row.iter().any(|(_, text)| text.contains("\x1b]66;"));
+        if sized {
+            let mut line = String::new();
+            for (colour, text) in row {
+                line.push_str(colour);
+                line.push_str(text);
+            }
+            let scale = tc::row_scale(&line).unwrap_or(1);
+            body.push(line);
+            // The rows the scaled heading occupies under its first line.
+            // Left empty so the glyph is not erased.
+            for _ in 1..scale {
+                body.push(String::new());
+            }
+        } else {
+            let refs: Vec<(&str, String)> =
+                row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
+            body.push(tc::seg(&refs, width.saturating_sub(1)));
+        }
+    }
+    body
 }
 
 /// The whole frame at width `w`, title first, at whatever height it needs.
@@ -793,27 +851,7 @@ fn frame(
                 if n > 0 {
                     body.push(String::new());
                 }
-                for (i, row) in strip(band, start, today, l, p, room).iter().enumerate() {
-                    let sized = i == 0 && row.iter().any(|(_, text)| text.contains("\x1b]66;"));
-                    if sized {
-                        let mut line = String::new();
-                        for (colour, text) in row {
-                            line.push_str(colour);
-                            line.push_str(text);
-                        }
-                        let scale = tc::row_scale(&line).unwrap_or(1);
-                        body.push(line);
-                        // The rows the scaled heading occupies under its
-                        // first line. Left empty so the glyph is not erased.
-                        for _ in 1..scale {
-                            body.push(String::new());
-                        }
-                    } else {
-                        let refs: Vec<(&str, String)> =
-                            row.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
-                        body.push(tc::seg(&refs, w.saturating_sub(1)));
-                    }
-                }
+                body.extend(place_strip(&strip(band, start, today, l, p, room), w));
             }
         }
     }
@@ -848,6 +886,9 @@ fn main() {
     loop {
         let now = Utc::now();
         let today = zone.day(now);
+        // Net steps this frame. Up and down in one poll cancel, and a
+        // downward step is what may skip a heading rather than sit in it.
+        let mut scrolled = 0i32;
         for key in keyboard.poll() {
             match key.as_str() {
                 // The shared screen, which relaunches this binary if it
@@ -874,12 +915,19 @@ fn main() {
                 "s" | "S" => {
                     neighbours = !neighbours;
                     scroll = 0;
+                    scrolled = 0;
                 }
                 // The wheel moves the view and nothing else: there is no
                 // selection here to protect, but paging is what the keys do
                 // and a wheel that paged would step a month per notch.
-                "ctrl-y" | "wheel-up" => scroll = scroll.saturating_sub(1),
-                "ctrl-e" | "wheel-down" => scroll = scroll.saturating_add(1),
+                "ctrl-y" | "wheel-up" => {
+                    scroll = scroll.saturating_sub(1);
+                    scrolled -= 1;
+                }
+                "ctrl-e" | "wheel-down" => {
+                    scroll = scroll.saturating_add(1);
+                    scrolled += 1;
+                }
                 _ => {}
             }
         }
@@ -895,8 +943,12 @@ fn main() {
         let room = h.saturating_sub(foot.len());
         let (head, rest) = body.split_at(1.min(body.len()));
         let room_below = room.saturating_sub(head.len()).max(1);
+        // The window may start earlier than this so a heading stays whole.
+        // That earlier row is not stored: storing it made the next downward
+        // step land inside the heading and snap back, so the calendar under
+        // it could not be reached.
+        scroll = settle_scroll(rest, scroll, room_below, scrolled > 0);
         let (start, last) = view_bounds(rest, scroll, room_below);
-        scroll = start;
         let mut rows: Vec<String> = head.to_vec();
         rows.extend_from_slice(&rest[start..last]);
         while rows.len() < room {
@@ -1484,26 +1536,84 @@ mod tests {
         let may = tc::display_width("MAY 2026");
         assert_eq!(tc::fitting_scale(september, block_width(true), 24, 4), 1);
         assert_eq!(tc::fitting_scale(may, block_width(false), 24, 4), 2);
-        for width in 23..120usize {
-            let Some(l) = layout(width, true) else {
-                continue;
-            };
-            let block = block_width(l.gutter);
-            for month in 1..=12u32 {
-                let heading = Month { year: 2026, month }.heading();
-                let cols = tc::display_width(&heading);
-                for height in [1usize, 2, 3, 4, 24] {
-                    let scale = tc::fitting_scale(cols, block, height, 4);
-                    if scale == 1 {
-                        assert_eq!(heading, Month { year: 2026, month }.heading());
-                    } else {
-                        let occupied = cols * scale as usize;
-                        assert!(occupied <= block, "{heading} scale {scale} in {block}");
-                        assert!(scale as usize <= height);
+        let p = palette();
+        let today = day(2026, 5, 4);
+        tc::with_text_sizing(true, || {
+            for width in 23..120usize {
+                let Some(l) = layout(width, true) else {
+                    continue;
+                };
+                let block = block_width(l.gutter);
+                for month in 1..=12u32 {
+                    let month = Month { year: 2026, month };
+                    let heading = month.heading();
+                    let cols = tc::display_width(&heading);
+                    for height in [1usize, 2, 3, 4, 24] {
+                        let scale = tc::fitting_scale(cols, block, height, 4);
+                        let cell = &block_rows(month, today, l.gutter, &p, scale)[0][0].1;
+                        assert!(
+                            cell.contains(&heading),
+                            "scale {scale} dropped {heading:?} from {cell:?}"
+                        );
+                        assert_eq!(cell.contains("\x1b]66;"), scale > 1);
+                        assert!(
+                            tc::occupied_columns(cell) <= block,
+                            "{heading} scale {scale} occupies {} in {block}",
+                            tc::occupied_columns(cell)
+                        );
                     }
                 }
             }
-        }
+        });
+    }
+
+    fn block_rows(
+        month: Month,
+        today: NaiveDate,
+        gutter: bool,
+        p: &Palette,
+        scale: u8,
+    ) -> Vec<Vec<(String, String)>> {
+        block(month, WeekStart::Sunday, today, gutter, p, scale)
+    }
+
+    #[test]
+    fn a_scaled_heading_keeps_blank_rows_under_the_full_name() {
+        let p = palette();
+        let today = day(2026, 5, 4);
+        tc::with_text_sizing(true, || {
+            // One month, no gutter: MAY is 8 columns and 2× fits in 21.
+            let narrow = layout(23, false).expect("one month");
+            assert!(!narrow.gutter);
+            let may = Month { year: 2026, month: 5 };
+            let band = strip(&[may], WeekStart::Sunday, today, narrow, &p, 24);
+            let drawn = place_strip(&band, 23);
+            let scale = tc::row_scale(&drawn[0]).expect("the heading is sized");
+            assert_eq!(scale, 2);
+            assert!(drawn[0].contains("\x1b]66;s=2;MAY 2026\x07"), "{:?}", drawn[0]);
+            assert_eq!(drawn.len(), band.len() + scale as usize - 1);
+            assert!(drawn[1].is_empty(), "the row under the heading was drawn");
+            assert!(drawn[scale as usize].contains("Su"));
+            assert!(
+                tc::occupied_columns(&drawn[0]) <= 23,
+                "heading occupies {}",
+                tc::occupied_columns(&drawn[0])
+            );
+            for row in &drawn {
+                assert!(tc::occupied_columns(row) <= 23);
+            }
+
+            // September forces the band back to the ordinary heading.
+            let wide = layout(64, true).expect("a gutter");
+            let september = Month { year: 2026, month: 9 };
+            let plain = strip(&[september], WeekStart::Sunday, today, wide, &p, 24);
+            let text: String = plain[0].iter().map(|(_, t)| t.clone()).collect();
+            assert!(!text.contains("\x1b]66;"), "{text:?}");
+            assert!(text.contains("SEPTEMBER 2026"), "{text:?}");
+            let placed = place_strip(&plain, 64);
+            assert_eq!(placed.len(), plain.len(), "an ordinary heading grew blank rows");
+            assert!(placed.iter().all(|row| tc::occupied_columns(row) <= 64));
+        });
     }
 
     #[test]
@@ -1518,6 +1628,29 @@ mod tests {
         ];
         assert_eq!(view_bounds(&rows, 2, 2), (1, 3));
         assert_eq!(view_bounds(&rows, 0, 2), (0, 1));
+        // Down into the blank row under the heading moves past the glyph.
+        // Remembering the backed-up start would land the next step inside
+        // it and snap back, so "grid" could never be reached.
+        assert_eq!(settle_scroll(&rows, 2, 2, true), 3);
+        let mut scroll = 0usize;
+        let mut saw_grid = false;
+        for _ in 0..rows.len() {
+            let (start, end) = view_bounds(&rows, scroll, 2);
+            if rows[start..end].iter().any(|row| row == "grid") {
+                saw_grid = true;
+            }
+            let next = settle_scroll(&rows, scroll + 1, 2, true);
+            if next == scroll {
+                break;
+            }
+            assert!(next > scroll, "down from {scroll} moved backward");
+            scroll = next;
+        }
+        assert!(saw_grid, "the rows under the heading were never shown");
+        assert!(scroll >= 3, "stopped on the heading at {scroll}");
+        // Up into the same blank row shows the whole heading and stays there.
+        assert_eq!(settle_scroll(&rows, 2, 2, false), 2);
+        assert_eq!(view_bounds(&rows, 2, 2), (1, 3));
         let plain: Vec<String> = (0..10).map(|i| format!("row {i}")).collect();
         assert_eq!(view_bounds(&plain, 3, 4), (3, 7));
         assert_eq!(view_bounds(&plain, 100, 4), (6, 10));

@@ -26,7 +26,7 @@ mod terminal;
 mod graphics;
 mod shm;
 
-pub use terminal::{capabilities, graphics_notice, Capabilities};
+pub use terminal::{capabilities, graphics_notice, with_text_sizing, Capabilities};
 pub use graphics::{braille, LineChart, Plot, Trace};
 
 pub use dependencies::{

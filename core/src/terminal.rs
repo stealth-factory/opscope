@@ -1,4 +1,5 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -24,6 +25,28 @@ const TIMEOUT: Duration = Duration::from_millis(800);
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 /// True after flag 1 was pushed, so every cleanup path pops exactly once.
 static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    /// A test's answer for the text-sizing probe. `None` means the session.
+    static TEXT_SIZING: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Clears a text-sizing override when the test's closure returns or panics.
+struct TextSizingGuard;
+impl Drop for TextSizingGuard {
+    fn drop(&mut self) {
+        TEXT_SIZING.with(|slot| slot.set(None));
+    }
+}
+
+/// Draw as if the text-sizing probe had answered `enabled`.
+///
+/// The answer applies only on this thread, and only until `body` returns,
+/// so one test can draw a scaled clock without changing what another draws.
+pub fn with_text_sizing<T>(enabled: bool, body: impl FnOnce() -> T) -> T {
+    let _guard = TextSizingGuard;
+    TEXT_SIZING.with(|slot| slot.set(Some(enabled)));
+    body()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
@@ -427,10 +450,14 @@ impl Drop for HeldSignals {
 }
 
 pub fn capabilities() -> Capabilities {
-    SESSION
+    let mut caps = SESSION
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .capabilities
+        .capabilities;
+    if let Some(on) = TEXT_SIZING.with(|slot| slot.get()) {
+        caps.text_sizing = on;
+    }
+    caps
 }
 
 /// How far underline styles may go on this terminal right now.
@@ -663,6 +690,14 @@ mod tests {
         late.reply("\x1b]99;i=opscope:p=?;a=report\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!late.capabilities.text_sizing);
         assert!(!late.capabilities.kitty_notifications);
+    }
+
+    #[test]
+    fn a_text_sizing_override_ends_when_the_test_does() {
+        assert!(!capabilities().text_sizing);
+        let inside = with_text_sizing(true, || capabilities().text_sizing);
+        assert!(inside);
+        assert!(!capabilities().text_sizing);
     }
 
     #[test]
