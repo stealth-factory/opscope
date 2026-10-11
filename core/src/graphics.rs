@@ -293,6 +293,7 @@ impl Plot {
                 colour: colour.into(),
             },
         ];
+        let mut marker_has_background = false;
         if let Some(at) = marker {
             let x = (at * width as f64).min((width as f64 - 0.25).max(0.0));
             // Keep the marker's position and width; paint its background on
@@ -302,6 +303,7 @@ impl Plot {
             if let Some((background, ink)) = mark.strip_prefix("\x1b[48;2;").and_then(|s| s.split_once('m')) {
                 let background = format!("\x1b[38;2;{background}m");
                 if rgb(&background).is_some() && rgb(ink).is_some() {
+                    marker_has_background = true;
                     let left = (x - 0.25).max(0.0);
                     rects.push(Rect {
                         x: left,
@@ -325,12 +327,17 @@ impl Plot {
         let at = marker.map(|v| ((v * width as f64).round() as usize).min(width.saturating_sub(1)));
         let text = (0..width)
             .map(|i| {
+                let reset = if marker_has_background && at.is_some_and(|at| i == at + 1) {
+                    super::NOBG
+                } else {
+                    ""
+                };
                 if Some(i) == at {
                     (mark.into(), "┃".into())
                 } else if i < filled {
-                    (format!("{}{colour}", super::NOBG), "█".into())
+                    (format!("{reset}{colour}"), "█".into())
                 } else {
-                    (format!("{}{track}", super::NOBG), "░".into())
+                    (format!("{reset}{track}"), "░".into())
                 }
             })
             .collect();
@@ -1004,6 +1011,26 @@ mod tests {
                 assert!(row.ends_with(" label"));
             }
         }
+    }
+
+    #[test]
+    fn unmarked_and_foreground_only_meters_preserve_inherited_backgrounds() {
+        let fill = super::super::rgb(30, 220, 180);
+        let track = super::super::rgb(80, 100, 120);
+        let ink = super::super::rgb(238, 244, 252);
+        let backed = format!("{}{}", super::super::bg(10, 12, 18), ink);
+        for (marker, mark) in [(None, &ink), (None, &backed), (Some(0.5), &ink)] {
+            let plot = Plot::meter(0, 1, 10, 0.5, marker, &fill, &track, mark);
+            let row = plot.fill.as_ref().unwrap().row(0, 10);
+            // A selected row's inherited tint must survive across the meter.
+            assert!(!row.contains("\x1b[49m"));
+            assert!(!row.contains("\x1b[48;"));
+            assert!(!row.contains(super::super::RST));
+        }
+        let plot = Plot::meter(0, 1, 10, 0.5, Some(0.5), &fill, &track, &backed);
+        let row = plot.fill.as_ref().unwrap().row(0, 10);
+        assert!(!row[..row.find('┃').unwrap()].contains(super::super::NOBG));
+        assert_eq!(row.matches(super::super::NOBG).count(), 1);
     }
 
     #[test]
