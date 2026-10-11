@@ -71,9 +71,12 @@ class Terminal:
                 self.answered = count
                 response = b""
                 if self.reply == "kitty" or self.reply == "keyboard":
+                    response += self._graphics_reply(b"OK")
+                elif self.reply == "basic":
+                    # A plain graphics OK, even when the placeholder probe was sent.
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
-                    response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
+                    response += self._graphics_reply(b"ENOTSUP")
                 response += b"\x1b[?2026;2$y"
                 # Device attributes often arrive before the keyboard flags.
                 # Current flags are 0 until we push; the flags reply is still
@@ -124,6 +127,12 @@ class Terminal:
             self.proc.kill()
             self.proc.wait(timeout=3)
         os.close(self.master)
+
+    def _graphics_reply(self, status):
+        # The placeholder probe uses its own id. Answering the plain query
+        # must not be treated as support for virtual placement.
+        ident = b"2147483645" if b"i=2147483645," in self.output else b"2147483646"
+        return b"\x1b_Gi=" + ident + b";" + status + b"\x1b\\"
 
 
 def shm_names(commands):
@@ -416,9 +425,11 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
-WRAP = (
+# Header ESC, then the payload's leading ESC doubled. tmux's FAQ uses the
+# same shape. unwrap_tmux treats the header as ending at that first ESC.
+PROBE = (
     b"\x1bPtmux;\x1b"
-    b"\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA"
+    b"\x1b\x1b_Gi=2147483645,s=1,v=1,a=q,U=1,t=d,f=24;AAAA"
     b"\x1b\x1b\\\x1b\\"
 )
 # Eight hex digits: U+10EEEE, not U+010EEE plus a trailing E.
@@ -457,13 +468,16 @@ def commands_of(data):
 
 
 def tmux_placeholders(t):
-    assert WRAP in t.output, "graphics query was not passed through"
+    assert PROBE in t.output, "placeholder probe was not passed through"
+    assert b"i=2147483646," not in t.output, "tmux sent the plain graphics query"
     images = [(keys, payload) for keys, payload in commands_of(unwrap_tmux(t.output)) if keys.get(b"a") == b"T"]
     assert images, "answered passthrough did not upload a chart"
     keys, _ = images[0]
-    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"2", keys
-    assert PLACEHOLDER in t.output, "placeholder cells were not drawn"
-    assert b"now" in t.output, "line-chart label was blanked"
+    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"1", keys
+    upload = t.output.find(b"a=T")
+    cell = t.output.find(PLACEHOLDER)
+    assert 0 <= upload < cell, "virtual placement was not uploaded before the cells"
+    assert b"\x1b[0mnow" in t.output, "label inherited the placeholder colour"
     assert not any(k.get(b"a") == b"p" for k, _ in commands_of(unwrap_tmux(t.output)))
     t.send(b"\x1b[B")
     t.read()
@@ -472,10 +486,23 @@ def tmux_placeholders(t):
 
 
 def tmux_text(t):
-    assert WRAP in t.output, "graphics query was not passed through"
+    assert PROBE in t.output, "placeholder probe was not passed through"
     t.read(0.7)
     fallback(t)
     assert PLACEHOLDER not in t.output, "an unanswered query still drew placeholders"
+
+
+def tmux_basic_is_braille(t):
+    assert PROBE in t.output, "placeholder probe was not passed through"
+    t.read(0.2)
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "a plain graphics OK enabled placeholders"
+
+
+def herdr_direct(t):
+    assert b"\x1bPtmux;" not in t.output, "Herdr was wrapped in a tmux passthrough"
+    assert b"U=1" not in t.output
+    supported(t)
 
 
 def responsive_selection(t):
@@ -568,9 +595,12 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
-    for extra in ({"TMUX": "/tmp/tmux-0/default,1,0"}, {"HERDR_ENV": "1"}):
-        run("auto", "kitty", tmux_placeholders, extra)
-        print(f"PASS placeholder {extra}")
+    run("auto", "kitty", tmux_placeholders, {"TMUX": "/tmp/tmux-0/default,1,0"})
+    print("PASS placeholder tmux")
+    run("auto", "basic", tmux_basic_is_braille, {"TMUX": "1"})
+    print("PASS placeholder plain-ok stays text")
+    run("auto", "kitty", herdr_direct, {"HERDR_ENV": "1"})
+    print("PASS herdr direct")
     run("auto", "silent", tmux_text, {"TMUX": "1"})
     print("PASS placeholder unanswered")
     for ending in ["signal", "panic"]:

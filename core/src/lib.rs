@@ -528,6 +528,8 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         whole && !reset,
     );
     let bytes = paint(&mut shown, &rows, w, h, lost);
+    // Placeholder uploads are in `before`, so the virtual placement exists
+    // before the cells that name it. Direct placements stay in `after`.
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
     // `out` drops a failed write, which a full frame every time could

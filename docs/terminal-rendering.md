@@ -179,21 +179,30 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
-Inside tmux (`$TMUX` set and non-empty) or Herdr (`HERDR_ENV=1`), core sends
-the graphics query wrapped in a tmux DCS passthrough. Placeholders are used
-only when that wrapped query is answered. The upload is once, with `q=2,U=1`,
-wrapped the same way, and each cell is U+10EEEE with the row and column
+Inside tmux (`$TMUX` set and non-empty), core sends a graphics query that
+asks for Unicode placeholders (`U=1`) wrapped in a tmux DCS passthrough.
+Placeholders are used only when that probe is answered. A plain graphics OK
+does not enable them: inside tmux, Kitty graphics without the virtual-placement
+extension stay on the Braille path, because a cursor placement does not survive
+the multiplexer. Herdr (`HERDR_ENV=1`) is not wrapped. Nothing in Herdr's own
+behaviour shows that it forwards a tmux DCS passthrough, so Herdr stays on the
+direct path.
+
+The upload uses `q=1,U=1` (an error is reported, the OK is not) and is written
+before the placeholder cells. Each cell is U+10EEEE with the row and column
 diacritics and the image id in the foreground colour. A non-zero high byte of
-the id, which these ids have, is a third diacritic. The cells are ordinary
-text, so scrolling and a pane move keep the image. tmux has to allow the passthrough:
+the id, which these ids have, is a third diacritic. A whole-frame heal sends
+`a=p,U=1,q=1` at the chart's real columns and rows. ENOENT on that probe
+uploads the pixels again on the next frame. tmux has to allow the passthrough:
 
 ```
 set -g allow-passthrough on
 ```
 
-Use `all` instead of `on` for a pane that is not visible. Outside tmux and
-Herdr, or when the wrapped query is not answered, behaviour stays as it is
-today.
+Use `all` instead of `on` for a pane that is not visible. Outside tmux, or
+when the placeholder probe is not answered, behaviour stays as it is today.
+The cells are ordinary text, so a scroll or a pane move is expected to keep
+the image. That was not checked by eye.
 
 For discrete data, use the other `Plot` constructors with the same viewport and
 drawing path:
@@ -340,14 +349,15 @@ bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-Inside tmux and Herdr the graphics query is wrapped in a DCS passthrough, and
-placeholders are used only when that wrapped query is answered. tmux needs
-`allow-passthrough on`, or `all` for a pane that is not visible. A multiplexer
-that drops the query uses the text path. Outside tmux and Herdr the query is
+Inside tmux the placeholder probe is wrapped in a DCS passthrough, and
+placeholders are used only when that probe is answered. Herdr is not wrapped.
+tmux needs `allow-passthrough on`, or `all` for a pane that is not visible. A
+multiplexer that drops the query uses the text path. Outside tmux the query is
 not wrapped. A positive reply still needs real visual checks for placement and
 pane clipping. Direct Kitty, actual SSH, Herdr, Luvus and tmux visual
 validation remains a release check; the managed test workspace has no attached
-graphical terminal.
+graphical terminal. A scroll or a pane move is expected to keep a placeholder
+image, and that was not checked by eye.
 
 ## Keyboard protocol
 

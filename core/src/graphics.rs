@@ -834,12 +834,28 @@ pub(crate) fn compose(
         for slot in 0..cache.len().max(images.len()) {
             let plot = images.get(slot);
             let cols = plot.map_or(0, |p| p.width.min(w - p.x));
+            // Once placeholders have been negotiated, deletes stay wrapped even
+            // after a later rejection, or tmux swallows them and the outer
+            // terminal keeps the image.
+            let wrap = placeholders || passthrough_enabled();
             if !lost && cache.get(slot).is_some_and(|c| Some(&c.plot) == plot && c.cols == cols) {
                 // The periodic whole frame repairs text another process may
                 // have scrolled or covered. The terminal still holds the image,
                 // so only its placement is put back, not the pixels.
-                if let Some(plot) = images.get(slot).filter(|_| heal && !placeholders) {
-                    after.push_str(&place(plot, slot, w));
+                if let Some(plot) = images.get(slot).filter(|_| heal) {
+                    if placeholders {
+                        // The chart's real columns and rows. A 1×1 probe
+                        // would shrink the virtual placement. ENOENT takes
+                        // the existing screen-lost path, which uploads
+                        // again next frame. q=1 reports that and stays
+                        // quiet when the image is still there.
+                        before.push_str(&emit_graphics(
+                            &placeholder_probe(plot, slot, w),
+                            wrap,
+                        ));
+                    } else {
+                        after.push_str(&place(plot, slot, w));
+                    }
                 }
                 continue;
             }
@@ -852,17 +868,20 @@ pub(crate) fn compose(
                     // Upload acknowledgements must not start a redraw/upload loop.
                     if cached.same_pixels(plot, cols, rgba) {
                         cached.plot = plot.clone();
-                        if heal && !placeholders {
-                            after.push_str(&place(plot, slot, w));
+                        if heal {
+                            if placeholders {
+                                before.push_str(&emit_graphics(
+                                    &placeholder_probe(plot, slot, w),
+                                    wrap,
+                                ));
+                            } else {
+                                after.push_str(&place(plot, slot, w));
+                            }
                         }
                         continue;
                     }
                 }
             }
-            // Once placeholders have been negotiated, deletes stay wrapped even
-            // after a later rejection, or tmux swallows them and the outer
-            // terminal keeps the image.
-            let wrap = placeholders || passthrough_enabled();
             if cache.get(slot).is_some() {
                 // a=T replaces this image ID itself. Deleting it first exposes a
                 // blank interval while the replacement pixels are transmitted.
@@ -874,12 +893,17 @@ pub(crate) fn compose(
             if let (Some(plot), Some(rgba)) = (plot, rgba) {
                 // Set before writing: a signal during transmission must clean it up.
                 LIVE.fetch_or(1 << slot, Ordering::Release);
-                let command = if placeholders {
-                    placeholder_transmit(plot, slot, w, &rgba)
+                if placeholders {
+                    // The virtual placement has to exist before the cells
+                    // that name it. draw_plots writes `before`, then the
+                    // rows, then `after`.
+                    before.push_str(&emit_graphics(
+                        &placeholder_transmit(plot, slot, w, &rgba),
+                        wrap,
+                    ));
                 } else {
-                    image_rgba(plot, slot, w, &rgba)
-                };
-                after.push_str(&emit_graphics(&command, wrap));
+                    after.push_str(&emit_graphics(&image_rgba(plot, slot, w, &rgba), wrap));
+                }
                 let cached = CachedPlot {
                     plot: plot.clone(),
                     cols,
@@ -1145,6 +1169,17 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
     pixel[3] = total as u8;
 }
 
+/// Ask whether the virtual placement is still there, without moving the
+/// cursor and without changing its size.
+fn placeholder_probe(plot: &Plot, slot: usize, pane_width: usize) -> String {
+    let cols = plot.width.min(pane_width.saturating_sub(plot.x));
+    format!(
+        "\x1b_Ga=p,i={},U=1,p=1,c={cols},r={},C=1,q=1\x1b\\",
+        image_id(slot),
+        plot.visible_rows,
+    )
+}
+
 /// Re-place an image the terminal already holds, at the same cell and size.
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
@@ -1164,7 +1199,29 @@ fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
 /// 9 saves little more at triple the time. See `docs/terminal-rendering.md`.
 const ZLIB_LEVEL: u8 = 6;
 
+fn graphics_key(bytes: &str, key: &str) -> bool {
+    bytes.split("\x1b_G").skip(1).any(|chunk| {
+        chunk
+            .split(';')
+            .next()
+            .is_some_and(|keys| keys.split(',').any(|item| item == key))
+    })
+}
+
+fn is_frame_edit(bytes: &str) -> bool {
+    graphics_key(bytes, "a=f") || graphics_key(bytes, "a=a") || graphics_key(bytes, "a=c")
+}
+
 fn emit_graphics(bytes: &str, wrap: bool) -> String {
+    // A shared-memory transmission names a filesystem path. Wrapping it
+    // would hand that path to the outer terminal. The direct path may
+    // still send `t=s` unwrapped; this branch does not invent that path.
+    let wrap = wrap || (is_frame_edit(bytes) && passthrough_enabled());
+    if graphics_key(bytes, "t=s") {
+        return if wrap { String::new() } else { bytes.to_string() };
+    }
+    // Frame edits have to be wrapped while placeholders are on, even when
+    // the caller forgot: tmux would otherwise swallow them.
     if wrap {
         super::terminal::tmux_passthrough(bytes)
     } else {
@@ -1242,7 +1299,7 @@ fn placeholder_transmit(plot: &Plot, slot: usize, pane_width: usize, rgba: &[u8]
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,q=2,U=1,m={more};",
+                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,q=1,U=1,m={more};",
             ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
@@ -2031,15 +2088,29 @@ mod tests {
             "abaxis values".into(),
         ];
         let plot = Plot::new(2, 1, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
-        let (text, _, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
+        compose(&rows, &[], 40, 6, true, true, true, false);
+        let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
         assert!(text[1].contains('\u{10EEEE}'), "{:?}", text[1]);
-        assert!(after.contains("q=2,U=1"));
-        assert!(after.contains("\x1bPtmux;"));
-        assert!(!after.contains("a=p"));
+        assert!(before.contains("q=1,U=1"), "{before:?}");
+        assert!(before.contains("a=T"), "{before:?}");
+        assert!(before.contains("\x1bPtmux;"));
+        assert!(!before.contains("a=p"), "{before:?}");
         assert!(
-            !after.contains("\x1b[2;3H"),
-            "a virtual placement must not move the cursor"
+            !before.contains("\x1b[2;3H"),
+            "a virtual placement must not move the cursor: {before:?}"
         );
+        assert!(!after.contains("a=T"), "{after:?}");
+        let frame = format!("{before}{}{after}", text.concat());
+        let upload = frame.find("q=1,U=1").expect("upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(upload < cell, "the virtual placement must precede its cells");
+        // A second transmission deletes the previous image before the new one.
+        let (text, before, after) = compose(&rows, &[plot.clone()], 40, 6, true, true, true, false);
+        let frame = format!("{before}{}{after}", text.concat());
+        let delete_at = frame.find("a=d").expect("delete");
+        let upload = frame.find("q=1,U=1").expect("upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(delete_at < upload && upload < cell, "{frame:?}");
         let cell = crate::placeholder::placeholder_cell(42, 0, 0);
         let mixed = format!("ab{cell}cd");
         assert_eq!(super::super::display_width(&mixed), 5);
@@ -2049,17 +2120,53 @@ mod tests {
         assert!(z < tail, "{replaced:?}");
         assert!(!replaced.contains('\u{10EEEE}'), "{replaced:?}");
         assert_eq!(super::super::display_width(&replaced), 5);
-        // Unchanged chart: the text cells are the placement, so nothing is re-sent.
+        // Unchanged chart: ask whether the placement is still there, at its
+        // real size, and do not send the pixels again.
         let (_, before, again) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, true);
-        assert!(
-            before.is_empty() && again.is_empty(),
-            "{before:?} {again:?}"
-        );
+        assert!(again.is_empty(), "{again:?}");
+        assert!(before.contains("a=p") && before.contains("U=1"), "{before:?}");
+        assert!(before.contains("q=1") && before.contains("c=8") && before.contains("r=2"), "{before:?}");
+        assert!(!before.contains("a=T"), "{before:?}");
+        assert!(!before.contains("\x1b[2;3H"), "{before:?}");
         let (direct, _, placed) = compose(&rows, &[plot], 40, 6, true, false, true, false);
         assert!(!direct.iter().any(|row| row.contains('\u{10EEEE}')));
         assert!(placed.contains("a=T"));
         assert!(!placed.contains("U=1"));
         compose(&rows, &[], 40, 6, true, false, true, false);
+    }
+
+    #[test]
+    fn passthrough_wraps_frame_edits_and_leaves_shared_memory_unwrapped() {
+        struct ResetPassthrough;
+        impl Drop for ResetPassthrough {
+            fn drop(&mut self) {
+                set_passthrough(false);
+            }
+        }
+        let _reset = ResetPassthrough;
+        set_passthrough(false);
+        let direct = emit_graphics("\x1b_Ga=T,t=d,i=1,q=1\x1b\\", false);
+        assert_eq!(direct, "\x1b_Ga=T,t=d,i=1,q=1\x1b\\");
+        let shared = emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", false);
+        assert_eq!(shared, "\x1b_Ga=T,t=s,i=1,q=1\x1b\\");
+        assert!(emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", true).is_empty());
+        // The payload can contain the letters of a key. Only the keys count.
+        let payload = emit_graphics("\x1b_Ga=T,t=d,q=1;abcd t=s xyz\x1b\\", true);
+        assert!(payload.starts_with("\x1bPtmux;"), "{payload:?}");
+        assert!(payload.contains("t=s"));
+        set_passthrough(true);
+        for action in ["a=f", "a=a", "a=c"] {
+            let raw = format!("\x1b_G{action},i=1,q=1\x1b\\");
+            let wrapped = emit_graphics(&raw, false);
+            assert!(wrapped.starts_with("\x1bPtmux;"), "{action}: {wrapped:?}");
+            assert!(wrapped.contains(action), "{action}: {wrapped:?}");
+        }
+        let shared = emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", false);
+        assert_eq!(shared, "\x1b_Ga=T,t=s,i=1,q=1\x1b\\");
+        assert!(emit_graphics("\x1b_Ga=T,t=s,i=1,q=1\x1b\\", true).is_empty());
+        let upload = emit_graphics("\x1b_Ga=T,t=d,i=1,q=1\x1b\\", true);
+        assert!(upload.starts_with("\x1bPtmux;"), "{upload:?}");
+        set_passthrough(false);
     }
 
     #[test]
