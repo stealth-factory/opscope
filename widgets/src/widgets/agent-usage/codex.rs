@@ -769,7 +769,13 @@ fn codex_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::P
             Some(at) if at - now() > 0.0 => format!("resets in {}", left_span(at - now())),
             Some(_) => "resetting".into(),
         };
-        let (pace_colour, pace_txt) = pace_cell(lead(win.pct, secs, win.reset), p);
+        // The last-session snapshot is stale on the summary even when the
+        // file is new: it is a fallback, not a fetch. A live window is not.
+        let (pace_colour, pace_txt) = pace_cell(
+            lead(win.pct, secs, win.reset),
+            pace_guessed(!live_answered, false, win.reset),
+            p,
+        );
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(label, label_w)))];
         line.extend(paced_bar_with_plot(plots, rows.len(), &line,
@@ -1697,6 +1703,38 @@ mod tests {
         assert_eq!(got[0].pct, 71.0);
         assert_eq!(got[0].window_secs, Some(10080.0 * 60.0));
         assert_eq!(got[0].label, "7d");
+    }
+
+    #[test]
+    fn the_last_session_pace_is_not_a_live_threshold() {
+        // Two hours left of a five-hour window, 80% spent. Behind the clock,
+        // and the snapshot is a fallback even when the file is new.
+        let reset = now() + 2.0 * 3600.0;
+        let limits = serde_json::json!({
+            "primary": {"used_percent": 80.0, "window_minutes": 300, "resets_at": reset}
+        });
+        let p = palette();
+        let cached = Data { limits: Some(limits), ..Data::default() };
+        let rows = codex_quota(&cached, 120, &p).join("\n");
+        assert!(rows.contains("from the last session"), "{rows}");
+        assert!(rows.contains('~'), "{rows}");
+        let threshold = "\x1b[58;2;255;214;140m";
+        assert!(!rows.contains(threshold), "{rows:?}");
+
+        let live = Data {
+            live: Some(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {"primary_window": {
+                    "used_percent": 80.0,
+                    "limit_window_seconds": 18000,
+                    "reset_at": reset
+                }}
+            })),
+            ..Data::default()
+        };
+        let live_rows = codex_quota(&live, 120, &p).join("\n");
+        assert!(live_rows.contains("live"), "{live_rows}");
+        assert!(!live_rows.contains('~'), "{live_rows}");
     }
 
     #[test]

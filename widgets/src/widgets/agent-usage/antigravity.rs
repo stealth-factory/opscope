@@ -946,7 +946,8 @@ fn antigravity_quota_rows_with_plots(
                 p,
             ));
             line.push((pct_colour(pct, hue, p), pct_text(pct)));
-            let (pace_colour, pace_txt) = pace_cell(lead(pct, secs, reset), p);
+            let (pace_colour, pace_txt) =
+                pace_cell(lead(pct, secs, reset), pace_guessed(false, false, reset), p);
             line.push((pace_colour, pace_txt));
             line.push((p.dim.clone(), format!("  {}", when)));
             let refs: Vec<(&str, String)> =

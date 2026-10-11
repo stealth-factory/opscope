@@ -833,13 +833,20 @@ fn quota_mark(
     )
 }
 
-/// The signed cushion, coloured by whether it is one.
-fn pace_cell(value: Option<f64>, p: &Palette) -> (String, String) {
-    pace_cell_of(value, false, p)
+/// Whether a pace is an estimate rather than a live reading.
+///
+/// The same three the summary already uses. A stale cache, a reset this
+/// widget rolled forward, or a window that has already closed. A negative
+/// cushion on any of those is not the live threshold: it wears `~` and a
+/// dashed underline. The coloured threshold is only for a pace fetched
+/// just now, of the window we are actually in.
+fn pace_guessed(stale: bool, projected: bool, reset: Option<f64>) -> bool {
+    let closed = reset.is_some_and(|at| at <= now());
+    stale || projected || closed
 }
 
-/// The pace figure, with `~` when it rests on a cached percentage rather
-/// than one fetched just now.
+/// The pace figure, with `~` when `guessed` says it rests on a cached
+/// percentage rather than one fetched just now.
 ///
 /// The tilde is doing real work here and it is worth being clear what it
 /// covers. Where the cached window is still open the figure is a few
@@ -848,7 +855,10 @@ fn pace_cell(value: Option<f64>, p: &Palette) -> (String, String) {
 /// reset - so the figure is carried forward rather than extrapolated, and
 /// the `~` is the only thing saying so. The star beside the bar says the
 /// reading is cached; the agent's own tab says how old.
-fn pace_cell_of(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String) {
+///
+/// `guessed` is the caller's freshness. Hardcoding it false is what put the
+/// live threshold underline on a number the heading had already called cached.
+fn pace_cell(value: Option<f64>, guessed: bool, p: &Palette) -> (String, String) {
     match value {
         None => (p.dim.clone(), String::new()),
         Some(v) => {
@@ -3897,6 +3907,41 @@ mod tests {
         // Nothing to say without both halves.
         assert_eq!(lead(50.0, None, half), None);
         assert_eq!(lead(50.0, window, None), None);
+    }
+
+    #[test]
+    fn a_cached_pace_does_not_wear_the_live_threshold() {
+        // The three the summary already treats as an estimate.
+        let open = Some(now() + 3600.0);
+        assert!(pace_guessed(true, false, open));
+        assert!(pace_guessed(false, true, open));
+        assert!(pace_guessed(false, false, Some(now() - 1.0)));
+        assert!(!pace_guessed(false, false, open));
+        assert!(!pace_guessed(false, false, None));
+
+        let p = palette();
+        let (live, live_txt) = pace_cell(Some(-12.0), false, &p);
+        let (cached, cached_txt) = pace_cell(Some(-12.0), true, &p);
+        assert_eq!(live_txt.trim(), "-12%");
+        assert_eq!(cached_txt.trim(), "~-12%");
+        // The threshold colour is the live underline. A cached figure must
+        // not carry it, whether or not this terminal has answered the probe.
+        let threshold = "\x1b[58;2;255;214;140m";
+        assert!(!cached.contains(threshold), "{cached:?}");
+        assert!(!cached.contains("\x1b[4:3m"), "{cached:?}");
+        if live.contains(threshold) {
+            assert!(
+                cached.contains("\x1b[4:5m") || cached.contains("\x1b[4m"),
+                "{cached:?}"
+            );
+        } else {
+            assert_eq!(live, p.warn);
+            assert_eq!(cached, p.dim);
+        }
+        // A cushion is not a threshold. Only falling behind is.
+        let (ahead, ahead_txt) = pace_cell(Some(12.0), false, &p);
+        assert_eq!(ahead_txt.trim(), "+12%");
+        assert!(!ahead.contains(threshold), "{ahead:?}");
     }
 
     /// Local noon on a date, as the epoch seconds the pace works in.

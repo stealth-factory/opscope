@@ -468,10 +468,9 @@ fn summary_with_plots(s: &State, w: usize, p: &Palette, names: &[&str], plots: &
             // Shown for a cached reading too, marked rather than withheld: a
             // blank cell tells the reader nothing, and the percentage it
             // rests on is on the same row with a star beside it.
-            let closed = ahead.is_some_and(|left| left <= 0.0);
-            let guessed = lane.stale || lane.projected || closed;
+            let guessed = pace_guessed(lane.stale, lane.projected, lane.reset);
             let cushion = lead(lane.pct, lane.window_secs, lane.reset);
-            let (pace_colour, pace_txt) = pace_cell_of(cushion, guessed, p);
+            let (pace_colour, pace_txt) = pace_cell(cushion, guessed, p);
             let mut line: Vec<(String, String)> = vec![(
                 p.dim.clone(),
                 format!("   {} ", tc::pad(&lane.label, label_w)),

@@ -546,7 +546,11 @@ fn draw_lanes_with_plots(lanes: &[&Lane], hue: Option<(u8, u8, u8)>, w: usize, p
             p,
         ));
         line.push((quota_mark(lane.pct, hue, p, lane.stale, lane.projected), pct_text(lane.pct)));
-        line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
+        line.push(pace_cell(
+            lead(lane.pct, lane.window_secs, lane.reset),
+            pace_guessed(lane.stale, lane.projected, lane.reset),
+            p,
+        ));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
         let when = match lane.reset.map(|reset| reset - now()) {
