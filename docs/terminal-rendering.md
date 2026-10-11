@@ -33,8 +33,10 @@ from graphics. A terminal that answers the OSC 99 query gets one notification
 per alert, with a stable id so a repeat replaces it and `a=report` so a click
 can focus the pane. Every other terminal, including one that only speaks OSC 9
 (Ghostty among them), still gets the OSC 9 and OSC 777 bytes clocks has always
-sent. Text sizing is OSC 66, detected by a cursor-position round trip: the
-width probe must move two columns and the scale probe two more. `clocks` and
+sent. A semicolon in that fallback is dropped, because OSC 777 uses it to
+split the command, the title and the body. Text sizing is OSC 66, detected by
+a cursor-position round trip: the width probe must move two columns and the
+scale probe two more. `clocks` and
 `months` use it only when a scale from 2× to 4× fits the pane. A block that
 does not fit stays the block digits or the ordinary heading. Core emits the
 sequences; widgets do not branch on the terminal.

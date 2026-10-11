@@ -445,8 +445,16 @@ fn notify_bytes(title: &str, body: &str, kitty: bool) -> String {
             "\x1b]99;i={NOTIFICATION_ID}:a=report:d=0;{title}\x1b\\\x1b]99;i={NOTIFICATION_ID}:p=body;{body}\x1b\\"
         )
     } else {
+        let title = plain_notify(title);
+        let body = plain_notify(body);
         format!("\x1b]9;{body}\x07\x1b]777;notify;{title};{body}\x07")
     }
+}
+
+/// OSC 9 and OSC 777 text. Controls would end the sequence, and a semicolon
+/// is how OSC 777 splits the command, the title and the body.
+fn plain_notify(text: &str) -> String {
+    escape_safe(text).replace(';', "")
 }
 
 /// Payload text with the C0 and C1 controls taken out. Those bytes would
@@ -661,17 +669,23 @@ fn forget_frame() {
 ///
 /// The whole frame when there is nothing to compare against, the size has
 /// changed, or `lost` says the screen was disturbed some other way or is
-/// due a whole frame anyway; otherwise
-/// each row that differs, reached with a cursor move of core's own and
-/// erased from column 0 before it is written, exactly as `painted` does it.
-/// A frame identical to the last writes nothing at all.
+/// due a whole frame anyway; otherwise each row that differs, and each row
+/// a previous sized block covered that this frame does not. Both are
+/// reached with a cursor move of core's own and erased from column 0
+/// before they are written, exactly as `painted` does it. A frame identical
+/// to the last writes nothing at all.
 fn paint(shown: &mut Option<Shown>, rows: &[String], w: usize, h: usize, lost: bool) -> String {
     let lines = lines(rows, w, h);
     let (buf, whole_at) = match shown {
         Some(last) if !lost && last.w == w && last.h == h => {
             let mut buf = String::new();
             for (i, line) in lines.iter().enumerate() {
-                if last.lines.get(i) != Some(line) {
+                // A row the previous sized block covered, and this frame does
+                // not, still shows that glyph — or never received the text
+                // that was under it. The strings can match either way.
+                let uncovered =
+                    covering_row(&last.lines, i).is_some() && covering_row(&lines, i).is_none();
+                if last.lines.get(i) != Some(line) || uncovered {
                     buf.push_str(&format!("\x1b[{}H", i + 1));
                     put_row(&mut buf, &lines, i);
                 }
@@ -4824,6 +4838,17 @@ mod tests {
         assert!(second.contains("i=opscope-pomodoro"));
         assert!(!first.contains("\x1b]9;"));
         assert!(!second.contains("\x1b]777;"));
+        // A semicolon is OSC 777's field separator. Controls end OSC 9.
+        // The Kitty path still carries the semicolon: its payload is not
+        // split that way.
+        let messy = super::notify_bytes("Po;mo\x1b", "line;one\x07", false);
+        assert_eq!(
+            messy,
+            "\x1b]9;lineone\x07\x1b]777;notify;Pomo;lineone\x07"
+        );
+        let kitty = super::notify_bytes("Po;mo", "line;one", true);
+        assert!(kitty.contains("Po;mo"), "{kitty:?}");
+        assert!(kitty.contains("line;one"), "{kitty:?}");
     }
 
     #[test]
@@ -5053,6 +5078,59 @@ mod tests {
         assert_eq!(again.len(), 1, "{again:?}");
         assert_eq!(again[0].0, 1);
         assert!(again[0].1.ends_with(&tag), "{:?}", again[0].1);
+    }
+
+    #[test]
+    fn a_shrunk_sized_block_repaints_the_rows_it_no_longer_covers() {
+        // The rows under a sized face are empty in both frames, so a
+        // comparison of the text says nothing changed. The old glyph is
+        // still sitting on them until something erases those rows. The row
+        // the smaller face still covers is left alone: erasing it from
+        // column 0 would delete the new glyph.
+        let w = 40;
+        let mut shown = None;
+        let big = vec![
+            "title".into(),
+            super::sized_sequence("12:34:56", 4),
+            String::new(),
+            String::new(),
+            String::new(),
+            "tail".into(),
+        ];
+        super::paint(&mut shown, &big, w, 6, false);
+        let small = vec![
+            "title".into(),
+            super::sized_sequence("12:34:56", 2),
+            String::new(),
+            String::new(),
+            String::new(),
+            "tail".into(),
+        ];
+        let bytes = super::paint(&mut shown, &small, w, 6, false);
+        let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
+        assert!(rows.contains(&2), "the smaller face was not sent: {rows:?}");
+        assert!(
+            rows.contains(&4) && rows.contains(&5),
+            "rows the scale-4 face covered were left: {rows:?}"
+        );
+        assert!(
+            !rows.contains(&3),
+            "the row under the scale-2 face was erased: {rows:?}"
+        );
+        // Becoming ordinary text uncovers that last row too.
+        let plain = vec![
+            "title".into(),
+            "12:34:56".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "tail".into(),
+        ];
+        let bytes = super::paint(&mut shown, &plain, w, 6, false);
+        let rows: Vec<usize> = rewritten(&bytes).into_iter().map(|(row, _)| row).collect();
+        assert!(rows.contains(&2), "{rows:?}");
+        assert!(rows.contains(&3), "the last covered row was left: {rows:?}");
+        assert!(!rows.contains(&4) && !rows.contains(&5), "{rows:?}");
     }
 
     #[test]
