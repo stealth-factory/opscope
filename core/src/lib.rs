@@ -221,8 +221,33 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 }
 
 /// The terminal columns occupied by printable text.
+///
+/// Colour and other escapes are not text. An OSC 66 sized block occupies
+/// `scale` times the width of its payload.
 pub fn display_width(s: &str) -> usize {
-    s.width()
+    if !s.contains('\u{1b}') {
+        return s.width();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut columns = 0usize;
+    let mut visible = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\u{1b}' {
+            if let Some((end, _, width)) = sized_span(&chars, i) {
+                columns += visible.width();
+                visible.clear();
+                columns += width;
+                i = end;
+                continue;
+            }
+            i = skip_escape(&chars, i);
+            continue;
+        }
+        visible.push(chars[i]);
+        i += 1;
+    }
+    columns + visible.width()
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
@@ -859,7 +884,8 @@ fn put_covered(buf: &mut String, origin: &str) {
 }
 
 /// Columns a drawn row occupies. Colour costs nothing. A sized block
-/// occupies `scale` times the width of its text.
+/// occupies `scale` times the width of its text. Any other escape is
+/// skipped whole, so its payload is not columns.
 pub fn occupied_columns(row: &str) -> usize {
     let chars: Vec<char> = row.chars().collect();
     let mut i = 0usize;
@@ -871,22 +897,13 @@ pub fn occupied_columns(row: &str) -> usize {
                 i = end;
                 continue;
             }
-            if chars.get(i + 1) == Some(&'[') {
-                let mut j = i + 2;
-                while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
-                    j += 1;
-                }
-                i = (j + 1).min(chars.len());
-                continue;
-            }
-            i += 1;
+            i = skip_escape(&chars, i);
             continue;
         }
         if chars[i] == '\t' {
             columns += 1;
         } else if !chars[i].is_control() {
-            let ch = chars[i];
-            columns += display_width(&ch.to_string());
+            columns += display_width(&chars[i].to_string());
         }
         i += 1;
     }
@@ -925,15 +942,7 @@ fn covered_ranges(row: &str) -> Vec<(usize, usize)> {
                 i = end;
                 continue;
             }
-            if chars.get(i + 1) == Some(&'[') {
-                let mut j = i + 2;
-                while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
-                    j += 1;
-                }
-                i = (j + 1).min(chars.len());
-                continue;
-            }
-            i += 1;
+            i = skip_escape(&chars, i);
             continue;
         }
         if chars[i] == '\t' {
@@ -944,6 +953,38 @@ fn covered_ranges(row: &str) -> Vec<(usize, usize)> {
         i += 1;
     }
     ranges
+}
+
+/// Index just after the escape that starts at `i`.
+fn skip_escape(chars: &[char], i: usize) -> usize {
+    if chars.get(i) != Some(&'\x1b') {
+        return (i + 1).min(chars.len());
+    }
+    match chars.get(i + 1) {
+        Some('[') => {
+            let mut j = i + 2;
+            while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
+                j += 1;
+            }
+            (j + 1).min(chars.len())
+        }
+        Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+            let mut j = i + 2;
+            while j < chars.len() {
+                if chars[j] == '\x07' {
+                    return j + 1;
+                }
+                if chars[j] == '\x1b' && chars.get(j + 1) == Some(&'\\') {
+                    return (j + 2).min(chars.len());
+                }
+                j += 1;
+            }
+            chars.len()
+        }
+        Some(n) if ('\x20'..='\x2f').contains(n) => (i + 3).min(chars.len()),
+        Some(_) => (i + 2).min(chars.len()),
+        None => i + 1,
+    }
 }
 
 /// OSC 66 `s=N` with a plain payload. `N` is 2..=7. Anything else is not
@@ -4879,6 +4920,49 @@ mod tests {
         );
         assert!(!too_wide[1].contains("\x1b]66"), "{:?}", too_wide[1]);
         assert!(too_wide[1].contains("12:34:56"));
+    }
+
+    #[test]
+    fn inert_keeps_sized_text() {
+        // OSC 66 has to survive `inert`, or the frame deletes the block
+        // before it is drawn. A scale outside 2..=7 is not sized text.
+        let face = super::sized_sequence("12:34:56", 2);
+        assert_eq!(super::inert(&face), face);
+        let st = "\x1b]66;s=3;AB\x1b\\";
+        assert_eq!(super::inert(st), st);
+        assert_eq!(super::inert("\x1b]66;s=1;12:34:56\x07"), "");
+        assert_eq!(super::inert("\x1b]52;c;AQID\x07plain"), "plain");
+    }
+
+    #[test]
+    fn display_width_counts_a_sized_block_as_scale_times_its_text() {
+        // Counting the OSC payload would report the command bytes, and the
+        // pane would think a 2× face still fits a column that cannot hold it.
+        assert_eq!(super::display_width("12:34:56"), 8);
+        let face = super::sized_sequence("12:34:56", 2);
+        assert_eq!(super::display_width(&face), 16);
+        assert_eq!(super::display_width(&super::sized_sequence("12:34:56", 4)), 32);
+        let coloured = format!("{} {}", super::rgb(120, 255, 200), face);
+        assert_eq!(super::display_width(&coloured), 1 + 16);
+    }
+
+    #[test]
+    fn occupied_columns_skips_an_osc_payload() {
+        // The payload is longer than the title. Walking one byte past ESC
+        // counts it as columns and a fitting sized block looks too wide
+        // for the pane.
+        let url = "https://example.com/opscope/deployments/1";
+        let title = "ship the pane";
+        assert!(url.len() > title.len());
+        let row = format!("\x1b]8;;{url}\x07{title}");
+        assert_eq!(super::occupied_columns(&row), super::display_width(title));
+        assert_eq!(super::occupied_columns("a\tb"), 3);
+        let face = super::sized_sequence("12:34:56", 2);
+        let both = format!("{row} {face}");
+        assert_eq!(
+            super::occupied_columns(&both),
+            super::display_width(title) + 1 + 16
+        );
     }
 
     #[test]

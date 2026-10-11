@@ -38,8 +38,9 @@ split the command, the title and the body. Text sizing is OSC 66, detected by
 a cursor-position round trip: the width probe must move two columns and the
 scale probe two more. `clocks` and
 `months` use it only when a scale from 2× to 4× fits the pane. A block that
-does not fit stays the block digits or the ordinary heading. Core emits the
-sequences; widgets do not branch on the terminal.
+does not fit stays the block digits or the ordinary heading. `draw` keeps an
+OSC 66 block, and that block occupies scale times the width of its text.
+Core emits the sequences; widgets do not branch on the terminal.
 
 ## Choosing a renderer
 
