@@ -62,10 +62,11 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 const RUN_TIMEOUT: u64 = 15;
 const EVENT_WAIT_GRACE: u64 = 3;
 
-// Test stand-in for `luvus_text`. Production always shells out; a test
-// that has to fail one read after another cannot do that against a live
-// session, and a cursor written by hand never reaches the failure path.
-#[cfg(test)]
+// Test stand-in for `luvus_text`. A cursor written by hand never reaches
+// the failure path, and there is no live session to fail against. This
+// stays unset outside tests. It cannot sit behind `cfg(test)`: the widget
+// checks keep only the source before the first one, so an early gate would
+// hide the rest of this file from them.
 thread_local! {
     static LUVUS_TEXT_OVERRIDE: std::cell::RefCell<
         Option<fn(&str, &[&str]) -> Result<String, String>>,
@@ -74,7 +75,6 @@ thread_local! {
 
 /// Run one luvus command against a named session and hand back its stdout.
 fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
-    #[cfg(test)]
     if let Some(answer) =
         LUVUS_TEXT_OVERRIDE.with(|slot| slot.borrow().map(|hook| hook(session, args)))
     {
