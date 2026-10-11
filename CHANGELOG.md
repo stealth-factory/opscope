@@ -3,6 +3,17 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [0.40.0] - 2026-10-11
+
+### CI
+
+- Migrate GitHub Actions runtimes to Node 24 (#339)
+
+### Features
+
+- **agent-usage**: Detect Devin via the signed-in CLI's credentials (#354)
+- **widgets**: Refresh Luvus and Herdr panes on session events (#340)
+
 ## [0.39.0] - 2026-10-10
 
 ### Features
