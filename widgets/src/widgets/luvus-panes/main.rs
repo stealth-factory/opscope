@@ -62,8 +62,24 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 const RUN_TIMEOUT: u64 = 15;
 const EVENT_WAIT_GRACE: u64 = 3;
 
+// Test stand-in for `luvus_text`. Production always shells out; a test
+// that has to fail one read after another cannot do that against a live
+// session, and a cursor written by hand never reaches the failure path.
+#[cfg(test)]
+thread_local! {
+    static LUVUS_TEXT_OVERRIDE: std::cell::RefCell<
+        Option<fn(&str, &[&str]) -> Result<String, String>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
 /// Run one luvus command against a named session and hand back its stdout.
 fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(answer) =
+        LUVUS_TEXT_OVERRIDE.with(|slot| slot.borrow().map(|hook| hook(session, args)))
+    {
+        return answer;
+    }
     let mut argv = vec!["luvus", "--session", session];
     argv.extend_from_slice(args);
     tc::run(&argv, RUN_TIMEOUT).map_err(|why| parse::sanitize_error(&why))
@@ -2621,12 +2637,66 @@ fn main() {
 mod tests {
     use super::*;
 
+    thread_local! {
+        static SNAPSHOT_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Clears the command stand-in even when the test panics, so a later
+    /// test on this thread cannot answer `luvus` from the fixture.
+    struct ClearLuvusOverride;
+
+    impl Drop for ClearLuvusOverride {
+        fn drop(&mut self) {
+            LUVUS_TEXT_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn scripted_luvus(_session: &str, args: &[&str]) -> Result<String, String> {
+        if args == ["uhp", "snapshot"] {
+            let attempt = SNAPSHOT_READS.with(|reads| {
+                let attempt = reads.get();
+                reads.set(attempt + 1);
+                attempt
+            });
+            return if attempt == 0 {
+                Ok(
+                    r#"{"result":{"event_sequence":61,"session":"fixture","workspaces":[]}}"#
+                        .into(),
+                )
+            } else {
+                Err("connection refused".into())
+            };
+        }
+        Err("fixture command has no answer".into())
+    }
+
     #[test]
     fn latest_successful_event_baseline_survives_a_failed_snapshot() {
-        let mut state = State::default();
-        state.snapshot_epoch = 4;
-        state.event_cursor = Some(61);
-        assert_eq!(event_baseline(&Arc::new(Mutex::new(state))), Some((4, 61)));
+        SNAPSHOT_READS.with(|reads| reads.set(0));
+        LUVUS_TEXT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(scripted_luvus));
+        let _clear = ClearLuvusOverride;
+        let state = Arc::new(Mutex::new(State::default()));
+        let mut seen = Seen::default();
+
+        poll(&state, &mut seen, "fixture");
+        assert_eq!(
+            event_baseline(&state),
+            Some((1, 61)),
+            "a parsed snapshot is what publishes the cursor"
+        );
+        assert!(state.lock().unwrap().snapshot.is_ok());
+
+        poll(&state, &mut seen, "fixture");
+        let guard = state.lock().unwrap();
+        assert!(
+            guard.snapshot.is_err(),
+            "the second read has to fail or the cursor was never at risk"
+        );
+        assert_eq!(guard.snapshot_epoch, 1);
+        assert_eq!(guard.event_cursor, Some(61));
+        drop(guard);
+        assert_eq!(event_baseline(&state), Some((1, 61)));
+        assert_eq!(SNAPSHOT_READS.with(|reads| reads.get()), 2);
     }
 
     #[test]
