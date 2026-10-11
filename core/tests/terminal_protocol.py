@@ -302,11 +302,27 @@ def cell_raster_rejects_absurd_and_zero(t):
     assert int(keys[b"v"]) == rows * 16
 
 
+def cell_queries_stay_outside_images(output):
+    """`CSI 16 t` is sent between frames, never inside a Kitty APC chunk."""
+    rest = output
+    while True:
+        start = rest.find(b"\x1b_G")
+        if start < 0:
+            break
+        end = rest.find(b"\x1b\\", start)
+        if end < 0:
+            assert b"\x1b[16t" not in rest[start:]
+            break
+        assert b"\x1b[16t" not in rest[start:end]
+        rest = rest[end + 2:]
+
+
 def cell_raster_follows_winsize_pixels(t):
     keys, _ = t.images()[0]
     cols, rows = int(keys[b"c"]), int(keys[b"r"])
     assert int(keys[b"s"]) == cols * 8
     # 20 rows, 80 cols, 1600×800 px → a 20×40 cell. Column count stays put.
+    before = t.output.count(b"\x1b[16t")
     fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 1600, 800))
     os.kill(t.proc.pid, signal.SIGWINCH)
     t.read(0.8)
@@ -315,6 +331,31 @@ def cell_raster_follows_winsize_pixels(t):
     assert int(keys[b"r"]) == rows
     assert int(keys[b"s"]) == cols * 20, keys
     assert int(keys[b"v"]) == rows * 40, keys
+    assert t.output.count(b"\x1b[16t") > before, "resize did not ask for a cell size"
+    cell_queries_stay_outside_images(t.output)
+
+
+def cell_raster_drops_a_barren_resize(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"s"]) == cols * 20
+    assert int(keys[b"v"]) == rows * 40
+    # Same cell grid, no pixel fields, and no new reply. The previous 20×40
+    # must not stick; the raster returns to 8×16.
+    before = t.output.count(b"\x1b[16t")
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"c"]) == cols
+    assert int(keys[b"r"]) == rows
+    assert int(keys[b"s"]) == cols * 8, keys
+    assert int(keys[b"v"]) == rows * 16, keys
+    assert t.output.count(b"\x1b[16t") > before
+    cell_queries_stay_outside_images(t.output)
 
 
 def responsive_selection(t):
@@ -339,6 +380,7 @@ if __name__ == "__main__":
                                ("auto", "kitty", cell_raster_follows_report),
                                ("auto", "kitty", cell_raster_rejects_absurd_and_zero),
                                ("auto", "kitty", cell_raster_follows_winsize_pixels),
+                               ("auto", "kitty", cell_raster_drops_a_barren_resize),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

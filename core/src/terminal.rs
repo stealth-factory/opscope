@@ -17,7 +17,6 @@ pub(crate) const FALLBACK_CELL_H: usize = 16;
 /// so the uncompressed RGBA bytes of a plot stay at or under this times
 /// 8×16×4.
 pub(crate) const MAX_PLOT_CELLS: usize = 20_000;
-const CELL_QUERY: &[u8] = b"\x1b[16t";
 /// `CSI ? u` stays immediately before `CSI c`. `CSI 16 t` follows `CSI c`.
 const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c\x1b[16t";
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
@@ -38,6 +37,10 @@ static QUERY_CELLS: AtomicBool = AtomicBool::new(false);
 static CELL_QUERY_GEN: AtomicU64 = AtomicU64::new(0);
 static CELL_REPORT_GEN: AtomicU64 = AtomicU64::new(u64::MAX);
 static CELL_STALE: AtomicBool = AtomicBool::new(false);
+/// Set from the SIGWINCH handler. The next complete frame sends the query;
+/// the handler itself does not write, so `CSI 16 t` cannot land inside an
+/// image chunk.
+static CELL_NEED_SEND: AtomicBool = AtomicBool::new(false);
 static CELL: AtomicU32 = AtomicU32::new(((FALLBACK_CELL_H as u32) << 16) | FALLBACK_CELL_W as u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -358,33 +361,56 @@ fn cell_from_winsize() -> Option<(usize, usize)> {
     )
 }
 
-/// A font change in Kitty is a SIGWINCH with a new cell size. Ask again,
-/// and let the next frame read the window's pixel fields until the reply.
-/// Signal-safe: atomics and one write, no locks.
+/// A font change in Kitty is a SIGWINCH with a new cell size. Record that
+/// the next frame should ask again. Signal-safe: atomics only, no write
+/// and no locks, so the query cannot split an image chunk.
 pub(crate) fn note_resize() {
     if !QUERY_CELLS.load(Ordering::Acquire) {
         return;
     }
     CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
     CELL_STALE.store(true, Ordering::Release);
-    unsafe {
-        libc::write(
-            libc::STDOUT_FILENO,
-            CELL_QUERY.as_ptr().cast(),
-            CELL_QUERY.len(),
-        );
+    CELL_NEED_SEND.store(true, Ordering::Release);
+}
+
+/// `CSI 16 t` for the front of the next complete frame, or empty when no
+/// resize is waiting. A failed write puts the flag back.
+pub(crate) fn take_cell_query() -> &'static str {
+    if CELL_NEED_SEND.swap(false, Ordering::AcqRel) {
+        "\x1b[16t"
+    } else {
+        ""
     }
 }
 
-/// Use the window pixel size when a resize is still waiting on `CSI 16 t`.
+pub(crate) fn restore_cell_query() {
+    CELL_NEED_SEND.store(true, Ordering::Release);
+}
+
+/// Cell to publish for a resize that does not already have a reply.
+///
+/// `None` leaves a still-valid report for this resize alone. Otherwise the
+/// window pixel size, or 8×16 when that report is missing, zero or absurd.
+pub(crate) fn pending_cell(
+    report_is_current: bool,
+    ioctl: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    if report_is_current {
+        None
+    } else {
+        Some(ioctl.unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H)))
+    }
+}
+
+/// Use the window pixel size, or 8×16, when a resize is still waiting on
+/// `CSI 16 t`. A reply that already matched this resize is left alone.
 pub(crate) fn apply_pending_cell_size() {
     if !CELL_STALE.swap(false, Ordering::AcqRel) {
         return;
     }
-    if CELL_REPORT_GEN.load(Ordering::Acquire) == CELL_QUERY_GEN.load(Ordering::Acquire) {
-        return;
-    }
-    if let Some((w, h)) = cell_from_winsize() {
+    let report_is_current =
+        CELL_REPORT_GEN.load(Ordering::Acquire) == CELL_QUERY_GEN.load(Ordering::Acquire);
+    if let Some((w, h)) = pending_cell(report_is_current, cell_from_winsize()) {
         publish_cell(w, h);
     }
 }
@@ -766,6 +792,16 @@ mod tests {
         // A usable window size is the step between a bad report and 8×16.
         assert_eq!(resolve_cell(None, Some((10, 22))), (10, 22));
         assert_eq!(resolve_cell(Some((20, 40)), Some((10, 22))), (20, 40));
+    }
+
+    #[test]
+    fn a_resize_without_a_report_or_pixels_uses_8x16() {
+        // A reply already matched this resize: leave that size alone.
+        assert_eq!(pending_cell(true, None), None);
+        assert_eq!(pending_cell(true, Some((20, 40))), None);
+        // No reply yet. A sane window size stands; a missing one is 8×16.
+        assert_eq!(pending_cell(false, Some((20, 40))), Some((20, 40)));
+        assert_eq!(pending_cell(false, None), Some((8, 16)));
     }
 
     #[test]

@@ -99,14 +99,18 @@ than make that up.
 
 Charts rasterise at the terminal's reported cell size. During the 800 ms
 negotiation core sends `CSI 16 t` and reads `CSI 6 ; height ; width t`. A
-resize (`SIGWINCH`, including a Kitty font change) asks again. Until that
-reply, and when the numbers are missing, zero, or not a character cell
-(outside 4×8..=48×96, or an aspect outside 5:4..=3:1), core uses the pixel
-fields of `TIOCGWINSZ` divided by the column and row counts. If those are
-zero too, the raster is 8×16, which is what Braille's 2×4 dots are compared
-with and what every in-process test measures. The terminal still places the
-image in the same cell box; only the raster is finer, so a HiDPI cell is not
-an 8×16 image scaled up after the stroke was drawn.
+resize (`SIGWINCH`, including a Kitty font change) only records that the
+next frame should ask again. That frame sends `CSI 16 t` on the normal
+output path, before its image bytes, so the query cannot split a Kitty
+chunk. Until that reply, and when the numbers are missing, zero, or not a
+character cell (outside 4×8..=48×96, or an aspect outside 5:4..=3:1), core
+uses the pixel fields of `TIOCGWINSZ` divided by the column and row counts.
+If those are missing, zero, or not a character cell either, the raster is
+8×16 rather than the size from before the resize. That is what Braille's
+2×4 dots are compared with and what every in-process test measures. A
+reply that already matched this resize is left as reported. The terminal
+still places the image in the same cell box; only the raster is finer, so
+a HiDPI cell is not an 8×16 image scaled up after the stroke was drawn.
 
 A larger cell lowers the per-plot cell cap. At 8×16 a plot may be 20,000
 cells (10,240,000 uncompressed RGBA bytes). At 20×40 the cap is 3,200 cells
@@ -276,7 +280,9 @@ also answer the keyboard-protocol query and check that flag 1 is pushed on
 start, popped on exit, suspend, panic and a typed Ctrl-C, Ctrl-Z or Ctrl-\,
 and pushed again after resume. They also check that a `CSI 16 t` reply
 changes the image's pixel size and that a zero or absurd reply leaves the
-8×16 raster, and that window pixel fields do the same when no reply arrives.
+8×16 raster, that window pixel fields do the same when no reply arrives,
+and that a resize with neither a new reply nor pixel fields returns to 8×16.
+The cell query stays outside image chunks.
 Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation,

@@ -478,6 +478,10 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
+    // The resize handler only sets a flag. The query goes out here, before
+    // this frame's image chunks, so it cannot land inside one.
+    let query = terminal::take_cell_query();
+    let bytes = format!("{query}{bytes}");
     // `out` drops a failed write, which a full frame every time could
     // afford: the next one put it right. Rows that never reached the
     // terminal must not be remembered as on it, or they stay wrong until
@@ -488,6 +492,9 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
         .and_then(|_| stdout.flush())
         .is_err()
     {
+        if !query.is_empty() {
+            terminal::restore_cell_query();
+        }
         *shown = None;
     }
 }
