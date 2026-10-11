@@ -119,9 +119,44 @@ owned image IDs. Scrolling crops the chart instead of changing its axes.
 Geometry is worked out on the full chart, then only the visible rows and the
 columns that fit the pane are allocated and stroked, coverage buffers included.
 Core cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
-resume. A one-sample tick still replaces the whole image. OPS-155 edits that
-image in place when the terminal accepts a frame operation, and keeps this
-full upload when it does not.
+resume.
+
+### One new sample
+
+A live line chart that gains samples does not have to be sent again. When
+the new series is the old one slid by N slots, the scale and the slot count
+are unchanged, and that slide is a whole number of pixels, core shifts the
+image the terminal already holds and uploads only the new columns.
+
+Kitty refuses to compose a frame onto itself when the rectangles overlap, and
+a one-slot shift always overlaps, so the shift is taken from a one-pixel copy
+of the root frame and written back onto the root (`a=c`, source offsets `X`/`Y`,
+destination offsets `x`/`y`). The copy's replaced pixel sits in the strip the
+shift discards. The new columns then replace the right-hand edge of the root
+(`a=f` with `r=1`, `x`, `s` and `v`). The join pixel, one left of an N-slot
+strip, is part of that upload: the new segment starts there. The oldest
+column is uploaded the same way. The segment that just left the chart can
+still cover it, and a pure shift would leave that tail behind.
+
+Startup sends a 1×1 probe and a frame compose on it, ahead of the capability
+tail. `OK` enables the path. `ENOENT` or `EINVAL`, or no answer, leaves it
+off, and every tick stays a full `a=T` upload. A later frame error does the
+same and asks the next frame to send the image again. A rescale, a slot-count
+change, a resize, a scroll that changes the crop, or a screen loss is a full
+upload too. Text and Braille are unchanged.
+
+The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
+pixels only for some shapes. A netwatch trace on an 80-column pane is 64
+cells wide. Its steady window is 128 samples, and 511 is not divisible by
+127, so that tick stays a full upload: 3294 bytes for the image command, on
+a 4-row one-trace chart at level-6 RGBA. The same width with 74 samples has
+pitch 7. There the image command is 2386 bytes and the frame edit is 451,
+measured from `compose`. Both figures are the command that carries the
+pixels. A full tick also deletes the previous image first; the frame edit
+does not.
+
+It is still not a general animation player. Nothing is drawn that the full
+raster would not have drawn.
 
 Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
 on synthetic frames at the sizes the widgets use:
@@ -154,8 +189,8 @@ placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
 does not depend on potentially unavailable cell-pixel-size reports. Up to 32
 visible plots, each at most 20,000 cells, use images; additional or larger plots
 use text to bound image memory/transport costs. It is a raster chart renderer,
-not a general replacement for terminal text, native scaled fonts or animation
-frames in the Kitty protocol.
+not a general replacement for terminal text or native scaled fonts. Frame
+edits are only the one-sample slide described above.
 
 ## Widget API
 

@@ -9,8 +9,10 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
-const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c";
-const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
+const GRAPHICS_QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+/// Sync, then the keyboard query, then device attributes. The keyboard
+/// query goes out before device attributes.
+const QUERY_TAIL: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
@@ -94,6 +96,7 @@ pub(crate) fn start() {
         ..Session::default()
     };
     SYNC_SUPPORTED.store(false, Ordering::Release);
+    super::graphics::reset_animation();
     if unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1 {
         return;
     }
@@ -115,14 +118,16 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    let mut bytes = format!(
-        "{}{UNDERLINE_QUERY}",
-        if mode == GraphicsMode::Text {
-            TEXT_QUERY
-        } else {
-            QUERY
-        }
-    );
+    // The frame probe sits before the tail, so a reply to the tail has already
+    // seen it. Until it is acknowledged, charts keep the full upload.
+    let mut bytes = if mode == GraphicsMode::Text {
+        format!("{QUERY_TAIL}{UNDERLINE_QUERY}")
+    } else {
+        format!(
+            "{GRAPHICS_QUERY}{}{QUERY_TAIL}{UNDERLINE_QUERY}",
+            super::graphics::animation_probe()
+        )
+    };
     if let Some(probe) = probe {
         bytes.push_str(&probe);
     }
@@ -185,6 +190,28 @@ impl Session {
             let id = keys
                 .split(',')
                 .find_map(|key| key.strip_prefix("i=")?.parse::<u32>().ok());
+            if id == Some(super::graphics::probe_id()) {
+                if message.starts_with("OK") {
+                    super::graphics::set_animation(true);
+                } else if message.starts_with("ENOENT") || message.starts_with("EINVAL") {
+                    super::graphics::set_animation(false);
+                }
+                let discard = super::graphics::discard_probe();
+                unsafe {
+                    libc::write(libc::STDOUT_FILENO, discard.as_ptr().cast(), discard.len());
+                }
+                return false;
+            }
+            // A frame edit that the terminal rejects is not a broken image.
+            // Drop back to full uploads; pixels stay on.
+            if id.is_some_and(super::graphics::frame_edit_pending)
+                && (message.starts_with("ENOENT") || message.starts_with("EINVAL"))
+            {
+                super::graphics::set_animation(false);
+                super::graphics::clear_frame_edits();
+                super::screen_lost();
+                return false;
+            }
             if let Some(id) = id.filter(|id| super::graphics::owns_image(*id)) {
                 // ENOENT means the terminal dropped the placement. Only a
                 // replaced object is collected; the current one reused the id.
@@ -503,6 +530,23 @@ mod tests {
             s.reply(&format!("\x1b_Gi={ours},p=1;EINVAL:bad\x1b\\"), now);
             assert!(!s.capabilities.kitty_graphics && s.image_rejected);
         }
+    }
+
+    #[test]
+    fn a_refused_frame_probe_keeps_full_uploads() {
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let probe = crate::graphics::probe_id();
+        s.reply(&format!("\x1b_Gi={probe};EINVAL:no animation\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        assert!(!crate::graphics::animation_ready());
+        s.reply(&format!("\x1b_Gi={probe};OK\x1b\\"), now);
+        assert!(crate::graphics::animation_ready());
+        crate::graphics::reset_animation();
     }
 
     #[test]

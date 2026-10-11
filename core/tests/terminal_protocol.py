@@ -65,8 +65,13 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if self.reply == "kitty" or self.reply == "keyboard":
+                if self.reply in ("kitty", "keyboard", "noframes"):
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
+                    probe = self.probe_id()
+                    if probe and self.reply == "kitty":
+                        response += b"\x1b_Gi=" + probe + b";OK\x1b\\"
+                    elif probe and self.reply == "noframes":
+                        response += b"\x1b_Gi=" + probe + b";EINVAL:no animation\x1b\\"
                 elif self.reply == "reject":
                     response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
                 response += b"\x1b[?2026;2$y"
@@ -101,6 +106,13 @@ class Terminal:
 
     def images(self):
         return [(keys, payload) for keys, payload in self.commands() if keys.get(b"a") == b"T"]
+
+    def probe_id(self):
+        # The startup compose is a 1x1 frame, distinct from a chart column.
+        for keys, _payload in self.commands():
+            if keys.get(b"a") == b"c" and keys.get(b"w") == b"1" and keys.get(b"h") == b"1":
+                return keys.get(b"i")
+        return None
 
     def quit(self):
         names = shm_names(self.commands())
@@ -406,6 +418,33 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+def frame_tick(t):
+    # The fixture's four slots are a whole-pixel shift at 80 columns.
+    mark = len(t.commands())
+    images = len(t.images())
+    t.send(b"t")
+    t.read(0.3)
+    fresh = t.commands()[mark:]
+    actions = [keys.get(b"a") for keys, _payload in fresh]
+    assert b"c" in actions and b"f" in actions, actions
+    assert b"T" not in actions, actions
+    assert len(t.images()) == images
+    # A changed sample in the middle is a new scale, not a slide.
+    mark = len(t.commands())
+    t.send(b"s")
+    t.read(0.3)
+    fresh = t.commands()[mark:]
+    assert any(keys.get(b"a") == b"T" for keys, _payload in fresh)
+
+
+def frames_refused(t):
+    mark = len(t.images())
+    t.send(b"t")
+    t.read(0.3)
+    assert len(t.images()) > mark, "a refused frame probe still has to upload the tick"
+    assert t.probe_id(), "animation probe was not sent"
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -493,7 +532,8 @@ if __name__ == "__main__":
                                ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
-                               ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
+                               ("text", "sync", underlines), ("text", "sync", plain_underlines),
+                               ("auto", "kitty", frame_tick), ("auto", "noframes", frames_refused)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
     for ending in ["signal", "panic"]:

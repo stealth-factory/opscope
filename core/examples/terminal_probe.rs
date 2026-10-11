@@ -13,6 +13,9 @@ fn main() {
     let mut moving_meter = false;
     let mut tick = 0_u64;
     let mut selected = 0;
+    // Four slots on an 80-column fixture: the chart is 74 cells wide, and
+    // (74 * 8 - 1) is divisible by 3, so one new sample is a whole-pixel shift.
+    let mut samples = vec![Some(0.2), Some(0.75), Some(0.4), Some(0.6)];
     loop {
         for key in keyboard.poll() {
             match key.as_str() {
@@ -29,6 +32,11 @@ fn main() {
                 }
                 "g" => gallery = !gallery,
                 "m" => moving_meter = !moving_meter,
+                "t" => {
+                    samples.remove(0);
+                    samples.push(Some(0.9));
+                }
+                "s" => samples[1] = Some(0.05),
                 "p" => panic!("intentional protocol fixture panic"),
                 _ => keys.push(key),
             }
@@ -77,24 +85,11 @@ fn main() {
             w.saturating_sub(1),
         );
         let chart = tc::LineChart {
-            slots: 12,
+            slots: samples.len(),
             focus: None,
             traces: vec![tc::Trace {
-                positions: Some((0..12).map(|i| i as f64 / 11.0).collect()),
-                values: vec![
-                    Some(0.1),
-                    Some(0.6),
-                    Some(0.4),
-                    None,
-                    None,
-                    Some(0.2),
-                    Some(0.5),
-                    Some(0.9),
-                    Some(0.6),
-                    Some(0.7),
-                    Some(0.3),
-                    Some(0.5),
-                ],
+                positions: None,
+                values: samples.clone(),
                 colour: tc::rgb(50, 220, 170),
                 baseline: None,
             }],
