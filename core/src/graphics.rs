@@ -1113,6 +1113,30 @@ mod tests {
     }
 
     #[test]
+    fn a_ramped_meter_keeps_the_padded_marker_and_resets_its_text_background() {
+        let cells = (0..4)
+            .map(|i| super::super::rgb(20 + i * 40, 30, 50))
+            .collect::<Vec<_>>();
+        let track = super::super::rgb(80, 100, 120);
+        let ink = super::super::rgb(238, 244, 252);
+        let mark = format!("{}{ink}", super::super::bg(10, 12, 18));
+        let plot = Plot::ramped_meter(0, 0, 4, 1.0, Some(0.5), &cells, &track, &mark);
+        let bytes = pixels(&plot);
+        let bare = pixels(&Plot::ramped_meter(0, 0, 4, 1.0, None, &cells, &track, &mark));
+        for x in 0..32 {
+            let offset = (8 * 32 + x) * 4;
+            let pixel = &bytes[offset..offset + 4];
+            match x {
+                16..=17 => assert_eq!(pixel, &[238, 244, 252, 255]),
+                14..=15 | 18..=19 => assert_eq!(pixel, &[10, 12, 18, 255]),
+                _ => assert_eq!(pixel, &bare[offset..offset + 4]),
+            }
+        }
+        let row = plot.fill.as_ref().unwrap().row(0, 4);
+        assert_eq!(row, format!("{}█{}█{mark}┃{}{}█", cells[0], cells[1], super::super::NOBG, cells[3]));
+    }
+
+    #[test]
     fn filled_plots_crop_without_changing_values_or_labels() {
         let colour = super::super::rgb(80, 220, 170);
         let p = Plot::bars(4, 3, &[(0.2, colour.clone()), (1.0, colour)], 4, 1.0, false);
