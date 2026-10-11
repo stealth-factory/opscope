@@ -160,7 +160,7 @@
     "refresh": 60.0
   },
   "herdr_panes": {
-    "_refresh_comment": "Seconds between reads of Herdr pane state.",
+    "_refresh_comment": "Maximum idle delay in seconds; Herdr events wake a full read sooner.",
     "refresh": 4.0
   },
   "latency": {
@@ -215,7 +215,7 @@
     "_comment": "What luvus-panes reads: one Luvus session's agents, tasks, leases and panes over UHP.",
     "_session_comment": "Which Luvus server session to read. `luvus session list` names the ones on this machine; `default` is the one `luvus` starts on its own.",
     "session": "default",
-    "_refresh_comment": "Seconds between reads of the session.",
+    "_refresh_comment": "Maximum idle delay in seconds; agent status events wake a full read sooner.",
     "refresh": 4.0
   },
   "months": {

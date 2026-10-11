@@ -44,3 +44,8 @@ Requires HERDR_ENV; it shells out to the `herdr` CLI.
 
 Press o to show or hide Opscope processes (hidden by default). Matching is
 case-insensitive in process names and commands, including dashboard widgets.
+
+Refresh: pane lifecycle and agent-status events wake a full CLI read.
+Workspace label events, socket reconnects, and subscription renewal also
+reconcile; CPU and memory sampling remains periodic. Manual r refreshes
+immediately, independent of the bounded event socket.
