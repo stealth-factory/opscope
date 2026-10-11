@@ -186,8 +186,12 @@ to whichever pane is focused, as keystrokes. Detection reads
 terminal's XTVERSION. Placeholders are used when that string names Kitty
 0.28.0 or newer, Ghostty, or another name on the allowlist, and
 `allow-passthrough` is `on` or `all`. If either command fails, the name is
-unknown, or passthrough is `off` or unreadable, charts stay on Braille. With
-several clients attached, tmux picks one `client_termtype`. A graphics OK does not decide
+unknown, or passthrough is `off` or unreadable, charts stay on Braille. A
+command that has not answered after 250 ms is killed and counts as
+unreadable. Both reads run once, at startup. A later reattach from a
+different outer terminal, or `allow-passthrough` changing after that, is
+not noticed until the widget is started again. With several
+clients attached, tmux picks one `client_termtype`. A graphics OK does not decide
 this. `a=q` is try-to-load, and `U` has no meaning on that command, so an
 old Kitty, WezTerm or Konsole can answer OK and then draw the placeholder
 character as tofu. A cursor placement does not survive the multiplexer
@@ -201,8 +205,8 @@ Each cell is U+10EEEE with the row and column diacritics and the image id in
 the foreground colour. A non-zero high byte of the id, which these ids have,
 is a third diacritic. Inside tmux there is no heal and no `a=p`
 query. Stock tmux does not forward an APC reply, and its key parser would
-type a `q=1` error into the focused pane. The periodic whole frame sends
-the same `q=2,U=1` upload again. A static chart whose image was dropped
+type a `q=1` error into the focused pane. The periodic whole frame, every
+5 seconds, sends the same `q=2,U=1` upload again. A static chart whose image was dropped
 stays blank until that upload fires. A frame that is not a whole frame
 leaves an unchanged chart alone. tmux has to allow the passthrough:
 
@@ -361,11 +365,13 @@ bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-Inside tmux, detection reads `client_termtype` rather than sending XTVERSION.
-Placeholders are used when that string names Kitty 0.28.0 or newer, Ghostty,
-or another allowlisted name, and `allow-passthrough` is `on` or `all`. If
-either command fails, the name is unknown, or passthrough is `off` or
-unreadable, charts stay on Braille. With several clients attached, tmux picks one. Herdr
+Inside tmux, detection reads `client_termtype` once at startup rather than
+sending XTVERSION. A later reattach or a later change to `allow-passthrough`
+is not noticed until the widget starts again. A hung read is abandoned after
+250 ms. Placeholders are used when that string names Kitty 0.28.0 or newer,
+Ghostty, or another allowlisted name, and `allow-passthrough` is `on` or
+`all`. If either command fails, the name is unknown, or passthrough is `off`
+or unreadable, charts stay on Braille. With several clients attached, tmux picks one. Herdr
 is not wrapped. tmux needs `allow-passthrough on`, or `all` for a pane that
 is not visible. Outside tmux the graphics query is not wrapped. A positive
 reply still needs real visual checks for placement and pane clipping. Direct
@@ -373,7 +379,7 @@ Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
 check; the managed test workspace has no attached graphical terminal. A
 scroll or a pane move is expected to keep a placeholder image, and that was
 not checked by eye. A static chart whose image was dropped stays blank until
-the whole-frame upload fires. That upload is not a heal.
+the whole-frame upload fires, every 5 seconds. That upload is not a heal.
 
 ## Keyboard protocol
 

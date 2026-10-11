@@ -177,14 +177,18 @@ Core detects tmux (`$TMUX` set and non-empty) and reads
 terminal's XTVERSION. Placeholders are used when that string names Kitty
 0.28.0 or newer, Ghostty, or another allowlisted name, and
 `allow-passthrough` is `on` or `all`. If either command fails, the name is
-unknown, or passthrough is `off` or unreadable, charts stay on Braille. With
-several clients attached, tmux picks one. Herdr (`HERDR_ENV=1`) is not treated as tmux:
+unknown, or passthrough is `off` or unreadable, charts stay on Braille. A
+command that has not answered after 250 ms is killed and counts as
+unreadable. Both reads run once, at startup. A later reattach from a
+different outer terminal, or `allow-passthrough` changing after that, is
+not noticed until the widget is started again. With several
+clients attached, tmux picks one. Herdr (`HERDR_ENV=1`) is not treated as tmux:
 nothing in Herdr shows it understands that wrapper, so charts there stay on
 today's direct path. When the name has placeholders, charts are Unicode
 placeholders rather than cursor placements. A pane move is expected to keep
 the image; that was not checked by eye. A static chart whose image was
-dropped stays blank until the next whole-frame upload. That upload is not a
-heal. tmux has to allow the passthrough:
+dropped stays blank until the next whole-frame upload, which is every 5
+seconds. That upload is not a heal. tmux has to allow the passthrough:
 
 ```
 set -g allow-passthrough on

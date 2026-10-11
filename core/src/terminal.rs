@@ -1,4 +1,6 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
+use std::io::Read;
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -21,6 +23,9 @@ const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
+/// A tmux client blocked on a socket that accepts and never answers must not
+/// hold the first frame. Both startup reads use this, then stay on Braille.
+const TMUX_READ_TIMEOUT: Duration = Duration::from_millis(250);
 static SYNC_SUPPORTED: AtomicBool = AtomicBool::new(false);
 /// True after flag 1 was pushed, so every cleanup path pops exactly once.
 static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
@@ -105,24 +110,9 @@ fn in_tmux() -> bool {
 /// Sending `CSI > q` through the passthrough is not safe: tmux keeps the
 /// first answer, which is its own query, and delivers a later one to the
 /// focused pane as keystrokes. `#{client_termtype}` is that stored text.
-/// With several clients attached, tmux picks one.
+/// With several clients attached, tmux picks one. Read once, at startup.
 fn client_termtype() -> Option<String> {
-    let output = std::process::Command::new("tmux")
-        .args(["display", "-p", "#{client_termtype}"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
+    tmux_text(&["display".into(), "-p".into(), "#{client_termtype}".into()])
 }
 
 /// `show-options` arguments for this pane's `allow-passthrough`.
@@ -141,24 +131,57 @@ fn passthrough_args(pane: Option<&str>) -> Vec<String> {
     args
 }
 
-/// Effective `allow-passthrough` for this pane. `None` means unreadable.
+/// Effective `allow-passthrough` for this pane. `None` means unreadable,
+/// including a read that did not finish. Read once, at startup.
 fn allow_passthrough() -> Option<String> {
     let pane = std::env::var("TMUX_PANE").ok();
-    let output = std::process::Command::new("tmux")
-        .args(passthrough_args(pane.as_deref()))
+    tmux_text(&passthrough_args(pane.as_deref()))
+}
+
+/// Run `tmux` and return trimmed stdout. A non-zero exit, empty output, or
+/// a read still running after `TMUX_READ_TIMEOUT` is `None` (Braille).
+fn tmux_text(args: &[String]) -> Option<String> {
+    let child = std::process::Command::new("tmux")
+        .args(args)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
+    bounded_output(child, TMUX_READ_TIMEOUT)
+}
+
+/// Wait up to `timeout`, then kill the child. The fast path returns as soon
+/// as the process exits. A kill is reaped so a hung client is not left behind.
+fn bounded_output(mut child: Child, timeout: Duration) -> Option<String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = child.stdout.take()?;
+                let mut text = String::new();
+                stdout.read_to_string(&mut text).ok()?;
+                let text = text.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                return Some(text.to_string());
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -215,8 +238,8 @@ pub(crate) fn start() {
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();
     let passthrough = mode != GraphicsMode::Text && in_tmux();
-    // Read before taking the session lock. The command is local and its
-    // failure is Braille, the same as an unknown name.
+    // Read before taking the session lock. A failed or timed-out command is
+    // Braille, the same as an unknown name. Not read again after startup.
     let (termtype, allowed) = if passthrough {
         (client_termtype(), allow_passthrough())
     } else {
@@ -914,6 +937,41 @@ mod tests {
             passthrough_args(Some("   ")),
             ["show-options", "-Apv", "allow-passthrough"]
         );
+    }
+
+    fn spawn_quiet(program: &str, args: &[&str]) -> std::process::Child {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|err| panic!("{program}: {err}"))
+    }
+
+    #[test]
+    fn a_hung_tmux_read_is_killed_and_unreadable() {
+        let millis = TMUX_READ_TIMEOUT.as_millis();
+        assert!((200..=300).contains(&millis), "{millis}");
+
+        assert_eq!(
+            bounded_output(spawn_quiet("/bin/echo", &["on"]), TMUX_READ_TIMEOUT).as_deref(),
+            Some("on")
+        );
+        assert!(bounded_output(spawn_quiet("/bin/echo", &[]), TMUX_READ_TIMEOUT).is_none());
+        assert!(
+            bounded_output(spawn_quiet("/bin/sh", &["-c", "exit 1"]), TMUX_READ_TIMEOUT).is_none()
+        );
+
+        let child = spawn_quiet("/bin/sleep", &["30"]);
+        let pid = child.id();
+        let started = Instant::now();
+        assert!(bounded_output(child, TMUX_READ_TIMEOUT).is_none());
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(800), "{elapsed:?}");
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        assert!(!alive, "hung client {pid} was not reaped");
     }
 
     #[test]
