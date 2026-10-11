@@ -101,8 +101,10 @@ Charts rasterise at the terminal's reported cell size. During the 800 ms
 negotiation core sends `CSI 16 t` and reads `CSI 6 ; height ; width t`. A
 resize (`SIGWINCH`, including a Kitty font change) only records that the
 next frame should ask again. That frame sends `CSI 16 t` on the normal
-output path, before its image bytes, so the query cannot split a Kitty
-chunk. Until that reply, and when the numbers are missing, zero, or not a
+output path, before its image bytes, and only while this process owns the
+terminal, so the query cannot split a Kitty chunk or land in a child's
+session. `restore_screen` drops a pending query before the handoff. Until
+that reply, and when the numbers are missing, zero, or not a
 character cell (outside 4×8..=48×96, or an aspect outside 5:4..=3:1), core
 uses the pixel fields of `TIOCGWINSZ` divided by the column and row counts.
 If those are missing, zero, or not a character cell either, the raster is

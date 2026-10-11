@@ -906,6 +906,7 @@ pub fn setup() {
 pub fn claim_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::claim_terminal();
     out(&format!("{}{}{}{}", MOUSE_ON, HIDE, CLEAR, HOME));
     flush();
 }
@@ -989,6 +990,7 @@ extern "C" fn handle_suspend(_: libc::c_int) {
 pub fn restore_screen() {
     forget_frame();
     graphics::cleanup();
+    terminal::release_terminal();
     terminal::cleanup_signal();
     out(&format!("{}{}{}{}{}", MOUSE_OFF, SHOW, RST, CLEAR, HOME));
     flush();
