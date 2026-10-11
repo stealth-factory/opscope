@@ -259,6 +259,8 @@ impl Plot {
 
     /// A measured fraction plus an optional reference position (e.g. elapsed
     /// quota window). Labels and percentages remain ordinary terminal text.
+    /// A truecolour background followed by a truecolour foreground in `mark`
+    /// gives the reference a dark surround in pixels and a background in text.
     pub fn meter(
         x: usize,
         y: usize,
@@ -291,25 +293,51 @@ impl Plot {
                 colour: colour.into(),
             },
         ];
+        let mut marker_has_background = false;
         if let Some(at) = marker {
+            let x = (at * width as f64).min((width as f64 - 0.25).max(0.0));
+            // Keep the marker's position and width; paint its background on
+            // either side, clipped to the bar. Do not send background SGR to
+            // the foreground-only rasterizer or it falls back to text.
+            let mut foreground = mark;
+            if let Some((background, ink)) = mark.strip_prefix("\x1b[48;2;").and_then(|s| s.split_once('m')) {
+                let background = format!("\x1b[38;2;{background}m");
+                if rgb(&background).is_some() && rgb(ink).is_some() {
+                    marker_has_background = true;
+                    let left = (x - 0.25).max(0.0);
+                    rects.push(Rect {
+                        x: left,
+                        y: 0.0625,
+                        width: (x + 0.5).min(width as f64) - left,
+                        height: 0.875,
+                        colour: background,
+                    });
+                    foreground = ink;
+                }
+            }
             rects.push(Rect {
-                x: (at * width as f64).min((width as f64 - 0.25).max(0.0)),
+                x,
                 y: 0.0625,
                 width: 0.25,
                 height: 0.875,
-                colour: mark.into(),
+                colour: foreground.into(),
             });
         }
         let filled = (fraction * width as f64).round() as usize;
         let at = marker.map(|v| ((v * width as f64).round() as usize).min(width.saturating_sub(1)));
         let text = (0..width)
             .map(|i| {
+                let reset = if marker_has_background && at.is_some_and(|at| i == at + 1) {
+                    super::NOBG
+                } else {
+                    ""
+                };
                 if Some(i) == at {
                     (mark.into(), "┃".into())
                 } else if i < filled {
-                    (colour.into(), "█".into())
+                    (format!("{reset}{colour}"), "█".into())
                 } else {
-                    (track.into(), "░".into())
+                    (format!("{reset}{track}"), "░".into())
                 }
             })
             .collect();
@@ -934,6 +962,75 @@ mod tests {
         let clipped = plot.in_viewport(1, 1, 1).unwrap();
         assert_eq!(clipped.y, 1);
         assert_eq!(pixels(&clipped), bytes);
+    }
+
+    #[test]
+    fn meter_marker_background_separates_pixels_without_moving_the_mark() {
+        let fill = super::super::rgb(30, 220, 180);
+        let track = super::super::rgb(80, 100, 120);
+        let mark = format!("{}{}", super::super::bg(10, 12, 18), super::super::rgb(238, 244, 252));
+        for width in [0, 1, 2, 10] {
+            for fraction in [0.0, 0.5, 1.0] {
+                for marker in [None, Some(0.0), Some(0.25), Some(0.5), Some(0.75), Some(1.0)] {
+                    let plot = Plot::meter(0, 1, width, fraction, marker, &fill, &track, &mark);
+                    assert!(plot.fill.as_ref().unwrap().rects.iter().all(|r| rgb(&r.colour).is_some()));
+                    let bytes = pixels(&plot);
+                    let bare = pixels(&Plot::meter(0, 1, width, fraction, None, &fill, &track, &mark));
+                    let start = marker.map(|m| ((m * width as f64).min((width as f64 - 0.25).max(0.0)) * 8.0) as usize);
+                    for x in 0..width * 8 {
+                        let at = (8 * width * 8 + x) * 4;
+                        let pixel = &bytes[at..at + 4];
+                        match start {
+                            Some(s) if x >= s && x < s + 2 => assert_eq!(pixel, &[238, 244, 252, 255]),
+                            Some(s) if x >= s.saturating_sub(2) && x < s + 4 => assert_eq!(pixel, &[10, 12, 18, 255]),
+                            _ => assert_eq!(pixel, &bare[at..at + 4]),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn meter_text_marker_background_is_confined_to_one_cell() {
+        let fill = super::super::rgb(30, 220, 180);
+        let track = super::super::rgb(80, 100, 120);
+        let mark = format!("{}{}", super::super::bg(10, 12, 18), super::super::rgb(238, 244, 252));
+        for width in [0, 1, 2, 10] {
+            for marker in [None, Some(0.0), Some(0.5), Some(1.0)] {
+                let plot = Plot::meter(0, 1, width, 0.5, marker, &fill, &track, &mark);
+                let fill = plot.fill.as_ref().unwrap();
+                assert_eq!(fill.text[0].iter().map(|(_, t)| super::super::display_width(t)).sum::<usize>(), width);
+                let row = replace_cells(&format!("{} label", " ".repeat(width)), 0, width, &fill.row(0, width));
+                if width > 0 && marker.is_some() {
+                    let tail = row.split_once(&format!("{mark}┃")).unwrap().1;
+                    assert!(tail.starts_with(super::super::NOBG) || tail.starts_with(super::super::RST), "{row:?}");
+                } else {
+                    assert!(!row.contains('┃'));
+                }
+                assert!(row.ends_with(" label"));
+            }
+        }
+    }
+
+    #[test]
+    fn unmarked_and_foreground_only_meters_preserve_inherited_backgrounds() {
+        let fill = super::super::rgb(30, 220, 180);
+        let track = super::super::rgb(80, 100, 120);
+        let ink = super::super::rgb(238, 244, 252);
+        let backed = format!("{}{}", super::super::bg(10, 12, 18), ink);
+        for (marker, mark) in [(None, &ink), (None, &backed), (Some(0.5), &ink)] {
+            let plot = Plot::meter(0, 1, 10, 0.5, marker, &fill, &track, mark);
+            let row = plot.fill.as_ref().unwrap().row(0, 10);
+            // A selected row's inherited tint must survive across the meter.
+            assert!(!row.contains("\x1b[49m"));
+            assert!(!row.contains("\x1b[48;"));
+            assert!(!row.contains(super::super::RST));
+        }
+        let plot = Plot::meter(0, 1, 10, 0.5, Some(0.5), &fill, &track, &backed);
+        let row = plot.fill.as_ref().unwrap().row(0, 10);
+        assert!(!row[..row.find('┃').unwrap()].contains(super::super::NOBG));
+        assert_eq!(row.matches(super::super::NOBG).count(), 1);
     }
 
     #[test]

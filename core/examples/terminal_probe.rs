@@ -94,7 +94,8 @@ fn main() {
                     tc::Plot::bars(3, 9, &columns, 3, 1.0, false),
                     tc::Plot::bars(13, 9, &columns, 3, 1.0, true),
                     tc::Plot::heatmap_levels(3, 14, &cells, &grey),
-                    tc::Plot::meter(3, 18, 20, 0.375, Some(0.65), &green, &grey, &blue),
+                    tc::Plot::meter(3, 18, 20, 0.375, Some(0.65), &green, &grey,
+                        &format!("{}{}", tc::bg(10, 12, 18), tc::rgb(238, 244, 252))),
                     tc::Plot::stacked_bar(
                         3,
                         13,

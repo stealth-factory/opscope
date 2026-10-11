@@ -174,6 +174,12 @@ def filled_graphics(t):
         decoded = zlib.decompress(base64.b64decode(payload))
         assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
         assert any(decoded[3::4]), "empty graphic"
+        if n == 3:
+            # The pace mark at 65% has two dark pixels on either side.
+            row = decoded[8 * 160 * 4:9 * 160 * 4]
+            assert row[102 * 4:104 * 4] == bytes([10, 12, 18, 255]) * 2
+            assert row[104 * 4:106 * 4] == bytes([238, 244, 252, 255]) * 2
+            assert row[106 * 4:108 * 4] == bytes([10, 12, 18, 255]) * 2
         artifact(f"opscope-gallery-{n}.rgba", decoded)
         artifact(f"opscope-gallery-{n}.size", f"{int(keys[b's'])} {int(keys[b'v'])}".encode())
     count = len(t.images())
@@ -190,6 +196,7 @@ def filled_text(t):
     assert not t.images()
     text = t.output.decode(errors="replace")
     assert all(glyph in text for glyph in "█┃")
+    assert "\x1b[48;2;10;12;18m\x1b[38;2;238;244;252m┃\x1b[49m" in text
 
 
 
