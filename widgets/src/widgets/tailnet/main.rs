@@ -982,7 +982,7 @@ fn main() {
             rows.extend(foot.iter().cloned());
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, indent);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         };
 
@@ -1127,7 +1127,7 @@ fn main() {
             // describe a frame that is no longer on screen.
             placed.clear();
 
-            std::thread::sleep(Duration::from_millis(100));
+            keyboard.wait(Duration::from_millis(100));
             continue;
         }
 
@@ -1419,7 +1419,7 @@ fn main() {
         rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, indent);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

@@ -664,7 +664,7 @@ fn items_in_window(
 }
 
 /// Deployments per time bucket, coloured by the worst outcome in it.
-fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (String, usize) {
+fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette, plots: &mut Vec<tc::Plot>, y: usize) -> (String, usize) {
     let cols = w.saturating_sub(2).max(10);
     let at = tc::now() * 1000.0;
     let span = hours * 3_600_000.0;
@@ -689,9 +689,11 @@ fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (S
             0,
         );
     }
+    let mut columns = Vec::new();
     let mut parts: Vec<(&str, String)> = vec![(p.dim.as_str(), " ".into())];
     for bucket in &buckets {
         if bucket.is_empty() {
+            columns.push((0.0, p.grid.clone()));
             parts.push((p.grid.as_str(), "·".into()));
             continue;
         }
@@ -703,9 +705,11 @@ fn activity(deps: &[serde_json::Value], w: usize, hours: f64, p: &Palette) -> (S
         } else {
             &p.ready
         };
+        columns.push((bucket.len() as f64, colour.clone()));
         let level = ((bucket.len() as f64 / peak as f64) * 7.99) as usize;
         parts.push((colour.as_str(), tc::SPARK[level.min(7)].to_string()));
     }
+    plots.push(tc::Plot::bars(1, y, &columns, 1, peak as f64, false));
     (tc::seg(&parts, w - 1), peak)
 }
 
@@ -1325,7 +1329,7 @@ fn main() {
     let mut filter = 0usize;
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
-    let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    let (mut selected, mut scroll) = (0usize, 0usize);
     // Every row each deployment occupies on the frame now on screen, and
     // how many rows stay pinned above the window. A click is answered
     // against the frame the reader was looking at when they clicked, which
@@ -1345,7 +1349,7 @@ fn main() {
     let mut shown: Vec<serde_json::Value> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1641,7 +1645,7 @@ fn main() {
             // Whichever overlay drew is the one on screen, so it is the one
             // a click arriving next has to be measured against.
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(100));
+            keyboard.wait(Duration::from_millis(100));
             continue;
         }
 
@@ -1749,7 +1753,8 @@ fn main() {
             ],
             w - 1,
         ));
-        let (chart, peak) = activity(&deps, w, 48.0, &p);
+        let mut plots = Vec::new();
+        let (chart, peak) = activity(&deps, w, 48.0, &p, &mut plots, rows.len());
         rows.push(chart);
         if peak > 0 {
             rows.push(tc::seg(
@@ -1790,6 +1795,8 @@ fn main() {
                 .collect();
             if !recent.is_empty() {
                 let hi = recent.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+                let columns: Vec<_> = recent.iter().map(|v| (*v, p.ready.clone())).collect();
+                plots.push(tc::Plot::bars(1, rows.len(), &columns, 1, hi, false));
                 let spark: String = recent
                     .iter()
                     .map(|x| tc::SPARK[(((x / hi) * 7.99) as usize).min(7)])
@@ -1963,9 +1970,10 @@ fn main() {
         );
         let foot_top = frame.len();
         frame.extend(footer);
-        tc::draw(&frame, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
+        tc::draw_plots(&frame, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 

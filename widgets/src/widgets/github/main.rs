@@ -614,6 +614,8 @@ fn flow_section(
     tick: usize,
     w: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
+    y: usize,
 ) -> Vec<String> {
     // The totals go on the axis they divide, and back into the heading on a
     // chart too short to carry them without breaking its rule.
@@ -641,6 +643,8 @@ fn flow_section(
         // the heading rather than leaving the pane.
         rows.extend(figure_line(figures.0, figures.1, w, tick, p));
     }
+    plots.push(tc::Plot::bars(1, y + rows.len(), &up.iter().map(|v| (*v, cu.into())).collect::<Vec<_>>(), 3, scale, false));
+    plots.push(tc::Plot::bars(1, y + rows.len() + 4, &down.iter().map(|v| (*v, cd.into())).collect::<Vec<_>>(), 3, scale, true));
     rows.extend(flow_body(
         up,
         down,
@@ -1690,6 +1694,7 @@ fn account_detail(
     w: usize,
     tick: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<usize>) {
     // Where the cursor over the oldest list ended up, so the caller can
     // scroll to it. The caller cannot work it out: how far down the page
@@ -1992,6 +1997,8 @@ fn account_detail(
             tick,
             w - 1,
             p,
+            plots,
+            rows.len(),
         ));
     }
     (rows, cursor)
@@ -2856,7 +2863,7 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
-    let (mut selected, mut tick) = (0usize, 0usize);
+    let mut selected = 0usize;
     // Every row each account occupies on the frame now on screen, and how
     // many rows stay pinned above the window. A click is answered against
     // the frame the reader was looking at when they clicked, which is the
@@ -2900,7 +2907,7 @@ fn main() {
     let mut seen_void = 0u64;
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -3120,7 +3127,7 @@ fn main() {
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         }
 
@@ -3343,6 +3350,7 @@ fn main() {
                 peak: span_hi as i64,
             }
         };
+        let mut plots = Vec::new();
         rows.extend(flow_section(
             head,
             totals,
@@ -3357,6 +3365,8 @@ fn main() {
             tick,
             w - 1,
             &p,
+            &mut plots,
+            rows.len(),
         ));
         rows.push(String::new());
 
@@ -3375,6 +3385,19 @@ fn main() {
                 p.lbl.as_str(),
                 p.dim.as_str(),
             ));
+            let shades = [tc::rgb(58, 66, 80), tc::rgb(60, 130, 95), tc::rgb(65, 170, 110), tc::rgb(80, 215, 130), p.ok.clone()];
+            let cols = grid.first().map_or(0, |r| r.chars().count());
+            let mut cells = vec![vec![None; cols]; 7];
+            let weeks: Vec<_> = cal["weeks"].as_array().into_iter().flatten().collect();
+            for (x, week) in weeks.iter().skip(weeks.len().saturating_sub(cols)).enumerate() {
+                for day in week["contributionDays"].as_array().into_iter().flatten() {
+                    let n = day["contributionCount"].as_i64().unwrap_or(0);
+                    let wd = (day["weekday"].as_u64().unwrap_or(0) as usize).min(6);
+                    let level = if n == 0 { 0 } else { (1 + (n as f64 / peak.max(1) as f64 * 3.99) as usize).min(4) };
+                    cells[wd][x] = Some((shades[level].clone(), level as u8));
+                }
+            }
+            plots.push(tc::Plot::heatmap_levels(5, rows.len(), &cells, &p.dim));
             for (r, line) in grid.iter().enumerate() {
                 // Rows are GitHub's own weekday index, where 0 is Sunday, so
                 // the labels come off the same constant rather than a
@@ -3610,7 +3633,8 @@ fn main() {
                         });
                     }
                 }
-                let (body, cursor) = account_detail(a, held.as_ref(), land.as_ref(), osel, w, tick, &p);
+                let mut detail_plots = Vec::new();
+                let (body, cursor) = account_detail(a, held.as_ref(), land.as_ref(), osel, w, tick, &p, &mut detail_plots);
                 let hints: Vec<Vec<(&str, String)>> = vec![
                     vec![
                         (p.accent.as_str(), "↑↓".into()),
@@ -3669,9 +3693,10 @@ fn main() {
                 }
                 let foot_top = out.len();
                 out.extend(foot);
-                tc::draw(&out, w, h);
+                let plots: Vec<_> = detail_plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room_below)).collect();
+                tc::draw_plots(&out, w, h, &plots);
                 keyboard.footer_at(&packed, foot_top, 1);
-                std::thread::sleep(Duration::from_millis(300));
+                keyboard.wait(Duration::from_millis(300));
                 continue;
             }
             detail = false;
@@ -3703,9 +3728,10 @@ fn main() {
         }
         let foot_top = rows.len();
         rows.extend(footer);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 
@@ -4471,7 +4497,8 @@ mod tests {
         let up = spread(&(0..days).map(|n| ((n * 7) % 11) as f64 + 1.0).collect::<Vec<_>>());
         let down = spread(&(0..days).map(|n| ((n * 5) % 9) as f64 + 1.0).collect::<Vec<_>>());
         let hi = up.iter().chain(down.iter()).cloned().fold(0.0f64, f64::max).max(1.0);
-        flow_section(
+        let mut plots = Vec::new();
+        let rows = flow_section(
             FlowHead::Counted {
                 span: format!("{}d", days),
                 peak: hi as i64,
@@ -4488,10 +4515,14 @@ mod tests {
             0,
             w - 1,
             &p,
-        )
-        .iter()
-        .map(|r| plain(r))
-        .collect()
+            &mut plots,
+            0,
+        );
+        assert_eq!(plots.len(), 2);
+        assert_eq!((plots[0].x, plots[0].y, plots[0].width, plots[0].height), (1, rows.len() - 8, up.len(), 3));
+        assert_eq!(plots[1].y, plots[0].y + 4);
+        assert!(plots.iter().all(|p| p.x + p.width <= w));
+        rows.iter().map(|r| plain(r)).collect()
     }
 
     /// A row with its escapes taken off. `display_width` counts what it is

@@ -2001,7 +2001,7 @@ fn main() {
 
     tc::setup();
     let mut keyboard = tc::Keyboard::new();
-    let (mut selected, mut tick, mut stack_sel) = (0usize, 0usize, 0usize);
+    let (mut selected, mut stack_sel) = (0usize, 0usize);
     // Where the list and the detail have been scrolled to, and whether a key
     // has just moved the selection. The wheel writes a scroll and never the
     // flag, so neither screen chases a cursor the moment it is turned.
@@ -2034,7 +2034,7 @@ fn main() {
     };
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         #[allow(clippy::type_complexity)]
         let (
             prs,
@@ -2529,7 +2529,7 @@ fn main() {
         frame.extend(footer);
         tc::draw(&frame, w, h);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 

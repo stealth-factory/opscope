@@ -4386,7 +4386,7 @@ pub fn run_settings(keyboard: &mut crate::Keyboard, spec: SettingsSpec) {
         crate::draw(&body, w, h);
         keyboard.footer_at(&next.footer, next.foot_top, next.foot_indent);
         click = next;
-        std::thread::sleep(Duration::from_millis(80));
+        keyboard.wait(Duration::from_millis(80));
     }
 }
 

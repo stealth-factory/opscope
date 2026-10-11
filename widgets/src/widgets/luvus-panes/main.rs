@@ -839,7 +839,7 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
     let mut opscope_filter = process_filter::Filter::default();
-    let (mut selected, mut tick) = (0usize, 0usize);
+    let mut selected = 0usize;
     // How far down the body, in drawn rows, the window has scrolled. Kept
     // across frames so the view holds still while the cursor moves inside
     // it, and only moves when the cursor would leave it.
@@ -869,7 +869,7 @@ fn main() {
     let mut sections: Vec<usize> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -2370,7 +2370,7 @@ fn main() {
         rows.extend(footer);
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 
