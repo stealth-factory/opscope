@@ -39,7 +39,10 @@ Devin is the same kind of reading. Its daily and weekly quota, the resets
 that came with them, and the extra-usage balance come from app.devin.ai.
 The bearer token goes in agent_usage.devin_token or DEVIN_BEARER_TOKEN
 (DEVIN_AUTHORIZATION is another name for that variable). The organization
-goes in agent_usage.devin_org. Nothing is read from a browser.
+goes in agent_usage.devin_org. With neither set, a signed-in Devin CLI's
+own files supply them - credentials.toml for the token, its config.json
+for the org - unless agent_usage.devin_cli_credentials is false. Nothing
+is read from a browser.
 
 Droid (Factory) reads token rate limits, or the older standard and premium
 token pools, with a Factory API key. The key goes in

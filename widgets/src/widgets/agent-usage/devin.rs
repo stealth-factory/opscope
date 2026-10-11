@@ -17,14 +17,19 @@
 //! Devin: daily and weekly quota, from the billing endpoint the web app uses.
 //!
 //! The bearer token and the organization are the reader's to give, in
-//! `config.json` or an environment variable. Nothing here reads a browser
-//! profile. The organization selects the request; it is not a usage figure.
+//! `config.json` or an environment variable - or the Devin CLI's to hold:
+//! a signed-in CLI's `credentials.toml` and `config.json` are read when
+//! neither is set. Nothing here reads a browser profile. The organization
+//! selects the request; it is not a usage figure.
 
 use std::hash::{Hash, Hasher};
 
 use opscope_core as tc;
 
-use crate::parse::{format_balance, parse_devin_quota, DevinQuota, DevinWindow};
+use crate::parse::{
+    format_balance, parse_devin_cli_org, parse_devin_cli_token, parse_devin_quota, DevinQuota,
+    DevinWindow,
+};
 use crate::shared::*;
 use crate::*;
 
@@ -45,31 +50,103 @@ const REPORT_TTL: f64 = 300.0;
 pub struct Data {
     quota: Option<DevinQuota>,
     read_at: f64,
-    /// `config`, `env`, or empty when no token was set.
+    /// `config`, `env`, `cli`, or empty when no token was set.
     source: &'static str,
     why: String,
 }
 
 /// The bearer token, and where it came from. The setting wins, then the
-/// named variable, then `DEVIN_AUTHORIZATION`.
+/// named variable, then `DEVIN_AUTHORIZATION`, then the credential a
+/// signed-in Devin CLI stored - the only local sign of Devin there is,
+/// since it installs no binary and writes no usage cache.
 pub fn token(cfg: &Config) -> (String, &'static str) {
-    let (raw, source) = if !cfg.devin_token.trim().is_empty() {
-        (cfg.devin_token.trim().to_string(), "config")
+    if !cfg.devin_token.trim().is_empty() {
+        return (strip_bearer(cfg.devin_token.trim()), "config");
+    }
+    let name = if cfg.devin_token_env.trim().is_empty() {
+        TOKEN_ENV
     } else {
-        let name = if cfg.devin_token_env.trim().is_empty() {
-            TOKEN_ENV
-        } else {
-            cfg.devin_token_env.trim()
-        };
-        match std::env::var(name) {
-            Ok(v) if !v.trim().is_empty() => (v, "env"),
-            _ => match std::env::var(TOKEN_ALIAS) {
-                Ok(v) if !v.trim().is_empty() => (v, "env"),
-                _ => (String::new(), ""),
-            },
-        }
+        cfg.devin_token_env.trim()
     };
-    (strip_bearer(&raw), source)
+    for var in [name, TOKEN_ALIAS] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.trim().is_empty() {
+                return (strip_bearer(&v), "env");
+            }
+        }
+    }
+    if cfg.devin_cli_credentials {
+        if let Some(v) = cli_token(&cli_credentials_paths()) {
+            return (strip_bearer(&v), "cli");
+        }
+    }
+    (String::new(), "")
+}
+
+/// The organization the quota is read for: `devin_org` when set, else the
+/// one the signed-in CLI named. An org id is not a secret - it selects
+/// the request - so borrowing the CLI's is safe even when the token came
+/// from config.
+pub fn org(cfg: &Config) -> String {
+    let named = cfg.devin_org.trim();
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    if !cfg.devin_cli_credentials {
+        return String::new();
+    }
+    cli_org(&cli_config_paths()).unwrap_or_default()
+}
+
+/// The places a Devin CLI leaves `credentials.toml`, in read order: the
+/// XDG data root (its default on Linux), the macOS Application Support
+/// dir, then %APPDATA% for Windows. Existence decides - the right answer
+/// varies within a platform, so `cfg` has no part in it.
+fn cli_credentials_paths() -> Vec<std::path::PathBuf> {
+    cli_paths("XDG_DATA_HOME", ".local/share", "credentials.toml")
+}
+
+/// The same walk for the CLI's `config.json`, which lives under the
+/// config root rather than the data root.
+fn cli_config_paths() -> Vec<std::path::PathBuf> {
+    cli_paths("XDG_CONFIG_HOME", ".config", "config.json")
+}
+
+fn cli_paths(xdg: &str, fallback: &str, file: &str) -> Vec<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let root = std::env::var(xdg)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{home}/{fallback}"));
+    let mut found = vec![std::path::PathBuf::from(format!("{root}/devin/{file}"))];
+    if !home.is_empty() {
+        found.push(format!("{home}/Library/Application Support/devin/{file}").into());
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            found.push(format!("{appdata}/devin/{file}").into());
+        }
+    }
+    found
+}
+
+/// `windsurf_api_key` from the first readable credentials file that has
+/// one. A file that parses to nothing does not stop the walk - an empty
+/// credentials.toml next to a real install should not hide it.
+fn cli_token(paths: &[std::path::PathBuf]) -> Option<String> {
+    paths.iter().find_map(|p| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|text| parse_devin_cli_token(&text))
+    })
+}
+
+fn cli_org(paths: &[std::path::PathBuf]) -> Option<String> {
+    paths.iter().find_map(|p| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|text| parse_devin_cli_org(&text))
+    })
 }
 
 /// A pasted `Authorization:` line or a `Bearer` prefix is the same token.
@@ -196,7 +273,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     }
     let (token, source) = token(cfg);
     data.source = source;
-    let org = cfg.devin_org.trim().to_string();
+    let org = org(cfg);
     if token.is_empty() {
         return data;
     }
@@ -290,7 +367,8 @@ pub fn why_no_lane(data: &Data) -> String {
     }
     if data.source.is_empty() {
         return tc::missing_config(&format!(
-            "no quota · no token · set agent_usage.devin_token, {TOKEN_ENV}, or {TOKEN_ALIAS}."
+            "no quota · no token · set agent_usage.devin_token, {TOKEN_ENV}, or \
+             {TOKEN_ALIAS}, or sign in with the Devin CLI."
         ));
     }
     "no quota · no reading from Devin yet.".into()
@@ -424,7 +502,9 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
             let what = if data.source.is_empty() && data.why.is_empty() {
                 tc::missing_config(&format!(
                     "No Devin token. Set agent_usage.devin_token and agent_usage.devin_org, or \
-                     export {TOKEN_ENV}. {TOKEN_ALIAS} is read when that variable is empty. \
+                     export {TOKEN_ENV}. {TOKEN_ALIAS} is read when that variable is empty, \
+                     and a signed-in Devin CLI's own credentials.toml and config.json are read \
+                     after that (agent_usage.devin_cli_credentials = false stops it). \
                      Both are sent only to app.devin.ai, and only while Devin is one of the \
                      agents shown. Nothing is read from a browser. Keep config.json chmod 600."
                 ))
@@ -586,6 +666,56 @@ mod tests {
         let data = read(&mut caches, &cfg, false);
         assert!(caches.live.keys().all(|key| !key.starts_with("devin")));
         assert!(why_no_lane(&data).contains("left out"));
+    }
+
+    #[test]
+    fn a_signed_in_clis_files_supply_token_and_org() {
+        let dir = std::env::temp_dir().join(format!("opscope-devin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred = dir.join("credentials.toml");
+        let conf = dir.join("config.json");
+        std::fs::write(
+            &cred,
+            "windsurf_api_key = \"cli-token\"\napi_server_url = \"https://x\"\n",
+        )
+        .unwrap();
+        std::fs::write(&conf, r#"{"devin":{"org_id":"org-cli"},"version":1}"#).unwrap();
+        assert_eq!(cli_token(&[cred.clone()]).as_deref(), Some("cli-token"));
+        assert_eq!(cli_org(&[conf.clone()]).as_deref(), Some("org-cli"));
+        // A file with no key does not stop the walk.
+        let empty = dir.join("empty.toml");
+        std::fs::write(&empty, "# nothing here\n").unwrap();
+        assert_eq!(
+            cli_token(&[empty, cred]).as_deref(),
+            Some("cli-token")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_written_token_still_wins_over_the_cli() {
+        // `devin_cli_credentials` is on for this one: the config token must
+        // still be the answer, without any CLI file being opened.
+        let cfg = Config {
+            devin_token: "config-token".into(),
+            devin_cli_credentials: true,
+            ..Config::default()
+        };
+        assert_eq!(token(&cfg), ("config-token".to_string(), "config"));
+    }
+
+    #[test]
+    fn the_cli_flag_off_is_the_only_way_tests_stay_away_from_real_files() {
+        // `Config::default()` carries `devin_cli_credentials: false`, so
+        // this would hold even on a machine whose CLI is signed in - the
+        // runtime loader is what turns it on.
+        let cfg = Config {
+            devin_token_env: "OPSCOPE_TEST_NO_SUCH_VARIABLE".into(),
+            ..Config::default()
+        };
+        std::env::remove_var(TOKEN_ALIAS);
+        assert!(token(&cfg).0.is_empty());
+        assert!(org(&cfg).is_empty());
     }
 
     #[test]
