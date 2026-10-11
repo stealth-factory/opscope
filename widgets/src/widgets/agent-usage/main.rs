@@ -857,9 +857,24 @@ fn paced_bar_with_plot(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let x = prefix.iter().map(|(_, text)| tc::display_width(text)).sum();
-    let fill = hue.map(|h| tint(h, 1.0)).unwrap_or_else(|| tc::heat(used));
-    plots.push(tc::Plot::meter(x, row, room, used, elapsed, &fill, &p.grid, &p.pace_mark));
+    plots.push(tc::Plot::ramped_meter(x, row, room, used, elapsed, &fill_ramp(used, room, hue), &p.grid, &p.pace_mark));
     paced_bar(used, elapsed, room, hue, p)
+}
+
+/// The colour of each filled cell of a `room`-wide bar: an agent's hue
+/// running dark to full across the fill, or the heat of the figure when
+/// there is no hue. One function for both renderers, so the pixels Kitty
+/// draws and the glyphs every other terminal draws cannot disagree.
+fn fill_ramp(used: f64, room: usize, hue: Option<(u8, u8, u8)>) -> Vec<String> {
+    let filled = tc::meter(used, room).chars().filter(|c| *c == '█').count();
+    (0..filled)
+        .map(|i| {
+            hue.map(|h| {
+                tint(h, 0.51 + 0.49 * (i as f64 / filled.saturating_sub(1).max(1) as f64))
+            })
+            .unwrap_or_else(|| tc::heat(used))
+        })
+        .collect()
 }
 
 fn paced_bar(
@@ -870,7 +885,8 @@ fn paced_bar(
     p: &Palette,
 ) -> Vec<(String, String)> {
     let bar = tc::meter(used, room);
-    let filled = bar.chars().filter(|c| *c == '█').count();
+    let ramp = fill_ramp(used, room, hue);
+    let filled = ramp.len();
     let at = elapsed.map(|e| ((e * room as f64).round() as usize).min(room.saturating_sub(1)));
     let mut parts: Vec<(String, String)> = Vec::new();
     for (i, ch) in bar.chars().enumerate() {
@@ -884,18 +900,7 @@ fn paced_bar(
             // Filled cells run dark to full across the fill, so the bar is
             // recognisably its agent's colour and still reads as a quantity
             // without counting cells.
-            let t = 0.51 + 0.49 * (i as f64 / filled.saturating_sub(1).max(1) as f64);
-            (
-                format!(
-                    "{}{}",
-                    p.nobg,
-                    match hue {
-                        Some(hue) => tint(hue, t),
-                        None => tc::heat(used),
-                    }
-                ),
-                ch,
-            )
+            (format!("{}{}", p.nobg, ramp[i]), ch)
         } else {
             (
                 format!(
@@ -4052,6 +4057,24 @@ mod tests {
         let bare = plain(&paced_bar(0.5, None, 10, None, &p));
         assert!(!bare.contains('┃'));
         assert_eq!(bare.chars().count(), 10);
+    }
+
+    #[test]
+    fn the_pixel_fill_is_the_same_ramp_the_text_bar_draws() {
+        let hue = Some((240, 132, 84));
+        let ramp = fill_ramp(0.5, 10, hue);
+        assert_eq!(ramp.len(), 5);
+        assert_ne!(ramp[0], ramp[4], "a ramp has two ends");
+        assert_eq!(ramp[4], tint((240, 132, 84), 1.0));
+        // The text bar's filled cells are the same colours, behind the nobg reset.
+        let p = palette();
+        let bar = paced_bar(0.5, None, 10, hue, &p);
+        let filled: Vec<&String> = bar.iter().filter(|(_, g)| g.contains('█')).map(|(c, _)| c).collect();
+        assert!(filled.iter().all(|c| ramp.iter().any(|r| c.ends_with(r.as_str()))), "{bar:?}");
+        // No hue: every cell is the figure's heat.
+        let flat = fill_ramp(0.5, 10, None);
+        assert!(flat.iter().all(|c| *c == flat[0]));
+        assert!(fill_ramp(0.0, 10, hue).is_empty());
     }
 
     #[test]

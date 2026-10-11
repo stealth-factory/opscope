@@ -130,7 +130,9 @@ colour-only convenience wrapper using the same renderer with solid tiles.
 Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
 and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
-change the measured fill. No primitive animates a value between API polls.
+change the measured fill. `Plot::ramped_meter` takes a colour per filled
+cell, so a ramp the text bar draws is painted in pixels too rather than
+flattened to one fill. No primitive animates a value between API polls.
 
 Collect plots in the same coordinate system as the body, then call
 `in_viewport` after the scroll offset is clamped. Clip to the body room above

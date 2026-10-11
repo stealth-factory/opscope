@@ -257,17 +257,19 @@ impl Plot {
         Self::filled(x, y, width, 1, rects, vec![text])
     }
 
-    /// A measured fraction plus an optional reference position (e.g. elapsed
-    /// quota window). Labels and percentages remain ordinary terminal text.
+    /// `meter`, with a colour per filled cell: `cells[i]` paints cell `i`
+    /// of the fill, so a ramp the text bar draws is drawn in pixels too.
+    /// A slice shorter than the fill repeats its last colour; an empty one
+    /// is the track. Text fallback is the same cells.
     /// A truecolour background followed by a truecolour foreground in `mark`
     /// gives the reference a dark surround in pixels and a background in text.
-    pub fn meter(
+    pub fn ramped_meter(
         x: usize,
         y: usize,
         width: usize,
         fraction: f64,
         marker: Option<f64>,
-        colour: &str,
+        cells: &[String],
         track: &str,
         mark: &str,
     ) -> Self {
@@ -277,22 +279,25 @@ impl Plot {
             0.0
         };
         let marker = marker.filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
-        let mut rects = vec![
-            Rect {
-                x: 0.0,
+        let cell = |i: usize| cells.get(i).or_else(|| cells.last());
+        let mut rects = vec![Rect {
+            x: 0.0,
+            y: 0.0625,
+            width: width as f64,
+            height: 0.875,
+            colour: track.into(),
+        }];
+        let filled_px = width as f64 * fraction;
+        for i in 0..filled_px.ceil() as usize {
+            let Some(colour) = cell(i) else { break };
+            rects.push(Rect {
+                x: i as f64,
                 y: 0.0625,
-                width: width as f64,
+                width: (filled_px - i as f64).min(1.0),
                 height: 0.875,
-                colour: track.into(),
-            },
-            Rect {
-                x: 0.0,
-                y: 0.0625,
-                width: width as f64 * fraction,
-                height: 0.875,
-                colour: colour.into(),
-            },
-        ];
+                colour: colour.clone(),
+            });
+        }
         let mut marker_has_background = false;
         if let Some(at) = marker {
             let x = (at * width as f64).min((width as f64 - 0.25).max(0.0));
@@ -335,13 +340,42 @@ impl Plot {
                 if Some(i) == at {
                     (mark.into(), "┃".into())
                 } else if i < filled {
-                    (format!("{reset}{colour}"), "█".into())
+                    (
+                        format!("{reset}{}", cell(i).cloned().unwrap_or_else(|| track.into())),
+                        "█".into(),
+                    )
                 } else {
                     (format!("{reset}{track}"), "░".into())
                 }
             })
             .collect();
         Self::filled(x, y, width, 1, rects, vec![text])
+    }
+
+    /// A measured fraction plus an optional reference position (e.g. elapsed
+    /// quota window). Labels and percentages remain ordinary terminal text.
+    /// A truecolour background followed by a truecolour foreground in `mark`
+    /// gives the reference a dark surround in pixels and a background in text.
+    pub fn meter(
+        x: usize,
+        y: usize,
+        width: usize,
+        fraction: f64,
+        marker: Option<f64>,
+        colour: &str,
+        track: &str,
+        mark: &str,
+    ) -> Self {
+        Self::ramped_meter(
+            x,
+            y,
+            width,
+            fraction,
+            marker,
+            &vec![colour.to_string(); width],
+            track,
+            mark,
+        )
     }
 
     fn filled(
@@ -1050,6 +1084,32 @@ mod tests {
         assert_eq!(at(20, 1), &[80, 100, 120, 255]);
         assert_eq!(at(20, 14), &[80, 100, 120, 255]);
         assert_eq!(at(19, 15)[3], 0);
+    }
+
+    #[test]
+    fn a_ramped_meter_paints_each_filled_cell_its_own_colour() {
+        let a = super::super::rgb(10, 20, 30);
+        let b = super::super::rgb(200, 210, 220);
+        let track = super::super::rgb(80, 100, 120);
+        let mark = super::super::rgb(240, 245, 250);
+        let p = Plot::ramped_meter(0, 0, 4, 0.5, None, &[a.clone(), b.clone()], &track, &mark);
+        let bytes = pixels(&p);
+        let at = |x: usize, y: usize| &bytes[(y * 32 + x) * 4..(y * 32 + x + 1) * 4];
+        assert_eq!(at(4, 8), &[10, 20, 30, 255]);
+        assert_eq!(at(12, 8), &[200, 210, 220, 255]);
+        assert_eq!(at(20, 8), &[80, 100, 120, 255]);
+        assert_eq!(at(28, 8), &[80, 100, 120, 255]);
+        // A fill longer than the slice repeats the last colour, and a
+        // single-entry ramp is a plain `meter` cell for cell.
+        let ramped = pixels(&Plot::ramped_meter(0, 0, 4, 1.0, None, &[a.clone()], &track, &mark));
+        let plain = pixels(&Plot::meter(0, 0, 4, 1.0, None, &a, &track, &mark));
+        assert_eq!(ramped, plain);
+        // Text fallback mirrors the cells: two filled, one track, one mark.
+        let p = Plot::ramped_meter(0, 0, 4, 0.5, Some(0.75), &[a.clone(), b.clone()], &track, &mark);
+        assert_eq!(
+            p.fill.as_ref().unwrap().row(0, 4),
+            format!("{a}█{b}█{track}░{mark}┃")
+        );
     }
 
     #[test]
