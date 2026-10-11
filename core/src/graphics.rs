@@ -1263,6 +1263,8 @@ pub(crate) fn transmit_pixels(pixels: &[u8], format: u8, keys: &str, id: u32, pl
     out
 }
 
+/// Direct Kitty transmission. Production draws through `image_rgba`; tests
+/// keep this name for the path that places at the cursor.
 #[cfg(test)]
 fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
     let cols = plot.width.min(pane_width.saturating_sub(plot.x));
