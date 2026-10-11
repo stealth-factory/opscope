@@ -866,7 +866,11 @@ fn paced_bar_with_plot(
 /// there is no hue. One function for both renderers, so the pixels Kitty
 /// draws and the glyphs every other terminal draws cannot disagree.
 fn fill_ramp(used: f64, room: usize, hue: Option<(u8, u8, u8)>) -> Vec<String> {
-    let filled = tc::meter(used, room).chars().filter(|c| *c == '█').count();
+    let rounded = tc::meter(used, room).chars().filter(|c| *c == '█').count();
+    // Under half a cell the text bar rounds to no block, but the pixel
+    // meter still paints that sliver and needs a colour to do it. An empty
+    // ramp leaves Kitty blank while the percentage beside it is not zero.
+    let filled = if used > 0.0 { rounded.max(1) } else { rounded };
     (0..filled)
         .map(|i| {
             hue.map(|h| {
@@ -886,7 +890,9 @@ fn paced_bar(
 ) -> Vec<(String, String)> {
     let bar = tc::meter(used, room);
     let ramp = fill_ramp(used, room, hue);
-    let filled = ramp.len();
+    // The ramp may hold one extra colour for a pixel sliver the text bar
+    // rounded away. Only the blocks `meter` actually drew take a ramp colour.
+    let filled = bar.chars().filter(|c| *c == '█').count();
     let at = elapsed.map(|e| ((e * room as f64).round() as usize).min(room.saturating_sub(1)));
     let mut parts: Vec<(String, String)> = Vec::new();
     for (i, ch) in bar.chars().enumerate() {
@@ -4069,12 +4075,29 @@ mod tests {
         // The text bar's filled cells are the same colours, behind the nobg reset.
         let p = palette();
         let bar = paced_bar(0.5, None, 10, hue, &p);
-        let filled: Vec<&String> = bar.iter().filter(|(_, g)| g.contains('█')).map(|(c, _)| c).collect();
-        assert!(filled.iter().all(|c| ramp.iter().any(|r| c.ends_with(r.as_str()))), "{bar:?}");
+        let filled: Vec<&String> = bar
+            .iter()
+            .flat_map(|(c, g)| g.chars().filter(|ch| *ch == '█').map(move |_| c))
+            .collect();
+        assert_eq!(filled.len(), ramp.len(), "{bar:?}");
+        assert!(
+            filled.iter().zip(&ramp).all(|(c, r)| c.ends_with(r.as_str())),
+            "{bar:?}"
+        );
         // No hue: every cell is the figure's heat.
         let flat = fill_ramp(0.5, 10, None);
         assert!(flat.iter().all(|c| *c == flat[0]));
         assert!(fill_ramp(0.0, 10, hue).is_empty());
+        // 1% of an 8-cell bar is under half a cell: no text block, one
+        // colour so the pixel sliver is not the empty track.
+        let sliver = fill_ramp(0.01, 8, hue);
+        assert_eq!(sliver.len(), 1);
+        let drawn: String = paced_bar(0.01, None, 8, hue, &p)
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect();
+        assert!(!drawn.contains('█'), "{drawn}");
+        assert_eq!(drawn.chars().filter(|c| *c == '░').count(), 8);
     }
 
     #[test]

@@ -642,10 +642,25 @@ mod tests {
         assert_eq!(lanes[0].window_secs, Some(DAY));
         assert_eq!(lanes[1].window_secs, Some(WEEK));
         let daily = lead(lanes[0].pct, lanes[0].window_secs, lanes[0].reset).unwrap();
+        let weekly = lead(lanes[1].pct, lanes[1].window_secs, lanes[1].reset).unwrap();
         assert!((daily - 40.0).abs() < 1.0, "{daily}");
-        let rows = plain(&tab(&data, 100, 30, &Config::default(), &palette()));
-        assert!(rows.contains('┃'), "{rows}");
-        assert!(!rows.contains("window length"), "{rows}");
+        assert!((weekly - 30.0).abs() < 1.0, "{weekly}");
+        let rows = tab(&data, 100, 30, &Config::default(), &palette());
+        let bars: Vec<String> = rows
+            .iter()
+            .map(|row| plain(std::slice::from_ref(row)))
+            .filter(|row| row.contains('┃'))
+            .collect();
+        assert_eq!(bars.len(), 2, "{}", plain(&rows));
+        assert!(
+            bars[0].contains("daily") && bars[0].contains(&format!("{:+.0}%", daily)),
+            "{bars:?}"
+        );
+        assert!(
+            bars[1].contains("weekly") && bars[1].contains(&format!("{:+.0}%", weekly)),
+            "{bars:?}"
+        );
+        assert!(!plain(&rows).contains("window length"));
     }
 
     #[test]

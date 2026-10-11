@@ -1137,6 +1137,24 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_cell_fill_needs_a_colour_or_the_pixel_bar_stays_empty() {
+        let fill = super::super::rgb(10, 20, 30);
+        let track = super::super::rgb(80, 100, 120);
+        let mark = super::super::rgb(240, 245, 250);
+        // 1% of eight cells is under half a glyph, so both text fallbacks
+        // round to an empty track. The pixel path still paints the sliver
+        // when it has a colour, and paints nothing when the ramp is empty.
+        let sliver = Plot::ramped_meter(0, 0, 8, 0.01, None, &[fill], &track, &mark);
+        let blank = Plot::ramped_meter(0, 0, 8, 0.01, None, &[], &track, &mark);
+        assert_ne!(pixels(&sliver), pixels(&blank));
+        for plot in [&sliver, &blank] {
+            let row = plot.fill.as_ref().unwrap().row(0, 8);
+            assert!(!row.contains('█'), "{row:?}");
+            assert_eq!(row.matches('░').count(), 8, "{row:?}");
+        }
+    }
+
+    #[test]
     fn filled_plots_crop_without_changing_values_or_labels() {
         let colour = super::super::rgb(80, 220, 170);
         let p = Plot::bars(4, 3, &[(0.2, colour.clone()), (1.0, colour)], 4, 1.0, false);
