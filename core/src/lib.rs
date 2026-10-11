@@ -25,6 +25,7 @@ mod settings;
 mod terminal;
 mod graphics;
 mod shm;
+mod placeholder;
 
 pub use terminal::{capabilities, graphics_notice, Capabilities};
 pub use graphics::{braille, LineChart, Plot, Trace};
@@ -221,8 +222,52 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 }
 
 /// The terminal columns occupied by printable text.
+///
+/// A Kitty unicode placeholder is one column: U+10EEEE, the row and column
+/// diacritics, and the image id carried in the foreground colour. Colour
+/// escapes take no columns either.
 pub fn display_width(s: &str) -> usize {
-    s.width()
+    if !s.contains('\u{10EEEE}') && !s.contains('\x1b') {
+        return s.width();
+    }
+    let mut width = 0;
+    let mut plain = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            if !plain.is_empty() {
+                width += plain.width();
+                plain.clear();
+            }
+            chars.next();
+            for n in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&n) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == placeholder::PLACEHOLDER {
+            if !plain.is_empty() {
+                width += plain.width();
+                plain.clear();
+            }
+            while chars
+                .peek()
+                .copied()
+                .is_some_and(placeholder::is_placeholder_diacritic)
+            {
+                chars.next();
+            }
+            width += 1;
+            continue;
+        }
+        plain.push(c);
+    }
+    if !plain.is_empty() {
+        width += plain.width();
+    }
+    width
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
@@ -472,8 +517,16 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let caps = capabilities();
     // Expire the probe and retired objects before images are published.
     terminal::on_frame();
-    let (rows, before, after) =
-        graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
+    let (rows, before, after) = graphics::compose(
+        rows,
+        plots,
+        w,
+        h,
+        caps.kitty_graphics,
+        caps.kitty_placeholders,
+        reset,
+        whole && !reset,
+    );
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
@@ -722,6 +775,18 @@ fn inert(row: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        // A Kitty placeholder cell is text: the private-use glyph and the
+        // row/column diacritics that name its place in the image. Nothing
+        // else in that private-use slot is part of a chart.
+        if c == placeholder::PLACEHOLDER {
+            out.push(c);
+            i += 1;
+            while i < chars.len() && placeholder::is_placeholder_diacritic(chars[i]) {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
         if c == '\x1b' {
             match chars.get(i + 1) {
                 Some('[') => {

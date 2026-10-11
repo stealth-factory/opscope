@@ -179,6 +179,22 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
+Inside tmux (`$TMUX` set and non-empty) or Herdr (`HERDR_ENV=1`), core sends
+the graphics query wrapped in a tmux DCS passthrough. Placeholders are used
+only when that wrapped query is answered. The upload is once, with `q=2,U=1`,
+wrapped the same way, and each cell is U+10EEEE with the row and column
+diacritics and the image id in the foreground colour. A non-zero high byte of
+the id, which these ids have, is a third diacritic. The cells are ordinary
+text, so scrolling and a pane move keep the image. tmux has to allow the passthrough:
+
+```
+set -g allow-passthrough on
+```
+
+Use `all` instead of `on` for a pane that is not visible. Outside tmux and
+Herdr, or when the wrapped query is not answered, behaviour stays as it is
+today.
+
 For discrete data, use the other `Plot` constructors with the same viewport and
 drawing path:
 
@@ -324,11 +340,14 @@ bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-This implementation requires replies through the actual pane and does not force
-passthrough wrappers. A multiplexer that drops queries uses the text path. A
-positive reply still needs real visual checks for placement and pane clipping.
-Direct Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
-check; the managed test workspace has no attached graphical terminal.
+Inside tmux and Herdr the graphics query is wrapped in a DCS passthrough, and
+placeholders are used only when that wrapped query is answered. tmux needs
+`allow-passthrough on`, or `all` for a pane that is not visible. A multiplexer
+that drops the query uses the text path. Outside tmux and Herdr the query is
+not wrapped. A positive reply still needs real visual checks for placement and
+pane clipping. Direct Kitty, actual SSH, Herdr, Luvus and tmux visual
+validation remains a release check; the managed test workspace has no attached
+graphical terminal.
 
 ## Keyboard protocol
 

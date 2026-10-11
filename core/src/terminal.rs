@@ -9,6 +9,7 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// Pop one keyboard-protocol stack entry, which returns the terminal to legacy.
 pub(crate) const KEYBOARD_POP: &str = "\x1b[<u";
+const GRAPHICS_QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
 const QUERY: &str = "\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?2026$p\x1b[?u\x1b[c";
 const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
@@ -21,6 +22,8 @@ static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     pub kitty_graphics: bool,
+    /// Unicode placeholders, only after a passthrough-wrapped query is answered.
+    pub kitty_placeholders: bool,
     pub synchronized_updates: bool,
     /// Kitty `Smulx`: curly and dashed underlines.
     pub styled_underlines: bool,
@@ -56,11 +59,14 @@ struct Session {
     probe_settled: bool,
     /// Later images go out as `t=s`. A failure clears this and stays on `t=d`.
     use_shm: bool,
+    /// The graphics query was wrapped for tmux or Herdr.
+    passthrough: bool,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
     capabilities: Capabilities {
         kitty_graphics: false,
+        kitty_placeholders: false,
         synchronized_updates: false,
         styled_underlines: false,
         underline_colour: false,
@@ -74,7 +80,34 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     keyboard_disambiguate: false,
     probe_settled: true,
     use_shm: false,
+    passthrough: false,
 });
+
+/// tmux or Herdr. An empty `TMUX` is not a session.
+pub(crate) fn multiplexer(tmux: Option<&str>, herdr: Option<&str>) -> bool {
+    tmux.is_some_and(|value| !value.is_empty()) || herdr == Some("1")
+}
+
+fn in_multiplexer() -> bool {
+    multiplexer(
+        std::env::var("TMUX").ok().as_deref(),
+        std::env::var("HERDR_ENV").ok().as_deref(),
+    )
+}
+
+/// Wrap an escape sequence so tmux forwards it. Every ESC inside is doubled.
+pub(crate) fn tmux_passthrough(sequence: &str) -> String {
+    let mut out = String::with_capacity(sequence.len() + 16);
+    out.push_str("\x1bPtmux;\x1b");
+    for c in sequence.chars() {
+        if c == '\x1b' {
+            out.push('\x1b');
+        }
+        out.push(c);
+    }
+    out.push_str("\x1b\\");
+    out
+}
 
 /// Query only after cbreak is active, so replies are never echoed as text.
 /// No wait here: the first frames use text while normal input polling negotiates.
@@ -87,10 +120,12 @@ pub(crate) fn start() {
     // Resume and a fresh start both drop the previous probe. A shared-memory
     // object that outlived the last session would be the leak this path is for.
     super::shm::force_direct();
+    let passthrough = mode != GraphicsMode::Text && in_multiplexer();
     let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *session = Session {
         mode,
         probe_settled: true,
+        passthrough,
         ..Session::default()
     };
     SYNC_SUPPORTED.store(false, Ordering::Release);
@@ -115,14 +150,17 @@ pub(crate) fn start() {
     // It goes out before device attributes. A flags reply inside the window
     // is support even when device attributes arrived first. No keyboard
     // reply before the deadline leaves the legacy decoder in place.
-    let mut bytes = format!(
-        "{}{UNDERLINE_QUERY}",
-        if mode == GraphicsMode::Text {
-            TEXT_QUERY
-        } else {
-            QUERY
-        }
-    );
+    // Inside tmux or Herdr only the graphics query goes through DCS
+    // passthrough. Placeholders are used only when that wrapped query is
+    // answered. The keyboard, underline, and shared-memory probe stay
+    // unwrapped. The probe id is the shared-memory guard and is not wrapped.
+    let mut bytes = if mode == GraphicsMode::Text {
+        format!("{TEXT_QUERY}{UNDERLINE_QUERY}")
+    } else if passthrough {
+        format!("{}{TEXT_QUERY}{UNDERLINE_QUERY}", tmux_passthrough(GRAPHICS_QUERY))
+    } else {
+        format!("{QUERY}{UNDERLINE_QUERY}")
+    };
     if let Some(probe) = probe {
         bytes.push_str(&probe);
     }
@@ -220,6 +258,7 @@ impl Session {
                         return false;
                     }
                     self.capabilities.kitty_graphics = false;
+                    self.capabilities.kitty_placeholders = false;
                     self.image_rejected = true;
                     self.graphics_answered = true;
                     return false;
@@ -231,8 +270,9 @@ impl Session {
         }
         if let Some(response) = sequence.strip_prefix("\x1b_Gi=2147483646;") {
             if !self.graphics_answered {
-                self.capabilities.kitty_graphics =
-                    response == "OK\x1b\\" && self.mode != GraphicsMode::Text;
+                let ok = response == "OK\x1b\\" && self.mode != GraphicsMode::Text;
+                self.capabilities.kitty_graphics = ok;
+                self.capabilities.kitty_placeholders = ok && self.passthrough;
                 self.graphics_answered = true;
             }
             false
@@ -275,7 +315,11 @@ impl Session {
             // It does not answer the keyboard query. Terminals send these
             // two replies in either order, and a flags reply still inside
             // the window is support.
-            self.graphics_answered = true;
+            // tmux answers DA itself, before the outer terminal can answer the
+            // wrapped query, so that reply must not close a passthrough probe.
+            if !self.passthrough {
+                self.graphics_answered = true;
+            }
             false
         } else {
             false
@@ -287,6 +331,9 @@ pub(crate) fn reply(sequence: &str) {
     let push = {
         let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
         let push = session.reply(sequence, Instant::now());
+        if session.capabilities.kitty_placeholders {
+            super::graphics::set_passthrough(true);
+        }
         SYNC_SUPPORTED.store(session.capabilities.synchronized_updates, Ordering::Release);
         push
     };
@@ -785,5 +832,53 @@ mod tests {
         };
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now + TIMEOUT + TIMEOUT);
         assert!(!s.use_shm && s.probe_settled);
+    }
+
+    #[test]
+    fn passthrough_wraps_by_doubling_escapes() {
+        let wrapped = tmux_passthrough(GRAPHICS_QUERY);
+        assert_eq!(
+            wrapped,
+            "\x1bPtmux;\x1b\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
+        );
+        assert!(multiplexer(Some("/tmp/tmux-0,1,0"), None));
+        assert!(multiplexer(None, Some("1")));
+        assert!(!multiplexer(Some(""), None));
+        assert!(!multiplexer(None, Some("0")));
+        assert!(!multiplexer(None, None));
+    }
+
+    #[test]
+    fn placeholders_turn_on_only_when_the_wrapped_query_is_answered() {
+        let now = Instant::now();
+        let mut direct = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        direct.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        assert!(direct.capabilities.kitty_graphics);
+        assert!(!direct.capabilities.kitty_placeholders);
+
+        let mut waiting = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        // tmux answers DA before the outer terminal answers the wrapped query.
+        waiting.reply("\x1b[?62;c", now);
+        assert!(!waiting.graphics_answered);
+        assert!(!waiting.capabilities.kitty_placeholders);
+        waiting.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        assert!(waiting.capabilities.kitty_graphics);
+        assert!(waiting.capabilities.kitty_placeholders);
+
+        let mut missed = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        missed.reply("\x1b_Gi=2147483646;ENOTSUP\x1b\\", now);
+        assert!(!missed.capabilities.kitty_graphics);
+        assert!(!missed.capabilities.kitty_placeholders);
     }
 }

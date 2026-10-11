@@ -31,10 +31,15 @@ COMMAND = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
 
 
 class Terminal:
-    def __init__(self, mode="auto", reply="kitty", image_reply="ok"):
+    def __init__(self, mode="auto", reply="kitty", image_reply="ok", extra=None):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 0, 0))
         env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
+        # The parent shell may be inside tmux. Existing cases are the direct path.
+        env.pop("TMUX", None)
+        env.pop("HERDR_ENV", None)
+        if extra:
+            env.update(extra)
         self.proc = subprocess.Popen([str(BINARY)], stdin=slave, stdout=slave,
                                      stderr=slave, env=env, start_new_session=True)
         os.close(slave)
@@ -157,8 +162,13 @@ def shm_read(name):
         os.close(fd)
 
 
-def run(mode, reply, check):
-    terminal = Terminal(mode, reply, image_reply="manual" if check == rejected_image else "ok")
+def run(mode, reply, check, extra=None):
+    terminal = Terminal(
+        mode,
+        reply,
+        image_reply="manual" if check == rejected_image else "ok",
+        extra=extra,
+    )
     try:
         terminal.read(0.3)
         check(terminal)
@@ -406,6 +416,67 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+WRAP = (
+    b"\x1bPtmux;\x1b"
+    b"\x1b\x1b_Gi=2147483646,s=1,v=1,a=q,t=d,f=24;AAAA"
+    b"\x1b\x1b\\\x1b\\"
+)
+PLACEHOLDER = "\U00010EEEE".encode()
+
+
+def unwrap_tmux(data):
+    """Undo DCS passthrough so the graphics commands can be parsed."""
+    out = bytearray()
+    i = 0
+    header = b"\x1bPtmux;\x1b"
+    while i < len(data):
+        if data.startswith(header, i):
+            i += len(header)
+            while i < len(data):
+                if data.startswith(b"\x1b\x1b", i):
+                    out.append(0x1B)
+                    i += 2
+                    continue
+                if data.startswith(b"\x1b\\", i):
+                    i += 2
+                    break
+                out.append(data[i])
+                i += 1
+            continue
+        out.append(data[i])
+        i += 1
+    return bytes(out)
+
+
+def commands_of(data):
+    return [
+        (dict(field.split(b"=", 1) for field in keys.split(b",") if b"=" in field), payload or b"")
+        for keys, payload in COMMAND.findall(data)
+    ]
+
+
+def tmux_placeholders(t):
+    assert WRAP in t.output, "graphics query was not passed through"
+    images = [(keys, payload) for keys, payload in commands_of(unwrap_tmux(t.output)) if keys.get(b"a") == b"T"]
+    assert images, "answered passthrough did not upload a chart"
+    keys, _ = images[0]
+    assert keys.get(b"U") == b"1" and keys.get(b"q") == b"2", keys
+    assert PLACEHOLDER in t.output, "placeholder cells were not drawn"
+    assert b"now" in t.output, "line-chart label was blanked"
+    assert not any(k.get(b"a") == b"p" for k, _ in commands_of(unwrap_tmux(t.output)))
+    t.send(b"\x1b[B")
+    t.read()
+    later = [k for k, _ in commands_of(unwrap_tmux(t.output)) if k.get(b"a") == b"T"]
+    assert int(later[-1][b"r"]) < int(keys[b"r"]), "scroll did not crop the placeholder chart"
+
+
+def tmux_text(t):
+    assert WRAP in t.output, "graphics query was not passed through"
+    t.read(0.7)
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "an unanswered query still drew placeholders"
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -496,6 +567,11 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
+    for extra in ({"TMUX": "/tmp/tmux-0/default,1,0"}, {"HERDR_ENV": "1"}):
+        run("auto", "kitty", tmux_placeholders, extra)
+        print(f"PASS placeholder {extra}")
+    run("auto", "silent", tmux_text, {"TMUX": "1"})
+    print("PASS placeholder unanswered")
     for ending in ["signal", "panic"]:
         t = Terminal()
         try:

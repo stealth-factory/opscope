@@ -171,6 +171,20 @@ clipboard and OSC 9/777 for notifications reach the machine the user is actually
 typing at, across SSH, with no dependency on Herdr. Detect Herdr via
 `HERDR_ENV=1` and add its native toast on top — never require it.
 
+**Pixel charts inside Herdr or tmux need passthrough.** Core detects Herdr
+(`HERDR_ENV=1`) and tmux (`$TMUX`) and sends the Kitty graphics query through
+a DCS passthrough. When that query is answered, charts are Unicode
+placeholders rather than cursor placements, so a pane move does not drop the
+image. tmux has to allow it:
+
+```
+set -g allow-passthrough on
+```
+
+Use `all` instead of `on` for a pane that is not visible. Without that
+setting, or outside tmux and Herdr, charts stay on today's path: direct Kitty
+images when the terminal answers, Braille otherwise.
+
 **Shell out to `herdr` without blocking.** A notification is not worth stalling
 a render loop for; fire and forget.
 
