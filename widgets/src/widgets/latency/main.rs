@@ -712,92 +712,46 @@ fn apply_interval(shared: &Arc<Mutex<Vec<Target>>>) {
     }
 }
 
-/// A braille cell is two dots wide and four tall, so one character holds
-/// eight addressable points. The bit for each is fixed by the encoding.
-
-/// Plot one series on a dot canvas eight times finer than the cells.
-///
-/// Consecutive samples are joined rather than left as marks, which is the
-/// difference between a line that reads as a round trip moving and one that
-/// reads as specks a row apart. The masks come back per cell instead of as
-/// text so that several series can be laid over one another first.
-fn braille_canvas(
-    values: &[Option<f64>],
-    llo: f64,
-    lhi: f64,
-    cols: usize,
-    rows: usize,
-) -> Vec<Vec<u8>> {
-    let (px_w, px_h) = (cols * 2, rows * 4);
-    let mut grid = vec![vec![0u8; cols]; rows];
-    if values.is_empty() || px_w == 0 || px_h == 0 {
-        return grid;
-    }
-    let vals: Vec<Option<f64>> = values.iter().rev().take(px_w).rev().copied().collect();
-    // Newest against the right edge: a target that has answered five times
-    // shows five samples there, not five stretched across the whole width.
-    let left = px_w - vals.len();
-    let decade = (lhi - llo).max(1e-9);
-    let point = |i: usize| -> Option<(i64, i64)> {
-        let v = vals[i]?;
-        let frac = ((v.max(1e-3).log10() - llo) / decade).clamp(0.0, 1.0);
-        Some((
-            (left + i) as i64,
-            ((1.0 - frac) * (px_h as f64 - 1.0)).round() as i64,
-        ))
-    };
-    let dot = |x: i64, y: i64, grid: &mut Vec<Vec<u8>>| {
-        if x >= 0 && (x as usize) < px_w && y >= 0 && (y as usize) < px_h {
-            grid[y as usize / 4][x as usize / 2] |= tc::BRAILLE[y as usize % 4][x as usize % 2];
-        }
-    };
-    // A single reading is a measurement and gets its dot: unlike netwatch's
-    // idle zero, there is no value here that means "nothing happened".
-    if let Some((x, y)) = point(0) {
-        dot(x, y, &mut grid);
-    }
-    for i in 1..vals.len() {
-        // A column with no reply is a gap, and a gap is not drawn through.
-        // Joining across one would draw a line where the link was down,
-        // which is the opposite of what happened.
-        let (Some((mut x0, mut y0)), Some((x1, y1))) = (point(i - 1), point(i)) else {
-            if let Some((x, y)) = point(i) {
-                dot(x, y, &mut grid);
-            }
-            continue;
-        };
-        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        loop {
-            dot(x0, y0, &mut grid);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let twice = 2 * err;
-            if twice >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if twice <= dx {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-    grid
-}
-
-/// Log-scale plot of every target's round trip.
-///
-/// Log because the targets on one screen can differ by two orders of
-/// magnitude, and a linear axis renders the near one as a flat line at the
-/// bottom.
+/// Aggregate successful replies per bucket, leaving a gap only when a
+/// populated bucket has no valid reply. Return values and time positions.
 ///
 /// Columns are anchored to a fixed time grid rather than measured backwards
 /// from now, so a sample never migrates between columns: the plot steps left
 /// exactly once per bucket instead of shuffling as the clock slides.
+fn bucketed_trace(
+    samples: &[(f64, Option<f64>)],
+    bucket: f64,
+    newest: f64,
+    slots: usize,
+    how: &str,
+) -> (Vec<Option<f64>>, Vec<f64>) {
+    let mut columns: Vec<Vec<Option<f64>>> = vec![Vec::new(); slots];
+    for (at, value) in samples {
+        let age = newest - (at / bucket).floor();
+        if !age.is_finite() || age < 0.0 || age >= slots as f64 {
+            continue;
+        }
+        columns[slots - 1 - age as usize].push(*value);
+    }
+    let mut values = Vec::new();
+    let mut positions = Vec::new();
+    for (column, samples) in columns.into_iter().enumerate() {
+        let x = column as f64 / slots.saturating_sub(1).max(1) as f64;
+        // An empty arrival bucket is not evidence of loss. A mixed bucket
+        // still has a measured RTT; loss accounting stays in the raw samples.
+        if samples.is_empty() {
+            continue;
+        }
+        let replies: Vec<f64> = samples.into_iter().flatten()
+            .filter(|v| v.is_finite()).collect();
+        values.push(if replies.is_empty() { None } else { Some(aggregate(&replies, how)) });
+        positions.push(x);
+    }
+    (values, positions)
+}
+
+/// Log-scale plot of every target's round trip. The log axis keeps both
+/// nearby and distant targets readable across orders of magnitude.
 fn graph(
     targets: &[Target],
     w: usize,
@@ -806,6 +760,8 @@ fn graph(
     how: &str,
     focus: Option<usize>,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
+    top: usize,
 ) -> (Vec<String>, f64) {
     let gw = w.saturating_sub(9).max(10);
     let gh = h.max(4);
@@ -813,36 +769,18 @@ fn graph(
     // did when each one had a whole character to itself.
     let slots = gw * 2;
     let newest = (tc::now() / bucket).floor();
-    let series: Vec<(usize, Vec<Option<f64>>)> = targets
+    let series: Vec<(usize, Vec<Option<f64>>, Vec<f64>)> = targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let mut columns: Vec<Vec<f64>> = vec![Vec::new(); slots];
-            for (at, rtt) in &t.samples {
-                let Some(rtt) = rtt else { continue };
-                let age = newest - (at / bucket).floor();
-                if age < 0.0 || age >= slots as f64 {
-                    continue;
-                }
-                columns[slots - 1 - age as usize].push(*rtt);
-            }
-            let values = columns
-                .into_iter()
-                .map(|c| {
-                    if c.is_empty() {
-                        None
-                    } else {
-                        Some(aggregate(&c, how))
-                    }
-                })
-                .collect();
-            (i, values)
+            let (values, positions) = bucketed_trace(&t.samples, bucket, newest, slots, how);
+            (i, values, positions)
         })
         .collect();
     let span = bucket * slots as f64;
     let seen: Vec<f64> = series
         .iter()
-        .flat_map(|(_, v)| v.iter().flatten())
+        .flat_map(|(_, v, _)| v.iter().flatten())
         .copied()
         .collect();
     if seen.is_empty() {
@@ -877,57 +815,23 @@ fn graph(
     let hi = (seen.iter().cloned().fold(0.0f64, f64::max) * 1.25).max(lo * 1.6);
     let (llo, lhi) = (lo.log10(), hi.log10());
 
-    // One canvas per target rather than one shared grid: a braille cell can
-    // carry the dots of two traces but only one hue, so each series has to
-    // keep its own until the moment they are laid over one another.
-    //
-    // The selected target is laid down last, so where two traces share a
-    // cell the colour goes to the one being looked at rather than to
-    // whichever happens to sit lower in the table. The others are mixed
-    // most of the way to the backdrop - still drawn, because a chart that
-    // dropped every other target the moment you selected one would be
-    // answering a different question, but no longer competing.
-    let mut layers: Vec<(String, Vec<Vec<u8>>)> = Vec::with_capacity(series.len());
-    let mut front: Option<(String, Vec<Vec<u8>>)> = None;
-    for (idx, values) in &series {
-        let canvas = braille_canvas(values, llo, lhi, gw, gh);
-        let hue = p.hues[idx % p.hues.len()].clone();
-        match focus {
-            // Nothing selected: every trace at full strength, in table
-            // order, which is the chart this widget has always drawn.
-            None => layers.push((hue, canvas)),
-            Some(at) if at == *idx => front = Some((hue, canvas)),
-            Some(_) => layers.push((p.faded[idx % p.faded.len()].clone(), canvas)),
-        }
-    }
-    let mut cells = tc::overlay(&layers, gw, gh);
-    // The focused trace takes its cells outright rather than being merged
-    // into them.
-    //
-    // `overlay` unions the dots and gives the cell to the last writer, which
-    // is right when every trace is equal: no sample is lost and the colour
-    // follows the table's order. Under focus it is a lie. Two targets a few
-    // percent apart share a cell constantly - 138ms and 127ms sit 0.036 of a
-    // decade apart where a dot row is 0.065 - and merging drew the other
-    // one's dots in the focused colour, so a flat trace came out two rows
-    // thick and the second row belonged to a different host.
-    //
-    // Replacing the cell hides the faded trace where the two meet. That is
-    // the right way round: the faded one is the one being pushed back, and
-    // it stays legible either side, whereas a sample drawn in a colour that
-    // is not its own is a number on screen that is not real.
-    if let Some((hue, canvas)) = front {
-        for (y, line) in canvas.iter().enumerate().take(gh) {
-            for (x, mask) in line.iter().enumerate().take(gw) {
-                if *mask != 0 {
-                    cells[y][x] = (hue.clone(), *mask);
-                }
-            }
-        }
-    }
-
+    // One model for both terminal backends; samples and gaps never depend on
+    // terminal resolution. The widget owns the axis transform and palette.
+    let chart = tc::LineChart {
+        slots,
+        focus,
+        traces: series.iter().map(|(idx, values, positions)| tc::Trace {
+            positions: Some(positions.clone()),
+            baseline: None,
+            values: values.iter().map(|v| v.map(|v| (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect(),
+            colour: if focus.is_some_and(|at| at != *idx) {
+                p.faded[idx % p.faded.len()].clone()
+            } else { p.hues[idx % p.hues.len()].clone() },
+        }).collect(),
+    };
+    plots.push(tc::Plot::new(8, top, gw, gh, chart));
     let mut out = Vec::new();
-    for (y, line) in cells.iter().enumerate() {
+    for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
         let value = 10f64.powf(llo + frac * (lhi - llo));
         // Label only the top, middle and bottom: a number on every row is a
@@ -939,17 +843,7 @@ fn graph(
         };
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
-        for (colour, mask) in line {
-            parts.push(match mask {
-                0 => (p.grid.as_str(), " ".into()),
-                m => (
-                    colour.as_str(),
-                    char::from_u32(0x2800 + *m as u32)
-                        .unwrap_or(' ')
-                        .to_string(),
-                ),
-            });
-        }
+        parts.push((p.grid.as_str(), " ".repeat(gw)));
         out.push(tc::seg(&parts, w - 1));
     }
     (out, span)
@@ -1206,7 +1100,7 @@ fn main() {
                 (
                     p.dim.as_str(),
                     if bucket <= interval {
-                        " · 1 ping/column".to_string()
+                        format!(" · {:.1}s buckets", bucket)
                     } else {
                         format!(" · {} of {}s blocks", how, bucket)
                     },
@@ -1442,7 +1336,8 @@ fn main() {
         // out exactly one pane tall however many targets there were.
         let log_h = LOG_ROWS;
         let gh = body_h.saturating_sub(rows.len() + log_h + 4).max(4);
-        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p);
+        let mut plots = Vec::new();
+        let (chart, span) = graph(&snapshot, w, gh, bucket, &how, selected, &p, &mut plots, rows.len());
         let drawn = chart.len();
         rows.extend(chart);
         if drawn > 1 {
@@ -1542,9 +1437,10 @@ fn main() {
         // under the pointer.
         let foot_top = rows.len();
         rows.extend(foot);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(scroll, 1, room_below)).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 
@@ -1602,6 +1498,11 @@ fn palette() -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn braille_canvas(values: &[Option<f64>], llo: f64, lhi: f64, cols: usize, rows: usize) -> Vec<Vec<u8>> {
+        let values: Vec<_> = values.iter().map(|v| v.map(|v| (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9))).collect();
+        tc::braille(&values, cols * 2, cols, rows)
+    }
 
     #[test]
     fn a_target_that_never_answers_does_not_grow_for_ever() {
@@ -1871,6 +1772,43 @@ mod tests {
     }
 
     #[test]
+    fn reply_jitter_does_not_invent_lost_pings() {
+        // Every half-second probe replied. RTT variation alone moves two
+        // replies into one arrival bucket and leaves intervening bins empty.
+        let samples = [(100.45, Some(50.0)), (101.10, Some(200.0)),
+            (101.45, Some(50.0)), (102.10, Some(200.0)), (102.45, Some(50.0))];
+        let (values, positions) = bucketed_trace(&samples, 0.5, 204.0, 5, "median");
+        assert_eq!(values, vec![Some(50.0), Some(125.0), Some(125.0)]);
+        assert_eq!(positions, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn only_loss_only_buckets_break_the_trace() {
+        let samples = [(100.45, Some(50.0)), (100.9, None),
+            (101.10, Some(200.0)), (101.2, None), (101.45, Some(50.0)), (102.0, None)];
+        let (values, positions) = bucketed_trace(&samples, 0.5, 204.0, 5, "median");
+        assert_eq!(values, vec![Some(50.0), None, Some(125.0), None]);
+        assert_eq!(positions, vec![0.0, 0.25, 0.5, 1.0]);
+        let (values, positions) = bucketed_trace(&samples, 0.5, 206.0, 2, "median");
+        assert!(values.is_empty() && positions.is_empty());
+    }
+
+    #[test]
+    fn mixed_buckets_plot_replies_regardless_of_loss_order() {
+        for samples in [
+            vec![(100.1, None), (100.2, Some(40.0)), (100.3, Some(80.0))],
+            vec![(100.1, Some(40.0)), (100.2, None), (100.3, Some(80.0))],
+            vec![(100.1, Some(40.0)), (100.2, Some(80.0)), (100.3, None)],
+        ] {
+            for (how, expected) in [("median", 60.0), ("mean", 60.0), ("max", 80.0)] {
+                let (values, positions) = bucketed_trace(&samples, 0.5, 200.0, 1, how);
+                assert_eq!(values, vec![Some(expected)]);
+                assert_eq!(positions, vec![0.0]);
+            }
+        }
+    }
+
+    #[test]
     fn a_gap_in_the_data_is_not_drawn_through() {
         // Two readings with a lost bucket between them. Joining across it
         // would draw a line where the link was down.
@@ -1996,14 +1934,14 @@ mod tests {
         // network. The chart used to send the reader to edit a file; the
         // settings screen is one keypress away and already knows which
         // file is in force.
-        let (rows, _) = graph(&[], 80, 8, 1.0, "median", None, &palette());
+        let (rows, _) = graph(&[], 80, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0);
         let shown = rows.join("\n");
         assert!(shown.contains("latency.hosts"), "{shown}");
         assert!(shown.contains(tc::SET_IN_SETTINGS), "{shown}");
         assert!(!shown.contains("collecting"), "{shown}");
         // And at the width the wall actually uses, not only a wide one.
         // The clause may wrap; the key it names must still be on screen.
-        let (narrow, _) = graph(&[], 40, 8, 1.0, "median", None, &palette());
+        let (narrow, _) = graph(&[], 40, 8, 1.0, "median", None, &palette(), &mut Vec::new(), 0);
         let shown = narrow.join("\n");
         assert!(shown.contains("`,`"), "{shown}");
         assert!(shown.contains("latency.hosts"), "{shown}");

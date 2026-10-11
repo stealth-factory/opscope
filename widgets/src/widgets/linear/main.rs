@@ -908,7 +908,7 @@ fn state_label(state: &str) -> &'static str {
 /// the two converging is one closing. Nothing here is a new request - the
 /// arrays arrive with the cycle.
 #[allow(clippy::too_many_arguments)]
-fn cycle_detail(
+fn cycle_detail_with_plots(
     c: &serde_json::Value,
     states: &HashMap<String, usize>,
     issues: &[Issue],
@@ -916,6 +916,7 @@ fn cycle_detail(
     w: usize,
     h: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<usize>) {
     let team = text(&c["team"], "name");
     // Linear cycles are often unnamed - the board falls back to their
@@ -958,6 +959,7 @@ fn cycle_detail(
     } else {
         0.0
     };
+    plots.push(tc::Plot::meter(30, 1, w.saturating_sub(label_w + 22).clamp(6, 24), pct / 100.0, None, &p.dim, &p.grid, &p.txt));
     field(
         "progress",
         format!("{:.0}%", pct),
@@ -1048,6 +1050,7 @@ fn cycle_detail(
                 v.to_vec()
             }
         };
+        plots.push(tc::Plot::bars(1, rows.len(), &fit(&scope).iter().map(|v| (*v, p.txt.clone())).collect::<Vec<_>>(), 3, hi, false));
         for line in tc::vbars(
             &fit(&scope).iter().map(|v| (*v, p.txt.clone())).collect::<Vec<_>>(),
             3,
@@ -1063,6 +1066,7 @@ fn cycle_detail(
             &[(tc::RST, " ".into()), (p.grid.as_str(), "─".repeat(fit(&scope).len()))],
             w - 1,
         ));
+        plots.push(tc::Plot::bars(1, rows.len(), &fit(&done).iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(), 3, hi, true));
         for line in tc::vbars_down(
             &fit(&done).iter().map(|v| (*v, p.ok.clone())).collect::<Vec<_>>(),
             3,
@@ -1096,6 +1100,7 @@ fn cycle_detail(
             .iter()
             .map(|(_, n, c)| (*n as f64 / open as f64, c.to_string()))
             .collect();
+        plots.push(tc::Plot::stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &parts));
         let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
         let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
         for (colour, txt) in &bar {
@@ -1209,7 +1214,7 @@ fn cycle_detail(
 
 /// One team in full: what it is holding, in the states it is holding it.
 #[allow(clippy::too_many_arguments)]
-fn team_detail(
+fn team_detail_with_plots(
     key: &str,
     name: &str,
     counts: &HashMap<String, usize>,
@@ -1220,6 +1225,7 @@ fn team_detail(
     w: usize,
     h: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<usize>) {
     let mut rows = vec![tc::title(&format!("{} · {}", key, name), w, &p.accent)];
     let label_w = 18usize;
@@ -1282,6 +1288,7 @@ fn team_detail(
                 .iter()
                 .map(|(_, n, c)| (*n as f64 / open as f64, c.to_string()))
                 .collect();
+            plots.push(tc::Plot::stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &parts));
             let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
             let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, txt) in &bar {
@@ -1385,6 +1392,7 @@ fn team_detail(
         if here {
             cursor = Some(rows.len());
         }
+        plots.push(tc::Plot::meter(2 + name_w + 2 + label_w + 2, rows.len(), bar_w, q.progress, None, colour, &p.grid, &p.txt));
         rows.push(tc::seg(
             &[
                 (
@@ -1414,7 +1422,7 @@ fn team_detail(
 /// status and a progress figure on the frame it opens - not one request
 /// later.
 #[allow(clippy::too_many_arguments)]
-fn project_detail(
+fn project_detail_with_plots(
     q: &Proj,
     team: &str,
     held: Option<&serde_json::Value>,
@@ -1422,6 +1430,7 @@ fn project_detail(
     oldest: Option<&(f64, String)>,
     w: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> Vec<String> {
     let title = if team.is_empty() {
         q.name.clone()
@@ -1443,6 +1452,7 @@ fn project_detail(
 
     // Linear's own progress, the same figure the team's list shows. Derived
     // here it would disagree with the line the reader just came from.
+    plots.push(tc::Plot::meter(30, 1, w.saturating_sub(label_w + 22).clamp(6, 24), q.progress, None, &p.dim, &p.grid, &p.txt));
     field(
         "progress",
         format!("{:.0}%", 100.0 * q.progress),
@@ -1607,6 +1617,7 @@ fn project_detail(
             .iter()
             .map(|(_, n, c)| (*n as f64 / open as f64, c.to_string()))
             .collect();
+        plots.push(tc::Plot::stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &parts));
         let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
         let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
         for (colour, txt) in &bar {
@@ -1697,6 +1708,7 @@ fn project_detail(
         let bar_w = (w - 1).saturating_sub(2 + name_w + 2 + 5 + 2 + 10).clamp(6, 30);
         for (name, date, frac) in &stones {
             let colour = if *frac >= 1.0 { p.ok.as_str() } else { p.txt.as_str() };
+            plots.push(tc::Plot::meter(2 + name_w + 2, rows.len(), bar_w, *frac, None, colour, &p.grid, &p.txt));
             rows.push(tc::seg(
                 &[
                     (p.txt.as_str(), format!("  {}", tc::pad(name, name_w))),
@@ -1999,12 +2011,11 @@ fn main() {
     let mut moved = false;
     // Which project the board's own list has under its cursor.
     let mut board_project: Option<String> = None;
-    let mut tick = 0usize;
     let mut settle_t = 0usize;
     let mut settle_from: Option<(Vec<f64>, Vec<f64>)> = None;
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
         // names for opening one. Rewritten before the match rather than
@@ -2260,6 +2271,7 @@ fn main() {
         let stale = s.window != want;
         let left = quota.lock().map(|g| g.requests).unwrap_or(None);
 
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("linear ops", w, &p.new)];
         // Where the focused section's cursor landed, so the board can be
         // scrolled to keep it on screen.
@@ -2311,7 +2323,7 @@ fn main() {
             rows.extend(foot);
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, 1);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         }
 
@@ -2410,6 +2422,7 @@ fn main() {
                     Some((n as f64 / total_open as f64, state_colour(st, &p).to_string()))
                 })
                 .collect();
+            plots.push(tc::Plot::stacked_bar(1, rows.len(), w.saturating_sub(3).max(10), &parts));
             let bar = tc::stacked_bar(&parts, w.saturating_sub(3).max(10));
             let mut line: Vec<(&str, String)> = vec![(tc::RST, " ".into())];
             for (colour, txt) in &bar {
@@ -2504,6 +2517,7 @@ fn main() {
             // and the plain ramp's hot end measures 3.18 on it. A cycle that
             // has completed almost nothing is what lands there.
             let hot = tc::health_on(frac, on);
+            plots.push(tc::Plot::meter(1 + cycle_name_w, rows.len(), meter_w, frac, None, &hot, &p.grid, &p.txt));
             let mut line = vec![
                 (
                     c_of(if on { &p.accent } else { &p.txt }),
@@ -2634,6 +2648,10 @@ fn main() {
                 _ => (real_u, real_d, p.new.clone(), p.ok.clone()),
             }
         };
+        plots.extend([
+            tc::Plot::bars(1, rows.len(), &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(), 3, 1.0, false),
+            tc::Plot::bars(1, rows.len() + 4, &hd.iter().map(|v| (*v, cd.clone())).collect::<Vec<_>>(), 3, 1.0, true),
+        ]);
         for line in tc::vbars(
             &hu.iter().map(|v| (*v, cu.clone())).collect::<Vec<_>>(),
             3,
@@ -2926,6 +2944,10 @@ fn main() {
                     (c_of(&p.txt), format!(" {:>3.0}%", 100.0 * q.progress)),
                     (c_of(&p.dim), aside),
                 ];
+                if bar_w > 0 {
+                    let x = line.iter().take(3).map(|(_, t)| tc::display_width(t)).sum::<usize>() + 2;
+                    plots.push(tc::Plot::meter(x, rows.len(), bar_w, q.progress, None, colour, &p.grid, &p.txt));
+                }
                 let refs: Vec<(&str, String)> =
                     line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
                 rows.push(tc::seg(&refs, w - 1));
@@ -2959,13 +2981,14 @@ fn main() {
             let reading = deep
                 .as_ref()
                 .and_then(|id| s.all_projects.iter().find(|q| &q.id == id).cloned());
+            let mut detail_plots = Vec::new();
             let (body, cursor) = if let Some(q) = reading.as_ref() {
                 let empty = HashMap::new();
                 let states = s.proj_state.get(&q.id).unwrap_or(&empty);
                 let oldest = s.proj_oldest.get(&q.id).cloned();
                 let record = held.lock().ok().and_then(|g| g.get(&q.id).map(|(v, _)| v.clone()));
                 (
-                    project_detail(
+                    project_detail_with_plots(
                         q,
                         &q.teams.join(" · "),
                         record.as_ref(),
@@ -2973,6 +2996,7 @@ fn main() {
                         oldest.as_ref(),
                         w,
                         &p,
+                        &mut detail_plots,
                     ),
                     None,
                 )
@@ -2988,7 +3012,7 @@ fn main() {
                         list_len = issues.len();
                         copy_url = issues.get(pick.min(issues.len().saturating_sub(1)))
                             .map(|i| (i.url.clone(), i.ident.clone()));
-                        cycle_detail(c, states, issues, pick, w, h, &p)
+                        cycle_detail_with_plots(c, states, issues, pick, w, h, &p, &mut detail_plots)
                     })
                     .unwrap_or_default()
             } else {
@@ -2997,7 +3021,7 @@ fn main() {
                         let empty = HashMap::new();
                         let counts = s.by_team.get(key).unwrap_or(&empty);
                         let opens = s.proj_open.get(key).unwrap_or(&empty);
-                        team_detail(key, name, counts, &projects, opens, pick, s.window, w, h, &p)
+                        team_detail_with_plots(key, name, counts, &projects, opens, pick, s.window, w, h, &p, &mut detail_plots)
                     })
                     .unwrap_or_default()
             };
@@ -3121,9 +3145,10 @@ fn main() {
                 placed.clear();
                 let foot_top = out.len();
                 out.extend(foot);
-                tc::draw(&out, w, h);
+                let detail_plots: Vec<_> = detail_plots.into_iter().filter_map(|p| p.in_viewport(from, 1, room_below)).collect();
+                tc::draw_plots(&out, w, h, &detail_plots);
                 keyboard.footer_at(&packed, foot_top, 1);
-                std::thread::sleep(Duration::from_millis(300));
+                keyboard.wait(Duration::from_millis(300));
                 continue;
             }
         } else {
@@ -3200,9 +3225,10 @@ fn main() {
         }
         let foot_top = out.len();
         out.extend(footer);
-        tc::draw(&out, w, h);
+        let plots: Vec<_> = plots.drain(..).filter_map(|p| p.in_viewport(board, 1, room_below)).collect();
+        tc::draw_plots(&out, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 
@@ -3506,7 +3532,14 @@ mod tests {
         // Nothing fetched yet: the name, status and progress the list
         // already knew are on the first frame, and the screen says a
         // request is out rather than looking empty.
-        let out = plain(&project_detail(&q, "ABC", None, &states, None, 100, &palette()));
+        let mut plots = Vec::new();
+        let rows = project_detail_with_plots(&q, "ABC", None, &states, None, 100, &palette(), &mut plots);
+        assert_eq!(plots.len(), 2);
+        let meter = &plots[0];
+        let progress = plain(&[rows[meter.y].clone()]);
+        assert!(progress.chars().skip(meter.x).take(meter.width).all(|c| matches!(c, '█' | '░')));
+        assert!(progress.contains("50%"));
+        let out = plain(&rows);
         assert!(out.contains("HALLWAY-LIGHTS · ABC"), "{}", out);
         assert!(out.contains(" 50%"), "{}", out);
         assert!(out.contains("In Progress"), "{}", out);
@@ -3919,4 +3952,46 @@ mod tests {
         // branch the test-local copy could never have got wrong.
         assert!(team_wanted(&of(&["OPS"]), &of(&["OPS"]), "OPS"));
     }
+}
+
+#[cfg(test)]
+fn cycle_detail(
+    c: &serde_json::Value,
+    states: &HashMap<String, usize>,
+    issues: &[Issue],
+    pick: usize,
+    w: usize,
+    h: usize,
+    p: &Palette,
+) -> (Vec<String>, Option<usize>) {
+    cycle_detail_with_plots(c, states, issues, pick, w, h, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+fn team_detail(
+    key: &str,
+    name: &str,
+    counts: &HashMap<String, usize>,
+    projects: &[Proj],
+    opens: &HashMap<String, usize>,
+    pick: usize,
+    window: i64,
+    w: usize,
+    h: usize,
+    p: &Palette,
+) -> (Vec<String>, Option<usize>) {
+    team_detail_with_plots(key, name, counts, projects, opens, pick, window, w, h, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+fn project_detail(
+    q: &Proj,
+    team: &str,
+    held: Option<&serde_json::Value>,
+    states: &HashMap<String, usize>,
+    oldest: Option<&(f64, String)>,
+    w: usize,
+    p: &Palette,
+) -> Vec<String> {
+    project_detail_with_plots(q, team, held, states, oldest, w, p, &mut Vec::new())
 }

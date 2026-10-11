@@ -390,6 +390,27 @@ permission to make changes.
 
 ## Requirements
 
+### Kitty and ordinary terminals
+
+Opscope detects terminal capabilities per session. Supporting terminals get
+synchronized frame updates and pixel charts through the Kitty graphics protocol.
+`latency`, `link`, `netwatch` and `ports` render network history; `github`,
+`github-actions`, `vercel-deployments` and `linear` render activity charts;
+`github` and `agent-usage` render calendars; `linear` and `agent-usage` also
+render progress/quota meters. Other sessions use Braille and text graphics with
+the same data and controls. Use `OPSCOPE_GRAPHICS=text` to keep text charts, or
+`OPSCOPE_GRAPHICS=kitty` to request pixels with an on-screen fallback explanation.
+The default is `auto`. No Kitty helper or image library needs installing.
+
+To force text charts even in Kitty, run `OPSCOPE_GRAPHICS=text opscope latency`
+for one widget or `OPSCOPE_GRAPHICS=text opscope` for the launcher and its widgets.
+See [forcing text rendering](docs/terminal-rendering.md#force-text-rendering-on-kitty-capable-terminals)
+for preview commands and a shell-wide setting.
+See [terminal rendering](docs/terminal-rendering.md) for the developer API,
+widget review, tests and multiplexer compatibility limits.
+
+### Platform and tools
+
 - **Nothing to install to run them** — the binaries carry what they link
   against, SQLite included. Node, if you use `npx`; a Rust toolchain only
   if you build rather than download or install

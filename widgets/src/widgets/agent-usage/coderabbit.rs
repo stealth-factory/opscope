@@ -550,7 +550,7 @@ fn days_until(date: &str, today: NaiveDate) -> Option<i64> {
 /// The rolling allowance, drawn as another agent's `[+]` lane is: a bar of the share
 /// used, with how many are left in words, since a share of five reviews
 /// reads better as a count.
-fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<String> {
+fn allowance_rows_with_plots(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let lanes = allowance(d);
     let Some(lane) = lanes.first() else {
         return Vec::new();
@@ -571,7 +571,7 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
     let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
     let mut line: Vec<(String, String)> =
         vec![(p.dim.clone(), format!(" {} ", tc::pad(&lane.label, label_w)))];
-    line.extend(paced_bar(used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
+    line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, elapsed_of(lane.window_secs, lane.reset), room, hue, p));
     line.push((pct_colour(lane.pct, hue, p), pct_text(lane.pct)));
     line.push(pace_cell(lead(lane.pct, lane.window_secs, lane.reset), p));
     let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
@@ -618,7 +618,7 @@ fn allowance_rows(d: &Data, u: &CodeRabbitUsage, w: usize, p: &Palette) -> Vec<S
 
 /// The seven-day review count and the fair-use rate the published table
 /// gives for it, both marked as estimates.
-fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn fair_use_rows_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(week) = reviews_across(&d.samples, d.read_at, WEEK) else {
         return Vec::new();
     };
@@ -659,7 +659,7 @@ fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let bar_room = ((w as i64) - 24 - label_w as i64).max(8) as usize;
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad("7 days", label_w)))];
-        line.extend(paced_bar(used, None, bar_room, agent_hue("coderabbit"), p));
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, None, bar_room, agent_hue("coderabbit"), p));
         line.push((p.txt.clone(), format!(" {}", week.reviews)));
         line.push((p.dim.clone(), format!(" of {}", last)));
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
@@ -789,7 +789,7 @@ fn plan(u: &CodeRabbitUsage, auth_plan: &str, drawn: bool, w: usize, p: &Palette
     plan_rows(u.get("plan").unwrap_or(auth_plan), &pairs, w, "", None, "", p)
 }
 
-pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(u) = d.usage.as_ref() else {
         let what = if d.why.is_empty() {
             "The coderabbit CLI is not installed, so there is no report to read. \
@@ -802,13 +802,16 @@ pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<Str
         let run = if d.why.starts_with("not signed in") { run_hint("coderabbit") } else { "" };
         return no_local(&what, run, w, p);
     };
-    let mut rows = allowance_rows(d, u, w, p);
+    let mut rows = allowance_rows_with_plots(d, u, w, p, plots);
     let drawn = !rows.is_empty();
     if drawn {
         rows.push(String::new());
     }
-    let fair = fair_use_rows(d, w, p);
+    let mut fair_plots = Vec::new();
+    let fair = fair_use_rows_with_plots(d, w, p, &mut fair_plots);
     if !fair.is_empty() {
+        let offset = rows.len();
+        plots.extend(fair_plots.into_iter().map(|mut p| { p.y += offset; p }));
         rows.extend(fair);
         rows.push(String::new());
     }
@@ -1335,4 +1338,14 @@ mod tests {
             assert!(all.contains("Example Org"), "{all}");
         }
     }
+}
+
+#[cfg(test)]
+fn fair_use_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    fair_use_rows_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, _cfg, p, &mut Vec::new())
 }

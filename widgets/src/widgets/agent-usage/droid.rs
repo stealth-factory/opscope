@@ -391,9 +391,9 @@ fn no_token_percent(usage: &FactoryUsage) -> bool {
         && !usage.premium.unlimited
 }
 
-pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+pub fn tab_with_plots(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     if let Some(billing) = data.billing.as_ref() {
-        let mut rows = rate_rows(data, billing, w, p);
+        let mut rows = rate_rows_with_plots(data, billing, w, p, plots);
         rows.extend(token_warning(data, w, p));
         return add_section(
             rows,
@@ -401,7 +401,7 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
         );
     }
     if let Some(usage) = data.usage.as_ref() {
-        let mut rows = legacy_rows(data, usage, w, p);
+        let mut rows = legacy_rows_with_plots(data, usage, w, p, plots);
         rows.extend(token_warning(data, w, p));
         return add_section(rows, account_rows(data, None, w, p));
     }
@@ -423,7 +423,7 @@ pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<
     rows
 }
 
-fn rate_rows(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette) -> Vec<String> {
+fn rate_rows_with_plots(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
@@ -442,7 +442,7 @@ fn rate_rows(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette) -> Ve
         .iter()
         .filter(|lane| lane.label.starts_with("core "))
         .collect();
-    rows.extend(draw_lanes(&standard, hue, w, p));
+    tc::append_plot_rows(&mut rows, plots, |plots| draw_lanes_with_plots(&standard, hue, w, p, plots));
     rows.extend(note(
         "Factory did not send a length for the weekly or monthly window, so no pace is drawn for them.",
         &p.dim,
@@ -451,7 +451,7 @@ fn rate_rows(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette) -> Ve
     if !core.is_empty() {
         rows.push(String::new());
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── CORE ── ".into())], w - 1));
-        rows.extend(draw_lanes(&core, hue, w, p));
+        tc::append_plot_rows(&mut rows, plots, |plots| draw_lanes_with_plots(&core, hue, w, p, plots));
     }
     if let Some(balance) = billing.balance {
         rows.push(tc::seg(
@@ -465,7 +465,7 @@ fn rate_rows(data: &Data, billing: &FactoryBilling, w: usize, p: &Palette) -> Ve
     rows
 }
 
-fn legacy_rows(data: &Data, usage: &FactoryUsage, w: usize, p: &Palette) -> Vec<String> {
+fn legacy_rows_with_plots(data: &Data, usage: &FactoryUsage, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut rows = vec![tc::seg(
         &[
             (p.lbl.as_str(), " ── QUOTA ── ".into()),
@@ -478,12 +478,11 @@ fn legacy_rows(data: &Data, usage: &FactoryUsage, w: usize, p: &Palette) -> Vec<
         w - 1,
     )];
     let hue = agent_hue("droid");
-    rows.extend(draw_lanes(
+    tc::append_plot_rows(&mut rows, plots, |plots| draw_lanes_with_plots(
         &lanes(data).iter().collect::<Vec<_>>(),
         hue,
         w,
-        p,
-    ));
+        p, plots));
     for (label, pool) in [("standard", &usage.standard), ("premium", &usage.premium)] {
         rows.extend(pool_note(label, pool, w, p));
     }
@@ -525,7 +524,7 @@ fn org_row(label: &str, tokens: Option<f64>, w: usize, p: &Palette) -> Vec<Strin
     )]
 }
 
-fn draw_lanes(lanes: &[&Lane], hue: Option<(u8, u8, u8)>, w: usize, p: &Palette) -> Vec<String> {
+fn draw_lanes_with_plots(lanes: &[&Lane], hue: Option<(u8, u8, u8)>, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let label_w = lanes
         .iter()
         .map(|lane| short_label(&lane.label).chars().count())
@@ -539,7 +538,7 @@ fn draw_lanes(lanes: &[&Lane], hue: Option<(u8, u8, u8)>, w: usize, p: &Palette)
         let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(shown, label_w)))];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(lane.window_secs, lane.reset),
             room,
@@ -923,4 +922,9 @@ mod tests {
         assert!(!usage_url(API, None).contains("userId"));
         assert!(!usage_url(API, Some("a b")).contains("userId"));
     }
+}
+
+#[cfg(test)]
+pub fn tab(data: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(data, w, _h, _cfg, p, &mut Vec::new())
 }

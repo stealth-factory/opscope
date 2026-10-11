@@ -914,7 +914,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 }
 
 /// The three lanes cursor-agent's Usage view shows, plus the cycle.
-fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn cursor_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(live) = d.live.as_ref() else {
         return Vec::new();
     };
@@ -1001,7 +1001,7 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let (pace_colour, pace_txt) = pace_cell(lead(pct, cycle_secs, reset_ts), p);
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {}", tc::pad(name, label_w)))];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(cycle_secs, reset_ts),
             w.saturating_sub(31 + label_w).max(8),
@@ -1042,7 +1042,7 @@ fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         };
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {}", tc::pad("grok bot", label_w)))];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(secs, reset),
             // Narrower than the plan lanes by the width of the reset cell,
@@ -1370,8 +1370,8 @@ fn cursor_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 /// The tab's own body: the lanes, the spend charts, and the authorship
 /// counts from the tracking database.
-fn cursor_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = cursor_quota(d, w, p);
+fn cursor_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let mut rows = cursor_quota_with_plots(d, w, p, plots);
     if rows.is_empty() {
         let note = why_no_lane(d);
         if !note.is_empty() {
@@ -1509,12 +1509,12 @@ fn cursor_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 /// The whole tab: the lanes and charts, what Cursor metered, and the plan
 /// the percentages are percentages of.
-pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     // METERED sits last-but-one on every tab, so Cursor's - which is
     // published by the server rather than priced from a rate card - lands
     // in the same place as everyone else's rather than floating up beside
     // its quota.
-    let body = add_section(cursor_tab(d, w, p), cursor_metered(d, w, p));
+    let body = add_section(cursor_tab_with_plots(d, w, p, plots), cursor_metered(d, w, p));
     add_section(body, cursor_plan_rows(d, w, p))
 }
 
@@ -2358,4 +2358,14 @@ mod tests {
         assert!(!narrow.contains("resets"), "a date was clipped rather than dropped: {}", narrow);
         assert!(narrow.contains("$40.36 left"), "the money stood down first: {}", narrow);
     }
+}
+
+#[cfg(test)]
+fn cursor_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    cursor_quota_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+fn cursor_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    cursor_tab_with_plots(d, w, p, &mut Vec::new())
 }

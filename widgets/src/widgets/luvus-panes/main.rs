@@ -1056,7 +1056,7 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let mut show_idle = true;
     let mut opscope_filter = process_filter::Filter::default();
-    let (mut selected, mut tick) = (0usize, 0usize);
+    let mut selected = 0usize;
     // How far down the body, in drawn rows, the window has scrolled. Kept
     // across frames so the view holds still while the cursor moves inside
     // it, and only moves when the cursor would leave it.
@@ -1086,7 +1086,7 @@ fn main() {
     let mut sections: Vec<usize> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -1602,6 +1602,20 @@ fn main() {
 
         // ---- the body, built at whatever height it needs ----
         let mut body: Vec<String> = Vec::new();
+        let mut plots = Vec::new();
+        let total: usize = counts.values().sum();
+        if total > 0 {
+            let mut states: Vec<_> = counts.iter().collect();
+            states.sort_by_key(|(state, _)| **state);
+            let parts: Vec<_> = states.into_iter().map(|(state, n)|
+                (*n as f64 / total as f64, colour_of(state, &p).to_string())).collect();
+            let width = w.saturating_sub(2);
+            plots.push(tc::Plot::stacked_bar(1, body.len(), width, &parts));
+            let bar = tc::stacked_bar(&parts, width);
+            let mut line = vec![(tc::RST, " ".into())];
+            line.extend(bar.iter().map(|(c, t)| (c.as_str(), t.clone())));
+            body.push(tc::seg(&line, w.saturating_sub(1)));
+        }
         // Where each entry's rows sit in `body`, so the window can hold the
         // selected one without counting rows a second time and disagreeing.
         let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
@@ -2627,9 +2641,13 @@ fn main() {
         // under the pointer.
         let foot_top = rows.len();
         rows.extend(footer);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|mut p| {
+            p.y += head_len;
+            p.in_viewport(start, head_len, room)
+        }).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 

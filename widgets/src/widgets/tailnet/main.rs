@@ -982,7 +982,7 @@ fn main() {
             rows.extend(foot.iter().cloned());
             tc::draw(&rows, w, h);
             keyboard.footer_at(&packed, foot_top, indent);
-            std::thread::sleep(Duration::from_millis(400));
+            keyboard.wait(Duration::from_millis(400));
             continue;
         };
 
@@ -1089,6 +1089,7 @@ fn main() {
 
         if let (Some(which), false) = (view, listed.is_empty()) {
             let chosen = listed[selected.min(listed.len() - 1)].clone();
+            let mut detail_plots = Vec::new();
             let (body, at) = if which == "info" {
                 let users: HashMap<String, serde_json::Value> = data["User"]
                     .as_object()
@@ -1106,15 +1107,15 @@ fn main() {
                         )
                     })
                     .unwrap_or_default();
-                info_overlay(
+                info_overlay_with_plots(
                     &chosen, &eps_now, &users, w, h, &rates, &latency, &probe_err, &stale, &derp,
-                    dscroll, &p,
+                    dscroll, &p, &mut detail_plots,
                 )
             } else {
                 copy_overlay(&chosen, &eps_now, w, h, &note.0, dscroll, &p)
             };
             dscroll = at;
-            tc::draw(&body, w, h);
+            tc::draw_plots(&body, w, h, &detail_plots);
             // This overlay writes its footer as one line of prose rather
             // than packing hints, so there are no placements to register -
             // and leaving the screen underneath registered would answer a
@@ -1127,7 +1128,7 @@ fn main() {
             // describe a frame that is no longer on screen.
             placed.clear();
 
-            std::thread::sleep(Duration::from_millis(100));
+            keyboard.wait(Duration::from_millis(100));
             continue;
         }
 
@@ -1419,7 +1420,7 @@ fn main() {
         rows.extend(foot.iter().cloned());
         tc::draw(&rows, w, h);
         keyboard.footer_at(&packed, foot_top, indent);
-        std::thread::sleep(Duration::from_millis(300));
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 
@@ -1446,7 +1447,7 @@ fn framed(rows: Vec<String>, h: usize, scroll: usize, foot: Vec<String>) -> (Vec
     (out, at)
 }
 
-fn info_overlay(
+fn info_overlay_with_plots(
     peer: &serde_json::Value,
     eps: &HashMap<String, Vec<String>>,
     users: &HashMap<String, serde_json::Value>,
@@ -1459,6 +1460,7 @@ fn info_overlay(
     derp: &HashMap<String, String>,
     scroll: usize,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, usize) {
     let mut rows = vec![tc::title("machine info", w, &p.accent)];
     // Every field below is out of the same cached status as the list behind
@@ -1772,10 +1774,20 @@ fn info_overlay(
             .fold(0.0f64, f64::max)
             .max(1.0);
         let sw = w.saturating_sub(22).max(10);
+        plots.push(tc::Plot::new(8, rows.len(), sw, 1, tc::LineChart {
+            traces: vec![tc::Trace { values: rx.iter().map(|v| Some(v / peak)).collect(),
+                positions: None, colour: p.online.clone(), baseline: Some(0.0) }],
+            slots: sw, focus: None,
+        }));
+        plots.push(tc::Plot::new(8, rows.len() + 1, sw, 1, tc::LineChart {
+            traces: vec![tc::Trace { values: tx.iter().map(|v| Some(v / peak)).collect(),
+                positions: None, colour: p.relay.clone(), baseline: Some(0.0) }],
+            slots: sw, focus: None,
+        }));
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), "   down ".into()),
-                (p.online.as_str(), spark(&rx, sw, peak)),
+                (p.online.as_str(), tc::pad(&spark(&rx, sw, peak), sw)),
                 (p.dim.as_str(), format!(" {}", rate(*rx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
@@ -1783,7 +1795,7 @@ fn info_overlay(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), "   up   ".into()),
-                (p.relay.as_str(), spark(&tx, sw, peak)),
+                (p.relay.as_str(), tc::pad(&spark(&tx, sw, peak), sw)),
                 (p.dim.as_str(), format!(" {}", rate(*tx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
@@ -1802,7 +1814,7 @@ fn info_overlay(
         ));
     }
 
-    framed(
+    let (rows, at) = framed(
         rows,
         h,
         scroll,
@@ -1810,7 +1822,9 @@ fn info_overlay(
             &[(p.dim.as_str(), " [c]opy addresses · ← or esc to close · [q]uit".into())],
             w - 1,
         )],
-    )
+    );
+    *plots = plots.drain(..).filter_map(|p| p.in_viewport(at, 1, h.saturating_sub(2).max(1))).collect();
+    (rows, at)
 }
 
 fn copy_overlay(
@@ -1878,6 +1892,38 @@ fn copy_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_traffic_plots_follow_scrolling_and_absent_history_stays_blank() {
+        let peer = serde_json::json!({"HostName": "example", "Online": true});
+        let rates = HashMap::from([("example".into(), vec![(10.0, 5.0), (20.0, 0.0)])]);
+        for width in [40, 80] {
+            for height in [12, 70] {
+                for scroll in [0, 20, usize::MAX] {
+                    let mut plots = Vec::new();
+                    let (rows, _) = info_overlay_with_plots(
+                        &peer, &HashMap::new(), &HashMap::new(), width, height,
+                        &rates, &[], "", "", &HashMap::new(), scroll, &palette(), &mut plots,
+                    );
+                    if height == 70 && scroll == 0 {
+                        assert_eq!(plots.len(), 2);
+                    }
+                    for plot in plots {
+                        assert!(plot.y > 0 && plot.y < height - 1);
+                        assert!(rows[plot.y].contains("   down ") || rows[plot.y].contains("   up   "));
+                        assert_eq!(plot.x, 8);
+                        assert!(plot.x + plot.width < width);
+                    }
+                }
+            }
+        }
+        let mut plots = Vec::new();
+        info_overlay_with_plots(
+            &peer, &HashMap::new(), &HashMap::new(), 80, 70,
+            &HashMap::new(), &[], "", "", &HashMap::new(), 0, &palette(), &mut plots,
+        );
+        assert!(plots.is_empty(), "absent history must not become zero traffic");
+    }
 
     #[test]
     fn hiding_the_offline_machines_is_a_filter_the_pane_states() {

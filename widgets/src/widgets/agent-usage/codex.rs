@@ -648,7 +648,7 @@ struct Win {
 ///
 /// The one genuine quota figure any of these agents publishes: the server
 /// sends it back with each response, and the rollout records it.
-fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn codex_quota_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut wins: Vec<Win> = Vec::new();
     let mut plan = String::new();
     if let Some(live) = d.live.as_ref() {
@@ -772,7 +772,7 @@ fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         let (pace_colour, pace_txt) = pace_cell(lead(win.pct, secs, win.reset), p);
         let mut line: Vec<(String, String)> =
             vec![(p.dim.clone(), format!(" {} ", tc::pad(label, label_w)))];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(secs, win.reset),
             w.saturating_sub(34 + label_w).max(8),
@@ -916,7 +916,7 @@ fn codex_rate_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// totals and the cost come from. A per-file sum would count a resumed
 /// session's replayed turns again and put a peak on the calendar that never
 /// happened.
-fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn codex_calendar_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let mut totals: HashMap<NaiveDate, f64> = HashMap::new();
     for (day, models) in &d.daily {
         let Ok(at) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
@@ -945,6 +945,9 @@ fn codex_calendar(d: &Data, w: usize, p: &Palette) -> Vec<String> {
         ],
         w - 1,
     )];
+    let mut plot = cal.plot.clone();
+    plot.y += rows.len();
+    plots.push(plot);
     for line in &cal.rows {
         let refs: Vec<(&str, String)> = line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
         rows.push(tc::seg(&refs, w - 1));
@@ -1298,8 +1301,8 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 
 /// The whole tab: the quota, what this machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
-pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    let mut rows = codex_quota(d, w, p);
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let mut rows = codex_quota_with_plots(d, w, p, plots);
     if rows.is_empty() {
         let note = why_no_lane(d);
         if !note.is_empty() {
@@ -1321,7 +1324,20 @@ pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     }
     rows.extend(codex_totals_rows(d, w, p));
     rows = add_section(rows, codex_rate_rows(d, w, p));
-    rows = add_section(rows, codex_calendar(d, w, p));
+    let mut calendar_plots = Vec::new();
+    let calendar = codex_calendar_with_plots(d, w, p, &mut calendar_plots);
+    if !calendar.is_empty() {
+        // add_section's separator, written out so the plots are placed by
+        // the same row count the calendar lands at.
+        while rows.last().is_some_and(|r| r.is_empty()) {
+            rows.pop();
+        }
+        rows.push(String::new());
+        tc::append_plot_rows(&mut rows, plots, |local| {
+            local.extend(calendar_plots);
+            calendar
+        });
+    }
     rows.push(String::new());
     for line in wrap_text(
         "Tokens and rate are measured here, from the rollouts. Quota is the \
@@ -2173,4 +2189,14 @@ mod tests {
 
         assert!(live_payload(None, None).is_none(), "neither call answered");
     }
+}
+
+#[cfg(test)]
+fn codex_quota(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    codex_quota_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, cfg, p, &mut Vec::new())
 }

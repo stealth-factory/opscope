@@ -781,6 +781,8 @@ fn activity(
     w: usize,
     hours: f64,
     p: &Palette,
+    plots: &mut Vec<tc::Plot>,
+    y: usize,
 ) -> (String, usize) {
     let cols = w.saturating_sub(2).max(10);
     let at = tc::now();
@@ -809,9 +811,11 @@ fn activity(
             0,
         );
     }
+    let mut columns = Vec::new();
     let mut parts: Vec<(&str, String)> = vec![(p.dim.as_str(), " ".into())];
     for bucket in &buckets {
         if bucket.is_empty() {
+            columns.push((0.0, p.grid.clone()));
             parts.push((p.grid.as_str(), "·".into()));
             continue;
         }
@@ -824,9 +828,11 @@ fn activity(
         } else {
             &p.ok
         };
+        columns.push((bucket.len() as f64, colour.clone()));
         let level = ((bucket.len() as f64 / peak as f64) * 7.99) as usize;
         parts.push((colour.as_str(), tc::SPARK[level.min(7)].to_string()));
     }
+    plots.push(tc::Plot::bars(1, y, &columns, 1, peak as f64, false));
     (tc::seg(&parts, w - 1), peak)
 }
 
@@ -1731,7 +1737,7 @@ fn main() {
     let (mut needle, mut typing) = (String::new(), false);
     let mut overlay = false;
     let mut overlay_id: i64 = 0;
-    let (mut tick, mut selected, mut scroll) = (0usize, 0usize, 0usize);
+    let (mut selected, mut scroll) = (0usize, 0usize);
     // Where each run's rows landed on the frame now on screen. The list
     // windows itself rather than the frame being windowed, so a frame row
     // is a body row and there is nothing pinned to skip.
@@ -1746,7 +1752,7 @@ fn main() {
     let mut shown: Vec<serde_json::Value> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         let mut keys = keyboard.poll();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
@@ -2049,7 +2055,7 @@ fn main() {
             // describe a frame that is no longer on screen.
             placed.clear();
             tc::draw(&out, w, h);
-            std::thread::sleep(Duration::from_millis(250));
+            keyboard.wait(Duration::from_millis(250));
             continue;
         }
 
@@ -2136,7 +2142,8 @@ fn main() {
             ],
             w - 1,
         ));
-        let (chart, peak) = activity(&runs, w, hours as f64, &p);
+        let mut plots = Vec::new();
+        let (chart, peak) = activity(&runs, w, hours as f64, &p, &mut plots, rows.len());
         rows.push(chart);
         if peak > 0 {
             rows.push(tc::seg(
@@ -2172,6 +2179,8 @@ fn main() {
                 ));
                 let recent = recent_run_secs(&runs, tc::now());
                 let spark = sparkline(&recent, w.saturating_sub(2).max(10));
+                let columns: Vec<_> = recent.iter().rev().take(w.saturating_sub(2).max(10)).rev().map(|v| (*v, p.ok.clone())).collect();
+                plots.push(tc::Plot::bars(1, rows.len(), &columns, 1, 0.0, false));
                 if !spark.is_empty() {
                     rows.push(tc::seg(&[(p.ok.as_str(), format!(" {}", spark))], w - 1));
                 }
@@ -2421,9 +2430,10 @@ fn main() {
         // under the pointer.
         let foot_top = rows.len();
         rows.extend(footer);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 
@@ -2851,7 +2861,7 @@ mod tests {
                 "conclusion": "success"
             }),
         ];
-        let (line, peak) = activity(&runs, 40, 48.0, &p);
+        let (line, peak) = activity(&runs, 40, 48.0, &p, &mut Vec::new(), 1);
         assert_eq!(peak, 0);
         assert!(line.contains("no runs"), "{line}");
     }

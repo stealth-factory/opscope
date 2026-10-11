@@ -1186,6 +1186,7 @@ fn main() {
 
         let (w, h) = tc::size();
         let now = Local::now();
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("clocks", w, &p.head)];
         rows.push(tc::seg(&[(p.lbl.as_str(), " ── SERVER TIME ──".into())], w - 1));
 
@@ -1269,6 +1270,7 @@ fn main() {
                 // being that it keeps getting harder to miss.
                 let total = pomo.duration() + over;
                 let base = ((bar_w as f64 * pomo.duration() / total).round() as usize).max(1);
+                plots.push(tc::Plot::stacked_bar(1, rows.len(), bar_w, &[(pomo.duration() / total, ink.clone()), (over / total, p.over.clone())]));
                 rows.push(tc::seg(
                     &[
                         (ink.as_str(), format!(" {}", "█".repeat(base))),
@@ -1277,6 +1279,7 @@ fn main() {
                     w - 1,
                 ));
             } else {
+                plots.push(tc::Plot::meter(1, rows.len(), bar_w, frac, None, &ink, &p.dim, &p.txt));
                 rows.push(tc::seg(
                     &[(ink.as_str(), format!(" {}", bar(frac, bar_w)))],
                     w - 1,
@@ -1291,6 +1294,7 @@ fn main() {
                 ],
                 w - 1,
             ));
+            plots.push(tc::Plot::meter(1, rows.len(), bar_w, item.frac, None, &item.ink, &p.dim, &p.txt));
             rows.push(tc::seg(
                 &[(item.ink.as_str(), format!(" {}", bar(item.frac, bar_w)))],
                 w - 1,
@@ -1434,7 +1438,8 @@ fn main() {
         if flash_on && flash_window(flash_started, flash_count, flash_gap, seconds()) {
             tc::draw(&flash_frame(&rows, w, h, &flash_bg, &flash_fg), w, h);
         } else {
-            tc::draw(&rows, w, h);
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1))).collect();
+            tc::draw_plots(&rows, w, h, &plots);
         }
         keyboard.footer_at(&packed, foot_top, 1);
         // Forget a flash once its last blink has passed, so the check stops
@@ -1444,7 +1449,7 @@ fn main() {
                 flash_started = None;
             }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        keyboard.wait(Duration::from_millis(200));
     }
 }
 

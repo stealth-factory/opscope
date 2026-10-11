@@ -943,7 +943,7 @@ fn main() {
     let mut keyboard = tc::Keyboard::new();
     let (mut show_labels, mut show_idle) = (true, true);
     let mut opscope_filter = process_filter::Filter::default();
-    let (mut selected, mut tick) = (0usize, 0usize);
+    let mut selected = 0usize;
     // Where each pane's rows landed on the frame now on screen. The three
     // sections share one index - agents, then busy, then the rest - which
     // is what the arrows walk, so a click lands in the same space and
@@ -966,7 +966,7 @@ fn main() {
     let mut sections: Vec<usize> = Vec::new();
 
     loop {
-        tick += 1;
+        let tick = tc::animation_tick();
         // A click on another row moves the cursor there; a click on the row
         // it is already on becomes `enter`, which is the key the footer
         // names for opening one. Rewritten before the match rather than
@@ -1128,6 +1128,7 @@ fn main() {
         let places: std::collections::HashSet<&str> =
             agents.iter().map(|a| a.workspace_id.as_str()).collect();
 
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("herdr panes", w, &p.accent)];
         // The span each pane covers, taken from where its rows started and
         // ended: a pane is one row, or several once its detail is drawn.
@@ -1151,6 +1152,18 @@ fn main() {
             }
         }
         rows.push(tc::seg(&summary, w - 1));
+        if !agents.is_empty() {
+            let mut states: Vec<_> = counts.iter().collect();
+            states.sort_by_key(|(state, _)| **state);
+            let parts: Vec<_> = states.into_iter().map(|(state, n)|
+                (*n as f64 / agents.len() as f64, colour_of(state, &p).to_string())).collect();
+            let width = w.saturating_sub(2);
+            plots.push(tc::Plot::stacked_bar(1, rows.len(), width, &parts));
+            let bar = tc::stacked_bar(&parts, width);
+            let mut line = vec![(tc::RST, " ".into())];
+            line.extend(bar.iter().map(|(c, t)| (c.as_str(), t.clone())));
+            rows.push(tc::seg(&line, w.saturating_sub(1)));
+        }
         if !err.is_empty() {
             rows.push(tc::seg(
                 &[(p.blocked.as_str(), format!(" ! {}", err))],
@@ -1739,9 +1752,10 @@ fn main() {
         placed = rows_at;
         let foot_top = rows.len();
         rows.extend(footer);
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(2))).collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, 1);
-        std::thread::sleep(Duration::from_millis(250));
+        keyboard.wait(Duration::from_millis(250));
     }
 }
 

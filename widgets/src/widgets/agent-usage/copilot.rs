@@ -459,7 +459,7 @@ fn commas(n: i64) -> String {
     }
 }
 
-fn copilot_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn copilot_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let null = serde_json::Value::Null;
     let live = d.live.as_ref().unwrap_or(&null);
     let mut rows: Vec<String> = Vec::new();
@@ -537,7 +537,7 @@ fn copilot_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             let room = ((w as i64) - 38 - label_w as i64).max(8) as usize;
             let hue = agent_hue("copilot");
             let mut line: Vec<(String, String)> = vec![(p.dim.clone(), format!(" {} ", name))];
-            line.extend(paced_bar(used, elapsed_of(span_secs, stamp), room, hue, p));
+            line.extend(paced_bar_with_plot(plots, rows.len(), &line, used, elapsed_of(span_secs, stamp), room, hue, p));
             line.push((pct_colour(pct, hue, p), pct_text(pct)));
             line.push(pace_cell(lead(pct, span_secs, stamp), p));
             let refs: Vec<(&str, String)> =
@@ -710,8 +710,8 @@ fn copilot_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 
 /// The whole tab: the quota, what this machine spent, what that cost, and
 /// which subscription the percentages are percentages of.
-pub fn tab(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    let body = add_section(copilot_tab(d, w, p), copilot_metered(d, w, cfg, p));
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let body = add_section(copilot_tab_with_plots(d, w, p, plots), copilot_metered(d, w, cfg, p));
     let null = serde_json::Value::Null;
     add_section(body, copilot_plan_rows(d.live.as_ref().unwrap_or(&null), w, p))
 }

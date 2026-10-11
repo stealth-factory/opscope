@@ -110,7 +110,12 @@ fn main() {
         .map(|_| (0..w).map(|_| glyphs[rng.below(glyphs.len())]).collect())
         .collect();
 
+    let mut pacer = tc::FramePacer::new(Duration::from_millis(33));
+    let mut previous = std::time::Instant::now();
     loop {
+        let now = std::time::Instant::now();
+        let step = now.duration_since(previous).as_secs_f64().min(0.25) / 0.055;
+        previous = now;
         for key in keyboard.poll() {
             if key == "q" || key == "Q" {
                 keyboard.restore();
@@ -130,7 +135,7 @@ fn main() {
 
         // A handful of cells change character every frame, wherever they
         // happen to be.
-        for _ in 0..(w * h / 40).max(1) {
+        for _ in 0..((w * h) as f64 / 40.0 * step).round().max(1.0) as usize {
             let y = rng.below(h);
             let x = rng.below(w);
             field[y][x] = glyphs[rng.below(glyphs.len())];
@@ -140,7 +145,7 @@ fn main() {
         let mut cells: Vec<Vec<(String, char)>> =
             vec![vec![(String::new(), ' '); w]; h];
         for (x, drop) in drops.iter_mut().enumerate() {
-            drop.y += drop.speed;
+            drop.y += drop.speed * step;
             if drop.y - drop.length as f64 > h as f64 {
                 *drop = Drop::new(h, &mut rng);
                 drop.y = -(drop.length as f64);
@@ -193,7 +198,7 @@ fn main() {
             );
         }
         tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(55));
+        pacer.wait();
     }
 }
 

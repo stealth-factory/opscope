@@ -1050,7 +1050,7 @@ pub fn scope_phrase(w: usize, used: usize) -> &'static str {
 /// the response carries a dozen null pools that /usage does not render
 /// either. Each entry names itself, so a model-scoped weekly limit arrives
 /// labelled without this having to know the name.
-pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+pub fn claude_quota_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let Some(u) = c.quota.as_ref() else {
         return Vec::new();
     };
@@ -1150,7 +1150,7 @@ pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
             },
             format!(" {} ", tc::pad(label, label_w)),
         )];
-        line.extend(paced_bar(
+        line.extend(paced_bar_with_plot(plots, rows.len(), &line,
             used,
             elapsed_of(window, reset),
             w.saturating_sub(35 + label_w).max(8),
@@ -1737,8 +1737,8 @@ pub fn claude_metered(c: &Data, w: usize, cfg: &Config, p: &Palette) -> Vec<Stri
     )
 }
 
-pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let mut rows = claude_quota(c, w, p);
+fn claude_tab_with_plots(c: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let mut rows = claude_quota_with_plots(c, w, p, plots);
     if rows.is_empty() {
         // Two facts have to survive a quota block that drew nothing: why the
         // bars are missing, and the extra-usage line, which lives inside that
@@ -2056,6 +2056,9 @@ pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
             ],
             w - 1,
         ));
+        let mut plot = cal.plot.clone();
+        plot.y += rows.len();
+        plots.push(plot);
         for line in &cal.rows {
             let refs: Vec<(&str, String)> =
                 line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
@@ -2303,8 +2306,8 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
 
 /// The whole tab: the quota, what the machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
-pub fn tab(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette) -> Vec<String> {
-    let body = add_section(claude_tab(c, w, p), claude_metered(c, w, cfg, p));
+pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    let body = add_section(claude_tab_with_plots(c, w, p, plots), claude_metered(c, w, cfg, p));
     match c.profile.as_ref() {
         Some(prof) => add_section(body, claude_plan_rows(prof, w, p)),
         None => body,
@@ -3743,7 +3746,7 @@ mod tests {
                 assert_eq!(models.len(), 1, "stats: {stats:?}, days: {days}");
                 assert_eq!(total_tokens(&models[0].1), 2_000_000.0);
             }
-            let rendered = bare(&tab(&data, 120, 40, &Config::default(), &palette()).join("\n"));
+            let rendered = bare(&tab_with_plots(&data, 120, 40, &Config::default(), &palette(), &mut Vec::new()).join("\n"));
             for label in ["today", "30 days"] {
                 let row = rendered.lines().find(|l| l.contains(label)).unwrap();
                 assert!(row.contains("$60.00") && row.contains("2.0M tokens"), "{row}");
@@ -3812,4 +3815,14 @@ mod tests {
         assert_eq!(num(&got[1].stats, "totalSessions") as i64, 9);
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+#[cfg(test)]
+pub fn claude_quota(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    claude_quota_with_plots(c, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn claude_tab(c: &Data, w: usize, p: &Palette) -> Vec<String> {
+    claude_tab_with_plots(c, w, p, &mut Vec::new())
 }

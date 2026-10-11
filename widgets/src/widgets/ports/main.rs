@@ -398,6 +398,8 @@ fn traffic_chart(
     w: usize,
     p: &Palette,
     stale: bool,
+    plots: &mut Vec<tc::Plot>,
+    y: usize,
 ) -> Vec<String> {
     let up_peak = series.iter().map(|s| s.0).fold(0.0f64, f64::max);
     let down_peak = series.iter().map(|s| s.1).fold(0.0f64, f64::max);
@@ -465,7 +467,7 @@ fn traffic_chart(
         return out;
     }
 
-    let half = |pick: fn(&(f64, f64, f64)) -> f64,
+    let mut half = |pick: fn(&(f64, f64, f64)) -> f64,
                 colour: &str,
                 peak: f64,
                 text: &str,
@@ -475,6 +477,7 @@ fn traffic_chart(
             .iter()
             .map(|s| (pick(s), colour.to_string()))
             .collect();
+        plots.push(tc::Plot::bars(lab + 1 + blank, y + 1 + if down { rows + 1 } else { 0 }, &cols, rows, peak, down));
         let bars = if down {
             tc::vbars_down(&cols, rows, peak)
         } else {
@@ -1729,6 +1732,7 @@ fn detail_rows(
     w: usize,
     p: &Palette,
     err: &str,
+    plots: &mut Vec<tc::Plot>,
 ) -> (Vec<String>, Option<usize>) {
     // Which row the selected address came out on, so the caller can keep it
     // in view. Nothing when there are no addresses to pick between.
@@ -1827,6 +1831,8 @@ fn detail_rows(
             w,
             p,
             !err.is_empty(),
+            plots,
+            rows.len(),
         )),
         None => rows.push(tc::seg(
             &[(p.dim.as_str(), format!(" {}", host::traffic_unavailable()))],
@@ -2545,7 +2551,7 @@ fn main() {
                 ),
             ];
             tc::draw(&rows, w, h);
-            std::thread::sleep(Duration::from_millis(100));
+            keyboard.wait(Duration::from_millis(100));
             continue;
         }
 
@@ -2578,6 +2584,7 @@ fn main() {
             } else {
                 Vec::new()
             };
+            let mut plots = Vec::new();
             let (rows, cursor) = detail_rows(
                 &view.row,
                 self_node,
@@ -2589,6 +2596,7 @@ fn main() {
                 w,
                 &ok,
                 &err,
+                &mut plots,
             );
             let foot = footer(
                 &confirm,
@@ -2639,14 +2647,16 @@ fn main() {
                 rows.push(String::new());
             }
             rows.extend(foot);
-            tc::draw(&rows, w, h);
-            std::thread::sleep(Duration::from_millis(300));
+            let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(dscroll, 1, room_below)).collect();
+            tc::draw_plots(&rows, w, h, &plots);
+            keyboard.wait(Duration::from_millis(300));
             continue;
         }
 
         let mine = all.iter().filter(|r| r.pid.is_some()).count();
         let off_box = all.iter().filter(|r| !r.exposed.is_empty()).count();
 
+        let mut plots = Vec::new();
         let mut rows = vec![tc::title("dev servers", w, &ok.port)];
         rows.push(tc::seg(
             &[
@@ -2699,6 +2709,8 @@ fn main() {
                 w,
                 &ok,
                 !err.is_empty(),
+                &mut plots,
+                rows.len(),
             ));
             rows.push(String::new());
         }
@@ -2966,9 +2978,11 @@ fn main() {
         while rows.len() < h.saturating_sub(foot.len() + 1) {
             rows.push(String::new());
         }
+        let room = rows.len();
         rows.extend(foot);
-        tc::draw(&rows, w, h);
-        std::thread::sleep(Duration::from_millis(300));
+        let plots: Vec<_> = plots.into_iter().filter_map(|p| p.in_viewport(0, 1, room.saturating_sub(1))).collect();
+        tc::draw_plots(&rows, w, h, &plots);
+        keyboard.wait(Duration::from_millis(300));
     }
 }
 
@@ -3526,6 +3540,7 @@ mod tests {
         };
         let series = vec![(1_000.0, 0.0, 4.0), (2_000.0, 0.0, 4.0)];
         let why = "traffic sampling failed: ss timed out - last rates held";
+        let mut plots = Vec::new();
         let (held, _) = detail_rows(
             &row,
             &Net::default(),
@@ -3537,7 +3552,12 @@ mod tests {
             80,
             &p,
             why,
+            &mut plots,
         );
+        assert_eq!(plots.len(), 2);
+        assert_eq!(plots[1].y, plots[0].y + 4);
+        assert!(plots.iter().all(|p| p.width == series.len() && p.x + p.width <= 79));
+        assert!(held[plots[0].y - 1].contains("TRAFFIC"));
         let held = held.join("\n");
         assert!(
             held.contains("traffic sampling failed"),
@@ -3563,6 +3583,7 @@ mod tests {
             80,
             &p,
             "",
+            &mut Vec::new(),
         );
         let live = live.join("\n");
         assert!(!live.contains("traffic sampling failed"));

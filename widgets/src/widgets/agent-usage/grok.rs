@@ -1174,7 +1174,7 @@ fn seg_of(parts: &[(String, String)], w: usize) -> String {
     tc::seg(&refs, w - 1)
 }
 
-fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+fn grok_tab_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let hue = agent_hue("grok");
     let mut rows: Vec<String> = Vec::new();
     // Not filtered on the percentage any more. A reading that names the
@@ -1234,7 +1234,7 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                     pct_colour(pct, hue, p),
                     format!(" {:<5}", format!("{:.0}%", pct)),
                 )];
-                line.extend(paced_bar(
+                line.extend(paced_bar_with_plot(plots, rows.len(), &line,
                     (pct / 100.0).clamp(0.0, 1.0),
                     elapsed_of(span, reset),
                     w.saturating_sub(38).max(10),
@@ -1266,7 +1266,7 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
                     pct_colour(pct, hue, p),
                     format!(" {:<5}", format!("{:.0}%", pct)),
                 )];
-                line.extend(paced_bar(
+                line.extend(paced_bar_with_plot(plots, rows.len(), &line,
                     (pct / 100.0).clamp(0.0, 1.0),
                     elapsed_of(span, reset),
                     // Measured against the tail actually being drawn, so a
@@ -1395,6 +1395,9 @@ fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
             ],
             w - 1,
         ));
+        let mut plot = cal.plot.clone();
+        plot.y += rows.len();
+        plots.push(plot);
         for line in &cal.rows {
             rows.push(seg_of(line, w));
         }
@@ -1478,8 +1481,8 @@ fn plan_block(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 /// running total with no model on it and no split by priced kind, and
 /// input, output and the two cache durations differ in price by up to
 /// fifty times - so a total here cannot be costed at all.
-pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
-    add_section(grok_tab(d, w, p), plan_block(d, w, p))
+pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
+    add_section(grok_tab_with_plots(d, w, p, plots), plan_block(d, w, p))
 }
 
 #[cfg(test)]
@@ -2300,4 +2303,14 @@ mod tests {
         let note = why_no_lane(&lapsed);
         assert!(note.contains("token lapsed"), "{note}");
     }
+}
+
+#[cfg(test)]
+fn grok_tab(d: &Data, w: usize, p: &Palette) -> Vec<String> {
+    grok_tab_with_plots(d, w, p, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub fn tab(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette) -> Vec<String> {
+    tab_with_plots(d, w, _h, _cfg, p, &mut Vec::new())
 }
