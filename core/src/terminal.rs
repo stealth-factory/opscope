@@ -1,6 +1,6 @@
 //! Capability negotiation belongs to the terminal session, never a widget.
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) const SYNC_BEGIN: &str = "\x1b[?2026h";
@@ -23,6 +23,10 @@ const TEXT_QUERY: &str = "\x1b[?2026$p\x1b[?u\x1b[c";
 /// XTGETTCAP for `Smulx` (styled underlines) and `Setulc` (underline colour).
 const UNDERLINE_QUERY: &str = "\x1bP+q536d756c78;536574756c63\x1b\\";
 const TIMEOUT: Duration = Duration::from_millis(800);
+/// A lost `CSI 16 t` reply never decrements the in-flight count, so every
+/// later reply is rejected. Drop the count after this long with no send
+/// and no reply. A cell report normally comes back in a round trip.
+const CELL_REPLY_WAIT_MS: u64 = 1_500;
 /// Inclusive window for a reported cell. 20×40, a HiDPI Kitty cell, sits
 /// inside it. Wider or taller than this, or an aspect outside 5:4..=3:1,
 /// is not a cell we will rasterise.
@@ -44,6 +48,9 @@ static CELL_SENT_PREV: AtomicU64 = AtomicU64::new(0);
 /// `CSI 16 t` has no id. Replies arrive in order, so a reply answers the
 /// latest query only when it is the only one still outstanding.
 static CELL_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
+/// Milliseconds on `cell_clock_ms` when a query was sent or a reply
+/// consumed. Zero means nothing is being timed.
+static CELL_HEARD_AT_MS: AtomicU64 = AtomicU64::new(0);
 static CELL_STALE: AtomicBool = AtomicBool::new(false);
 /// Set from the SIGWINCH handler. The next complete frame sends the query;
 /// the handler itself does not write, so `CSI 16 t` cannot land inside an
@@ -157,6 +164,7 @@ pub(crate) fn start() {
     QUERY_CELLS.store(query_cells, Ordering::Release);
     // A new negotiation replaces any query the previous session left in flight.
     CELL_OUTSTANDING.store(0, Ordering::Release);
+    CELL_HEARD_AT_MS.store(0, Ordering::Release);
     if query_cells {
         CELL_QUERY_GEN.fetch_add(1, Ordering::AcqRel);
         note_cell_query_sent();
@@ -335,7 +343,12 @@ pub(crate) fn reply(sequence: &str) {
     // Outside the 800 ms capability window on purpose: a font change asks
     // again on SIGWINCH, long after startup, and the reply is still a cell size.
     if let Some(report) = cell_report(sequence) {
-        let outstanding = consume_cell_reply();
+        let now = cell_clock_ms();
+        expire_silent_cell_queries(now);
+        let outstanding = decrement_cell_outstanding(&CELL_OUTSTANDING);
+        if outstanding > 0 {
+            CELL_HEARD_AT_MS.store(now, Ordering::Release);
+        }
         let sent = CELL_SENT_GEN.load(Ordering::Acquire);
         let query = CELL_QUERY_GEN.load(Ordering::Acquire);
         // A newer resize, or an older query still in flight, means this
@@ -504,26 +517,48 @@ pub(crate) fn restore_cell_query() {
     CELL_NEED_SEND.store(true, Ordering::Release);
     // The bytes did not go out, so a reply still belongs to the previous query.
     CELL_SENT_GEN.store(CELL_SENT_PREV.load(Ordering::Acquire), Ordering::Release);
-    let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
-    if outstanding > 0 {
-        CELL_OUTSTANDING.fetch_sub(1, Ordering::AcqRel);
-    }
+    decrement_cell_outstanding(&CELL_OUTSTANDING);
 }
 
 fn note_cell_query_sent() {
+    let now = cell_clock_ms();
     let query_gen = CELL_QUERY_GEN.load(Ordering::Acquire);
-    CELL_SENT_PREV.store(CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel), Ordering::Release);
-    CELL_OUTSTANDING.fetch_add(1, Ordering::AcqRel);
+    CELL_SENT_PREV.store(
+        CELL_SENT_GEN.swap(query_gen, Ordering::AcqRel),
+        Ordering::Release,
+    );
+    loop {
+        let silent = cell_query_silence_ms(CELL_HEARD_AT_MS.load(Ordering::Acquire), now);
+        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        // A lost reply leaves a count of two or more, or one phantom after
+        // the reply that did arrive was rejected. Silence drops it, so this
+        // send is the only query in flight.
+        let next = cell_outstanding_after_silence(outstanding, silent).saturating_add(1);
+        if CELL_OUTSTANDING
+            .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    CELL_HEARD_AT_MS.store(now, Ordering::Release);
 }
 
-/// Count before this reply is consumed. Zero means nothing was in flight.
-fn consume_cell_reply() -> u64 {
+fn cell_clock_ms() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Previous count, or zero when there was nothing to release. The
+/// subtraction lands only while the observed count is still positive, so a
+/// racing reply cannot wrap it.
+fn decrement_cell_outstanding(count: &AtomicU64) -> u64 {
     loop {
-        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        let outstanding = count.load(Ordering::Acquire);
         if outstanding == 0 {
             return 0;
         }
-        if CELL_OUTSTANDING
+        if count
             .compare_exchange(
                 outstanding,
                 outstanding - 1,
@@ -534,6 +569,53 @@ fn consume_cell_reply() -> u64 {
         {
             return outstanding;
         }
+    }
+}
+
+fn expire_silent_cell_queries(now_ms: u64) {
+    loop {
+        let heard = CELL_HEARD_AT_MS.load(Ordering::Acquire);
+        let silent = cell_query_silence_ms(heard, now_ms);
+        let outstanding = CELL_OUTSTANDING.load(Ordering::Acquire);
+        let next = cell_outstanding_after_silence(outstanding, silent);
+        if next == outstanding {
+            return;
+        }
+        if CELL_OUTSTANDING
+            .compare_exchange(outstanding, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // A send that landed after this expiry keeps its own timestamp.
+            let _ = CELL_HEARD_AT_MS.compare_exchange(
+                heard,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            return;
+        }
+    }
+}
+
+/// Milliseconds since the last send or reply. Zero when nothing is timed,
+/// so a cleared count is not treated as ancient silence.
+pub(crate) fn cell_query_silence_ms(heard_at_ms: u64, now_ms: u64) -> u64 {
+    if heard_at_ms == 0 {
+        0
+    } else {
+        now_ms.saturating_sub(heard_at_ms)
+    }
+}
+
+/// In-flight queries still counted after `silent_ms` with no send and no
+/// reply. At the wait, the count drops to zero: a lost reply must not
+/// reject every later one, and the phantom it leaves between frames goes
+/// with it.
+pub(crate) fn cell_outstanding_after_silence(outstanding: u64, silent_ms: u64) -> u64 {
+    if silent_ms >= CELL_REPLY_WAIT_MS {
+        0
+    } else {
+        outstanding
     }
 }
 
@@ -553,6 +635,7 @@ pub(crate) fn release_terminal() {
     OWNS_TERMINAL.store(false, Ordering::Release);
     CELL_NEED_SEND.store(false, Ordering::Release);
     CELL_OUTSTANDING.store(0, Ordering::Release);
+    CELL_HEARD_AT_MS.store(0, Ordering::Release);
 }
 
 /// Cell to publish for a resize that does not already have a reply.
@@ -586,6 +669,7 @@ pub(crate) fn cell_after_resize(
 /// Use the window pixel size, or 8×16, when a resize is still waiting on
 /// `CSI 16 t`. A reply that already matched this resize is left alone.
 pub(crate) fn apply_pending_cell_size() {
+    expire_silent_cell_queries(cell_clock_ms());
     if !CELL_STALE.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -1157,6 +1241,44 @@ mod tests {
             (8, 16)
         );
         assert!(cell_reply_matches(5, 5, 1));
+    }
+
+    #[test]
+    fn silence_drops_a_lost_cell_reply_so_the_next_query_can_match() {
+        assert_eq!(cell_query_silence_ms(0, 5_000), 0);
+        assert_eq!(cell_outstanding_after_silence(2, CELL_REPLY_WAIT_MS - 1), 2);
+        assert_eq!(cell_outstanding_after_silence(4, CELL_REPLY_WAIT_MS), 0);
+        // The reply that did arrive was rejected and left a phantom of one.
+        assert_eq!(cell_outstanding_after_silence(1, CELL_REPLY_WAIT_MS), 0);
+        let outstanding = cell_outstanding_after_silence(2, CELL_REPLY_WAIT_MS).saturating_add(1);
+        assert!(cell_reply_matches(5, 5, outstanding));
+        assert!(!cell_reply_matches(5, 5, 2));
+    }
+
+    #[test]
+    fn a_rollback_does_not_wrap_the_outstanding_count() {
+        let count = AtomicU64::new(0);
+        assert_eq!(decrement_cell_outstanding(&count), 0);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        let count = AtomicU64::new(2);
+        assert_eq!(decrement_cell_outstanding(&count), 2);
+        assert_eq!(count.load(Ordering::Acquire), 1);
+
+        let count = std::sync::Arc::new(AtomicU64::new(1));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let count = std::sync::Arc::clone(&count);
+            let gate = std::sync::Arc::clone(&gate);
+            handles.push(std::thread::spawn(move || {
+                gate.wait();
+                decrement_cell_outstanding(&count);
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(count.load(Ordering::Acquire), 0);
     }
 
     #[test]
