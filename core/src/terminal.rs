@@ -125,11 +125,27 @@ fn client_termtype() -> Option<String> {
     }
 }
 
-/// Effective `allow-passthrough` for this pane. `-A` includes the global
-/// value when the window has not set its own. `None` means unreadable.
+/// `show-options` arguments for this pane's `allow-passthrough`.
+///
+/// `-p` is the pane option. A window-only query misses a pane override.
+/// `-A` still includes an inherited window or global value. `-t` is
+/// `TMUX_PANE` when that variable is set, so another pane's option is not
+/// the one read.
+fn passthrough_args(pane: Option<&str>) -> Vec<String> {
+    let mut args = vec!["show-options".to_string(), "-Apv".to_string()];
+    if let Some(pane) = pane.map(str::trim).filter(|pane| !pane.is_empty()) {
+        args.push("-t".to_string());
+        args.push(pane.to_string());
+    }
+    args.push("allow-passthrough".to_string());
+    args
+}
+
+/// Effective `allow-passthrough` for this pane. `None` means unreadable.
 fn allow_passthrough() -> Option<String> {
+    let pane = std::env::var("TMUX_PANE").ok();
     let output = std::process::Command::new("tmux")
-        .args(["show-options", "-Awv", "allow-passthrough"])
+        .args(passthrough_args(pane.as_deref()))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -873,6 +889,30 @@ mod tests {
         assert!(
             !s.use_shm,
             "a second probe reply must not turn shared memory back on"
+        );
+    }
+
+    #[test]
+    fn passthrough_query_targets_this_pane() {
+        assert_eq!(
+            passthrough_args(Some("%7")),
+            ["show-options", "-Apv", "-t", "%7", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("  %12 ")),
+            ["show-options", "-Apv", "-t", "%12", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(None),
+            ["show-options", "-Apv", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("")),
+            ["show-options", "-Apv", "allow-passthrough"]
+        );
+        assert_eq!(
+            passthrough_args(Some("   ")),
+            ["show-options", "-Apv", "allow-passthrough"]
         );
     }
 

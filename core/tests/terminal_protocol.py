@@ -39,6 +39,7 @@ class Terminal:
         env = dict(os.environ, TERM="xterm-kitty", OPSCOPE_GRAPHICS=mode)
         # The parent shell may be inside tmux. Existing cases are the direct path.
         env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
         env.pop("HERDR_ENV", None)
         if extra:
             env.update(extra)
@@ -586,23 +587,35 @@ def missing_and_late_replies_keep_their_upload_keys():
         t.close()
 
 
-def tmux_env(termtype, passthrough="on"):
-    """A tmux on PATH that prints client_termtype and allow-passthrough.
+def tmux_env(termtype, passthrough="on", pane="%1"):
+    """A tmux on PATH that prints client_termtype and this pane's option.
 
     termtype None makes the termtype command fail. passthrough None makes
-    the option unreadable.
+    the option unreadable. pane None omits TMUX_PANE, so the query has no -t.
+    A window-scoped query (-Awv) is not answered.
     """
     directory = tempfile.mkdtemp(prefix="opscope-tmux-")
     script = Path(directory) / "tmux"
     term = "exit 1" if termtype is None else f"printf '%s\\n' '{termtype}'"
     option = "exit 1" if passthrough is None else f"printf '%s\\n' '{passthrough}'"
+    if pane:
+        option_if = (
+            "if [ \"$1\" = show-options ] && [ \"$2\" = -Apv ] && "
+            "[ \"$3\" = -t ] && [ \"$4\" = '" + pane + "' ] && "
+            "[ \"$5\" = allow-passthrough ]; then\n"
+        )
+    else:
+        option_if = (
+            "if [ \"$1\" = show-options ] && [ \"$2\" = -Apv ] && "
+            "[ \"$3\" = allow-passthrough ]; then\n"
+        )
     body = (
         "#!/bin/sh\n"
         "if [ \"$1\" = display ] && [ \"$2\" = -p ] && [ \"$3\" = '#{client_termtype}' ]; then\n"
         f"  {term}\n"
         "  exit 0\n"
         "fi\n"
-        "if [ \"$1\" = show-options ] && [ \"$2\" = -Awv ] && [ \"$3\" = allow-passthrough ]; then\n"
+        f"{option_if}"
         f"  {option}\n"
         "  exit 0\n"
         "fi\n"
@@ -611,14 +624,17 @@ def tmux_env(termtype, passthrough="on"):
     script.write_text(body)
     script.chmod(0o755)
     path = os.environ.get("PATH", "/usr/bin")
-    return directory, {
+    env = {
         "TMUX": "/tmp/tmux-0/default,1,0",
         "PATH": f"{directory}:{path}",
     }
+    if pane:
+        env["TMUX_PANE"] = pane
+    return directory, env
 
 
-def run_tmux(reply, check, termtype, passthrough="on"):
-    directory, env = tmux_env(termtype, passthrough)
+def run_tmux(reply, check, termtype, passthrough="on", pane="%1"):
+    directory, env = tmux_env(termtype, passthrough, pane)
     try:
         run("auto", reply, check, env)
     finally:
@@ -641,8 +657,10 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
-    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on", "%1")
     print("PASS placeholder tmux")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on", None)
+    print("PASS placeholder tmux without TMUX_PANE")
     run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "all")
     print("PASS placeholder tmux allow-passthrough all")
     run_tmux("kitty", tmux_passthrough_off_is_braille, "kitty(0.40.0)", "off")
