@@ -184,9 +184,10 @@ tmux already asked, and a second answer through the passthrough is delivered
 to whichever pane is focused, as keystrokes. Detection reads
 `tmux display -p '#{client_termtype}'`, tmux's stored copy of the outer
 terminal's XTVERSION. Placeholders are used when that string names Kitty
-0.28.0 or newer, Ghostty, or another name on the allowlist. If the command
-fails or the name is unknown, charts stay on Braille. With several clients
-attached, tmux picks one `client_termtype`. A graphics OK does not decide
+0.28.0 or newer, Ghostty, or another name on the allowlist, and
+`allow-passthrough` is `on` or `all`. If either command fails, the name is
+unknown, or passthrough is `off` or unreadable, charts stay on Braille. With
+several clients attached, tmux picks one `client_termtype`. A graphics OK does not decide
 this. `a=q` is try-to-load, and `U` has no meaning on that command, so an
 old Kitty, WezTerm or Konsole can answer OK and then draw the placeholder
 character as tofu. A cursor placement does not survive the multiplexer
@@ -362,8 +363,9 @@ emulator's implementation of them.
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
 Inside tmux, detection reads `client_termtype` rather than sending XTVERSION.
 Placeholders are used when that string names Kitty 0.28.0 or newer, Ghostty,
-or another allowlisted name. If the command fails or the name is unknown,
-charts stay on Braille. With several clients attached, tmux picks one. Herdr
+or another allowlisted name, and `allow-passthrough` is `on` or `all`. If
+either command fails, the name is unknown, or passthrough is `off` or
+unreadable, charts stay on Braille. With several clients attached, tmux picks one. Herdr
 is not wrapped. tmux needs `allow-passthrough on`, or `all` for a pane that
 is not visible. Outside tmux the graphics query is not wrapped. A positive
 reply still needs real visual checks for placement and pane clipping. Direct

@@ -493,6 +493,12 @@ def tmux_text(t):
     assert PLACEHOLDER not in t.output, "a failed termtype query still drew placeholders"
 
 
+def tmux_passthrough_off_is_braille(t):
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
+    fallback(t)
+    assert PLACEHOLDER not in t.output, "passthrough off still drew placeholders"
+
+
 def tmux_basic_is_braille(t):
     assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
     t.read(0.2)
@@ -580,21 +586,28 @@ def missing_and_late_replies_keep_their_upload_keys():
         t.close()
 
 
-def tmux_env(termtype):
-    """A tmux on PATH that prints client_termtype, or fails when termtype is None."""
+def tmux_env(termtype, passthrough="on"):
+    """A tmux on PATH that prints client_termtype and allow-passthrough.
+
+    termtype None makes the termtype command fail. passthrough None makes
+    the option unreadable.
+    """
     directory = tempfile.mkdtemp(prefix="opscope-tmux-")
     script = Path(directory) / "tmux"
-    if termtype is None:
-        body = "#!/bin/sh\nexit 1\n"
-    else:
-        body = (
-            "#!/bin/sh\n"
-            "if [ \"$1\" = display ] && [ \"$2\" = -p ] && [ \"$3\" = '#{client_termtype}' ]; then\n"
-            f"  printf '%s\\n' '{termtype}'\n"
-            "  exit 0\n"
-            "fi\n"
-            "exit 1\n"
-        )
+    term = "exit 1" if termtype is None else f"printf '%s\\n' '{termtype}'"
+    option = "exit 1" if passthrough is None else f"printf '%s\\n' '{passthrough}'"
+    body = (
+        "#!/bin/sh\n"
+        "if [ \"$1\" = display ] && [ \"$2\" = -p ] && [ \"$3\" = '#{client_termtype}' ]; then\n"
+        f"  {term}\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = show-options ] && [ \"$2\" = -Awv ] && [ \"$3\" = allow-passthrough ]; then\n"
+        f"  {option}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
     script.write_text(body)
     script.chmod(0o755)
     path = os.environ.get("PATH", "/usr/bin")
@@ -604,8 +617,8 @@ def tmux_env(termtype):
     }
 
 
-def run_tmux(reply, check, termtype):
-    directory, env = tmux_env(termtype)
+def run_tmux(reply, check, termtype, passthrough="on"):
+    directory, env = tmux_env(termtype, passthrough)
     try:
         run("auto", reply, check, env)
     finally:
@@ -628,8 +641,12 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
-    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "on")
     print("PASS placeholder tmux")
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)", "all")
+    print("PASS placeholder tmux allow-passthrough all")
+    run_tmux("kitty", tmux_passthrough_off_is_braille, "kitty(0.40.0)", "off")
+    print("PASS placeholder passthrough off stays text")
     run_tmux("basic", tmux_basic_is_braille, "kitty(0.27.1)")
     print("PASS placeholder old kitty stays text")
     run("auto", "kitty", herdr_direct, {"HERDR_ENV": "1"})

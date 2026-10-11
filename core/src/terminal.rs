@@ -125,10 +125,42 @@ fn client_termtype() -> Option<String> {
     }
 }
 
-/// `Some` is the `client_termtype` string. `None` means the command failed.
+/// Effective `allow-passthrough` for this pane. `-A` includes the global
+/// value when the window has not set its own. `None` means unreadable.
+fn allow_passthrough() -> Option<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["show-options", "-Awv", "allow-passthrough"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// tmux forwards a DCS passthrough only for `on` and `all`. `off`, an empty
+/// answer, and a failed read all stay on Braille.
+fn passthrough_enabled_by(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("on") | Some("all"))
+}
+
+/// `termtype` is `client_termtype`. `allowed` is `allow-passthrough`.
+/// Either missing, or passthrough not `on`/`all`, stays on Braille.
 /// A direct session does not use this: its graphics query is unchanged.
-fn decide_placeholders(session: &mut Session, termtype: Option<&str>) {
+fn decide_placeholders(session: &mut Session, termtype: Option<&str>, allowed: Option<&str>) {
     if !session.passthrough {
+        return;
+    }
+    if !passthrough_enabled_by(allowed) {
+        session.graphics_answered = true;
         return;
     }
     match termtype {
@@ -169,7 +201,11 @@ pub(crate) fn start() {
     let passthrough = mode != GraphicsMode::Text && in_tmux();
     // Read before taking the session lock. The command is local and its
     // failure is Braille, the same as an unknown name.
-    let termtype = if passthrough { client_termtype() } else { None };
+    let (termtype, allowed) = if passthrough {
+        (client_termtype(), allow_passthrough())
+    } else {
+        (None, None)
+    };
     let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *session = Session {
         mode,
@@ -194,7 +230,7 @@ pub(crate) fn start() {
         session.probe_settled = false;
     }
     if passthrough {
-        decide_placeholders(&mut session, termtype.as_deref());
+        decide_placeholders(&mut session, termtype.as_deref(), allowed.as_deref());
         super::graphics::set_passthrough(session.capabilities.kitty_placeholders);
     }
     drop(session);
@@ -974,7 +1010,7 @@ mod tests {
         direct.reply("\x1bP>|kitty(0.40.0)\x1b\\", now);
         assert!(!direct.graphics_answered);
         assert!(!direct.capabilities.kitty_graphics);
-        decide_placeholders(&mut direct, Some("kitty(0.40.0)"));
+        decide_placeholders(&mut direct, Some("kitty(0.40.0)"), Some("on"));
         assert!(!direct.capabilities.kitty_graphics);
         direct.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         assert!(direct.capabilities.kitty_graphics);
@@ -1016,7 +1052,7 @@ mod tests {
                 deadline: Some(now + TIMEOUT),
                 ..Session::default()
             };
-            decide_placeholders(&mut session, Some(termtype));
+            decide_placeholders(&mut session, Some(termtype), Some("on"));
             assert_eq!(session.graphics_answered, true, "{termtype}");
             assert_eq!(session.capabilities.kitty_graphics, on, "{termtype}");
             assert_eq!(session.capabilities.kitty_placeholders, on, "{termtype}");
@@ -1028,9 +1064,44 @@ mod tests {
             deadline: Some(now + TIMEOUT),
             ..Session::default()
         };
-        decide_placeholders(&mut failed, None);
+        decide_placeholders(&mut failed, None, Some("on"));
         assert!(failed.graphics_answered);
         assert!(!failed.capabilities.kitty_graphics);
         assert!(!failed.capabilities.kitty_placeholders);
+
+        // allow-passthrough must be on or all. off and an unreadable
+        // option stay on Braille even when the terminal name would qualify.
+        for allowed in [Some("on"), Some("all"), Some("  on"), Some("all\n")] {
+            let mut session = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            decide_placeholders(&mut session, Some("kitty(0.40.0)"), allowed);
+            assert!(
+                session.capabilities.kitty_placeholders,
+                "{allowed:?}"
+            );
+            assert!(passthrough_enabled_by(allowed), "{allowed:?}");
+        }
+        for allowed in [Some("off"), Some(""), Some("ON"), None] {
+            let mut session = Session {
+                passthrough: true,
+                deadline: Some(now + TIMEOUT),
+                ..Session::default()
+            };
+            decide_placeholders(&mut session, Some("kitty(0.40.0)"), allowed);
+            assert!(session.graphics_answered, "{allowed:?}");
+            assert!(!session.capabilities.kitty_graphics, "{allowed:?}");
+            assert!(!session.capabilities.kitty_placeholders, "{allowed:?}");
+            assert!(!passthrough_enabled_by(allowed), "{allowed:?}");
+        }
+        let mut old = Session {
+            passthrough: true,
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        decide_placeholders(&mut old, Some("kitty(0.27.1)"), Some("all"));
+        assert!(!old.capabilities.kitty_placeholders);
     }
 }
