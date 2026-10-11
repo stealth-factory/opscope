@@ -252,7 +252,9 @@ python3 core/tests/terminal_protocol.py
 ```
 
 Set `OPSCOPE_PROBE_ARTIFACTS` to a directory to keep the decoded images the
-PTY checks receive, for looking at by eye.
+PTY checks receive, for looking at by eye. RGBA is saved as `.rgba`. An
+opaque `f=24` image is saved as `.rgb`, unchanged from the bytes that were
+sent, and its `.size` line names that format after the width and height.
 
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent

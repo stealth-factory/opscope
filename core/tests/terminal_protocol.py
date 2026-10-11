@@ -209,8 +209,14 @@ def filled_graphics(t):
             assert row[102 * bpp:104 * bpp] == dark * 2
             assert row[104 * bpp:106 * bpp] == light * 2
             assert row[106 * bpp:108 * bpp] == dark * 2
-        artifact(f"opscope-gallery-{n}.rgba", decoded)
-        artifact(f"opscope-gallery-{n}.size", f"{int(keys[b's'])} {int(keys[b'v'])}".encode())
+        # Keep the transmitted bytes. RGB is not padded out to RGBA; the
+        # name and the size line say which layout a viewer should use.
+        ext = "rgb" if bpp == 3 else "rgba"
+        artifact(f"opscope-gallery-{n}.{ext}", decoded)
+        artifact(
+            f"opscope-gallery-{n}.size",
+            f"{width} {height} {ext}".encode(),
+        )
     assert formats[:4] == [b"32", b"32", b"32", b"32"], "gaps, partial bars and the meter inset keep alpha"
     assert formats[-1] == b"24", "a fully opaque tile is sent as RGB"
     count = len(t.images())
