@@ -3214,13 +3214,12 @@ impl Keyboard {
         self.pending
             .push_str(&String::from_utf8_lossy(&self.buf).to_string());
         self.buf.clear();
-        let mut keys = decode(&mut self.pending, &mut self.lone_esc);
-        keys.extend(release_stale_string(
+        let keys = settle(
             &mut self.pending,
             &mut self.lone_esc,
             &mut self.string_since,
             Instant::now(),
-        ));
+        );
         keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
 }
@@ -3396,6 +3395,26 @@ fn still_arriving(s: &[char]) -> bool {
             .all(|c| ('\x20'..='\x3f').contains(c)),
         _ => false,
     }
+}
+
+/// Decode what has arrived, then let go of a terminal string that has been
+/// left unfinished for too long.
+fn settle(
+    pending: &mut String,
+    lone_esc: &mut bool,
+    since: &mut Option<Instant>,
+    now: Instant,
+) -> Vec<String> {
+    let arrived = pending.len();
+    let mut keys = decode(pending, lone_esc);
+    if pending.len() < arrived {
+        // decode consumed something, and an unfinished string can only
+        // follow what it consumed: whatever is held now started in this
+        // read, so it gets its own patience.
+        *since = None;
+    }
+    keys.extend(release_stale_string(pending, lone_esc, since, now));
+    keys
 }
 
 /// Let go of a terminal string that started arriving and then stopped.
@@ -3889,6 +3908,18 @@ mod tests {
         );
         assert!(pending.is_empty());
         assert!(since.is_none());
+
+        // A reply that finishes while the next begins: the second waits
+        // its own full patience, not what was left of the first's.
+        let mut pending = "\x1b_Gi=1".to_string();
+        let mut since = None;
+        assert!(super::settle(&mut pending, &mut escape, &mut since, start).is_empty());
+        pending.push_str(";OK\x1b\\\x1b_Gi=2");
+        let later = start + super::STRING_PATIENCE - std::time::Duration::from_millis(10);
+        assert!(super::settle(&mut pending, &mut escape, &mut since, later).is_empty());
+        let soon = start + super::STRING_PATIENCE;
+        assert!(super::settle(&mut pending, &mut escape, &mut since, soon).is_empty());
+        assert_eq!(pending, "\x1b_Gi=2");
 
         let mut pending = format!("\x1b_{}", "G".repeat(super::MAX_PENDING_STRING));
         assert!(!super::decode(&mut pending, &mut escape).is_empty());
