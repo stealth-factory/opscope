@@ -381,6 +381,60 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+def image_bytes(commands, index):
+    """One transmitted image, including every continuation chunk after index."""
+    blob = b""
+    keys = commands[index][0]
+    for chunk_keys, payload in commands[index:]:
+        blob += payload
+        if chunk_keys.get(b"m", b"0") == b"0":
+            break
+    return keys, zlib.decompress(base64.b64decode(blob))
+
+
+def cell_raster_follows_report(t):
+    assert b"\x1b[16t" in t.output
+    assert t.images(), "no image before the cell-size reply"
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    assert cols > 0 and rows > 0
+    assert int(keys[b"s"]) == cols * 8
+    assert int(keys[b"v"]) == rows * 16
+    t.send(b"\x1b[6;40;20t")
+    t.read(0.8)
+    commands = t.commands()
+    last = max(i for i, (k, _) in enumerate(commands) if k.get(b"a") == b"T")
+    keys, decoded = image_bytes(commands, last)
+    assert int(keys[b"s"]) == cols * 20, keys
+    assert int(keys[b"v"]) == rows * 40, keys
+    assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
+
+
+def cell_raster_rejects_absurd_and_zero(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    t.send(b"\x1b[6;0;0t\x1b[6;2;500t\x1b[6;8;8t")
+    t.read(0.5)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"s"]) == cols * 8
+    assert int(keys[b"v"]) == rows * 16
+
+
+def cell_raster_follows_winsize_pixels(t):
+    keys, _ = t.images()[0]
+    cols, rows = int(keys[b"c"]), int(keys[b"r"])
+    assert int(keys[b"s"]) == cols * 8
+    # 20 rows, 80 cols, 1600×800 px → a 20×40 cell. Column count stays put.
+    fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 80, 1600, 800))
+    os.kill(t.proc.pid, signal.SIGWINCH)
+    t.read(0.8)
+    keys, _ = t.images()[-1]
+    assert int(keys[b"c"]) == cols, "pixel size changed the cell layout"
+    assert int(keys[b"r"]) == rows
+    assert int(keys[b"s"]) == cols * 20, keys
+    assert int(keys[b"v"]) == rows * 40, keys
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -466,6 +520,9 @@ if __name__ == "__main__":
                                ("auto", "kitty", shm_rejected), ("auto", "kitty", shm_accepted),
                                ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
+                               ("auto", "kitty", cell_raster_follows_report),
+                               ("auto", "kitty", cell_raster_rejects_absurd_and_zero),
+                               ("auto", "kitty", cell_raster_follows_winsize_pixels),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

@@ -147,13 +147,22 @@ frame saves 17% at level 6 for similar time. The multi-trace table above
 shows the larger CPU tradeoff; these results do not promise the same saving
 for every chart. Shared-memory uploads bypass compression entirely.
 
-The first implementation uses an 8×16 pixel raster per cell, scaled to the
-placement's terminal cells, compared with Braille's 2×4 dots. It deliberately
-does not depend on potentially unavailable cell-pixel-size reports. Up to 32
-visible plots, each at most 20,000 cells, use images; additional or larger plots
-use text to bound image memory/transport costs. It is a raster chart renderer,
+Charts rasterise at the terminal's reported cell size. During the 800 ms
+negotiation core sends `CSI 16 t` and reads `CSI 6 ; height ; width t`. A
+resize (`SIGWINCH`, including a Kitty font change) asks again. Until that
+reply, and when the numbers are missing, zero, or not a character cell
+(outside 4×8..=48×96, or an aspect outside 5:4..=3:1), core uses the pixel
+fields of `TIOCGWINSZ` divided by the column and row counts. If those are
+zero too, the raster is 8×16, which is what Braille's 2×4 dots are compared
+with and what every in-process test measures. The terminal still places the
+image in the same cell box; only the raster is finer, so a HiDPI cell is not
+an 8×16 image scaled up after the stroke was drawn.
+
+A larger cell lowers the per-plot cell cap so the uncompressed bytes stay
+at the 8×16 product. Up to 32 visible plots use images; additional or larger
+plots use text. Cell layout is unchanged. It is a raster chart renderer,
 not a general replacement for terminal text, native scaled fonts or animation
-frames in the Kitty protocol.
+frames.
 
 ## Widget API
 
@@ -199,13 +208,15 @@ let smooth_states = tc::Plot::gradient_stacked_bar(x, y, width, &shares);
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's
 Claude, Codex and Grok calendars all use the same gapless core heatmap renderer:
-solid tiles fill each entire 8×16 pixel cell, matching the solid text blocks.
+solid tiles fill each entire cell (8×16 pixels when the terminal does not
+report a size), matching the solid text blocks.
 Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
-Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
-and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
+Kitty meters fill seven eighths of the cell height (14 of 16 pixels at the
+fallback size), with a gap above and below, so quota bars remain readable
+alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. `Plot::ramped_meter` takes a colour per filled
 cell, so a ramp the text bar draws is painted in pixels too rather than
@@ -315,9 +326,13 @@ does not unlink, because that call is not async-signal-safe), cached
 frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
 signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
-Ctrl-Z or Ctrl-\, and pushed again after resume. Unit tests
+Ctrl-Z or Ctrl-\, and pushed again after resume. They also check that a
+`CSI 16 t` reply changes the image's pixel size and that a zero or absurd
+reply leaves the 8×16 raster, and that window pixel fields do the same when
+no reply arrives. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
-markers, quota references, cropping, compression/chunking and input isolation.
+markers, quota references, cropping, compression/chunking and input isolation,
+plus the cell-size parser and the byte cap.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the
 PTY checks exercise both its pixel and text paths. These tests verify emitted
 bytes and state, not a terminal
@@ -416,6 +431,11 @@ Startup sends an XTGETTCAP query for `Smulx` and `Setulc` with the graphics and 
 `seg()` underlines the content of a marked segment, leaving its leading and trailing whitespace unmarked without removing any alignment cells. For ` -35% `, only `-35%` takes the mark. Internal spaces in a phrase remain underlined, and the following segment never inherits the mark. The core regression test checks the SGR state at each character, including clipped values, all-padding segments and Unicode whitespace.
 
 The PTY fixture checks the query, a positive reply (curly, dashed, and the coloured underline around the same three words) and a negative reply (a plain underline, same words). That is a byte check, not a Kitty window. Visual confirmation in Kitty, SSH, Herdr, Luvus and tmux is still outstanding.
+
+Cell size is the xterm `CSI 16 t` report. It is separate from the keyboard
+protocol above and from font sizing. Legacy keyboard bindings remain the
+input contract. A HiDPI Kitty display has not been checked by eye; the PTY
+fixture checks the bytes, not placement on a real screen.
 
 ### Input responsiveness
 
