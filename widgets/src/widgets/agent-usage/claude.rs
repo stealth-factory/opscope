@@ -3751,7 +3751,7 @@ mod tests {
                 assert_eq!(models.len(), 1, "stats: {stats:?}, days: {days}");
                 assert_eq!(total_tokens(&models[0].1), 2_000_000.0);
             }
-            let rendered = bare(&tab(&data, 120, 40, &Config::default(), &palette()).join("\n"));
+            let rendered = bare(&tab_with_plots(&data, 120, 40, &Config::default(), &palette(), &mut Vec::new()).join("\n"));
             for label in ["today", "30 days"] {
                 let row = rendered.lines().find(|l| l.contains(label)).unwrap();
                 assert!(row.contains("$60.00") && row.contains("2.0M tokens"), "{row}");

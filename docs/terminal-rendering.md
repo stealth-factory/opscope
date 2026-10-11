@@ -122,7 +122,8 @@ Measured zeroes use a dark fill;
 missing days are blank. No outlines or dithering are used. Widgets own their colour ramps and activity scales;
 core owns the shapes, spacing and both fallbacks. `Plot::heatmap` remains a
 colour-only convenience wrapper using the same renderer with solid tiles.
-Meters clamp the drawn fill to 0–100%, while
+Kitty meters fill 14 of each row's 16 pixels, with one pixel of space above
+and below, so quota bars remain readable alongside text. Meters clamp the drawn fill to 0–100%, while
 the widget's numeric label can still report an overage. Reference marks do not
 change the measured fill. No primitive animates a value between API polls.
 
