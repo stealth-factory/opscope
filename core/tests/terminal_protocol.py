@@ -12,9 +12,11 @@ from pathlib import Path
 import pty
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
+import tempfile
 import termios
 import time
 import zlib
@@ -70,10 +72,7 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if b"[>q" in self.output:
-                    # Inside tmux the probe is XTVERSION, not a graphics query.
-                    response += self._xtversion()
-                elif self.reply == "kitty" or self.reply == "keyboard":
+                if self.reply == "kitty" or self.reply == "keyboard":
                     response += self._graphics_reply(b"OK")
                 elif self.reply == "basic":
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
@@ -131,20 +130,12 @@ class Terminal:
         os.close(self.master)
 
     def _graphics_reply(self, status):
-        # Direct path only. 2147483645 is the shared-memory probe on another
-        # branch and is not a query this one sends.
-        assert b"i=2147483645," not in self.output
+        # 2147483645 is the shared-memory probe. The placeholder path does
+        # not send it, and a direct session may send only that probe.
+        for keys, _ in self.commands():
+            if keys.get(b"i") == b"2147483645":
+                assert keys.get(b"a") == b"q" and keys.get(b"t") == b"s", keys
         return b"\x1b_Gi=2147483646;" + status + b"\x1b\\"
-
-    def _xtversion(self):
-        # Kitty gained placeholders in 0.28.0. An older Kitty answers
-        # XTVERSION and then draws the placeholder character as tofu.
-        if self.reply == "kitty":
-            return b"\x1bP>|kitty(0.40.0)\x1b\\"
-        if self.reply == "basic":
-            return b"\x1bP>|kitty(0.27.1)\x1b\\"
-        return b""
-
 
 def shm_names(commands):
     names = []
@@ -440,11 +431,6 @@ def shared_rgb_gallery(t):
 # starts with ESC therefore has two ESC bytes before its command, which
 # is the example in tmux's FAQ. unwrap_tmux treats the header as ending
 # at `tmux;`, with no extra ESC of its own.
-PROBE = (
-    b"\x1bPtmux;"
-    b"\x1b\x1b[>q"
-    b"\x1b\\"
-)
 # Eight hex digits: U+10EEEE, not U+010EEE plus a trailing E.
 PLACEHOLDER = "\U0010EEEE".encode()
 
@@ -481,7 +467,7 @@ def commands_of(data):
 
 
 def tmux_placeholders(t):
-    assert PROBE in t.output, "XTVERSION was not passed through"
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
     assert b"i=2147483646," not in t.output, "tmux sent the plain graphics query"
     assert b"2147483645" not in t.output, "tmux used the shared-memory probe id"
     assert b"\x1bPtmux;\x1b\x1b\x1b" not in t.output, "passthrough header carried an extra ESC"
@@ -501,14 +487,14 @@ def tmux_placeholders(t):
 
 
 def tmux_text(t):
-    assert PROBE in t.output, "XTVERSION was not passed through"
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
     t.read(0.7)
     fallback(t)
-    assert PLACEHOLDER not in t.output, "an unanswered query still drew placeholders"
+    assert PLACEHOLDER not in t.output, "a failed termtype query still drew placeholders"
 
 
 def tmux_basic_is_braille(t):
-    assert PROBE in t.output, "XTVERSION was not passed through"
+    assert b"[>q" not in t.output, "XTVERSION was sent through the passthrough"
     t.read(0.2)
     fallback(t)
     assert PLACEHOLDER not in t.output, "a plain graphics OK enabled placeholders"
@@ -594,6 +580,38 @@ def missing_and_late_replies_keep_their_upload_keys():
         t.close()
 
 
+def tmux_env(termtype):
+    """A tmux on PATH that prints client_termtype, or fails when termtype is None."""
+    directory = tempfile.mkdtemp(prefix="opscope-tmux-")
+    script = Path(directory) / "tmux"
+    if termtype is None:
+        body = "#!/bin/sh\nexit 1\n"
+    else:
+        body = (
+            "#!/bin/sh\n"
+            "if [ \"$1\" = display ] && [ \"$2\" = -p ] && [ \"$3\" = '#{client_termtype}' ]; then\n"
+            f"  printf '%s\\n' '{termtype}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 1\n"
+        )
+    script.write_text(body)
+    script.chmod(0o755)
+    path = os.environ.get("PATH", "/usr/bin")
+    return directory, {
+        "TMUX": "/tmp/tmux-0/default,1,0",
+        "PATH": f"{directory}:{path}",
+    }
+
+
+def run_tmux(reply, check, termtype):
+    directory, env = tmux_env(termtype)
+    try:
+        run("auto", reply, check, env)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 if __name__ == "__main__":
     moving_meter_keeps_unchanged_pixels()
     successful_upload_before_shared_failure()
@@ -610,14 +628,14 @@ if __name__ == "__main__":
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)
         print(f"PASS {mode}/{reply}: {check.__name__}")
-    run("auto", "kitty", tmux_placeholders, {"TMUX": "/tmp/tmux-0/default,1,0"})
+    run_tmux("kitty", tmux_placeholders, "kitty(0.40.0)")
     print("PASS placeholder tmux")
-    run("auto", "basic", tmux_basic_is_braille, {"TMUX": "1"})
-    print("PASS placeholder plain-ok stays text")
+    run_tmux("basic", tmux_basic_is_braille, "kitty(0.27.1)")
+    print("PASS placeholder old kitty stays text")
     run("auto", "kitty", herdr_direct, {"HERDR_ENV": "1"})
     print("PASS herdr direct")
-    run("auto", "silent", tmux_text, {"TMUX": "1"})
-    print("PASS placeholder unanswered")
+    run_tmux("silent", tmux_text, None)
+    print("PASS placeholder termtype failed")
     for ending in ["signal", "panic"]:
         t = Terminal()
         try:

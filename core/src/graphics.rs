@@ -840,14 +840,23 @@ pub(crate) fn compose(
             let wrap = placeholders || passthrough_enabled();
             if !lost && cache.get(slot).is_some_and(|c| Some(&c.plot) == plot && c.cols == cols) {
                 // The periodic whole frame repairs text another process may
-                // have scrolled or covered. The terminal still holds the image,
-                // so only its placement is put back, not the pixels.
-                // Placeholder mode does not send that placement. Stock tmux
-                // does not forward an APC reply, and q=1 would let the key
-                // parser type the error into the focused pane. A dropped
-                // image is sent again when the chart changes.
-                if let Some(plot) = images.get(slot).filter(|_| heal && !placeholders) {
-                    after.push_str(&place(plot, slot, w));
+                // have scrolled or covered. On the direct path the terminal
+                // still holds the image, so only its placement is put back.
+                // A placeholder upload is quiet, so a drop has no reply. A
+                // static chart stays blank until this whole frame sends the
+                // same `q=2,U=1` upload again. That is an upload, not a heal
+                // and not an `a=p` query: a `q=1` reply would be typed into
+                // the focused pane. Any other frame leaves the chart alone.
+                if let Some(plot) = images.get(slot).filter(|_| heal) {
+                    if placeholders {
+                        let rgba = raster_pixels(plot, cols);
+                        before.push_str(&emit_graphics(
+                            &placeholder_transmit(plot, slot, w, &rgba),
+                            wrap,
+                        ));
+                    } else {
+                        after.push_str(&place(plot, slot, w));
+                    }
                 }
                 continue;
             }
@@ -860,11 +869,18 @@ pub(crate) fn compose(
                     // Upload acknowledgements must not start a redraw/upload loop.
                     if cached.same_pixels(plot, cols, rgba) {
                         cached.plot = plot.clone();
-                        // Placeholder mode does not send that placement. Stock tmux
-                        // does not forward an APC reply, and q=1 would let the key
-                        // parser type the error into the focused pane.
-                        if heal && !placeholders {
-                            after.push_str(&place(plot, slot, w));
+                        // Same quiet whole-frame upload as an unchanged plot.
+                        // A frame that is not a whole frame leaves the pixels alone,
+                        // which is what stops an acknowledgement from uploading again.
+                        if heal {
+                            if placeholders {
+                                before.push_str(&emit_graphics(
+                                    &placeholder_transmit(plot, slot, w, rgba),
+                                    wrap,
+                                ));
+                            } else {
+                                after.push_str(&place(plot, slot, w));
+                            }
                         }
                         continue;
                     }
@@ -2099,13 +2115,19 @@ mod tests {
         assert!(z < tail, "{replaced:?}");
         assert!(!replaced.contains('\u{10EEEE}'), "{replaced:?}");
         assert_eq!(super::super::display_width(&replaced), 5);
-        // Unchanged chart: do not ask the terminal. A q=1 probe would be
+        // The whole frame resends the quiet upload. A q=1 probe would be
         // typed into the pane when tmux does not forward the APC reply.
-        let (_, before, again) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, true);
-        assert!(
-            before.is_empty() && again.is_empty(),
-            "{before:?} {again:?}"
-        );
+        let (text, before, again) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, true);
+        assert!(before.contains("q=2,U=1") && before.contains("a=T"), "{before:?}");
+        assert!(!before.contains("a=p") && !again.contains("a=p"), "{before:?} {again:?}");
+        assert!(!before.contains("q=1") && !again.contains("q=1"), "{before:?} {again:?}");
+        let frame = format!("{before}{}{again}", text.concat());
+        let upload = frame.find("q=2,U=1").expect("whole-frame upload");
+        let cell = frame.find('\u{10EEEE}').expect("placeholder");
+        assert!(upload < cell, "the resent image must precede its cells");
+        // A frame that is not the whole frame does not resend a static chart.
+        let (_, quiet, still) = compose(&rows, &[plot.clone()], 40, 6, true, true, false, false);
+        assert!(quiet.is_empty() && still.is_empty(), "{quiet:?} {still:?}");
         let (direct, _, placed) = compose(&rows, &[plot], 40, 6, true, false, true, false);
         assert!(!direct.iter().any(|row| row.contains('\u{10EEEE}')));
         assert!(placed.contains("a=T"));

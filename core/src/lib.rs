@@ -510,9 +510,12 @@ pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
     let whole = due(&shown, Instant::now());
     let lost = signalled | whole;
-    // Images are sent again only when the screen may really have lost them.
-    // The periodic whole frame just re-places them: resending every chart
-    // every few seconds is most of a dashboard's bandwidth over SSH.
+    // Direct images are sent again only when the screen may really have
+    // lost them. The periodic whole frame just re-places those: resending
+    // every chart every few seconds is most of a dashboard's bandwidth
+    // over SSH. A placeholder upload is quiet, so that same whole frame
+    // sends the image again. Until it does, a static chart whose image
+    // was dropped stays blank. The resend is an upload, not a heal.
     let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
     // Expire the probe and retired objects before images are published.

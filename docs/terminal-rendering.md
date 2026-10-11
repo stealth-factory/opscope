@@ -179,33 +179,39 @@ let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
 
-Inside tmux (`$TMUX` set and non-empty), core sends XTVERSION (`CSI > q`)
-wrapped in a tmux DCS passthrough and reads the name in the answer.
-Placeholders are used when that answer names Kitty 0.28.0 or newer, Ghostty,
-or another name on the allowlist. A graphics OK does not decide this. `a=q`
-is try-to-load, and `U` has no meaning on that command, so an old Kitty,
-WezTerm or Konsole can answer OK and then draw the placeholder character as
-tofu. Those stay on Braille. A cursor placement does not survive the
-multiplexer either. Herdr (`HERDR_ENV=1`) is not wrapped. Nothing in Herdr's
-own behaviour shows that it forwards a tmux DCS passthrough, so Herdr stays
-on the direct path.
+Inside tmux (`$TMUX` set and non-empty), core does not send XTVERSION.
+tmux already asked, and a second answer through the passthrough is delivered
+to whichever pane is focused, as keystrokes. Detection reads
+`tmux display -p '#{client_termtype}'`, tmux's stored copy of the outer
+terminal's XTVERSION. Placeholders are used when that string names Kitty
+0.28.0 or newer, Ghostty, or another name on the allowlist. If the command
+fails or the name is unknown, charts stay on Braille. With several clients
+attached, tmux picks one `client_termtype`. A graphics OK does not decide
+this. `a=q` is try-to-load, and `U` has no meaning on that command, so an
+old Kitty, WezTerm or Konsole can answer OK and then draw the placeholder
+character as tofu. A cursor placement does not survive the multiplexer
+either. Herdr (`HERDR_ENV=1`) is not wrapped. Nothing in Herdr's own
+behaviour shows that it forwards a tmux DCS passthrough, so Herdr stays on
+the direct path.
 
 The upload uses `q=2,U=1`, the quiet mode Kitty specifies for placeholders,
 and is written before the placeholder cells. There is no APC reply to read.
 Each cell is U+10EEEE with the row and column diacritics and the image id in
 the foreground colour. A non-zero high byte of the id, which these ids have,
-is a third diacritic. Inside tmux a whole-frame heal does not query the
-image. Stock tmux does not forward an APC reply, and its key parser would
-type the error into the focused pane. A dropped image is sent again when the
-chart changes. tmux has to allow the passthrough:
+is a third diacritic. Inside tmux there is no heal and no `a=p`
+query. Stock tmux does not forward an APC reply, and its key parser would
+type a `q=1` error into the focused pane. The periodic whole frame sends
+the same `q=2,U=1` upload again. A static chart whose image was dropped
+stays blank until that upload fires. A frame that is not a whole frame
+leaves an unchanged chart alone. tmux has to allow the passthrough:
 
 ```
 set -g allow-passthrough on
 ```
 
 Use `all` instead of `on` for a pane that is not visible. Outside tmux, or
-when XTVERSION does not name a terminal with placeholders, behaviour stays
-as it is today.
+when `client_termtype` does not name a terminal with placeholders, behaviour
+stays as it is today.
 The cells are ordinary text, so a scroll or a pane move is expected to keep
 the image. That was not checked by eye.
 
@@ -354,15 +360,18 @@ bytes and state, not a terminal
 emulator's implementation of them.
 
 An outer Kitty terminal does not establish support inside Herdr, Luvus or tmux.
-Inside tmux, XTVERSION is wrapped in a DCS passthrough. Placeholders are used
-when the answer names Kitty 0.28.0 or newer, Ghostty, or another allowlisted
-name. Herdr is not wrapped. tmux needs `allow-passthrough on`, or `all` for a
-pane that is not visible. A multiplexer that drops the query uses the text
-path. Outside tmux the graphics query is not wrapped. A positive reply still
-needs real visual checks for placement and pane clipping. Direct Kitty, actual
-SSH, Herdr, Luvus and tmux visual validation remains a release check; the
-managed test workspace has no attached graphical terminal. A scroll or a pane
-move is expected to keep a placeholder image, and that was not checked by eye.
+Inside tmux, detection reads `client_termtype` rather than sending XTVERSION.
+Placeholders are used when that string names Kitty 0.28.0 or newer, Ghostty,
+or another allowlisted name. If the command fails or the name is unknown,
+charts stay on Braille. With several clients attached, tmux picks one. Herdr
+is not wrapped. tmux needs `allow-passthrough on`, or `all` for a pane that
+is not visible. Outside tmux the graphics query is not wrapped. A positive
+reply still needs real visual checks for placement and pane clipping. Direct
+Kitty, actual SSH, Herdr, Luvus and tmux visual validation remains a release
+check; the managed test workspace has no attached graphical terminal. A
+scroll or a pane move is expected to keep a placeholder image, and that was
+not checked by eye. A static chart whose image was dropped stays blank until
+the whole-frame upload fires. That upload is not a heal.
 
 ## Keyboard protocol
 
