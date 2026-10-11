@@ -53,11 +53,16 @@ class Terminal:
             if count > self.answered and self.reply != "silent":
                 self.answered = count
                 response = b""
-                if self.reply == "kitty":
+                if self.reply == "kitty" or self.reply == "keyboard":
                     response += b"\x1b_Gi=2147483646;OK\x1b\\"
                 elif self.reply == "reject":
                     response += b"\x1b_Gi=2147483646;ENOTSUP\x1b\\"
-                response += b"\x1b[?2026;2$y\x1b[?62;c"
+                response += b"\x1b[?2026;2$y"
+                # Current flags are 0 until we push. The reply is the support signal,
+                # and it has to arrive before device attributes or the query is missed.
+                if self.reply == "keyboard":
+                    response += b"\x1b[?0u"
+                response += b"\x1b[?62;c"
                 # Deliberately split strings/CSI across reads.
                 for part in [response[:4], response[4:17], response[17:]]:
                     self.send(part)
@@ -140,7 +145,15 @@ def supported(t):
 
 def fallback(t):
     assert not t.images()
+    assert b"\x1b[>1u" not in t.output, "keyboard protocol pushed without an answer"
     assert any(0x2800 < ord(c) <= 0x28ff for c in t.output.decode(errors="replace")), "no text chart"
+
+
+def left_in_legacy(output, where):
+    last_push = output.rfind(b"\x1b[>1u")
+    last_pop = output.rfind(b"\x1b[<u")
+    assert last_push != -1, f"{where}: keyboard protocol was not pushed"
+    assert last_pop > last_push, f"{where}: terminal was not left in legacy mode"
 
 
 def timeout(t):
@@ -265,3 +278,42 @@ if __name__ == "__main__":
             print(f"PASS cleanup/{ending}")
         finally:
             t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[?u" in t.output, "keyboard support was not queried"
+        assert b"\x1b[>1u" in t.output, "an answer did not push disambiguation"
+        t.quit()
+        left_in_legacy(t.output, "exit")
+        print("PASS keyboard/exit")
+    finally:
+        t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        os.kill(t.proc.pid, signal.SIGTSTP)
+        t.read()
+        left_in_legacy(t.output, "suspend")
+        os.kill(t.proc.pid, signal.SIGCONT)
+        t.read(0.6)
+        assert t.output.rfind(b"\x1b[>1u") > t.output.rfind(b"\x1b[<u"), "resume did not push again"
+        t.quit()
+        left_in_legacy(t.output, "exit after resume")
+        print("PASS keyboard/suspend")
+    finally:
+        t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        t.send(b"p")
+        t.read(0.3)
+        assert t.proc.wait(timeout=3) != 0
+        left_in_legacy(t.output, "panic")
+        print("PASS keyboard/panic")
+    finally:
+        t.close()

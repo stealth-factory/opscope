@@ -3148,6 +3148,9 @@ impl Keyboard {
     pub fn restore(&mut self) {
         if let Some(saved) = self.saved.take() {
             graphics::cleanup();
+            // Panic, a normal exit, and handing the terminal to a child all
+            // come through here. The signal paths pop in `cleanup_signal`.
+            terminal::pop_keyboard();
             forget_termios();
             unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &saved) };
             out(MOUSE_OFF);
@@ -3531,6 +3534,164 @@ fn release_stale_string(
     decode(pending, lone_esc)
 }
 
+/// The name a single legacy byte already has, shared with `CSI u` so the
+/// two forms cannot drift. vim's scroll pair and readline's kill-line are
+/// named rather than left as control bytes: a widget matching `"\x05"`
+/// reads as a typo, and a control byte in a match arm is invisible to
+/// anyone scanning the file for its keys. Those three are safe to take.
+/// The terminal is in cbreak with ISIG still on, so the bytes it
+/// intercepts are the signal ones - these are not among them, and neither
+/// is flow control's ^S/^Q.
+fn name_byte(ch: char) -> String {
+    match ch {
+        '\r' | '\n' => "enter".to_string(),
+        '\t' => "tab".to_string(),
+        '\u{7f}' | '\u{8}' => "backspace".to_string(),
+        '\u{1b}' => "esc".to_string(),
+        '\u{19}' => "ctrl-y".to_string(),
+        '\u{5}' => "ctrl-e".to_string(),
+        '\u{15}' => "ctrl-u".to_string(),
+        c => c.to_string(),
+    }
+}
+
+/// The byte a legacy terminal emits for Ctrl held with `ch`, from the
+/// keyboard protocol's legacy ctrl table. Keys the table leaves untouched
+/// stay the character itself.
+fn ctrl_legacy(ch: char) -> char {
+    match ch.to_ascii_lowercase() {
+        ' ' | '@' | '2' => '\0',
+        'a'..='z' => char::from((ch.to_ascii_lowercase() as u32 as u8) & 0x1f),
+        '[' | '3' => '\u{1b}',
+        '\\' | '4' => '\u{1c}',
+        ']' | '5' => '\u{1d}',
+        '^' | '6' | '~' => '\u{1e}',
+        '/' | '7' | '_' => '\u{1f}',
+        '?' | '8' => '\u{7f}',
+        other => other,
+    }
+}
+
+fn shifted(ch: char) -> char {
+    match ch {
+        'a'..='z' => ch.to_ascii_uppercase(),
+        '`' => '~',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        other => other,
+    }
+}
+
+fn read_number(s: &[char], i: &mut usize) -> Option<u32> {
+    let start = *i;
+    let mut n = 0u32;
+    while let Some(c) = s.get(*i).filter(|c| c.is_ascii_digit()) {
+        n = n.saturating_mul(10).saturating_add(*c as u32 - '0' as u32);
+        *i += 1;
+    }
+    (*i > start).then_some(n)
+}
+
+/// A finished `CSI … u` key report: how many characters it took, and the
+/// legacy name of a press or a repeat. A release is consumed and named
+/// nothing. Anything that is not this shape returns `None` so the legacy
+/// decoder still owns it.
+///
+/// Alt does not change the name. A legacy terminal sends Alt as an ESC
+/// prefix, and that prefix is discarded, so Alt+a is already `"a"`. The
+/// CSI form has to produce that same name or a widget's match arm would
+/// see a key it was not written for. The gain is that Alt+[ arrives as
+/// `[` instead of sitting in the buffer as an unfinished control sequence.
+fn kitty_press(s: &[char]) -> Option<(usize, Option<String>)> {
+    if s.first() != Some(&'\x1b') || s.get(1) != Some(&'[') {
+        return None;
+    }
+    let mut i = 2;
+    if !s.get(i).is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let code = read_number(s, &mut i)?;
+    while s.get(i) == Some(&':') {
+        i += 1;
+        read_number(s, &mut i)?;
+    }
+    let mut modifiers = 1u32;
+    let mut event = 1u32;
+    if s.get(i) == Some(&';') {
+        i += 1;
+        if s.get(i).is_some_and(|c| c.is_ascii_digit()) {
+            modifiers = read_number(s, &mut i)?;
+        }
+        if s.get(i) == Some(&':') {
+            i += 1;
+            event = read_number(s, &mut i).unwrap_or(1);
+        }
+        if s.get(i) == Some(&';') {
+            i += 1;
+            while s.get(i).is_some_and(|c| c.is_ascii_digit() || *c == ':') {
+                i += 1;
+            }
+        }
+    }
+    if s.get(i) != Some(&'u') {
+        return None;
+    }
+    i += 1;
+    if event == 3 {
+        return Some((i, None));
+    }
+    Some((i, legacy_named(code, modifiers)))
+}
+
+/// The key name `code` with Kitty's modifier field would have under the
+/// legacy encoding. Shift-tab stays unnamed: legacy sends `CSI Z`, which
+/// is dropped. Modifiers this program has no binding for are dropped too.
+fn legacy_named(code: u32, modifiers: u32) -> Option<String> {
+    let bits = modifiers.saturating_sub(1) & !0b1100_0000;
+    if bits & !0b0111 != 0 {
+        return None;
+    }
+    let shift = bits & 1 != 0;
+    let ctrl = bits & 4 != 0;
+    match code {
+        27 if !shift && !ctrl => return Some("esc".to_string()),
+        13 if !shift => return Some("enter".to_string()),
+        9 if !shift => return Some("tab".to_string()),
+        127 | 8 if !shift => return Some("backspace".to_string()),
+        _ => {}
+    }
+    let ch = char::from_u32(code)?;
+    if !ch.is_ascii() || ch.is_ascii_control() {
+        return None;
+    }
+    let produced = if ctrl {
+        ctrl_legacy(ch)
+    } else if shift {
+        shifted(ch)
+    } else {
+        ch
+    };
+    Some(name_byte(produced))
+}
+
 /// Turn what the terminal sent into key names, leaving anything incomplete
 /// in `buf` for the next poll.
 ///
@@ -3594,6 +3755,16 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
                 }
                 continue;
             }
+            // Kitty keyboard protocol, before the catch-all that drops
+            // unknown CSI. `CSI 27 u` is the Escape key and is finished in
+            // this poll; a bare ESC is still a prefix and still waits.
+            if let Some((len, key)) = kitty_press(&chars[at..]) {
+                at += len;
+                if let Some(name) = key {
+                    keys.push(name);
+                }
+                continue;
+            }
             if let Some(len) = escape_len(&chars[at..]) {
                 terminal::reply(&chars[at..at + len].iter().collect::<String>());
                 at += len; // a sequence this program does not map; drop it
@@ -3620,29 +3791,7 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
         }
         let ch = chars[at];
         at += 1;
-        match ch {
-            '\r' | '\n' => keys.push("enter".to_string()),
-            '\t' => keys.push("tab".to_string()),
-            '\x7f' | '\x08' => keys.push("backspace".to_string()),
-            // vim's own pair for moving the view and leaving the cursor
-            // where it is, which is exactly what these do here. Named
-            // rather than passed through raw: a widget matching "\x05"
-            // reads as a typo, and a control byte in a match arm is
-            // invisible to anyone scanning the file for its keys.
-            //
-            // Safe to take. The terminal is in cbreak with ISIG still on,
-            // so the bytes it intercepts are the signal ones - these are
-            // not among them, and neither is flow control's ^S/^Q.
-            '\x19' => keys.push("ctrl-y".to_string()),
-            '\x05' => keys.push("ctrl-e".to_string()),
-            // Kill-line, as readline and every shell prompt use it. Named
-            // here so a screen with a text field gets it for free, and so it
-            // cannot be confused with a character somebody meant to type -
-            // which is the whole reason to clear with a control byte rather
-            // than with tab, a letter, or a second meaning for escape.
-            '\x15' => keys.push("ctrl-u".to_string()),
-            c => keys.push(c.to_string()),
-        }
+        keys.push(name_byte(ch));
     }
     chars.drain(..at);
     *buf = chars.into_iter().collect();
@@ -5682,6 +5831,60 @@ mod tests {
         buf.push_str("[A");
         assert_eq!(decode(&mut buf, &mut held), vec!["up"]);
         assert!(buf.is_empty());
+    }
+
+    /// Legacy bytes and `CSI u` name the same keys. Escape is the one that
+    /// is not the same shape: the legacy byte has to wait a poll, because
+    /// it might be the start of a sequence, and `CSI 27 u` is already finished.
+    #[test]
+    fn legacy_and_csi_u_name_esc_ctrl_alt_and_the_editing_keys_alike() {
+        let mut buf = "\u{1b}".to_string();
+        let mut held = false;
+        assert!(decode(&mut buf, &mut held).is_empty(), "a bare escape still waits");
+        assert_eq!(decode(&mut buf, &mut held), vec!["esc".to_string()]);
+
+        let same = [
+            ("\r", "\u{1b}[13u", "enter"),
+            ("\n", "\u{1b}[13u", "enter"),
+            ("\t", "\u{1b}[9u", "tab"),
+            ("\u{7f}", "\u{1b}[127u", "backspace"),
+            ("\u{8}", "\u{1b}[127u", "backspace"),
+            ("\u{19}", "\u{1b}[121;5u", "ctrl-y"),
+            ("\u{5}", "\u{1b}[101;5u", "ctrl-e"),
+            ("\u{15}", "\u{1b}[117;5u", "ctrl-u"),
+            // Alt is an ESC prefix in legacy, and that prefix is not part of the name.
+            ("\u{1b}a", "\u{1b}[97;3u", "a"),
+            ("\u{1b}I", "\u{1b}[105;4u", "I"),
+            ("\u{1b}\u{19}", "\u{1b}[121;7u", "ctrl-y"),
+        ];
+        for (legacy, csi, name) in same {
+            assert_eq!(keys(legacy), vec![name.to_string()], "legacy {legacy:?}");
+            assert_eq!(keys(csi), vec![name.to_string()], "csi {csi:?}");
+        }
+        // One poll, not two: the protocol's Escape key does not wait.
+        assert_eq!(keys("\u{1b}[27u"), vec!["esc".to_string()]);
+        // Alt+[ is no longer an unfinished CSI. Legacy holds that prefix.
+        assert_eq!(keys("\u{1b}[91;3u"), vec!["[".to_string()]);
+        let mut held_prefix = "\u{1b}[".to_string();
+        let mut waiting = false;
+        assert!(decode(&mut held_prefix, &mut waiting).is_empty());
+        assert_eq!(held_prefix, "\u{1b}[");
+        // A release is not a second press. A repeat is the key again.
+        assert_eq!(keys("\u{1b}[121;5:3u"), Vec::<String>::new());
+        assert_eq!(keys("\u{1b}[121;5:2u"), vec!["ctrl-y".to_string()]);
+        // Shift-tab stays dropped, in both encodings.
+        assert_eq!(keys("\u{1b}[Z"), Vec::<String>::new());
+        assert_eq!(keys("\u{1b}[9;2u"), Vec::<String>::new());
+        // The report is one key, and what follows it is still read.
+        assert_eq!(
+            keys("\u{1b}[121;5uq"),
+            vec!["ctrl-y".to_string(), "q".to_string()]
+        );
+        // A query reply is not a key. Neither is a half-arrived report.
+        assert_eq!(keys("\u{1b}[?0u"), Vec::<String>::new());
+        let mut partial = "\u{1b}[121".to_string();
+        assert!(decode(&mut partial, &mut waiting).is_empty());
+        assert_eq!(partial, "\u{1b}[121");
     }
 
     #[test]
