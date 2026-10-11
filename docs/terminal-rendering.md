@@ -282,16 +282,18 @@ Braille.
 Flag 1 reports Ctrl-C, Ctrl-Z and Ctrl-\ as `CSI 99;5u`, `CSI 122;5u` and
 `CSI 92;5u` instead of the bytes the terminal driver would turn into signals.
 Those chords raise SIGINT, SIGTSTP and SIGQUIT, so interrupt, suspend and quit
-still run. SIGQUIT uses the same restore path as SIGINT, and the exit status
-is still SIGQUIT's.
+still run. SIGQUIT uses the same restore path as SIGINT. The handler then
+calls `_exit(128 + SIGQUIT)`, status 131. That is a normal exit, not a death
+by signal: a waiter does not see `WIFSIGNALED`.
 
 `CSI < u` pops the mode on the same paths that already delete images: normal
 exit, panic (dropping `Keyboard`), handing the terminal to another program,
 and suspend (`SIGTSTP`). Resume queries again and pushes only if the terminal
 answers again. A signal that exits pops as well, so the shell is not left
 disambiguating. The push, the pop and the flag that records them are one
-transition: the signals that pop are blocked until the flag and the bytes
-have both been updated.
+transition on the calling thread. `pthread_sigmask` blocks the signals that
+pop until the flag and the bytes have both been updated. It does not block
+those signals in any other thread.
 
 The PTY fixture answers the query and checks the push and the pop. It does
 not stand in for a real Kitty, Ghostty, WezTerm, iTerm2, foot, Alacritty or

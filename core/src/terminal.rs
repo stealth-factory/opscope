@@ -208,9 +208,11 @@ pub(crate) fn reply(sequence: &str) {
         push
     };
     if push {
-        // The flag and the bytes are one transition. SIGINT, SIGTERM,
-        // SIGTSTP and SIGQUIT stay blocked until both have happened, and
-        // the flag is stored first so a handler that still runs pops.
+        // The flag and the bytes are one transition on this thread.
+        // pthread_sigmask does not block the same signals elsewhere.
+        // SIGINT, SIGTERM, SIGTSTP and SIGQUIT stay blocked here until both
+        // have happened, and the flag is stored first so a handler that
+        // still runs pops.
         let _hold = block_handled_signals();
         KEYBOARD_PUSHED.store(true, Ordering::Release);
         super::out(KEYBOARD_PUSH);
@@ -253,7 +255,8 @@ pub(crate) fn cleanup_signal() {
 
 /// Signals whose handlers pop the keyboard mode. Held across the push, the
 /// pop, and the flag update so those handlers cannot observe a half-written
-/// transition. Restores the previous mask on drop, including from a handler.
+/// transition on this thread. `pthread_sigmask` does not cover other threads.
+/// Restores the previous mask on drop, including from a handler.
 struct HeldSignals {
     old: libc::sigset_t,
 }

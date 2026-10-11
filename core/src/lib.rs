@@ -3122,6 +3122,10 @@ impl Keyboard {
         } else {
             None
         };
+        // A test that builds a Keyboard to hit-test a footer must not start
+        // the session: the query goes to stdout, and a reply in that process
+        // can push flag 1 onto a stream the test never captured.
+        #[cfg(not(test))]
         if saved.is_some() {
             terminal::start();
         }
@@ -3705,8 +3709,11 @@ fn legacy_named(code: u32, modifiers: u32) -> Option<LegacyPress> {
     if let Some(name) = keypad_motion(code) {
         return Some(LegacyPress::Key(name.to_string()));
     }
+    // The keypad number is already the key. Shift and Ctrl must not run it
+    // through the main-keyboard tables: Ctrl+keypad 4 is not VQUIT, and
+    // Shift+keypad 1 is not `!`.
     if let Some(ch) = keypad_text(code) {
-        return named_text(ch, shift, ctrl);
+        return Some(LegacyPress::Key(ch.to_string()));
     }
     match code {
         27 if !shift && !ctrl => return Some(LegacyPress::Key("esc".to_string())),
@@ -6032,9 +6039,9 @@ mod tests {
             ("\u{1b}[92;5u", libc::SIGQUIT),
             // Alt is a prefix; the driver still interrupts on the byte.
             ("\u{1b}[99;7u", libc::SIGINT),
-            // Ctrl-4 is the same VQUIT byte as Ctrl-\, and so is Ctrl+keypad 4.
+            // Ctrl-4 on the main keyboard is the same VQUIT byte as Ctrl-\.
+            // Keypad 4 is not: that number stays the digit.
             ("\u{1b}[52;5u", libc::SIGQUIT),
-            ("\u{1b}[57403;5u", libc::SIGQUIT),
         ];
         for (sequence, sig) in chord {
             assert_eq!(keys(sequence), Vec::<String>::new(), "{sequence}");
@@ -6082,8 +6089,10 @@ mod tests {
         for (code, name) in same {
             assert_eq!(keys(&format!("\u{1b}[{code}u")), vec![name], "{code}");
         }
-        // Shift and alt do what they do for the same non-keypad key.
-        assert_eq!(keys("\u{1b}[57400;2u"), vec!["!"]);
+        // Shift and Ctrl leave the keypad character as it is.
+        assert_eq!(keys("\u{1b}[57400;2u"), vec!["1"]);
+        assert_eq!(keys("\u{1b}[57403;5u"), vec!["4"]);
+        assert!(reported("\u{1b}[57403;5u").1.is_empty());
         assert_eq!(keys("\u{1b}[57404;3u"), vec!["5"]);
         assert_eq!(keys("\u{1b}[57419;5u"), vec!["up"]);
         // Insert, delete, begin and the media keys have no legacy name here.
