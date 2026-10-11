@@ -196,19 +196,20 @@ impl Session {
                 } else if message.starts_with("ENOENT") || message.starts_with("EINVAL") {
                     super::graphics::set_animation(false);
                 }
-                let discard = super::graphics::discard_probe();
-                unsafe {
-                    libc::write(libc::STDOUT_FILENO, discard.as_ptr().cast(), discard.len());
-                }
+                // Same path as every other write outside `draw`, so the
+                // delete stays ordered with the frame bytes.
+                super::out(&super::graphics::discard_probe());
+                super::flush();
                 return false;
             }
-            // A frame edit that the terminal rejects is not a broken image.
-            // Drop back to full uploads; pixels stay on.
-            if id.is_some_and(super::graphics::frame_edit_pending)
-                && (message.starts_with("ENOENT") || message.starts_with("EINVAL"))
-            {
+            // A frame edit the terminal rejects is not a broken image.
+            // Kitty answers ENOSPC when animation storage is exhausted.
+            // One edit can draw several of these, so the slot bits stay
+            // until the next full upload replaces them. Clearing them on
+            // the first reply made the next one look like a bad image and
+            // turned graphics off.
+            if id.is_some_and(super::graphics::frame_edit_pending) && frame_refused(message) {
                 super::graphics::set_animation(false);
-                super::graphics::clear_frame_edits();
                 super::screen_lost();
                 return false;
             }
@@ -308,6 +309,12 @@ impl Session {
             false
         }
     }
+}
+
+fn frame_refused(message: &str) -> bool {
+    message.starts_with("ENOENT")
+        || message.starts_with("EINVAL")
+        || message.starts_with("ENOSPC")
 }
 
 pub(crate) fn reply(sequence: &str) {
@@ -534,6 +541,7 @@ mod tests {
 
     #[test]
     fn a_refused_frame_probe_keeps_full_uploads() {
+        let _slots = crate::graphics::test_lock();
         let now = Instant::now();
         let mut s = Session {
             deadline: Some(now + TIMEOUT),
@@ -547,6 +555,52 @@ mod tests {
         s.reply(&format!("\x1b_Gi={probe};OK\x1b\\"), now);
         assert!(crate::graphics::animation_ready());
         crate::graphics::reset_animation();
+    }
+
+    #[test]
+    fn repeated_frame_errors_keep_graphics() {
+        let _slots = crate::graphics::test_lock();
+        crate::graphics::clear_frame_edits();
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let pid = unsafe { libc::getpid() } as u32;
+        let slot = |n: u32| 0x40000000 | ((pid & 0x1fffff) << 4) | n;
+        // An image error that was not a frame edit still ends graphics.
+        s.reply(
+            &format!("\x1b_Gi={};ENOSPC:animation storage exhausted\x1b\\", slot(0)),
+            now,
+        );
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        crate::graphics::testing_mark_frame(0);
+        crate::graphics::testing_mark_frame(1);
+        for message in [
+            format!("\x1b_Gi={};EINVAL:overlap\x1b\\", slot(0)),
+            format!("\x1b_Gi={};EINVAL:overlap\x1b\\", slot(0)),
+            format!("\x1b_Gi={};ENOSPC:animation storage exhausted\x1b\\", slot(1)),
+        ] {
+            s.reply(&message, now);
+            assert!(
+                s.capabilities.kitty_graphics && !s.image_rejected,
+                "{message}"
+            );
+        }
+        assert!(!crate::graphics::animation_ready());
+        // Once the fallback upload clears the bits, a real image error still ends graphics.
+        crate::graphics::clear_frame_edits();
+        s.reply(&format!("\x1b_Gi={};EINVAL:bad\x1b\\", slot(0)), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
+        crate::graphics::reset_animation();
+        crate::graphics::clear_frame_edits();
     }
 
     #[test]

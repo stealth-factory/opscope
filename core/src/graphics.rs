@@ -691,8 +691,22 @@ pub(crate) fn frame_edit_pending(id: u32) -> bool {
     (0..MAX_PLOTS).any(|slot| image_id(slot) == id && slots & (1 << slot) != 0)
 }
 
+#[cfg(test)]
 pub(crate) fn clear_frame_edits() {
     FRAME_SLOTS.store(0, Ordering::Release);
+}
+
+/// `compose` and the frame-error replies share `FRAME_SLOTS`. Tests that
+/// touch either hold this for the whole test.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn testing_mark_frame(slot: usize) {
+    note_frame(slot);
 }
 
 /// One-pixel image, a second frame copied from it, then a compose of that
@@ -1231,7 +1245,8 @@ fn frame_edit(prev: &Plot, next: &Plot, slot: usize, pane_width: usize) -> Optio
 enum Slide {
     No,
     Unique(usize),
-    Any,
+    /// Every shift that matches. A repeated series has more than one.
+    Any(Vec<usize>),
 }
 
 fn shared_slide(old: &[Trace], new: &[Trace], slots: usize) -> Option<usize> {
@@ -1239,6 +1254,9 @@ fn shared_slide(old: &[Trace], new: &[Trace], slots: usize) -> Option<usize> {
         return None;
     }
     let mut unique = None;
+    // Shifts a repeated trace actually matches. The unique shift is used
+    // only when it is one of them; otherwise the chart is uploaded whole.
+    let mut ambiguous = Vec::new();
     for (prev, next) in old.iter().zip(new) {
         if prev.colour != next.colour || prev.baseline != next.baseline {
             return None;
@@ -1252,33 +1270,46 @@ fn shared_slide(old: &[Trace], new: &[Trace], slots: usize) -> Option<usize> {
         } else {
             slots
         };
-        match value_slide(&prev.values, &next.values, window) {
-            Slide::No => return None,
-            Slide::Unique(n) => {
-                if unique.unwrap_or(n) != n {
-                    return None;
-                }
-                unique = Some(n);
-            }
-            // A repeated value matches several shifts. Another trace's unique
-            // shift decides it; with none, a full upload cannot pick the wrong one.
-            Slide::Any => {}
+        if !note_slide(
+            &mut unique,
+            &mut ambiguous,
+            value_slide(&prev.values, &next.values, window),
+        ) {
+            return None;
         }
         if let (Some(old_at), Some(new_at)) = (&prev.positions, &next.positions) {
             let window = old_at.len().max(new_at.len()).max(slots);
-            match value_slide_f64(old_at, new_at, window) {
-                Slide::No => return None,
-                Slide::Unique(n) => {
-                    if unique.unwrap_or(n) != n {
-                        return None;
-                    }
-                    unique = Some(n);
-                }
-                Slide::Any => {}
+            if !note_slide(
+                &mut unique,
+                &mut ambiguous,
+                value_slide_f64(old_at, new_at, window),
+            ) {
+                return None;
             }
         }
     }
-    unique
+    let n = unique?;
+    if ambiguous.iter().any(|candidates| !candidates.contains(&n)) {
+        return None;
+    }
+    Some(n)
+}
+
+fn note_slide(unique: &mut Option<usize>, ambiguous: &mut Vec<Vec<usize>>, slide: Slide) -> bool {
+    match slide {
+        Slide::No => false,
+        Slide::Unique(n) => {
+            if unique.unwrap_or(n) != n {
+                return false;
+            }
+            *unique = Some(n);
+            true
+        }
+        Slide::Any(candidates) => {
+            ambiguous.push(candidates);
+            true
+        }
+    }
 }
 
 fn value_slide(old: &[Option<f64>], new: &[Option<f64>], slots: usize) -> Slide {
@@ -1293,21 +1324,13 @@ fn value_slide(old: &[Option<f64>], new: &[Option<f64>], slots: usize) -> Slide 
     if new.len() != old.len() {
         return Slide::No;
     }
-    let mut found = None;
-    let mut extra = false;
-    for n in 1..old.len() {
-        if new[..old.len() - n] == old[n..] {
-            if found.is_some() {
-                extra = true;
-                break;
-            }
-            found = Some(n);
-        }
-    }
-    match (found, extra) {
-        (Some(_), true) => Slide::Any,
-        (Some(n), false) => Slide::Unique(n),
-        (None, _) => Slide::No,
+    let found: Vec<usize> = (1..old.len())
+        .filter(|&n| new[..old.len() - n] == old[n..])
+        .collect();
+    match found.as_slice() {
+        [] => Slide::No,
+        [n] => Slide::Unique(*n),
+        _ => Slide::Any(found),
     }
 }
 
@@ -2292,8 +2315,7 @@ mod tests {
     /// hold this for the whole test so a parallel run cannot swap the cache
     /// between two of their calls.
     fn compose_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::test_lock()
     }
 
     /// Turns frames on for this thread and off again, including on panic.
@@ -2352,6 +2374,122 @@ mod tests {
             out[at..at + col_w * 4].copy_from_slice(&new[at..at + col_w * 4]);
         }
         out
+    }
+
+    fn trace_of(values: &[f64]) -> Trace {
+        Trace {
+            positions: None,
+            values: values.iter().copied().map(Some).collect(),
+            colour: super::super::rgb(30, 220, 180),
+            baseline: None,
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_trace_does_not_borrow_another_traces_shift() {
+        // Eight slots. The repeated trace matches shifts of two, four and
+        // six samples, not one. A sibling that uniquely slid by one must
+        // not drag it along: a nine-pixel shift is not that trace.
+        let repeating = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.2, 0.8];
+        let repeating_next = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.3, 0.4];
+        let unique: Vec<f64> = (1..=8).map(|i| i as f64 / 10.0).collect();
+        let mut unique_next = unique[1..].to_vec();
+        unique_next.push(0.9);
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&repeating), trace_of(&unique)],
+                &[trace_of(&repeating_next), trace_of(&unique_next)],
+                8,
+            ),
+            None
+        );
+        let old = Plot::new(2, 1, 8, 3, chart(repeating.into_iter().map(Some).collect()));
+        let new = Plot::new(
+            2,
+            1,
+            8,
+            3,
+            chart(repeating_next.into_iter().map(Some).collect()),
+        );
+        assert!(spliced(&pixels(&old), &pixels(&new), 64, 9) != pixels(&new));
+
+        // [0, 1, 0, 1, 0, 1] → [0, 1, 0, 1, 0.2, 0.3] matches two and four, not three.
+        let periodic = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let periodic_next = [0.0, 1.0, 0.0, 1.0, 0.2, 0.3];
+        let six: Vec<f64> = (1..=6).map(|i| i as f64 / 10.0).collect();
+        let six_next = vec![0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&periodic), trace_of(&six)],
+                &[trace_of(&periodic_next), trace_of(&six_next)],
+                6,
+            ),
+            None
+        );
+
+        // A constant series matches every shift, including the unique one.
+        let flat = [0.5; 8];
+        assert_eq!(
+            shared_slide(
+                &[trace_of(&flat), trace_of(&unique)],
+                &[trace_of(&flat), trace_of(&unique_next)],
+                8,
+            ),
+            Some(1)
+        );
+
+        // Positions keep their own candidate shifts. These match two and
+        // four, while the values uniquely match one.
+        let mut old_pos = trace_of(&unique);
+        let mut new_pos = trace_of(&unique_next);
+        old_pos.positions = Some(repeating.to_vec());
+        new_pos.positions = Some(repeating_next.to_vec());
+        assert_eq!(shared_slide(&[old_pos], &[new_pos], 8), None);
+    }
+
+    #[test]
+    fn an_ambiguous_chart_is_uploaded_whole_and_a_constant_trace_may_slide() {
+        let _cache = compose_lock();
+        let _frames = FramesOn::new();
+        let rows = vec!["protected title".into(), "axis".into()];
+        let repeating = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.2, 0.8];
+        let repeating_next = [0.2, 0.8, 0.2, 0.8, 0.2, 0.8, 0.3, 0.4];
+        let unique: Vec<f64> = (1..=8).map(|i| i as f64 / 10.0).collect();
+        let mut unique_next = unique[1..].to_vec();
+        unique_next.push(0.9);
+        let old = Plot::new(2, 1, 8, 3, chart_of(&[&repeating[..], &unique]));
+        let new = Plot::new(
+            2,
+            1,
+            8,
+            3,
+            chart_of(&[&repeating_next[..], unique_next.as_slice()]),
+        );
+        compose(&rows, &[old], 40, 8, true, true, false);
+        let (_, _, bytes) = compose(&rows, &[new], 40, 8, true, false, false);
+        assert!(bytes.contains("a=T") && !bytes.contains("a=c"));
+        compose(&rows, &[], 40, 8, true, false, false);
+
+        let flat = [0.5; 8];
+        let old = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], &unique]));
+        let new = Plot::new(2, 1, 8, 3, chart_of(&[&flat[..], unique_next.as_slice()]));
+        compose(&rows, &[old], 40, 8, true, true, false);
+        let (_, before, after) = compose(&rows, &[new], 40, 8, true, false, false);
+        assert!(
+            before.is_empty()
+                && after.contains("a=c")
+                && after.contains("a=f")
+                && !after.contains("a=T")
+        );
+        compose(&rows, &[], 40, 8, true, false, false);
+    }
+
+    fn chart_of(traces: &[&[f64]]) -> LineChart {
+        let mut chart = chart(traces[0].iter().copied().map(Some).collect());
+        for values in &traces[1..] {
+            chart.traces.push(trace_of(values));
+        }
+        chart
     }
 
     #[test]

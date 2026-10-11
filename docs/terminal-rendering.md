@@ -124,9 +124,10 @@ resume.
 ### One new sample
 
 A live line chart that gains samples does not have to be sent again. When
-the new series is the old one slid by N slots, the scale and the slot count
-are unchanged, and that slide is a whole number of pixels, core shifts the
-image the terminal already holds and uploads only the new columns.
+every trace is the old one slid by the same N slots, the scale and the slot
+count are unchanged, and that slide is a whole number of pixels, core shifts
+the image the terminal already holds and uploads only the new columns. A
+trace that matches several shifts counts only when N is one of them.
 
 Kitty refuses to compose a frame onto itself when the rectangles overlap, and
 a one-slot shift always overlaps, so the shift is taken from a one-pixel copy
@@ -140,10 +141,11 @@ still cover it, and a pure shift would leave that tail behind.
 
 Startup sends a 1×1 probe and a frame compose on it, ahead of the capability
 tail. `OK` enables the path. `ENOENT` or `EINVAL`, or no answer, leaves it
-off, and every tick stays a full `a=T` upload. A later frame error does the
-same and asks the next frame to send the image again. A rescale, a slot-count
-change, a resize, a scroll that changes the crop, or a screen loss is a full
-upload too. Text and Braille are unchanged.
+off, and every tick stays a full `a=T` upload. A later frame error,
+including `ENOSPC` when animation storage is exhausted, does the same and
+asks the next frame to send the image again. Graphics stay on. A rescale,
+a slot-count change, a resize, a scroll that changes the crop, or a screen
+loss is a full upload too. Text and Braille are unchanged.
 
 The pitch is `(width in pixels − 1) / (slots − 1)`. It is a whole number of
 pixels only for some shapes. A netwatch trace on an 80-column pane is 64
