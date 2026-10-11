@@ -946,11 +946,11 @@ fn forget_termios() {
 /// deadlock on the same stdout lock `draw` holds; Drop on `Keyboard` never
 /// runs either way, so the handler has to give the shell its echo back.
 fn restore_terminal_signal() {
-    // Suspend and a signalled exit both come through here. Drop any
-    // shared-memory object first and stay on the direct path until the
-    // resume probe: a draw that lands before that probe would otherwise
-    // name an object this handler is about to unlink.
-    shm::force_direct();
+    // Suspend and a signalled exit both come through here. Disarm shared
+    // memory without unlinking: `shm_unlink` is not async-signal-safe, and
+    // calling it here can stop the handler from restoring the terminal.
+    // Resume and `Keyboard` drop collect the objects.
+    shm::disarm_for_signal();
     graphics::cleanup_signal();
     terminal::cleanup_signal();
     if HAS_TERMIOS.load(Ordering::Acquire) {

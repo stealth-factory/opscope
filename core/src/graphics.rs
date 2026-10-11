@@ -626,10 +626,9 @@ fn delete(slot: usize) -> String {
 
 /// Also called by the signal handler: only atomics and write(2), no locks,
 /// formatting, allocation or shared references to a mutating image cache.
-/// Shared-memory names are the same kind of table; `shm_unlink` is the one
-/// extra syscall and it does not allocate.
+/// Shared memory is not unlinked here. `shm_unlink` is not async-signal-safe;
+/// `cleanup` collects those objects on the ordinary path.
 pub(crate) fn cleanup_signal() {
-    super::shm::release_signal();
     let live = LIVE.swap(0, Ordering::AcqRel);
     for slot in 0..MAX_PLOTS {
         if live & (1 << slot) == 0 {
@@ -661,6 +660,7 @@ pub(crate) fn cleanup_signal() {
 }
 
 pub(crate) fn cleanup() {
+    super::shm::release();
     cleanup_signal();
     CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }

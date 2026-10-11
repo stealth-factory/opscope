@@ -10,8 +10,19 @@
 //! This module rewrites that frame after the fact, when the probe has
 //! succeeded. The compressed bytes are the base64 payload with the
 //! framing removed, which is the same buffer `t=d` would have carried.
+//!
+//! `shm_unlink` is not async-signal-safe, so a signal handler only disarms
+//! the transport. Exit, panic and resume unlink from ordinary code. A name
+//! is published in the cleanup table before the object is truncated or
+//! copied, and a replaced object stays until its read window ends so a
+//! later reply cannot collect the replacement that reused the image id.
+//! Darwin stores the page-rounded length in the object; the escape carries
+//! `S=` so the terminal reads the exact payload. Tests map that object.
+//! `read` is not a source: Darwin shm descriptors reject it.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use base64::Engine;
 
@@ -19,7 +30,10 @@ use base64::Engine;
 pub(crate) const PROBE_ID: u32 = 2_147_483_645;
 
 const NAME_CAP: usize = 31;
-const SLOTS: usize = 24;
+const SLOTS: usize = 48;
+/// How long a replaced object stays after a newer one is published for the
+/// same image. The terminal may still be reading the previous name.
+const RETIRE_MS: u64 = 1_000;
 const UNPROBED: u8 = 0;
 const SHARED: u8 = 1;
 const DIRECT: u8 = 2;
@@ -54,35 +68,64 @@ pub(crate) fn parse_shm_probe(sequence: &str) -> ProbeFate {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Slot {
-    live: AtomicBool,
-    len: AtomicU8,
-    id: AtomicU32,
-    name: [AtomicU8; NAME_CAP],
+    live: bool,
+    id: u32,
+    /// Zero while this is the object the next reply should keep. A deadline
+    /// means a newer object already owns the image id.
+    retire_ms: u64,
+    name: [u8; NAME_CAP],
+    name_len: u8,
 }
 
 const fn empty_slot() -> Slot {
     Slot {
-        live: AtomicBool::new(false),
-        len: AtomicU8::new(0),
-        id: AtomicU32::new(0),
-        name: [const { AtomicU8::new(0) }; NAME_CAP],
+        live: false,
+        id: 0,
+        retire_ms: 0,
+        name: [0; NAME_CAP],
+        name_len: 0,
     }
 }
 
-static SLOTS_TABLE: [Slot; SLOTS] = [const { empty_slot() }; SLOTS];
+static TABLE: Mutex<[Slot; SLOTS]> = Mutex::new([empty_slot(); SLOTS]);
 static TRANSPORT: AtomicU8 = AtomicU8::new(DIRECT);
-static SEQ: AtomicU32 = AtomicU32::new(0);
+static NAME_SEQ: AtomicU32 = AtomicU32::new(1);
+/// Plot slots whose latest transmission was `t=s` and has not been replaced
+/// by a `t=d` frame. A queued error for one of these stays a transport
+/// failure after the first error clears `use_shm`.
+static SHARED_PENDING: AtomicU32 = AtomicU32::new(0);
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+fn mono_ms() -> u64 {
+    STARTED
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn with_table<T>(body: impl FnOnce(&mut [Slot; SLOTS]) -> T) -> T {
+    let mut table = TABLE.lock().unwrap_or_else(|err| err.into_inner());
+    body(&mut table)
+}
 
 pub(crate) fn is_shared() -> bool {
     TRANSPORT.load(Ordering::Acquire) == SHARED
 }
 
+/// Signal handlers stop here. `shm_unlink` is not async-signal-safe, so the
+/// handler can still restore the terminal and exit. Resume and `Drop` unlink.
+pub(crate) fn disarm_for_signal() {
+    TRANSPORT.store(DIRECT, Ordering::Release);
+}
+
 /// Drop every object and stay on the direct path. Resume and text mode
 /// both start from here, so a previous probe cannot leak into the next one.
 pub(crate) fn force_direct() {
-    TRANSPORT.store(DIRECT, Ordering::Release);
-    release_signal();
+    disarm_for_signal();
+    release();
 }
 
 /// A 1×1 image, transmitted and not placed, with a reply requested (`q=0`).
@@ -93,7 +136,7 @@ pub(crate) fn begin_probe() -> Option<String> {
     TRANSPORT.store(UNPROBED, Ordering::Release);
     let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
     Some(format!(
-        "\x1b_Ga=t,f=32,t=s,s=1,v=1,i={PROBE_ID},q=0;{payload}\x1b\\"
+        "\x1b_Ga=t,f=32,t=s,s=1,v=1,i={PROBE_ID},q=0,S=4;{payload}\x1b\\"
     ))
 }
 
@@ -113,38 +156,103 @@ pub(crate) fn expire_probe() {
     apply_rejected();
 }
 
-/// A later image failed while shared memory was in use. Graphics stay on;
-/// the next frame is direct, and anything the terminal did not take is unlinked.
+/// A later image failed while shared memory was in use. Graphics stay on.
+/// Objects the terminal may still be reading are retired, not unlinked.
 pub(crate) fn transport_failed() {
     TRANSPORT.store(DIRECT, Ordering::Release);
-    release_signal();
+    let deadline = mono_ms().saturating_add(RETIRE_MS);
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            if slot.live && slot.retire_ms == 0 {
+                slot.retire_ms = deadline;
+            }
+        }
+    });
+}
+
+/// Ids whose latest send was shared memory. Cleared when a later frame
+/// transmits that id directly.
+pub(crate) fn shared_pending(id: u32) -> bool {
+    plot_bit(id).is_some_and(|bit| SHARED_PENDING.load(Ordering::Acquire) & bit != 0)
+}
+
+pub(crate) fn mark_shared(id: u32) {
+    if let Some(bit) = plot_bit(id) {
+        SHARED_PENDING.fetch_or(bit, Ordering::Release);
+    }
+}
+
+pub(crate) fn mark_direct(id: u32) {
+    if let Some(bit) = plot_bit(id) {
+        SHARED_PENDING.fetch_and(!bit, Ordering::Release);
+    }
+}
+
+fn plot_bit(id: u32) -> Option<u32> {
+    // Main owns the id layout (five slot bits, prefix 0x60000000). Matching
+    // it here is what lets a queued shared-memory error stay a transport
+    // failure instead of a graphics rejection.
+    let slot = (id & 0x1f) as usize;
+    if slot >= 32 {
+        return None;
+    }
+    (id == super::graphics::image_id(slot)).then_some(1u32 << slot)
 }
 
 /// Rewrite direct transmissions when the probe succeeded. Deletes in
-/// `before` free the name they replaced. A failure to publish puts the
-/// original direct bytes back and leaves shared memory off.
+/// `before` retire the name they replaced; they do not unlink it while the
+/// terminal may still be reading. A failure to publish puts the original
+/// direct bytes back and leaves shared memory off.
 pub(crate) fn deliver(before: &str, after: String) -> String {
+    reap_expired();
     if !is_shared() {
+        note_transport(&after, false);
         return after;
     }
     for id in command_ids(before, "a=d") {
-        unlink_id(id);
+        retire_id(id);
     }
     match rewrite(&after) {
-        Ok(rewritten) => rewritten,
+        Ok(rewritten) => {
+            note_transport(&rewritten, true);
+            rewritten
+        }
         Err(()) => {
             transport_failed();
+            note_transport(&after, false);
             after
         }
     }
 }
 
-/// Signal handler and `Keyboard` drop both end here. Names live in atomics
-/// so this can run off a signal: `shm_unlink` and nothing that allocates.
-pub(crate) fn release_signal() {
-    for slot in &SLOTS_TABLE {
-        unlink_slot(slot);
+fn note_transport(bytes: &str, shared: bool) {
+    let mut pos = 0;
+    while let Some((_start, end, keys, _payload)) = next_apc(bytes, pos) {
+        if keys.split(',').any(|part| part == "a=T") {
+            if let Some(id) = image_id_of(keys) {
+                if shared {
+                    mark_shared(id);
+                } else {
+                    mark_direct(id);
+                }
+            }
+        }
+        pos = end;
     }
+}
+
+/// `Keyboard` drop, resume and a normal exit end here. Not a signal handler.
+pub(crate) fn release() {
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            unlink_slot(slot);
+        }
+    });
+}
+
+pub(crate) fn reap_expired() {
+    let now = mono_ms();
+    with_table(|slots| reap_in(slots, now));
 }
 
 fn command_ids(bytes: &str, action: &str) -> Vec<u32> {
@@ -194,7 +302,7 @@ fn rewrite(input: &str) -> Result<String, ()> {
         let wire = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
         out.push_str(&input[pos..start]);
         out.push_str("\x1b_G");
-        out.push_str(&retarget(keys));
+        out.push_str(&retarget(keys, raw.len()));
         out.push(';');
         out.push_str(&wire);
         out.push_str("\x1b\\");
@@ -245,11 +353,11 @@ fn image_id_of(keys: &str) -> Option<u32> {
         .find_map(|part| part.strip_prefix("i=")?.parse().ok())
 }
 
-fn retarget(keys: &str) -> String {
-    let mut out = String::with_capacity(keys.len() + 4);
+fn retarget(keys: &str, nbytes: usize) -> String {
+    let mut out = String::with_capacity(keys.len() + 16);
     let mut seen_m = false;
     for part in keys.split(',') {
-        if part.is_empty() {
+        if part.is_empty() || part.starts_with("S=") {
             continue;
         }
         if !out.is_empty() {
@@ -270,67 +378,107 @@ fn retarget(keys: &str) -> String {
         }
         out.push_str("m=0");
     }
+    // Darwin's fstat size is the page-rounded object. `S` is the payload.
+    out.push_str(&format!(",S={nbytes}"));
     out
 }
 
-fn remember(id: u32, name: &str) -> bool {
+/// Publish `name` before the caller truncates or copies. The previous object
+/// for `id` is retired, not unlinked: the terminal may still be reading it.
+/// The name bytes are stored before `live` is set, under the table lock, so
+/// cleanup cannot observe a slot it would skip and then forget.
+fn claim(id: u32, name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > NAME_CAP {
         return false;
     }
-    for slot in &SLOTS_TABLE {
-        if slot.live.load(Ordering::Acquire) && slot.id.load(Ordering::Acquire) == id {
-            // The previous object for this placement. Kitty unlinks after a
-            // successful read; unlinking again is ENOENT, and it frees the
-            // name if the read never happened.
-            unlink_slot(slot);
+    let now = mono_ms();
+    with_table(|slots| {
+        reap_in(slots, now);
+        let deadline = now.saturating_add(RETIRE_MS);
+        for slot in slots.iter_mut() {
+            if slot.live && slot.id == id && slot.retire_ms == 0 {
+                slot.retire_ms = deadline;
+            }
         }
-    }
-    for slot in &SLOTS_TABLE {
-        if slot
-            .live
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            write_name(slot, id, bytes);
-            return true;
-        }
-    }
-    false
+        let Some(slot) = slots.iter_mut().find(|slot| !slot.live) else {
+            return false;
+        };
+        slot.name[..bytes.len()].copy_from_slice(bytes);
+        slot.name_len = bytes.len() as u8;
+        slot.id = id;
+        slot.retire_ms = 0;
+        slot.live = true;
+        true
+    })
 }
 
-fn write_name(slot: &Slot, id: u32, bytes: &[u8]) {
-    // `len == 0` tells the signal handler the bytes are not ready.
-    slot.len.store(0, Ordering::Release);
-    for (i, byte) in bytes.iter().enumerate() {
-        slot.name[i].store(*byte, Ordering::Relaxed);
-    }
-    slot.id.store(id, Ordering::Relaxed);
-    slot.len.store(bytes.len() as u8, Ordering::Release);
+fn retire_id(id: u32) {
+    let deadline = mono_ms().saturating_add(RETIRE_MS);
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            if slot.live && slot.id == id && slot.retire_ms == 0 {
+                slot.retire_ms = deadline;
+            }
+        }
+    });
 }
 
 pub(crate) fn unlink_id(id: u32) {
-    for slot in &SLOTS_TABLE {
-        if slot.live.load(Ordering::Acquire) && slot.id.load(Ordering::Acquire) == id {
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            if slot.live && slot.id == id {
+                unlink_slot(slot);
+            }
+        }
+    });
+}
+
+/// An `ENOENT` for an image id drops only objects already replaced. The
+/// current object reused that id and is still the one to keep.
+pub(crate) fn unlink_retired(id: u32) {
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            if slot.live && slot.id == id && slot.retire_ms != 0 {
+                unlink_slot(slot);
+            }
+        }
+    });
+}
+
+fn reap_in(slots: &mut [Slot; SLOTS], now: u64) {
+    for slot in slots.iter_mut() {
+        if slot.live && slot.retire_ms != 0 && now >= slot.retire_ms {
             unlink_slot(slot);
         }
     }
 }
 
-fn unlink_slot(slot: &Slot) {
-    if !slot.live.load(Ordering::Acquire) {
+fn drop_named(name: &str) {
+    let bytes = name.as_bytes();
+    with_table(|slots| {
+        for slot in slots.iter_mut() {
+            if slot.live && slot.name_len as usize == bytes.len() && &slot.name[..bytes.len()] == bytes
+            {
+                unlink_slot(slot);
+            }
+        }
+    });
+}
+
+fn unlink_slot(slot: &mut Slot) {
+    if !slot.live {
         return;
     }
-    let len = slot.len.load(Ordering::Acquire) as usize;
+    let len = slot.name_len as usize;
     if (1..=NAME_CAP).contains(&len) {
         let mut buf = [0u8; NAME_CAP + 1];
-        for i in 0..len {
-            buf[i] = slot.name[i].load(Ordering::Relaxed);
-        }
+        buf[..len].copy_from_slice(&slot.name[..len]);
         unlink_cstr(&buf);
     }
-    slot.len.store(0, Ordering::Release);
-    slot.live.store(false, Ordering::Release);
+    slot.name_len = 0;
+    slot.retire_ms = 0;
+    slot.live = false;
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -347,7 +495,7 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
         return None;
     }
     for _ in 0..8 {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let n = NAME_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = unsafe { libc::getpid() } as u32;
         let name = format!("/o{pid:x}-{n:x}");
         if name.len() > NAME_CAP {
@@ -368,6 +516,15 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
             }
             return None;
         }
+        // The cleanup table learns the name before truncate, map or copy.
+        // A panic while filling the object can still unlink it.
+        if !claim(id, &name) {
+            unsafe {
+                libc::close(fd);
+                libc::shm_unlink(c_name.as_ptr());
+            }
+            return None;
+        }
         let map_len = bytes.len();
         let failed = unsafe { libc::ftruncate(fd, map_len as libc::off_t) } != 0;
         let ptr = if failed {
@@ -385,10 +542,8 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
             }
         };
         if ptr == libc::MAP_FAILED {
-            unsafe {
-                libc::close(fd);
-                libc::shm_unlink(c_name.as_ptr());
-            }
+            unsafe { libc::close(fd) };
+            drop_named(&name);
             return None;
         }
         unsafe {
@@ -396,13 +551,9 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
             let unmapped = libc::munmap(ptr, map_len);
             libc::close(fd);
             if unmapped != 0 {
-                libc::shm_unlink(c_name.as_ptr());
+                drop_named(&name);
                 return None;
             }
-        }
-        if !remember(id, &name) {
-            unsafe { libc::shm_unlink(c_name.as_ptr()) };
-            return None;
         }
         return Some(name);
     }
@@ -412,6 +563,11 @@ fn create(bytes: &[u8], id: u32) -> Option<String> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn create(_bytes: &[u8], _id: u32) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+pub(crate) fn expire_retired() {
+    with_table(|slots| reap_in(slots, u64::MAX));
 }
 
 #[cfg(test)]
@@ -452,7 +608,8 @@ mod tests {
 
     /// Darwin shm descriptors use `fo_no_read`, so `read` fails there. The
     /// bytes are only visible through `mmap`, which is how the terminal
-    /// reads them. `fstat` reports the exact `ftruncate` length.
+    /// reads them. Darwin's `fstat` size is the page-rounded object, so
+    /// callers compare the payload prefix rather than the mapped length.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn read_object(name: &str) -> Option<Vec<u8>> {
         let c_name = std::ffi::CString::new(name).ok()?;
@@ -492,13 +649,50 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn assert_object(name: &str, expected: &[u8]) {
         let got = read_object(name).unwrap_or_else(|| panic!("{name} could not be mapped"));
-        assert_eq!(got.len(), expected.len(), "{name} length");
-        if let Some(i) = got.iter().zip(expected).position(|(a, b)| a != b) {
+        assert!(
+            got.len() >= expected.len(),
+            "{name} mapped {} bytes, payload {}",
+            got.len(),
+            expected.len()
+        );
+        if let Some(i) = got[..expected.len()]
+            .iter()
+            .zip(expected)
+            .position(|(a, b)| a != b)
+        {
             panic!(
                 "{name} differs at byte {i}: got {:#x} want {:#x}",
                 got[i], expected[i]
             );
         }
+    }
+
+    /// `read` on a Darwin shm descriptor is `fo_no_read` and returns nothing.
+    /// The bytes the terminal sees are the mapping. Where `read` does return
+    /// the payload, the mapping is that same length; Darwin's `fstat` size is
+    /// the page-rounded object, so the mapping is longer and `read` is absent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn posix_read(name: &str) -> Option<Vec<u8>> {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDONLY, 0) };
+        if fd < 0 {
+            return None;
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::fstat(fd, &mut stat) } == 0;
+        let len = usize::try_from(stat.st_size).unwrap_or(0);
+        if !ok || len == 0 {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), len) };
+        unsafe { libc::close(fd) };
+        if n <= 0 {
+            return None;
+        }
+        buf.truncate(n as usize);
+        Some(buf)
     }
 
     fn payload_of(command: &str) -> String {
@@ -563,6 +757,7 @@ mod tests {
         assert!(!rewritten.contains("t=d"));
         assert!(rewritten.contains("m=0"));
         assert!(!rewritten.contains("m=1"));
+        assert!(rewritten.contains(&format!("S={}", raw.len())));
         let name = String::from_utf8(
             base64::engine::general_purpose::STANDARD
                 .decode(payload_of(&rewritten))
@@ -580,10 +775,18 @@ mod tests {
             )
             .unwrap();
             assert_ne!(name, name2);
-            assert!(!exists(&name), "the replaced object was left behind");
+            assert!(
+                exists(&name),
+                "the object still being read was unlinked with its image id"
+            );
             assert_object(&name2, &raw);
+            unlink_retired(42);
+            assert!(!exists(&name), "the retired object survived ENOENT");
+            assert!(exists(&name2), "ENOENT unlinked the replacement");
+            expire_retired();
+            assert!(exists(&name2));
         }
-        release_signal();
+        release();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(!exists(&name), "release left an object");
     }
@@ -596,6 +799,7 @@ mod tests {
         let compressed = direct_payload(&command);
         let rewritten = rewrite(&command).expect("object");
         assert!(rewritten.contains("t=s") && !rewritten.contains("t=d"));
+        assert!(rewritten.contains(&format!("S={}", compressed.len())));
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let name = String::from_utf8(
@@ -605,7 +809,7 @@ mod tests {
             )
             .unwrap();
             assert_object(&name, &compressed);
-            release_signal();
+            release();
             assert!(!exists(&name));
         }
     }
@@ -625,6 +829,34 @@ mod tests {
     }
 
     #[test]
+    fn the_payload_is_mapped_because_read_is_not_required() {
+        let _guard = guard();
+        let raw: Vec<u8> = (0..100).collect();
+        let Some(name) = create(&raw, 5) else {
+            return;
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mapped = read_object(&name).expect("mapped");
+            assert_eq!(&mapped[..raw.len()], raw.as_slice());
+            match posix_read(&name) {
+                // Darwin: fo_no_read, and fstat reports the page-rounded size.
+                None => assert!(
+                    mapped.len() > raw.len(),
+                    "read() saw nothing, but the object was not page-rounded"
+                ),
+                Some(bytes) => {
+                    assert_eq!(bytes, raw);
+                    assert_eq!(mapped.len(), raw.len());
+                }
+            }
+        }
+        release();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(!exists(&name));
+    }
+
+    #[test]
     fn release_unlinks_after_unwind_the_way_exit_and_suspend_do() {
         let _guard = guard();
         let Some(name) = create(b"still-here", 99) else {
@@ -634,12 +866,15 @@ mod tests {
         assert!(exists(&name));
         let panicked = std::panic::catch_unwind(|| panic!("fixture")).is_err();
         assert!(panicked);
-        // Unwind does not collect a POSIX object. Exit, suspend and panic
-        // reach `release_signal` from `graphics::cleanup_signal` (signals,
-        // including SIGTSTP) and from `graphics::cleanup` (`Keyboard` drop).
+        // Unwind alone does not collect a POSIX object. Panic and a normal
+        // exit reach `release` from `graphics::cleanup` (`Keyboard` drop).
+        // A signal handler only disarms: `shm_unlink` is not async-signal-safe.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(exists(&name));
-        release_signal();
+        disarm_for_signal();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(exists(&name), "the signal path unlinked an object");
+        release();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(!exists(&name));
     }

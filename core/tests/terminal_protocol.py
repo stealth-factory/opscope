@@ -125,7 +125,8 @@ def shm_exists(name):
 
 def shm_read(name):
     # Darwin shm descriptors reject read(); the bytes are mapped, which is
-    # also how the terminal reads the object. fstat is the exact length.
+    # also how the terminal reads the object. fstat there is the page-rounded
+    # length, so callers slice to the command's S= payload size.
     fd = LIBC.shm_open(name, os.O_RDONLY, 0)
     if fd < 0:
         return None
@@ -317,6 +318,8 @@ def shm_accepted(t):
     assert keys[b"t"] == b"s" and keys[b"m"] == b"0" and keys[b"o"] == b"z"
     data = shm_read(base64.b64decode(payload))
     assert data, "shared image was not readable"
+    if b"S" in keys:
+        data = data[: int(keys[b"S"])]
     decoded = zlib.decompress(data)
     assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
     assert any(decoded[3::4]), "empty graphic"
@@ -351,6 +354,18 @@ if __name__ == "__main__":
         try:
             t.read(0.3)
             assert t.images()
+            t.send(b"\x1b_Gi=2147483645;OK\x1b\\")
+            t.read(0.25)
+            before = len(t.images())
+            fcntl.ioctl(t.master, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 60, 0, 0))
+            os.kill(t.proc.pid, signal.SIGWINCH)
+            t.read(0.4)
+            added = t.images()[before:]
+            assert added, f"{ending} had no chart after the probe was accepted"
+            keys, payload = added[-1]
+            assert keys[b"t"] == b"s", f"{ending} cleaned up before a shared chart existed"
+            name = base64.b64decode(payload)
+            assert shm_exists(name), f"{ending} chart was not in shared memory"
             if ending == "signal":
                 os.kill(t.proc.pid, signal.SIGTERM)
             else:
@@ -358,8 +373,10 @@ if __name__ == "__main__":
             t.read(0.2)
             assert t.proc.wait(timeout=3) != 0
             assert t.commands()[-1][0].get(b"a") == b"d", f"{ending} left an image"
-            left = [name for name in shm_names(t.commands()) if shm_exists(name)]
-            assert not left, f"{ending} left shared memory {left!r}"
+            # Panic drops Keyboard, which unlinks. SIGTERM only disarms: shm_unlink
+            # is not async-signal-safe, so the handler must not collect the object.
+            if ending == "panic":
+                assert not shm_exists(name), "panic left shared memory"
             assert t.output.rfind(b"\x1b[?2026l") > t.output.rfind(b"\x1b[?2026h")
             print(f"PASS cleanup/{ending}")
         finally:

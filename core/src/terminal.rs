@@ -145,8 +145,10 @@ fn keyboard_answer(sequence: &str) -> Option<u32> {
 }
 
 /// Called once a frame. A probe that never answers is abandoned here, so the
-/// images in this frame stay on the direct path.
+/// images in this frame stay on the direct path. Retired shared-memory
+/// objects are collected once their read window has passed.
 pub(crate) fn on_frame() {
+    super::shm::reap_expired();
     let now = Instant::now();
     let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if !session.probe_settled && session.deadline.is_some_and(|deadline| now > deadline) {
@@ -183,27 +185,31 @@ impl Session {
             let id = keys
                 .split(',')
                 .find_map(|key| key.strip_prefix("i=")?.parse::<u32>().ok());
-            // ENOENT for one of ours means the terminal dropped the image
-            // (a re-place found nothing): send it again, not give up.
-            if id.is_some_and(super::graphics::owns_image) && message.starts_with("ENOENT") {
-                if let Some(id) = id {
-                    super::shm::unlink_id(id);
-                }
-                super::screen_lost();
-                return false;
-            }
-            if id.is_some_and(super::graphics::owns_image) && message != "OK\x1b\\" {
-                // Shared memory failed. Keep pixels, resend this frame direct.
-                if self.use_shm {
-                    self.use_shm = false;
-                    super::shm::transport_failed();
+            if let Some(id) = id.filter(|id| super::graphics::owns_image(*id)) {
+                // ENOENT means the terminal dropped the placement. Only a
+                // replaced object is collected; the current one reused the id.
+                if message.starts_with("ENOENT") {
+                    super::shm::unlink_retired(id);
                     super::screen_lost();
                     return false;
                 }
-                self.capabilities.kitty_graphics = false;
-                self.image_rejected = true;
-                self.graphics_answered = true;
-                return false;
+                if message != "OK\x1b\\" {
+                    // Every reply from the shared frame stays a transport
+                    // failure, including ones that arrive after the first
+                    // error has already cleared `use_shm`. A later direct
+                    // frame clears that mark, and only then is an error a
+                    // graphics rejection.
+                    if self.use_shm || super::shm::shared_pending(id) {
+                        self.use_shm = false;
+                        super::shm::transport_failed();
+                        super::screen_lost();
+                        return false;
+                    }
+                    self.capabilities.kitty_graphics = false;
+                    self.image_rejected = true;
+                    self.graphics_answered = true;
+                    return false;
+                }
             }
         }
         if !self.deadline.is_some_and(|deadline| now <= deadline) {
@@ -658,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_memory_failure_keeps_graphics_until_a_direct_error() {
+    fn queued_shared_memory_errors_keep_graphics_until_a_direct_send() {
         let _guard = crate::shm::guard();
         let now = Instant::now();
         let mut s = Session {
@@ -668,10 +674,19 @@ mod tests {
         s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         s.reply("\x1b_Gi=2147483645;OK\x1b\\", now);
         assert!(s.use_shm && s.capabilities.kitty_graphics);
-        let ours = crate::graphics::image_id(0);
-        s.reply(&format!("\x1b_Gi={ours};EBADF:shared memory\x1b\\"), now);
+        let id0 = crate::graphics::image_id(0);
+        let id1 = crate::graphics::image_id(1);
+        crate::shm::mark_shared(id0);
+        crate::shm::mark_shared(id1);
+        s.reply(&format!("\x1b_Gi={id0};EBADF:shared memory\x1b\\"), now);
         assert!(s.capabilities.kitty_graphics && !s.image_rejected && !s.use_shm);
-        s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
+        s.reply(&format!("\x1b_Gi={id1};EBADF:shared memory\x1b\\"), now);
+        assert!(
+            s.capabilities.kitty_graphics && !s.image_rejected,
+            "a second queued shared-memory error turned graphics off"
+        );
+        crate::shm::mark_direct(id0);
+        s.reply(&format!("\x1b_Gi={id0};EINVAL:bad\x1b\\"), now);
         assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 

@@ -81,9 +81,18 @@ whenever the probe is rejected, times out, or a later image reports an
 error, the session stays on `t=d` and keeps drawing pixels. A shared-memory
 failure does not turn graphics off.
 
-An object the terminal does not take is unlinked on that error. Anything
-still open is unlinked on exit, suspend and panic, on the same cleanup that
-deletes placements. A process cannot catch SIGKILL.
+An object the terminal does not take is retired, then unlinked once a short
+read window has passed, so a replacement that reuses the image id is not
+collected by a reply still in flight for the previous object. Darwin reports
+the object size rounded up to a page; the escape carries `S=` with the exact
+payload length, and the bytes are read by mapping the object. `read` is not
+used: Darwin shared-memory descriptors reject it.
+
+Exit and panic unlink from ordinary cleanup, the same path that deletes
+placements. A signal handler does not. `shm_unlink` is not async-signal-safe,
+so SIGINT, SIGTERM and SIGTSTP only disarm the transport and restore the
+terminal; a fatal signal can leave an object behind, as SIGKILL can. Suspend
+unlinks on resume, after the handler has returned.
 
 Stable charts reuse terminal images; changed regions replace their
 owned image IDs. Scrolling crops the chart instead of changing its axes. Core
@@ -251,7 +260,8 @@ The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
 terminals, fragmented/late replies, image errors, a shared-memory probe that
 fails (the following image stays `t=d`) and one that succeeds (the following
-image is `t=s`, and the object is gone after quit, panic and SIGTERM), cached
+image is `t=s`, and the object is gone after quit and panic; a fatal signal
+does not unlink, because that call is not async-signal-safe), cached
 frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
 signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
