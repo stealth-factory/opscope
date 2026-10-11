@@ -251,7 +251,9 @@ fn strip_escapes(s: &str) -> String {
 ///
 /// Covers colour, OSC, and the short `ESC` forms. An opener with no
 /// terminator consumes whatever is left, so a cut cannot treat the tail
-/// of a link target as title text.
+/// of a link target as title text. The length is always a char boundary:
+/// a short form counted in raw bytes lands inside a glyph when the byte
+/// after ESC is a multibyte lead, and slicing there panics.
 fn markup_len(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     if b.first() != Some(&0x1b) {
@@ -260,7 +262,7 @@ fn markup_len(s: &str) -> Option<usize> {
     if b.len() == 1 {
         return Some(1);
     }
-    match b[1] {
+    let n = match b[1] {
         b'[' => {
             let mut i = 2;
             while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
@@ -269,24 +271,36 @@ fn markup_len(s: &str) -> Option<usize> {
             if i < b.len() {
                 i += 1;
             }
-            Some(i)
+            i
         }
         b']' | b'P' | b'X' | b'^' | b'_' => {
             let mut i = 2;
             while i < b.len() {
                 if b[i] == 0x07 {
-                    return Some(i + 1);
+                    return Some(char_boundary(s, i + 1));
                 }
                 if b[i] == b'\\' && b[i - 1] == 0x1b {
-                    return Some(i + 1);
+                    return Some(char_boundary(s, i + 1));
                 }
                 i += 1;
             }
-            Some(b.len())
+            b.len()
         }
-        c if (0x20..=0x2f).contains(&c) => Some(b.len().min(3)),
-        _ => Some(b.len().min(2)),
+        c if (0x20..=0x2f).contains(&c) => b.len().min(3),
+        _ => b.len().min(2),
+    };
+    Some(char_boundary(s, n))
+}
+
+/// `n`, moved forward until `s` can be sliced there.
+fn char_boundary(s: &str, mut n: usize) -> usize {
+    if n > s.len() {
+        n = s.len();
     }
+    while n < s.len() && !s.is_char_boundary(n) {
+        n += 1;
+    }
+    n
 }
 
 /// OSC payload, without the introducer and without BEL or ST.
@@ -305,11 +319,10 @@ fn https_uri(uri: &str) -> bool {
     let Some(rest) = uri.strip_prefix("https://") else {
         return false;
     };
-    !rest.is_empty()
-        && uri.chars().all(|c| {
-            let u = c as u32;
-            u >= 0x21 && u != 0x7f && c != '\\'
-        })
+    // `is_control` covers C0, DEL, and C1. A code point above U+007F used
+    // to pass the old `>= 0x21` check, so a C1 byte in a target was treated
+    // as a link. Space and `\` are not controls; both still end a target.
+    !rest.is_empty() && uri.chars().all(|c| !c.is_control() && c != ' ' && c != '\\')
 }
 
 /// OSC 8 whose target is `https://`, and the empty OSC 8 that closes one.
@@ -4984,6 +4997,47 @@ mod tests {
         let guarded = super::link(url, "a\x1bb");
         assert_eq!(super::strip_escapes(&guarded), "ab");
         assert_eq!(super::inert(&guarded), guarded);
+    }
+
+    #[test]
+    fn a_short_escape_before_a_multibyte_glyph_does_not_split_it() {
+        // A build log reaches `seg` with the line intact. ESC then `é`
+        // is three bytes, and a two-byte guess lands inside the glyph.
+        assert_eq!(super::inert("\x1b"), "");
+        assert_eq!(super::strip_escapes("\x1b"), "");
+        assert_eq!(super::inert("\x1bé still here"), " still here");
+        assert_eq!(super::strip_escapes("\x1bé still here"), " still here");
+        // ESC, an intermediate byte, then the same glyph.
+        assert_eq!(super::inert("\x1b é still here"), " still here");
+        assert_eq!(super::strip_escapes("\x1b é still here"), " still here");
+        let logged = super::seg(&[("", "  \x1bé still here".into())], 40);
+        assert!(super::strip_escapes(&logged).contains("still here"), "{logged:?}");
+    }
+
+    #[test]
+    fn an_https_target_rejects_a_c1_control() {
+        assert!(super::https_uri("https://example.com/ok"));
+        let nel = "https://example.com/\u{85}x";
+        assert!(!super::https_uri(nel), "U+0085 is a C1 control");
+        assert_eq!(super::link(nel, "title"), "title");
+        let csi = "https://example.com/\u{9b}x";
+        assert!(!super::https_uri(csi), "U+009B is a C1 control");
+        assert_eq!(super::link(csi, "title"), "title");
+        assert!(!super::https_uri("https://example.com/a b"));
+    }
+
+    #[test]
+    fn an_https_osc8_occupies_only_its_title() {
+        // The target is longer than the title. Counting those bytes as
+        // columns would shove the rest of the row. The sequence itself
+        // stays: dropping it would close the link by deleting it.
+        let title = "ship the pane";
+        let url = "https://example.com/opscope/deployments/1";
+        assert!(url.len() > title.len());
+        let linked = super::link(url, title);
+        assert_eq!(super::inert(&linked), linked);
+        assert_eq!(super::display_width(&linked), super::display_width(title));
+        assert!(linked.contains(url));
     }
 
     #[test]
