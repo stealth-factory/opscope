@@ -80,6 +80,12 @@ impl Session {
             let id = keys
                 .split(',')
                 .find_map(|key| key.strip_prefix("i=")?.parse::<u32>().ok());
+            // ENOENT for one of ours means the terminal dropped the image
+            // (a re-place found nothing): send it again, not give up.
+            if id.is_some_and(super::graphics::owns_image) && message.starts_with("ENOENT") {
+                super::screen_lost();
+                return;
+            }
             if id.is_some_and(super::graphics::owns_image) && message != "OK\x1b\\" {
                 self.capabilities.kitty_graphics = false;
                 self.image_rejected = true;
@@ -185,6 +191,21 @@ mod tests {
         assert!(!s.capabilities.kitty_graphics);
         s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
         assert!(s.capabilities.kitty_graphics);
+    }
+
+    #[test]
+    fn a_dropped_image_is_resent_rather_than_ending_graphics() {
+        let now = Instant::now();
+        let mut s = Session {
+            deadline: Some(now + TIMEOUT),
+            ..Session::default()
+        };
+        s.reply("\x1b_Gi=2147483646;OK\x1b\\", now);
+        let ours = 0x40000000 | (((unsafe { libc::getpid() } as u32) & 0x1fffff) << 4);
+        s.reply(&format!("\x1b_Gi={ours};ENOENT:no such image\x1b\\"), now);
+        assert!(s.capabilities.kitty_graphics && !s.image_rejected);
+        s.reply(&format!("\x1b_Gi={ours};EINVAL:bad\x1b\\"), now);
+        assert!(!s.capabilities.kitty_graphics && s.image_rejected);
     }
 
     #[test]

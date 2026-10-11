@@ -149,14 +149,14 @@ def timeout(t):
     t.read()
     fallback(t)
     assert b"\x1b[?2026h" not in t.output
-    assert b"Kitty unavailable; using text" in t.output
+    assert b"Kitty unavailable" in t.output
 
 
 def rejected_image(t):
     keys, _ = t.images()[0]
     t.send(b"\x1b_Gi=" + keys[b"i"] + b",p=1;ENOMEM:fixture\x1b\\")
     t.read()
-    assert b"Kitty image rejected; using text" in t.output
+    assert b"Kitty image rejected" in t.output
     assert t.commands()[-1][0].get(b"a") == b"d"
     count = len(t.images())
     t.read()

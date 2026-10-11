@@ -453,6 +453,11 @@ static SHOWN: std::sync::Mutex<Option<Shown>> = std::sync::Mutex::new(None);
 /// shell's text would sit under every row that does not change - the
 /// title and the version among them.
 static SCREEN_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Ask the next frame to repaint and resend its images in full.
+pub(crate) fn screen_lost() {
+    SCREEN_LOST.store(true, Ordering::Release);
+}
 static SESSION_CHANGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_lost_screen(sig: libc::c_int) {
@@ -568,9 +573,10 @@ fn lines(rows: &[String], w: usize, h: usize) -> Vec<String> {
         .map(|i| {
             let line = rows.get(i).map(|r| inert(r)).unwrap_or_default();
             if i == 0 {
-                let line = if let Some(notice) = graphics_notice() {
-                    format!("{notice} · {line}")
-                } else { line };
+                let line = match graphics_notice() {
+                    Some(notice) => with_notice(&line, notice, w),
+                    None => line,
+                };
                 stamped(&line, w)
             } else {
                 line
@@ -677,6 +683,37 @@ fn inert(row: &str) -> String {
 
 /// An inert row cut to what the version leaves of `w`, padded out to
 /// exactly that, then the version.
+/// The title row with the graphics notice after the title's name, in place
+/// of the rule that fills the rest of the row. The name is what identifies a
+/// pane, so it stays first. The notice is never cut: where it does not fit
+/// whole, its short form (`Kitty unavailable`) is used, and where that does
+/// not fit either, the row is left as it was.
+fn with_notice(title: &str, notice: &str, w: usize) -> String {
+    let mut name_end = 0;
+    let mut text = String::new();
+    let mut chars = title.char_indices();
+    while let Some((i, c)) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|(_, n)| *n == 'm');
+            continue;
+        }
+        text.push(c);
+        if !matches!(c, '━' | '╸' | ' ') {
+            name_end = i + c.len_utf8();
+        }
+    }
+    let name = display_width(text.trim_end_matches(['━', '╸', ' ']));
+    let keep = w.saturating_sub(version_room(w));
+    let short = notice.split(';').next().unwrap_or(notice);
+    match [notice, short]
+        .into_iter()
+        .find(|n| name + display_width(" · ") + display_width(n) <= keep)
+    {
+        Some(n) => format!("{}{RST} · {n}", &title[..name_end]),
+        None => title.to_string(),
+    }
+}
+
 fn stamped(row: &str, w: usize) -> String {
     let room = version_room(w);
     if room == 0 {
@@ -3819,6 +3856,17 @@ mod tests {
                 assert!(pending.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn a_graphics_notice_never_pushes_the_title_under_the_version() {
+        // The notice once went first and took a 40-column pane's whole top
+        // row, so the pane no longer said which widget it was.
+        let notice = "Kitty unavailable; using text";
+        let at = |w| super::stamped(&super::with_notice(&super::title("latency", w, ""), notice, w), w);
+        assert!(at(80).contains("LATENCY") && at(80).contains(notice));
+        assert!(at(40).contains("LATENCY") && at(40).contains("Kitty unavailable") && !at(40).contains("using"));
+        assert!(at(24).contains("LATENCY") && !at(24).contains("Kitty"));
     }
 
     #[test]
