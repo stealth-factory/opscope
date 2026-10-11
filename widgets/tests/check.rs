@@ -4019,8 +4019,10 @@ fn function_bodies(src: &str) -> Vec<(String, String)> {
             i = j;
             continue;
         }
+        // Byte slice, not `src[i..]`: a block glyph is three bytes, and
+        // stepping one byte at a time lands inside it.
         let at_fn = (i == 0 || !is_ident_cont(b[i - 1]))
-            && src[i..].starts_with("fn")
+            && b[i..].starts_with(b"fn")
             && i + 2 < b.len()
             && b[i + 2].is_ascii_whitespace();
         if at_fn {
@@ -4199,7 +4201,10 @@ fn link_sites(src: &str) -> Vec<Result<String, String>> {
                 i = j;
                 continue;
             }
-            let end = (i + 48).min(src.len());
+            let mut end = (i + 48).min(src.len());
+            while end < src.len() && !src.is_char_boundary(end) {
+                end += 1;
+            }
             out.push(Err(src[i..end].replace('\n', " ")));
             i += needle.len();
             continue;
@@ -4286,7 +4291,7 @@ fn copy() {
         "{missed:?}"
     );
 
-    let good = r#"
+    let good = r##"
 fn pr_url(pr: &V) -> String { String::new() }
 fn row() {
     let s = r#"{"a":1}"#;
@@ -4299,7 +4304,7 @@ fn copy() {
     let url = pr_url(pr);
     tc::clipboard(&url);
 }
-"#;
+"##;
     assert!(
         links_missing_a_copied_url(good).is_empty(),
         "{:?}",
@@ -4350,6 +4355,15 @@ fn row() {
     assert!(
         !links_missing_a_copied_url(only_the_link).is_empty(),
         "the link call itself is not the copy"
+    );
+
+    // A block glyph is wider than one byte. Walking the source a byte at
+    // a time used to slice the string in the middle of it.
+    let blocks = "fn row() {\n    let mark = \"█\";\n    tc::link(&pr_url(x), \"t\");\n}\nfn copy() {\n    let u = pr_url(x);\n    tc::clipboard(&u);\n}\n";
+    assert!(
+        links_missing_a_copied_url(blocks).is_empty(),
+        "{:?}",
+        links_missing_a_copied_url(blocks)
     );
 }
 

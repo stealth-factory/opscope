@@ -4959,12 +4959,14 @@ mod tests {
         let bel = format!("\x1b]8;;{url}\x07Fix the parser\x1b]8;;\x07");
         assert_eq!(super::inert(&bel), bel);
 
+        // The non-https opener goes. The empty closer stays: dropping
+        // every closer would also drop the one that ends an https link.
         let http = "\x1b]8;;http://github.com/example\x1b\\title\x1b]8;;\x1b\\";
-        assert_eq!(super::inert(http), "title");
+        assert_eq!(super::inert(http), "title\x1b]8;;\x1b\\");
         let file = "\x1b]8;;file:///etc/passwd\x1b\\x\x1b]8;;\x1b\\";
-        assert_eq!(super::inert(file), "x");
+        assert_eq!(super::inert(file), "x\x1b]8;;\x1b\\");
         let script = "\x1b]8;;javascript:alert(1)\x1b\\x\x1b]8;;\x1b\\";
-        assert_eq!(super::inert(script), "x");
+        assert_eq!(super::inert(script), "x\x1b]8;;\x1b\\");
         // The closer on its own stays, so a link split across a clip can end.
         assert_eq!(super::inert("\x1b]8;;\x1b\\"), "\x1b]8;;\x1b\\");
         // OSC 52, and an OSC 8 that is not two parameters, do not.
