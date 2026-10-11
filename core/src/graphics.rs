@@ -840,9 +840,40 @@ fn gradient_stops(hue: [u8; 3]) -> ([u8; 3], [u8; 3]) {
     (mix_rgb(hue, [255; 3], t), mix_rgb(hue, [255; 3], (t + 0.45).min(1.0)))
 }
 
+#[cfg(test)]
+thread_local! {
+    static ALLOCATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn alloc_bytes(n: usize) -> Vec<u8> {
+    #[cfg(test)]
+    ALLOCATED.with(|cell| cell.set(cell.get().saturating_add(n)));
+    vec![0u8; n]
+}
+
+/// Pixel origin and size of the visible crop. Geometry stays in the full
+/// chart; only this rectangle is allocated and stroked. Columns are the
+/// left-hand pane clip, rows the scrolled window.
+fn crop_px(plot: &Plot, cols: usize) -> (usize, usize, usize, usize) {
+    let cols = cols.min(plot.width);
+    let row0 = plot.first_row.min(plot.height);
+    let rows = plot.visible_rows.min(plot.height - row0);
+    (0, row0 * CELL_H, cols * CELL_W, rows * CELL_H)
+}
+
+#[cfg(test)]
 fn pixels(plot: &Plot) -> Vec<u8> {
-    let (w, h) = (plot.width * CELL_W, plot.height * CELL_H);
-    let mut pixels = vec![0u8; w * h * 4];
+    raster_pixels(plot, plot.width)
+}
+
+fn raster_pixels(plot: &Plot, cols: usize) -> Vec<u8> {
+    let (x0, y0, w, h) = crop_px(plot, cols);
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let full_w = plot.width * CELL_W;
+    let full_h = plot.height * CELL_H;
+    let mut pixels = alloc_bytes(w * h * 4);
     if let Some(fill) = &plot.fill {
         for (index, rect) in fill.rects.iter().enumerate() {
             let colour = rgb(&rect.colour).unwrap_or([180, 200, 220]);
@@ -851,11 +882,15 @@ fn pixels(plot: &Plot) -> Vec<u8> {
             let top = rect.y * CELL_H as f64;
             let right = left + rect.width * CELL_W as f64;
             let bottom = top + rect.height * CELL_H as f64;
-            for y in top.floor().max(0.0) as usize..(bottom.ceil() as usize).min(h) {
-                for x in left.floor().max(0.0) as usize..(right.ceil() as usize).min(w) {
+            let y_start = (top.floor().max(0.0) as usize).max(y0);
+            let y_end = (bottom.ceil() as usize).min(full_h).min(y0 + h);
+            let x_start = (left.floor().max(0.0) as usize).max(x0);
+            let x_end = (right.ceil() as usize).min(full_w).min(x0 + w);
+            for y in y_start..y_end {
+                for x in x_start..x_end {
                     let area = (right.min(x as f64 + 1.0) - left.max(x as f64)).max(0.0)
                         * (bottom.min(y as f64 + 1.0) - top.max(y as f64)).max(0.0);
-                    let at = (y * w + x) * 4;
+                    let at = ((y - y0) * w + (x - x0)) * 4;
                     let colour = end.map(|end| mix_rgb(colour, end,
                         (x as f64 - left) / (right - left - 1.0).max(1.0)))
                         .unwrap_or(colour);
@@ -872,25 +907,44 @@ fn pixels(plot: &Plot) -> Vec<u8> {
     let order = (0..plot.chart.traces.len())
         .filter(|i| Some(*i) != plot.chart.focus)
         .chain(plot.chart.focus.filter(|i| *i < plot.chart.traces.len()));
+    let y_end = y0 + h;
+    let x_end = x0 + w;
     for i in order {
         let trace = &plot.chart.traces[i];
         let colour = rgb(&trace.colour).unwrap_or([180, 200, 220]);
-        let mut coverage = vec![0u8; w * h * 4];
+        let mut coverage = alloc_bytes(w * h * 4);
         segments(
             &trace.values,
             plot.chart.slots,
-            w,
-            h,
+            full_w,
+            full_h,
             trace.baseline,
             trace.positions.as_deref(),
             |a, b| {
-                // Draw a one-pixel-wide stroke at 2x resolution, then downsample
-                // coverage. Smoothing never crosses a missing measurement.
+                // Endpoints are full-chart pixels. A segment that stays
+                // outside the crop cannot stamp a subpixel inside it.
+                if a.1.max(b.1) < y0 || a.1.min(b.1) >= y_end || a.0.min(b.0) >= x_end {
+                    return;
+                }
+                // One-pixel stroke at 2x resolution, then downsample. The
+                // stamp can land one subpixel across a crop edge, so the
+                // walk stays on the full segment and only the covered
+                // subpixels are stored.
                 raster((a.0 * 2, a.1 * 2), (b.0 * 2, b.1 * 2), |x, y| {
                     for dy in 0..2 {
                         for dx in 0..2 {
-                            if x + dx < w * 2 && y + dy < h * 2 {
-                                coverage[(y + dy) * w * 2 + x + dx] = 1;
+                            let sx = x + dx;
+                            let sy = y + dy;
+                            if sx >= x0 * 2
+                                && sx < x_end * 2
+                                && sy >= y0 * 2
+                                && sy < y_end * 2
+                                && sx < full_w * 2
+                                && sy < full_h * 2
+                            {
+                                let lx = sx - x0 * 2;
+                                let ly = sy - y0 * 2;
+                                coverage[ly * w * 2 + lx] = 1;
                             }
                         }
                     }
@@ -947,26 +1001,40 @@ fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
     )
 }
 
+/// zlib level for chart payloads. Level 6 is the measured point: on a
+/// scrolled 12-trace chart it is about 30% smaller than level 3, and level
+/// 9 saves little more at triple the time. See `docs/terminal-rendering.md`.
+const ZLIB_LEVEL: u8 = 6;
+
 fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
-    let source = pixels(plot);
-    let cols = plot.width.min(pane_width - plot.x);
-    let (w, h) = (cols * CELL_W, plot.visible_rows * CELL_H);
-    let mut clipped = Vec::with_capacity(w * h * 4);
-    for y in plot.first_row * CELL_H..(plot.first_row + plot.visible_rows) * CELL_H {
-        let start = y * plot.width * CELL_W * 4;
-        clipped.extend_from_slice(&source[start..start + w * 4]);
-    }
-    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&clipped, 3);
+    let cols = plot.width.min(pane_width.saturating_sub(plot.x));
+    let (_, _, w, h) = crop_px(plot, cols);
+    let rgba = raster_pixels(plot, cols);
+    // Filled plots are RGB only when the crop is fully opaque. Gaps,
+    // fractional edges and the meter inset need alpha, and line charts
+    // always do: their strokes are partial coverage.
+    let opaque =
+        plot.fill.is_some() && !rgba.is_empty() && rgba.chunks_exact(4).all(|px| px[3] == 255);
+    let (format, raw) = if opaque {
+        let rgb: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        (24, rgb)
+    } else {
+        (32, rgba)
+    };
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&raw, ZLIB_LEVEL);
     let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
     let mut out = format!("\x1b[{};{}H", plot.y + 1, plot.x + 1);
     let chunks: Vec<_> = payload.as_bytes().chunks(4096).collect();
+    let rows = h / CELL_H;
     for (i, chunk) in chunks.iter().enumerate() {
         let more = usize::from(i + 1 < chunks.len());
         if i == 0 {
             out.push_str(&format!(
-                "\x1b_Ga=T,f=32,t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={},C=1,q=1,m={more};",
+                "\x1b_Ga=T,f={format},t=d,o=z,s={w},v={h},i={},p=1,c={cols},r={rows},C=1,q=1,m={more};",
                 image_id(slot),
-                plot.visible_rows
             ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};"));
@@ -1117,6 +1185,15 @@ mod tests {
         let clipped = plot.in_viewport(1, 1, 1).unwrap();
         assert_eq!(clipped.y, 1);
         assert_eq!(pixels(&clipped), bytes);
+    }
+
+    fn rows_of(full: &[u8], plot: &Plot, cropped: &Plot) -> Vec<u8> {
+        let row = plot.width * CELL_W * 4;
+        let y0 = cropped.first_row * CELL_H;
+        let y1 = y0 + cropped.visible_rows * CELL_H;
+        (y0..y1)
+            .flat_map(|y| full[y * row..(y + 1) * row].iter().copied())
+            .collect()
     }
 
     #[test]
@@ -1367,7 +1444,10 @@ mod tests {
         let colour = super::super::rgb(80, 220, 170);
         let p = Plot::bars(4, 3, &[(0.2, colour.clone()), (1.0, colour)], 4, 1.0, false);
         let clipped = p.clone().in_viewport(4, 1, 2).unwrap();
-        assert_eq!(pixels(&p), pixels(&clipped));
+        let full = pixels(&p);
+        let cropped = pixels(&clipped);
+        assert_eq!(cropped, rows_of(&full, &p, &clipped));
+        assert_eq!(cropped.len() * p.height, full.len() * clipped.visible_rows);
         assert_eq!(
             (clipped.y, clipped.first_row, clipped.visible_rows),
             (1, 2, 2)
@@ -1516,7 +1596,8 @@ mod tests {
                 baseline: None,
             })
             .collect();
-        let p = Plot::new(3, 2, 100, 10, c).in_viewport(3, 1, 5).unwrap();
+        let base = Plot::new(3, 2, 100, 10, c);
+        let p = base.clone().in_viewport(3, 1, 5).unwrap();
         let command = image(&p, 0, 70);
         let chunks: Vec<_> = command.split("\x1b_G").skip(1).collect();
         assert!(chunks.len() > 1);
@@ -1533,14 +1614,96 @@ mod tests {
             .decode(payload)
             .unwrap();
         let decoded = miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap();
-        let full = pixels(&p);
-        let expected: Vec<_> = (p.first_row * CELL_H..(p.first_row + p.visible_rows) * CELL_H)
-            .flat_map(|y| {
-                full[y * p.width * CELL_W * 4..y * p.width * CELL_W * 4 + 67 * CELL_W * 4]
-                    .iter()
-                    .copied()
-            })
+        let full = pixels(&base);
+        let visible = rows_of(&full, &base, &p);
+        assert_eq!(pixels(&p), visible);
+        let expected: Vec<_> = visible
+            .chunks(base.width * CELL_W * 4)
+            .flat_map(|row| row[..67 * CELL_W * 4].iter().copied())
             .collect();
         assert_eq!(decoded, expected);
+        assert!(command.contains("f=32,"));
+        assert!(command.contains(&format!("v={}", p.visible_rows * CELL_H)));
+    }
+
+    #[test]
+    fn a_scrolled_chart_allocates_the_visible_rows() {
+        let mut c = chart(Vec::new());
+        c.slots = 100;
+        c.traces = (0..12)
+            .map(|i| Trace {
+                positions: None,
+                values: (0..100)
+                    .map(|n| Some(((n * (i + 3)) % 17) as f64 / 16.0))
+                    .collect(),
+                colour: super::super::rgb(40 + (i as u8) * 12, 80 + (i as u8) * 8, 160),
+                baseline: None,
+            })
+            .collect();
+        let p = Plot::new(0, 0, 100, 10, c);
+        ALLOCATED.with(|cell| cell.set(0));
+        let full = pixels(&p);
+        let full_bytes = ALLOCATED.with(|cell| cell.get());
+        let scrolled = p.clone().in_viewport(5, 0, 5).unwrap();
+        assert_eq!((scrolled.height, scrolled.visible_rows), (10, 5));
+        ALLOCATED.with(|cell| cell.set(0));
+        let cropped = pixels(&scrolled);
+        let cropped_bytes = ALLOCATED.with(|cell| cell.get());
+        assert_eq!(cropped, rows_of(&full, &p, &scrolled));
+        assert_eq!(cropped.len() * 2, full.len());
+        // One raster plus one coverage buffer per trace, both the crop.
+        assert_eq!(cropped_bytes * p.height, full_bytes * scrolled.visible_rows);
+        assert_eq!(cropped_bytes, cropped.len() * (1 + p.chart.traces.len()));
+        let pane = raster_pixels(&scrolled, 40);
+        assert_eq!(pane.len(), scrolled.visible_rows * CELL_H * 40 * CELL_W * 4);
+        let row = 100 * CELL_W * 4;
+        let cols = 40 * CELL_W * 4;
+        let expected: Vec<u8> = cropped
+            .chunks(row)
+            .flat_map(|line| line[..cols].iter().copied())
+            .collect();
+        assert_eq!(pane, expected);
+    }
+
+    #[test]
+    fn opaque_fills_are_rgb_and_anything_with_a_gap_stays_rgba() {
+        let colour = super::super::rgb(90, 210, 140);
+        let solid = Plot::heatmap_levels(0, 0, &[vec![Some((colour.clone(), 4)); 4]], &colour);
+        let command = image(&solid, 0, 80);
+        assert!(command.contains("f=24,t=d,o=z,s=32,v=16"));
+        let (format, decoded) = decode_image(&command);
+        assert_eq!(format, 24);
+        let rgba = pixels(&solid);
+        let rgb: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|px| {
+                assert_eq!(px[3], 255);
+                px[..3].iter().copied()
+            })
+            .collect();
+        assert_eq!(decoded, rgb);
+        let gapped = Plot::heatmap(0, 0, &[vec![None, Some(colour.clone())]], &colour);
+        let command = image(&gapped, 0, 80);
+        assert!(command.contains("f=32,"));
+        let (_, decoded) = decode_image(&command);
+        assert_eq!(decoded, pixels(&gapped));
+        let line = Plot::new(0, 0, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
+        assert!(image(&line, 0, 80).contains("f=32,"));
+    }
+
+    fn decode_image(command: &str) -> (u8, Vec<u8>) {
+        let format = if command.contains("f=24,") { 24 } else { 32 };
+        let mut payload = String::new();
+        for chunk in command.split("\x1b_G").skip(1) {
+            let (_, data) = chunk.split_once(';').unwrap();
+            payload.push_str(data.trim_end_matches("\x1b\\"));
+        }
+        let encoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        (
+            format,
+            miniz_oxide::inflate::decompress_to_vec_zlib(&encoded).unwrap(),
+        )
     }
 }

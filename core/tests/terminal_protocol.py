@@ -118,6 +118,7 @@ def supported(t):
     assert len(t.images()) == count, "unchanged chart retransmitted"
     keys, payload = t.images()[0]
     assert keys[b"t"] == b"d" and keys[b"o"] == b"z" and keys[b"C"] == b"1"
+    assert keys[b"f"] == b"32", "line charts keep alpha"
     decoded = zlib.decompress(base64.b64decode(payload))
     assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
     artifact("opscope-probe.rgba", decoded)
@@ -182,20 +183,36 @@ def filled_graphics(t):
     t.send(b"g")
     t.read()
     added = t.images()[count:]
-    assert len(added) == 5, "bars, calendar, meter and state distribution did not reach the compositor"
+    assert len(added) == 6, "bars, calendar, meter, state distribution and solid tile did not reach the compositor"
+    formats = []
     for n, (keys, payload) in enumerate(added):
         assert keys[b"m"] == b"0", "small gallery fixture unexpectedly chunked"
+        assert keys[b"f"] in (b"24", b"32")
+        bpp = 3 if keys[b"f"] == b"24" else 4
         decoded = zlib.decompress(base64.b64decode(payload))
-        assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
-        assert any(decoded[3::4]), "empty graphic"
+        width = int(keys[b"s"])
+        height = int(keys[b"v"])
+        assert len(decoded) == width * height * bpp
+        if bpp == 4:
+            assert any(decoded[3::4]), "empty graphic"
+        else:
+            assert any(decoded), "empty graphic"
+        formats.append(keys[b"f"])
         if n == 3:
-            # The pace mark at 65% has two dark pixels on either side.
-            row = decoded[8 * 160 * 4:9 * 160 * 4]
-            assert row[102 * 4:104 * 4] == bytes([10, 12, 18, 255]) * 2
-            assert row[104 * 4:106 * 4] == bytes([238, 244, 252, 255]) * 2
-            assert row[106 * 4:108 * 4] == bytes([10, 12, 18, 255]) * 2
+            # Pace mark at 65% of the meter: two dark pixels, the mark, two
+            # dark pixels. The buffer is the visible crop, so the row is the
+            # middle of what was sent and the stride is that crop's width.
+            y = height // 2
+            row = decoded[y * width * bpp:(y + 1) * width * bpp]
+            dark = bytes([10, 12, 18, 255][:bpp])
+            light = bytes([238, 244, 252, 255][:bpp])
+            assert row[102 * bpp:104 * bpp] == dark * 2
+            assert row[104 * bpp:106 * bpp] == light * 2
+            assert row[106 * bpp:108 * bpp] == dark * 2
         artifact(f"opscope-gallery-{n}.rgba", decoded)
         artifact(f"opscope-gallery-{n}.size", f"{int(keys[b's'])} {int(keys[b'v'])}".encode())
+    assert formats[:4] == [b"32", b"32", b"32", b"32"], "gaps, partial bars and the meter inset keep alpha"
+    assert formats[-1] == b"24", "a fully opaque tile is sent as RGB"
     count = len(t.images())
     t.read()
     assert len(t.images()) == count, "unchanged figures retransmitted"

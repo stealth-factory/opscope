@@ -66,14 +66,36 @@ uses synchronized updates when supported.
 ## Image transport and lifecycle
 
 No Kitty executable, image conversion command, shared file, shared memory or
-system graphics library is needed. Images are RGBA, zlib compressed in pure Rust,
-base64 encoded and sent in chunks of at most 4096 payload bytes. They can travel
-over SSH. Stable charts reuse terminal images; changed regions replace their
-owned image IDs. Scrolling crops the chart instead of changing its axes.
-OPS-148 crops that raster to the visible rows before it is allocated, and
-records the measured payload change on the pull request. Core
-cleans up on screen handoffs, suspend, exit and panic, and recovers on resize or
-resume. A process cannot catch SIGKILL.
+system graphics library is needed. Images are zlib compressed in pure Rust at
+level 6, base64 encoded and sent in chunks of at most 4096 payload bytes. They
+can travel over SSH. Line charts stay RGBA (`f=32`): a stroke is partial
+coverage. A filled plot is RGB (`f=24`, three quarters of the raw size) when
+every pixel in the crop is opaque, and stays RGBA when a gap, a fractional edge
+or the meter inset has to leave the terminal background showing. Stable charts
+reuse terminal images; changed regions replace their owned image IDs. Scrolling
+crops the chart instead of changing its axes. Geometry is worked out on the
+full chart, then only the visible rows and the columns that fit the pane are
+allocated and stroked, coverage buffers included. Core cleans up on screen
+handoffs, suspend, exit and panic, and recovers on resize or resume. A process
+cannot catch SIGKILL.
+
+Level 6 is a measurement, not a guess. Release build, mean of 20 compressions,
+on synthetic frames at the sizes the widgets use:
+
+| frame | raw | level 3 | level 6 | level 9 |
+| --- | --- | --- | --- | --- |
+| 100×10 line, 12 traces | 512000 RGBA | 69770 B, 5.0 ms | 48569 B, 12.8 ms | 44863 B, 39.1 ms |
+| same chart, 5 rows visible | 256000 RGBA | 35754 B, 2.5 ms | 25256 B, 7.1 ms | 23560 B, 18.7 ms |
+| 80×5 line, 1 trace | 204800 RGBA | 1871 B, 0.49 ms | 1942 B, 0.65 ms | 1359 B, 1.5 ms |
+| 40×4 bars | 81920 RGBA | 1366 B, 0.25 ms | 564 B, 0.30 ms | 457 B, 0.37 ms |
+| 26×7 heatmap with gaps | 93184 RGBA | 1253 B, 0.24 ms | 470 B, 0.26 ms | 463 B, 0.47 ms |
+| 26×7 solid heatmap | 69888 RGB | 95 B, 0.14 ms | 95 B, 0.14 ms | 95 B, 0.14 ms |
+| 24-cell meter | 12288 RGBA | 141 B, 0.04 ms | 152 B, 0.08 ms | 117 B, 0.10 ms |
+
+On the 12-trace chart, level 6 removes about 30% of the bytes versus level 3.
+Level 9 saves little more and triples the time. A one-trace chart and the meter
+are a few dozen bytes larger at level 6 than at level 3; the filled plots more
+than make that up.
 
 The first implementation uses an 8×16 pixel raster per cell, scaled to the
 placement's terminal cells, compared with Braille's 2×4 dots. It deliberately

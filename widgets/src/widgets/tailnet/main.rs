@@ -1784,10 +1784,12 @@ fn info_overlay_with_plots(
                 positions: None, colour: p.relay.clone(), baseline: Some(0.0) }],
             slots: sw, focus: None,
         }));
+        // The plot covers these cells. compose paints Braille or the image
+        // over them in every mode, so a text spark here never reaches the screen.
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), "   down ".into()),
-                (p.online.as_str(), tc::pad(&spark(&rx, sw, peak), sw)),
+                (p.dim.as_str(), " ".repeat(sw)),
                 (p.dim.as_str(), format!(" {}", rate(*rx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
@@ -1795,7 +1797,7 @@ fn info_overlay_with_plots(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), "   up   ".into()),
-                (p.relay.as_str(), tc::pad(&spark(&tx, sw, peak), sw)),
+                (p.dim.as_str(), " ".repeat(sw)),
                 (p.dim.as_str(), format!(" {}", rate(*tx.last().unwrap_or(&0.0)))),
             ],
             w - 1,
@@ -1911,6 +1913,10 @@ mod tests {
                     for plot in plots {
                         assert!(plot.y > 0 && plot.y < height - 1);
                         assert!(rows[plot.y].contains("   down ") || rows[plot.y].contains("   up   "));
+                        assert!(
+                            !rows[plot.y].chars().any(|c| tc::SPARK.contains(&c)),
+                            "compose covers this rectangle, so a spark here is never shown"
+                        );
                         assert_eq!(plot.x, 8);
                         assert!(plot.x + plot.width < width);
                     }
