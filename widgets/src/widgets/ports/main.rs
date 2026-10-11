@@ -2890,22 +2890,8 @@ fn main() {
                 String::new()
             };
             let traffic_c = format!("{}{}", tint, if moving { &ok.open } else { &ok.dim });
-            // Built before the row, because every segment's colour has to
-            // outlive the borrows the row is assembled from.
-            let shape: Vec<(String, String)> = if sparks {
-                let mut out = vec![(format!("{}{}", tint, ok.dim), "  ".to_string())];
-                let seen = rates
-                    .as_ref()
-                    .map(|t| t.series(row.port))
-                    .unwrap_or_default();
-                for (colour, text) in spark(&seen, spark_cells, &ok) {
-                    out.push((format!("{}{}", tint, colour), text));
-                }
-                out.push((format!("{}{}", tint, ok.dim), "  ".to_string()));
-                out
-            } else {
-                Vec::new()
-            };
+            // The prefix is measured before the spark is drawn onto it, so
+            // the plot's column is the cell the shape actually starts in.
             let mut line = vec![
                 (
                     port_colour.as_str(),
@@ -2918,6 +2904,71 @@ fn main() {
             if busy {
                 line.push((traffic_c.as_str(), tc::pad(&traffic_text, traffic_w)));
             }
+            let prefix = line.iter().map(|(_, t)| tc::display_width(t)).sum::<usize>();
+            // Built before the row, because every segment's colour has to
+            // outlive the borrows the row is assembled from.
+            let shape: Vec<(String, String)> = if sparks {
+                let mut out = vec![(format!("{}{}", tint, ok.dim), "  ".to_string())];
+                let seen = rates
+                    .as_ref()
+                    .map(|t| t.series(row.port))
+                    .unwrap_or_default();
+                let window: Vec<f64> = seen
+                    .iter()
+                    .rev()
+                    .take(spark_cells)
+                    .rev()
+                    .map(|s| s.0 + s.1)
+                    .collect();
+                let peak = window.iter().copied().fold(0.0, f64::max);
+                let blank = spark_cells.saturating_sub(window.len());
+                if peak > 0.0 && !window.is_empty() {
+                    if blank > 0 {
+                        out.push((format!("{}{}", tint, ok.grid), "·".repeat(blank)));
+                    }
+                    // The plot covers only the measured cells. Dots for the
+                    // samples that have not arrived yet stay text, in both
+                    // modes, so an unmeasured stretch is not a flat line.
+                    let col = prefix + 2 + blank;
+                    let values: Vec<Option<f64>> =
+                        window.iter().map(|v| Some((v / peak).clamp(0.0, 1.0))).collect();
+                    plots.push(
+                        tc::Plot::new(
+                            col,
+                            rows.len(),
+                            values.len(),
+                            1,
+                            tc::LineChart {
+                                slots: values.len(),
+                                focus: None,
+                                traces: vec![tc::Trace {
+                                    values,
+                                    positions: None,
+                                    colour: ok.open.clone(),
+                                    baseline: None,
+                                }],
+                            },
+                        )
+                        .under_text(),
+                    );
+                    let stamp = brief(*window.last().unwrap_or(&0.0));
+                    let n = stamp.chars().count();
+                    if n > 0 && n <= window.len() {
+                        out.push((format!("{}{}", tint, ok.dim), " ".repeat(window.len() - n)));
+                        out.push((format!("{}{}", tint, ok.open), stamp));
+                    } else {
+                        out.push((format!("{}{}", tint, ok.dim), " ".repeat(window.len())));
+                    }
+                } else {
+                    for (colour, text) in spark(&seen, spark_cells, &ok) {
+                        out.push((format!("{}{}", tint, colour), text));
+                    }
+                }
+                out.push((format!("{}{}", tint, ok.dim), "  ".to_string()));
+                out
+            } else {
+                Vec::new()
+            };
             for (colour, text) in &shape {
                 line.push((colour.as_str(), text.clone()));
             }

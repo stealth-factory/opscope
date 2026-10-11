@@ -103,6 +103,7 @@ fn main() {
             Vec::new()
         } else {
             tc::Plot::new(3, 2, w.saturating_sub(6), 6, chart)
+                .under_text()
                 .in_viewport(scroll, 1, h.saturating_sub(2))
                 .into_iter()
                 .collect()
@@ -159,6 +160,11 @@ fn main() {
             )];
         }
         rows.resize(h, String::new());
+        // Inside the line-chart rectangle. Pixel mode keeps it; Braille
+        // paints over it, which is the text-mode chart.
+        if h > 3 {
+            rows[2] = "   now".into();
+        }
         if h > 9 {
             rows[8] = samples;
         }

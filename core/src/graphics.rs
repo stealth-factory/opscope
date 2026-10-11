@@ -75,6 +75,9 @@ pub struct Plot {
     fill: Option<Fill>,
     first_row: usize,
     visible_rows: usize,
+    /// Place the image under terminal text. Line charts only: a solid fill
+    /// would hide the glyphs and fail the contrast rule.
+    under_text: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +127,20 @@ impl Plot {
             fill: None,
             first_row: 0,
             visible_rows: height,
+            under_text: false,
         }
+    }
+
+    /// Draw this line chart under the cell text instead of blanking it.
+    ///
+    /// Pixel mode keeps the glyphs and the selected-row tint; Braille and
+    /// text mode still paint the chart the way they do today. Solid fills
+    /// ignore it: text over a heatmap or a meter does not stay readable.
+    pub fn under_text(mut self) -> Self {
+        if self.fill.is_none() {
+            self.under_text = true;
+        }
+        self
     }
 
     /// Discrete columns, one terminal cell per bucket. Both renderers share
@@ -739,7 +755,15 @@ pub(crate) fn compose(
         } else {
             plot.chart.cells(plot.width, plot.height)
         };
+        // A line chart under the text keeps whatever the widget drew there:
+        // an axis value, a rate, the tint. Blanking those cells is what
+        // puts the image in a hole beside the label. Braille and solid
+        // fills still replace the cells, so text mode does not move.
+        let keep_text = use_pixels && plot.under_text;
         for row in 0..plot.visible_rows {
+            if keep_text {
+                continue;
+            }
             let content = if use_pixels {
                 " ".repeat(cols)
             } else if let Some(fill) = &plot.fill {
@@ -812,6 +836,12 @@ pub(crate) fn compose(
             // Set before writing: a signal during transmission must clean it up.
             LIVE.fetch_or(1 << slot, Ordering::Release);
             after.push_str(&image_rgba(plot, slot, w, cell_w, cell_h, &rgba));
+            // image_rgba() places at the default z, above the text. The same
+            // placement id is put back underneath, in this write, so a
+            // frame never shows the chart covering its labels.
+            if plot.under_text {
+                after.push_str(&place(plot, slot, w));
+            }
             let cached = CachedPlot {
                 plot: plot.clone(),
                 cols,
@@ -1066,14 +1096,19 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
 /// Re-place an image the terminal already holds, at the same cell and size.
 /// Same placement id, so it replaces the old placement rather than adding one.
 fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
+    // z=-1 is under the glyphs and above cells that have a background.
+    // Anything below -1073741824 is also under that background, so an
+    // opaque selected-row tint would cover the stroke.
+    let z = if plot.under_text { ",z=-1" } else { "" };
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={},p={},c={},r={},C=1,q=1{z}\x1b\\",
         plot.y + 1,
         plot.x + 1,
         image_id(slot),
         PLACEMENTS[slot].load(Ordering::Acquire),
         plot.width.min(pane_width - plot.x),
-        plot.visible_rows
+        plot.visible_rows,
+        z = z,
     )
 }
 
@@ -1887,6 +1922,47 @@ mod tests {
         assert_eq!(decoded, pixels(&gapped));
         let line = Plot::new(0, 0, 8, 2, chart(vec![Some(0.2), Some(0.8)]));
         assert!(image(&line, 0, 80, CELL_W, CELL_H).contains("f=32,"));
+    }
+
+    #[test]
+    fn under_text_keeps_cell_text_in_pixel_mode_and_matches_braille() {
+        let rows = vec![
+            "title".into(),
+            "ab12.3ms later".into(),
+            "abaxis values".into(),
+        ];
+        let chart = chart(vec![Some(0.2), Some(0.8)]);
+        let plain = Plot::new(2, 1, 8, 2, chart);
+        let over = plain.clone().under_text();
+        assert!(over.under_text);
+        let (braille, _, _) = compose(&rows, &[plain], 40, 6, false, true, false);
+        let (same, _, quiet) = compose(&rows, &[over.clone()], 40, 6, false, true, false);
+        assert_eq!(braille, same);
+        assert!(quiet.is_empty());
+        assert!(braille.iter().any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
+        assert!(!braille[1].contains("12.3ms"));
+        let (text, _, after) = compose(&rows, &[over], 40, 6, true, true, false);
+        assert!(text[1].contains("12.3ms"), "{:?}", text[1]);
+        assert!(text[2].contains("axis"));
+        assert!(after.contains("a=T"));
+        assert!(graphics_keys(&after).iter().any(|keys| keys.contains("z=-1")));
+        let colour = super::super::rgb(30, 220, 180);
+        let cols = vec![(1.0, colour)];
+        let bars = Plot::bars(0, 1, &cols, 1, 1.0, false).under_text();
+        assert!(!bars.under_text, "a solid bar is not a line chart");
+        let bar_rows = vec![String::new(), "keep".into()];
+        let (text, _, after) = compose(&bar_rows, &[bars], 20, 4, true, true, false);
+        assert!(!text[1].contains("keep"));
+        assert!(graphics_keys(&after).iter().all(|keys| !keys.contains("z=")));
+        compose(&rows, &[], 40, 6, true, true, false);
+    }
+
+    fn graphics_keys(bytes: &str) -> Vec<&str> {
+        bytes
+            .split("\x1b_G")
+            .skip(1)
+            .filter_map(|chunk| chunk.split(';').next())
+            .collect()
     }
 
     fn decode_image(command: &str) -> (u8, Vec<u8>) {

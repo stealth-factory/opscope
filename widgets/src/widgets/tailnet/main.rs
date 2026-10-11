@@ -227,24 +227,6 @@ fn derp_regions() -> HashMap<String, String> {
     out
 }
 
-fn spark(values: &[f64], n: usize, peak: f64) -> String {
-    let vals = &values[values.len().saturating_sub(n)..];
-    if vals.is_empty() {
-        return String::new();
-    }
-    let hi = if peak > 0.0 {
-        peak
-    } else {
-        vals.iter().cloned().fold(0.0f64, f64::max)
-    };
-    if hi <= 0.0 {
-        return "·".repeat(vals.len());
-    }
-    vals.iter()
-        .map(|v| tc::SPARK[(((v / hi) * 7.99) as usize).min(7)])
-        .collect()
-}
-
 fn ago(s: f64) -> String {
     let s = s.max(0.0) as i64;
     if s < 3600 {
@@ -651,7 +633,8 @@ fn activity_rows(
     w: usize,
     limit: usize,
     p: &Palette,
-) -> Vec<String> {
+    y0: usize,
+) -> (Vec<String>, Vec<tc::Plot>) {
     let mut active: Vec<(f64, &String, &Vec<(f64, f64)>)> = rates
         .iter()
         .filter_map(|(name, hist)| {
@@ -669,30 +652,37 @@ fn activity_rows(
         .collect();
     active.sort_by(|a, b| b.0.total_cmp(&a.0));
     if active.is_empty() {
-        return vec![tc::seg(
-            &[(p.dim.as_str(), " no peer traffic in the last few minutes".into())],
-            w - 1,
-        )];
+        return (
+            vec![tc::seg(
+                &[(p.dim.as_str(), " no peer traffic in the last few minutes".into())],
+                w - 1,
+            )],
+            Vec::new(),
+        );
     }
     let sw = (w.saturating_sub(42)).clamp(8, 28);
     let peak = active[0].0;
-    active
+    let mut plots = Vec::new();
+    let rows = active
         .iter()
         .take(limit)
-        .map(|(_, name, hist)| {
-            let rx: Vec<f64> = hist.iter().map(|(r, _)| *r).collect();
-            let tx: Vec<f64> = hist.iter().map(|(_, t)| *t).collect();
+        .enumerate()
+        .map(|(i, (_, name, hist))| {
+            let rx: Vec<f64> = hist.iter().map(|(r, _)| *r).rev().take(sw).rev().collect();
+            let tx: Vec<f64> = hist.iter().map(|(_, t)| *t).rev().take(sw).rev().collect();
+            let name = format!(
+                " {}",
+                tc::pad(&name.chars().take(18).collect::<String>(), 19)
+            );
+            let mut x = tc::display_width(&name) + 1;
+            let down = trace_cells(&rx, peak, x, y0 + i, &p.online, &mut plots);
+            x += tc::display_width(&down) + 2;
+            let up = trace_cells(&tx, peak, x, y0 + i, &p.relay, &mut plots);
             tc::seg(
                 &[
-                    (
-                        p.txt.as_str(),
-                        format!(
-                            " {}",
-                            tc::pad(&name.chars().take(18).collect::<String>(), 19)
-                        ),
-                    ),
-                    (p.online.as_str(), format!("↓{}", spark(&rx, sw, peak))),
-                    (p.relay.as_str(), format!(" ↑{}", spark(&tx, sw, peak))),
+                    (p.txt.as_str(), name),
+                    (p.online.as_str(), format!("↓{down}")),
+                    (p.relay.as_str(), format!(" ↑{up}")),
                     (
                         p.dim.as_str(),
                         format!(
@@ -705,7 +695,49 @@ fn activity_rows(
                 w - 1,
             )
         })
-        .collect()
+        .collect();
+    (rows, plots)
+}
+
+/// One direction of a board sparkline. A silent run stays the dotted
+/// text it always was. A run that moved becomes a line chart in those
+/// cells: pixel mode draws the trace under the row, text mode the Braille.
+fn trace_cells(
+    values: &[f64],
+    peak: f64,
+    x: usize,
+    y: usize,
+    colour: &str,
+    plots: &mut Vec<tc::Plot>,
+) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let hi = peak.max(values.iter().copied().fold(0.0, f64::max));
+    if hi <= 0.0 {
+        return "·".repeat(values.len());
+    }
+    let samples: Vec<Option<f64>> = values.iter().map(|v| Some((v / hi).clamp(0.0, 1.0))).collect();
+    plots.push(
+        tc::Plot::new(
+            x,
+            y,
+            samples.len(),
+            1,
+            tc::LineChart {
+                slots: samples.len(),
+                focus: None,
+                traces: vec![tc::Trace {
+                    values: samples,
+                    positions: None,
+                    colour: colour.to_string(),
+                    baseline: None,
+                }],
+            },
+        )
+        .under_text(),
+    );
+    " ".repeat(values.len())
 }
 
 fn main() {
@@ -1132,6 +1164,7 @@ fn main() {
             continue;
         }
 
+        let mut plots = Vec::new();
         if show_graph {
             rows.push(tc::seg(
                 &[
@@ -1140,7 +1173,9 @@ fn main() {
                 ],
                 w - 1,
             ));
-            rows.extend(activity_rows(&rates, w, 4, &p));
+            let (lines, graph) = activity_rows(&rates, w, 4, &p, rows.len());
+            rows.extend(lines);
+            plots.extend(graph);
             rows.push(String::new());
         }
 
@@ -1418,7 +1453,11 @@ fn main() {
         placed = rows_at;
         let foot_top = rows.len();
         rows.extend(foot.iter().cloned());
-        tc::draw(&rows, w, h);
+        let plots: Vec<_> = plots
+            .into_iter()
+            .filter_map(|p| p.in_viewport(0, 1, foot_top.saturating_sub(1).max(1)))
+            .collect();
+        tc::draw_plots(&rows, w, h, &plots);
         keyboard.footer_at(&packed, foot_top, indent);
         keyboard.wait(Duration::from_millis(300));
     }

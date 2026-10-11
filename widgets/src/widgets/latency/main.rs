@@ -851,7 +851,24 @@ fn graph(
             } else { p.hues[idx % p.hues.len()].clone() },
         }).collect(),
     };
-    plots.push(tc::Plot::new(8, top, gw, gh, chart));
+    plots.push(tc::Plot::new(8, top, gw, gh, chart).under_text());
+    // The focused target's latest reply, drawn at the right end of its
+    // line. Pixel mode leaves it on the chart; Braille paints over these
+    // cells, so text mode still shows the axis and the trace alone.
+    // One trace can be labelled without a selection. Several traces share
+    // the canvas, so the number is the focused line only: any other choice
+    // would name a host the pane is not pointing at.
+    let current_idx = focus.or_else(|| (series.len() == 1).then_some(series[0].0));
+    let current = current_idx.and_then(|idx| {
+        series.iter().find(|(i, _, _)| *i == idx).and_then(|(_, values, _)| {
+            values.iter().copied().rev().find_map(|v| v)
+        })
+    });
+    let current_row = current.map(|v| {
+        let frac = (v.max(1e-3).log10() - llo) / (lhi - llo).max(1e-9);
+        ((1.0 - frac.clamp(0.0, 1.0)) * (gh as f64 - 1.0).max(1.0)).round() as usize
+    });
+    let reading = current.map(|v| fmt_ms(Some(v)));
     let mut out = Vec::new();
     for y in 0..gh {
         let frac = 1.0 - (y as f64 / (gh as f64 - 1.0).max(1.0));
@@ -865,7 +882,21 @@ fn graph(
         };
         let mut parts: Vec<(&str, String)> =
             vec![(p.dim.as_str(), label), (p.grid.as_str(), "│".into())];
-        parts.push((p.grid.as_str(), " ".repeat(gw)));
+        if current_row == Some(y) {
+            if let Some(reading) = reading.as_deref() {
+                let n = reading.chars().count();
+                if n <= gw {
+                    parts.push((p.grid.as_str(), " ".repeat(gw - n)));
+                    parts.push((p.txt.as_str(), reading.to_string()));
+                } else {
+                    parts.push((p.grid.as_str(), " ".repeat(gw)));
+                }
+            } else {
+                parts.push((p.grid.as_str(), " ".repeat(gw)));
+            }
+        } else {
+            parts.push((p.grid.as_str(), " ".repeat(gw)));
+        }
         out.push(tc::seg(&parts, w - 1));
     }
     (out, span)

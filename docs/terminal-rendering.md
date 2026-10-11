@@ -192,11 +192,31 @@ let chart = tc::LineChart {
     }],
     focus: None,
 };
-let plot = tc::Plot::new(chart_x, chart_y, chart_width, chart_height, chart);
+let plot = tc::Plot::new(chart_x, chart_y, chart_width, chart_height, chart).under_text();
 let plots: Vec<_> = plot.in_viewport(scroll, pinned_rows, body_room)
     .into_iter().collect();
 tc::draw_plots(&text_rows, width, height, &plots);
 ```
+
+`Plot::under_text()` is only for line charts. In a Kitty graphics session the
+image is placed at `z=-1`: under the glyphs, and above cells that have a
+background colour. A lower z, below `-1073741824`, would also sit under that
+background, so an opaque selected-row tint would cover the stroke. The widget
+draws labels and the current value in the chart cells. Pixel mode leaves them
+there. Braille and text mode still replace those cells with the chart, so the
+fallback layout does not move. `under_text()` does nothing for bars, heatmaps,
+meters or stacked bars: text over a solid fill does not stay readable, and it
+would fail the contrast rule.
+
+The placement is a second graphics command (`a=p` with the same placement id)
+after `image()` transmits the pixels at the default z. `image()` is unchanged.
+Terminals without Kitty graphics never see the command, and the cells are
+drawn as Braille exactly as before.
+
+This was checked by the PTY fixture, which asserts the `z=-1` placement and
+that the label cell is not blanked. Kitty, Ghostty and WezTerm were not
+available in the build environment, so the z-index under a tinted cell was
+not watched on a real terminal.
 
 For discrete data, use the other `Plot` constructors with the same viewport and
 drawing path:
@@ -294,9 +314,9 @@ and intentional text presentation, not unimplemented widget migrations.
 
 | Widget | Implemented in this change | Further useful visual work / reason to retain text |
 | --- | --- | --- |
-| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved | Measure real-terminal readability with many overlapping targets |
+| `latency` | Shared pixel/Braille traces; logarithmic scale, gaps and focus preserved. The focused target's latest reply, or the only target's, sits at the end of its line in pixel mode | Measure real-terminal readability with many overlapping targets |
 | `link` | Shared pixel/Braille charts in list and detail; young-session alignment preserved | Validate dense connections and selected-trace contrast in real Kitty |
-| `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank | Profile busy process views with several changing plots |
+| `netwatch` | Shared bidirectional pixel/Braille charts in overview and details, including disk I/O; idle runs stay blank. The newest sample's rate sits at the end of each line in pixel mode | Profile busy process views with several changing plots |
 | `matrix` | Deadline-paced ~30 fps; elapsed-time falling speed and glyph mutation | Keep glyphs as text; rasterizing the entire rain would add bandwidth and lose font rendering |
 | `github` | Pixel PR-flow bars on board and account details; contribution heatmap; elapsed-time loading motion | Keep discrete day buckets and side-by-side figures; validate dense account boards |
 | `linear` | Pixel created/completed bars, cycle burnup, board/detail progress and milestone meters, and state distributions | Preserve exact scope/percentage labels; validate dense project details |
@@ -308,8 +328,8 @@ and intentional text presentation, not unimplemented widget migrations.
 | `luvus-panes` | Measured agent-state distribution bar; elapsed-time working indicators | Retain coordination/evidence tables as text; verify pane protocol support end to end |
 | `clocks` | Pixel countdown and pomodoro progress/overtime bars | Keep clock digits as text; native scaled text needs separate capability negotiation |
 | `months` | Synchronized text presentation | Date cells are discrete and benefit from stable text; no reason to animate static dates |
-| `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels | Keep the server table and unmeasured-history dots as text |
-| `tailnet` | Shared pixel/Braille receive/send history in machine details | Compact board sparklines remain efficient text; exact current rates stay beside traces |
+| `ports` | Pixel traffic bars in list and port detail, with independent up/down scales and held-history labels. An active list sparkline is a one-row line chart under the row text; quiet rows stay a dash and unmeasured cells stay dots | Keep the server table and unmeasured-history dots as text |
+| `tailnet` | Shared pixel/Braille receive/send history in machine details. Board sparklines that are moving are one-row line charts under the row; a silent direction stays dotted, and the current rates stay beside the traces | Exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
 ## Verification and compatibility limits
