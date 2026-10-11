@@ -215,6 +215,9 @@ cargo build -p opscope-core --example terminal_probe
 python3 core/tests/terminal_protocol.py
 ```
 
+Set `OPSCOPE_PROBE_ARTIFACTS` to a directory to keep the decoded images the
+PTY checks receive, for looking at by eye.
+
 The protocol fixture is explicitly synthetic test data, not a widget. The PTY
 tests emulate acknowledged/rejected graphics, synchronized-only and silent
 terminals, fragmented/late replies, image errors, cached frames, scrolling,

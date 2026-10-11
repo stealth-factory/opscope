@@ -95,6 +95,15 @@ def run(mode, reply, check):
         terminal.close()
 
 
+def artifact(name, data):
+    # Decoded images for visual inspection, written only when asked for, to a
+    # directory the caller chose rather than a fixed name under /tmp.
+    directory = os.environ.get("OPSCOPE_PROBE_ARTIFACTS")
+    if directory:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        (Path(directory) / name).write_bytes(data)
+
+
 def supported(t):
     assert t.images(), "acknowledged Kitty did not receive images"
     assert b"\x1b[?2026h" in t.output
@@ -105,9 +114,8 @@ def supported(t):
     assert keys[b"t"] == b"d" and keys[b"o"] == b"z" and keys[b"C"] == b"1"
     decoded = zlib.decompress(base64.b64decode(payload))
     assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
-    # Save only a test artifact for optional visual inspection.
-    Path("/tmp/opscope-probe.rgba").write_bytes(decoded)
-    Path("/tmp/opscope-probe-size.txt").write_text(f"{int(keys[b's'])} {int(keys[b'v'])}")
+    artifact("opscope-probe.rgba", decoded)
+    artifact("opscope-probe-size.txt", f"{int(keys[b's'])} {int(keys[b'v'])}".encode())
     t.send(b"\x1b[B")
     t.read()
     assert int(t.images()[-1][0][b"r"]) < int(keys[b"r"]), "scroll did not crop chart"
@@ -166,8 +174,8 @@ def filled_graphics(t):
         decoded = zlib.decompress(base64.b64decode(payload))
         assert len(decoded) == int(keys[b"s"]) * int(keys[b"v"]) * 4
         assert any(decoded[3::4]), "empty graphic"
-        Path(f"/tmp/opscope-gallery-{n}.rgba").write_bytes(decoded)
-        Path(f"/tmp/opscope-gallery-{n}.size").write_text(f"{int(keys[b's'])} {int(keys[b'v'])}")
+        artifact(f"opscope-gallery-{n}.rgba", decoded)
+        artifact(f"opscope-gallery-{n}.size", f"{int(keys[b's'])} {int(keys[b'v'])}".encode())
     count = len(t.images())
     t.read()
     assert len(t.images()) == count, "unchanged figures retransmitted"

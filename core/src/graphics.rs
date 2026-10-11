@@ -524,6 +524,7 @@ pub(crate) fn compose(
     h: usize,
     kitty: bool,
     lost: bool,
+    heal: bool,
 ) -> (Vec<String>, String, String) {
     let mut text = rows.to_vec();
     text.resize(h, String::new());
@@ -590,6 +591,12 @@ pub(crate) fn compose(
     let mut after = String::new();
     for slot in 0..cache.len().max(images.len()) {
         if !lost && cache.get(slot) == images.get(slot) {
+            // The periodic whole frame repairs text another process may
+            // have scrolled or covered. The terminal still holds the image,
+            // so only its placement is put back, not the pixels.
+            if let Some(plot) = images.get(slot).filter(|_| heal) {
+                after.push_str(&place(plot, slot, w));
+            }
             continue;
         }
         if cache.get(slot).is_some() {
@@ -742,6 +749,19 @@ fn blend(pixel: &mut [u8], colour: [u8; 3], alpha: u32) {
         pixel[c] = ((colour[c] as u32 * alpha + pixel[c] as u32 * old) / total) as u8;
     }
     pixel[3] = total as u8;
+}
+
+/// Re-place an image the terminal already holds, at the same cell and size.
+/// Same placement id, so it replaces the old placement rather than adding one.
+fn place(plot: &Plot, slot: usize, pane_width: usize) -> String {
+    format!(
+        "\x1b[{};{}H\x1b_Ga=p,i={},p=1,c={},r={},C=1,q=1\x1b\\",
+        plot.y + 1,
+        plot.x + 1,
+        image_id(slot),
+        plot.width.min(pane_width - plot.x),
+        plot.visible_rows
+    )
 }
 
 fn image(plot: &Plot, slot: usize, pane_width: usize) -> String {
@@ -1030,24 +1050,27 @@ mod tests {
     fn image_cache_reuses_unchanged_plots_and_deletes_on_fallback_or_screen_change() {
         let p = Plot::new(2, 1, 10, 3, chart(vec![Some(0.2), Some(0.8)]));
         let rows = vec!["protected title".into(), "axis".into()];
-        let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, true);
+        let (_, _, bytes) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
         assert!(bytes.contains("a=T"));
-        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false);
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, false);
         assert!(before.is_empty() && after.is_empty());
-        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, true);
+        // The periodic whole frame re-places the held image, never resends it.
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, false, true);
+        assert!(before.is_empty() && after.contains("a=p") && !after.contains("a=T"));
+        let (_, before, after) = compose(&rows, &[p.clone()], 40, 8, true, true, false);
         assert!(before.contains("a=d") && after.contains("a=T"));
-        let (text, before, after) = compose(&rows, &[p.clone()], 40, 8, false, false);
+        let (text, before, after) = compose(&rows, &[p.clone()], 40, 8, false, false, false);
         assert!(before.contains("a=d") && after.is_empty());
         assert!(text
             .iter()
             .any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))));
         let mut header_plot = p.clone();
         header_plot.y = 0;
-        let (text, _, after) = compose(&rows, &[header_plot], 40, 8, true, false);
+        let (text, _, after) = compose(&rows, &[header_plot], 40, 8, true, false, false);
         assert_eq!(text[0], rows[0]);
         assert!(after.is_empty());
-        compose(&rows, &[p], 40, 8, true, false);
-        let (_, before, after) = compose(&rows, &[], 40, 8, true, false);
+        compose(&rows, &[p], 40, 8, true, false, false);
+        let (_, before, after) = compose(&rows, &[], 40, 8, true, false, false);
         assert!(before.contains("a=d") && after.is_empty());
     }
 

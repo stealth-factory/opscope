@@ -371,10 +371,16 @@ pub fn append_plot_rows(
 /// Draw text and structured charts together, choosing the terminal backend in core.
 pub fn draw_plots(rows: &[String], w: usize, h: usize, plots: &[Plot]) {
     let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
-    let lost = SCREEN_LOST.swap(false, Ordering::AcqRel) | due(&shown, Instant::now());
-    let reset = lost || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
+    let signalled = SCREEN_LOST.swap(false, Ordering::AcqRel);
+    let whole = due(&shown, Instant::now());
+    let lost = signalled | whole;
+    // Images are sent again only when the screen may really have lost them.
+    // The periodic whole frame just re-places them: resending every chart
+    // every few seconds is most of a dashboard's bandwidth over SSH.
+    let reset = signalled || shown.as_ref().is_none_or(|s| s.w != w || s.h != h);
     let caps = capabilities();
-    let (rows, before, after) = graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset);
+    let (rows, before, after) =
+        graphics::compose(rows, plots, w, h, caps.kitty_graphics, reset, whole && !reset);
     let bytes = paint(&mut shown, &rows, w, h, lost);
     let bytes = format!("{before}{bytes}{after}");
     let bytes = terminal::synchronized(bytes, capabilities().synchronized_updates);
@@ -2961,6 +2967,9 @@ pub struct Keyboard {
     /// A bare ESC is held for one poll before it counts as Escape: it is
     /// indistinguishable from the start of a sequence still arriving.
     lone_esc: bool,
+    /// When `pending` began with a terminal string that has not finished,
+    /// so one that never does is let go as keys instead of holding them.
+    string_since: Option<Instant>,
     /// Where this frame's footer hints are - key, frame row, first column,
     /// width - so a click on one arrives as the key it names. Empty until
     /// a widget registers a footer, which is what makes clickable hints
@@ -2993,6 +3002,7 @@ impl Keyboard {
         Keyboard {
             pending: String::new(),
             lone_esc: false,
+            string_since: None,
             fd,
             saved,
             buf: Vec::new(),
@@ -3052,6 +3062,7 @@ impl Keyboard {
         self.buf.clear();
         self.pending.clear();
         self.lone_esc = false;
+        self.string_since = None;
         // Whatever was on screen while the child had the terminal was the
         // child's, so no placement of ours describes it. Dropped for the
         // same reason the buffered input above is.
@@ -3166,10 +3177,14 @@ impl Keyboard {
         self.pending
             .push_str(&String::from_utf8_lossy(&self.buf).to_string());
         self.buf.clear();
-        decode(&mut self.pending, &mut self.lone_esc)
-            .into_iter()
-            .map(|key| self.hint_under(key))
-            .collect()
+        let mut keys = decode(&mut self.pending, &mut self.lone_esc);
+        keys.extend(release_stale_string(
+            &mut self.pending,
+            &mut self.lone_esc,
+            &mut self.string_since,
+            Instant::now(),
+        ));
+        keys.into_iter().map(|key| self.hint_under(key)).collect()
     }
 }
 
@@ -3304,12 +3319,32 @@ fn mouse_report(s: &[char]) -> Option<(usize, Option<String>)> {
     }
 }
 
+/// Longest terminal string held while waiting for its terminator. Replies
+/// this program asks for are a few dozen characters.
+const MAX_PENDING_STRING: usize = 1024;
+
+/// How long an unfinished terminal string may sit before it is treated as
+/// keys. A reply arrives in one burst; `ESC ]` that goes quiet is Alt+].
+const STRING_PATIENCE: Duration = Duration::from_millis(250);
+
 fn still_arriving(s: &[char]) -> bool {
     match s {
         [] => false,
         ['\x1b'] => true,
         ['\x1b', 'O'] => true,
-        ['\x1b', '_' | ']' | 'P' | '^' | 'X', ..] => true,
+        // A terminal string (a protocol reply) still waiting for its BEL or
+        // ESC \. Its body never holds an ESC except as the first half of
+        // that terminator, so an ESC anywhere else is a new key - Alt+]
+        // followed by an arrow or Escape - and the string was never one.
+        // Bounded too, so a stray introducer cannot swallow input forever;
+        // `Keyboard::poll` also gives up on one that stops arriving.
+        ['\x1b', '_' | ']' | 'P' | '^' | 'X', rest @ ..] => {
+            rest.len() < MAX_PENDING_STRING
+                && !rest
+                    .iter()
+                    .take(rest.len().saturating_sub(1))
+                    .any(|c| *c == '\x1b')
+        }
         // A mouse report that has not reached its M or m yet. Without this
         // arm the `<` fails the test below, the report is declared
         // malformed, and the ESC is dropped one character at a time -
@@ -3324,6 +3359,35 @@ fn still_arriving(s: &[char]) -> bool {
             .all(|c| ('\x20'..='\x3f').contains(c)),
         _ => false,
     }
+}
+
+/// Let go of a terminal string that started arriving and then stopped.
+///
+/// `ESC ]` is how a terminal sends Alt+], and Escape then `]` inside one
+/// read looks the same. Both look like the start of a reply, and without
+/// this every later key would be held behind them. The ESC is dropped and
+/// the rest decoded as keys, which is what happened to `ESC ]` before
+/// replies were understood at all.
+fn release_stale_string(
+    pending: &mut String,
+    lone_esc: &mut bool,
+    since: &mut Option<Instant>,
+    now: Instant,
+) -> Vec<String> {
+    // decode() leaves only an unfinished tail, so an introducer here is a
+    // string still waiting for its terminator.
+    let head: Vec<char> = pending.chars().take(2).collect();
+    if !matches!(head.as_slice(), ['\x1b', '_' | ']' | 'P' | '^' | 'X']) {
+        *since = None;
+        return Vec::new();
+    }
+    let started = *since.get_or_insert(now);
+    if now.duration_since(started) < STRING_PATIENCE {
+        return Vec::new();
+    }
+    *since = None;
+    pending.remove(0);
+    decode(pending, lone_esc)
 }
 
 /// Turn what the terminal sent into key names, leaving anything incomplete
@@ -3755,6 +3819,31 @@ mod tests {
                 assert!(pending.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn an_unfinished_terminal_string_never_traps_later_keys() {
+        // Alt+] arrives as ESC ], the start of an OSC reply. An arrow or
+        // Escape after it shows it was never one; a pause does too.
+        let mut pending = "\x1b]\x1b[A".to_string();
+        let mut escape = false;
+        assert_eq!(super::decode(&mut pending, &mut escape), ["]", "up"]);
+        assert!(pending.is_empty());
+
+        let mut pending = "\x1b]q".to_string();
+        let mut since = None;
+        let start = std::time::Instant::now();
+        assert!(super::decode(&mut pending, &mut escape).is_empty());
+        assert!(super::release_stale_string(&mut pending, &mut escape, &mut since, start).is_empty());
+        assert_eq!(
+            super::release_stale_string(&mut pending, &mut escape, &mut since, start + super::STRING_PATIENCE),
+            ["]", "q"]
+        );
+        assert!(pending.is_empty());
+        assert!(since.is_none());
+
+        let mut pending = format!("\x1b_{}", "G".repeat(super::MAX_PENDING_STRING));
+        assert!(!super::decode(&mut pending, &mut escape).is_empty());
     }
 
     /// A frame's rows as they land on screen: the leading home dropped,

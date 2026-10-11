@@ -1326,9 +1326,18 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
     rows = add_section(rows, codex_rate_rows(d, w, p));
     let mut calendar_plots = Vec::new();
     let calendar = codex_calendar_with_plots(d, w, p, &mut calendar_plots);
-    let start = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1) + 1;
-    plots.extend(calendar_plots.into_iter().map(|mut p| { p.y += start; p }));
-    rows = add_section(rows, calendar);
+    if !calendar.is_empty() {
+        // add_section's separator, written out so the plots are placed by
+        // the same row count the calendar lands at.
+        while rows.last().is_some_and(|r| r.is_empty()) {
+            rows.pop();
+        }
+        rows.push(String::new());
+        tc::append_plot_rows(&mut rows, plots, |local| {
+            local.extend(calendar_plots);
+            calendar
+        });
+    }
     rows.push(String::new());
     for line in wrap_text(
         "Tokens and rate are measured here, from the rollouts. Quota is the \
