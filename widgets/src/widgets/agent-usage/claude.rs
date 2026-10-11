@@ -34,6 +34,12 @@ use crate::*;
 const RATE_FILES: usize = 3;
 /// Seconds; below this the timestamps are not a turn.
 const MIN_GAP: f64 = 1.0;
+/// The official client's optional reset-grant block, alongside normal usage.
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
+/// Compatibility surface required by the usage endpoint's grant inventory.
+/// Verified against the published Claude Code 2.1.296 client. The server
+/// gates grants by client surface/version. No reset is redeemed by this GET.
+const USAGE_USER_AGENT: &str = "claude-cli/2.1.296 (external, cli)";
 
 /// One Claude Code config directory the widget should read.
 ///
@@ -77,6 +83,22 @@ pub struct Data {
 }
 
 impl Data {
+    pub(crate) fn reset_summary_line(&self) -> Option<String> {
+        let quota = self.quota.as_ref()?;
+        let bank = crate::parse::parse_claude_resets(&quota.to_string(), now())?;
+        if bank.left == 0 {
+            return None;
+        }
+        let mut line = match bank.soonest.and_then(crate::codex::local_expiry) {
+            Some(stamp) => format!("{} reset available ({stamp})", bank.left),
+            None => format!("{} reset available", bank.left),
+        };
+        if !self.quota_live {
+            line.push_str(&format!(" · cached {} ago", ago(self.quota_at)));
+        }
+        Some(line)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn with_session_quota(label: &str, pct: i64) -> Self {
         Self {
@@ -460,7 +482,7 @@ fn claude_try(url: &str, tok: &str) -> Result<serde_json::Value, String> {
         &[
             ("Authorization", &format!("Bearer {}", tok)),
             ("anthropic-beta", "oauth-2025-04-20"),
-            ("User-Agent", "opscope"),
+            ("User-Agent", if url == USAGE_URL { USAGE_USER_AGENT } else { "opscope" }),
         ],
         20,
     )
@@ -914,7 +936,7 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         let Some((tok, plan)) = claude_token_at(&dir.path) else {
             return Some(serde_json::json!({ "why": "no token - Claude Code has not signed in here" }));
         };
-        match claude_try("https://api.anthropic.com/api/oauth/usage", &tok) {
+        match claude_try(USAGE_URL, &tok) {
             Ok(u) => Some(serde_json::json!({ "u": u, "at": now(), "plan": plan })),
             Err(why) => Some(serde_json::json!({ "why": why })),
         }
@@ -977,13 +999,16 @@ fn read_one(caches: &mut Caches, dir: &ClaudeDir) -> Data {
         Some(stats) => {
             claude.ok = true;
             claude.stats = stats;
-            let (rates, sampled) = claude_rates_at(&projects_path(&dir.path));
-            claude.rates = rates;
-            claude.sampled = sampled;
-            claude.daily = claude_daily_at(caches, &projects_path(&dir.path));
         }
         None => claude.why = "no stats cache".into(),
     }
+    // Transcripts are written as Claude runs; the optional stats cache is
+    // rebuilt separately. A missing cache must not hide recorded usage.
+    let projects = projects_path(&dir.path);
+    let (rates, sampled) = claude_rates_at(&projects);
+    claude.rates = rates;
+    claude.sampled = sampled;
+    claude.daily = claude_daily_at(caches, &projects);
     claude
 }
 
@@ -2297,6 +2322,19 @@ pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Data {
+        pub(crate) fn with_reset_grants(label: &str, pct: Option<i64>, grants: serde_json::Value, live: bool) -> Self {
+            let mut data = Self::with_session_quota(label, pct.unwrap_or(0));
+            let quota = data.quota.as_mut().unwrap();
+            if pct.is_none() {
+                quota["limits"] = serde_json::json!([]);
+            }
+            quota["cedar_ember"] = serde_json::json!({"eligible": true, "grants": grants});
+            data.quota_live = live;
+            data
+        }
+    }
 
     /// The rule the fossil taught: Claude Code's cache is worth reading only
     /// while Claude Code itself would read it.
@@ -3681,6 +3719,61 @@ mod tests {
         std::fs::write(&sibling, "{}").unwrap();
         assert_eq!(claude_json_for(&dir_s), sibling.to_string_lossy());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transcripts_are_metered_without_a_readable_stats_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "ops-144-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let project = root.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let stamp = Local::now().date_naive().and_hms_opt(12, 0, 0).unwrap();
+        let record = serde_json::json!({
+            "type": "assistant", "uuid": "metered-turn",
+            "timestamp": Local.from_local_datetime(&stamp).single().unwrap().to_rfc3339(),
+            "message": { "model": "claude-fable-5-1", "usage": {
+                "input_tokens": 1_000_000, "output_tokens": 1_000_000
+            }}
+        });
+        std::fs::write(project.join("session.jsonl"), record.to_string()).unwrap();
+        let dir = ClaudeDir { path: root.to_string_lossy().into(), label: String::new() };
+        let mut caches = Caches::default();
+        for stats in [None, Some("not json"), Some("{}")] {
+            if let Some(body) = stats {
+                std::fs::write(root.join("stats-cache.json"), body).unwrap();
+            }
+            let data = read_one(&mut caches, &dir);
+            assert_eq!(data.ok, stats == Some("{}"));
+            assert_eq!(data.sampled, 1, "transcript sampling must not depend on stats");
+            for days in [1, 30] {
+                let models = window_models(&data.daily, days);
+                assert_eq!(models.len(), 1, "stats: {stats:?}, days: {days}");
+                assert_eq!(total_tokens(&models[0].1), 2_000_000.0);
+            }
+            let rendered = bare(&tab_with_plots(&data, 120, 40, &Config::default(), &palette(), &mut Vec::new()).join("\n"));
+            for label in ["today", "30 days"] {
+                let row = rendered.lines().find(|l| l.contains(label)).unwrap();
+                assert!(row.contains("$60.00") && row.contains("2.0M tokens"), "{row}");
+            }
+            assert_eq!(rendered.contains("No stats cache"), !data.ok);
+            assert!(!rendered.contains("agent_usage.rates"), "{rendered}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_transcripts_do_not_claim_missing_prices() {
+        let day = (Local::now().date_naive() - Days::days(31)).to_string();
+        let mut tokens = empty_tokens();
+        tokens.insert("input".into(), 1_000_000.0);
+        let data = Data {
+            daily: HashMap::from([(day, HashMap::from([("claude-fable-5-1".into(), tokens)]))]),
+            ..Default::default()
+        };
+        let rows = bare(&claude_metered(&data, 120, &Config::default(), &palette()).join("\n"));
+        assert!(rows.contains("No recorded token usage in these windows."), "{rows}");
+        assert!(!rows.contains("agent_usage.rates") && !rows.contains('$'), "{rows}");
     }
 
     #[test]

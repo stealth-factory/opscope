@@ -160,6 +160,11 @@ Measured here: the file sat untouched for three days across a version upgrade
 and five live sessions, then refreshed the moment that screen was opened.
 `/stats` and `/cost` are aliases for the same command.
 
+Metered usage reads the project transcripts independently of this cache, so
+a missing or unreadable cache does not hide recorded tokens or their cost.
+When no tokens are recorded in the displayed windows, METERED says so;
+missing prices are reported only for models with recorded usage.
+
 So those four sections can be days behind while everything else on the tab is
 current, and nothing this widget does can move them — the refresh is the
 reader's to trigger. The tab says so in as many words at its foot, and the two
@@ -196,6 +201,27 @@ no entry for — distinct from a day that recorded zero.
 The **quota block** answers a different question from everything below it —
 what is *left*, account-wide, rather than what this machine spent — and it is
 the same set of windows Claude Code's own `/usage` shows.
+
+On **`[+]`**, Claude also shows **`N reset available (<expiry>)`** under
+each account's rows, with the same indentation and wrapping as Codex.
+The date is the soonest expiry in the machine's local zone; if any counted
+grant has no readable expiry, only the count is shown. Zero or unavailable
+inventory adds no line. Multiple profiles keep their own counts, including
+when an account has no quota lanes. Cached availability carries its age,
+and a grant whose expiry has passed is no longer counted.
+
+This comes from the optional `cedar_ember` block on
+`GET /api/oauth/usage?cedar_ember=1`, using the existing per-profile OAuth
+credential, poll interval, and account-bound snapshot. There is no second
+poll or redemption request. An eligible block lists grants with
+`resets_left`, `usable_now`, `paused`, `starts_at`, and `ends_at`; only usable,
+unpaused, unexpired grants count. Their wire fields and the CLI request
+surface were checked against the published Claude Code **2.1.296** package.
+The request uses its `claude-cli/2.1.296 (external, cli)` compatibility
+User-Agent because the reset block is gated by surface/version; an
+ineligible or absent block stays unknown. The optional query and surface
+gating are also documented in
+[ai-usagebar's Claude reader](https://github.com/akitaonrails/ai-usagebar/blob/main/src/anthropic/fetch.rs).
 
 The lanes are the ones Anthropic itself marks as worth showing, and each
 arrives already named — so a model-scoped weekly limit appears as **Fable**

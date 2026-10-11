@@ -240,16 +240,16 @@ impl Plot {
         let mut rects = vec![
             Rect {
                 x: 0.0,
-                y: 0.25,
+                y: 0.0625,
                 width: width as f64,
-                height: 0.5,
+                height: 0.875,
                 colour: track.into(),
             },
             Rect {
                 x: 0.0,
-                y: 0.25,
+                y: 0.0625,
                 width: width as f64 * fraction,
-                height: 0.5,
+                height: 0.875,
                 colour: colour.into(),
             },
         ];
@@ -868,6 +868,11 @@ mod tests {
         assert_eq!(at(20, 8), &[80, 100, 120, 255]);
         assert_eq!(at(60, 8), &[240, 245, 250, 255]);
         assert_eq!(at(20, 0)[3], 0);
+        assert_eq!(at(19, 1), &[30, 220, 180, 255]);
+        assert_eq!(at(19, 14), &[30, 220, 180, 255]);
+        assert_eq!(at(20, 1), &[80, 100, 120, 255]);
+        assert_eq!(at(20, 14), &[80, 100, 120, 255]);
+        assert_eq!(at(19, 15)[3], 0);
     }
 
     #[test]
