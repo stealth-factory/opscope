@@ -41,6 +41,10 @@ static CELL_STALE: AtomicBool = AtomicBool::new(false);
 /// the handler itself does not write, so `CSI 16 t` cannot land inside an
 /// image chunk.
 static CELL_NEED_SEND: AtomicBool = AtomicBool::new(false);
+/// True between `claim_screen` and `restore_screen`. A cell query is
+/// written only while this is set, so a resize during a child handoff
+/// does not land in the child's session.
+static OWNS_TERMINAL: AtomicBool = AtomicBool::new(false);
 static CELL: AtomicU32 = AtomicU32::new(((FALLBACK_CELL_H as u32) << 16) | FALLBACK_CELL_W as u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -454,18 +458,39 @@ pub(crate) fn note_resize() {
     CELL_NEED_SEND.store(true, Ordering::Release);
 }
 
-/// `CSI 16 t` for the front of the next complete frame, or empty when no
-/// resize is waiting. A failed write puts the flag back.
-pub(crate) fn take_cell_query() -> &'static str {
-    if CELL_NEED_SEND.swap(false, Ordering::AcqRel) {
+/// `CSI 16 t` when this process owns the terminal and a resize is waiting.
+pub(crate) fn cell_query_to_send(owns: bool, pending: bool) -> &'static str {
+    if owns && pending {
         "\x1b[16t"
     } else {
         ""
     }
 }
 
+/// Prefix for the next complete frame, or empty when no resize is waiting
+/// or this process does not own the terminal. A failed write puts the flag
+/// back. Handing the terminal to a child clears it.
+pub(crate) fn take_cell_query() -> &'static str {
+    let owns = OWNS_TERMINAL.load(Ordering::Acquire);
+    // Do not consume the flag while a child has the terminal. The next
+    // frame after we claim it again still asks.
+    let pending = owns && CELL_NEED_SEND.swap(false, Ordering::AcqRel);
+    cell_query_to_send(owns, pending)
+}
+
 pub(crate) fn restore_cell_query() {
     CELL_NEED_SEND.store(true, Ordering::Release);
+}
+
+pub(crate) fn claim_terminal() {
+    OWNS_TERMINAL.store(true, Ordering::Release);
+}
+
+/// Drop a pending cell query. Called from `restore_screen`, before a child
+/// is given the terminal.
+pub(crate) fn release_terminal() {
+    OWNS_TERMINAL.store(false, Ordering::Release);
+    CELL_NEED_SEND.store(false, Ordering::Release);
 }
 
 /// Cell to publish for a resize that does not already have a reply.
@@ -483,6 +508,19 @@ pub(crate) fn pending_cell(
     }
 }
 
+/// Cell this resize should publish, starting from the size already in force.
+///
+/// A reply that already matched this resize leaves `previous` alone.
+/// Otherwise the window pixel size, or 8×16 when that report is missing,
+/// zero or absurd — never the size from before the resize.
+pub(crate) fn cell_after_resize(
+    previous: (usize, usize),
+    report_is_current: bool,
+    ioctl: Option<(usize, usize)>,
+) -> (usize, usize) {
+    pending_cell(report_is_current, ioctl).unwrap_or(previous)
+}
+
 /// Use the window pixel size, or 8×16, when a resize is still waiting on
 /// `CSI 16 t`. A reply that already matched this resize is left alone.
 pub(crate) fn apply_pending_cell_size() {
@@ -491,9 +529,8 @@ pub(crate) fn apply_pending_cell_size() {
     }
     let report_is_current =
         CELL_REPORT_GEN.load(Ordering::Acquire) == CELL_QUERY_GEN.load(Ordering::Acquire);
-    if let Some((w, h)) = pending_cell(report_is_current, cell_from_winsize()) {
-        publish_cell(w, h);
-    }
+    let (w, h) = cell_after_resize(cell_size(), report_is_current, cell_from_winsize());
+    publish_cell(w, h);
 }
 
 pub(crate) fn cleanup_signal() {
@@ -1013,6 +1050,27 @@ mod tests {
         // No reply yet. A sane window size stands; a missing one is 8×16.
         assert_eq!(pending_cell(false, Some((20, 40))), Some((20, 40)));
         assert_eq!(pending_cell(false, None), Some((8, 16)));
+    }
+
+    #[test]
+    fn a_20x40_report_falls_back_to_8x16_when_the_next_resize_has_nothing() {
+        let reported = resolve_cell(cell_report("\x1b[6;40;20t").unwrap(), None);
+        assert_eq!(reported, (20, 40));
+        // No pixel fields and no reply for this resize. The 20×40 does not stick.
+        assert_eq!(cell_after_resize(reported, false, None), (8, 16));
+        // A reply that already matched this resize is left alone.
+        assert_eq!(cell_after_resize(reported, true, None), (20, 40));
+        assert_eq!(
+            cell_after_resize(reported, false, Some((10, 22))),
+            (10, 22)
+        );
+    }
+
+    #[test]
+    fn a_cell_query_is_sent_only_while_this_process_owns_the_terminal() {
+        assert_eq!(cell_query_to_send(false, true), "");
+        assert_eq!(cell_query_to_send(true, false), "");
+        assert_eq!(cell_query_to_send(true, true), "\x1b[16t");
     }
 
     #[test]
