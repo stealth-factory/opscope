@@ -505,6 +505,12 @@ fn text(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or("").to_string()
 }
 
+/// The address `c` copies for this pull request. The title is a link to
+/// the same string, and to nothing else.
+fn pr_url(pr: &serde_json::Value) -> String {
+    text(pr, "url")
+}
+
 fn number(value: &serde_json::Value, key: &str) -> i64 {
     value[key].as_i64().unwrap_or(0)
 }
@@ -2215,10 +2221,10 @@ fn main() {
                     // The URL of whatever is on screen: the open PR in the
                     // dashboard, the highlighted row in the list.
                     let url = match &detail {
-                        Some(d) => text(d, "url"),
+                        Some(d) => pr_url(d),
                         None => shown
                             .get(selected.min(shown.len().saturating_sub(1)))
-                            .map(|pr| text(pr, "url"))
+                            .map(|pr| pr_url(pr))
                             .unwrap_or_default(),
                     };
                     if !url.is_empty() {
@@ -3433,12 +3439,10 @@ fn list_view(
         if pr["isDraft"].as_bool().unwrap_or(false) {
             name = format!("draft · {}", name);
         }
+        let shown = name.chars().take(title_w - 1).collect::<String>();
         line.push((
             c(&p.txt),
-            tc::pad(
-                &name.chars().take(title_w - 1).collect::<String>(),
-                title_w,
-            ),
+            tc::pad(&tc::link(&pr_url(pr), &shown), title_w),
         ));
         line.push((c(rcol), format!("{:>13}", rlabel)));
         line.push((c(ccol), format!("{:>8}", clabel)));
@@ -3549,10 +3553,13 @@ fn detail_view(
             (p.pr.as_str(), format!(" #{} ", number(pr, "number"))),
             (
                 p.txt.as_str(),
-                text(pr, "title")
-                    .chars()
-                    .take(w.saturating_sub(24).max(10))
-                    .collect::<String>(),
+                tc::link(
+                    &pr_url(pr),
+                    &text(pr, "title")
+                        .chars()
+                        .take(w.saturating_sub(24).max(10))
+                        .collect::<String>(),
+                ),
             ),
             (p.dim.as_str(), draft.into()),
         ],
@@ -4153,6 +4160,28 @@ mod tests {
     }
 
     #[test]
+    fn a_list_title_links_the_url_c_copies() {
+        let p = palette();
+        let prs = a_long_list(1);
+        let url = "https://github.com/owner/repo/pull/1";
+        assert_eq!(pr_url(&prs[0]), url);
+        let (list, _, _) =
+            list_view(&prs, 0, "created", true, "", 120, false, "all", prs.len(), &p);
+        let row = list
+            .iter()
+            .find(|r| r.contains(url))
+            .expect("the title carries the pull request url");
+        assert!(row.contains(&format!("\x1b]8;;{url}\x1b\\")));
+        let shown = plain(row);
+        assert!(shown.contains("a change worth reading about, number 1"));
+        assert!(!shown.contains("https://"), "{shown}");
+        assert_eq!(
+            tc::display_width(&tc::link(url, "a change worth reading about, number 1")),
+            tc::display_width("a change worth reading about, number 1")
+        );
+    }
+
+    #[test]
     fn a_short_pane_scrolls_the_stats_rather_than_hiding_them() {
         let p = palette();
         let prs = a_long_list(40);
@@ -4748,9 +4777,25 @@ mod tests {
         let mut chars = row.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
+                match chars.peek() {
+                    Some(']' | '_' | 'P' | 'X' | '^') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\u{7}' {
+                                break;
+                            }
+                            if n == '\x1b' && chars.peek() == Some(&'\\') {
+                                chars.next();
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        for next in chars.by_ref() {
+                            if next.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
                     }
                 }
             } else {

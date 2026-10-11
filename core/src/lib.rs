@@ -221,8 +221,175 @@ pub fn bg(r: u8, g: u8, b: u8) -> String {
 }
 
 /// The terminal columns occupied by printable text.
+///
+/// Colour and OSC sequences are not text. A linked title has to measure
+/// the same as the plain one, or the columns beside it shift.
 pub fn display_width(s: &str) -> usize {
-    s.width()
+    strip_escapes(s).width()
+}
+
+/// `s` with every escape removed and the characters that were text left
+/// in order. An escape that never terminates takes the rest of the string
+/// with it: those bytes have not been shown.
+fn strip_escapes(s: &str) -> String {
+    let mut visible = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            rest = &rest[n..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        visible.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    visible
+}
+
+/// Byte length of one escape at the start of `s`.
+///
+/// Covers colour, OSC, and the short `ESC` forms. An opener with no
+/// terminator consumes whatever is left, so a cut cannot treat the tail
+/// of a link target as title text.
+fn markup_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&0x1b) {
+        return None;
+    }
+    if b.len() == 1 {
+        return Some(1);
+    }
+    match b[1] {
+        b'[' => {
+            let mut i = 2;
+            while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
+                i += 1;
+            }
+            if i < b.len() {
+                i += 1;
+            }
+            Some(i)
+        }
+        b']' | b'P' | b'X' | b'^' | b'_' => {
+            let mut i = 2;
+            while i < b.len() {
+                if b[i] == 0x07 {
+                    return Some(i + 1);
+                }
+                if b[i] == b'\\' && b[i - 1] == 0x1b {
+                    return Some(i + 1);
+                }
+                i += 1;
+            }
+            Some(b.len())
+        }
+        c if (0x20..=0x2f).contains(&c) => Some(b.len().min(3)),
+        _ => Some(b.len().min(2)),
+    }
+}
+
+/// OSC payload, without the introducer and without BEL or ST.
+fn osc_body(escape: &str) -> Option<&str> {
+    let rest = escape.strip_prefix("\x1b]")?;
+    rest.strip_suffix('\u{7}')
+        .or_else(|| rest.strip_suffix("\x1b\\"))
+}
+
+/// An `https://` target with no controls and no spaces.
+///
+/// Anything else is today's plain text. Terminals that do not implement
+/// OSC 8 ignore the sequence and show that text either way; a scheme
+/// other than `https` is not given the chance.
+fn https_uri(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && uri.chars().all(|c| {
+            let u = c as u32;
+            u >= 0x21 && u != 0x7f && c != '\\'
+        })
+}
+
+/// OSC 8 whose target is `https://`, and the empty OSC 8 that closes one.
+///
+/// The closer has no scheme. Dropping it would leave the link open
+/// across the rest of the row.
+fn osc8_kept(body: &str) -> bool {
+    let Some(rest) = body.strip_prefix("8;") else {
+        return false;
+    };
+    let Some((_, uri)) = rest.split_once(';') else {
+        return false;
+    };
+    uri.is_empty() || https_uri(uri)
+}
+
+fn keep_escape(escape: &str) -> bool {
+    if let Some(body) = escape.strip_prefix("\x1b[") {
+        let Some(final_byte) = body.chars().last() else {
+            return false;
+        };
+        if final_byte != 'm' {
+            return false;
+        }
+        let params = &body[..body.len() - final_byte.len_utf8()];
+        return params
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+    }
+    osc_body(escape).is_some_and(osc8_kept)
+}
+
+/// Append the OSC 8 closer when a clip kept the opener and cut the end.
+fn close_dangling_link(s: &str) -> String {
+    let mut open = 0i32;
+    let mut rest = s;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            if let Some(body) = osc_body(&rest[..n]) {
+                if let Some(after) = body.strip_prefix("8;") {
+                    if let Some((_, uri)) = after.split_once(';') {
+                        if uri.is_empty() {
+                            open -= 1;
+                        } else if https_uri(uri) {
+                            open += 1;
+                        }
+                    }
+                }
+            }
+            rest = &rest[n..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        rest = &rest[ch.len_utf8()..];
+    }
+    if open > 0 {
+        format!("{s}\x1b]8;;\x1b\\")
+    } else {
+        s.to_string()
+    }
+}
+
+/// A title that a pointer can open, as an OSC 8 hyperlink.
+///
+/// Core owns the escape. Widgets pass the URL a key already copies and
+/// the title text; they do not branch on the terminal. Only an `https://`
+/// target is wrapped. Every other string comes back unchanged, which is
+/// the row a terminal that ignores OSC 8 shows anyway: the sequence is
+/// defined to be skipped, so the text does not move and no probe is
+/// required before sending it.
+pub fn link(url: &str, text: &str) -> String {
+    if !https_uri(url) {
+        return text.to_string();
+    }
+    // A control in the title could close the link early and leave the
+    // rest of the row wearing the target. Titles from the APIs do not
+    // carry controls; one that did is shown without them.
+    let visible: String = text.chars().filter(|c| !c.is_control()).collect();
+    format!("\x1b]8;;{url}\x1b\\{visible}\x1b]8;;\x1b\\")
 }
 
 /// Keep the longest character prefix that fits in `width` terminal columns.
@@ -241,7 +408,8 @@ fn clip_width(s: &str, width: usize) -> (String, usize, bool) {
             used = columns;
         }
     }
-    (s[..end].to_string(), used, end < s.len())
+    let cut = close_dangling_link(&s[..end]);
+    (cut, used, end < s.len())
 }
 
 /// Break a word that is itself wider than the pane, rather than dropping it.
@@ -314,8 +482,11 @@ pub fn pad(s: &str, n: usize) -> String {
 /// The colour of each segment is a prefix that costs nothing on screen, so
 /// only the text counts toward the width. Every widget's layout arithmetic
 /// depends on that, which is why escapes have to live in the colour half of
-/// the pair and never in the text. Underlines mark content, skipping its
-/// leading and trailing alignment whitespace while retaining every cell.
+/// the pair and never in the text. A `link()` in the text half is the
+/// exception that is still zero width: the escape is skipped by the same
+/// measurement, and a clip closes the link so the next column is not part
+/// of it. Underlines mark content, skipping its leading and trailing
+/// alignment whitespace while retaining every cell.
 pub fn seg(parts: &[(&str, String)], width: usize) -> String {
     let mut out = String::new();
     let mut n = 0usize;
@@ -652,11 +823,12 @@ fn version_room(w: usize) -> usize {
 /// - The top row is cut to what the version leaves and the version is
 ///   appended after a reset, so neither the widget's text nor its colours
 ///   reach those cells.
-/// - Every row is made inert first. Colour escapes pass; anything else
-///   that can move the cursor or rewrite the screen - a CSI that is not
-///   colour, a bare ESC sequence, an OSC, a carriage return, a backspace -
-///   is dropped. Without that, a later row could carry `ESC[1;70H` and
-///   write over the version from underneath.
+/// - Every row is made inert first. Colour escapes pass, and so does an
+///   OSC 8 whose target is `https://` (and the empty OSC 8 that closes
+///   it). Anything else that can move the cursor or rewrite the screen -
+///   a CSI that is not colour, a bare ESC sequence, every other OSC, a
+///   carriage return, a backspace - is dropped. Without that, a later row
+///   could carry `ESC[1;70H` and write over the version from underneath.
 ///
 /// What this cannot stop is a widget writing to the terminal without
 /// `draw` at all. `no_widget_moves_the_cursor_itself` in `check.rs` is
@@ -710,66 +882,34 @@ fn put_line(buf: &mut String, line: &str) {
     buf.push_str(RST);
 }
 
-/// `row`, with every escape that is not a colour and every control
-/// character taken out.
+/// `row`, with every escape that is not a colour or an `https` OSC 8, and
+/// every control character, taken out.
 ///
-/// Colour is `ESC [` then digits, `;` and `:`, then `m`. A tab becomes a
-/// space rather than vanishing, since it was meant as a gap; everything
-/// else - C0, DEL, and C1, which includes the one-byte CSI `\u{9b}` - goes.
+/// Colour is `ESC [` then digits, `;` and `:`, then `m`. OSC 8 is kept
+/// only when its target is `https://`, plus the empty OSC 8 that closes
+/// that link. A tab becomes a space rather than vanishing, since it was
+/// meant as a gap; everything else - C0, DEL, and C1, which includes the
+/// one-byte CSI `\u{9b}` - goes.
 fn inert(row: &str) -> String {
-    let chars: Vec<char> = row.chars().collect();
     let mut out = String::with_capacity(row.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\x1b' {
-            match chars.get(i + 1) {
-                Some('[') => {
-                    // CSI: parameter and intermediate bytes, then one final
-                    // byte in `@`..`~`. Unterminated runs to the end.
-                    let mut j = i + 2;
-                    while j < chars.len() && !('\x40'..='\x7e').contains(&chars[j]) {
-                        j += 1;
-                    }
-                    let colour = chars.get(j) == Some(&'m')
-                        && chars[i + 2..j]
-                            .iter()
-                            .all(|c| c.is_ascii_digit() || *c == ';' || *c == ':');
-                    if colour {
-                        out.extend(&chars[i..=j]);
-                    }
-                    i = j + 1;
-                }
-                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
-                    // A string: runs to BEL or to ST (`ESC \\`).
-                    let mut j = i + 2;
-                    while j < chars.len() {
-                        if chars[j] == '\x07' {
-                            j += 1;
-                            break;
-                        }
-                        if chars[j] == '\x1b' && chars.get(j + 1) == Some(&'\\') {
-                            j += 2;
-                            break;
-                        }
-                        j += 1;
-                    }
-                    i = j;
-                }
-                // `ESC 7`, `ESC 8`, `ESC M`, `ESC c` and the rest: two
-                // characters, or three when the second is an intermediate.
-                Some(n) if ('\x20'..='\x2f').contains(n) => i += 3,
-                Some(_) => i += 2,
-                None => i += 1,
+    let mut rest = row;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            let escape = &rest[..n];
+            if keep_escape(escape) {
+                out.push_str(escape);
             }
+            rest = &rest[n..];
             continue;
         }
-        if c == '\t' {
+        let ch = rest.chars().next().unwrap();
+        if ch == '\t' {
             out.push(' ');
-        } else if !c.is_control() {
-            out.push(c);
+        } else if !ch.is_control() {
+            out.push(ch);
         }
-        i += 1;
+        rest = &rest[ch.len_utf8()..];
     }
     out
 }
@@ -784,16 +924,19 @@ fn inert(row: &str) -> String {
 fn with_notice(title: &str, notice: &str, w: usize) -> String {
     let mut name_end = 0;
     let mut text = String::new();
-    let mut chars = title.char_indices();
-    while let Some((i, c)) = chars.next() {
-        if c == '\x1b' {
-            chars.by_ref().find(|(_, n)| *n == 'm');
+    let mut i = 0;
+    while i < title.len() {
+        if title.as_bytes()[i] == 0x1b {
+            i += markup_len(&title[i..]).unwrap_or(1);
             continue;
         }
+        let c = title[i..].chars().next().unwrap();
+        let n = c.len_utf8();
         text.push(c);
         if !matches!(c, '━' | '╸' | ' ') {
-            name_end = i + c.len_utf8();
+            name_end = i + n;
         }
+        i += n;
     }
     let name = display_width(text.trim_end_matches(['━', '╸', ' ']));
     let keep = w.saturating_sub(version_room(w));
@@ -819,18 +962,15 @@ fn stamped(row: &str, w: usize) -> String {
     let mut cut = String::new();
     let mut text = String::new();
     let mut used = 0;
-    let mut chars = row.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            cut.push(c);
-            for n in chars.by_ref() {
-                cut.push(n);
-                if n == 'm' {
-                    break;
-                }
-            }
+    let mut rest = row;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == 0x1b {
+            let n = markup_len(rest).unwrap_or(1);
+            cut.push_str(&rest[..n]);
+            rest = &rest[n..];
             continue;
         }
+        let c = rest.chars().next().unwrap();
         text.push(c);
         let width = display_width(&text);
         if width > keep {
@@ -838,6 +978,7 @@ fn stamped(row: &str, w: usize) -> String {
         }
         cut.push(c);
         used = width;
+        rest = &rest[c.len_utf8()..];
     }
     let (r, g, b) = VERSION_INK;
     format!(
@@ -4807,6 +4948,56 @@ mod tests {
         let row = format!("{}ok{} {}warn{}", super::rgb(1, 2, 3), super::RST, super::bg(4, 5, 6), super::NOBG);
         assert_eq!(super::inert(&row), row);
         assert_eq!(super::inert("a\tb"), "a b");
+    }
+
+    #[test]
+    fn osc8_https_passes_and_every_other_osc_is_stripped() {
+        let url = "https://github.com/example/repo/pull/1";
+        let link = super::link(url, "Fix the parser");
+        assert_eq!(super::inert(&link), link, "an https OSC 8 is the link");
+        // BEL is the other terminator the protocol allows.
+        let bel = format!("\x1b]8;;{url}\x07Fix the parser\x1b]8;;\x07");
+        assert_eq!(super::inert(&bel), bel);
+
+        let http = "\x1b]8;;http://github.com/example\x1b\\title\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(http), "title");
+        let file = "\x1b]8;;file:///etc/passwd\x1b\\x\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(file), "x");
+        let script = "\x1b]8;;javascript:alert(1)\x1b\\x\x1b]8;;\x1b\\";
+        assert_eq!(super::inert(script), "x");
+        // The closer on its own stays, so a link split across a clip can end.
+        assert_eq!(super::inert("\x1b]8;;\x1b\\"), "\x1b]8;;\x1b\\");
+        // OSC 52, and an OSC 8 that is not two parameters, do not.
+        assert_eq!(super::inert("\x1b]52;c;AQID\x1b\\title"), "title");
+        assert_eq!(super::inert("\x1b]8;https://example.com/a\x1b\\t"), "t");
+        assert_eq!(super::link("http://example.com/a", "t"), "t");
+        assert_eq!(super::link("https://", "t"), "t");
+        // A control in the title cannot close the link early.
+        let guarded = super::link(url, "a\x1bb");
+        assert_eq!(super::strip_escapes(&guarded), "ab");
+        assert_eq!(super::inert(&guarded), guarded);
+    }
+
+    #[test]
+    fn a_linked_title_measures_the_same_as_the_plain_one() {
+        let title = "Fix the parser";
+        let url = "https://github.com/example/repo/pull/1";
+        let linked = super::link(url, title);
+        assert_eq!(super::display_width(&linked), super::display_width(title));
+        assert_eq!(super::strip_escapes(&linked), title);
+        let padded = super::pad(&linked, 20);
+        assert_eq!(super::display_width(&padded), 20);
+        assert_eq!(super::strip_escapes(&padded).trim_end(), title);
+        // Clipping keeps the visible prefix and closes the link, so the
+        // next column is not part of the target.
+        let clipped = super::seg(&[("", linked.clone())], 4);
+        assert_eq!(super::display_width(&clipped), 4);
+        assert_eq!(super::strip_escapes(&clipped), "Fix ");
+        assert!(clipped.ends_with("\x1b]8;;\x1b\\"), "{clipped:?}");
+        assert_eq!(
+            super::display_width(&super::seg(&[("", title.into())], 4)),
+            super::display_width(&clipped)
+        );
     }
 
     #[test]

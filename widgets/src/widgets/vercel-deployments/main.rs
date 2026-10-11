@@ -536,6 +536,12 @@ fn when(ms: Option<f64>) -> String {
     }
 }
 
+/// The dashboard address the copy list's first key copies. The commit
+/// subject, which is the deployment's title, links to the same URL.
+fn deployment_url(dep: &serde_json::Value) -> String {
+    text(dep, "inspectorUrl")
+}
+
 /// Everything worth copying out of a deployment.
 fn copy_items(dep: &serde_json::Value, detail: Option<&serde_json::Value>) -> Vec<(String, String)> {
     let meta = &dep["meta"];
@@ -545,7 +551,7 @@ fn copy_items(dep: &serde_json::Value, detail: Option<&serde_json::Value>) -> Ve
             items.push((label.to_string(), value));
         }
     };
-    push("Deployment dashboard", text(dep, "inspectorUrl"));
+    push("Deployment dashboard", deployment_url(dep));
     let branch_alias = text(meta, "branchAlias");
     if !branch_alias.is_empty() {
         push("Branch preview", format!("https://{}", branch_alias));
@@ -1003,7 +1009,13 @@ fn info_overlay(
         let subject = text(meta, "githubCommitMessage");
         let subject = subject.lines().next().unwrap_or("");
         for line in wrap(subject, w.saturating_sub(4).max(10)) {
-            rows.push(tc::seg(&[(p.msg.as_str(), format!("  {}", line))], w - 1));
+            rows.push(tc::seg(
+                &[(
+                    p.msg.as_str(),
+                    format!("  {}", tc::link(&deployment_url(dep), &line)),
+                )],
+                w - 1,
+            ));
         }
         let who = match text(meta, "githubCommitAuthorName") {
             name if !name.is_empty() => name,
@@ -1859,6 +1871,7 @@ fn main() {
             };
             let subject = text(meta, "githubCommitMessage");
             let subject = subject.lines().next().unwrap_or("").to_string();
+            let subject = tc::link(&deployment_url(d), &subject);
             let c = |colour: &str| format!("{}{}", tint, colour);
             let mut line = vec![
                 (
@@ -2342,6 +2355,36 @@ mod tests {
         // No branch alias, so no branch preview - an empty row would be a
         // key that copies nothing.
         assert!(!labels.contains(&"Branch preview"));
+        assert_eq!(items[0].1, deployment_url(&dep));
+    }
+
+    #[test]
+    fn the_commit_subject_links_the_dashboard_a_key_copies() {
+        let dep = serde_json::json!({
+            "inspectorUrl": "https://vercel.com/x",
+            "name": "app",
+            "state": "READY",
+            "meta": {
+                "githubCommitMessage": "ship the pane",
+                "githubCommitSha": "0123456789abcdef"
+            }
+        });
+        let url = "https://vercel.com/x";
+        assert_eq!(deployment_url(&dep), url);
+        assert_eq!(copy_items(&dep, None)[0].1, url);
+        // The fetched detail has no inspector URL. The subject still links
+        // the deployment the copy sheet lists first.
+        let detail = serde_json::json!({"readyState": "READY"});
+        let rows = info_overlay(&dep, Some(&detail), 80, 24, "", &palette());
+        let subject = rows
+            .iter()
+            .find(|r| r.contains("ship the pane"))
+            .expect("commit subject");
+        assert!(subject.contains(&format!("\x1b]8;;{url}\x1b\\")), "{subject}");
+        assert_eq!(
+            tc::display_width(&tc::link(url, "ship the pane")),
+            tc::display_width("ship the pane")
+        );
     }
 
     #[test]

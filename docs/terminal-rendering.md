@@ -291,6 +291,27 @@ and intentional text presentation, not unimplemented widget migrations.
 | `tailnet` | Shared pixel/Braille receive/send history in machine details | Compact board sparklines remain efficient text; exact current rates stay beside traces |
 | Launcher | Synchronized updates; session renegotiation after child return | Retain text previews and keyboard navigation |
 
+## OSC 8 hyperlinks
+
+`tc::link(url, text)` wraps a title when `url` is an `https://` target with
+no spaces and no controls. Any other string comes back unchanged, which is
+the row drawn today.
+
+`draw` keeps that sequence, and the empty OSC 8 that closes it. OSC 8 with
+another scheme, and every other OSC, is stripped with the rest of the
+non-colour escapes. The sequence is zero width in `display_width`, `pad` and
+`seg`. A clip that cuts the visible text appends the closer, so the next
+column is not part of the target.
+
+Widgets call `link` only where a key already copies that same URL. They do
+not probe for OSC 8 and they do not branch on Kitty. A terminal that ignores
+the sequence shows the same text; that is the defined fallback, so there is
+nothing to negotiate first. Kitty, Ghostty, WezTerm, iTerm2, Konsole and
+tmux 3.4+ are the protocol's audience. This workspace has no attached
+graphical terminal. The PTY check reads the bytes on the label row, and
+where a link sits in a real pane stays a release check, the same limit as
+the graphics path above.
+
 ## Verification and compatibility limits
 
 Run:
@@ -315,7 +336,9 @@ does not unlink, because that call is not async-signal-safe), cached
 frames, scrolling, resize, screen changes, suspend/resume, quit, panic and
 signal cleanup. They also answer the keyboard-protocol query and check that
 flag 1 is pushed on start, popped on exit, suspend, panic and a typed Ctrl-C,
-Ctrl-Z or Ctrl-\, and pushed again after resume. Unit tests
+Ctrl-Z or Ctrl-\, and pushed again after resume. They also check that an
+`https` OSC 8 on the label row is written and that an `http` OSC 8 and an
+OSC 52 on that row are not. Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
 The fixture's `g` key shows synthetic bars, a calendar, a quota meter and a state distribution; the

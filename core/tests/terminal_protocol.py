@@ -381,6 +381,15 @@ def shared_rgb_gallery(t):
     assert b"o" not in keys and keys[b"q"] == b"0"
 
 
+def osc8(t):
+    # Visible text is the same label. The https target stays; a non-https
+    # OSC 8 and an OSC 52 on that row do not.
+    assert b"\x1b]8;;https://example.com/opscope-probe\x1b\\" in t.output
+    assert b"axes and labels remain text" in t.output
+    assert b"http://opscope.invalid" not in t.output
+    assert b"\x1b]52;" not in t.output
+
+
 def responsive_selection(t):
     # Each press must produce its own frame inside the 300 ms idle interval.
     # Also verifies unchanged Kitty images are not retransmitted on navigation.
@@ -466,6 +475,7 @@ if __name__ == "__main__":
                                ("auto", "kitty", shm_rejected), ("auto", "kitty", shm_accepted),
                                ("auto", "kitty", shared_rgb_gallery),
                                ("auto", "kitty", filled_graphics), ("text", "sync", filled_text),
+                               ("auto", "kitty", osc8), ("text", "sync", osc8),
                                ("auto", "kitty", responsive_selection), ("text", "sync", responsive_selection),
                                ("text", "sync", underlines), ("text", "sync", plain_underlines)]:
         run(mode, reply, check)

@@ -1450,6 +1450,11 @@ fn sparkline(values: &[f64], width: usize) -> String {
         .collect()
 }
 
+/// The address `c` copies for a workflow run. The title links to it.
+fn run_url(run: &serde_json::Value) -> String {
+    text(run, "html_url")
+}
+
 fn copy_items(run: &serde_json::Value) -> Vec<(String, String)> {
     let mut items = Vec::new();
     let mut push = |label: &str, value: String| {
@@ -1457,7 +1462,7 @@ fn copy_items(run: &serde_json::Value) -> Vec<(String, String)> {
             items.push((label.to_string(), value));
         }
     };
-    push("Run URL", text(run, "html_url"));
+    push("Run URL", run_url(run));
     push("Commit SHA", text(run, "head_sha"));
     push("Branch", text(run, "branch"));
     items
@@ -1517,7 +1522,14 @@ fn info_overlay(
         rows.push(tc::seg(
             &[
                 (p.dim.as_str(), format!("  {}", &sha[..sha.len().min(7)])),
-                (p.txt.as_str(), if title.is_empty() { String::new() } else { format!("  {}", title) }),
+                (
+                    p.txt.as_str(),
+                    if title.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", tc::link(&run_url(run), &title))
+                    },
+                ),
             ],
             w - 1,
         ));
@@ -2353,7 +2365,11 @@ fn main() {
             if cols.single {
                 line.push((
                     c(if here { &p.txt } else { &p.msg }),
-                    format!("  {} · {}", text(run, "workflow"), subject),
+                    format!(
+                        "  {} · {}",
+                        text(run, "workflow"),
+                        tc::link(&run_url(run), &subject)
+                    ),
                 ));
             }
             if here {
@@ -2371,7 +2387,7 @@ fn main() {
                         (&c(&p.lbl), format!("   {}", text(run, "workflow"))),
                         (
                             &c(if here { &p.txt } else { &p.msg }),
-                            format!(" · {}", subject),
+                            format!(" · {}", tc::link(&run_url(run), &subject)),
                         ),
                         (&tint, if here { " ".repeat(w) } else { String::new() }),
                     ],
@@ -2745,6 +2761,15 @@ mod tests {
         assert_eq!(got["repo_fetched"], 30);
         assert_eq!(got["attempt"], 2);
         assert!(is_failed(&got));
+        let url = "https://github.com/acme/app/actions/runs/9";
+        assert_eq!(run_url(&got), url);
+        assert_eq!(copy_items(&got)[0].1, url);
+        let rows = info_overlay(&got, None, 80, 0, "", &palette());
+        assert!(
+            rows.iter().any(|r| r.contains(&format!("\x1b]8;;{url}\x1b\\"))),
+            "the run title links the url the copy sheet lists"
+        );
+        assert!(rows.iter().any(|r| r.contains("fix: the thing")));
     }
 
     #[test]
