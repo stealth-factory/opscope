@@ -916,6 +916,45 @@ fn devin_plan(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String
         .find_map(|key| non_empty(obj.get(*key)?))
 }
 
+/// The bearer a signed-in Devin CLI leaves on this machine:
+/// `windsurf_api_key` in its `credentials.toml`. The file is a flat
+/// `key = "value"` list, so a line scan is all it needs and a TOML crate
+/// is not. `[section]` headers and `#` comments are skipped, and a quoted
+/// value keeps a `#` it happens to carry.
+pub fn parse_devin_cli_token(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim_start();
+        if line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let Some((key, rest)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "windsurf_api_key" {
+            continue;
+        }
+        let value = rest.trim();
+        let unquoted = if let Some(inner) = value.strip_prefix('"') {
+            inner.split('"').next().unwrap_or("")
+        } else if let Some(inner) = value.strip_prefix('\'') {
+            inner.split('\'').next().unwrap_or("")
+        } else {
+            value.split('#').next().unwrap_or("").trim()
+        };
+        if !unquoted.is_empty() {
+            return Some(unquoted.to_string());
+        }
+    }
+    None
+}
+
+/// The organization a signed-in Devin CLI named, `devin.org_id` in its
+/// `config.json`. An id anywhere else in the file is not the one.
+pub fn parse_devin_cli_org(text: &str) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    non_empty(body.get("devin")?.get("org_id")?)
+}
+
 /// One Factory rate-limit window. `seconds_remaining` is set only when the
 /// body sent a positive count. `window_end` is the instant even when it is
 /// already past: a closed window and the percent that was sent are different
@@ -1897,6 +1936,45 @@ Period resets : 2026-10-06
         .unwrap();
         assert_eq!(top.daily.as_ref().map(|w| w.pct), Some(8.0));
         assert!(top.weekly.is_none());
+    }
+
+    #[test]
+    fn a_devin_cli_credentials_file_gives_up_only_its_api_key() {
+        assert_eq!(
+            parse_devin_cli_token(
+                "windsurf_api_key = \"tok_1\"\napi_server_url = \"https://x\"\n",
+            )
+            .as_deref(),
+            Some("tok_1")
+        );
+        // Single quotes, no spaces around `=`, a trailing comment, and a
+        // lookalike key that must not match.
+        assert_eq!(
+            parse_devin_cli_token("other_api_key=\"nope\"\nwindsurf_api_key='tok_2' # c")
+                .as_deref(),
+            Some("tok_2")
+        );
+        // A `#` inside the quotes is part of the token, not a comment.
+        assert_eq!(
+            parse_devin_cli_token("windsurf_api_key = \"tok#3\"").as_deref(),
+            Some("tok#3")
+        );
+        assert!(parse_devin_cli_token("api_server_url = \"https://x\"").is_none());
+        assert!(parse_devin_cli_token("[devin]\n# windsurf_api_key = \"x\"").is_none());
+        assert!(parse_devin_cli_token("windsurf_api_key = \"\"").is_none());
+    }
+
+    #[test]
+    fn a_devin_cli_config_names_its_organization_and_nothing_else() {
+        assert_eq!(
+            parse_devin_cli_org(r#"{"devin":{"org_id":"org-abc"},"version":1}"#).as_deref(),
+            Some("org-abc")
+        );
+        assert!(parse_devin_cli_org(r#"{"devin":{}}"#).is_none());
+        // The same key at the top level is not the organization.
+        assert!(parse_devin_cli_org(r#"{"org_id":"org-abc"}"#).is_none());
+        assert!(parse_devin_cli_org(r#"{"devin":{"org_id":"  "}}"#).is_none());
+        assert!(parse_devin_cli_org("not json").is_none());
     }
 
     #[test]

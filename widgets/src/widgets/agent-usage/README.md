@@ -1346,13 +1346,18 @@ It is not a lane on `[+]`.
   the same: no bar, and the tab says the window was not in the answer. A 0
   that was sent is a real 0.
 - **The percent is kept as sent.** A value below 1 is not multiplied by 100.
-- **The credential is pasted.** `devin_token` or `DEVIN_BEARER_TOKEN`
-  (`DEVIN_AUTHORIZATION` is another name for that variable), and `devin_org`.
-  An internal id (`org-` or `org_`) is the path and the `x-cog-org-id` header.
-  A slug is requested as `org/<slug>`. Nothing is read from a browser. Devin
-  is here when both the token and the organization are set. The request goes
-  only to `app.devin.ai`, and only while Devin is one of the agents shown.
-  Keep `config.json` chmod 600; the tab warns when it is not.
+- **The credential is pasted, or the signed-in CLI's.** `devin_token` or
+  `DEVIN_BEARER_TOKEN` (`DEVIN_AUTHORIZATION` is another name for that
+  variable), and `devin_org`. With none of them set, the Devin CLI's own
+  files are read: `windsurf_api_key` in its `credentials.toml` for the
+  token and `devin.org_id` in its `config.json` for the organization -
+  so a signed-in CLI is enough, and `devin_cli_credentials: false` turns
+  that off. An internal id (`org-` or `org_`) is the path and the
+  `x-cog-org-id` header. A slug is requested as `org/<slug>`. Nothing is
+  read from a browser. Devin is here when both the token and the
+  organization are set. The request goes only to `app.devin.ai`, and only
+  while Devin is one of the agents shown. Keep `config.json` chmod 600;
+  the tab warns when it is not.
 
 A plan string is shown only when the body carried one at the top level.
 

@@ -1853,6 +1853,10 @@ struct Config {
     devin_token_env: String,
     /// The Devin organization: an internal id, or a slug.
     devin_org: String,
+    /// Whether a signed-in Devin CLI's files may supply the token and
+    /// organization. On at runtime; `Config::default()` leaves it off so a
+    /// test never reads real credential files by accident.
+    devin_cli_credentials: bool,
     /// Factory's API key for Droid. Empty reads `factory_api_key_env`, then
     /// `~/.factory/.env`.
     factory_api_key: String,
@@ -1916,6 +1920,10 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
         devin_token: tc::cfg_str(&raw, "devin_token", ""),
         devin_token_env: tc::cfg_str(&raw, "devin_token_env", crate::devin::TOKEN_ENV),
         devin_org: tc::cfg_str(&raw, "devin_org", ""),
+        devin_cli_credentials: raw
+            .get("devin_cli_credentials")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         factory_api_key: tc::cfg_str(&raw, "factory_api_key", ""),
         factory_api_key_env: tc::cfg_str(&raw, "factory_api_key_env", crate::droid::API_KEY_ENV),
         antigravity_remote: raw
@@ -2020,7 +2028,8 @@ fn agent_spec(name: &str) -> (&'static str, Vec<&'static str>, Vec<String>) {
         // Nothing on this machine to find: Notion AI is a web service, and
         // it is here when a token for it is. `detect_agents` checks that.
         "notion" => ("Notion AI", vec![], vec![]),
-        // Same shape: a pasted credential, not a binary and not a browser.
+        // Same shape: a credential the reader pasted or the CLI stored,
+        // not a binary and not a browser. `detect_agents` resolves both.
         "devin" => ("Devin", vec![], vec![]),
         "droid" => ("Droid", vec![], vec![]),
         other => (Box::leak(other.to_string().into_boxed_str()), vec![], vec![]),
@@ -2095,7 +2104,7 @@ fn detect_agents(cfg: &Config) -> HashMap<String, Presence> {
     found.insert(
         "devin".into(),
         Presence {
-            present: !devin_token.is_empty() && !cfg.devin_org.trim().is_empty(),
+            present: !devin_token.is_empty() && !crate::devin::org(cfg).is_empty(),
         },
     );
     found.insert(
