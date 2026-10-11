@@ -317,3 +317,50 @@ if __name__ == "__main__":
         print("PASS keyboard/panic")
     finally:
         t.close()
+
+    # os.kill covers the handler. These are the bytes flag 1 sends for the
+    # chords the terminal driver used to turn into signals.
+    for sequence, sig, label in [
+        (b"\x1b[99;5u", signal.SIGINT, "typed-interrupt"),
+        (b"\x1b[92;5u", signal.SIGQUIT, "typed-quit"),
+    ]:
+        t = Terminal(reply="keyboard")
+        try:
+            t.read(0.3)
+            assert b"\x1b[>1u" in t.output
+            t.send(sequence)
+            t.read(0.4)
+            status = t.proc.wait(timeout=3)
+            t.read(0.2)
+            assert status == 128 + sig, f"{label}: exit {status}"
+            left_in_legacy(t.output, label)
+            print(f"PASS keyboard/{label}")
+        finally:
+            t.close()
+
+    t = Terminal(reply="keyboard")
+    try:
+        t.read(0.3)
+        assert b"\x1b[>1u" in t.output
+        t.send(b"\x1b[122;5u")
+        stopped = False
+        until = time.monotonic() + 1
+        while time.monotonic() < until:
+            state = subprocess.check_output(
+                ["ps", "-o", "state=", "-p", str(t.proc.pid)], text=True
+            ).strip()
+            if state.startswith("T"):
+                stopped = True
+                break
+            time.sleep(0.02)
+        assert stopped, "typed Ctrl-Z did not stop the process"
+        t.read(0.2)
+        left_in_legacy(t.output, "typed suspend")
+        os.kill(t.proc.pid, signal.SIGCONT)
+        t.read(1.0)
+        assert t.output.rfind(b"\x1b[>1u") > t.output.rfind(b"\x1b[<u"), "resume did not push again"
+        t.quit()
+        left_in_legacy(t.output, "exit after typed suspend")
+        print("PASS keyboard/typed-suspend")
+    finally:
+        t.close()

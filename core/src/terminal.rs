@@ -208,16 +208,19 @@ pub(crate) fn reply(sequence: &str) {
         push
     };
     if push {
-        // Write the push before publishing the flag, so a signal that pops
-        // cannot land between the flag and the bytes and leave flag 1 on.
+        // The flag and the bytes are one transition. SIGINT, SIGTERM,
+        // SIGTSTP and SIGQUIT stay blocked until both have happened, and
+        // the flag is stored first so a handler that still runs pops.
+        let _hold = block_handled_signals();
+        KEYBOARD_PUSHED.store(true, Ordering::Release);
         super::out(KEYBOARD_PUSH);
         super::flush();
-        KEYBOARD_PUSHED.store(true, Ordering::Release);
     }
 }
 
 /// Pop flag 1 if this process pushed it. Safe to call more than once.
 pub(crate) fn pop_keyboard() {
+    let _hold = block_handled_signals();
     if KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         super::out(KEYBOARD_POP);
         super::flush();
@@ -225,6 +228,9 @@ pub(crate) fn pop_keyboard() {
 }
 
 pub(crate) fn cleanup_signal() {
+    // Same hold as the push: the handler can itself be interrupted, and
+    // the flag clear and the pop bytes have to stay one transition.
+    let _hold = block_handled_signals();
     if SYNC_SUPPORTED.load(Ordering::Acquire) {
         unsafe {
             libc::write(
@@ -241,6 +247,34 @@ pub(crate) fn cleanup_signal() {
                 KEYBOARD_POP.as_ptr().cast(),
                 KEYBOARD_POP.len(),
             );
+        }
+    }
+}
+
+/// Signals whose handlers pop the keyboard mode. Held across the push, the
+/// pop, and the flag update so those handlers cannot observe a half-written
+/// transition. Restores the previous mask on drop, including from a handler.
+struct HeldSignals {
+    old: libc::sigset_t,
+}
+
+fn block_handled_signals() -> HeldSignals {
+    unsafe {
+        let mut block = std::mem::zeroed();
+        libc::sigemptyset(&mut block);
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGTSTP, libc::SIGQUIT] {
+            libc::sigaddset(&mut block, sig);
+        }
+        let mut old = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut old);
+        HeldSignals { old }
+    }
+}
+
+impl Drop for HeldSignals {
+    fn drop(&mut self) {
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut());
         }
     }
 }
@@ -454,5 +488,47 @@ mod tests {
         assert!(!legacy.reply("\x1b[?62;c", now));
         assert!(!legacy.reply("\x1b[?1u", now));
         assert!(!legacy.keyboard_disambiguate);
+    }
+
+    #[test]
+    fn keyboard_transitions_block_the_signals_that_pop() {
+        let mut before = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut before);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut before),
+                0
+            );
+        }
+        let held = [libc::SIGINT, libc::SIGTERM, libc::SIGTSTP, libc::SIGQUIT];
+        {
+            let _hold = block_handled_signals();
+            let mut during = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::sigemptyset(&mut during);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut during),
+                    0
+                );
+            }
+            for sig in held {
+                assert_eq!(unsafe { libc::sigismember(&during, sig) }, 1, "{sig}");
+            }
+        }
+        let mut after = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut after);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut after),
+                0
+            );
+        }
+        for sig in held {
+            assert_eq!(
+                unsafe { libc::sigismember(&after, sig) },
+                unsafe { libc::sigismember(&before, sig) },
+                "{sig}"
+            );
+        }
     }
 }

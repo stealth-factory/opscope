@@ -854,6 +854,10 @@ pub fn setup() {
         let handler = handle_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+        // Quit joins the same restore path. Flag 1 delivers Ctrl-\ as a
+        // report rather than as the byte the terminal driver would turn
+        // into SIGQUIT, and a default terminate would skip the pop.
+        libc::signal(libc::SIGQUIT, handler);
         libc::signal(libc::SIGTSTP, handle_suspend as *const () as libc::sighandler_t);
         // `sigaction` rather than `signal`, so that `SA_RESTART` is ours to
         // ask for rather than the platform's to decide: `SIGWINCH` arrives
@@ -3494,14 +3498,24 @@ fn settle(
     now: Instant,
 ) -> Vec<String> {
     let arrived = pending.len();
-    let mut keys = decode(pending, lone_esc);
+    let mut signals = Vec::new();
+    let mut keys = decode_reporting(pending, lone_esc, &mut signals);
     if pending.len() < arrived {
         // decode consumed something, and an unfinished string can only
         // follow what it consumed: whatever is held now started in this
         // read, so it gets its own patience.
         *since = None;
     }
-    keys.extend(release_stale_string(pending, lone_esc, since, now));
+    keys.extend(release_stale_string(
+        pending,
+        lone_esc,
+        since,
+        now,
+        &mut signals,
+    ));
+    // After the buffer is settled, so a suspend resumes with the rest of
+    // this read already consumed. SIGINT and SIGQUIT do not return.
+    raise_legacy_signals(&signals);
     keys
 }
 
@@ -3517,6 +3531,7 @@ fn release_stale_string(
     lone_esc: &mut bool,
     since: &mut Option<Instant>,
     now: Instant,
+    signals: &mut Vec<libc::c_int>,
 ) -> Vec<String> {
     // decode() leaves only an unfinished tail, so an introducer here is a
     // string still waiting for its terminator.
@@ -3531,7 +3546,7 @@ fn release_stale_string(
     }
     *since = None;
     pending.remove(0);
-    decode(pending, lone_esc)
+    decode_reporting(pending, lone_esc, signals)
 }
 
 /// The name a single legacy byte already has, shared with `CSI u` so the
@@ -3540,8 +3555,9 @@ fn release_stale_string(
 /// reads as a typo, and a control byte in a match arm is invisible to
 /// anyone scanning the file for its keys. Those three are safe to take.
 /// The terminal is in cbreak with ISIG still on, so the bytes it
-/// intercepts are the signal ones - these are not among them, and neither
-/// is flow control's ^S/^Q.
+/// intercepts, Ctrl-C, Ctrl-Z and Ctrl-\, never arrive here. Flag 1 sends
+/// those chords as `CSI u` instead, and [`legacy_named`] turns them back
+/// into the same signals. Flow control's ^S/^Q is not among either.
 fn name_byte(ch: char) -> String {
     match ch {
         '\r' | '\n' => "enter".to_string(),
@@ -3620,7 +3636,7 @@ fn read_number(s: &[char], i: &mut usize) -> Option<u32> {
 /// CSI form has to produce that same name or a widget's match arm would
 /// see a key it was not written for. The gain is that Alt+[ arrives as
 /// `[` instead of sitting in the buffer as an unfinished control sequence.
-fn kitty_press(s: &[char]) -> Option<(usize, Option<String>)> {
+fn kitty_press(s: &[char]) -> Option<(usize, Option<LegacyPress>)> {
     if s.first() != Some(&'\x1b') || s.get(1) != Some(&'[') {
         return None;
     }
@@ -3661,26 +3677,101 @@ fn kitty_press(s: &[char]) -> Option<(usize, Option<String>)> {
     Some((i, legacy_named(code, modifiers)))
 }
 
+/// A press `CSI u` turns into. A release is the `None` beside the length,
+/// not a variant: it is consumed and names nothing.
+enum LegacyPress {
+    Key(String),
+    /// The chord whose legacy byte is VINTR, VSUSP, or VQUIT.
+    Signal(libc::c_int),
+}
+
 /// The key name `code` with Kitty's modifier field would have under the
 /// legacy encoding. Shift-tab stays unnamed: legacy sends `CSI Z`, which
 /// is dropped. Modifiers this program has no binding for are dropped too.
-fn legacy_named(code: u32, modifiers: u32) -> Option<String> {
+///
+/// Printable non-ASCII is the character itself. Alt is an ESC prefix in
+/// the legacy encoding and that prefix is not part of the name, so
+/// Alt+é and é agree. Functional keys this program does not bind stay
+/// unnamed, including the private-use numbers flag 1 uses for them.
+fn legacy_named(code: u32, modifiers: u32) -> Option<LegacyPress> {
     let bits = modifiers.saturating_sub(1) & !0b1100_0000;
     if bits & !0b0111 != 0 {
         return None;
     }
     let shift = bits & 1 != 0;
     let ctrl = bits & 4 != 0;
+    // Flag 1 gives keypad keys their own numbers. Legacy mode sends the
+    // non-keypad key, which is the name already matched below.
+    if let Some(name) = keypad_motion(code) {
+        return Some(LegacyPress::Key(name.to_string()));
+    }
+    if let Some(ch) = keypad_text(code) {
+        return named_text(ch, shift, ctrl);
+    }
     match code {
-        27 if !shift && !ctrl => return Some("esc".to_string()),
-        13 if !shift => return Some("enter".to_string()),
-        9 if !shift => return Some("tab".to_string()),
-        127 | 8 if !shift => return Some("backspace".to_string()),
+        27 if !shift && !ctrl => return Some(LegacyPress::Key("esc".to_string())),
+        13 if !shift => return Some(LegacyPress::Key("enter".to_string())),
+        9 if !shift => return Some(LegacyPress::Key("tab".to_string())),
+        127 | 8 if !shift => return Some(LegacyPress::Key("backspace".to_string())),
         _ => {}
     }
     let ch = char::from_u32(code)?;
-    if !ch.is_ascii() || ch.is_ascii_control() {
+    if ch.is_control() || is_private_use(ch) {
         return None;
+    }
+    named_text(ch, shift, ctrl)
+}
+
+/// Enter and the keypad arrows, as the legacy sequences already name them.
+/// Insert, delete and begin have no name in this decoder, so they are absent.
+fn keypad_motion(code: u32) -> Option<&'static str> {
+    Some(match code {
+        57414 => "enter",
+        57417 => "left",
+        57418 => "right",
+        57419 => "up",
+        57420 => "down",
+        57421 => "pgup",
+        57422 => "pgdn",
+        57423 => "home",
+        57424 => "end",
+        _ => return None,
+    })
+}
+
+/// Keypad digits and the operators a numpad sends as text. `57399` is 0.
+fn keypad_text(code: u32) -> Option<char> {
+    Some(match code {
+        57399..=57408 => char::from(b'0' + (code - 57399) as u8),
+        57409 => '.',
+        57410 => '/',
+        57411 => '*',
+        57412 => '-',
+        57413 => '+',
+        57415 => '=',
+        57416 => ',',
+        _ => return None,
+    })
+}
+
+fn is_private_use(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    )
+}
+
+fn named_text(ch: char, shift: bool, ctrl: bool) -> Option<LegacyPress> {
+    // Shift is not part of the legacy signal byte: Ctrl-Shift-C is its own
+    // report, and the driver never saw 0x03 for it. Alt is a prefix the
+    // driver still interrupts on, so Alt-Ctrl-C signals.
+    if ctrl && !shift {
+        if let Some(sig) = intr_quit_susp(ctrl_legacy(ch)) {
+            return Some(LegacyPress::Signal(sig));
+        }
+    }
+    if !ch.is_ascii() {
+        return Some(LegacyPress::Key(ch.to_string()));
     }
     let produced = if ctrl {
         ctrl_legacy(ch)
@@ -3689,7 +3780,24 @@ fn legacy_named(code: u32, modifiers: u32) -> Option<String> {
     } else {
         ch
     };
-    Some(name_byte(produced))
+    Some(LegacyPress::Key(name_byte(produced)))
+}
+
+/// VINTR, VSUSP and VQUIT: the bytes ISIG turns into signals before a
+/// program in cbreak can read them.
+fn intr_quit_susp(ch: char) -> Option<libc::c_int> {
+    match ch {
+        '\u{3}' => Some(libc::SIGINT),
+        '\u{1a}' => Some(libc::SIGTSTP),
+        '\u{1c}' => Some(libc::SIGQUIT),
+        _ => None,
+    }
+}
+
+fn raise_legacy_signals(signals: &[libc::c_int]) {
+    for &sig in signals {
+        unsafe { libc::raise(sig) };
+    }
 }
 
 /// Turn what the terminal sent into key names, leaving anything incomplete
@@ -3700,6 +3808,15 @@ fn legacy_named(code: u32, modifiers: u32) -> Option<String> {
 /// ignored or arrives as a handful of characters that other keys are bound
 /// to.
 fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
+    let mut signals = Vec::new();
+    decode_reporting(buf, lone_esc, &mut signals)
+}
+
+fn decode_reporting(
+    buf: &mut String,
+    lone_esc: &mut bool,
+    signals: &mut Vec<libc::c_int>,
+) -> Vec<String> {
     const SEQUENCES: &[(&str, &str)] = &[
         ("\x1b[A", "up"),
         ("\x1b[B", "down"),
@@ -3760,8 +3877,10 @@ fn decode(buf: &mut String, lone_esc: &mut bool) -> Vec<String> {
             // this poll; a bare ESC is still a prefix and still waits.
             if let Some((len, key)) = kitty_press(&chars[at..]) {
                 at += len;
-                if let Some(name) = key {
-                    keys.push(name);
+                match key {
+                    Some(LegacyPress::Key(name)) => keys.push(name),
+                    Some(LegacyPress::Signal(sig)) => signals.push(sig),
+                    None => {}
                 }
                 continue;
             }
@@ -4135,9 +4254,22 @@ mod tests {
         let mut since = None;
         let start = std::time::Instant::now();
         assert!(super::decode(&mut pending, &mut escape).is_empty());
-        assert!(super::release_stale_string(&mut pending, &mut escape, &mut since, start).is_empty());
+        assert!(super::release_stale_string(
+            &mut pending,
+            &mut escape,
+            &mut since,
+            start,
+            &mut Vec::new()
+        )
+        .is_empty());
         assert_eq!(
-            super::release_stale_string(&mut pending, &mut escape, &mut since, start + super::STRING_PATIENCE),
+            super::release_stale_string(
+                &mut pending,
+                &mut escape,
+                &mut since,
+                start + super::STRING_PATIENCE,
+                &mut Vec::new()
+            ),
             ["]", "q"]
         );
         assert!(pending.is_empty());
@@ -5885,6 +6017,102 @@ mod tests {
         let mut partial = "\u{1b}[121".to_string();
         assert!(decode(&mut partial, &mut waiting).is_empty());
         assert_eq!(partial, "\u{1b}[121");
+    }
+
+    /// Flag 1 reports the ISIG chords as CSI u. They must not become key
+    /// names, and they must be the same signals the legacy bytes raise.
+    #[test]
+    fn csi_u_ctrl_c_z_and_backslash_are_the_legacy_signals() {
+        let chord = [
+            ("\u{1b}[99;5u", libc::SIGINT),
+            ("\u{1b}[122;5u", libc::SIGTSTP),
+            ("\u{1b}[92;5u", libc::SIGQUIT),
+            // Alt is a prefix; the driver still interrupts on the byte.
+            ("\u{1b}[99;7u", libc::SIGINT),
+            // Ctrl-4 is the same VQUIT byte as Ctrl-\, and so is Ctrl+keypad 4.
+            ("\u{1b}[52;5u", libc::SIGQUIT),
+            ("\u{1b}[57403;5u", libc::SIGQUIT),
+        ];
+        for (sequence, sig) in chord {
+            assert_eq!(keys(sequence), Vec::<String>::new(), "{sequence}");
+            let (names, signals) = reported(sequence);
+            assert!(names.is_empty(), "{sequence}");
+            assert_eq!(signals, vec![sig], "{sequence}");
+        }
+        // A release is not a second signal. A repeat is the signal again.
+        assert!(reported("\u{1b}[99;5:3u").1.is_empty());
+        assert_eq!(reported("\u{1b}[99;5:2u").1, vec![libc::SIGINT]);
+        // Ctrl-Shift-C was never the INTR byte.
+        let (names, signals) = reported("\u{1b}[99;6u");
+        assert!(signals.is_empty());
+        assert_eq!(names, vec!["\u{3}"]);
+        // What follows the chord is still a key.
+        let (names, signals) = reported("\u{1b}[99;5uq");
+        assert_eq!(signals, vec![libc::SIGINT]);
+        assert_eq!(names, vec!["q"]);
+    }
+
+    /// Keypad numbers flag 1 sends are the legacy non-keypad names.
+    #[test]
+    fn keypad_reports_use_the_legacy_names() {
+        let same = [
+            (57414, "enter"),
+            (57399, "0"),
+            (57400, "1"),
+            (57408, "9"),
+            (57409, "."),
+            (57410, "/"),
+            (57411, "*"),
+            (57412, "-"),
+            (57413, "+"),
+            (57415, "="),
+            (57416, ","),
+            (57417, "left"),
+            (57418, "right"),
+            (57419, "up"),
+            (57420, "down"),
+            (57421, "pgup"),
+            (57422, "pgdn"),
+            (57423, "home"),
+            (57424, "end"),
+        ];
+        for (code, name) in same {
+            assert_eq!(keys(&format!("\u{1b}[{code}u")), vec![name], "{code}");
+        }
+        // Shift and alt do what they do for the same non-keypad key.
+        assert_eq!(keys("\u{1b}[57400;2u"), vec!["!"]);
+        assert_eq!(keys("\u{1b}[57404;3u"), vec!["5"]);
+        assert_eq!(keys("\u{1b}[57419;5u"), vec!["up"]);
+        // Insert, delete, begin and the media keys have no legacy name here.
+        for code in [57425, 57426, 57427, 57428, 57358] {
+            assert_eq!(
+                keys(&format!("\u{1b}[{code}u")),
+                Vec::<String>::new(),
+                "{code}"
+            );
+        }
+    }
+
+    /// Alt+é is an ESC prefix in legacy and `CSI 233;3u` with flag 1.
+    #[test]
+    fn alt_plus_a_printable_non_ascii_key_matches_the_legacy_prefix() {
+        let same = [
+            ("é", "\u{1b}[233u", "é"),
+            ("\u{1b}\u{e9}", "\u{1b}[233;3u", "é"),
+            ("\u{1b}你", "\u{1b}[20320;3u", "你"),
+        ];
+        for (legacy, csi, name) in same {
+            assert_eq!(keys(legacy), vec![name.to_string()], "legacy {legacy:?}");
+            assert_eq!(keys(csi), vec![name.to_string()], "csi {csi:?}");
+        }
+    }
+
+    fn reported(text: &str) -> (Vec<String>, Vec<libc::c_int>) {
+        let mut buf = text.to_string();
+        let mut held = false;
+        let mut signals = Vec::new();
+        let names = super::decode_reporting(&mut buf, &mut held, &mut signals);
+        (names, signals)
     }
 
     #[test]

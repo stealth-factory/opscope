@@ -235,7 +235,8 @@ tests emulate acknowledged/rejected graphics, synchronized-only and silent
 terminals, fragmented/late replies, image errors, cached frames, scrolling,
 resize, screen changes, suspend/resume, quit, panic and signal cleanup. They
 also answer the keyboard-protocol query and check that flag 1 is pushed on
-start, popped on exit, suspend and panic, and pushed again after resume.
+start, popped on exit, suspend, panic and a typed Ctrl-C, Ctrl-Z or Ctrl-\,
+and pushed again after resume.
 Unit tests
 cover shared geometry, gap/idle semantics, fractional bar heights, missing-day
 markers, quota references, cropping, compression/chunking and input isolation.
@@ -270,15 +271,27 @@ it is how every other sequence begins, and a torn arrow has to stay an arrow.
 Ctrl, Alt and the editing keys are decoded from `CSI … u` into the names the
 legacy bytes already produce — `esc`, `enter`, `tab`, `backspace`, `ctrl-y`,
 `ctrl-e`, `ctrl-u`, and the character a legacy ESC prefix already yielded for
-Alt. Alt+`[` arrives as `[` instead of sitting in the buffer as an unfinished
-control sequence. Release events are ignored. Match arms in the widgets are
-unchanged, and so are text and Braille.
+Alt. That includes a printable non-ASCII key: Alt+é is `é`, the same name as
+ESC followed by é. Alt+`[` arrives as `[` instead of sitting in the buffer as
+an unfinished control sequence. Keypad enter, digits and navigation use those
+same legacy names (`enter`, `0`-`9`, the arrows, `home`, `end`, `pgup`,
+`pgdn`). Release events are ignored, and so are functional keys this program
+does not bind. Match arms in the widgets are unchanged, and so are text and
+Braille.
+
+Flag 1 reports Ctrl-C, Ctrl-Z and Ctrl-\ as `CSI 99;5u`, `CSI 122;5u` and
+`CSI 92;5u` instead of the bytes the terminal driver would turn into signals.
+Those chords raise SIGINT, SIGTSTP and SIGQUIT, so interrupt, suspend and quit
+still run. SIGQUIT uses the same restore path as SIGINT, and the exit status
+is still SIGQUIT's.
 
 `CSI < u` pops the mode on the same paths that already delete images: normal
 exit, panic (dropping `Keyboard`), handing the terminal to another program,
 and suspend (`SIGTSTP`). Resume queries again and pushes only if the terminal
 answers again. A signal that exits pops as well, so the shell is not left
-disambiguating.
+disambiguating. The push, the pop and the flag that records them are one
+transition: the signals that pop are blocked until the flag and the bytes
+have both been updated.
 
 The PTY fixture answers the query and checks the push and the pop. It does
 not stand in for a real Kitty, Ghostty, WezTerm, iTerm2, foot, Alacritty or
