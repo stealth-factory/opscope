@@ -314,8 +314,10 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
                     cwd: text_at(pane, "cwd"),
                     command: text_at(pane, "agent"),
                     is_opscope: crate::process_filter::matches("", &text_at(pane, "agent")),
-                    root_pid: pane["root_process"]["pid"].as_u64()
-                        .and_then(|pid| u32::try_from(pid).ok()).filter(|&pid| pid > 0),
+                    root_pid: pane["root_process"]["pid"]
+                        .as_u64()
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .filter(|&pid| pid > 0),
                     status: text_at(pane, "agent_status"),
                     authority: text_at(pane, "agent_authority"),
                     focused: pane["focused"].as_bool().unwrap_or(false),
@@ -326,7 +328,9 @@ pub fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
     Ok(Snapshot {
         session: text_at(&result, "session"),
         protocol,
-        sequence: result["event_sequence"].as_u64().unwrap_or(0),
+        sequence: result["event_sequence"]
+            .as_u64()
+            .ok_or_else(|| "luvus answered with no valid event_sequence".to_string())?,
         spaces,
         panes,
         process_error: String::new(),
@@ -342,11 +346,18 @@ pub fn parse_process_flags(text: &str) -> Result<std::collections::HashSet<u32>,
     let mut matches = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let mut fields = line.split_whitespace();
-        let pid = fields.next().and_then(|s| s.parse::<u32>().ok())
-            .filter(|&pid| pid > 0).ok_or("local process scan returned an invalid PID")?;
-        let parent = fields.next().and_then(|s| s.parse::<u32>().ok())
+        let pid = fields
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&pid| pid > 0)
+            .ok_or("local process scan returned an invalid PID")?;
+        let parent = fields
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
             .ok_or("local process scan returned an invalid parent PID")?;
-        let name = fields.next().ok_or("local process scan returned no executable name")?;
+        let name = fields
+            .next()
+            .ok_or("local process scan returned no executable name")?;
         let command = fields.collect::<Vec<_>>().join(" ");
         parents.insert(pid, parent);
         if crate::process_filter::matches(name, &command) {
@@ -372,8 +383,12 @@ pub fn mark_opscope_processes(snapshot: &mut Snapshot, processes: Result<&str, S
                 pane.is_opscope |= pane.root_pid.is_some_and(|pid| marked.contains(&pid));
             }
         }
-        Err(why) => snapshot.process_error = format!(
-            "opscope command filtering unavailable: {}; using reported names only", why),
+        Err(why) => {
+            snapshot.process_error = format!(
+                "opscope command filtering unavailable: {}; using reported names only",
+                why
+            )
+        }
     }
 }
 
@@ -758,16 +773,25 @@ mod tests {
             ("OpScOpE widget", "node", "server.js", true),
         ] {
             // The UHP wire exposes pid and start_marker, never name/argv.
-            let text = serde_json::json!({"result": {"workspaces": [{"tabs": [{"panes": [
+            let text = serde_json::json!({"result": {"event_sequence": 1, "workspaces": [{"tabs": [{"panes": [
                 {"pane_id": "1", "agent": agent, "root_process": {"pid": 100, "start_marker": "fixture"}, "agent_status": "working"}
             ]}]}]}}).to_string();
             let mut snapshot = parse_snapshot(&text).unwrap();
-            let table = format!("100 1 bash bash\n101 100 {} {}\n102 1 normal normal", name, command);
+            let table = format!(
+                "100 1 bash bash\n101 100 {} {}\n102 1 normal normal",
+                name, command
+            );
             mark_opscope_processes(&mut snapshot, Ok(&table));
             assert_eq!(snapshot.panes[0].is_opscope, expected);
             assert!(snapshot.process_error.is_empty());
             let mut filter = crate::process_filter::Filter::default();
-            let count = |filter: &crate::process_filter::Filter| snapshot.panes.iter().filter(|p| filter.visible(p.is_opscope)).count();
+            let count = |filter: &crate::process_filter::Filter| {
+                snapshot
+                    .panes
+                    .iter()
+                    .filter(|p| filter.visible(p.is_opscope))
+                    .count()
+            };
             assert_eq!(count(&filter), usize::from(!expected));
             let mut selected = 3;
             for _ in 0..2 {
@@ -979,6 +1003,20 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_event_sequence_must_be_a_valid_unsigned_integer() {
+        let zero = SNAPSHOT.replace("\"event_sequence\": 2094", "\"event_sequence\": 0");
+        assert_eq!(parse_snapshot(&zero).unwrap().sequence, 0);
+        for invalid in [
+            SNAPSHOT.replace("\"event_sequence\": 2094,", ""),
+            SNAPSHOT.replace("\"event_sequence\": 2094", "\"event_sequence\": -1"),
+            SNAPSHOT.replace("\"event_sequence\": 2094", "\"event_sequence\": 1.5"),
+            SNAPSHOT.replace("\"event_sequence\": 2094", "\"event_sequence\": \"2094\""),
+        ] {
+            assert!(parse_snapshot(&invalid).is_err());
+        }
+    }
+
+    #[test]
     fn an_empty_session_is_not_a_broken_one() {
         let bare = r#"{"id":"1","result":{"session":"scratch","event_sequence":1,
           "protocol":{"major":1,"minor":0},"workspaces":[]}}"#;
@@ -992,7 +1030,7 @@ mod tests {
     fn the_three_absences_are_told_apart() {
         // The live wording, with the socket path this widget never prints.
         assert_eq!(
-            parse_failure("Error: no luvus server running (socket: /srv/run/luvus.sock)"),
+            parse_failure("Error: no luvus server running (socket: /local/endpoint)"),
             Absence::NoServer
         );
         assert_eq!(
@@ -1011,11 +1049,11 @@ mod tests {
         );
         // And whatever it says, the socket path never reaches a row.
         assert_eq!(
-            parse_failure("Error: something else (socket: /srv/run/luvus.sock)"),
+            parse_failure("Error: something else (socket: /local/endpoint)"),
             Absence::Other("Error: something else".into())
         );
         assert_eq!(
-            sanitize_error("Error: no luvus server running (socket: /srv/run/luvus.sock)"),
+            sanitize_error("Error: no luvus server running (socket: /local/endpoint)"),
             "Error: no luvus server running"
         );
         // Already clean stays clean, so a second pass cannot invent a reason.

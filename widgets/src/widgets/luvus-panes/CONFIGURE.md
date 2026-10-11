@@ -19,10 +19,19 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 1. Confirm `luvus` exists and answers — `luvus ping` is the cheapest check, and `luvus session list` names the sessions that exist on this machine. No hostname, socket path, token, or workspace name belongs in a tracked file.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
 3. `session` is only worth changing on a machine running more than one Luvus server. The name must be one `luvus session list` reports; a name with no server behind it draws the "no luvus server" screen rather than an empty board.
-4. `refresh` is the cadence of those four calls. Keep the default unless the user has a concrete responsiveness need.
+4. `refresh` is the maximum idle delay before a full read. A `pane.agent_status_changed` event can wake it sooner; task, lease, pane, Git, and worktree-only changes are picked up at the idle ceiling. Keep the default unless the user has a concrete responsiveness need.
 5. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
 6. Save through the settings screen and leave it — the widget reloads itself on the way out, so no restart is needed. Then verify that the real session answers, or that the pane gives a specific reason why it cannot.
 
 ## Boundaries
+
+Only one bounded event wait is used, for agent status changes, so blocked and
+finished agents get the quickest attention without multiplying child
+processes. It uses a one-second minimum and a thirty-second maximum; the
+authoritative poller keeps the configured ceiling independently, including
+sub-second settings. Press `r` to wake that poller even while the event wait
+is active. Event payloads never patch the display; the next full read remains
+authoritative. Wait failures are shown separately from source-read failures
+and trigger a new full read.
 
 Do not fabricate session names, workspace names, agent names, branches, task ids, reserved paths, pane ids, or successful readings. If a value cannot be established from the local environment or the user's explicit instruction, ask.

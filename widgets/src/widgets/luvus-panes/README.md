@@ -229,6 +229,20 @@ bottom rather than leaving the body with no rows: a body with nothing in it
 looks exactly like a session with nothing in it, and those are opposite
 readings of the same screen. The title and the counts never go.
 
+## Refresh
+
+`refresh` is the maximum idle delay before another authoritative full read.
+One bounded `events.wait` prioritizes `pane.agent_status_changed`, so blocked
+or finished agents can appear sooner without spawning a waiter per pane.
+Task, lease, pane, Git and worktree-only changes use the configured idle
+ceiling instead. The event wait has a one-second minimum and a thirty-second
+maximum; the separate poller honors the configured ceiling even below one
+second. `r` wakes the poller independently of the event wait.
+
+Events only wake a read: their payloads never patch the board. A lost,
+malformed or disconnected event response is visible and requests a fresh
+snapshot before its cursor is reset.
+
 ## Keys
 
 | Key | Action |

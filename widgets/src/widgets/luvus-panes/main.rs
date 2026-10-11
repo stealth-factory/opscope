@@ -23,7 +23,8 @@
 //! for — claimable tasks and the file-path leases they hold.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opscope_core as tc;
@@ -33,6 +34,12 @@ mod process_filter;
 
 #[path = "parse.rs"]
 mod parse;
+
+#[path = "events.rs"]
+mod events;
+
+#[path = "../refresh_wake.rs"]
+mod refresh_wake;
 
 use parse::{
     Absence, Agent, Explanation, GitState, Lease, NextTask, Pane, Resumable, Snapshot, Task,
@@ -53,6 +60,7 @@ const SETTINGS: tc::SettingsSpec = tc::SettingsSpec {
 /// unbounded wait would hold the poller there forever with the pane still
 /// drawing whatever it last had.
 const RUN_TIMEOUT: u64 = 15;
+const EVENT_WAIT_GRACE: u64 = 3;
 
 /// Run one luvus command against a named session and hand back its stdout.
 fn luvus_text(session: &str, args: &[&str]) -> Result<String, String> {
@@ -68,7 +76,10 @@ fn focus_pane(session: &str, pane: &str) -> bool {
 }
 
 fn local_processes() -> Result<String, String> {
-    tc::run(&["ps", "-axww", "-o", "pid=,ppid=,comm=,args="], RUN_TIMEOUT)
+    tc::run(
+        &["ps", "-axww", "-o", "pid=,ppid=,comm=,args="],
+        RUN_TIMEOUT,
+    )
 }
 
 /// Everything one poll established, each source answering for itself.
@@ -103,6 +114,15 @@ struct State {
     /// explanation with it and leaves a board that looks like an empty
     /// session, which is the one thing this widget must never do.
     err: String,
+    /// Event delivery is independent of the authoritative sources above:
+    /// a successful snapshot must not imply that the waiter is healthy.
+    watcher_err: String,
+    /// Incremented only when an authoritative snapshot supplies a valid
+    /// event cursor. Waiters discard results from an older epoch.
+    snapshot_epoch: u64,
+    /// Last successful snapshot cursor, retained while later snapshot reads
+    /// fail so an in-flight waiter cannot mistake an old result for current.
+    event_cursor: Option<u64>,
     /// False until the first poll has answered, so "nothing here" is not
     /// drawn over a session nobody has looked at yet.
     read: bool,
@@ -122,6 +142,9 @@ impl Default for State {
             worktrees: Err(WAITING.into()),
             absent: None,
             err: String::new(),
+            watcher_err: String::new(),
+            snapshot_epoch: 0,
+            event_cursor: None,
             read: false,
         }
     }
@@ -218,6 +241,7 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         listed
     });
 
+    let event_sequence = snapshot.as_ref().ok().map(|snapshot| snapshot.sequence);
     if let Ok(mut guard) = state.lock() {
         guard.snapshot = snapshot;
         guard.agents = agents;
@@ -229,8 +253,147 @@ fn poll(state: &Arc<Mutex<State>>, seen: &mut Seen, session: &str) {
         guard.worktrees = worktrees;
         guard.absent = None;
         guard.read = true;
+        if let Some(sequence) = event_sequence {
+            guard.snapshot_epoch = guard.snapshot_epoch.wrapping_add(1);
+            guard.event_cursor = Some(sequence);
+        }
     }
     seen.first_poll = false;
+}
+
+fn event_baseline(state: &Arc<Mutex<State>>) -> Option<(u64, u64)> {
+    let guard = state.lock().ok()?;
+    Some((guard.snapshot_epoch, guard.event_cursor?))
+}
+
+fn watcher_error(state: &Arc<Mutex<State>>, error: impl Into<String>) {
+    if let Ok(mut guard) = state.lock() {
+        guard.watcher_err = error.into();
+    }
+}
+
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(|message| message.to_string())
+        })
+        .unwrap_or_else(|| "non-string panic payload".into())
+}
+
+fn run_watcher_catching_panic(state: &Arc<Mutex<State>>, watch: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(watch)) {
+        watcher_error(
+            state,
+            format!("event watcher panicked: {}", panic_reason(payload.as_ref())),
+        );
+    }
+}
+
+fn recover_event_baseline(
+    state: &Arc<Mutex<State>>,
+    wake: &refresh_wake::Wake,
+    stop: &AtomicBool,
+    old_epoch: u64,
+) -> Option<(u64, u64)> {
+    refresh_wake::request(wake);
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(baseline) = event_baseline(state) {
+            if baseline.0 != old_epoch {
+                return Some(baseline);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+fn event_watcher(
+    state: Arc<Mutex<State>>,
+    wake: refresh_wake::Wake,
+    session: String,
+    refresh: f64,
+    stop: Arc<AtomicBool>,
+) {
+    let timeout_s = (refresh.floor() as u64).clamp(1, 30);
+    let execution_timeout = timeout_s + EVENT_WAIT_GRACE;
+    let args = ["luvus", "--session", &session, "uhp", "proxy"];
+    let mut baseline = None;
+    let mut backoff = Duration::from_secs(1);
+
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(current) = event_baseline(&state) {
+            if baseline.is_none_or(|previous: (u64, u64)| previous.0 != current.0) {
+                baseline = Some(current);
+            }
+        }
+        let Some((wait_epoch, cursor)) = baseline else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+
+        // One status-only wait prioritizes blocked-agent latency; other
+        // session changes are covered by the independent refresh ceiling.
+        let request = events::wait_request(cursor, timeout_s);
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tc::run_input(&args, &request, execution_timeout)
+        }));
+        let response = match response {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                watcher_error(&state, parse::sanitize_error(&error));
+                baseline = recover_event_baseline(&state, &wake, &stop, wait_epoch);
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(8));
+                continue;
+            }
+            Err(payload) => {
+                watcher_error(
+                    &state,
+                    format!("event watcher panicked: {}", panic_reason(payload.as_ref())),
+                );
+                baseline = recover_event_baseline(&state, &wake, &stop, wait_epoch);
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(8));
+                continue;
+            }
+        };
+
+        let result = events::parse_wait_response(&response, cursor);
+        let current = event_baseline(&state).unwrap_or((wait_epoch, cursor));
+        if let Some((next_baseline, should_wake)) =
+            events::reconcile_result(&result, wait_epoch, cursor, current)
+        {
+            if should_wake {
+                refresh_wake::request(&wake);
+            }
+            baseline = Some(next_baseline);
+            if let Ok(mut guard) = state.lock() {
+                guard.watcher_err.clear();
+            }
+            backoff = Duration::from_secs(1);
+            continue;
+        }
+
+        if let Err(error) = result {
+            watcher_error(&state, error);
+            baseline = recover_event_baseline(&state, &wake, &stop, wait_epoch);
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_secs(8));
+        }
+    }
 }
 
 /// One agent's evidence, fetched when asked for rather than every poll.
@@ -499,8 +662,16 @@ fn plural(n: usize) -> &'static str {
 fn pane_summary(total: usize, hidden_opscope: usize, resting: usize, show_idle: bool) -> String {
     let hidden_idle = if show_idle { 0 } else { resting };
     let visible = total - hidden_opscope - hidden_idle;
-    format!(" · {} {}pane{}", visible,
-        if hidden_opscope + hidden_idle > 0 { "visible " } else { "" }, plural(visible))
+    format!(
+        " · {} {}pane{}",
+        visible,
+        if hidden_opscope + hidden_idle > 0 {
+            "visible "
+        } else {
+            ""
+        },
+        plural(visible)
+    )
 }
 
 /// The filter `[i]` applies, named, or nothing when it is holding nothing.
@@ -610,7 +781,10 @@ fn membership_rank(inside: Option<bool>) -> u8 {
 /// panes keep the longer sentence.
 /// The widest of some values, in cells.
 fn widest<S: AsRef<str>>(values: impl Iterator<Item = S>) -> usize {
-    values.map(|v| tc::display_width(v.as_ref())).max().unwrap_or(0)
+    values
+        .map(|v| tc::display_width(v.as_ref()))
+        .max()
+        .unwrap_or(0)
 }
 
 /// What the BRANCH column says for an agent: its branch, or the project
@@ -650,17 +824,29 @@ impl Columns {
         // An agent row: `▸`, the mark and a space, the name, STATE and FOR,
         // the space before the workspace; the space before BRANCH when wide.
         let agent = if wide {
-            tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 1 + 1), &[(8, want[0]), (14, want[1]), (0, want[2])])
+            tc::fit_columns(
+                row.saturating_sub(3 + 9 + 7 + 1 + 1),
+                &[(8, want[0]), (14, want[1]), (0, want[2])],
+            )
         } else {
-            tc::fit_columns(row.saturating_sub(3 + 9 + 7 + 1), &[(8, want[0]), (14, want[1])])
+            tc::fit_columns(
+                row.saturating_sub(3 + 9 + 7 + 1),
+                &[(8, want[0]), (14, want[1])],
+            )
         };
         // A pane row: `▸`, the mark and a space, the command, STATE, the
         // space before the workspace; the space before the directory when
         // wide.
         let busy = if wide {
-            tc::fit_columns(row.saturating_sub(3 + 9 + 1 + 1), &[(12, want[3]), (14, want[4]), (0, want[5])])
+            tc::fit_columns(
+                row.saturating_sub(3 + 9 + 1 + 1),
+                &[(12, want[3]), (14, want[4]), (0, want[5])],
+            )
         } else {
-            tc::fit_columns(row.saturating_sub(3 + 9 + 1), &[(12, want[3]), (14, want[4])])
+            tc::fit_columns(
+                row.saturating_sub(3 + 9 + 1),
+                &[(12, want[3]), (14, want[4])],
+            )
         };
         // An idle row: `▸`, the mark and a space, the directory and a
         // space, then the workspace.
@@ -799,10 +985,12 @@ fn main() {
 
     let p = palette();
     let state = Arc::new(Mutex::new(State::default()));
-    let wake = Arc::new((Mutex::new(false), Condvar::new()));
+    let wake = refresh_wake::new();
     let poller = Arc::clone(&state);
     let poller_wake = Arc::clone(&wake);
     let polled_session = session.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let poller_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
         let mut seen = Seen {
             first_poll: true,
@@ -814,25 +1002,38 @@ fn main() {
             let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 poll(&poller, &mut seen, &polled_session)
             }));
-            if step.is_err() {
+            if let Err(payload) = step {
                 if let Ok(mut guard) = poller.lock() {
-                    guard.err = "poller stopped - see the pane it was started from".into();
+                    guard.err = format!("poller stopped: {}", panic_reason(payload.as_ref()));
                 }
                 return;
             }
-            let (lock, cond) = &*poller_wake;
-            let mut asked = match lock.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            if !*asked {
-                asked = match cond.wait_timeout(asked, Duration::from_secs_f64(refresh)) {
-                    Ok((g, _)) => g,
-                    Err(_) => return,
-                };
+            if poller_stop.load(Ordering::Relaxed) {
+                return;
             }
-            *asked = false;
+            if refresh_wake::wait_for(&poller_wake, Duration::from_secs_f64(refresh)).is_err() {
+                if let Ok(mut guard) = poller.lock() {
+                    guard.err = "poller wake signal failed".into();
+                }
+                return;
+            }
         }
+    });
+    let watcher_state = Arc::clone(&state);
+    let watcher_wake = Arc::clone(&wake);
+    let watcher_stop = Arc::clone(&stop);
+    let watcher_session = session.clone();
+    std::thread::spawn(move || {
+        let loop_state = Arc::clone(&watcher_state);
+        run_watcher_catching_panic(&watcher_state, move || {
+            event_watcher(
+                loop_state,
+                watcher_wake,
+                watcher_session,
+                refresh,
+                watcher_stop,
+            )
+        });
     });
 
     tc::setup();
@@ -876,13 +1077,21 @@ fn main() {
         // names for opening one. Rewritten before the match rather than
         // acted on here, so the arm below does the opening and this cannot
         // drift from what the keyboard does.
-        if let Some(at) = tc::rows_clicked(&mut keys, Some(selected), list_head, list_scroll, &placed, None) {
+        if let Some(at) = tc::rows_clicked(
+            &mut keys,
+            Some(selected),
+            list_head,
+            list_scroll,
+            &placed,
+            None,
+        ) {
             selected = at;
             moved = true;
         }
         for key in keys {
             match key.as_str() {
                 "q" | "Q" => {
+                    stop.store(true, Ordering::Relaxed);
                     keyboard.restore();
                     tc::restore_screen();
                     return;
@@ -892,11 +1101,7 @@ fn main() {
                     continue;
                 }
                 "r" | "R" => {
-                    let (lock, cond) = &*wake;
-                    if let Ok(mut asked) = lock.lock() {
-                        *asked = true;
-                        cond.notify_all();
-                    }
+                    refresh_wake::request(&wake);
                 }
                 "o" | "O" => {
                     if detail.is_none() {
@@ -1055,23 +1260,36 @@ fn main() {
         }
 
         let (w, h) = tc::size();
-        let (snapshot, agents, tasks, leases, absent, err, read, next, sessions, git, worktrees) =
-            match state.lock() {
-                Ok(g) => (
-                    g.snapshot.clone(),
-                    g.agents.clone(),
-                    g.tasks.clone(),
-                    g.leases.clone(),
-                    g.absent.clone(),
-                    g.err.clone(),
-                    g.read,
-                    g.next.clone(),
-                    g.sessions.clone(),
-                    g.git.clone(),
-                    g.worktrees.clone(),
-                ),
-                Err(_) => return,
-            };
+        let (
+            snapshot,
+            agents,
+            tasks,
+            leases,
+            absent,
+            err,
+            watcher_err,
+            read,
+            next,
+            sessions,
+            git,
+            worktrees,
+        ) = match state.lock() {
+            Ok(g) => (
+                g.snapshot.clone(),
+                g.agents.clone(),
+                g.tasks.clone(),
+                g.leases.clone(),
+                g.absent.clone(),
+                g.err.clone(),
+                g.watcher_err.clone(),
+                g.read,
+                g.next.clone(),
+                g.sessions.clone(),
+                g.git.clone(),
+                g.worktrees.clone(),
+            ),
+            Err(_) => return,
+        };
         let wide = w >= 76;
 
         // Rows for drawing. A failed source stays a failed source: these
@@ -1105,7 +1323,10 @@ fn main() {
             .cloned()
             .collect();
         let total_others = others.len();
-        let hidden_opscope = others.iter().filter(|n| !opscope_filter.visible(n.is_opscope)).count();
+        let hidden_opscope = others
+            .iter()
+            .filter(|n| !opscope_filter.visible(n.is_opscope))
+            .count();
         others.retain(|n| opscope_filter.visible(n.is_opscope));
         // Unstated first, then busy, then the prompts: the row that wants
         // looking at is the one where luvus could not say.
@@ -1243,6 +1464,15 @@ fn main() {
                 w.saturating_sub(1),
             ));
         }
+        if !watcher_err.is_empty() {
+            head.push(tc::seg(
+                &[(
+                    p.blocked.as_str(),
+                    format!(" ! event wait: {}", watcher_err),
+                )],
+                w.saturating_sub(1),
+            ));
+        }
         let wants =
             counts.get("blocked").copied().unwrap_or(0) + counts.get("done").copied().unwrap_or(0);
         head.push(if agents.is_err() {
@@ -1319,9 +1549,13 @@ fn main() {
         // It wraps, so how many rows it takes depends on the width, and the
         // body cannot know its own budget until that is settled.
         let hints: Vec<Vec<(&str, String)>> = vec![
-            vec![
-                (p.dim.as_str(), format!("[o]{} Opscope", if opscope_filter.show { "hide" } else { "show" })),
-            ],
+            vec![(
+                p.dim.as_str(),
+                format!(
+                    "[o]{} Opscope",
+                    if opscope_filter.show { "hide" } else { "show" }
+                ),
+            )],
             vec![
                 (p.accent.as_str(), "↑↓".into()),
                 (p.dim.as_str(), " select".into()),
@@ -1348,8 +1582,7 @@ fn main() {
             vec![(p.dim.as_str(), "[q]uit".into())],
         ];
         let packed = tc::pack_hints_placed(&hints, w.saturating_sub(2), "  ");
-        let footer: Vec<String> =
-            packed.lines.iter().map(|l| format!(" {}", l)).collect();
+        let footer: Vec<String> = packed.lines.iter().map(|l| format!(" {}", l)).collect();
 
         // ---- the body, built at whatever height it needs ----
         let mut body: Vec<String> = Vec::new();
@@ -1736,7 +1969,10 @@ fn main() {
                             format!("{}{}", if a.exact { "" } else { "≥" }, parse::ago(a.since))
                         ),
                     ),
-                    (c(&p.accent), format!(" {}", tc::pad(&a.workspace, agent_workspace_w))),
+                    (
+                        c(&p.accent),
+                        format!(" {}", tc::pad(&a.workspace, agent_workspace_w)),
+                    ),
                 ];
                 if wide {
                     let branch = branch_of(a);
@@ -2045,7 +2281,9 @@ fn main() {
                                 // What the kind and the membership leave,
                                 // and never less than the 34 it always had.
                                 w.saturating_sub(1 + 3 + 8 + 1 + 2)
-                                    .saturating_sub(membership_label(r.in_workspace, wide).chars().count())
+                                    .saturating_sub(
+                                        membership_label(r.in_workspace, wide).chars().count()
+                                    )
                                     .max(34),
                             )
                         ),
@@ -2178,7 +2416,10 @@ fn main() {
                             tc::pad(if unstated_here { "no state" } else { &n.status }, 8)
                         ),
                     ),
-                    (c(&p.accent), format!(" {}", tc::pad(&n.workspace, busy_workspace_w))),
+                    (
+                        c(&p.accent),
+                        format!(" {}", tc::pad(&n.workspace, busy_workspace_w)),
+                    ),
                 ];
                 if wide {
                     line.push((c(&p.dim), format!(" {}", parse::homely(&n.cwd))));
@@ -2198,13 +2439,15 @@ fn main() {
                 // all. Saying the first about the second would be a claim
                 // about panes that do not exist.
                 let empty = process_filter::empty_message(
-                    hidden_opscope, resting.len(),
-                    if panes.is_empty() { "no panes in this session" } else { "every other pane is idle at a prompt" },
+                    hidden_opscope,
+                    resting.len(),
+                    if panes.is_empty() {
+                        "no panes in this session"
+                    } else {
+                        "every other pane is idle at a prompt"
+                    },
                 );
-                let (said, bad) = empty_or_why(
-                    &snapshot.clone().map(|s| s.panes),
-                    &empty,
-                );
+                let (said, bad) = empty_or_why(&snapshot.clone().map(|s| s.panes), &empty);
                 body.push(tc::seg(
                     &[(
                         if bad {
@@ -2379,6 +2622,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn latest_successful_event_baseline_survives_a_failed_snapshot() {
+        let mut state = State::default();
+        state.snapshot_epoch = 4;
+        state.event_cursor = Some(61);
+        assert_eq!(event_baseline(&Arc::new(Mutex::new(state))), Some((4, 61)));
+    }
+
+    #[test]
+    fn watcher_panic_reason_is_visible_in_state() {
+        let state = Arc::new(Mutex::new(State::default()));
+        run_watcher_catching_panic(&state, || panic!("fixture watcher failure"));
+        assert!(state
+            .lock()
+            .unwrap()
+            .watcher_err
+            .contains("fixture watcher failure"));
+    }
+
+    #[test]
     fn local_process_scan_works_on_the_current_host() {
         if !tc::missing(&["ps"]).is_empty() {
             return; // Optional at runtime; fixture tests cover unavailable scans.
@@ -2516,9 +2778,21 @@ mod tests {
         let long = [60, 80, 60, 60, 80, 90, 90, 80];
         for w in 76..=240 {
             let c = Columns::fit(w, true, long);
-            assert!(3 + c.name_w + 16 + 1 + c.agent_workspace_w <= w - 1, "agent row at {}", w);
-            assert!(3 + c.command_w + 9 + 1 + c.busy_workspace_w <= w - 1, "pane row at {}", w);
-            assert!(3 + c.dir_w + 1 + c.idle_workspace_w <= w - 1, "idle row at {}", w);
+            assert!(
+                3 + c.name_w + 16 + 1 + c.agent_workspace_w <= w - 1,
+                "agent row at {}",
+                w
+            );
+            assert!(
+                3 + c.command_w + 9 + 1 + c.busy_workspace_w <= w - 1,
+                "pane row at {}",
+                w
+            );
+            assert!(
+                3 + c.dir_w + 1 + c.idle_workspace_w <= w - 1,
+                "idle row at {}",
+                w
+            );
         }
         // At the threshold the old widths still stand.
         let at = Columns::fit(76, true, long);

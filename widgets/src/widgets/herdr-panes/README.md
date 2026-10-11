@@ -129,6 +129,18 @@ behind it.
 Agents have a focus-by-id command; other panes do not, so those focus their
 *tab* — which brings the pane into view, since a tab tiles its panes.
 
+## Refresh
+
+`refresh` is the maximum idle delay before another authoritative CLI read.
+A Unix-domain socket subscription covers workspace lifecycle and rename
+events, pane lifecycle events, and agent-status changes on every known pane,
+including panes that are not agents. A new pane or a changed inventory
+renews those filters; events wake the next full read but never update rows
+directly. Acknowledgements, reconnects and finite-window renewal all request
+a reconciliation read. CPU and memory sampling stays periodic, and `r`
+wakes the CLI poller independently of any socket wait. Socket failures are
+shown separately from CLI read failures.
+
 ## Configuration
 
 ```json
@@ -136,3 +148,4 @@ Agents have a focus-by-id command; other panes do not, so those focus their
 ```
 
 Requires `HERDR_ENV`; reports plainly when the CLI is unavailable.
+Event-socket acquisition is supported on Linux and macOS.

@@ -18,10 +18,20 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 1. Confirm `herdr` exists and can list panes. No hostname, token, or workspace name belongs in tracked files.
 2. Read the resolved path shown by the settings screen and the current values before proposing changes.
-3. Only refresh cadence is configurable; keep the default unless the user has a concrete responsiveness need.
+3. `refresh` is the maximum idle delay between authoritative reads; pane and agent-status events can wake a read sooner. Keep the default unless the user has a concrete responsiveness need.
 4. Change only this widget's declared section. Keep secrets out of chat, logs, shell history, source files, and screenshots.
 5. Save through the settings screen and leave it — the widget reloads itself on the way out, so no restart is needed. Then verify that the real source answers, or that the pane gives a specific reason why it cannot.
 
 ## Boundaries
+
+Herdr is read from full CLI snapshots, while a bounded Unix-domain socket
+subscription wakes refreshes for workspace-label changes, pane lifecycle
+changes, and status changes on every known pane. Socket filters change only
+when the pane inventory changes. Subscription acknowledgement, window
+renewal, or reconnect triggers reconciliation; events never patch the
+display. CPU and memory sampling remains periodic, and `r` wakes the CLI
+poller even while the event socket is waiting. Socket errors are shown
+separately from CLI errors. Socket acquisition is available on Linux and
+macOS.
 
 Do not fabricate hostnames, account names, team names, repositories, prices, ports, credentials, or successful readings. If a value cannot be established from the local environment or the user's explicit instruction, ask.
