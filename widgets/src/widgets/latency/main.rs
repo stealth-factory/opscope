@@ -100,6 +100,11 @@ struct Target {
     /// identical - an empty row either way, retried every two seconds for
     /// as long as the widget was up, saying nothing.
     err: String,
+    /// The latest reply was a spike against the median *before* it was
+    /// stored. NOW's underline reuses that decision. Judging it again from
+    /// the median after the reply has joined the window disagrees with the
+    /// event log once the reply moves the median.
+    now_is_spike: bool,
 }
 
 /// Everything the table says about one target over the retained window.
@@ -131,6 +136,17 @@ impl Target {
             let drop = self.samples.len() - window;
             self.samples.drain(..drop);
         }
+    }
+
+    /// Store a reply, and whether it was a spike against the median already kept.
+    ///
+    /// The returned median is the one the event log names. It is not the
+    /// median after this reply is included.
+    fn record_reply(&mut self, at: f64, rtt: f64, window: usize, spike_factor: f64) -> Option<f64> {
+        let med = spike_median(&self.stats(), rtt, spike_factor);
+        self.now_is_spike = med.is_some();
+        self.record(at, Some(rtt), window);
+        med
     }
 
     /// Round trips that arrived, newest last.
@@ -175,6 +191,15 @@ impl Target {
             n: total,
         }
     }
+}
+
+/// The median a new reply is a spike against, if it is one.
+///
+/// `st` is the window before the reply is stored. `n` counts every sample
+/// the event log counts, losses included, and the cut is the same `n > 10`.
+fn spike_median(st: &Stats, rtt: f64, spike_factor: f64) -> Option<f64> {
+    let med = st.med?;
+    (st.n > 10 && rtt > med * spike_factor).then_some(med)
 }
 
 /// A round trip in a fixed seven cells, so the columns cannot shift.
@@ -573,22 +598,21 @@ fn watch(
                 // A spike is worth a line in the log because the median in
                 // the table will not move for it, and a link that is fine
                 // except once a minute is a different problem from one that
-                // is slow.
-                let st = target.stats();
-                if let Some(med) = st.med {
-                    if st.n > 10 && rtt > med * spike_factor {
-                        log(
-                            &events,
-                            &hue,
-                            &label,
-                            "SPIKE",
-                            format!(
-                                "{} (median {})",
-                                fmt_ms(Some(rtt)).trim(),
-                                fmt_ms(Some(med)).trim()
-                            ),
-                        );
-                    }
+                // is slow. The underline on NOW keeps this same decision.
+                target.alive = true;
+                let spike = target.record_reply(stamp, rtt, window, spike_factor);
+                if let Some(med) = spike {
+                    log(
+                        &events,
+                        &hue,
+                        &label,
+                        "SPIKE",
+                        format!(
+                            "{} (median {})",
+                            fmt_ms(Some(rtt)).trim(),
+                            fmt_ms(Some(med)).trim()
+                        ),
+                    );
                 }
                 if let Some(since) = target.down_since.take() {
                     log(
@@ -599,8 +623,6 @@ fn watch(
                         format!("recovered after {:.0}s", stamp - since),
                     );
                 }
-                target.alive = true;
-                target.record(stamp, Some(rtt), window);
             } else if is_loss(&line) {
                 if dialect == PingDialect::SequenceGaps {
                     // macOS can print `Request timeout` even though BSD ping
@@ -1077,8 +1099,8 @@ fn main() {
                 Some(at.min(snapshot.len() - 1))
             };
         }
-        let (interval, per_column, how, spike_factor) = match settings.lock() {
-            Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone(), s.spike_factor),
+        let (interval, per_column, how) = match settings.lock() {
+            Ok(s) => (s.interval, s.seconds_per_column, s.aggregate.clone()),
             Err(_) => return,
         };
         // Zero means one bucket per ping, which is the finest motion the
@@ -1184,12 +1206,10 @@ fn main() {
             let tinted = |colour: &str| format!("{}{}", tint, colour);
             // The newest sample older than one interval is a poll that has
             // not come back. A window that has not filled yet is partial.
-            // A spike is the same test the event log already uses.
+            // A spike is the decision saved when the reply was recorded.
             let stale = t.samples.last().is_some_and(|(at, _)| tc::now() - *at > interval);
             let partial = st.avg.is_some() && st.n < window;
-            let spiked = st.now.is_some_and(|now| {
-                st.med.is_some_and(|med| st.n > 10 && now > med * spike_factor)
-            });
+            let spiked = st.now.is_some() && t.now_is_spike;
             let now_ink = tc::marked(
                 &tinted(if st.now.is_some() { &p.txt } else { &p.bad }),
                 tc::Marks { stale, threshold: spiked, ..tc::Marks::default() },
@@ -1685,6 +1705,35 @@ mod tests {
         assert_eq!(st.max, Some(400.0));
         assert_eq!(st.min, Some(10.0));
         assert_eq!(st.now, Some(400.0));
+    }
+
+    #[test]
+    fn a_spike_is_judged_before_the_reply_joins_the_median() {
+        let mut t = Target::default();
+        // Six at 1 ms and five at 10 ms. The median is 1 ms, so 4 ms is
+        // more than three times it. After 4 ms is stored the median is
+        // 4 ms, and the same comparison would not call it a spike.
+        for v in [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 10.0, 10.0, 10.0, 10.0, 10.0] {
+            t.record(0.0, Some(v), 600);
+        }
+        let med = t.record_reply(1.0, 4.0, 600, 3.0);
+        assert_eq!(med, Some(1.0));
+        assert!(t.now_is_spike);
+        let st = t.stats();
+        assert_eq!(st.now, Some(4.0));
+        assert!(st.med.is_some_and(|m| st.now.unwrap() <= m * 3.0));
+        // Ten samples already kept is not enough: the log requires n > 10
+        // before this reply is stored, so this eleventh sample is not a spike.
+        let mut short = Target::default();
+        for _ in 0..10 {
+            short.record(0.0, Some(1.0), 600);
+        }
+        assert_eq!(short.record_reply(1.0, 100.0, 600, 3.0), None);
+        assert!(!short.now_is_spike);
+        // A later ordinary reply clears the mark. The underline follows
+        // the reply on screen, not an earlier one.
+        assert_eq!(t.record_reply(2.0, 1.0, 600, 3.0), None);
+        assert!(!t.now_is_spike);
     }
 
     #[test]

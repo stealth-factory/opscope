@@ -5053,12 +5053,19 @@ mod tests {
             caps(terminal::UnderlineSupport::Unknown, false),
         );
         assert_eq!(held, ink);
-        let line = seg(&[(plain.as_str(), "12".into())], 4);
-        assert!(line.contains("12"));
-        assert!(line.contains(UNDERLINE_OFF));
-        let bare = seg(&[(ink, "12".into())], 4);
+        // The colour prefix already starts with the reset. A following
+        // segment is what shows that `seg` turns the underline off after
+        // the marked text, rather than leaving it to run into the next one.
+        let line = seg(&[(plain.as_str(), "12".into()), (ink, "34".into())], 8);
+        let after = line.split_once("12").expect("marked text").1;
+        let next = after.find("34").expect("unmarked text");
+        assert!(
+            after[..next].contains(UNDERLINE_OFF),
+            "the reset has to follow the marked text: {line:?}"
+        );
+        let bare = seg(&[(ink, "12".into()), (ink, "34".into())], 8);
         assert!(!bare.contains(UNDERLINE_OFF));
-        assert!(bare.contains("12"));
+        assert!(bare.contains("12") && bare.contains("34"));
     }
 
     #[test]
